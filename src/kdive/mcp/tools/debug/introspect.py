@@ -15,6 +15,7 @@ drgn-backed seams disabled; the live runner injects them only on hosts prepared 
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import Annotated, NamedTuple, cast
 from uuid import UUID
 
@@ -23,6 +24,8 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
+import kdive.config as config
+from kdive.config.core_settings import LIVE_SCRIPT_MAX_TIMEOUT_SECONDS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
@@ -30,6 +33,7 @@ from kdive.mcp.responses import ResponseData, ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import capability_unsupported as _capability_unsupported
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._docmeta import MaturityReason
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_target_failure
 from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
@@ -39,6 +43,7 @@ from kdive.providers.ports import (
     DebugTransportKind,
     IntrospectionMode,
     LiveIntrospector,
+    LiveScriptOutput,
     VmcoreIntrospector,
 )
 from kdive.security.authz.context import RequestContext
@@ -50,6 +55,25 @@ _LIVE_HELPERS = frozenset({"tasks", "modules", "sysinfo"})
 _DRGN_LIVE: DebugTransportKind = "drgn-live"
 _OFFLINE_VMCORE: IntrospectionMode = "offline-vmcore"
 _LIVE_INTROSPECTION: IntrospectionMode = "live"
+_LIVE_SCRIPT: IntrospectionMode = "live-script"
+# The agent-chosen ``introspect.script`` timeout is clamped to ``[_TIMEOUT_FLOOR, ceiling]`` before
+# it drives the in-guest ``timeout drgn -k`` wrapper. The floor is > 0 because coreutils
+# ``timeout 0`` means *no* timeout — a 0/negative value would delete the in-guest bound (ADR-0240).
+_TIMEOUT_FLOOR = 1.0
+_DEFAULT_SCRIPT_TIMEOUT = 30.0
+
+
+def _clamp_timeout(requested: float) -> float:
+    """Clamp the agent timeout to ``[_TIMEOUT_FLOOR, operator-ceiling]`` before it reaches drgn.
+
+    A non-finite, ``0``, or negative request clamps up to the floor; an over-ceiling request clamps
+    down to ``KDIVE_LIVE_SCRIPT_MAX_TIMEOUT_SECONDS``. The clamped value drives both the in-guest
+    ``timeout`` and the derived transport timeout, so neither can be inflated past the ceiling.
+    """
+    ceiling = float(config.require(LIVE_SCRIPT_MAX_TIMEOUT_SECONDS))
+    if not math.isfinite(requested) or requested < _TIMEOUT_FLOOR:
+        requested = _TIMEOUT_FLOOR
+    return min(requested, ceiling)
 
 
 def _require_introspection(
@@ -219,8 +243,74 @@ async def _introspect_live_session(
     )
 
 
+async def introspect_script(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    session_id: str,
+    script: str,
+    timeout_sec: float,
+    introspector: LiveIntrospector,
+) -> ToolResponse:
+    """Run a caller drgn script over a `live` drgn-live DebugSession; return capped stdout.
+
+    Requires a `live` drgn-live DebugSession (contributor). ``timeout_sec`` is clamped to
+    ``[1.0, ceiling]`` before it reaches the guest. The port runs the script **in the guest** and
+    is the single redaction boundary, so the returned stdout is already masked of platform secrets
+    and byte-capped; the raw transcript is ``sensitive`` and is never returned. Off a prepared live
+    host, the provider seam reports ``missing_dependency`` instead of importing drgn (ADR-0240).
+    """
+    with bind_context(principal=ctx.principal):
+        async with pool.connection() as conn:
+            try:
+                resolved = await resolve_live_drgn_session(conn, ctx, session_id)
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(session_id, exc)
+        return await _run_live_script(
+            session_id,
+            resolved=resolved,
+            script=script,
+            timeout_sec=timeout_sec,
+            introspector=introspector,
+        )
+
+
+async def _run_live_script(
+    response_id: str,
+    *,
+    resolved: LiveDrgnSession,
+    script: str,
+    timeout_sec: float,
+    introspector: LiveIntrospector,
+) -> ToolResponse:
+    """Clamp the timeout, run the script off-loop, shape the response (shared by tool + tests)."""
+    clamped = _clamp_timeout(timeout_sec)
+    try:
+        output: LiveScriptOutput = await asyncio.to_thread(
+            introspector.run_script,
+            transport_handle=resolved.transport_handle,
+            script=script,
+            timeout_sec=clamped,
+        )
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(response_id, exc)
+    return ToolResponse.success(
+        response_id,
+        "succeeded",
+        suggested_next_actions=["introspect.script", "debug.end_session"],
+        data=cast(
+            ResponseData,
+            {
+                "output": output.output,
+                "truncated": str(output.truncated).lower(),
+                "transcript_sensitivity": "sensitive",
+            },
+        ),
+    )
+
+
 def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:
-    """Register the `introspect.from_vmcore` and `introspect.run` tools on ``app``."""
+    """Register the `introspect.from_vmcore`, `introspect.run`, and `introspect.script` tools."""
 
     @app.tool(
         name="introspect.from_vmcore",
@@ -287,5 +377,60 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             session_id,
             resolved=resolved,
             helper=helper,
+            introspector=runtime.live_introspector,
+        )
+
+    @app.tool(
+        name="introspect.script",
+        annotations=_docmeta.mutating(),
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=MaturityReason.LIVE_DEPENDENCY,
+            detail="needs an operator-prepared drgn-live host; CI exercises only the fake seam",
+            promotion="a live_vm proof runs a real caller script end-to-end through the guest",
+        ),
+    )
+    async def introspect_script_tool(
+        session_id: Annotated[str, Field(description="A live drgn-live DebugSession.")],
+        script: Annotated[
+            str,
+            Field(
+                description=(
+                    "A drgn (Python) script run against the live guest kernel; `prog` is the live "
+                    "drgn.Program. Its stdout is returned (byte-capped). Each call is a fresh drgn "
+                    "process — put any multi-step work in one script."
+                )
+            ),
+        ],
+        timeout_sec: Annotated[
+            float,
+            Field(
+                description=(
+                    "In-guest execution bound (seconds); clamped to [1.0, operator ceiling]. "
+                    "Defaults to 30. A wedged script is recovered with debug.end_session."
+                )
+            ),
+        ] = _DEFAULT_SCRIPT_TIMEOUT,
+    ) -> ToolResponse:
+        """Run a caller drgn script over a live drgn-live DebugSession. Requires contributor."""
+        ctx = current_context()
+        async with pool.connection() as conn:
+            try:
+                resolved = await resolve_live_drgn_session(conn, ctx, session_id)
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(session_id, exc)
+        async with pool.connection() as conn:
+            try:
+                runtime = await resolver.runtime_for_session(conn, resolved.session_id)
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(session_id, exc)
+        denied = _require_introspection(session_id, runtime, _LIVE_SCRIPT)
+        if denied is not None:
+            return denied
+        return await _run_live_script(
+            session_id,
+            resolved=resolved,
+            script=script,
+            timeout_sec=timeout_sec,
             introspector=runtime.live_introspector,
         )
