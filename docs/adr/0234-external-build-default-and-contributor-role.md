@@ -3,9 +3,9 @@
 - **Status:** Proposed
 - **Date:** 2026-06-24
 - **Deciders:** kdive maintainers
-- **Builds on (does not supersede):** [ADR-0048](0048-external-build-ingestion.md) (the
+- **Builds on (does not supersede):** [ADR-0048](0048-external-build-artifact-ingestion.md) (the
   external-build ingestion seam this ADR promotes to the default lane),
-  [ADR-0081](0081-remote-build.md)/[ADR-0101](0101-local-libvirt-remote-build.md) (the
+  [ADR-0081](0081-remote-build-kernel-bundle.md)/[ADR-0101](0101-local-libvirt-remote-build-host.md) (the
   combined kernel+modules tar this ADR unifies on), [ADR-0006](0006-oidc-rbac-attribution.md)/
   [ADR-0020](0020-rbac-audit-gate-implementation.md) (the project-role rank this ADR inserts
   `contributor` into), [ADR-0013](0013-object-store-layout-retention.md) (the retention-class
