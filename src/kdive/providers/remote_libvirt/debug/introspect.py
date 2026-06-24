@@ -20,7 +20,7 @@ from typing import Any, Protocol
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import IntrospectOutput
+from kdive.providers.ports import IntrospectOutput, LiveScriptOutput
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
 from kdive.providers.remote_libvirt.guest.agent import (
     AgentCommand,
@@ -34,7 +34,10 @@ from kdive.providers.shared.debug_common.drgn_program import (
     read_vmcoreinfo_build_id,
     run_introspection_helper,
 )
-from kdive.providers.shared.debug_common.introspect import assemble_report
+from kdive.providers.shared.debug_common.introspect import (
+    assemble_report,
+    assemble_script_output,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 
@@ -193,6 +196,7 @@ class RemoteLibvirtLiveIntrospect:
         self._secret_backend_factory = secret_backend_factory or (
             lambda: secret_backend_from_env(registry=secret_registry)
         )
+        self._live_script_byte_cap = _REPORT_BYTE_CAP
 
     @classmethod
     def from_env(
@@ -236,6 +240,40 @@ class RemoteLibvirtLiveIntrospect:
             secret_registry=self._secret_registry,
         )
 
+    def run_script(
+        self, *, transport_handle: str, script: str, timeout_sec: float
+    ) -> LiveScriptOutput:
+        """Run a caller drgn script in-guest via the guest agent; cap + redact its stdout.
+
+        The script rides the guest-exec ``input-data`` (stdin), so argv stays the fixed,
+        allowlisted ``[kdive-drgn, run-script, <timeout>]`` and the single-program allowlist is
+        unchanged (ADR-0240). drgn runs **in the guest**; the worker only opens the agent channel.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` for a blank handle; ``TRANSPORT_FAILURE``
+                for an unreachable guest agent; ``DEBUG_ATTACH_FAILURE`` for a non-zero in-guest
+                exit (script error or drgn could not attach).
+        """
+        domain_name = transport_handle.strip()
+        if not domain_name:
+            raise CategorizedError(
+                "remote live introspection handle must carry a domain name",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        argv = [_DRGN_HELPER, "run-script", str(int(timeout_sec))]
+        result = self._exec(domain_name, argv, input_data=script)
+        if result.exit_status != 0:
+            raise CategorizedError(
+                "in-guest drgn script exited non-zero (script error or could not attach)",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={"domain": domain_name, "exit_status": result.exit_status},
+            )
+        return assemble_script_output(
+            result.stdout.decode("utf-8", "replace"),
+            byte_cap=self._live_script_byte_cap,
+            secret_registry=self._secret_registry,
+        )
+
     def _run_in_guest(self, domain_name: str, helper: str) -> dict[str, object]:
         result = self._exec(domain_name, [_DRGN_HELPER, helper])
         if result.exit_status != 0:
@@ -258,12 +296,15 @@ class RemoteLibvirtLiveIntrospect:
             )
         return decoded
 
-    def _exec(self, domain_name: str, argv: list[str]) -> AgentExecResult:
+    def _exec(
+        self, domain_name: str, argv: list[str], *, input_data: str | None = None
+    ) -> AgentExecResult:
         """Open the qemu+tls connection, look up the domain, run argv via GuestAgentExec.
 
         Fully unit-testable with an injected ``agent_command`` + ``open_connection`` +
         ``secret_backend_factory`` (mirroring install.py); only ``_open_libvirt``'s real
-        ``libvirt.open`` is the ``live_vm`` seam.
+        ``libvirt.open`` is the ``live_vm`` seam. ``input_data``, when given, is delivered to the
+        program on stdin (the channel a caller drgn script rides; ADR-0240).
         """
         agent = GuestAgentExec(
             agent_command=self._agent_command,
@@ -274,7 +315,7 @@ class RemoteLibvirtLiveIntrospect:
             config, self._secret_backend_factory(), open_connection=self._open_connection
         ) as conn:
             domain = conn.lookupByName(domain_name)
-            return agent.run(domain, argv)
+            return agent.run(domain, argv, input_data=input_data)
 
 
 def _open_libvirt(uri: str) -> Any:  # pragma: no cover - live_vm

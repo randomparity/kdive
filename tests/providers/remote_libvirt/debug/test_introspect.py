@@ -745,3 +745,45 @@ def test_assemble_report_redacts_each_section():
     assert "leaked-secret" not in str(out.tasks)
     assert "leaked-secret" not in str(out.modules)
     assert "leaked-secret" not in str(out.sysinfo)
+
+
+# --- RemoteLibvirtLiveIntrospect.run_script (ADR-0240, arbitrary drgn over guest-agent stdin) -
+
+_DRGN_HELPER = "/usr/local/sbin/kdive-drgn"
+
+
+def test_run_script_returns_capped_stdout():
+    agent = _ScriptedAgent(lambda argv: AgentExecResult(0, b"hash_shift=20\n", b""))
+    out = _live(agent).run_script(transport_handle="kdive-sys", script="print(1)", timeout_sec=5.0)
+    assert "hash_shift=20" in out.output
+    assert out.truncated is False
+
+
+def test_run_script_uses_allowlisted_run_script_argv_and_clamped_int_timeout():
+    agent = _ScriptedAgent(lambda argv: AgentExecResult(0, b"ok", b""))
+    _live(agent).run_script(transport_handle="kdive-sys", script="print(1)", timeout_sec=5.0)
+    assert agent.argvs == [[_DRGN_HELPER, "run-script", "5"]]
+
+
+def test_run_script_blank_handle_is_configuration_error():
+    agent = _ScriptedAgent(lambda argv: AgentExecResult(0, b"", b""))
+    with pytest.raises(CategorizedError) as exc:
+        _live(agent).run_script(transport_handle="   ", script="print(1)", timeout_sec=5.0)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert agent.argvs == []  # rejected before any agent round-trip
+
+
+def test_run_script_nonzero_exit_is_debug_attach_failure():
+    agent = _ScriptedAgent(lambda argv: AgentExecResult(3, b"", b"boom"))
+    with pytest.raises(CategorizedError) as exc:
+        _live(agent).run_script(transport_handle="kdive-sys", script="boom", timeout_sec=5.0)
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+
+
+def test_run_script_byte_caps_and_sets_truncated():
+    agent = _ScriptedAgent(lambda argv: AgentExecResult(0, b"z" * 5000, b""))
+    live = _live(agent)
+    live._live_script_byte_cap = 64
+    out = live.run_script(transport_handle="kdive-sys", script="print('z'*5000)", timeout_sec=5.0)
+    assert out.truncated is True
+    assert len(out.output.encode("utf-8")) <= 64

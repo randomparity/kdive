@@ -37,6 +37,7 @@ from kdive.providers.ports import (
     CrashOutput,
     InstallRequest,
     IntrospectOutput,
+    LiveScriptOutput,
     SystemHandle,
     TransportHandle,
 )
@@ -193,6 +194,11 @@ class _IntrospectorProvider:
 
     def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
         return IntrospectOutput(tasks={}, modules={}, sysinfo={}, truncated=False)
+
+    def run_script(
+        self, *, transport_handle: str, script: str, timeout_sec: float
+    ) -> LiveScriptOutput:
+        return LiveScriptOutput(output="", truncated=False)
 
 
 def test_provider_runtime_returns_typed_provider_ports_directly() -> None:

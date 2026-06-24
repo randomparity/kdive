@@ -20,6 +20,7 @@ from kdive.providers.local_libvirt.debug.introspect import (
     LocalLibvirtVmcoreIntrospect,
     VmcoreIntrospector,
 )
+from kdive.providers.ports import LiveScriptOutput
 from kdive.providers.shared.debug_common.introspect import (
     _Module,
     _Program,
@@ -471,6 +472,11 @@ def test_live_introspector_is_protocol() -> None:
     class _Impl:
         def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
             return IntrospectOutput(tasks={}, modules={}, sysinfo={}, truncated=False)
+
+        def run_script(
+            self, *, transport_handle: str, script: str, timeout_sec: float
+        ) -> LiveScriptOutput:
+            return LiveScriptOutput(output="", truncated=False)
 
     impl: LiveIntrospector = _Impl()
     assert (

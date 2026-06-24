@@ -25,7 +25,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug import introspect as introspect_tools
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
-from kdive.providers.ports import IntrospectOutput
+from kdive.providers.ports import IntrospectOutput, LiveScriptOutput
 from kdive.security.authz.rbac import AuthorizationError, Role
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.json_data import data_mapping, json_mapping, json_sequence
@@ -430,6 +430,18 @@ class _FakeLiveIntrospector:
         if self._raises is not None:
             raise self._raises
         return self._output
+
+    def run_script(
+        self, *, transport_handle: str, script: str, timeout_sec: float
+    ) -> LiveScriptOutput:
+        self.kwargs = {
+            "transport_handle": transport_handle,
+            "script": script,
+            "timeout_sec": timeout_sec,
+        }
+        if self._raises is not None:
+            raise self._raises
+        return LiveScriptOutput(output="ok", truncated=False)
 
 
 class _CountingResolver(ProviderResolver):
