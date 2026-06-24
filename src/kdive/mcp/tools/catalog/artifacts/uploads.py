@@ -162,6 +162,7 @@ type ArtifactDeclaration = Mapping[str, object]
 @dataclass(frozen=True)
 class _UploadOwnerSpec:
     owner_kind: upload_manifest.UploadOwnerKind
+    required_role: Role
     lock_scope: LockScope
     allowed_names: frozenset[str]
     next_action: str
@@ -362,6 +363,7 @@ async def _system_accepts_upload(
 
 _RUN_UPLOAD = _UploadOwnerSpec(
     owner_kind=upload_manifest.RUN_UPLOAD_OWNER,
+    required_role=Role.CONTRIBUTOR,
     lock_scope=LockScope.RUN,
     allowed_names=RUN_ARTIFACT_NAMES,
     next_action="runs.complete_build",
@@ -370,6 +372,7 @@ _RUN_UPLOAD = _UploadOwnerSpec(
 )
 _SYSTEM_UPLOAD = _UploadOwnerSpec(
     owner_kind=upload_manifest.SYSTEM_UPLOAD_OWNER,
+    required_role=Role.OPERATOR,
     lock_scope=LockScope.SYSTEM,
     allowed_names=SYSTEM_ARTIFACT_NAMES,
     next_action="systems.provision_defined",
@@ -403,7 +406,7 @@ async def _create_upload(
             project = await spec.project(conn, uid)
             if project is None or project not in ctx.projects:
                 return _config_error(owner_id)
-            require_role(ctx, project, Role.OPERATOR)
+            require_role(ctx, project, spec.required_role)
 
             validated = _validate_artifact_declarations(
                 owner_id, artifacts, spec.allowed_names, _max_upload_bytes()

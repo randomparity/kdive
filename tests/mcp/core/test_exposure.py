@@ -170,7 +170,7 @@ def test_no_grants_sees_only_public_subset() -> None:
     names = {
         "projects.list",  # public
         "jobs.get",  # project viewer
-        "allocations.request",  # project operator
+        "allocations.request",  # project contributor
         "control.force_crash",  # project admin
         "ops.reconcile_now",  # platform operator
     }
@@ -181,3 +181,83 @@ def test_viewer_sees_reads_but_not_mutations() -> None:
     viewer = _ctx(roles={"a": Role.VIEWER})
     names = {"jobs.get", "allocations.request", "control.power", "ops.reconcile_now"}
     assert visible_tool_names(viewer, names) == {"jobs.get"}
+
+
+def test_contributor_scope_rank() -> None:
+    # PROJECT_CONTRIBUTOR sits between viewer and operator (ADR-0234): contributor and up
+    # satisfy it; viewer does not.
+    contributor = _ctx(roles={"a": Role.CONTRIBUTOR})
+    assert scope_satisfied(ExposureScope.PROJECT_CONTRIBUTOR, contributor)
+    assert scope_satisfied(ExposureScope.PROJECT_VIEWER, contributor)
+    assert not scope_satisfied(ExposureScope.PROJECT_OPERATOR, contributor)
+    assert not scope_satisfied(ExposureScope.PROJECT_ADMIN, contributor)
+    assert scope_satisfied(ExposureScope.PROJECT_CONTRIBUTOR, _ctx(roles={"a": Role.OPERATOR}))
+    assert scope_satisfied(ExposureScope.PROJECT_CONTRIBUTOR, _ctx(roles={"a": Role.ADMIN}))
+    assert not scope_satisfied(ExposureScope.PROJECT_CONTRIBUTOR, _ctx(roles={"a": Role.VIEWER}))
+
+
+#: The external build-debug loop a contributor must be able to see and drive (ADR-0234).
+_CONTRIBUTOR_LOOP = frozenset(
+    {
+        "runs.create",
+        "runs.bind",
+        "runs.build",
+        "runs.complete_build",
+        "runs.install",
+        "runs.boot",
+        "runs.cancel",
+        "artifacts.create_run_upload",
+        "debug.start_session",
+        "debug.read_memory",
+        "debug.list_breakpoints",  # shares the engine-op runtime gate → contributor, not viewer
+        "postmortem.crash",
+        "postmortem.triage",
+        "vmcore.fetch",
+        "allocations.request",
+        "investigations.open",
+    }
+)
+
+#: What must remain above contributor: operator-only and admin-only project tools.
+_ABOVE_CONTRIBUTOR = frozenset(
+    {
+        "systems.define",
+        "systems.provision",
+        "images.upload",
+        "artifacts.create_system_upload",  # system upload stays operator
+        "control.power",
+        "systems.teardown",  # admin
+        "control.force_crash",  # admin
+    }
+)
+
+
+def test_contributor_sees_the_full_loop_but_not_operator_tools() -> None:
+    contributor = _ctx(roles={"a": Role.CONTRIBUTOR})
+    assert visible_tool_names(contributor, _CONTRIBUTOR_LOOP) == _CONTRIBUTOR_LOOP
+    assert visible_tool_names(contributor, _ABOVE_CONTRIBUTOR) == frozenset()
+
+
+def test_viewer_sees_none_of_the_loop() -> None:
+    viewer = _ctx(roles={"a": Role.VIEWER})
+    assert visible_tool_names(viewer, _CONTRIBUTOR_LOOP) == frozenset()
+
+
+def test_operator_still_sees_the_whole_loop_and_above() -> None:
+    # The rank is a superset: re-gating to contributor never removes an operator's view.
+    operator = _ctx(roles={"a": Role.OPERATOR})
+    assert visible_tool_names(operator, _CONTRIBUTOR_LOOP) == _CONTRIBUTOR_LOOP
+    assert visible_tool_names(operator, _ABOVE_CONTRIBUTOR) == _ABOVE_CONTRIBUTOR - {
+        "systems.teardown",
+        "control.force_crash",
+    }
+
+
+def test_create_system_upload_stays_operator_but_run_upload_drops() -> None:
+    # The shared upload seam splits by owner kind: run-upload → contributor, system → operator.
+    assert required_scopes("artifacts.create_run_upload") == frozenset(
+        {ExposureScope.PROJECT_CONTRIBUTOR}
+    )
+    assert required_scopes("artifacts.create_system_upload") == frozenset(
+        {ExposureScope.PROJECT_OPERATOR}
+    )

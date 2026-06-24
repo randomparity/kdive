@@ -44,7 +44,7 @@ async def install_run(
             run = await RUNS.get(conn, uid)
             if run is None or run.project not in ctx.projects:
                 return _config_error(run_id)
-            require_role(ctx, run.project, Role.OPERATOR)
+            require_role(ctx, run.project, Role.CONTRIBUTOR)
             if run.state is not RunState.SUCCEEDED:
                 return _config_error(run_id, data={"current_status": run.state.value})
             if run.system_id is None:
@@ -77,7 +77,7 @@ async def boot_run(
             run = await RUNS.get(conn, uid)
             if run is None or run.project not in ctx.projects:
                 return _config_error(run_id)
-            require_role(ctx, run.project, Role.OPERATOR)
+            require_role(ctx, run.project, Role.CONTRIBUTOR)
             if run.state is not RunState.SUCCEEDED:
                 return _config_error(run_id, data={"current_status": run.state.value})
             if run.system_id is None:

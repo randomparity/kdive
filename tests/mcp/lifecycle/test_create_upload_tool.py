@@ -619,7 +619,9 @@ def test_create_upload_rejects_effective_config_over_1mib_without_manifest(
     asyncio.run(_run())
 
 
-def test_create_upload_requires_operator(migrated_url: str) -> None:
+def test_create_run_upload_admits_contributor_denies_viewer(migrated_url: str) -> None:
+    # ADR-0234: the run-upload seam drops to `contributor`; a viewer is still denied, but a
+    # contributor is admitted and the upload window opens (manifest persisted).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_created_run(pool, build_profile=_EXTERNAL_PROFILE)
@@ -629,6 +631,36 @@ def test_create_upload_requires_operator(migrated_url: str) -> None:
                     _ctx(role=Role.VIEWER),
                     run_id=run_id,
                     artifacts=[{"name": "kernel", "sha256": "aaa", "size_bytes": 100}],
+                    store=_FakeStore(),
+                )
+            # A contributor is past the gate (a denial would raise); the window opens.
+            await create_run_upload(
+                pool,
+                _ctx(role=Role.CONTRIBUTOR),
+                run_id=run_id,
+                artifacts=[{"name": "kernel", "sha256": "aaa", "size_bytes": 100}],
+                store=_FakeStore(),
+            )
+            async with pool.connection() as conn:
+                manifest = await upload_manifest.get_manifest(conn, "runs", UUID(run_id))
+            assert manifest is not None
+
+    asyncio.run(_run())
+
+
+def test_create_system_upload_still_requires_operator(migrated_url: str) -> None:
+    # ADR-0234: the system-upload half of the shared seam stays at `operator`; a contributor
+    # (admitted for run uploads) is denied here.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _defined_system_via_tool(pool)
+            with pytest.raises(AuthorizationError):
+                await create_system_upload(
+                    pool,
+                    _ctx(role=Role.CONTRIBUTOR),
+                    system_id=sys_id,
+                    artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
+                    resolver=provider_resolver(),
                     store=_FakeStore(),
                 )
 

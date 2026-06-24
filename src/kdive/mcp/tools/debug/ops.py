@@ -6,7 +6,7 @@ These extend the `debug.*` session lifecycle tools registered by ``sessions.py``
 a session lazily spawns a gdb/MI engine over the session's RSP endpoint, cached in a
 process-scoped
 :class:`DebugEngineRuntime` (registry + per-session ``asyncio.Lock`` table + the
-``live_vm``-gated attach seam). Every op is gated (operator + project + ``live`` state), takes
+``live_vm``-gated attach seam). Every op is gated (contributor + project + ``live`` state), takes
 the per-session lock, attaches-or-reuses, and runs the blocking engine call via
 ``asyncio.to_thread`` so a long `continue` never stalls the event loop.
 
@@ -366,7 +366,7 @@ def _register_debug_set_breakpoint(
         ],
         location: Annotated[str, Field(description="Bare C function or symbol name to break at.")],
     ) -> ToolResponse:
-        """Set a breakpoint on a live DebugSession via gdb-MI. Requires operator."""
+        """Set a breakpoint on a live DebugSession via gdb-MI. Requires contributor."""
         return await run_engine_op(
             pool,
             current_context(),
@@ -393,7 +393,7 @@ def _register_debug_clear_breakpoint(
             Field(description="Breakpoint number to clear (from debug.list_breakpoints)."),
         ],
     ) -> ToolResponse:
-        """Clear a breakpoint by number on a live DebugSession. Requires operator."""
+        """Clear a breakpoint by number on a live DebugSession. Requires contributor."""
         return await run_engine_op(
             pool,
             current_context(),
@@ -416,7 +416,7 @@ def _register_debug_list_breakpoints(
             str, Field(description="The live DebugSession whose breakpoints to list.")
         ],
     ) -> ToolResponse:
-        """List all breakpoints on a live DebugSession. Requires operator."""
+        """List all breakpoints on a live DebugSession. Requires contributor."""
         return await run_engine_op(
             pool, current_context(), session_id, runtime, _list_breakpoints_op(session_id)
         )
@@ -435,7 +435,7 @@ def _register_debug_read_memory(
         address: Annotated[int, Field(description="Start address (integer) to read from.")],
         byte_count: Annotated[int, Field(description="Number of bytes to read (capped at 4096).")],
     ) -> ToolResponse:
-        """Read raw memory bytes from a live DebugSession (up to 4096 bytes). Requires operator."""
+        """Read raw memory bytes from a live DebugSession (up to 4096). Requires contributor."""
         return await run_engine_op(
             pool,
             current_context(),
@@ -462,7 +462,7 @@ def _register_debug_read_registers(
             Field(description='Register names to read (e.g. ["rip", "rsp"]).'),
         ],
     ) -> ToolResponse:
-        """Read named registers from a live DebugSession. Requires operator."""
+        """Read named registers from a live DebugSession. Requires contributor."""
         return await run_engine_op(
             pool,
             current_context(),
@@ -492,7 +492,7 @@ def _register_debug_continue(
             ),
         ] = 0.0,
     ) -> ToolResponse:
-        """Resume execution on a live DebugSession and wait for a stop event. Operator only."""
+        """Resume a live DebugSession and wait for a stop event. Requires contributor."""
         return await run_engine_op(
             pool,
             current_context(),
@@ -513,7 +513,7 @@ def _register_debug_interrupt(
     async def debug_interrupt(
         session_id: Annotated[str, Field(description="The live DebugSession to interrupt.")],
     ) -> ToolResponse:
-        """Send an interrupt to halt a running live DebugSession. Requires operator."""
+        """Send an interrupt to halt a running live DebugSession. Requires contributor."""
         return await run_engine_op(
             pool, current_context(), session_id, runtime, _interrupt_op(session_id)
         )

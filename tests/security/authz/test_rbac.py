@@ -67,6 +67,40 @@ def test_require_role_admin_satisfies_operator() -> None:
     require_role(_ctx(roles={"proj": Role.ADMIN}), "proj", Role.OPERATOR)
 
 
+def test_roles_from_claims_parses_contributor() -> None:
+    # The new ADR-0234 role parses from the claim like any other Role value.
+    assert roles_from_claims({"roles": {"a": "contributor"}}) == {"a": Role.CONTRIBUTOR}
+
+
+def test_contributor_satisfies_viewer() -> None:
+    # contributor ranks above viewer, so a read gate is satisfied.
+    require_role(_ctx(roles={"proj": Role.CONTRIBUTOR}), "proj", Role.VIEWER)
+
+
+def test_contributor_exact_match_ok() -> None:
+    require_role(_ctx(roles={"proj": Role.CONTRIBUTOR}), "proj", Role.CONTRIBUTOR)
+
+
+def test_operator_satisfies_contributor() -> None:
+    # The rank is a total order: operator (and admin) retain every contributor power.
+    require_role(_ctx(roles={"proj": Role.OPERATOR}), "proj", Role.CONTRIBUTOR)
+    require_role(_ctx(roles={"proj": Role.ADMIN}), "proj", Role.CONTRIBUTOR)
+
+
+def test_viewer_denied_contributor() -> None:
+    # viewer stays read-only: it cannot reach a contributor-gated operation.
+    with pytest.raises(RoleDenied):
+        require_role(_ctx(roles={"proj": Role.VIEWER}), "proj", Role.CONTRIBUTOR)
+
+
+def test_contributor_denied_operator_and_admin() -> None:
+    # contributor cannot escalate to operator-only or admin-only operations.
+    with pytest.raises(RoleDenied):
+        require_role(_ctx(roles={"proj": Role.CONTRIBUTOR}), "proj", Role.OPERATOR)
+    with pytest.raises(RoleDenied):
+        require_role(_ctx(roles={"proj": Role.CONTRIBUTOR}), "proj", Role.ADMIN)
+
+
 def test_require_role_exact_match_ok() -> None:
     require_role(_ctx(roles={"proj": Role.OPERATOR}), "proj", Role.OPERATOR)
 

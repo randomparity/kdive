@@ -315,7 +315,7 @@ def _register_runs_build(
                 cmdline=cmdline,
                 idempotency_key=idempotency_key,
             ),
-            required_role=Role.OPERATOR,
+            required_role=Role.CONTRIBUTOR,
         )
 
 
@@ -355,7 +355,7 @@ def _register_runs_complete_build(
             lambda _runtime: _complete_build_handlers().complete_build(
                 pool, ctx, run_id, build_id=build_id, cmdline=cmdline
             ),
-            required_role=Role.OPERATOR,
+            required_role=Role.CONTRIBUTOR,
         )
 
 

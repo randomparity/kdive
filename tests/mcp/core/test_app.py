@@ -407,7 +407,9 @@ def test_exposure_map_covers_every_registered_tool() -> None:
     assert required_scopes("control.force_crash") == frozenset({ExposureScope.PROJECT_ADMIN})
     assert required_scopes("systems.teardown") == frozenset({ExposureScope.PROJECT_ADMIN})
     assert required_scopes("ops.reconcile_now") == frozenset({ExposureScope.PLATFORM_OPERATOR})
-    assert required_scopes("allocations.request") == frozenset({ExposureScope.PROJECT_OPERATOR})
+    # allocations.request drops to contributor (ADR-0234); systems.define stays operator.
+    assert required_scopes("allocations.request") == frozenset({ExposureScope.PROJECT_CONTRIBUTOR})
+    assert required_scopes("systems.define") == frozenset({ExposureScope.PROJECT_OPERATOR})
 
 
 # --- Canonical lifecycle prompts (ADR-0202) ---------------------------------------------

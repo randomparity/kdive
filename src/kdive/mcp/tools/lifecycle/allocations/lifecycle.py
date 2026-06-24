@@ -37,7 +37,7 @@ async def release_allocation(
             alloc = await ALLOCATIONS.get(conn, uid)
             if alloc is None or alloc.project not in ctx.projects:
                 return _not_found(allocation_id)
-            require_role(ctx, alloc.project, Role.OPERATOR)
+            require_role(ctx, alloc.project, Role.CONTRIBUTOR)
         outcome = await release_with_backstops(
             pool, uid, project=alloc.project, audit_writer=ctx_audit_writer(ctx)
         )
@@ -78,7 +78,7 @@ async def renew_allocation(
             alloc = await ALLOCATIONS.get(conn, uid)
             if alloc is None or alloc.project not in ctx.projects:
                 return _not_found(allocation_id)
-            require_role(ctx, alloc.project, Role.OPERATOR)
+            require_role(ctx, alloc.project, Role.CONTRIBUTOR)
             outcome = await renew(
                 conn, ctx, allocation_id=uid, extend=extend, idempotency_key=idempotency_key
             )

@@ -129,7 +129,7 @@ class VmcoreHandlers:
                 runtime=runtime,
                 idempotency_key=idempotency_key,
             ),
-            required_role=Role.OPERATOR,
+            required_role=Role.CONTRIBUTOR,
         )
 
     async def postmortem_crash(
@@ -183,7 +183,7 @@ class VmcoreHandlers:
             ctx,
             run_id,
             lambda runtime: run(runtime.crash_postmortem, self.secret_registry),
-            required_role=Role.VIEWER,
+            required_role=Role.CONTRIBUTOR,
         )
 
 
@@ -252,7 +252,7 @@ async def _fetch_vmcore(
     runtime: ProviderRuntime,
     idempotency_key: str | None = None,
 ) -> ToolResponse:
-    """Admit a `capture_vmcore` job on a `crashed` System (operator); return the job handle.
+    """Admit a `capture_vmcore` job on a `crashed` System (contributor); return the job handle.
 
     The capture method is admitted against the bound provider's ADR-0208 descriptor (ADR-0209):
     an explicit method the provider does not support is rejected up front with
@@ -269,7 +269,7 @@ async def _fetch_vmcore(
             system = await SYSTEMS.get(conn, uid)
             if system is None or system.project not in ctx.projects:
                 return _config_error(system_id)
-            require_role(ctx, system.project, Role.OPERATOR)
+            require_role(ctx, system.project, Role.CONTRIBUTOR)
             if system.state is not SystemState.CRASHED:
                 return _config_error(
                     system_id,
