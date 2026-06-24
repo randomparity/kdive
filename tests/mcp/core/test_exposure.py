@@ -72,6 +72,17 @@ def test_public_tool_visible_to_anyone() -> None:
     assert tool_visible("some.unclassified_tool", bare)  # fail-open default
 
 
+def test_session_whoami_is_public_and_admits_viewer_and_role_less() -> None:
+    # ADR-0232 / #752 AC#3: the identity probe is ungated, so a viewer-only or even a
+    # role-less authenticated caller is admitted (sees and may call it).
+    viewer_only = _ctx(roles={"a": Role.VIEWER})
+    role_less = _ctx(projects=("a",))  # member of "a" with no role
+    assert required_scopes("session.whoami") == frozenset()
+    assert tool_visible("session.whoami", viewer_only)
+    assert tool_visible("session.whoami", role_less)
+    assert tool_visible("session.whoami", _ctx())  # token-only, no membership
+
+
 def test_dual_gated_tool_visible_to_either_grant() -> None:
     # audit.query is project ADMIN *or* platform auditor.
     project_admin = _ctx(roles={"a": Role.ADMIN})
