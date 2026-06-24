@@ -67,44 +67,68 @@ remote-libvirt already produces. The separate local-libvirt `modules` artifact a
 - **Acceptance:** remote build tests pass unchanged; the shared module has its own tests; no
   behavior change. Files: shared kernel_bundle.py (+test), remote_libvirt/build.py.
 
-### T2 — Converge local-libvirt build onto the combined tar; drop `modules_ref` from the contract
+> **Commit-boundary note (challenge iter-1, finding 1):** removing `InstallRequest.modules_ref`
+> while `install.py` still reads it breaks whole-tree `ty`. The contract removal and the install
+> rewrite are **one logical change** and land together in T3. T2 keeps the field in place (local
+> build simply stops *setting* it) so every commit type-checks and tests green.
+
+### T2 — Converge local-libvirt build onto the combined tar (contract field stays)
 - `local_libvirt/build.py`: always `modules_install` + `make_kernel_bundle_bytes`; publish `kernel`
   = combined tar; remove `_maybe_publish_modules`, `_local_modules_bundle`, `transport_modules_bundle`,
   the `modules` publish, the kdump-capability conditional, the staging seams that only fed modules.
-  Reuse the shared bundle seam (worker + transport). `build()` returns `BuildOutput` without
-  `modules_ref`.
-- `build_artifacts/results.py`: remove `BuildOutput.modules_ref`.
-- `providers/ports/lifecycle.py`: remove `InstallRequest.modules_ref`.
-- `services/runs/steps.py`: remove `BuildStepResult.modules_ref`, its (de)serialization, the
-  `modules` ref entry, and `installed_modules_ref()`.
-- `jobs/handlers/runs_build.py` + `runs_install.py`: drop the `modules_ref` plumbing.
-- Update `tests/providers/local_libvirt/test_build.py`, `tests/services/runs/test_steps.py`,
-  `tests/jobs/handlers/test_runs_build.py`, `tests/providers/test_ports_contracts.py`,
-  `tests/mcp/lifecycle/test_runs_tools.py`.
+  Reuse the shared bundle seam (worker + transport). `build()` returns `BuildOutput(...)` leaving
+  `modules_ref` at its `None` default (the field is still present; it is removed in T3).
+- `jobs/handlers/runs_build.py`: stop persisting a `modules_ref` (output no longer carries one).
+- Update `tests/providers/local_libvirt/test_build.py`, `tests/jobs/handlers/test_runs_build.py`.
 - **Acceptance:** local build publishes exactly two artifacts (`kernel` combined tar + `vmlinux`);
-  no `modules` artifact; no `modules_ref` anywhere; remote build untouched.
+  no `modules` artifact is produced; remote build untouched; the now-unused `modules_ref` field is
+  still defined (default `None`) and the tree type-checks/tests green.
+- **CONFIG_MODULES=n parity (challenge iter-1, finding adj.):** `modules_install` now runs for every
+  local config, including all-builtin (`CONFIG_MODULES=n`). This is exactly what remote already does,
+  so it is proven; assert in the build test that an all-builtin staging tree (only `lib/modules/<ver>/`
+  with `modules.builtin`, no `.ko`) still bundles without error.
 
-### T3 — Local install consumes the combined tar
+### T3 — Local install consumes the combined tar; remove `modules_ref` from the contract
 - `local_libvirt/lifecycle/install.py`: fetch `kernel_ref` (combined tar) to `staging/kernel.tar.gz`;
   host-side extract `boot/vmlinuz` → `staging/kernel`; on KDUMP-or-debuginfo, repack
   `lib/modules/…` → `staging/modules.tar.gz` and `inject(...)` (injector unchanged). Recompute the
-  kdump-absent guard against "tar carried no modules and no initrd". Remove the `modules_ref` fetch.
+  kdump-absent guard against "tar carried no modules and no initrd".
 - New pure-Python extract/repack helpers (testable without libguestfs): extract a named member to a
   path; repack `lib/modules/…` members into a gzip tar; surface a missing `boot/vmlinuz` as a
   categorized error.
-- Update `runs_install.py` (no `modules_ref`), `tests/providers/local_libvirt/test_install.py`.
+- **In the same commit** (one logical change): remove `InstallRequest.modules_ref`
+  (`providers/ports/lifecycle.py`), `BuildOutput.modules_ref` (`build_artifacts/results.py`),
+  `BuildStepResult.modules_ref` + its (de)serialization + the `modules` ref entry +
+  `installed_modules_ref()` (`services/runs/steps.py`), and the `modules_ref` plumbing in
+  `runs_install.py`.
+- **Trace before removing the `modules` ref entry (challenge iter-1, finding 3):** grep every reader
+  of the `BuildStepResult` refs mapping, `installed_modules_ref`, and the `"modules"` artifact name in
+  response builders (`runs.get`, retrieve plane, artifact listings). Update or confirm no consumer;
+  add/adjust a test pinning the run's reported refs.
+- Update `tests/providers/local_libvirt/test_install.py`, `tests/services/runs/test_steps.py`,
+  `tests/providers/test_ports_contracts.py`, `tests/mcp/lifecycle/test_runs_tools.py`.
 - **Acceptance:** install stages `<kernel>` from the tar's `boot/vmlinuz`; kdump injects modules
-  extracted from the same tar; non-kdump boot needs no separate modules upload.
+  extracted from the same tar; non-kdump boot needs no separate modules upload; no `modules_ref`
+  anywhere; the tree type-checks/tests green.
 
 ### T4 — External `kernel` upload validation = combined tar
-- `build_artifacts/validation.py`: `_check_magic("kernel", …)` → gzip magic; add a bounded
-  streaming shape check (`boot/vmlinuz` is a bzImage + a `lib/modules/<ver>/…` member). A
-  malformed/incomplete tar is a `BUILD_FAILURE` with an actionable message.
-- Tests in `tests/build_artifacts/test_validation.py` (or the existing validation test): valid
-  combined tar passes; raw bzImage now rejected; gzip-of-not-a-tar rejected; tar missing
-  `boot/vmlinuz` or `lib/modules` rejected; oversized/early-exit bound honored.
+- `build_artifacts/validation.py`: `_check_magic("kernel", …)` → gzip magic at offset 0, then a
+  **bounded streaming shape check**: stream the gzip tar via sequential `get_range` reads feeding
+  `tarfile` in stream mode, confirming `boot/vmlinuz` is present and is a bzImage (`HdrS` at member
+  offset `0x202`) and at least one `lib/modules/<ver>/…` member exists. A malformed/incomplete tar is
+  a `BUILD_FAILURE` with an actionable message.
+- **Bound the decompressed output, not the ranged-read count (challenge iter-1, finding 2):**
+  `boot/vmlinuz` is the first member, so the first `lib/modules` header is only reachable after
+  decompressing the whole bzImage payload (tens of MB). Set a decompressed-output cap comfortably
+  above a real bzImage (`_KERNEL_TAR_SCAN_MAX_BYTES`, low-hundreds-of-MB) and abort with
+  `BUILD_FAILURE` if both members are not seen before the cap — this both prevents false rejects of a
+  large-but-legal bzImage and caps a gzip-bomb (tiny gzip → gigabytes of tar). Read in fixed chunks;
+  count decompressed bytes via the streaming tar offset, not the compressed bytes fetched.
+- Tests in the validation test module: valid combined tar passes; raw bzImage now rejected;
+  gzip-of-not-a-tar rejected; tar missing `boot/vmlinuz` or `lib/modules` rejected; a `boot/vmlinuz`
+  that is not a bzImage rejected; a decompression-bomb (members never appear) aborts at the cap.
 - **Acceptance:** an external builder uploading the combined `kernel` tar passes
-  `runs.complete_build`; a raw bzImage is rejected with a clear message.
+  `runs.complete_build`; a raw bzImage is rejected with a clear message; the scan is bounded.
 
 ### T5 — Docs
 - `expected_uploads.py`: `kernel` description → "Combined kernel+modules tar (gzip): `boot/vmlinuz`
@@ -119,5 +143,10 @@ remote-libvirt already produces. The separate local-libvirt `modules` artifact a
   deprecate" policy (no production data).
 
 ## Guardrails
-`just lint` · `just type` (whole tree) · `just test` before each commit; full `just ci` + the
-`live_vm`-gated build/install paths noted as host-only in the PR body.
+`just lint` · `just type` (whole tree) · `just test` before each commit; full `just ci` before push.
+
+## Live proof (challenge iter-1, finding 4)
+This dev host runs KVM/libvirt directly, so the combined-tar build→install path is exercised live,
+not deferred: run the `live_vm`-gated local build + install proof on this host before opening the PR
+and record the build stamp + outcome in the PR body. If the live stack cannot be brought up in time,
+that limitation is stated explicitly in the PR body rather than implied.
