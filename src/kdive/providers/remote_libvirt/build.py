@@ -62,6 +62,7 @@ from kdive.providers.shared.build_host.publishing.artifact_publish import (
     StorePort,
     publish_artifact_source,
 )
+from kdive.providers.shared.build_host.publishing.build_log import build_workspace_capturing_log
 from kdive.providers.shared.build_host.transports.transport_seams import (
     transport_git_checkout,
     transport_read_build_id,
@@ -238,8 +239,13 @@ class RemoteLibvirtBuild:
         """
         workspace = self._orchestrator.workspace_path(run_id)
         try:
-            self._orchestrator.build_workspace(
-                run_id, profile, recorder=recorder, provider=provider
+            build_workspace_capturing_log(
+                lambda: self._orchestrator.build_workspace(
+                    run_id, profile, recorder=recorder, provider=provider
+                ),
+                self._store_for_publish(),
+                run_id,
+                tenant=_TENANT,
             )
             mod_root = self._staging_factory()
             try:

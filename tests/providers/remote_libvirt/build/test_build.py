@@ -289,6 +289,28 @@ def test_build_nonzero_make_is_build_failure(tmp_path: Path) -> None:
     assert store.puts == []
 
 
+def test_build_failure_persists_build_log_and_threads_key(tmp_path: Path) -> None:
+    store, seams = _FakeStore(), _Seams(make_returncode=2, make_output="ld: undefined symbol foo")
+
+    with pytest.raises(CategorizedError) as caught:
+        _builder(store, seams, tmp_path).build(_RUN, _profile())
+
+    assert caught.value.details["build_log_artifact"] == f"{_TENANT}/runs/{_RUN}/build-log"
+    by_name = {name: (sens, data) for _, name, _, sens, data in store.puts}
+    assert by_name["build-log"] == (Sensitivity.REDACTED, b"ld: undefined symbol foo")
+
+
+def test_build_log_persist_failure_is_swallowed(tmp_path: Path) -> None:
+    store = _FakeStore(fail_on="build-log")
+    seams = _Seams(make_returncode=2, make_output="err")
+
+    with pytest.raises(CategorizedError) as caught:
+        _builder(store, seams, tmp_path).build(_RUN, _profile())
+
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert "build_log_artifact" not in caught.value.details
+
+
 def test_build_nonzero_modules_install_is_build_failure_nothing_stored(tmp_path: Path) -> None:
     store, seams = _FakeStore(), _Seams(modules_install_returncode=1)
 
