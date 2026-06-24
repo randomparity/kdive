@@ -258,6 +258,23 @@ def test_collection_chains_full_discovery_lifecycle(tmp_path: Path) -> None:
         assert tool in actions, tool
 
 
+def test_direct_kernel_placeholder_is_a_non_uri_warm_tree_label() -> None:
+    # D5 (#763): the direct-kernel placeholder kernel_source_ref must be a bare warm-tree label,
+    # not a URI-looking string. A `git:…`/`https://…`-looking bare string is silently routed to
+    # the local warm-tree lane (workspace.real_checkout dispatches on the {"git": {...}} *object*,
+    # never on a string scheme), so advertising one teaches the misleading shape the
+    # build-source-staging doc warns about. Mirror the sibling runs.profile_examples placeholder
+    # (`REPLACE_ME-warm-tree-source`), which is already a non-URI label.
+    examples = _examples(None)
+    for provider in ("local-libvirt", "fault-inject"):
+        ref = _profile_of(examples[provider])["kernel_source_ref"]
+        assert isinstance(ref, str)
+        assert "REPLACE_ME" in ref
+        # No URI-looking scheme prefix: a bare `git:`/`https:` etc. is the trap.
+        assert "://" not in ref
+        assert not any(ref.startswith(f"{scheme}:") for scheme in ("git", "https", "http", "ssh"))
+
+
 def test_disk_image_example_emits_no_kernel_source_ref(tmp_path: Path) -> None:
     # #472: the remote-libvirt (disk-image) example must not instruct the agent to invent a kernel
     # source for a VM-only provision.

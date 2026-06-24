@@ -183,8 +183,13 @@ def _register_runs_create(
             ExpectedBootFailureInput | None,
             Field(
                 description=(
-                    "Optional expected boot failure, e.g. "
-                    "{'kind':'console_crash','pattern':'Oops'}."
+                    "Optional declared boot crash, e.g. "
+                    "{'kind':'console_crash','pattern':'Unable to handle kernel'}. The pattern is "
+                    "matched as a case-sensitive literal substring (NOT a regex), tested "
+                    "line-by-line against the redacted console log; a single line containing the "
+                    "substring is a match. Use '|' to OR alternatives (e.g. "
+                    "'Oops|Unable to handle kernel') — up to 16 terms, 256 characters total, each "
+                    "term non-empty. A match makes the expected crash the Run's success outcome."
                 )
             ),
         ] = None,

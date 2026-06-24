@@ -250,7 +250,17 @@ class ProvisioningProfile(_ProfileBase):
     memory_mb: int | None = Field(default=None, gt=0, strict=True)
     disk_gb: int | None = Field(default=None, gt=0, strict=True)
     boot_method: BootMethod
-    kernel_source_ref: NonEmptyStr | None = None
+    kernel_source_ref: NonEmptyStr | None = Field(
+        default=None,
+        description=(
+            "Label for the baseline kernel this System is provisioned against. Required for "
+            "boot_method 'direct-kernel': the System must reach 'ready' on a baseline kernel "
+            "before its Runs iterate kernels, so the direct-kernel lane needs one named here. A "
+            "bare warm-tree label (e.g. 'linux-6.9'), not a URL — runs.create takes the structured "
+            "git source. Omit it for boot_method 'disk-image': that lane boots the operator-staged "
+            "base image's own kernel and never reads this field (ADR-0078/0080, #472)."
+        ),
+    )
     provider: ProviderSection
 
     _reject_coerced_version = schema_version_validator

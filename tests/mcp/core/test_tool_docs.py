@@ -312,6 +312,28 @@ def test_run_lifecycle_tools_cross_reference_build_cmdline() -> None:
         assert "runs.build.cmdline" in (tools[tool_name].description or "")
 
 
+def test_expected_boot_failure_documents_match_contract() -> None:
+    # D7 (#763): the expected_boot_failure pattern is matched by
+    # security.artifacts.artifact_search.search_text (a case-sensitive literal substring, applied
+    # line-by-line against the redacted console log, with `|` as an OR separator — not regex). The
+    # schema text must spell out that contract, not just give one example, so a black-box caller
+    # writes a matching pattern from the surface alone.
+    tools = {t.name: t for t in TOOLS}
+    description = tools["runs.create"].parameters["properties"]["expected_boot_failure"][
+        "description"
+    ]
+    lowered = description.lower()
+    assert "substring" in lowered
+    assert "case-sensitive" in lowered
+    assert "line" in lowered  # line-by-line matching
+    assert "redacted" in lowered
+    assert "not a regex" in lowered or "not regex" in lowered
+    # The `|`-OR alternation and its bounds (<=16 terms, <=256 chars) are named.
+    assert "|" in description
+    assert "16" in description
+    assert "256" in description
+
+
 def test_allocation_and_estimate_payload_schemas_are_concrete() -> None:
     tools = {t.name: t for t in TOOLS}
 
