@@ -16,7 +16,7 @@ Run offline drgn introspection over a Run's captured core; returns redacted repo
 
 `implemented` · `read-only`
 
-Run live drgn introspection over a live drgn-live DebugSession. Requires operator.
+Run live drgn introspection over a live drgn-live DebugSession. Requires contributor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
