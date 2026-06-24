@@ -45,6 +45,7 @@
 |----------|-----------|---------|----------|-------|
 | `KDIVE_CRASH_DIR` | worker | — | no | Directory for local kdump crash captures (live_vm path). |
 | `KDIVE_DEBUG_DIR` | worker | `/var/lib/kdive/debug` | no | Directory for debug-session transcripts. |
+| `KDIVE_LIVE_SCRIPT_MAX_TIMEOUT_SECONDS` | server | `600` | no | Upper bound (seconds) the server clamps an agent-chosen `introspect.script` `timeout_sec` to before it drives the in-guest `timeout drgn -k` wrapper. A deployment policy bounding how long one live drgn script can hold a server thread-pool slot; single-tenant operators may set it high (ADR-0240). |
 
 ## fault-inject
 
