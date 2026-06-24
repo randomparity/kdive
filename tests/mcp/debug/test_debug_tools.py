@@ -666,6 +666,105 @@ def test_start_session_rejects_drgn_live_for_crashed_halted_live(migrated_url: s
     assert opened == []
 
 
+@pytest.mark.live_vm
+def test_live_vm_start_session_attaches_to_halted_early_boot_crash(  # pragma: no cover
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """End-to-end #747 acceptance on a real host: the real debug.start_session handler opens a
+    live gdbstub session against a real early-boot-panicked, preserved libvirt domain.
+
+    Real Postgres (migrated_url) + the real LocalLibvirtConnect connector (resolves the gdb port
+    from the live domain XML and runs the real rsp_reachable probe) + a real KVM domain rendered
+    by kdive's own render_domain_xml that VFS-panics on an empty disk. Only the boot-step row is
+    seeded directly (its recording is unit-tested separately). Gated on KDIVE_LIVE_VM_BZIMAGE.
+    """
+    import contextlib
+    import os
+    import subprocess
+    import time
+    import xml.etree.ElementTree as ET
+    from pathlib import Path
+
+    from kdive.profiles.provisioning import ProvisioningProfile
+    from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
+    from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
+
+    bzimage = os.environ.get("KDIVE_LIVE_VM_BZIMAGE")
+    if not bzimage or not Path(bzimage).is_file():
+        pytest.skip("KDIVE_LIVE_VM_BZIMAGE (an early-panicking kernel image) unavailable")
+    try:
+        import libvirt  # noqa: PLC0415  # operator-provided
+    except ImportError:
+        pytest.skip("libvirt-python unavailable")
+
+    uri = os.environ.get("KDIVE_LIBVIRT_URI", "qemu:///session")
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", uri)
+    disk = tmp_path / "garbage.qcow2"
+    console = tmp_path / "console.log"
+    console.write_text("")
+    subprocess.run(
+        ["qemu-img", "create", "-f", "qcow2", str(disk), "1G"], check=True, capture_output=True
+    )
+
+    data = copy.deepcopy(_PROFILE)
+    data["provider"]["local-libvirt"]["rootfs"] = {"kind": "local", "path": str(disk)}
+    data["provider"]["local-libvirt"]["debug"] = {"gdbstub": True, "preserve_on_crash": True}
+    data["provider"]["local-libvirt"].pop("crashkernel", None)
+    profile = ProvisioningProfile.parse(data)
+    base = render_domain_xml(uuid4(), profile, disk_path=str(disk), gdb_port=51299)
+    root = ET.fromstring(base)  # noqa: S314 - kdive-rendered, trusted
+    name_el = root.find("name")
+    assert name_el is not None
+    name_el.text = "kdive-x"  # match _seed_system's domain_name so the connector resolves it
+    os_el = root.find("os")
+    assert os_el is not None
+    ET.SubElement(os_el, "kernel").text = bzimage
+    ET.SubElement(os_el, "cmdline").text = "console=ttyS0 panic=0 root=/dev/vda"
+    serial_log = root.find("./devices/serial/log")
+    assert serial_log is not None
+    serial_log.set("file", str(console))
+    final_xml = ET.tostring(root, encoding="unicode")
+
+    async def _drive() -> Any:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_run(
+                pool, sys_id, boot_result={"boot_outcome": "crashed_halted_live"}
+            )
+            handlers = debug_tools.DebugSessionHandlers.from_resolver(
+                provider_resolver(
+                    connector=LocalLibvirtConnect.from_env(),
+                    profile_policy=_PROFILE_POLICY,
+                    supported_debug_transports=frozenset({"gdbstub"}),
+                ),
+                runtime_resolver=None,
+                secret_registry=SecretRegistry(),
+            )
+            resp = await handlers.start_session(pool, _ctx(), run_id=run_id, transport="gdbstub")
+            if resp.status == "live":
+                await handlers.end_session(pool, _ctx(), resp.object_id)
+            return resp
+
+    conn = libvirt.open(uri)
+    dom = None
+    try:
+        dom = conn.createXML(final_xml, 0)
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            if "Kernel panic" in console.read_text(errors="replace"):
+                break
+            time.sleep(0.5)
+        assert "Kernel panic" in console.read_text(errors="replace"), "no early-boot panic"
+        resp = asyncio.run(_drive())
+        assert resp.status == "live", f"start_session did not attach: {resp.status} {resp.data}"
+    finally:
+        if dom is not None:
+            with contextlib.suppress(libvirt.libvirtError):
+                dom.destroy()
+        conn.close()
+
+
 def test_start_session_bad_transport_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
