@@ -205,12 +205,17 @@ class GuestAgentExec:
         self._sleep = sleep
         self._monotonic = monotonic
 
-    def run(self, domain: GuestDomain, argv: list[str]) -> AgentExecResult:
+    def run(
+        self, domain: GuestDomain, argv: list[str], *, input_data: str | None = None
+    ) -> AgentExecResult:
         """Run ``argv`` in-guest and return its captured stdout/stderr/exit status.
 
         ``argv[0]`` is the program path; the remainder are its arguments. The command
         is rejected before any agent round-trip unless ``argv[0]`` is allowlisted —
-        enforcement is worker-side, never delegated to an in-guest shell.
+        enforcement is worker-side, never delegated to an in-guest shell. ``input_data``,
+        when given, is base64-encoded into the ``guest-exec`` ``input-data`` field so the
+        program receives it on stdin — the channel a caller-supplied drgn script rides without
+        ever appearing in argv (ADR-0240), so the single-program allowlist is unaffected.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for an empty argv, a non-allowlisted
@@ -232,16 +237,20 @@ class GuestAgentExec:
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"program": program},
             )
-        pid = self._spawn(domain, program, args)
+        pid = self._spawn(domain, program, args, input_data=input_data)
         return self._await_exit(domain, pid)
 
-    def _spawn(self, domain: GuestDomain, program: str, args: list[str]) -> int:
-        command = json.dumps(
-            {
-                "execute": "guest-exec",
-                "arguments": {"path": program, "arg": args, "capture-output": True},
-            }
-        )
+    def _spawn(
+        self, domain: GuestDomain, program: str, args: list[str], *, input_data: str | None = None
+    ) -> int:
+        arguments: dict[str, object] = {
+            "path": program,
+            "arg": args,
+            "capture-output": True,
+        }
+        if input_data is not None:
+            arguments["input-data"] = base64.b64encode(input_data.encode("utf-8")).decode("ascii")
+        command = json.dumps({"execute": "guest-exec", "arguments": arguments})
         reply = self._agent(domain, command)
         try:
             return int(reply["return"]["pid"])
