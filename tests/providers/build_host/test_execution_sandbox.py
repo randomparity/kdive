@@ -16,6 +16,8 @@ def _box() -> sb.BuildSandbox:
 
 class _R:
     returncode = 0
+    stdout = ""
+    stderr = ""
 
 
 def test_run_make_passes_sandbox_to_chokepoint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -28,7 +30,7 @@ def test_run_make_passes_sandbox_to_chokepoint(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(ex, "sandbox_run", fake_sandbox_run)
     box = _box()
-    assert ex.real_run_make(Path("/ws"), sandbox=box) == 0
+    assert ex.real_run_make(Path("/ws"), sandbox=box).returncode == 0
     assert seen["sandbox"] is box
     assert seen["argv"][0] == "make"
 

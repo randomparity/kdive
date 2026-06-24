@@ -39,6 +39,7 @@ from kdive.providers.remote_libvirt import build as build_module
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
 from kdive.providers.shared.build_host import execution as build_host_execution
 from kdive.providers.shared.build_host.configuration import config as build_host_config
+from kdive.providers.shared.build_host.execution import CapturedStep
 from kdive.providers.shared.build_host.workspaces import workspace as build_host_workspace
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -99,6 +100,8 @@ class _Seams:
     config_text: str = _GOOD_CONFIG
     olddefconfig_returncode: int = 0
     make_returncode: int = 0
+    make_output: str = ""
+    olddefconfig_output: str = ""
     modules_install_returncode: int = 0
     build_id_hex: str = "abcdef0123456789"
     bundle_bytes: bytes = b"gzip-bundle-bytes"
@@ -123,18 +126,18 @@ class _Seams:
         self.merged_fragments.append(fragment_bytes)
         self.checkout_run_ids.append(run_id)
 
-    def run_olddefconfig(self, workspace: Path) -> int:
+    def run_olddefconfig(self, workspace: Path) -> CapturedStep:
         self.call_order.append("olddefconfig")
-        return self.olddefconfig_returncode
+        return CapturedStep(self.olddefconfig_returncode, self.olddefconfig_output)
 
     def read_config(self, workspace: Path) -> str:
         self.call_order.append("read_config")
         return self.config_text
 
-    def run_make(self, workspace: Path) -> int:
+    def run_make(self, workspace: Path) -> CapturedStep:
         self.make_calls += 1
         self.call_order.append("make")
-        return self.make_returncode
+        return CapturedStep(self.make_returncode, self.make_output)
 
     def run_modules_install(self, workspace: Path, mod_root: Path) -> int:
         self.modules_install_calls += 1
@@ -286,6 +289,28 @@ def test_build_nonzero_make_is_build_failure(tmp_path: Path) -> None:
     assert store.puts == []
 
 
+def test_build_failure_persists_build_log_and_threads_key(tmp_path: Path) -> None:
+    store, seams = _FakeStore(), _Seams(make_returncode=2, make_output="ld: undefined symbol foo")
+
+    with pytest.raises(CategorizedError) as caught:
+        _builder(store, seams, tmp_path).build(_RUN, _profile())
+
+    assert caught.value.details["build_log_key"] == f"{_TENANT}/runs/{_RUN}/build-log"
+    by_name = {name: (sens, data) for _, name, _, sens, data in store.puts}
+    assert by_name["build-log"] == (Sensitivity.REDACTED, b"ld: undefined symbol foo")
+
+
+def test_build_log_persist_failure_is_swallowed(tmp_path: Path) -> None:
+    store = _FakeStore(fail_on="build-log")
+    seams = _Seams(make_returncode=2, make_output="err")
+
+    with pytest.raises(CategorizedError) as caught:
+        _builder(store, seams, tmp_path).build(_RUN, _profile())
+
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert "build_log_key" not in caught.value.details
+
+
 def test_build_nonzero_modules_install_is_build_failure_nothing_stored(tmp_path: Path) -> None:
     store, seams = _FakeStore(), _Seams(modules_install_returncode=1)
 
@@ -388,9 +413,9 @@ def test_validate_config_ref_rejects_file_outside_roots(tmp_path: Path) -> None:
         workspace_root=tmp_path / "ws",
         store_factory=lambda: _FakeStore(),
         checkout=lambda _r, _p, _w, _f: None,
-        run_olddefconfig=lambda _w: 0,
+        run_olddefconfig=lambda _w: CapturedStep(0, ""),
         read_config=lambda _w: _GOOD_CONFIG,
-        run_make=lambda _w: 0,
+        run_make=lambda _w: CapturedStep(0, ""),
         run_modules_install=lambda _w, _m: 0,
         make_bundle=lambda _w, _m: build_module.ArtifactBytes(b"b"),
         read_vmlinux_source=lambda _w: build_module.ArtifactBytes(b"v"),
@@ -418,9 +443,9 @@ def test_validate_config_ref_accepts_file_inside_roots(tmp_path: Path) -> None:
         workspace_root=tmp_path / "ws",
         store_factory=lambda: _FakeStore(),
         checkout=lambda _r, _p, _w, _f: None,
-        run_olddefconfig=lambda _w: 0,
+        run_olddefconfig=lambda _w: CapturedStep(0, ""),
         read_config=lambda _w: _GOOD_CONFIG,
-        run_make=lambda _w: 0,
+        run_make=lambda _w: CapturedStep(0, ""),
         run_modules_install=lambda _w, _m: 0,
         make_bundle=lambda _w, _m: build_module.ArtifactBytes(b"b"),
         read_vmlinux_source=lambda _w: build_module.ArtifactBytes(b"v"),
@@ -695,7 +720,7 @@ def test_real_run_make_argv_and_returncode(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(subprocess, "run", _capture)
 
-    assert build_host_execution.real_run_make(Path("/ws")) == 3
+    assert build_host_execution.real_run_make(Path("/ws")).returncode == 3
     argv = captured[0]
     assert argv[:3] == ["make", "-C", "/ws"]
     expected_jobs = os.cpu_count() or 1
@@ -1711,7 +1736,9 @@ def test_merge_config_defconfig_failure_is_build_failure(
     # A non-zero ``make defconfig`` short-circuits before the fragment is written/merged.
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    monkeypatch.setattr(build_host_workspace, "run_make_target", lambda *a, **k: 2)
+    monkeypatch.setattr(
+        build_host_workspace, "run_make_target", lambda *a, **k: CapturedStep(2, "")
+    )
 
     with pytest.raises(CategorizedError) as caught:
         build_host_workspace.merge_config(b"CONFIG_X=y\n", workspace, _RUN)
@@ -1726,7 +1753,9 @@ def test_merge_config_runs_merge_script_and_propagates_failure(
 ) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    monkeypatch.setattr(build_host_workspace, "run_make_target", lambda *a, **k: 0)
+    monkeypatch.setattr(
+        build_host_workspace, "run_make_target", lambda *a, **k: CapturedStep(0, "")
+    )
     captured: list[list[str]] = []
 
     def _merge(argv: list[str], **__: object) -> subprocess.CompletedProcess[str]:

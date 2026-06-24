@@ -274,7 +274,7 @@ def merge_config(
     fragment_bytes: bytes, workspace: Path, run_id: UUID, sandbox: BuildSandbox | None = None
 ) -> None:  # pragma: no cover
     """Run base defconfig (demoted), merge the kdump fragment, leave olddefconfig to the caller."""
-    if run_make_target(workspace, ["defconfig"], "make defconfig", sandbox=sandbox) != 0:
+    if run_make_target(workspace, ["defconfig"], "make defconfig", sandbox=sandbox).returncode != 0:
         raise build_failure("make defconfig exited non-zero", run_id)
     _write_fragment(fragment_bytes, workspace, sandbox)
     fragment_path = workspace / "kdump.config.fragment"

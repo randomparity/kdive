@@ -60,6 +60,7 @@ from kdive.providers.shared.build_host.publishing.artifact_publish import (
     StorePort,
     publish_artifact_source,
 )
+from kdive.providers.shared.build_host.publishing.build_log import build_workspace_capturing_log
 from kdive.providers.shared.build_host.sandbox import (
     SandboxProvider,
     resolve_build_sandbox_provider,
@@ -268,8 +269,13 @@ class LocalLibvirtBuild:
         """
         workspace = self._orchestrator.workspace_path(run_id)
         try:
-            self._orchestrator.build_workspace(
-                run_id, profile, recorder=recorder, provider=provider
+            build_workspace_capturing_log(
+                lambda: self._orchestrator.build_workspace(
+                    run_id, profile, recorder=recorder, provider=provider
+                ),
+                self._store_for_publish(),
+                run_id,
+                tenant=self._tenant,
             )
             with recorder.phase(BuildPhase.ARTIFACT, provider):
                 build_id = self._read_build_id(workspace)
@@ -313,6 +319,11 @@ class LocalLibvirtBuild:
         """
         self._orchestrator.validate_config_ref(ref)
 
+    def _store_for_publish(self) -> StorePort:
+        if self._store is None:
+            self._store = self._store_factory()
+        return self._store
+
     def publish(self, run_id: UUID, name: str, source: ArtifactSource) -> StoredArtifact:
         """Publish one build artifact; bytes PUT directly, host files via presigned PUT.
 
@@ -321,10 +332,8 @@ class LocalLibvirtBuild:
                 operation or presigned upload; ``BUILD_FAILURE`` if the host-side hash/size of a
                 remote file cannot be read.
         """
-        if self._store is None:
-            self._store = self._store_factory()
         return publish_artifact_source(
-            self._store,
+            self._store_for_publish(),
             run_id,
             name,
             source,

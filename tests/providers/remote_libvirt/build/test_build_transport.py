@@ -36,6 +36,7 @@ from kdive.providers.remote_libvirt.build import (
     transport_make_bundle,
     transport_vmlinux_source,
 )
+from kdive.providers.shared.build_host.execution import CapturedStep
 from kdive.providers.shared.build_host.transports.transport_seams import (
     transport_read_build_id,
     transport_run_modules_install,
@@ -169,9 +170,9 @@ def _transport_builder(
         workspace_root=tmp_path / "ws",
         store_factory=lambda: store,
         checkout=lambda _r, _p, _w, _f: None,
-        run_olddefconfig=lambda _w: 0,
+        run_olddefconfig=lambda _w: CapturedStep(0, ""),
         read_config=lambda _w: _GOOD_CONFIG,
-        run_make=lambda _w: 0,
+        run_make=lambda _w: CapturedStep(0, ""),
         run_modules_install=transport_run_modules_install(transport),
         make_bundle=transport_make_bundle(transport),
         read_vmlinux_source=transport_vmlinux_source(transport),

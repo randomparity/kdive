@@ -492,12 +492,26 @@ def test_transport_run_step_builds_make_argv(tmp_path: Path) -> None:
 
 
 def test_transport_run_step_returns_transport_exit_code(tmp_path: Path) -> None:
-    """transport_run_step returns the CommandResult.returncode from t.run."""
+    """transport_run_step surfaces the CommandResult.returncode on the CapturedStep."""
     transport = FakeBuildTransport(run_returncode=42)
     ws = tmp_path / "ws"
     step = transport_run_step(transport, ["targets"])
 
-    assert step(ws) == 42
+    assert step(ws).returncode == 42
+
+
+def test_transport_run_step_captures_stdout_and_stderr(tmp_path: Path) -> None:
+    """transport_run_step surfaces the transport's stdout+stderr as the CapturedStep output."""
+    transport = FakeBuildTransport(
+        run_results=[CommandResult(returncode=2, stdout="compiling foo.c", stderr="ld: error")]
+    )
+    ws = tmp_path / "ws"
+    step = transport_run_step(transport, ["targets"])
+
+    captured = step(ws)
+    assert captured.returncode == 2
+    assert "compiling foo.c" in captured.output
+    assert "ld: error" in captured.output
 
 
 def test_transport_run_make_argv_includes_j_flag(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
+from kdive.providers.shared.build_host.execution import CapturedStep
 from kdive.providers.shared.build_host.orchestration import BuildHostOrchestrator, WorkspaceCleanup
 
 _RUN = UUID("44444444-4444-4444-4444-444444444444")
@@ -42,9 +43,9 @@ def _validating_orchestrator(
         workspace_root=tmp_path,
         catalog_fetch=lambda _name: fragment,
         checkout=lambda _r, _p, _w, _f: None,
-        run_olddefconfig=lambda _w: 0,
+        run_olddefconfig=lambda _w: CapturedStep(0, ""),
         read_config=lambda _w: final_config,
-        run_make=lambda _w: 0,
+        run_make=lambda _w: CapturedStep(0, ""),
     )
 
 
@@ -56,9 +57,9 @@ def _orchestrator(
         workspace_root=workspace_root,
         catalog_fetch=lambda _name: b"",
         checkout=lambda _r, _p, _w, _f: None,
-        run_olddefconfig=lambda _w: 0,
+        run_olddefconfig=lambda _w: CapturedStep(0, ""),
         read_config=lambda _w: "",
-        run_make=lambda _w: 0,
+        run_make=lambda _w: CapturedStep(0, ""),
         cleanup=cleanup,
     )
 

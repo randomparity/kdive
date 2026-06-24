@@ -23,6 +23,7 @@ from kdive.providers.shared.build_host.configuration.config import resolve_local
 from kdive.providers.shared.build_host.execution import (
     MAKE_TIMEOUT_S,
     OBJCOPY_TIMEOUT_S,
+    CapturedStep,
     ReadBuildId,
     ReadConfig,
     RunModulesInstall,
@@ -46,10 +47,16 @@ def transport_run_step(
     args: list[str],
     timeout_s: int = MAKE_TIMEOUT_S,
 ) -> RunStep:
-    """Return a ``RunStep`` that runs ``make -C <ws> <args...>`` over the transport."""
+    """Return a ``RunStep`` that runs ``make -C <ws> <args...>`` over the transport.
 
-    def _step(ws: Path) -> int:
-        return t.run(["make", "-C", str(ws), *args], cwd=str(ws), timeout_s=timeout_s).returncode
+    The transport already captures stdout+stderr in its ``CommandResult``; the returned step
+    surfaces both as a redacted, tail-capped ``CapturedStep`` so a failed build's output can be
+    persisted as a build-log artifact (#770).
+    """
+
+    def _step(ws: Path) -> CapturedStep:
+        result = t.run(["make", "-C", str(ws), *args], cwd=str(ws), timeout_s=timeout_s)
+        return CapturedStep.from_streams(result.returncode, result.stdout, result.stderr)
 
     return _step
 

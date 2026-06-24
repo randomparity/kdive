@@ -6,18 +6,60 @@ import os
 import subprocess  # noqa: S404 - all calls use fixed argv and no shell
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
 from kdive.build_artifacts.validation import parse_gnu_build_id
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.shared.build_host.sandbox import BuildSandbox, sandbox_run
+from kdive.security.secrets.redaction import Redactor
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 MAKE_TIMEOUT_S = 2 * 60 * 60
 OBJCOPY_TIMEOUT_S = 60
 
+# Trailing build-output bytes retained for the build-log artifact (#770, ADR-0238). 16 KiB — eight
+# times the 2000-char pre-compile `STDERR_TAIL` (a compiler error trails many recipe-echo lines),
+# yet under the 64 KiB inline-serve cap so the whole log returns in one `artifacts.get`.
+BUILD_LOG_TAIL_BYTES = 16 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedStep:
+    """A build step's exit code plus its redacted, tail-capped combined output (ADR-0238)."""
+
+    returncode: int
+    output: str
+
+    @classmethod
+    def from_streams(
+        cls,
+        returncode: int,
+        stdout: str | None,
+        stderr: str | None,
+        *,
+        registry: SecretRegistry | None = None,
+    ) -> CapturedStep:
+        """Combine, redact, and tail-cap a step's captured streams into a `CapturedStep`."""
+        return cls(returncode, redact_and_cap(stdout, stderr, registry=registry))
+
+
+def redact_and_cap(
+    stdout: str | None, stderr: str | None, *, registry: SecretRegistry | None = None
+) -> str:
+    """Redact secrets from the combined stdout+stderr and keep the trailing build-log slice.
+
+    The tail is kept (not the head): the failing recipe line and the compiler error live at the
+    end of build output, so a head cap would discard exactly the bytes an agent needs.
+    """
+    combined = (stdout or "") + (stderr or "")
+    redacted = Redactor(registry=registry).redact_text(combined)
+    return redacted[-BUILD_LOG_TAIL_BYTES:]
+
+
 type ReadConfig = Callable[[Path], str]
-type RunStep = Callable[[Path], int]
+type RunStep = Callable[[Path], CapturedStep]
 type RunModulesInstall = Callable[[Path, Path], int]
 type ReadBytes = Callable[[Path], bytes]
 type ReadBuildId = Callable[[Path], str]
@@ -95,28 +137,12 @@ def real_read_vmlinux(workspace: Path) -> bytes:  # pragma: no cover - live_vm
     )
 
 
-def real_run_make(workspace: Path, sandbox: BuildSandbox | None = None) -> int:  # pragma: no cover
+def real_run_make(workspace: Path, sandbox: BuildSandbox | None = None) -> CapturedStep:
     """Run the default parallel kernel build (demoted when a sandbox is active)."""
-    try:
-        return sandbox_run(
-            sandbox,
-            ["make", "-C", str(workspace), f"-j{os.cpu_count() or 1}"],
-            timeout=MAKE_TIMEOUT_S,
-            check=False,
-        ).returncode
-    except subprocess.TimeoutExpired as exc:
-        raise CategorizedError(
-            "make exceeded the build timeout",
-            category=ErrorCategory.BUILD_FAILURE,
-            details={"timeout_s": MAKE_TIMEOUT_S},
-        ) from exc
-    except OSError as exc:
-        raise launch_failure("make", exc, category=ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
+    return run_make_target(workspace, [f"-j{os.cpu_count() or 1}"], "make", sandbox=sandbox)
 
 
-def real_run_olddefconfig(
-    workspace: Path, sandbox: BuildSandbox | None = None
-) -> int:  # pragma: no cover
+def real_run_olddefconfig(workspace: Path, sandbox: BuildSandbox | None = None) -> CapturedStep:
     return run_make_target(workspace, ["olddefconfig"], "make olddefconfig", sandbox=sandbox)
 
 
@@ -128,28 +154,52 @@ def real_run_modules_install(
         [f"INSTALL_MOD_PATH={mod_root}", "modules_install"],
         "make modules_install",
         sandbox=sandbox,
-    )
+    ).returncode
 
 
 def run_make_target(
     workspace: Path, args: list[str], label: str, sandbox: BuildSandbox | None = None
-) -> int:
-    """Run ``make -C <workspace> <args...>`` (demoted when a sandbox is active); map faults."""
+) -> CapturedStep:
+    """Run ``make -C <workspace> <args...>`` (demoted when a sandbox is active); capture + map.
+
+    Stdout and stderr are captured (not inherited) so a failing build's compiler output can be
+    persisted as a build-log artifact (#770). A timeout still raises, but carries the partial
+    captured output on ``details["build_log"]`` so a hung build is not a black hole.
+    """
     try:
-        return sandbox_run(
+        completed = sandbox_run(
             sandbox,
             ["make", "-C", str(workspace), *args],
             timeout=MAKE_TIMEOUT_S,
             check=False,
-        ).returncode
+            capture_output=True,
+            text=True,
+        )
     except subprocess.TimeoutExpired as exc:
         raise CategorizedError(
             f"{label} exceeded the build timeout",
             category=ErrorCategory.BUILD_FAILURE,
-            details={"timeout_s": MAKE_TIMEOUT_S},
+            details=_timeout_details(exc),
         ) from exc
     except OSError as exc:
         raise launch_failure("make", exc, category=ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
+    return CapturedStep.from_streams(completed.returncode, completed.stdout, completed.stderr)
+
+
+def _timeout_details(exc: subprocess.TimeoutExpired) -> dict[str, object]:
+    """Build-failure details for a timed-out make, carrying any partial captured output."""
+    details: dict[str, object] = {"timeout_s": MAKE_TIMEOUT_S}
+    build_log = redact_and_cap(_as_text(exc.stdout), _as_text(exc.stderr))
+    if build_log:
+        details["build_log"] = build_log
+    return details
+
+
+def _as_text(value: str | bytes | None) -> str | None:
+    """Decode a ``TimeoutExpired`` stream (bytes when ``text`` was not honored) to text."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value
 
 
 def real_read_build_id(workspace: Path) -> str:  # pragma: no cover - live_vm
@@ -191,8 +241,14 @@ def real_read_build_id(workspace: Path) -> str:  # pragma: no cover - live_vm
     return parse_gnu_build_id(notes)
 
 
-def build_failure(message: str, run_id: UUID) -> CategorizedError:
-    """A build failure with run-id details."""
-    return CategorizedError(
-        message, category=ErrorCategory.BUILD_FAILURE, details={"run_id": str(run_id)}
-    )
+def build_failure(message: str, run_id: UUID, *, build_log: str | None = None) -> CategorizedError:
+    """A build failure with run-id details, optionally carrying captured build output.
+
+    When ``build_log`` is non-empty it is attached under ``details["build_log"]`` so the builder
+    can persist it as a ``build-log`` artifact (#770, ADR-0238); absent or empty, the details are
+    unchanged so a pre-compile failure stays a black-box-free no-op on the build-log path.
+    """
+    details: dict[str, object] = {"run_id": str(run_id)}
+    if build_log:
+        details["build_log"] = build_log
+    return CategorizedError(message, category=ErrorCategory.BUILD_FAILURE, details=details)
