@@ -79,7 +79,7 @@ from drgn.helpers.linux.pid import for_each_task
 release = prog["init_uts_ns"].name.release.string_().decode()
 init_comm = prog["init_task"].comm.string_().decode()
 ntasks = sum(1 for _ in for_each_task(prog))
-print(f"KDIVE_LIVE_PROOF release={release} init_comm={init_comm} ntasks={ntasks}")
+print(f"DRGN_LIVE_PROOF release={release} init_comm={init_comm} ntasks={ntasks}")
 """
 # Over the 256 KiB inbound cap: the tool rejects it as configuration_error before any guest send.
 _OVERSIZE_SCRIPT = "# pad\n" + ("x" * (_MAX_SCRIPT_BYTES + 16))
@@ -500,7 +500,7 @@ def test_spine_live_script_over_the_wire() -> None:
                     "introspect-script",
                 )
                 output = data_str(env, "output")
-                assert "KDIVE_LIVE_PROOF" in output, f"proof marker missing: {output!r}"
+                assert "DRGN_LIVE_PROOF" in output, f"proof marker missing: {output!r}"
                 assert "ntasks=" in output and "ntasks=0" not in output, (
                     f"no live task walk: {output!r}"
                 )
