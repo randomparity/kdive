@@ -110,7 +110,9 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Test: `tests/providers/local_libvirt/test_profile_policy.py` (create if absent), plus one assertion each for remote/fault in their existing policy tests (or the same new file).
 
 **Interfaces:**
-- Produces: `ProfilePolicy.gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool` — True iff the System is provisioned with a gdbstub `-gdb` endpoint, **independent** of `capture_method` precedence (so a kdump-primary System that also set `gdbstub` returns True). Consumed by Task 3.
+- Produces TWO provider-neutral predicates on the `ProfilePolicy` port, both consumed by Task 3 (so the generic boot handler never reads a provider-specific profile section):
+  - `gdbstub_provisioned(self, profile) -> bool` — True iff the System has a gdbstub `-gdb` endpoint, **independent** of `capture_method` precedence (a kdump-primary System that also set `gdbstub` returns True).
+  - `host_dump_provisioned(self, profile) -> bool` — True iff the System can produce a host-side memory dump on a preserved crash (local: `preserve_on_crash`; remote: False; fault: False). Used only to compute `available_capture`.
 
 - [ ] **Step 1: Write failing tests.** Create `tests/providers/local_libvirt/test_profile_policy.py`:
 
@@ -132,17 +134,28 @@ def test_gdbstub_provisioned_true_even_when_kdump_is_primary() -> None:
 
 def test_gdbstub_provisioned_false_when_flag_unset() -> None:
     assert LocalLibvirtProfilePolicy().gdbstub_provisioned(_profile(gdbstub=False)) is False
+
+def test_host_dump_provisioned_tracks_preserve_on_crash() -> None:
+    pol = LocalLibvirtProfilePolicy()
+    assert pol.host_dump_provisioned(_profile(gdbstub=True, preserve_on_crash=True)) is True
+    assert pol.host_dump_provisioned(_profile(gdbstub=True, preserve_on_crash=False)) is False
 ```
+
+(Extend `_profile` to take a `preserve_on_crash: bool = False` kwarg setting `debug.preserve_on_crash`.)
 
 (Confirm the concrete class name with `rg -n "class .*ProfilePolicy" src/kdive/providers/local_libvirt/profile_policy.py`. Build `_profile` by copying an existing local-libvirt profile construction from `tests/providers/local_libvirt/`.)
 
 - [ ] **Step 2: Run, verify red.** `uv run python -m pytest tests/providers/local_libvirt/test_profile_policy.py -q` → FAIL (`AttributeError: gdbstub_provisioned`).
 
-- [ ] **Step 3: Implement.** In `runtime.py` `ProfilePolicy` Protocol add:
+- [ ] **Step 3: Implement.** In `runtime.py` `ProfilePolicy` Protocol add both:
 
 ```python
     def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
-        """Whether the System is provisioned with a gdbstub endpoint (independent of capture_method)."""
+        """Whether the System has a gdbstub endpoint (independent of capture_method)."""
+        ...
+
+    def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
+        """Whether a host-side memory dump is available on a preserved crash."""
         ...
 ```
 
@@ -151,19 +164,28 @@ In `local_libvirt/profile_policy.py`:
 ```python
     def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
         return profile.provider.local_libvirt.debug.gdbstub
+
+    def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
+        return profile.provider.local_libvirt.debug.preserve_on_crash
 ```
 
-In `remote_libvirt/profile_policy.py` (remote unconditionally provisions gdbstub — ADR-0083, `capture_method` returns GDBSTUB absent crashkernel):
+In `remote_libvirt/profile_policy.py` (remote unconditionally provisions gdbstub — ADR-0083, `capture_method` returns GDBSTUB absent crashkernel; the remote section has no preserve flag, so no host_dump):
 
 ```python
     def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
         return True
+
+    def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
+        return False
 ```
 
-In `fault_inject/profile_policy.py` (the test/failure provider has no gdbstub endpoint):
+In `fault_inject/profile_policy.py` (the test/failure provider has neither endpoint):
 
 ```python
     def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
+        return False
+
+    def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
         return False
 ```
 
@@ -173,11 +195,13 @@ In `fault_inject/profile_policy.py` (the test/failure provider has no gdbstub en
 
 ```bash
 git add src/kdive/providers/core/runtime.py src/kdive/providers/local_libvirt/profile_policy.py src/kdive/providers/remote_libvirt/profile_policy.py src/kdive/providers/fault_inject/profile_policy.py tests/providers/local_libvirt/test_profile_policy.py
-git commit -m "feat(providers): add ProfilePolicy.gdbstub_provisioned seam
+git commit -m "feat(providers): add ProfilePolicy gdbstub/host_dump provisioned seam
 
-A provider-neutral predicate for 'this System has a gdbstub endpoint',
-independent of capture_method precedence, so the generic boot handler can
-detect the live-attach fallback even on a kdump-primary System (ADR-0233, #747).
+Provider-neutral predicates 'this System has a gdbstub endpoint' (independent
+of capture_method precedence) and 'host_dump available on a preserved crash',
+so the generic boot handler detects the live-attach fallback and builds
+available_capture without reading a provider-specific profile section
+(ADR-0233, #747).
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -191,7 +215,8 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Test: `tests/jobs/handlers/test_runs_boot.py`
 
 **Interfaces:**
-- Consumes: `ProfilePolicy.gdbstub_provisioned` (Task 2); `Connector.open_transport(system: SystemHandle, kind) -> TransportHandle` (raises `CategorizedError` when unreachable); `profile.provider.local_libvirt.debug.preserve_on_crash`; `domain_name_for(system_id)` (`providers/local_libvirt/lifecycle/...`, used by `render_domain_xml`); `search_text`; `_capture_console_artifact`; `_record_boot_audit`.
+- Consumes: `ProfilePolicy.gdbstub_provisioned` and `ProfilePolicy.host_dump_provisioned` (Task 2 — the handler reads **no** provider-specific profile section); `Connector.open_transport(system: SystemHandle, kind) -> TransportHandle` (raises `CategorizedError` when unreachable); `domain_name_for` (import from `kdive.providers.local_libvirt.naming` — confirm with `rg -n "def domain_name_for" src/`); `search_text`; `_capture_console_artifact`; `_record_boot_audit`; `SYSTEMS` (`kdive.db.repositories`).
+- Sole caller of `_run_boot_and_capture_outcome` is `boot_handler` (`runs_boot.py:257`); no test calls it directly, so the signature change touches exactly one call site (verified by `rg -n "_run_boot_and_capture_outcome" src/ tests/`).
 - Produces: a `boot` `run_steps.result` dict `{system_id, boot_outcome: "crashed_halted_live", evidence_kind: "console", evidence_artifact_id, available_capture: [...]}` recorded as a **succeeded** step; consumed by Task 4. Allowed `available_capture` strings are `CaptureMethod` values `"gdbstub"`, `"console"`, `"host_dump"`.
 
 > Probe mechanism: do **not** re-resolve the gdb port. Call `connector.open_transport(SystemHandle(domain_name_for(system_id)), "gdbstub")` inside a `try`; a returned handle ⇒ reachable, a `CategorizedError` ⇒ unreachable. `open_transport` internally runs the read-only `rsp_reachable` probe and the loopback guard, holds no session row, and `close_transport` is a no-op — so this does not consume the single-attach slot.
@@ -269,8 +294,10 @@ Add the helper (keep it ≤100 lines / complexity ≤8 — extract `_available_c
 
 ```python
 def _available_capture(profile_policy: ProfilePolicy, profile: ProvisioningProfile) -> list[str]:
+    # Provider-neutral: built from ProfilePolicy predicates only, never a provider-specific
+    # profile section, so this generic handler stays correct for every provider (ADR-0233).
     methods = [CaptureMethod.GDBSTUB.value, CaptureMethod.CONSOLE.value]
-    if profile.provider.local_libvirt.debug.preserve_on_crash:
+    if profile_policy.host_dump_provisioned(profile):
         methods.append(CaptureMethod.HOST_DUMP.value)
     return methods
 
@@ -294,7 +321,10 @@ async def _record_crash_halted_live(
     artifact_store: ObjectStore | None,
 ) -> dict[str, Any] | None:
     """Record crashed_halted_live iff gdbstub-provisioned, console shows a panic, stub reachable."""
-    profile = ProvisioningProfile.parse(run.require_system().provisioning_profile)  # see note
+    system = await SYSTEMS.get(conn, system_id)
+    if system is None:
+        return None
+    profile = ProvisioningProfile.parse(system.provisioning_profile)
     if not profile_policy.gdbstub_provisioned(profile):
         return None
     artifact = await _capture_console_artifact(conn, system_id, secret_registry, artifact_store)
@@ -312,7 +342,7 @@ async def _record_crash_halted_live(
     }
 ```
 
-Note on the profile source: the boot handler has `run` and `system_id`; load the System's `provisioning_profile` the same way `sessions_lifecycle._gdbstub_credential_check` does (`SYSTEMS.get(conn, system_id)` then `ProvisioningProfile.parse(system.provisioning_profile)`). If a `run.require_system()` helper does not exist, fetch via `await SYSTEMS.get(conn, system_id)` and guard `None` → return `None`. Add the needed imports (`Connector`, `SystemHandle` from `kdive.providers.ports`; `ProfilePolicy` from `kdive.providers.core.runtime`; `ProvisioningProfile` from `kdive.profiles.provisioning`; `CaptureMethod` from `kdive.domain.capture`; `domain_name_for` from its module; `SYSTEMS` from `kdive.db.repositories`).
+Imports to add to `runs_boot.py`: `Connector`, `SystemHandle` from `kdive.providers.ports`; `ProfilePolicy` from `kdive.providers.core.runtime`; `ProvisioningProfile` from `kdive.profiles.provisioning`; `CaptureMethod` from `kdive.domain.capture`; `domain_name_for` from `kdive.providers.shared.runtime_paths`; `SYSTEMS` from `kdive.db.repositories`; `UUID`/`Any` already imported. The profile load mirrors `sessions_lifecycle` (`SYSTEMS.get` then `ProvisioningProfile.parse(system.provisioning_profile)`).
 
 - [ ] **Step 8: Run, verify green + guardrails.** `uv run python -m pytest tests/jobs/handlers/test_runs_boot.py -q` → PASS. `just lint`; `just type`.
 
@@ -416,11 +446,18 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Modify/Create: a `live_vm`-marked test under `tests/providers/local_libvirt/` (mirror `tests/providers/local_libvirt/test_connect.py` live setup) or `tests/integration/`.
 
 **Interfaces:**
-- Consumes: the full local-libvirt provision→boot→`debug.start_session` path; the kdive-debug kernel that early-panics with no rootfs.
+- Consumes: the full local-libvirt provision→boot→`debug.start_session` path; a kernel that panics early in boot.
 
-- [ ] **Step 1: Write the gated test.** A `@pytest.mark.live_vm` test that: provisions a System with `provider.local_libvirt.debug = {gdbstub: true, preserve_on_crash: true}` and a kernel cmdline that forces an early-boot VFS panic (no/invalid rootfs), boots it (expects `READINESS_FAILURE` → `crashed_halted_live`), then asserts `debug.start_session(run, "gdbstub")` returns an `ok` live session and `end_session` detaches. Follow the existing live harness for stack/fixtures; skip cleanly when absent.
+**Panic induction (the crux — confirm against the provisioning path first).** The spike forced the panic by booting the kernel with no mountable root (`VFS: Unable to mount root fs` → `Kernel panic - not syncing`). Reproduce that deterministically through kdive in this priority order:
+1. **Kernel cmdline override**, if the local profile/boot path exposes one (grep first: `rg -n "cmdline|append|<kernel>|<cmdline>|root=" src/kdive/providers/local_libvirt/`). If a direct-kernel boot renders `<cmdline>`, provision with `root=/dev/does-not-exist panic=0` so the kernel halts (not reboots) on the VFS panic.
+2. **Deliberately incompatible rootfs**, if no cmdline hook exists: point the profile's rootfs at an empty/garbage qcow2 the kernel cannot mount, yielding the same early-boot VFS panic.
+3. Only if neither is reachable, add a **test-only** cmdline-append seam used solely by this `live_vm` test — it must not relax any production gate and must be off by default.
 
-- [ ] **Step 2: Run it for real on this host.** `just test-live -k crashed_halted` (or the live-stack runbook bring-up; worker=root needs `sudo` + `KDIVE_KERNEL_SRC`). Capture the gdb/session evidence. If it fails, debug on the host (this is the falsifiable gate — do not stub past it).
+Whichever path: the System sets `provider.local_libvirt.debug = {gdbstub: true, preserve_on_crash: true}`, so the panic preserves the domain with a live stub. State in the test docstring which induction path was used.
+
+- [ ] **Step 1: Write the gated test.** A `@pytest.mark.live_vm` test that provisions the System above, boots it (expects `READINESS_FAILURE` resolved to a succeeded `boot` step with `boot_outcome == "crashed_halted_live"`), asserts `debug.start_session(run, "gdbstub")` returns an `ok` live session, and `end_session` detaches. Follow the existing live harness for stack/fixtures; skip cleanly when absent. **Teardown (required):** wrap provisioning in a try/finally that tears down the System / releases the Allocation and asserts the libvirt domain is gone (`virsh -c qemu:///system list --all` shows no `kdive-<system_id>` domain), so a live run leaves no residual QEMU process or domain on the host.
+
+- [ ] **Step 2: Run it for real on this host.** Bring up the live stack (runbook `docs/operating/runbooks/live-stack.md`; worker=root needs `sudo` + `KDIVE_KERNEL_SRC`), then `just test-live -k crashed_halted`. Capture the session evidence (a register read in the panic frame is a strong proof — mirror the spike's `bt`). If it fails, debug on the host — this is the falsifiable gate; do not stub past it. After the run, confirm no leaked domain remains.
 
 - [ ] **Step 3: Commit.**
 
@@ -441,5 +478,5 @@ git commit -m "test(live): prove gdbstub live-attach to a preserved early-boot p
 ## Self-Review
 
 - **Spec coverage:** Component 1 → Task 1; Component 2 (probe) → Task 3 (via `open_transport`); Component 3 (record) → Task 3, with the `gdbstub_provisioned` seam in Task 2; Component 4 (admit) → Task 4; Component 5 (surface options) → `available_capture` recorded in Task 3 (read off the `boot` step result by `runs.get`'s existing free-form `data`); console-panic crash signal, audit parity, degraded-store, System-READY invariant all carried in Tasks 3-4 tests; `live_vm` proof → Task 5.
-- **Type consistency:** `gdbstub_provisioned` (Protocol + 3 impls) ↔ called in Task 3; `_record_crash_halted_live`/`_available_capture`/`_gdbstub_reachable` defined and called in Task 3; `crashed_halted_live` string identical across Tasks 3-5; `available_capture` strings are `CaptureMethod` values.
+- **Type consistency:** `gdbstub_provisioned` + `host_dump_provisioned` (Protocol + 3 impls each) ↔ called in Task 3; the generic boot handler reads **no** provider-specific profile section (only policy predicates), so it is correct for remote/fault Systems; `_record_crash_halted_live`/`_available_capture`/`_gdbstub_reachable` defined and called in Task 3; `crashed_halted_live` string identical across Tasks 3-5; `available_capture` strings are `CaptureMethod` values.
 - **Placeholders:** the `_profile_with` / live-harness builders are the only "copy the existing fixture" references; each names the exact existing test to copy from. No "TBD"/"add error handling".
