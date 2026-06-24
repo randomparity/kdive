@@ -149,9 +149,11 @@ def _record_expected(
     return asyncio.run(_run()), audits
 
 
-def test_record_expected_crash_discloses_console_and_inert() -> None:
+def test_record_expected_crash_discloses_console_and_inert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     result, audits = _record_expected(
-        monkeypatch=pytest.MonkeyPatch(),
+        monkeypatch,
         gdbstub=True,
         host_dump=True,
         kdump=False,
@@ -165,9 +167,11 @@ def test_record_expected_crash_discloses_console_and_inert() -> None:
     assert len(audits) == 1
 
 
-def test_record_expected_crash_degrades_when_system_gone() -> None:
+def test_record_expected_crash_degrades_when_system_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     result, _ = _record_expected(
-        monkeypatch=pytest.MonkeyPatch(),
+        monkeypatch,
         gdbstub=True,
         host_dump=True,
         kdump=True,
@@ -178,7 +182,7 @@ def test_record_expected_crash_degrades_when_system_gone() -> None:
     assert result["inert_capture"] == []
 ```
 
-Note: the two functions above construct their own `pytest.MonkeyPatch()` so `_record_expected` needs no `monkeypatch` fixture threading; if the repo's lint flags an unused fixture, use the fixture-injected `monkeypatch` instead by giving each test a `monkeypatch: pytest.MonkeyPatch` parameter and passing it through.
+The two tests take the pytest-injected `monkeypatch` fixture and thread it into `_record_expected` (exactly as the existing `_record(...)` callers do). Do **not** construct a bare `pytest.MonkeyPatch()` here — a manually built one is never `.undo()`-ed at teardown, so its `setattr` on `runs_boot.SYSTEMS.get` / `runs_boot._record_boot_audit` would leak into sibling tests (notably the `crashed_halted_live` `_record(...)` tests that patch the same globals).
 
 - [ ] **Step 7: Run the `_record_expected_crash` tests to verify they fail**
 
@@ -356,10 +360,12 @@ def test_step_progress_surfaces_capture_disclosure(migrated_url: str) -> None:
     asyncio.run(_run())
 ```
 
-- [ ] **Step 6: Run the DB-backed test to verify it fails, then passes**
+- [ ] **Step 6: Run the DB-backed test**
 
 Run: `uv run python -m pytest tests/mcp/lifecycle/test_runs_tools.py -k step_progress -q`
-Expected: first FAIL (the assertion attributes do not yet flow — if Step 3 was committed before this, the test passes immediately; either way confirm green after Step 3). Then PASS for the whole `-k step_progress` selection (the pre-existing exact-match `StepProgress(...)` test stays green because the new fields default to `None`).
+Expected: PASS for the whole `-k step_progress` selection (the pre-existing exact-match `StepProgress(...)` test stays green because the new fields default to `None`).
+
+Note on test-first: the red→green guarantee for this task is carried by the `_optional_str_list` unit tests (Steps 1-4), which are written and observed to fail before the coercion exists. This DB-backed test is a post-hoc **integration** check that the value flows from a persisted `run_steps.result` through `step_progress` — it is expected to pass immediately on top of the Step-3 implementation, not to fail first. (If you prefer a strict red first, add the two `StepProgress` fields in Step 3 but defer wiring them in `step_progress` until after writing this test, so the assertions fail on `available_capture is None`.)
 
 - [ ] **Step 7: Lint + type, then commit**
 
