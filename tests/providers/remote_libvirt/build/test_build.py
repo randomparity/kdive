@@ -40,6 +40,7 @@ from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
 from kdive.providers.shared.build_host import execution as build_host_execution
 from kdive.providers.shared.build_host.configuration import config as build_host_config
 from kdive.providers.shared.build_host.execution import CapturedStep
+from kdive.providers.shared.build_host.publishing.kernel_bundle import local_kernel_bundle
 from kdive.providers.shared.build_host.workspaces import workspace as build_host_workspace
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -912,108 +913,6 @@ def test_workspace_failure_is_infrastructure_with_op_and_path() -> None:
     assert err.details == {"op": "rmtree", "path": "/ws/123"}
 
 
-def _write_fake_build_tree(workspace: Path, mod_root: Path, version: str = "6.9.0") -> None:
-    """A minimal workspace + INSTALL_MOD_PATH staging tree for bundle packaging."""
-    bzimage = workspace / "arch" / "x86" / "boot" / "bzImage"
-    bzimage.parent.mkdir(parents=True)
-    bzimage.write_bytes(b"vmlinuz-bytes")
-    moddir = mod_root / "lib" / "modules" / version
-    (moddir / "kernel" / "drivers").mkdir(parents=True)
-    (moddir / "kernel" / "drivers" / "virtio_blk.ko").write_bytes(b"module-bytes")
-    (moddir / "modules.dep").write_text("virtio_blk.ko:\n")
-    # The back-reference symlinks make modules_install plants (absolute worker paths).
-    (moddir / "build").symlink_to(workspace)
-    (moddir / "source").symlink_to(workspace)
-
-
-def test_real_build_bundle_includes_vmlinuz_and_modules_excludes_backrefs(
-    tmp_path: Path,
-) -> None:
-    workspace = tmp_path / "ws"
-    mod_root = tmp_path / "stage"
-    _write_fake_build_tree(workspace, mod_root)
-
-    data = build_module._real_build_bundle(workspace, mod_root)
-
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-        names = set(tar.getnames())
-    assert "boot/vmlinuz" in names
-    assert "lib/modules/6.9.0/kernel/drivers/virtio_blk.ko" in names
-    # the dangling absolute back-reference symlinks are stripped
-    assert "lib/modules/6.9.0/build" not in names
-    assert "lib/modules/6.9.0/source" not in names
-
-
-def test_real_build_bundle_is_valid_gzip(tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    mod_root = tmp_path / "stage"
-    _write_fake_build_tree(workspace, mod_root)
-
-    data = build_module._real_build_bundle(workspace, mod_root)
-
-    assert data[:2] == b"\x1f\x8b"  # gzip magic
-
-
-def test_real_build_bundle_missing_bzimage_is_build_failure(tmp_path: Path) -> None:
-    # A zero-exit make that left no bzImage must surface as a typed BUILD_FAILURE, not a bare
-    # OSError that escapes the provider error contract (the local-libvirt parity guard).
-    workspace = tmp_path / "ws"
-    mod_root = tmp_path / "stage"
-    (mod_root / "lib" / "modules" / "6.9.0").mkdir(parents=True)  # modules exist, bzImage absent
-
-    with pytest.raises(CategorizedError) as caught:
-        build_module._real_build_bundle(workspace, mod_root)
-
-    assert caught.value.category is ErrorCategory.BUILD_FAILURE
-    assert str(caught.value) == "kernel bundle could not be packaged"
-    assert caught.value.details == {"output": "bzImage"}
-
-
-def test_real_build_bundle_module_oserror_is_build_failure_module_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A module file that vanishes mid-pack must surface as a typed BUILD_FAILURE whose details
-    # name the *module bundle* output (distinct from the bzImage face), not a bare OSError.
-    workspace = tmp_path / "ws"
-    mod_root = tmp_path / "stage"
-    _write_fake_build_tree(workspace, mod_root)
-
-    real_add = tarfile.TarFile.add
-
-    def _add(self: tarfile.TarFile, name: Any, *args: Any, **kwargs: Any) -> None:
-        if str(name).endswith(".ko"):
-            raise OSError("module file vanished")
-        return real_add(self, name, *args, **kwargs)
-
-    monkeypatch.setattr(tarfile.TarFile, "add", _add)
-
-    with pytest.raises(CategorizedError) as caught:
-        build_module._real_build_bundle(workspace, mod_root)
-
-    assert caught.value.category is ErrorCategory.BUILD_FAILURE
-    assert caught.value.details == {"output": "module bundle"}
-
-
-def test_build_bundle_member_dirs_keeps_non_backref_symlinks(tmp_path: Path) -> None:
-    # Only the absolute back-reference symlinks (``build``/``source``) are dropped; a regular
-    # symlink that is *not* a back-ref stays in the member list (guards ``and`` -> ``or``).
-    modules_root = tmp_path / "lib" / "modules" / "6.9.0"
-    (modules_root / "kernel").mkdir(parents=True)
-    real_ko = modules_root / "kernel" / "virtio_blk.ko"
-    real_ko.write_bytes(b"module-bytes")
-    (modules_root / "build").symlink_to(tmp_path)  # dropped back-ref
-    (modules_root / "source").symlink_to(tmp_path)  # dropped back-ref
-    (modules_root / "vmlinuz.link").symlink_to(real_ko)  # kept: not a back-ref name
-
-    members = build_module._build_bundle_member_dirs(modules_root)
-    names = {p.name for p in members}
-
-    assert "vmlinuz.link" in names  # non-backref symlink survives
-    assert "virtio_blk.ko" in names
-    assert "build" not in names
-    assert "source" not in names
-
-
 def test_local_staging_cleanup_ignores_missing_dir(tmp_path: Path) -> None:
     # ``shutil.rmtree(..., ignore_errors=True)`` must swallow a missing path so the build's
     # ``finally`` cleanup never masks the real error with a FileNotFoundError.
@@ -1137,7 +1036,7 @@ def test_live_vm_real_make_bundle_has_modules() -> None:  # pragma: no cover - l
             read_config=build_host_execution.real_read_config,
             run_make=build_host_execution.real_run_make,
             run_modules_install=build_host_execution.real_run_modules_install,
-            make_bundle=build_module._local_make_bundle,
+            make_bundle=local_kernel_bundle,
             read_vmlinux_source=build_module._local_vmlinux_source,
             read_build_id=build_host_execution.real_read_build_id,
             staging_factory=lambda: Path(tempfile.mkdtemp(prefix="kdive-mod-")),

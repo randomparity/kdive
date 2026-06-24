@@ -26,17 +26,17 @@ from kdive.artifacts.storage import (
 )
 from kdive.build_artifacts.validation import parse_gnu_build_id
 from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.ports.build_transport import CommandResult
-from kdive.providers.remote_libvirt import build as build_module
 from kdive.providers.remote_libvirt.build import (
     ArtifactBytes,
     ArtifactRemoteFile,
     RemoteLibvirtBuild,
-    transport_make_bundle,
     transport_vmlinux_source,
 )
 from kdive.providers.shared.build_host.execution import CapturedStep
+from kdive.providers.shared.build_host.publishing.kernel_bundle import transport_kernel_bundle
 from kdive.providers.shared.build_host.transports.transport_seams import (
     transport_read_build_id,
     transport_run_modules_install,
@@ -174,7 +174,7 @@ def _transport_builder(
         read_config=lambda _w: _GOOD_CONFIG,
         run_make=lambda _w: CapturedStep(0, ""),
         run_modules_install=transport_run_modules_install(transport),
-        make_bundle=transport_make_bundle(transport),
+        make_bundle=transport_kernel_bundle(transport),
         read_vmlinux_source=transport_vmlinux_source(transport),
         read_build_id=transport_read_build_id(transport),
         staging_factory=lambda: _make_staging(tmp_path),
@@ -358,7 +358,7 @@ def test_transport_sha256sum_nonzero_is_build_failure(tmp_path: Path) -> None:
     transport.files[path] = b"payload"
     builder = _transport_builder(store, transport, tmp_path)
 
-    with pytest.raises(build_module.CategorizedError) as caught:
+    with pytest.raises(CategorizedError) as caught:
         builder.publish(_RUN, "kernel", ArtifactRemoteFile(path=path, transport=transport))
 
-    assert caught.value.category is build_module.ErrorCategory.BUILD_FAILURE
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
