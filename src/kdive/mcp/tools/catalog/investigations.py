@@ -6,8 +6,8 @@ mutate the `external_refs` jsonb under a per-Investigation advisory lock, keyed 
 `(tracker, id)` natural key (link upserts, unlink removes-if-present — both idempotent).
 `get`/the mutators render through `_envelope_for_investigation` (every Investigation state
 is a non-failure status, so no failure mapping is needed). RBAC: mutations require
-`operator`; reads require `viewer` on the owning project. Authz denials raise (ADR-0020: no authz
-ErrorCategory).
+`contributor`; reads require `viewer` on the owning project. Authz denials raise
+(ADR-0020: no authz ErrorCategory).
 """
 
 from __future__ import annotations
@@ -214,7 +214,7 @@ async def open_investigation(
 ) -> ToolResponse:
     """Mint an Investigation (`open`) for the caller's project."""
     require_project(ctx, project)
-    require_role(ctx, project, Role.OPERATOR)
+    require_role(ctx, project, Role.CONTRIBUTOR)
     with bind_context(principal=ctx.principal):
         if not _validate_text(title, description):
             return _invalid_text_error(project)
@@ -286,14 +286,14 @@ async def get_investigation(
             return await _envelope_for_investigation(conn, inv)
 
 
-async def _resolve_operator_investigation(
+async def _resolve_contributor_investigation(
     conn: AsyncConnection, ctx: RequestContext, uid: UUID, raw_id: str
 ) -> Investigation | ToolResponse:
-    """Resolve an operator-owned Investigation row or return the not-found-shaped error."""
+    """Resolve a contributor-writable Investigation row or return the not-found-shaped error."""
     inv = await INVESTIGATIONS.get(conn, uid)
     if inv is None or inv.project not in ctx.projects:
         return _not_found(raw_id)
-    require_role(ctx, inv.project, Role.OPERATOR)
+    require_role(ctx, inv.project, Role.CONTRIBUTOR)
     return inv
 
 
@@ -338,7 +338,7 @@ async def close_investigation(
         return _invalid_uuid_error("investigation_id", investigation_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
-            inv = await _resolve_operator_investigation(conn, ctx, uid, investigation_id)
+            inv = await _resolve_contributor_investigation(conn, ctx, uid, investigation_id)
             if isinstance(inv, ToolResponse):
                 return inv
             try:
@@ -477,7 +477,7 @@ async def link_external_ref(
         )
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
-            inv = await _resolve_operator_investigation(conn, ctx, uid, investigation_id)
+            inv = await _resolve_contributor_investigation(conn, ctx, uid, investigation_id)
             if isinstance(inv, ToolResponse):
                 return inv
             return await _link_locked(conn, ctx, uid, parsed, project=inv.project)
@@ -499,7 +499,7 @@ async def unlink_external_ref(
         )
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
-            inv = await _resolve_operator_investigation(conn, ctx, uid, investigation_id)
+            inv = await _resolve_contributor_investigation(conn, ctx, uid, investigation_id)
             if isinstance(inv, ToolResponse):
                 return inv
             return await _unlink_locked(conn, ctx, uid, key, project=inv.project)
@@ -573,7 +573,7 @@ async def set_investigation(
         return _invalid_text_error(investigation_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
-            inv = await _resolve_operator_investigation(conn, ctx, uid, investigation_id)
+            inv = await _resolve_contributor_investigation(conn, ctx, uid, investigation_id)
             if isinstance(inv, ToolResponse):
                 return inv
             return await _set_locked(

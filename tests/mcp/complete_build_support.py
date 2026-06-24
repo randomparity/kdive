@@ -30,9 +30,9 @@ from kdive.security.authz.rbac import Role
 TEST_DT = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def ctx() -> RequestContext:
+def ctx(role: Role = Role.OPERATOR) -> RequestContext:
     return RequestContext(
-        principal="user-1", agent_session="s", projects=("proj",), roles={"proj": Role.OPERATOR}
+        principal="user-1", agent_session="s", projects=("proj",), roles={"proj": role}
     )
 
 

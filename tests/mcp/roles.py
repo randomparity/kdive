@@ -48,18 +48,22 @@ class Principal:
 
 @dataclass(frozen=True)
 class ProjectPrincipals:
-    """The three separated principals (viewer/operator/admin) for one project."""
+    """The four separated principals (viewer/contributor/operator/admin) for one project."""
 
     project: str
     viewer: Principal
+    contributor: Principal
     operator: Principal
     admin: Principal
 
     def of(self, role: Role) -> Principal:
         """Return this project's principal holding exactly ``role``."""
-        return {Role.VIEWER: self.viewer, Role.OPERATOR: self.operator, Role.ADMIN: self.admin}[
-            role
-        ]
+        return {
+            Role.VIEWER: self.viewer,
+            Role.CONTRIBUTOR: self.contributor,
+            Role.OPERATOR: self.operator,
+            Role.ADMIN: self.admin,
+        }[role]
 
 
 @dataclass(frozen=True)
@@ -103,6 +107,7 @@ def _project_principals(keypair: RSAKeyPair, project: str) -> ProjectPrincipals:
     return ProjectPrincipals(
         project=project,
         viewer=_principal(keypair, project, Role.VIEWER),
+        contributor=_principal(keypair, project, Role.CONTRIBUTOR),
         operator=_principal(keypair, project, Role.OPERATOR),
         admin=_principal(keypair, project, Role.ADMIN),
     )
@@ -112,9 +117,9 @@ def make_role_fixture() -> RoleFixture:
     """Mint the separated-role principals for both projects under one shared keypair.
 
     Returns:
-        A :class:`RoleFixture` exposing ``viewer``/``operator``/``admin`` principals for
-        ``PROJECT_A`` and ``PROJECT_B``, each carrying a signed token and the derived
-        ``RequestContext``.
+        A :class:`RoleFixture` exposing ``viewer``/``contributor``/``operator``/``admin``
+        principals for ``PROJECT_A`` and ``PROJECT_B``, each carrying a signed token and the
+        derived ``RequestContext``.
     """
     keypair = make_keypair()
     return RoleFixture(

@@ -111,7 +111,7 @@ def register(
             Field(description="Transport kind: `gdbstub` (default) or `drgn-live`."),
         ] = _GDBSTUB,
     ) -> ToolResponse:
-        """Open a single-attach transport and insert a live DebugSession. Requires operator."""
+        """Open a single-attach transport and insert a live DebugSession. Requires contributor."""
         return await handlers.start_session(
             pool, current_context(), run_id=run_id, transport=transport
         )
@@ -124,7 +124,7 @@ def register(
     async def debug_end_session(
         session_id: Annotated[str, Field(description="The DebugSession to detach and close.")],
     ) -> ToolResponse:
-        """Drive a live/attach DebugSession to detached; close its transport. Requires operator."""
+        """Drive a live DebugSession to detached; close its transport. Requires contributor."""
         return await handlers.end_session(pool, current_context(), session_id)
 
     @app.tool(

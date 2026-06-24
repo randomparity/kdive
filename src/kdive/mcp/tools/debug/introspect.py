@@ -128,7 +128,7 @@ async def resolve_live_drgn_session(
 ) -> LiveDrgnSession:
     """Resolve a `live` drgn-live DebugSession to the domain inputs required by the port.
 
-    Gates on UUID shape, project scope, ``operator`` role, ``live`` state, and the
+    Gates on UUID shape, project scope, ``contributor`` role, ``live`` state, and the
     ``drgn-live`` transport (live introspection rides drgn-live, not gdbstub; ADR-0039 §4 /
     ADR-0085). The provider realizes drgn-live over SSH (local) or the guest agent (remote);
     core treats the resolved ``transport_handle`` as opaque.
@@ -162,7 +162,7 @@ async def introspect_run(
 ) -> ToolResponse:
     """Run live drgn introspection over a `live` drgn-live DebugSession; return a redacted report.
 
-    Requires a `live` drgn-live DebugSession (operator). The ``helper`` must be one of the fixed
+    Requires a `live` drgn-live DebugSession (contributor). The ``helper`` must be one of the fixed
     in-tree helpers — there is no caller-supplied drgn script. The port is the single redaction
     boundary, so the returned report is already masked; the raw drgn transcript is ``sensitive``
     and is never returned (the response only advertises that, ADR-0039 §2/§3).
@@ -269,7 +269,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             ),
         ],
     ) -> ToolResponse:
-        """Run live drgn introspection over a live drgn-live DebugSession. Requires operator."""
+        """Run live drgn introspection over a live drgn-live DebugSession. Requires contributor."""
         async with pool.connection() as conn:
             try:
                 resolved = await resolve_live_drgn_session(conn, current_context(), session_id)

@@ -48,14 +48,14 @@ async def resolve_debug_session_context(
     require_live: bool = False,
     include_system: bool = False,
 ) -> DebugSessionContext | ToolResponse:
-    """Load a DebugSession, enforce project/operator gates, and optionally require live state."""
+    """Load a DebugSession, enforce project/contributor gates, and optionally require live state."""
     uid = _as_uuid(session_id)
     if uid is None:
         return debug_session_error(session_id, "bad_session_id")
     session = await DEBUG_SESSIONS.get(conn, uid)
     if session is None or session.project not in ctx.projects:
         return debug_session_error(session_id, "unknown_session")
-    require_role(ctx, session.project, Role.OPERATOR)
+    require_role(ctx, session.project, Role.CONTRIBUTOR)
     if require_live and session.state is not DebugSessionState.LIVE:
         return debug_session_error(session_id, "not_live", current_status=session.state.value)
     if required_transport is not None and session.transport != required_transport:

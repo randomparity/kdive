@@ -122,7 +122,7 @@ async def _resolve_bind_targets(
     run = await RUNS.get(conn, run_id)
     if run is None or run.project not in ctx.projects:
         _raise_config(str(run_id))
-    require_role(ctx, run.project, Role.OPERATOR)
+    require_role(ctx, run.project, Role.CONTRIBUTOR)
     blocked = _run_bindable_error(run)
     if blocked is not None:
         raise blocked

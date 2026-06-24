@@ -98,7 +98,7 @@ async def request_allocation(
     recorded into a no-op emitter rather than reaching for a process-global.
     """
     require_project(ctx, project)
-    require_role(ctx, project, Role.OPERATOR)
+    require_role(ctx, project, Role.CONTRIBUTOR)
     with bind_context(principal=ctx.principal):
         spec = _spec_from_payload(request)
         if isinstance(spec, ToolResponse):

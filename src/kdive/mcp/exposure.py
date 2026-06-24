@@ -26,7 +26,12 @@ from enum import StrEnum
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import _PLATFORM_IMPLIES, PlatformRole, Role
 
-_ROLE_RANK: dict[Role, int] = {Role.VIEWER: 0, Role.OPERATOR: 1, Role.ADMIN: 2}
+_ROLE_RANK: dict[Role, int] = {
+    Role.VIEWER: 0,
+    Role.CONTRIBUTOR: 1,
+    Role.OPERATOR: 2,
+    Role.ADMIN: 3,
+}
 
 
 class ExposureScope(StrEnum):
@@ -37,6 +42,7 @@ class ExposureScope(StrEnum):
     """
 
     PROJECT_VIEWER = "project_viewer"
+    PROJECT_CONTRIBUTOR = "project_contributor"
     PROJECT_OPERATOR = "project_operator"
     PROJECT_ADMIN = "project_admin"
     PLATFORM_OPERATOR = "platform_operator"
@@ -46,6 +52,7 @@ class ExposureScope(StrEnum):
 
 _PROJECT_SCOPE: dict[ExposureScope, Role] = {
     ExposureScope.PROJECT_VIEWER: Role.VIEWER,
+    ExposureScope.PROJECT_CONTRIBUTOR: Role.CONTRIBUTOR,
     ExposureScope.PROJECT_OPERATOR: Role.OPERATOR,
     ExposureScope.PROJECT_ADMIN: Role.ADMIN,
 }
@@ -56,6 +63,7 @@ _PLATFORM_SCOPE: dict[ExposureScope, PlatformRole] = {
 }
 
 _VIEWER = frozenset({ExposureScope.PROJECT_VIEWER})
+_CONTRIBUTOR = frozenset({ExposureScope.PROJECT_CONTRIBUTOR})
 _OPERATOR = frozenset({ExposureScope.PROJECT_OPERATOR})
 _ADMIN = frozenset({ExposureScope.PROJECT_ADMIN})
 _PLAT_OP = frozenset({ExposureScope.PLATFORM_OPERATOR})
@@ -83,14 +91,14 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "allocations.get": _VIEWER,
     "allocations.list": _VIEWER,
     "allocations.wait": _VIEWER,
-    "allocations.request": _OPERATOR,
-    "allocations.release": _OPERATOR,
-    "allocations.renew": _OPERATOR,
+    "allocations.request": _CONTRIBUTOR,
+    "allocations.release": _CONTRIBUTOR,
+    "allocations.renew": _CONTRIBUTOR,
     # artifacts
     "artifacts.get": _VIEWER,
     "artifacts.list": _VIEWER,
     "artifacts.search_text": _VIEWER,
-    "artifacts.create_run_upload": _OPERATOR,
+    "artifacts.create_run_upload": _CONTRIBUTOR,
     "artifacts.create_system_upload": _OPERATOR,
     # audit (dual: project admin or platform auditor)
     "audit.query": frozenset({ExposureScope.PROJECT_ADMIN, ExposureScope.PLATFORM_AUDITOR}),
@@ -107,17 +115,17 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "control.power": _OPERATOR,  # `on` is operator; destructive actions gate to admin
     "control.force_crash": _ADMIN,
     # debug
-    "debug.list_breakpoints": _VIEWER,
+    "debug.list_breakpoints": _CONTRIBUTOR,
     "debug.get_session": _VIEWER,
     "debug.list_sessions": _VIEWER,
-    "debug.start_session": _OPERATOR,
-    "debug.end_session": _OPERATOR,
-    "debug.continue": _OPERATOR,
-    "debug.interrupt": _OPERATOR,
-    "debug.set_breakpoint": _OPERATOR,
-    "debug.clear_breakpoint": _OPERATOR,
-    "debug.read_memory": _OPERATOR,
-    "debug.read_registers": _OPERATOR,
+    "debug.start_session": _CONTRIBUTOR,
+    "debug.end_session": _CONTRIBUTOR,
+    "debug.continue": _CONTRIBUTOR,
+    "debug.interrupt": _CONTRIBUTOR,
+    "debug.set_breakpoint": _CONTRIBUTOR,
+    "debug.clear_breakpoint": _CONTRIBUTOR,
+    "debug.read_memory": _CONTRIBUTOR,
+    "debug.read_registers": _CONTRIBUTOR,
     # images
     "images.build": _PLAT_OP,
     "images.publish": _PLAT_OP,
@@ -127,18 +135,20 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "images.prune_expired": _PLAT_ADMIN,
     # introspect
     "introspect.from_vmcore": _VIEWER,
-    "introspect.run": _VIEWER,
+    # introspect.run actively drives a live drgn-live session (resolve_debug_session_context →
+    # contributor), unlike from_vmcore's offline-core read.
+    "introspect.run": _CONTRIBUTOR,
     # inventory (platform auditor)
     "inventory.list": _PLAT_AUDITOR,
     "inventory.clear_override": _PLAT_ADMIN,
     # investigations
     "investigations.get": _VIEWER,
     "investigations.list": _VIEWER,
-    "investigations.open": _OPERATOR,
-    "investigations.close": _OPERATOR,
-    "investigations.link": _OPERATOR,
-    "investigations.unlink": _OPERATOR,
-    "investigations.set": _OPERATOR,
+    "investigations.open": _CONTRIBUTOR,
+    "investigations.close": _CONTRIBUTOR,
+    "investigations.link": _CONTRIBUTOR,
+    "investigations.unlink": _CONTRIBUTOR,
+    "investigations.set": _CONTRIBUTOR,
     # jobs
     "jobs.get": _VIEWER,
     "jobs.list": _VIEWER,
@@ -158,8 +168,8 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "ops.force_teardown": _PLAT_ADMIN,
     "ops.reconcile_systems": _PLAT_ADMIN,
     # postmortem
-    "postmortem.crash": _OPERATOR,
-    "postmortem.triage": _OPERATOR,
+    "postmortem.crash": _CONTRIBUTOR,
+    "postmortem.triage": _CONTRIBUTOR,
     # resources (drain is dual: operator or admin)
     "resources.cordon": _PLAT_OP,
     "resources.uncordon": _PLAT_OP,
@@ -173,13 +183,13 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     # runs
     "runs.get": _VIEWER,
     "runs.list": _VIEWER,
-    "runs.create": _OPERATOR,
-    "runs.bind": _OPERATOR,
-    "runs.cancel": _OPERATOR,
-    "runs.build": _OPERATOR,
-    "runs.complete_build": _OPERATOR,
-    "runs.install": _OPERATOR,
-    "runs.boot": _OPERATOR,
+    "runs.create": _CONTRIBUTOR,
+    "runs.bind": _CONTRIBUTOR,
+    "runs.cancel": _CONTRIBUTOR,
+    "runs.build": _CONTRIBUTOR,
+    "runs.complete_build": _CONTRIBUTOR,
+    "runs.install": _CONTRIBUTOR,
+    "runs.boot": _CONTRIBUTOR,
     # secrets (platform operator)
     "secrets.list": _PLAT_OP,
     # shapes
@@ -195,7 +205,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "systems.teardown": _ADMIN,
     # vmcore
     "vmcore.list": _VIEWER,
-    "vmcore.fetch": _OPERATOR,
+    "vmcore.fetch": _CONTRIBUTOR,
 }
 
 #: Reviewed intentionally-public tools (open reads / onboarding / catalog). Each is callable

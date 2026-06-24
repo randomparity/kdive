@@ -2,14 +2,21 @@
 
 ## Roles
 
-KDIVE uses three project-scoped RBAC roles asserted by the identity provider
-([ADR-0020](../adr/0020-rbac-audit-gate-implementation.md)):
+KDIVE uses four project-scoped RBAC roles asserted by the identity provider
+([ADR-0020](../adr/0020-rbac-audit-gate-implementation.md),
+[ADR-0234](../adr/0234-external-build-default-and-contributor-role.md)). They form a total
+rank: a higher role satisfies every lower requirement.
 
 | Role | Capabilities |
 |---|---|
-| `viewer` | Read access: `*.get`, `*.list`, read-only debug ops |
-| `operator` | All viewer capabilities plus mutations: create allocations and runs, boot systems, attach debug sessions, perform reversible power ops |
-| `admin` | All operator capabilities plus destructive ops (see below) |
+| `viewer` | Read-only: `*.get`, `*.list`, read-only debug/introspection ops — accounting, audit, and activity review. |
+| `contributor` | All viewer capabilities plus the crash-investigation loop: create/bind/build runs, upload a built kernel (`artifacts.create_run_upload`), `complete_build`, install, boot, attach and drive debug sessions, run post-mortem/`vmcore.fetch`, and request/hold the allocations and open/close the investigations that loop needs. |
+| `operator` | All contributor capabilities plus shared-resource management: define and provision systems, manage project images (`images.upload`/`delete`), upload system rootfs (`artifacts.create_system_upload`), and reversible power-on. |
+| `admin` | All operator capabilities plus destructive ops (see below). |
+
+The `contributor` role lets an agent build a kernel in its own checkout, upload it, and boot and
+debug it without the broader `operator` grant ([ADR-0234](../adr/0234-external-build-default-and-contributor-role.md));
+`viewer` stays a pure observer.
 
 In addition, a **platform tier** (`platform_admin`, `platform_operator`,
 `platform_auditor`) provides cross-project authority for shared infrastructure

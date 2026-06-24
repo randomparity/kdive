@@ -269,7 +269,7 @@ async def _resolve_targets(
     inv = await INVESTIGATIONS.get(conn, investigation_id)
     if inv is None or inv.project not in ctx.projects:
         _raise_config(str(investigation_id))
-    require_role(ctx, inv.project, Role.OPERATOR)
+    require_role(ctx, inv.project, Role.CONTRIBUTOR)
     system = await SYSTEMS.get(conn, system_id)
     if system is None or system.project not in ctx.projects:
         _raise_config(str(system_id))
@@ -658,7 +658,7 @@ async def _create_unbound(
     inv = await INVESTIGATIONS.get(conn, investigation_id)
     if inv is None or inv.project not in ctx.projects:
         _raise_config(object_id)
-    require_role(ctx, inv.project, Role.OPERATOR)
+    require_role(ctx, inv.project, Role.CONTRIBUTOR)
     project = inv.project
     async with (
         conn.transaction(),

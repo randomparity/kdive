@@ -17,24 +17,27 @@ from tests.mcp.conftest import AUDIENCE, ISSUER
 from tests.mcp.roles import PROJECT_A, PROJECT_B, PROJECTS, make_role_fixture
 
 
-def test_fixture_has_three_roles_across_two_projects() -> None:
+def test_fixture_has_four_roles_across_two_projects() -> None:
     fx = make_role_fixture()
     assert PROJECTS == (PROJECT_A, PROJECT_B)
     for project in PROJECTS:
         pp = fx.project(project)
         assert pp.viewer.role is Role.VIEWER
+        assert pp.contributor.role is Role.CONTRIBUTOR
         assert pp.operator.role is Role.OPERATOR
         assert pp.admin.role is Role.ADMIN
         # Each principal is scoped to exactly its one project, holding exactly its role.
-        for principal in (pp.viewer, pp.operator, pp.admin):
+        for principal in (pp.viewer, pp.contributor, pp.operator, pp.admin):
             assert principal.ctx.projects == (project,)
             assert principal.ctx.roles == {project: principal.role}
 
 
 def test_fixture_principals_are_distinct_subjects() -> None:
     fx = make_role_fixture()
-    subjects = {p.subject for pp in (fx.a, fx.b) for p in (pp.viewer, pp.operator, pp.admin)}
-    assert len(subjects) == 6  # 3 roles x 2 projects, all distinct
+    subjects = {
+        p.subject for pp in (fx.a, fx.b) for p in (pp.viewer, pp.contributor, pp.operator, pp.admin)
+    }
+    assert len(subjects) == 8  # 4 roles x 2 projects, all distinct
 
 
 def test_fixture_tokens_verify_and_derive_to_claimed_role() -> None:
@@ -64,3 +67,4 @@ def test_project_principals_of_returns_matching_role() -> None:
     assert pp.of(Role.OPERATOR) is pp.operator
     assert pp.of(Role.ADMIN) is pp.admin
     assert pp.of(Role.VIEWER) is pp.viewer
+    assert pp.of(Role.CONTRIBUTOR) is pp.contributor

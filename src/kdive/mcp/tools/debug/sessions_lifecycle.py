@@ -284,7 +284,7 @@ class DebugSessionHandlers:
         run_id: str,
         transport: str = _GDBSTUB,
     ) -> ToolResponse:
-        """Open a single-attach transport and insert a `live` DebugSession (operator).
+        """Open a single-attach transport and insert a `live` DebugSession (contributor).
 
         For a ``transport="drgn-live"`` session whose profile realizes it over SSH (the
         local-libvirt section; ``drgn_live_requires_credential``) the guest credential is
@@ -343,7 +343,7 @@ class DebugSessionHandlers:
         run = await RUNS.get(conn, run_id)
         if run is None or run.project not in ctx.projects:
             return _config_error(str(run_id))
-        require_role(ctx, run.project, Role.OPERATOR)
+        require_role(ctx, run.project, Role.CONTRIBUTOR)
         system = await _attach_preconditions(conn, run, transport)
         if isinstance(system, ToolResponse):
             return system
@@ -382,7 +382,7 @@ class DebugSessionHandlers:
         ctx: RequestContext,
         session_id: str,
     ) -> ToolResponse:
-        """Drive a live/attach DebugSession `-> detached` (idempotent on detached; operator).
+        """Drive a live/attach DebugSession `-> detached` (idempotent on detached; contributor).
 
         Also reaps the lazy gdb-MI engine (ADR-0034 §4d): under the per-session lock it exits
         the gdb subprocess and drops the registry entry, so an ended session never strands a

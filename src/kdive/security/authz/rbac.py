@@ -1,6 +1,6 @@
 """Project-scoped RBAC: roles, claim parsing, and enforcement (ADR-0006, ADR-0020).
 
-The three project roles form a total rank, so a higher role satisfies a lower requirement.
+The four project roles form a total rank, so a higher role satisfies a lower requirement.
 `roles_from_claims` turns a verified token's `roles` claim into the per-project role
 map carried on `RequestContext`; `require_role` is the enforcement point every plane
 tool calls before a privileged operation. A denial raises `AuthorizationError`
@@ -24,20 +24,28 @@ _PLATFORM_ROLES_CLAIM = "platform_roles"
 
 
 class Role(StrEnum):
-    """The three project-scoped roles, ordered viewer < operator < admin."""
+    """The four project-scoped roles, ordered viewer < contributor < operator < admin.
+
+    ``contributor`` is the lowest role that can run a full crash-investigation
+    loop — build/upload, install, boot, debug, post-mortem, and the allocations and
+    investigations that loop needs — while ``viewer`` stays read-only (accounting, audit,
+    activity) and system definition, image management, and destructive ops stay at
+    ``operator``/``admin``.
+    """
 
     VIEWER = "viewer"
+    CONTRIBUTOR = "contributor"
     OPERATOR = "operator"
     ADMIN = "admin"
 
 
-_RANK: dict[Role, int] = {Role.VIEWER: 0, Role.OPERATOR: 1, Role.ADMIN: 2}
+_RANK: dict[Role, int] = {Role.VIEWER: 0, Role.CONTRIBUTOR: 1, Role.OPERATOR: 2, Role.ADMIN: 3}
 
 
 class PlatformRole(StrEnum):
     """The three platform-scoped roles (ADR-0043 §2).
 
-    Granted **independently** — not a ``viewer < operator < admin`` rank — to preserve
+    Granted **independently** — not a ``viewer < contributor < operator < admin`` rank — to preserve
     separation of duties (an infra operator does not thereby read every project's data;
     an auditor cannot mutate). The one deliberate partial-order exception is encoded in
     :data:`_PLATFORM_IMPLIES`.

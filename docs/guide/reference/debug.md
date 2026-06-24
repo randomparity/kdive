@@ -6,7 +6,7 @@
 
 `implemented`
 
-Clear a breakpoint by number on a live DebugSession. Requires operator.
+Clear a breakpoint by number on a live DebugSession. Requires contributor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -17,7 +17,7 @@ Clear a breakpoint by number on a live DebugSession. Requires operator.
 
 `implemented`
 
-Resume execution on a live DebugSession and wait for a stop event. Operator only.
+Resume a live DebugSession and wait for a stop event. Requires contributor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -28,7 +28,7 @@ Resume execution on a live DebugSession and wait for a stop event. Operator only
 
 `implemented`
 
-Drive a live/attach DebugSession to detached; close its transport. Requires operator.
+Drive a live DebugSession to detached; close its transport. Requires contributor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -48,7 +48,7 @@ Return one visible debug session for recovery. Requires viewer.
 
 `implemented`
 
-Send an interrupt to halt a running live DebugSession. Requires operator.
+Send an interrupt to halt a running live DebugSession. Requires contributor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -58,7 +58,7 @@ Send an interrupt to halt a running live DebugSession. Requires operator.
 
 `implemented` · `read-only`
 
-List all breakpoints on a live DebugSession. Requires operator.
+List all breakpoints on a live DebugSession. Requires contributor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -82,7 +82,7 @@ List the caller's debug sessions, filterable by run/system/project/state. Viewer
 
 `implemented` · `read-only`
 
-Read raw memory bytes from a live DebugSession (up to 4096 bytes). Requires operator.
+Read raw memory bytes from a live DebugSession (up to 4096). Requires contributor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -94,7 +94,7 @@ Read raw memory bytes from a live DebugSession (up to 4096 bytes). Requires oper
 
 `implemented` · `read-only`
 
-Read named registers from a live DebugSession. Requires operator.
+Read named registers from a live DebugSession. Requires contributor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -105,7 +105,7 @@ Read named registers from a live DebugSession. Requires operator.
 
 `implemented`
 
-Set a breakpoint on a live DebugSession via gdb-MI. Requires operator.
+Set a breakpoint on a live DebugSession via gdb-MI. Requires contributor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -116,7 +116,7 @@ Set a breakpoint on a live DebugSession via gdb-MI. Requires operator.
 
 `implemented`
 
-Open a single-attach transport and insert a live DebugSession. Requires operator.
+Open a single-attach transport and insert a live DebugSession. Requires contributor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

@@ -70,7 +70,7 @@ class BuildRunHandlers:
                 run = await RUNS.get(conn, uid)
                 if run is None or run.project not in ctx.projects:
                     return _config_error(run_id)
-                require_role(ctx, run.project, Role.OPERATOR)
+                require_role(ctx, run.project, Role.CONTRIBUTOR)
                 try:
                     parsed = BuildProfile.parse(run.build_profile)
                 except CategorizedError as exc:
