@@ -121,7 +121,7 @@ def build_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
         # `debug.*` and `introspect.run` tool maturity is `implemented` (ADR-0218 §6 / ADR-0219).
         supported_capture_methods=frozenset({CaptureMethod.KDUMP, CaptureMethod.HOST_DUMP}),
         supported_debug_transports=frozenset({"gdbstub", "drgn-live"}),
-        supported_introspection=frozenset({"offline-vmcore", "live"}),
+        supported_introspection=frozenset({"offline-vmcore", "live", "live-script"}),
         debug=DebugCapabilities(
             attach_seam=default_attach_seam,
             engine=GdbMiEngine(redactor_factory=lambda: Redactor(registry=secret_registry)),

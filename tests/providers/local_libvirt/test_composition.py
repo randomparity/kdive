@@ -75,7 +75,7 @@ def test_build_runtime_wires_local_ports_and_capabilities() -> None:
         {CaptureMethod.KDUMP, CaptureMethod.HOST_DUMP}
     )
     assert runtime.supported_debug_transports == frozenset({"gdbstub", "drgn-live"})
-    assert runtime.supported_introspection == frozenset({"offline-vmcore", "live"})
+    assert runtime.supported_introspection == frozenset({"offline-vmcore", "live", "live-script"})
     assert runtime.debug is not None
     assert isinstance(runtime.debug.engine, GdbMiEngine)
     # Direct-kernel boot: the platform owns the whole-disk root device (ADR-0183).

@@ -950,7 +950,7 @@ def test_remote_runtime_advertises_its_debug_and_introspection_descriptor() -> N
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
     assert runtime.supported_debug_transports == frozenset({"gdbstub", "drgn-live"})
-    assert runtime.supported_introspection == frozenset({"offline-vmcore", "live"})
+    assert runtime.supported_introspection == frozenset({"offline-vmcore", "live", "live-script"})
 
 
 def test_remote_runtime_advertises_host_dump_as_a_capture_method() -> None:

@@ -302,7 +302,7 @@ def build_runtime(
         # (gdbstub + drgn-live, ADR-0083/0085) and both introspection modes (the wired
         # RemoteLibvirtVmcoreIntrospect / RemoteLibvirtLiveIntrospect ports).
         supported_debug_transports=frozenset({"gdbstub", "drgn-live"}),
-        supported_introspection=frozenset({"offline-vmcore", "live"}),
+        supported_introspection=frozenset({"offline-vmcore", "live", "live-script"}),
         debug=DebugCapabilities(
             attach_seam=remote_attach_seam,
             engine=GdbMiEngine(
