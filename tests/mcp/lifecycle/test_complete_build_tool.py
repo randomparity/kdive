@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import tarfile
 from typing import Any
 
 from psycopg.rows import dict_row
@@ -51,7 +53,22 @@ from tests.mcp.complete_build_support import (
 )
 from tests.mcp.systems_support import provider_resolver
 
-_BZIMAGE_HEAD = b"\x00" * 0x202 + b"HdrS"
+
+def _combined_kernel_tar() -> bytes:
+    """The unified `kernel` artifact: gzip tar of boot/vmlinuz (a bzImage) + lib/modules/<ver>/."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, data in (
+            ("boot/vmlinuz", b"\x00" * 0x202 + b"HdrS" + b"\x00" * 16),
+            ("lib/modules/6.9.0/modules.dep", b""),
+        ):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+_KERNEL_TAR = _combined_kernel_tar()
 _EXTERNAL_PROFILE_WITH_REQUIREMENTS = {
     "schema_version": 1,
     "source": "external",
@@ -330,7 +347,7 @@ def test_complete_build_writes_artifacts_after_effective_config_validation(
                 _ctx(),
                 run_id=str(run_id),
                 artifacts=[
-                    {"name": "kernel", "sha256": "ck", "size_bytes": len(_BZIMAGE_HEAD)},
+                    {"name": "kernel", "sha256": "ck", "size_bytes": len(_KERNEL_TAR)},
                     {"name": "effective_config", "sha256": "cc", "size_bytes": len(config)},
                 ],
                 store=_UploadStore(),
@@ -340,9 +357,9 @@ def test_complete_build_writes_artifacts_after_effective_config_validation(
             kernel_key = f"local/runs/{run_id}/kernel"
             config_key = f"local/runs/{run_id}/effective_config"
             store = _ValidationStore(
-                {kernel_key: _BZIMAGE_HEAD, config_key: config},
+                {kernel_key: _KERNEL_TAR, config_key: config},
                 {
-                    kernel_key: HeadResult(len(_BZIMAGE_HEAD), "ck", "e-k"),
+                    kernel_key: HeadResult(len(_KERNEL_TAR), "ck", "e-k"),
                     config_key: HeadResult(len(config), "cc", "e-c"),
                 },
             )
@@ -375,15 +392,15 @@ def test_complete_build_rejects_missing_effective_config_without_artifacts(
                 _ctx(),
                 run_id=str(run_id),
                 artifacts=[
-                    {"name": "kernel", "sha256": "ck", "size_bytes": len(_BZIMAGE_HEAD)},
+                    {"name": "kernel", "sha256": "ck", "size_bytes": len(_KERNEL_TAR)},
                 ],
                 store=_UploadStore(),
             )
             assert {response.status for response in responses.items} == {"upload_ready"}
             kernel_key = f"local/runs/{run_id}/kernel"
             store = _ValidationStore(
-                {kernel_key: _BZIMAGE_HEAD},
-                {kernel_key: HeadResult(len(_BZIMAGE_HEAD), "ck", "e-k")},
+                {kernel_key: _KERNEL_TAR},
+                {kernel_key: HeadResult(len(_KERNEL_TAR), "ck", "e-k")},
             )
 
             resp = await CompleteBuildHandlers(
@@ -434,7 +451,7 @@ class _ReassemblyStore:
         return None
 
     def get_range(self, key: str, *, start: int, length: int) -> bytes:
-        return _BZIMAGE_HEAD[start : start + length]
+        return _KERNEL_TAR[start : start + length]
 
     def create_multipart_upload(
         self, key: str, *, sensitivity: Sensitivity, retention_class: str

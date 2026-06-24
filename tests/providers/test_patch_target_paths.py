@@ -7,7 +7,9 @@ validation surface (ELF build-id extraction, magic/manifest checks, chunk verifi
 
 from __future__ import annotations
 
+import io
 import struct
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -114,8 +116,16 @@ def _head(blob: bytes, checksum: str = "sha-x") -> HeadResult:
     return HeadResult(size_bytes=len(blob), checksum_sha256=checksum, etag="e")
 
 
-def _bzimage() -> bytes:
-    return b"\x00" * _BZIMAGE_MAGIC_OFFSET + b"HdrS" + b"\x00" * 16
+def _kernel_tar() -> bytes:
+    """The unified `kernel` artifact: gzip tar of boot/vmlinuz (a bzImage) + lib/modules/<ver>/."""
+    boot = b"\x00" * _BZIMAGE_MAGIC_OFFSET + b"HdrS" + b"\x00" * 16
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, data in (("boot/vmlinuz", boot), ("lib/modules/6.9.0/modules.dep", b"")):
+            entry = tarfile.TarInfo(name)
+            entry.size = len(data)
+            tar.addfile(entry, io.BytesIO(data))
+    return buf.getvalue()
 
 
 def _elf_with_build_id(build_id: bytes) -> bytes:
@@ -270,7 +280,7 @@ def test_extract_build_id_ranged_sht_past_object_size_is_build_failure() -> None
 
 
 def _kernel_only(checksum: str = "kc") -> tuple[_FakeStore, list[ManifestEntry], dict[str, str]]:
-    blob = _bzimage()
+    blob = _kernel_tar()
     store = _FakeStore({"k": blob}, {"k": _head(blob, checksum)})
     manifest = [ManifestEntry(name="kernel", sha256=checksum, size_bytes=len(blob))]
     return store, manifest, {"kernel": "k"}
@@ -304,8 +314,8 @@ def test_validate_external_artifacts_size_mismatch_is_build_failure() -> None:
     assert exc.value.details == {"name": "kernel"}
 
 
-def test_validate_external_artifacts_bad_kernel_magic_is_build_failure() -> None:
-    blob = b"\x00" * (_BZIMAGE_MAGIC_OFFSET + 8)  # no HdrS at the bzImage offset
+def test_validate_external_artifacts_non_gzip_kernel_is_build_failure() -> None:
+    blob = b"\x00" * (_BZIMAGE_MAGIC_OFFSET + 8)  # a raw blob, not a gzip combined tar
     store = _FakeStore({"k": blob}, {"k": _head(blob, "kc")})
     manifest = [ManifestEntry(name="kernel", sha256="kc", size_bytes=len(blob))]
     with pytest.raises(CategorizedError) as exc:
@@ -313,7 +323,7 @@ def test_validate_external_artifacts_bad_kernel_magic_is_build_failure() -> None
             store, manifest=manifest, keys={"kernel": "k"}, declared_build_id=None
         )
     assert exc.value.category is ErrorCategory.BUILD_FAILURE
-    assert str(exc.value) == "kernel is not a bzImage"
+    assert str(exc.value) == "kernel artifact is not a gzip-compressed combined tar"
     assert exc.value.details == {"name": "kernel"}
 
 
@@ -330,7 +340,7 @@ def test_validate_external_artifacts_uploaded_object_missing_is_configuration_er
 
 
 def test_validate_external_artifacts_vmlinux_requires_declared_build_id() -> None:
-    kblob = _bzimage()
+    kblob = _kernel_tar()
     vblob = _elf_with_build_id(bytes.fromhex("00"))
     store = _FakeStore(
         {"k": kblob, "v": vblob},
@@ -349,7 +359,7 @@ def test_validate_external_artifacts_vmlinux_requires_declared_build_id() -> Non
 
 
 def test_validate_external_artifacts_build_id_mismatch_is_build_failure() -> None:
-    kblob = _bzimage()
+    kblob = _kernel_tar()
     vblob = _elf_with_build_id(bytes.fromhex("0011"))
     store = _FakeStore(
         {"k": kblob, "v": vblob},
@@ -371,7 +381,7 @@ def test_validate_external_artifacts_build_id_mismatch_is_build_failure() -> Non
 
 
 def test_validate_external_artifacts_build_id_match_is_case_insensitive() -> None:
-    kblob = _bzimage()
+    kblob = _kernel_tar()
     vblob = _elf_with_build_id(bytes.fromhex("00aa11"))
     store = _FakeStore(
         {"k": kblob, "v": vblob},
@@ -392,7 +402,7 @@ def test_validate_external_artifacts_build_id_match_is_case_insensitive() -> Non
 
 
 def test_validate_external_artifacts_missing_upload_key_is_configuration_error() -> None:
-    blob = _bzimage()
+    blob = _kernel_tar()
     store = _FakeStore({"k": blob}, {"k": _head(blob, "kc")})
     manifest = [
         ManifestEntry(name="kernel", sha256="kc", size_bytes=len(blob)),
@@ -423,7 +433,7 @@ def test_effective_config_required_when_profile_requirements_selected() -> None:
 
 
 def test_effective_config_satisfies_requirements_passes() -> None:
-    kblob = _bzimage()
+    kblob = _kernel_tar()
     cfg = b"CONFIG_FOO=y\n"
     store = _FakeStore(
         {"k": kblob, "c": cfg},
@@ -513,7 +523,7 @@ def test_chunked_artifact_skips_whole_object_checksum_but_checks_size() -> None:
     # A reassembled multipart object exposes only a composite checksum, so the whole-object
     # SHA-256 is NOT compared; only the total size is. A matching size passes even with a
     # differing whole-object checksum, while a size mismatch is a build failure.
-    kblob = _bzimage()
+    kblob = _kernel_tar()
     chunks = (ChunkEntry(sha256="c1", size_bytes=len(kblob)),)
     store = _FakeStore({"k": kblob}, {"k": _head(kblob, "DIFFERENT")})
     manifest = [
@@ -540,7 +550,7 @@ def test_oversized_effective_config_message_and_details_and_boundary() -> None:
     # The size cap is read off the object head WITHOUT reading the body. A config exactly at the
     # cap is allowed; one byte over is a configuration error naming the size and the cap.
     cap = 1024 * 1024
-    kblob = _bzimage()
+    kblob = _kernel_tar()
     reqs = ConfigRequirements(required={})
 
     # At the cap: allowed (head reports exactly cap; body need not exist since size==cap is fine
@@ -688,7 +698,7 @@ def test_patch_target_paths_keeps_path_before_last_tab() -> None:
 def test_validate_external_artifacts_kernel_in_manifest_but_no_key_is_missing_kernel() -> None:
     # "kernel" present in the manifest but absent from keys must still be the headline
     # missing-kernel configuration error (manifest-OR-keys guard), not a per-artifact failure.
-    blob = _bzimage()
+    blob = _kernel_tar()
     store = _FakeStore({}, {})
     manifest = [ManifestEntry(name="kernel", sha256="kc", size_bytes=len(blob))]
     with pytest.raises(CategorizedError) as exc:
@@ -700,7 +710,7 @@ def test_bad_vmlinux_magic_is_build_failure() -> None:
     # _check_magic gates on the exact artifact name "vmlinux"; a vmlinux whose first bytes are not
     # the ELF magic is a build failure. A name-comparison that no longer matched "vmlinux" would
     # skip this check and wrongly admit a non-ELF vmlinux.
-    kblob = _bzimage()
+    kblob = _kernel_tar()
     vblob = b"\x00" * 64  # valid size, but no ELF magic
     store = _FakeStore(
         {"k": kblob, "v": vblob},
@@ -724,7 +734,7 @@ def test_bad_vmlinux_magic_is_build_failure() -> None:
 
 def test_effective_config_present_key_but_missing_head_is_configuration_error() -> None:
     # key-present / head-absent (and the symmetric case) must each raise: the guard is OR, not AND.
-    kblob = _bzimage()
+    kblob = _kernel_tar()
     store = _FakeStore({"k": kblob}, {"k": _head(kblob, "kc")})
     manifest = [ManifestEntry(name="kernel", sha256="kc", size_bytes=len(kblob))]
     reqs = ConfigRequirements(required={})

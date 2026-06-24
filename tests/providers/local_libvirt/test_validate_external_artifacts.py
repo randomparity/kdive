@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import struct
+import tarfile
 
 import pytest
 
@@ -15,7 +17,29 @@ from kdive.build_artifacts.validation import (
 from kdive.components.requirements import ConfigRequirements
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
-_BZIMAGE_HEAD = b"\x00" * 0x202 + b"HdrS"  # bzImage magic at offset 0x202
+_BZIMAGE_BODY = b"\x00" * 0x202 + b"HdrS" + b"\x00" * 16  # bzImage magic at offset 0x202
+
+
+def _tar_add(tar: tarfile.TarFile, name: str, data: bytes) -> None:
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    tar.addfile(info, io.BytesIO(data))
+
+
+def _combined_kernel_tar(
+    *, boot: bytes | None = _BZIMAGE_BODY, with_modules: bool = True, version: str = "6.9.0"
+) -> bytes:
+    """A gzip combined tar: boot/vmlinuz (optional) + lib/modules/<ver>/ (optional)."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        if boot is not None:
+            _tar_add(tar, "boot/vmlinuz", boot)
+        if with_modules:
+            _tar_add(tar, f"lib/modules/{version}/modules.dep", b"")
+    return buf.getvalue()
+
+
+_KERNEL_TAR = _combined_kernel_tar()
 
 
 class _FakeStore:
@@ -98,37 +122,86 @@ def test_missing_object_is_configuration_error() -> None:
 
 def test_checksum_mismatch_is_build_failure() -> None:
     store = _FakeStore(
-        {"k": _BZIMAGE_HEAD},
-        {"k": HeadResult(size_bytes=len(_BZIMAGE_HEAD), checksum_sha256="OTHER", etag="e")},
+        {"k": _KERNEL_TAR},
+        {"k": HeadResult(size_bytes=len(_KERNEL_TAR), checksum_sha256="OTHER", etag="e")},
     )
     with pytest.raises(CategorizedError) as e:
         validate_external_artifacts(
             store,
-            manifest=[ManifestEntry("kernel", "csum", len(_BZIMAGE_HEAD))],
+            manifest=[ManifestEntry("kernel", "csum", len(_KERNEL_TAR))],
             keys={"kernel": "k"},
             declared_build_id=None,
         )
     assert e.value.category is ErrorCategory.BUILD_FAILURE
 
 
-def test_bad_kernel_magic_is_build_failure() -> None:
-    bad = b"\x00" * 0x300
-    store = _FakeStore({"k": bad}, {"k": HeadResult(len(bad), "csum", "e")})
+def _validate_kernel_blob(blob: bytes) -> None:
+    """Wire a `kernel` blob through validate_external_artifacts to reach the content check."""
+    store = _FakeStore({"k": blob}, {"k": HeadResult(len(blob), "csum", "e")})
+    validate_external_artifacts(
+        store,
+        manifest=[ManifestEntry("kernel", "csum", len(blob))],
+        keys={"kernel": "k"},
+        declared_build_id=None,
+    )
+
+
+def test_non_gzip_kernel_is_build_failure() -> None:
+    # A raw bzImage (the legacy local format) and any non-gzip blob are now rejected: the unified
+    # `kernel` artifact must be a gzip-compressed combined tar (ADR-0234 §2).
+    for blob in (b"\x00" * 0x300, _BZIMAGE_BODY):
+        with pytest.raises(CategorizedError) as e:
+            _validate_kernel_blob(blob)
+        assert e.value.category is ErrorCategory.BUILD_FAILURE
+
+
+def test_gzip_non_tar_kernel_is_build_failure() -> None:
+    import gzip
+
     with pytest.raises(CategorizedError) as e:
-        validate_external_artifacts(
-            store,
-            manifest=[ManifestEntry("kernel", "csum", len(bad))],
-            keys={"kernel": "k"},
-            declared_build_id=None,
-        )
+        _validate_kernel_blob(gzip.compress(b"not a tar at all"))
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+
+
+def test_kernel_tar_missing_boot_vmlinuz_is_build_failure() -> None:
+    with pytest.raises(CategorizedError) as e:
+        _validate_kernel_blob(_combined_kernel_tar(boot=None))
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+    assert "boot/vmlinuz" in str(e.value)
+
+
+def test_kernel_tar_boot_not_bzimage_is_build_failure() -> None:
+    with pytest.raises(CategorizedError) as e:
+        _validate_kernel_blob(_combined_kernel_tar(boot=b"\x00" * 0x300))
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+    assert "boot/vmlinuz" in str(e.value)
+
+
+def test_kernel_tar_missing_lib_modules_is_build_failure() -> None:
+    with pytest.raises(CategorizedError) as e:
+        _validate_kernel_blob(_combined_kernel_tar(with_modules=False))
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+    assert "lib/modules" in str(e.value)
+
+
+def test_kernel_tar_scan_is_bounded_against_a_decompression_bomb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With the decompress bound set below the boot/vmlinuz payload, the lib/modules header is never
+    # reached, so validation rejects rather than decompressing unbounded — the gzip-bomb guard.
+    import kdive.build_artifacts.validation as validation_module
+
+    monkeypatch.setattr(validation_module, "_KERNEL_TAR_SCAN_MAX_BYTES", 256)
+    with pytest.raises(CategorizedError) as e:
+        _validate_kernel_blob(_combined_kernel_tar(boot=b"\x00" * (4 * 1024)))
     assert e.value.category is ErrorCategory.BUILD_FAILURE
 
 
 def test_happy_path_kernel_only_returns_build_output() -> None:
-    store = _FakeStore({"k": _BZIMAGE_HEAD}, {"k": HeadResult(len(_BZIMAGE_HEAD), "csum", "e")})
+    store = _FakeStore({"k": _KERNEL_TAR}, {"k": HeadResult(len(_KERNEL_TAR), "csum", "e")})
     out = validate_external_artifacts(
         store,
-        manifest=[ManifestEntry("kernel", "csum", len(_BZIMAGE_HEAD))],
+        manifest=[ManifestEntry("kernel", "csum", len(_KERNEL_TAR))],
         keys={"kernel": "k"},
         declared_build_id=None,
     )
@@ -143,14 +216,14 @@ def test_happy_path_kernel_only_returns_build_output() -> None:
 def test_build_id_mismatch_is_build_failure() -> None:
     blob = _elf_with_build_id(bytes.fromhex("dead"))
     store = _FakeStore(
-        {"k": _BZIMAGE_HEAD, "v": blob},
-        {"k": HeadResult(len(_BZIMAGE_HEAD), "ck", "e"), "v": HeadResult(len(blob), "cv", "e")},
+        {"k": _KERNEL_TAR, "v": blob},
+        {"k": HeadResult(len(_KERNEL_TAR), "ck", "e"), "v": HeadResult(len(blob), "cv", "e")},
     )
     with pytest.raises(CategorizedError) as e:
         validate_external_artifacts(
             store,
             manifest=[
-                ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)),
+                ManifestEntry("kernel", "ck", len(_KERNEL_TAR)),
                 ManifestEntry("vmlinux", "cv", len(blob)),
             ],
             keys={"kernel": "k", "vmlinux": "v"},
@@ -162,14 +235,14 @@ def test_build_id_mismatch_is_build_failure() -> None:
 def test_vmlinux_without_declared_build_id_is_configuration_error() -> None:
     blob = _elf_with_build_id(bytes.fromhex("dead"))
     store = _FakeStore(
-        {"k": _BZIMAGE_HEAD, "v": blob},
-        {"k": HeadResult(len(_BZIMAGE_HEAD), "ck", "e"), "v": HeadResult(len(blob), "cv", "e")},
+        {"k": _KERNEL_TAR, "v": blob},
+        {"k": HeadResult(len(_KERNEL_TAR), "ck", "e"), "v": HeadResult(len(blob), "cv", "e")},
     )
     with pytest.raises(CategorizedError) as e:
         validate_external_artifacts(
             store,
             manifest=[
-                ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)),
+                ManifestEntry("kernel", "ck", len(_KERNEL_TAR)),
                 ManifestEntry("vmlinux", "cv", len(blob)),
             ],
             keys={"kernel": "k", "vmlinux": "v"},
@@ -181,13 +254,13 @@ def test_vmlinux_without_declared_build_id_is_configuration_error() -> None:
 def test_matching_build_id_passes_and_pairs_vmlinux() -> None:
     blob = _elf_with_build_id(bytes.fromhex("deadbeef"))
     store = _FakeStore(
-        {"k": _BZIMAGE_HEAD, "v": blob},
-        {"k": HeadResult(len(_BZIMAGE_HEAD), "ck", "e"), "v": HeadResult(len(blob), "cv", "e")},
+        {"k": _KERNEL_TAR, "v": blob},
+        {"k": HeadResult(len(_KERNEL_TAR), "ck", "e"), "v": HeadResult(len(blob), "cv", "e")},
     )
     out = validate_external_artifacts(
         store,
         manifest=[
-            ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)),
+            ManifestEntry("kernel", "ck", len(_KERNEL_TAR)),
             ManifestEntry("vmlinux", "cv", len(blob)),
         ],
         keys={"kernel": "k", "vmlinux": "v"},
@@ -199,13 +272,13 @@ def test_matching_build_id_passes_and_pairs_vmlinux() -> None:
 
 def test_initrd_is_validated_and_returned_in_keys() -> None:
     store = _FakeStore(
-        {"k": _BZIMAGE_HEAD, "i": b"\x1f\x8b" + b"\x00" * 40},
-        {"k": HeadResult(len(_BZIMAGE_HEAD), "ck", "e"), "i": HeadResult(42, "ci", "e")},
+        {"k": _KERNEL_TAR, "i": b"\x1f\x8b" + b"\x00" * 40},
+        {"k": HeadResult(len(_KERNEL_TAR), "ck", "e"), "i": HeadResult(42, "ci", "e")},
     )
     out = validate_external_artifacts(
         store,
         manifest=[
-            ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)),
+            ManifestEntry("kernel", "ck", len(_KERNEL_TAR)),
             ManifestEntry("initrd", "ci", 42),
         ],
         keys={"kernel": "k", "initrd": "i"},
@@ -218,9 +291,9 @@ def test_initrd_is_validated_and_returned_in_keys() -> None:
 def test_effective_config_satisfies_profile_requirements() -> None:
     config = b"CONFIG_VIRTIO_BLK=y\n"
     store = _FakeStore(
-        {"k": _BZIMAGE_HEAD, "c": config},
+        {"k": _KERNEL_TAR, "c": config},
         {
-            "k": HeadResult(len(_BZIMAGE_HEAD), "ck", "e"),
+            "k": HeadResult(len(_KERNEL_TAR), "ck", "e"),
             "c": HeadResult(len(config), "cc", "ec"),
         },
     )
@@ -228,7 +301,7 @@ def test_effective_config_satisfies_profile_requirements() -> None:
     out = validate_external_artifacts(
         store,
         manifest=[
-            ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)),
+            ManifestEntry("kernel", "ck", len(_KERNEL_TAR)),
             ManifestEntry("effective_config", "cc", len(config)),
         ],
         keys={"kernel": "k", "effective_config": "c"},
@@ -240,12 +313,12 @@ def test_effective_config_satisfies_profile_requirements() -> None:
 
 
 def test_effective_config_required_when_profile_requirements_selected() -> None:
-    store = _FakeStore({"k": _BZIMAGE_HEAD}, {"k": HeadResult(len(_BZIMAGE_HEAD), "ck", "e")})
+    store = _FakeStore({"k": _KERNEL_TAR}, {"k": HeadResult(len(_KERNEL_TAR), "ck", "e")})
 
     with pytest.raises(CategorizedError) as caught:
         validate_external_artifacts(
             store,
-            manifest=[ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD))],
+            manifest=[ManifestEntry("kernel", "ck", len(_KERNEL_TAR))],
             keys={"kernel": "k"},
             declared_build_id=None,
             profile_requirements=ConfigRequirements(required={"CONFIG_VIRTIO_BLK": "y"}),
@@ -256,9 +329,9 @@ def test_effective_config_required_when_profile_requirements_selected() -> None:
 
 def test_oversized_effective_config_is_configuration_error_without_read() -> None:
     store = _FakeStore(
-        {"k": _BZIMAGE_HEAD, "c": b""},
+        {"k": _KERNEL_TAR, "c": b""},
         {
-            "k": HeadResult(len(_BZIMAGE_HEAD), "ck", "e"),
+            "k": HeadResult(len(_KERNEL_TAR), "ck", "e"),
             "c": HeadResult(1024 * 1024 + 1, "cc", "ec"),
         },
     )
@@ -267,7 +340,7 @@ def test_oversized_effective_config_is_configuration_error_without_read() -> Non
         validate_external_artifacts(
             store,
             manifest=[
-                ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)),
+                ManifestEntry("kernel", "ck", len(_KERNEL_TAR)),
                 ManifestEntry("effective_config", "cc", 1024 * 1024 + 1),
             ],
             keys={"kernel": "k", "effective_config": "c"},
@@ -282,9 +355,9 @@ def test_oversized_effective_config_is_configuration_error_without_read() -> Non
 def test_effective_config_mismatch_is_configuration_error() -> None:
     config = b"CONFIG_VIRTIO_BLK=n\n"
     store = _FakeStore(
-        {"k": _BZIMAGE_HEAD, "c": config},
+        {"k": _KERNEL_TAR, "c": config},
         {
-            "k": HeadResult(len(_BZIMAGE_HEAD), "ck", "e"),
+            "k": HeadResult(len(_KERNEL_TAR), "ck", "e"),
             "c": HeadResult(len(config), "cc", "ec"),
         },
     )
@@ -293,7 +366,7 @@ def test_effective_config_mismatch_is_configuration_error() -> None:
         validate_external_artifacts(
             store,
             manifest=[
-                ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)),
+                ManifestEntry("kernel", "ck", len(_KERNEL_TAR)),
                 ManifestEntry("effective_config", "cc", len(config)),
             ],
             keys={"kernel": "k", "effective_config": "c"},
@@ -305,12 +378,12 @@ def test_effective_config_mismatch_is_configuration_error() -> None:
 
 
 def test_vmlinux_without_upload_key_is_configuration_error() -> None:
-    store = _FakeStore({"k": _BZIMAGE_HEAD}, {"k": HeadResult(len(_BZIMAGE_HEAD), "ck", "e")})
+    store = _FakeStore({"k": _KERNEL_TAR}, {"k": HeadResult(len(_KERNEL_TAR), "ck", "e")})
     with pytest.raises(CategorizedError) as e:
         validate_external_artifacts(
             store,
             manifest=[
-                ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)),
+                ManifestEntry("kernel", "ck", len(_KERNEL_TAR)),
                 ManifestEntry("vmlinux", "cv", 64),
             ],
             keys={"kernel": "k"},  # vmlinux declared but no upload key
@@ -322,13 +395,13 @@ def test_vmlinux_without_upload_key_is_configuration_error() -> None:
 def _validate_vmlinux_blob(blob: bytes) -> None:
     """Wire a vmlinux blob through validate_external_artifacts to reach the extractor."""
     store = _FakeStore(
-        {"k": _BZIMAGE_HEAD, "v": blob},
-        {"k": HeadResult(len(_BZIMAGE_HEAD), "ck", "e"), "v": HeadResult(len(blob), "cv", "e")},
+        {"k": _KERNEL_TAR, "v": blob},
+        {"k": HeadResult(len(_KERNEL_TAR), "ck", "e"), "v": HeadResult(len(blob), "cv", "e")},
     )
     validate_external_artifacts(
         store,
         manifest=[
-            ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)),
+            ManifestEntry("kernel", "ck", len(_KERNEL_TAR)),
             ManifestEntry("vmlinux", "cv", len(blob)),
         ],
         keys={"kernel": "k", "vmlinux": "v"},
@@ -474,8 +547,8 @@ def test_verify_chunks_checksum_mismatch_is_build_failure() -> None:
 
 def test_chunked_entry_skips_whole_object_checksum_on_final_object() -> None:
     # The reassembled final object exposes a composite/None checksum; validation must accept
-    # it on size + magic alone for a chunked entry (the per-chunk checks happened earlier).
-    final = b"\x00" * 0x202 + b"HdrS"
+    # it on size + content alone for a chunked entry (the per-chunk checks happened earlier).
+    final = _KERNEL_TAR
     entry = ManifestEntry("kernel", "whole", len(final), chunks=(ChunkEntry("c0", len(final)),))
     store = _FakeStore({"k": final}, {"k": HeadResult(len(final), None, "e")})
     out = validate_external_artifacts(
@@ -485,7 +558,7 @@ def test_chunked_entry_skips_whole_object_checksum_on_final_object() -> None:
 
 
 def test_chunked_entry_final_size_mismatch_is_build_failure() -> None:
-    final = b"\x00" * 0x202 + b"HdrS"
+    final = _KERNEL_TAR
     entry = ManifestEntry("kernel", "whole", 9999, chunks=(ChunkEntry("c0", 9999),))
     store = _FakeStore({"k": final}, {"k": HeadResult(len(final), None, "e")})
     with pytest.raises(CategorizedError) as e:

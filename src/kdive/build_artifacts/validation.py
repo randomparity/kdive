@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import struct
+import tarfile
+import zlib
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
@@ -15,11 +18,22 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 
 _NT_GNU_BUILD_ID = 3
 _ELF_MAGIC = b"\x7fELF"
+_GZIP_MAGIC = b"\x1f\x8b"
 _BZIMAGE_MAGIC = b"HdrS"
 _BZIMAGE_MAGIC_OFFSET = 0x202
 _SHT_NOTE = 7
 _MAX_SECTION_BYTES = 16 * 1024 * 1024
 _MAX_EFFECTIVE_CONFIG_BYTES = 1024 * 1024
+
+# The combined `kernel` artifact is a gzip tar of boot/vmlinuz + lib/modules/<ver>/ (ADR-0234 §2).
+_KERNEL_BOOT_MEMBER = "boot/vmlinuz"
+_MODULES_MEMBER_PREFIX = "lib/modules/"
+# Bound on *decompressed* output the shape scan reads: boot/vmlinuz is the first member, so the
+# first lib/modules header is reached only after the bzImage payload (tens of MB). The cap sits
+# well above a real bzImage so a large-but-legal kernel passes, while a gzip bomb (tiny gzip →
+# gigabytes of tar) is stopped here rather than decompressing unbounded.
+_KERNEL_TAR_SCAN_MAX_BYTES = 128 * 1024 * 1024
+_RANGE_CHUNK_BYTES = 4 * 1024 * 1024
 
 
 class HeadStore(Protocol):
@@ -266,18 +280,92 @@ def _validate_one_artifact(
         # whole-object SHA-256 is not comparable here; the per-chunk pins (verify_chunks)
         # already bound every byte. Only the total size is checked on the final object.
         raise _build_failure("reassembled artifact size disagrees with its manifest", name=name)
-    _check_magic(store, name, key)
+    _check_artifact_content(store, name, key, head.size_bytes)
     return head
 
 
-def _check_magic(store: ValidatorStore, name: str, key: str) -> None:
+def _check_artifact_content(store: ValidatorStore, name: str, key: str, size_bytes: int) -> None:
     if name == "vmlinux":
         if store.get_range(key, start=0, length=4) != _ELF_MAGIC:
             raise _build_failure("vmlinux is not an ELF file", name=name)
     elif name == "kernel":
-        magic = store.get_range(key, start=_BZIMAGE_MAGIC_OFFSET, length=4)
-        if magic != _BZIMAGE_MAGIC:
-            raise _build_failure("kernel is not a bzImage", name=name)
+        _check_kernel_combined_tar(store, key, name, size_bytes=size_bytes)
+
+
+def _check_kernel_combined_tar(
+    store: ValidatorStore, key: str, name: str, *, size_bytes: int
+) -> None:
+    """Validate the external `kernel` upload is a combined kernel+modules tar (ADR-0234 §2).
+
+    The artifact must be a gzip stream whose tar holds ``boot/vmlinuz`` (itself a bzImage) and at
+    least one ``lib/modules/<ver>/`` member. The scan decompresses at most
+    :data:`_KERNEL_TAR_SCAN_MAX_BYTES` so a gzip bomb cannot make this read unbounded; if both
+    members are not seen within that bound the upload is rejected.
+    """
+    if store.get_range(key, start=0, length=2) != _GZIP_MAGIC:
+        raise _build_failure("kernel artifact is not a gzip-compressed combined tar", name=name)
+    data = _decompress_bounded(
+        store, key, total_size=size_bytes, max_out=_KERNEL_TAR_SCAN_MAX_BYTES
+    )
+    _verify_combined_tar_shape(data, name)
+
+
+def _decompress_bounded(store: ValidatorStore, key: str, *, total_size: int, max_out: int) -> bytes:
+    """Gunzip ``key`` via sequential ranged reads, stopping at ``max_out`` decompressed bytes."""
+    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)  # 16 + MAX_WBITS selects gzip framing
+    out = bytearray()
+    offset = 0
+    while offset < total_size and len(out) < max_out:
+        length = min(_RANGE_CHUNK_BYTES, total_size - offset)
+        chunk = store.get_range(key, start=offset, length=length)
+        if not chunk:
+            break
+        offset += len(chunk)
+        out += decompressor.decompress(chunk, max_out - len(out))
+        if decompressor.eof:
+            break
+    return bytes(out)
+
+
+def _verify_combined_tar_shape(data: bytes, name: str) -> None:
+    boot_ok = False
+    modules_ok = False
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
+            for member in archive:
+                path = _normalized_member_name(member.name)
+                if path == _KERNEL_BOOT_MEMBER and member.isfile():
+                    boot_ok = _member_is_bzimage(archive, member)
+                elif path.startswith(_MODULES_MEMBER_PREFIX):
+                    modules_ok = True
+                if boot_ok and modules_ok:
+                    break
+    except tarfile.TarError as exc:
+        # An open failure (not a tar at all) is fatal; a truncation mid-iteration is the expected
+        # outcome when the decompress bound cut the tail — fall through to the member checks so a
+        # gzip bomb surfaces as a precise "no lib/modules within the scan bound".
+        if not (boot_ok or modules_ok):
+            raise _build_failure("kernel artifact is not a readable tar", name=name) from exc
+    if not boot_ok:
+        raise _build_failure("kernel combined tar has no boot/vmlinuz bzImage member", name=name)
+    if not modules_ok:
+        raise _build_failure(
+            "kernel combined tar has no lib/modules member within the scan bound", name=name
+        )
+
+
+def _member_is_bzimage(archive: tarfile.TarFile, member: tarfile.TarInfo) -> bool:
+    extracted = archive.extractfile(member)
+    if extracted is None:
+        return False
+    head = extracted.read(_BZIMAGE_MAGIC_OFFSET + 4)
+    return head[_BZIMAGE_MAGIC_OFFSET : _BZIMAGE_MAGIC_OFFSET + 4] == _BZIMAGE_MAGIC
+
+
+def _normalized_member_name(name: str) -> str:
+    if name.startswith("./"):
+        name = name[2:]
+    return name.lstrip("/")
 
 
 def _find_build_id_note(
