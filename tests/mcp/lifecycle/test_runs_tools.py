@@ -823,6 +823,184 @@ def test_get_expected_crash_boot_recommends_triage(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+async def _seed_boot_job(
+    pool: AsyncConnectionPool,
+    run_id: str,
+    *,
+    state: JobState,
+    error_category: ErrorCategory | None = None,
+) -> str:
+    """Insert a boot job for ``run_id`` under its deterministic ``dedup_key`` (#750).
+
+    Seeds the terminal state directly (no real worker) so the read-side helper is tested in
+    isolation. The ``dedup_key`` mirrors ``_enqueue_step``'s ``f"{run.id}:boot"``.
+    """
+    job_id = uuid4()
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO jobs (id, kind, payload, state, max_attempts, authorizing, dedup_key, "
+            "    error_category) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                job_id,
+                JobKind.BOOT.value,
+                Jsonb({"run_id": run_id}),
+                state.value,
+                3,
+                Jsonb({"principal": "user-1", "agent_session": "s", "project": "proj"}),
+                f"{run_id}:boot",
+                error_category.value if error_category is not None else None,
+            ),
+        )
+    return str(job_id)
+
+
+def test_failed_boot_attempt_none_when_no_boot_job(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            async with pool.connection() as conn:
+                attempt = await run_steps.failed_boot_attempt(conn, UUID(run_id))
+        assert attempt is None
+
+    asyncio.run(_run())
+
+
+def test_failed_boot_attempt_none_for_queued_job(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _seed_boot_job(pool, run_id, state=JobState.QUEUED)
+            async with pool.connection() as conn:
+                attempt = await run_steps.failed_boot_attempt(conn, UUID(run_id))
+        assert attempt is None
+
+    asyncio.run(_run())
+
+
+def test_failed_boot_attempt_none_for_running_job(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _seed_boot_job(pool, run_id, state=JobState.RUNNING)
+            async with pool.connection() as conn:
+                attempt = await run_steps.failed_boot_attempt(conn, UUID(run_id))
+        assert attempt is None
+
+    asyncio.run(_run())
+
+
+def test_failed_boot_attempt_surfaces_failed_job(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            job_id = await _seed_boot_job(
+                pool,
+                run_id,
+                state=JobState.FAILED,
+                error_category=ErrorCategory.READINESS_FAILURE,
+            )
+            async with pool.connection() as conn:
+                attempt = await run_steps.failed_boot_attempt(conn, UUID(run_id))
+        assert attempt is not None
+        assert attempt.job_id == UUID(job_id)
+        assert attempt.error_category is ErrorCategory.READINESS_FAILURE
+        assert attempt.as_data() == {
+            "job_id": job_id,
+            "status": "failed",
+            "error_category": "readiness_failure",
+        }
+
+    asyncio.run(_run())
+
+
+def test_failed_boot_attempt_null_category(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _seed_boot_job(pool, run_id, state=JobState.FAILED, error_category=None)
+            async with pool.connection() as conn:
+                attempt = await run_steps.failed_boot_attempt(conn, UUID(run_id))
+        assert attempt is not None
+        assert attempt.error_category is None
+        assert attempt.as_data() == {
+            "job_id": str(attempt.job_id),
+            "status": "failed",
+            "error_category": None,
+        }
+
+    asyncio.run(_run())
+
+
+def test_get_run_surfaces_failed_boot_attempt(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            # Boot terminally failed: the boot run_steps row was deleted (ADR-0185), and the
+            # boot job survives as `failed` with its category (#750).
+            job_id = await _seed_boot_job(
+                pool,
+                run_id,
+                state=JobState.FAILED,
+                error_category=ErrorCategory.READINESS_FAILURE,
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["steps"]["boot"] == "pending"
+        assert resp.data["boot_readiness"] == {
+            "job_id": job_id,
+            "status": "failed",
+            "error_category": "readiness_failure",
+        }
+
+    asyncio.run(_run())
+
+
+def test_get_run_no_boot_readiness_when_never_attempted(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["steps"]["boot"] == "pending"
+        assert "boot_readiness" not in resp.data
+
+    asyncio.run(_run())
+
+
+def test_get_run_no_boot_readiness_for_inflight_boot(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _seed_boot_job(pool, run_id, state=JobState.QUEUED)
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["steps"]["boot"] == "pending"
+        assert "boot_readiness" not in resp.data
+
+    asyncio.run(_run())
+
+
+def test_get_run_no_boot_readiness_when_boot_succeeded(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _insert_step(pool, run_id, "boot", "succeeded", {"boot_outcome": "ready"})
+            # A stale failed boot job must not surface once the boot step has succeeded.
+            await _seed_boot_job(
+                pool,
+                run_id,
+                state=JobState.FAILED,
+                error_category=ErrorCategory.READINESS_FAILURE,
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["steps"]["boot"] == "succeeded"
+        assert "boot_readiness" not in resp.data
+
+    asyncio.run(_run())
+
+
 def test_get_booted_run_surfaces_console_ref(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

@@ -13,7 +13,7 @@ from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools.lifecycle._recovery import build_profile_summary
 from kdive.services.runs import states as run_states
-from kdive.services.runs.steps import StepProgress
+from kdive.services.runs.steps import BootAttempt, StepProgress
 
 ALLOC_HOSTABLE = run_states.ALLOC_HOSTABLE
 INVESTIGATION_OPEN_FOR_RUN = run_states.INVESTIGATION_OPEN_FOR_RUN
@@ -111,6 +111,7 @@ def envelope_for_run(
     failing_job: Job | None = None,
     active_debug_session_ids: list[str] | None = None,
     step_progress: StepProgress | None = None,
+    boot_readiness: BootAttempt | None = None,
 ) -> ToolResponse:
     """Render a Run; `failed` becomes a failure envelope carrying its `failure_category`.
 
@@ -125,6 +126,11 @@ def envelope_for_run(
     this Run so a recovering agent can pivot from a known Run to a live session handle. The
     Run is already project-scoped before this is built, so the ids carry no cross-project
     signal. Surfaced only on a non-failed Run (a failed Run holds no live session).
+
+    `boot_readiness` (#750, ADR-0230) is the Run's terminally-failed boot job, surfaced as
+    `data.boot_readiness` on the `SUCCEEDED` success path so a caller can distinguish a failed
+    boot (whose `run_steps` row was deleted to `pending` by the ADR-0185 recycle) from a
+    never-attempted one. The read path passes it only when the boot step is not yet succeeded.
     """
     if run.state is RunState.FAILED:
         category = run.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -148,6 +154,11 @@ def envelope_for_run(
     }
     if steps is not None:
         data["steps"] = cast(JsonValue, steps)
+    if boot_readiness is not None:
+        # The boot step row was deleted on terminal failure (ADR-0185), so `steps.boot` reads
+        # `pending`; surface the surviving failed boot job as evidence (#750, ADR-0230). Only the
+        # SUCCEEDED read path passes a non-None value, so this stays scoped to `runs.get`.
+        data["boot_readiness"] = cast(JsonValue, boot_readiness.as_data())
     if required_cmdline is not None:
         # The platform-owned boot args (#748). Extra kernel debug args are not set here: they
         # are appended via runs.build.cmdline (or runs.complete_build.cmdline for external
