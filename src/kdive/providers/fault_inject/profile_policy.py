@@ -27,3 +27,9 @@ class FaultInjectProfilePolicy:
 
     def capture_method(self, profile: ProvisioningProfile) -> CaptureMethod:
         return profile.provider.fault_inject.capture_method
+
+    def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
+        return False
+
+    def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
+        return False

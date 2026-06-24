@@ -193,6 +193,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_GUEST_IMAGE` | — | Path to the operator-built local-libvirt guest rootfs qcow2 the live_stack spine boots; unset → the live_stack suite skips. |
 | `KDIVE_IMAGE` | — | Container image ref under test for the image smoke test; unset → the smoke test skips. |
 | `KDIVE_LIVE_SSH_TARGET` | — | SSH target gating the criterion-5 live_stack tier; unset → the live_stack suite skips. |
+| `KDIVE_LIVE_VM_BZIMAGE` | — | Path to a kernel image that panics early in boot (no usable rootfs) for the gated local-libvirt preserve-crash live-attach test (#747); unset → that test skips. |
 | `KDIVE_LIVE_VM_SYSTEM_ID` | — | System id of a pre-provisioned live VM for the gated local-libvirt install test. |
 | `KDIVE_OIDC_CLIENT_ID` | `kdive-test` | OIDC client id the live_stack harness presents to the mock issuer. |
 | `KDIVE_REMOTE_BASE_IMAGE_VOLUME` | — | Name of the prebuilt remote-libvirt base-image storage volume for the remote live_stack test; unset → that test skips. |

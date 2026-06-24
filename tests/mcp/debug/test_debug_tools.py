@@ -613,6 +613,59 @@ def test_start_session_rejects_expected_crash_run(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_start_session_admits_gdbstub_for_crashed_halted_live(migrated_url: str) -> None:
+    # A halted early-boot panic with a live stub (ADR-0233, #747) is live-debuggable over gdbstub.
+    async def _run() -> tuple[Any, list[Any], str]:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_run(
+                pool, sys_id, boot_result={"boot_outcome": "crashed_halted_live"}
+            )
+            conn_fake = _FakeConnector()
+            resp = await _start_session(
+                pool, _ctx(), run_id=run_id, transport="gdbstub", connector=conn_fake
+            )
+            async with pool.connection() as c, c.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
+                row = await cur.fetchone()
+        assert row is not None
+        return resp, conn_fake.opened, row["state"]
+
+    resp, opened, system_state = asyncio.run(_run())
+    assert resp.status == "live"
+    assert opened == [("kdive-x", "gdbstub")]
+    # The boot handler never transitions the System on a crash, so it stays READY (the gate's
+    # READY re-check passes). A future libvirt-domain -> System sync would need this revisited.
+    assert system_state == "ready"
+
+
+def test_start_session_rejects_drgn_live_for_crashed_halted_live(migrated_url: str) -> None:
+    # A halted/panicked guest has no running sshd, so drgn-live cannot attach (ADR-0233).
+    async def _run() -> tuple[Any, int, list[Any]]:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_run(
+                pool, sys_id, boot_result={"boot_outcome": "crashed_halted_live"}
+            )
+            conn_fake = _FakeConnector()
+            resp = await _start_session(
+                pool, _ctx(), run_id=run_id, transport="drgn-live", connector=conn_fake
+            )
+            count = await _session_count(pool)
+        return resp, count, conn_fake.opened
+
+    resp, count, opened = asyncio.run(_run())
+    assert resp.status == "error"
+    assert resp.error_category == "configuration_error"
+    assert resp.data["reason"] == "crashed_not_ssh_debuggable"
+    assert resp.detail is not None and "gdbstub" in resp.detail
+    assert resp.suggested_next_actions == ["debug.start_session"]
+    assert count == 0
+    assert opened == []
+
+
 def test_start_session_bad_transport_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

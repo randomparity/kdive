@@ -68,6 +68,13 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "System id of a pre-provisioned live VM for the gated local-libvirt install test.",
     ),
     ExternalEnvVar(
+        "KDIVE_LIVE_VM_BZIMAGE",
+        "test",
+        None,
+        "Path to a kernel image that panics early in boot (no usable rootfs) for the gated "
+        "local-libvirt preserve-crash live-attach test (#747); unset → that test skips.",
+    ),
+    ExternalEnvVar(
         "KDIVE_REQUIRE_DOCKER",
         "test",
         "0",

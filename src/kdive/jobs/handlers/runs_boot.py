@@ -13,7 +13,8 @@ from psycopg.rows import dict_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.db.idempotency import claim_run_step, complete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ARTIFACTS, RUNS
+from kdive.db.repositories import ARTIFACTS, RUNS, SYSTEMS
+from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import Run
@@ -22,9 +23,15 @@ from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.runs_common import abandon_run_step_best_effort
 from kdive.jobs.payloads import RunPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
+from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.ports import Booter
-from kdive.providers.shared.runtime_paths import console_log_path, read_console_log
+from kdive.providers.core.runtime import ProfilePolicy
+from kdive.providers.ports import Booter, Connector, SystemHandle
+from kdive.providers.shared.runtime_paths import (
+    console_log_path,
+    domain_name_for,
+    read_console_log,
+)
 from kdive.security import audit
 from kdive.security.artifacts.artifact_search import ArtifactSearchInputError, search_text
 from kdive.security.authz.context import RequestContext
@@ -169,6 +176,90 @@ def _expected_crash_matches(run: Run, redacted_console: bytes) -> bool:
         return False
 
 
+# A generic, provider-neutral kernel-panic signature for an undeclared early-boot crash. The
+# console match (not the RSP probe) is the crash signal, so the probe's halt-on-connect side
+# effect cannot promote a slow-but-healthy boot to a live-debuggable crash (ADR-0233, #747). A
+# console without this line abandons to FAILED — the gate errs toward the safe side.
+_GENERIC_PANIC_PATTERN = "Kernel panic - not syncing"
+
+
+def _generic_panic_matches(redacted_console: bytes) -> bool:
+    """True iff the redacted console shows a generic kernel panic; fails closed on bad input."""
+    try:
+        return (
+            search_text(
+                redacted_console,
+                pattern=_GENERIC_PANIC_PATTERN,
+                before_lines=0,
+                after_lines=0,
+                max_matches=1,
+            ).match_count
+            > 0
+        )
+    except ArtifactSearchInputError:
+        return False
+
+
+def _available_capture(profile_policy: ProfilePolicy, profile: ProvisioningProfile) -> list[str]:
+    """The genuinely-available follow-up methods for a halted System (policy predicates only).
+
+    Built from provider-neutral ``ProfilePolicy`` predicates, never a provider-specific profile
+    section, so this generic handler stays correct for every provider (ADR-0233).
+    """
+    methods = [CaptureMethod.GDBSTUB.value, CaptureMethod.CONSOLE.value]
+    if profile_policy.host_dump_provisioned(profile):
+        methods.append(CaptureMethod.HOST_DUMP.value)
+    return methods
+
+
+def _gdbstub_reachable(connector: Connector, system_id: UUID) -> bool:
+    """Probe the gdbstub via the connector's read-only open path; True iff it answers.
+
+    Reuses ``open_transport`` (which runs the bounded ``rsp_reachable`` probe + loopback guard
+    and holds no session row), so no port is re-resolved and the single-attach slot is untouched.
+    """
+    try:
+        connector.open_transport(SystemHandle(domain_name_for(system_id)), "gdbstub")
+    except CategorizedError:
+        return False
+    return True
+
+
+async def _record_crash_halted_live(
+    conn: AsyncConnection,
+    job_ctx: RequestContext,
+    run: Run,
+    system_id: UUID,
+    connector: Connector,
+    profile_policy: ProfilePolicy,
+    secret_registry: SecretRegistry,
+    artifact_store: ObjectStore | None,
+) -> dict[str, Any] | None:
+    """Record ``crashed_halted_live`` iff gdbstub-provisioned, console panics, stub reachable.
+
+    Returns the succeeded ``boot`` step result, or ``None`` to let the caller abandon to FAILED.
+    """
+    system = await SYSTEMS.get(conn, system_id)
+    if system is None:
+        return None
+    profile = ProvisioningProfile.parse(system.provisioning_profile)
+    if not profile_policy.gdbstub_provisioned(profile):
+        return None
+    artifact = await _capture_console_artifact(conn, system_id, secret_registry, artifact_store)
+    if artifact is None or not artifact.data or not _generic_panic_matches(artifact.data):
+        return None
+    if not await asyncio.to_thread(_gdbstub_reachable, connector, system_id):
+        return None
+    await _record_boot_audit(conn, job_ctx, run)
+    return {
+        "system_id": str(system_id),
+        "boot_outcome": "crashed_halted_live",
+        "evidence_kind": "console",
+        "evidence_artifact_id": str(artifact.id),
+        "available_capture": _available_capture(profile_policy, profile),
+    }
+
+
 async def _record_boot_audit(
     conn: AsyncConnection,
     job_ctx: RequestContext,
@@ -193,6 +284,8 @@ async def _run_boot_and_capture_outcome(
     job_ctx: RequestContext,
     run: Run,
     booter: Booter,
+    connector: Connector,
+    profile_policy: ProfilePolicy,
     secret_registry: SecretRegistry,
     artifact_store: ObjectStore | None,
 ) -> dict[str, Any]:
@@ -217,6 +310,19 @@ async def _run_boot_and_capture_outcome(
                 "evidence_kind": "console",
                 "evidence_artifact_id": str(artifact.id),
             }
+        if exc.category is ErrorCategory.READINESS_FAILURE:
+            crash = await _record_crash_halted_live(
+                conn,
+                job_ctx,
+                run,
+                system_id,
+                connector,
+                profile_policy,
+                secret_registry,
+                artifact_store,
+            )
+            if crash is not None:
+                return crash
         raise
     artifact = await _capture_console_artifact(conn, system_id, secret_registry, artifact_store)
     await _record_boot_audit(conn, job_ctx, run)
@@ -255,7 +361,14 @@ async def boot_handler(
 
     try:
         result = await _run_boot_and_capture_outcome(
-            conn, job_ctx, run, booter, secret_registry, artifact_store
+            conn,
+            job_ctx,
+            run,
+            booter,
+            binding.runtime.connector,
+            binding.runtime.profile_policy,
+            secret_registry,
+            artifact_store,
         )
     except CategorizedError:
         await abandon_run_step_best_effort(conn, run_id, "boot")

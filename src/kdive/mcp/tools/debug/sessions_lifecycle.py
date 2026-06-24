@@ -80,6 +80,10 @@ _EXPECTED_CRASH_DETAIL = (
     "run booted into an expected crash and is not live-debuggable; analyze its captured core "
     "instead"
 )
+_CRASHED_HALTED_LIVE_DRGN_DETAIL = (
+    "run crashed during early boot and is halted with a live gdbstub; attach over gdbstub. "
+    "drgn-live needs a running in-guest sshd, which a halted crash does not have"
+)
 
 # A live/attach session occupies the System's single endpoint **for that transport kind**
 # (single-attach per transport, ADR-0039 §4): a gdbstub and a drgn-live session may coexist on
@@ -495,6 +499,16 @@ async def _attach_preconditions(
             suggested_next_actions=["postmortem.triage", "vmcore.fetch"],
             data={"reason": "expected_crash_not_live_debuggable"},
         )
+    if boot_result.get("boot_outcome") == "crashed_halted_live" and transport == _DRGN_LIVE:
+        return ToolResponse.failure(
+            str(run.id),
+            ErrorCategory.CONFIGURATION_ERROR,
+            detail=_CRASHED_HALTED_LIVE_DRGN_DETAIL,
+            suggested_next_actions=["debug.start_session"],
+            data={"reason": "crashed_not_ssh_debuggable"},
+        )
+    # A `crashed_halted_live` outcome over gdbstub falls through to the System-ready/occupied
+    # checks and is admitted (ADR-0233, #747) — do not re-add a blanket crash reject here.
     system = await _system_for_run(conn, run)
     if system is None:
         return _config_error(str(run.id))

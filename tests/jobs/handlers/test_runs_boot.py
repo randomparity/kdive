@@ -3,21 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import cast
+from uuid import uuid4
 
 import pytest
 from psycopg import AsyncConnection
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import Run
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers import runs, runs_boot
 from kdive.jobs.handlers.runs_build import BuildHostTransportFactories
 from kdive.jobs.models import HandlerRegistry
+from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProfilePolicy
+from kdive.providers.ports import Connector
 from kdive.security.artifacts.artifact_search import (
     ArtifactSearchInputError,
     search_text,
 )
+from kdive.security.authz.context import RequestContext
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
 
@@ -160,3 +167,168 @@ def test_register_handlers_binds_each_run_kind_to_its_handler(
         "secret_registry": ports.secret_registry,
         "artifact_store": ports.artifact_store,
     }
+
+
+# --- crashed_halted_live recording (ADR-0233, #747) ----------------------------------------
+
+_PANIC_CONSOLE = b"[ 1.45] Kernel panic - not syncing: VFS: Unable to mount root fs\n"
+
+_PROFILE_DICT: dict[str, object] = {
+    "schema_version": 1,
+    "arch": "x86_64",
+    "vcpu": 4,
+    "memory_mb": 4096,
+    "disk_gb": 20,
+    "boot_method": "direct-kernel",
+    "kernel_source_ref": "git+https://git.kernel.org/pub/scm/linux.git#v6.9",
+    "provider": {
+        "local-libvirt": {
+            "domain_xml_params": {"machine": "pc-q35-9.0"},
+            "rootfs": {"kind": "local", "path": "/var/lib/kdive/rootfs/fedora-40.qcow2"},
+        }
+    },
+}
+
+
+class _Pol:
+    """Fake ProfilePolicy carrying just the two predicates the recording path reads."""
+
+    def __init__(self, *, gdbstub: bool, host_dump: bool) -> None:
+        self._gdbstub, self._host_dump = gdbstub, host_dump
+
+    def gdbstub_provisioned(self, _profile: object) -> bool:
+        return self._gdbstub
+
+    def host_dump_provisioned(self, _profile: object) -> bool:
+        return self._host_dump
+
+
+class _Connector:
+    """Fake Connector: open_transport raises when the stub is unreachable."""
+
+    def __init__(self, *, raises: bool) -> None:
+        self._raises = raises
+
+    def open_transport(self, _system: object, _kind: object) -> object:
+        if self._raises:
+            raise CategorizedError("no stub", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
+        return object()
+
+    def close_transport(self, _handle: object) -> None: ...
+
+
+def _pol(*, gdbstub: bool, host_dump: bool) -> ProfilePolicy:
+    return cast(ProfilePolicy, _Pol(gdbstub=gdbstub, host_dump=host_dump))
+
+
+def test_available_capture_without_preserve() -> None:
+    out = runs_boot._available_capture(
+        _pol(gdbstub=True, host_dump=False), cast(ProvisioningProfile, object())
+    )
+    assert out == ["gdbstub", "console"]
+
+
+def test_available_capture_with_preserve() -> None:
+    out = runs_boot._available_capture(
+        _pol(gdbstub=True, host_dump=True), cast(ProvisioningProfile, object())
+    )
+    assert out == ["gdbstub", "console", "host_dump"]
+
+
+def test_gdbstub_reachable_true_when_open_succeeds() -> None:
+    conn = cast(Connector, _Connector(raises=False))
+    assert runs_boot._gdbstub_reachable(conn, uuid4()) is True
+
+
+def test_gdbstub_reachable_false_when_open_raises() -> None:
+    conn = cast(Connector, _Connector(raises=True))
+    assert runs_boot._gdbstub_reachable(conn, uuid4()) is False
+
+
+@dataclass
+class _FakeSystem:
+    provisioning_profile: dict[str, object]
+
+
+def _record(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    gdbstub: bool,
+    host_dump: bool,
+    console: bytes | None,
+    reachable: bool,
+) -> tuple[dict[str, object] | None, list[object]]:
+    audits: list[object] = []
+
+    async def _fake_get(_conn: object, _system_id: object) -> _FakeSystem:
+        return _FakeSystem(_PROFILE_DICT)
+
+    async def _fake_capture(*_a: object, **_k: object) -> object:
+        if console is None:
+            return None
+        return runs_boot._ConsoleArtifact(uuid4(), "tenant/console", console)
+
+    async def _fake_audit(_conn: object, _ctx: object, run: object) -> None:
+        audits.append(run)
+
+    monkeypatch.setattr(runs_boot.SYSTEMS, "get", _fake_get)
+    monkeypatch.setattr(runs_boot, "_capture_console_artifact", _fake_capture)
+    monkeypatch.setattr(runs_boot, "_record_boot_audit", _fake_audit)
+
+    async def _run() -> dict[str, object] | None:
+        return await runs_boot._record_crash_halted_live(
+            cast(AsyncConnection, object()),
+            cast(RequestContext, object()),
+            cast(Run, _FakeRun(None)),
+            uuid4(),
+            cast(Connector, _Connector(raises=not reachable)),
+            cast(ProfilePolicy, _Pol(gdbstub=gdbstub, host_dump=host_dump)),
+            cast(SecretRegistry, object()),
+            None,
+        )
+
+    return asyncio.run(_run()), audits
+
+
+def test_records_crashed_halted_live_on_panic_with_reachable_stub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, audits = _record(
+        monkeypatch, gdbstub=True, host_dump=False, console=_PANIC_CONSOLE, reachable=True
+    )
+    assert result is not None
+    assert result["boot_outcome"] == "crashed_halted_live"
+    assert result["available_capture"] == ["gdbstub", "console"]
+    assert len(audits) == 1  # the gate reversal is audited like the other outcomes
+
+
+def test_available_capture_includes_host_dump_when_preserve_provisioned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, _ = _record(
+        monkeypatch, gdbstub=True, host_dump=True, console=_PANIC_CONSOLE, reachable=True
+    )
+    assert result is not None
+    assert result["available_capture"] == ["gdbstub", "console", "host_dump"]
+
+
+def test_no_record_when_stub_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    result, audits = _record(
+        monkeypatch, gdbstub=True, host_dump=False, console=_PANIC_CONSOLE, reachable=False
+    )
+    assert result is None and audits == []
+
+
+def test_no_record_when_console_has_no_panic(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Panic signature, not the probe, is the crash signal: a reachable stub is not enough.
+    result, audits = _record(
+        monkeypatch, gdbstub=True, host_dump=False, console=b"[ 2.0] systemd up\n", reachable=True
+    )
+    assert result is None and audits == []
+
+
+def test_no_record_when_gdbstub_not_provisioned(monkeypatch: pytest.MonkeyPatch) -> None:
+    result, audits = _record(
+        monkeypatch, gdbstub=False, host_dump=False, console=_PANIC_CONSOLE, reachable=True
+    )
+    assert result is None and audits == []
