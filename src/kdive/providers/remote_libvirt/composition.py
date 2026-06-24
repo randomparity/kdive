@@ -46,6 +46,7 @@ from kdive.providers.remote_libvirt.config import (
     unbound_remote_config,
 )
 from kdive.providers.remote_libvirt.console.collector import ConsoleCollector, ConsoleStream
+from kdive.providers.remote_libvirt.console.snapshot import RemoteLibvirtConsoleSnapshotter
 from kdive.providers.remote_libvirt.console.wiring import (
     RemoteConsolePartStore,
     open_remote_console,
@@ -316,6 +317,11 @@ def build_runtime(
         staged_volume_probe=lambda volumes: probe_staged_volumes(
             volumes, config_factory=config_factory
         ),
+        # ADR-0235: the reconciler-resident collector streams the console to S3 parts; the boot
+        # worker assembles them into an immutable per-Run `console-<run>` artifact so a later boot
+        # of the same System never overwrites earlier crash→fix evidence. Builds its store lazily
+        # (this composition stays buildable without S3 config, ADR-0076).
+        console_snapshotter=RemoteLibvirtConsoleSnapshotter(),
         # The remote base image is partitioned and boots via in-guest GRUB, which already carries
         # the correct root=UUID=… (inherited by the install helper's grubby --copy-default). The
         # platform must not inject a root device or it overrides that (ADR-0183, #587).

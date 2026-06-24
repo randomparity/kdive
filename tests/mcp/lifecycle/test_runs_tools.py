@@ -4126,7 +4126,7 @@ def test_boot_handler_registers_console_on_success(
             n = await _count(
                 pool,
                 "SELECT count(*) AS n FROM artifacts WHERE object_key LIKE %s",
-                ("%/console",),
+                ("%/console-%",),
             )
         assert nsteps == 1  # boot step recorded succeeded
         assert n == 1  # non-empty console registered on the happy path
@@ -4164,7 +4164,7 @@ def test_boot_handler_registers_console_even_on_failure(
             n = await _count(
                 pool,
                 "SELECT count(*) AS n FROM artifacts WHERE object_key LIKE %s",
-                ("%/console",),
+                ("%/console-%",),
             )
         assert n == 1
 
@@ -4327,7 +4327,7 @@ def test_boot_handler_skips_empty_console(
             n = await _count(
                 pool,
                 "SELECT count(*) AS n FROM artifacts WHERE object_key LIKE %s",
-                ("%/console",),
+                ("%/console-%",),
             )
         assert nsteps == 1  # boot itself succeeded
         assert n == 0  # but an empty console capture registers nothing
@@ -4422,24 +4422,23 @@ def test_boot_handler_console_is_readable_via_artifacts(
         console = items[0]
         assert console.status == "available"
         assert console.refs is not None
-        assert console.refs.get("object", "").endswith("/console")
+        assert "/console-" in console.refs.get("object", "")
 
     asyncio.run(_run())
 
 
-def test_boot_handler_reboot_refreshes_console_etag(
+def test_boot_handler_reboot_preserves_prior_run_console(
     migrated_url: str,
     minio_store: Any,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Re-booting a System refreshes the console row's etag to match the rewritten object.
+    """A second boot of a System keeps the first Run's console intact (ADR-0235, #761).
 
-    The console object key is System-scoped, so a second boot of the same System (a new
-    Run) overwrites the object with a new etag. Before the fix the ledger insert was skipped
-    whenever a `%/console` row already existed, leaving the row pinned to the FIRST boot's
-    etag while the object held the second boot's content — a consumer's conditional `If-Match`
-    GET then hit STALE_HANDLE. The row's etag must instead track the stored object.
+    The console object key includes the run id, so two boots of the same System write two
+    distinct immutable rows. Before the fix the key was System-scoped and the second boot
+    overwrote the first Run's bytes, destroying the "before" side of the reproduce→fix→verify
+    A/B loop. Each Run's `refs.console` must now resolve to *its own* boot's bytes.
 
     The two boots run sequentially, matching M0 (a System's Runs boot one at a time). Two Runs
     booting one System *concurrently* is not serialized by boot_handler and is out of scope.
@@ -4448,7 +4447,7 @@ def test_boot_handler_reboot_refreshes_console_etag(
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            # First boot of the System registers the console row at the first object's etag.
+            # First boot of the System registers a per-Run console row for run1.
             run1 = await _seed_succeeded_run(pool)
             await _record_install_step(pool, run1)
             sid = await _system_id_of(pool, run1)
@@ -4463,8 +4462,8 @@ def test_boot_handler_reboot_refreshes_console_etag(
                     artifact_store=minio_store,
                 )
 
-            # Second boot of the SAME System (new Run): the host console log is overwritten
-            # with different content, so put_artifact rewrites the object at the same key.
+            # Second boot of the SAME System (new Run): the host console log holds different
+            # content, written under run2's own per-Run object key.
             run2 = await _seed_succeeded_run_on_system(pool, sid)
             await _record_install_step(pool, run2)
             (tmp_path / f"{sid}.log").write_bytes(b"[    0.0] SECOND-BOOT-MARKER oops\n")
@@ -4481,26 +4480,30 @@ def test_boot_handler_reboot_refreshes_console_etag(
             n = await _count(
                 pool,
                 "SELECT count(*) AS n FROM artifacts WHERE object_key LIKE %s",
-                ("%/console",),
+                ("%/console-%",),
             )
+            key1 = f"local/systems/{sid}/console-{run1}"
+            key2 = f"local/systems/{sid}/console-{run2}"
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
-                    "SELECT object_key, etag FROM artifacts WHERE object_key LIKE %s",
-                    ("%/console",),
+                    "SELECT object_key, etag FROM artifacts WHERE object_key = %s", (key1,)
                 )
-                row = await cur.fetchone()
+                row1 = await cur.fetchone()
+                await cur.execute(
+                    "SELECT object_key, etag FROM artifacts WHERE object_key = %s", (key2,)
+                )
+                row2 = await cur.fetchone()
 
-        assert n == 1  # still one System-scoped console row, never a duplicate
-        assert row is not None
-        # The row's etag must equal the rewritten object's etag — no stale-etag row.
-        head = minio_store.head(row["object_key"])
-        assert head is not None
-        assert row["etag"] == head.etag
-        # And the consequence the issue names: a conditional If-Match GET (the pattern
-        # get_artifact uses) resolves to the SECOND boot's console, not a STALE_HANDLE.
-        fetched = minio_store.get_artifact(row["object_key"], row["etag"])
-        assert b"SECOND-BOOT-MARKER" in fetched.data
-        assert b"FIRST-BOOT-MARKER" not in fetched.data
+        assert n == 2  # one immutable console row per Run, never collapsed onto one key
+        assert row1 is not None and row2 is not None
+        # The first Run's console is preserved — it still resolves to ITS OWN boot's bytes,
+        # not the second boot's (the A/B "before" evidence the issue exists to protect).
+        first = minio_store.get_artifact(row1["object_key"], row1["etag"])
+        assert b"FIRST-BOOT-MARKER" in first.data
+        assert b"SECOND-BOOT-MARKER" not in first.data
+        second = minio_store.get_artifact(row2["object_key"], row2["etag"])
+        assert b"SECOND-BOOT-MARKER" in second.data
+        assert b"FIRST-BOOT-MARKER" not in second.data
 
     asyncio.run(_run())
 
