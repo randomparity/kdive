@@ -34,6 +34,13 @@ def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _optional_str_list(value: object) -> list[str] | None:
+    """Coerce a persisted JSON value to a ``list[str]``; ``None`` on any non-string-list (#760)."""
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return None
+    return [item for item in value if isinstance(item, str)]
+
+
 @dataclass(frozen=True, slots=True)
 class BuildStepResult:
     """Typed boundary for the `run_steps(step='build').result` JSON payload."""
@@ -110,6 +117,8 @@ class StepProgress:
     boot: str
     boot_outcome: str | None
     console_evidence_artifact_id: str | None = None
+    available_capture: list[str] | None = None
+    inert_capture: list[str] | None = None
 
     def steps_map(self) -> dict[str, str]:
         """The fixed-key `runs.get` `data.steps` map; `build` is `succeeded` by construction."""
@@ -125,11 +134,15 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
     outcome), used to route the booted-run next-action. ``console_evidence_artifact_id`` is the
     console artifact id the boot handler recorded in the same ``boot`` result (ADR-0226), used to
     surface ``refs.console`` on ``runs.get``; ``None`` when boot is unrecorded or captured no
-    console evidence.
+    console evidence. ``available_capture`` / ``inert_capture`` are the capture-disclosure lists the
+    boot handler recorded for a crash outcome (ADR-0239); ``None`` when the boot result carries
+    neither.
     """
     states = {step: "pending" for step in _PROGRESS_STEPS}
     boot_outcome: str | None = None
     console_evidence_artifact_id: str | None = None
+    available_capture: list[str] | None = None
+    inert_capture: list[str] | None = None
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT step, state, result FROM run_steps WHERE run_id = %s AND step = ANY(%s)",
@@ -143,11 +156,15 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
             outcome = boot_result.get("boot_outcome")
             boot_outcome = outcome if isinstance(outcome, str) else None
             console_evidence_artifact_id = _optional_str(boot_result.get("evidence_artifact_id"))
+            available_capture = _optional_str_list(boot_result.get("available_capture"))
+            inert_capture = _optional_str_list(boot_result.get("inert_capture"))
     return StepProgress(
         install=states["install"],
         boot=states["boot"],
         boot_outcome=boot_outcome,
         console_evidence_artifact_id=console_evidence_artifact_id,
+        available_capture=available_capture,
+        inert_capture=inert_capture,
     )
 
 

@@ -247,6 +247,25 @@ def _available_capture(profile_policy: ProfilePolicy, profile: ProvisioningProfi
     return methods
 
 
+def _inert_capture(profile_policy: ProfilePolicy, profile: ProvisioningProfile) -> list[str]:
+    """Capture methods the System was provisioned for that will NOT fire on an expected crash.
+
+    The ``expected_crash_observed`` outcome leaves the System ``READY`` and is routed to the
+    console A/B flow (ADR-0227), so a provisioned ``gdbstub`` (live-attach refused),
+    ``host_dump``, or ``kdump`` (both need ``CRASHED``) is inert here. Built from provider-neutral
+    ``ProfilePolicy`` predicates so the generic boot handler stays correct for every provider
+    (ADR-0239).
+    """
+    methods: list[str] = []
+    if profile_policy.gdbstub_provisioned(profile):
+        methods.append(CaptureMethod.GDBSTUB.value)
+    if profile_policy.host_dump_provisioned(profile):
+        methods.append(CaptureMethod.HOST_DUMP.value)
+    if profile_policy.capture_method(profile) is CaptureMethod.KDUMP:
+        methods.append(CaptureMethod.KDUMP.value)
+    return methods
+
+
 def _gdbstub_reachable(connector: Connector, system_id: UUID) -> bool:
     """Probe the gdbstub via the connector's read-only open path; True iff it answers.
 
@@ -298,6 +317,60 @@ async def _record_crash_halted_live(
     }
 
 
+async def _expected_crash_inert_capture(
+    conn: AsyncConnection,
+    system_id: UUID,
+    profile_policy: ProfilePolicy,
+) -> list[str]:
+    """The inert capture set for an expected crash; ``[]`` on a missing/unparseable profile.
+
+    Best-effort: a torn-down System or a profile that fails to parse yields an empty set so the
+    disclosure never downgrades a correctly-observed expected crash to a failed boot (ADR-0239).
+    """
+    system = await SYSTEMS.get(conn, system_id)
+    if system is None:
+        return []
+    try:
+        profile = ProvisioningProfile.parse(system.provisioning_profile)
+    except Exception:
+        _log.warning(
+            "could not parse provisioning profile for system %s; inert capture set omitted",
+            system_id,
+            exc_info=True,
+        )
+        return []
+    return _inert_capture(profile_policy, profile)
+
+
+async def _record_expected_crash(
+    conn: AsyncConnection,
+    job_ctx: RequestContext,
+    run: Run,
+    system_id: UUID,
+    profile_policy: ProfilePolicy,
+    artifact: _ConsoleArtifact,
+) -> dict[str, Any]:
+    """Record ``expected_crash_observed``, disclosing the reachable + inert capture surface.
+
+    The System stays ``READY`` and is routed to the console A/B flow (ADR-0227), so
+    ``available_capture`` is ``["console"]``; ``inert_capture`` lists the provisioned-but-
+    unreachable methods (ADR-0239). The inert disclosure is best-effort: a missing or
+    unparseable System profile degrades to an empty inert set rather than failing a
+    correctly-observed expected crash.
+    """
+    inert = await _expected_crash_inert_capture(conn, system_id, profile_policy)
+    await _record_boot_audit(conn, job_ctx, run)
+    return {
+        "system_id": str(system_id),
+        "boot_outcome": "expected_crash_observed",
+        "expectation_matched": True,
+        "evidence_kind": "console",
+        "evidence_artifact_id": str(artifact.id),
+        "available_capture": [CaptureMethod.CONSOLE.value],
+        "inert_capture": inert,
+    }
+
+
 async def _record_boot_audit(
     conn: AsyncConnection,
     job_ctx: RequestContext,
@@ -341,14 +414,9 @@ async def _run_boot_and_capture_outcome(
                 conn, system_id, run.id, secret_registry, artifact_store, snapshotter
             )
         if artifact is not None and artifact.data and _expected_crash_matches(run, artifact.data):
-            await _record_boot_audit(conn, job_ctx, run)
-            return {
-                "system_id": str(system_id),
-                "boot_outcome": "expected_crash_observed",
-                "expectation_matched": True,
-                "evidence_kind": "console",
-                "evidence_artifact_id": str(artifact.id),
-            }
+            return await _record_expected_crash(
+                conn, job_ctx, run, system_id, profile_policy, artifact
+            )
         if exc.category is ErrorCategory.READINESS_FAILURE:
             crash = await _record_crash_halted_live(
                 conn,

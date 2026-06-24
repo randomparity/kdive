@@ -775,6 +775,42 @@ def test_step_progress_non_string_evidence_id_is_none(migrated_url: str) -> None
     asyncio.run(_run())
 
 
+def test_step_progress_surfaces_capture_disclosure(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(
+                pool,
+                run_id,
+                "boot",
+                "succeeded",
+                {
+                    "boot_outcome": "expected_crash_observed",
+                    "available_capture": ["console"],
+                    "inert_capture": ["gdbstub", "host_dump"],
+                },
+            )
+            async with pool.connection() as conn:
+                progress = await step_progress(conn, UUID(run_id))
+        assert progress.available_capture == ["console"]
+        assert progress.inert_capture == ["gdbstub", "host_dump"]
+
+    asyncio.run(_run())
+
+
+def test_step_progress_capture_disclosure_absent_is_none(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "boot", "succeeded", {"boot_outcome": "ready"})
+            async with pool.connection() as conn:
+                progress = await step_progress(conn, UUID(run_id))
+        assert progress.available_capture is None
+        assert progress.inert_capture is None
+
+    asyncio.run(_run())
+
+
 def test_get_built_only_run_steps_and_install_action(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -841,6 +877,44 @@ def test_get_expected_crash_boot_recommends_triage(migrated_url: str) -> None:
             )
             resp = await get_run(pool, _ctx(), run_id)
         assert resp.suggested_next_actions == ["runs.get", "postmortem.triage", "vmcore.fetch"]
+
+    asyncio.run(_run())
+
+
+def test_get_expected_crash_surfaces_capture_disclosure(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _insert_step(
+                pool,
+                run_id,
+                "boot",
+                "succeeded",
+                {
+                    "boot_outcome": "expected_crash_observed",
+                    "available_capture": ["console"],
+                    "inert_capture": ["gdbstub", "host_dump"],
+                },
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["available_capture"] == ["console"]
+        assert resp.data["inert_capture"] == ["gdbstub", "host_dump"]
+
+    asyncio.run(_run())
+
+
+def test_get_boot_without_disclosure_omits_capture_keys(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _insert_step(
+                pool, run_id, "boot", "succeeded", {"boot_outcome": "expected_crash_observed"}
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert "available_capture" not in resp.data
+        assert "inert_capture" not in resp.data
 
     asyncio.run(_run())
 

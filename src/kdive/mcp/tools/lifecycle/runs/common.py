@@ -180,6 +180,12 @@ def envelope_for_run(
         if isinstance(kind, str):
             data["expected_boot_failure"] = kind
         data["expected_boot_failure_detail"] = cast(JsonValue, run.expected_boot_failure)
+    if step_progress is not None and step_progress.available_capture is not None:
+        # The crash outcome's reachable-now capture methods, and the provisioned-but-inert ones,
+        # so an agent learns which capture flags will not fire on this boot (#760, ADR-0239).
+        data["available_capture"] = cast(JsonValue, step_progress.available_capture)
+    if step_progress is not None and step_progress.inert_capture is not None:
+        data["inert_capture"] = cast(JsonValue, step_progress.inert_capture)
     data.update(_run_recovery(run))
     console_ref = step_progress.console_evidence_artifact_id if step_progress is not None else None
     return ToolResponse.success(
