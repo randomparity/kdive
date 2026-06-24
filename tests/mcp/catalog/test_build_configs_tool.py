@@ -12,11 +12,21 @@ import pytest
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.build_configs.catalog import (
+    upsert_config_build_config,
+    upsert_operator_build_config,
+    upsert_seed_build_config,
+)
 from kdive.build_configs.seed import KDUMP_FRAGMENT_PATH, seed_build_configs
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import build_configs
-from kdive.mcp.tools.catalog.build_configs import read_build_config, set_build_config
+from kdive.mcp.tools.catalog.build_configs import (
+    delete_build_config,
+    list_build_config_entries,
+    read_build_config,
+    set_build_config,
+)
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 from kdive.store.objectstore import ObjectStore
@@ -34,6 +44,13 @@ _PLATFORM_OPERATOR = RequestContext(
     projects=(),
     roles={},
     platform_roles=frozenset({PlatformRole.PLATFORM_OPERATOR}),
+)
+_ANON = RequestContext(
+    principal="dev-1",
+    agent_session="sess-dev",
+    projects=(),
+    roles={},
+    platform_roles=frozenset(),
 )
 
 
@@ -315,6 +332,136 @@ def test_set_denies_and_audits_before_resolving_store(migrated_url: str) -> None
             audited = await _platform_audit_rows(pool, "buildconfig.set")
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
         assert store_calls == []  # the gate short-circuited before store resolution
+        assert len(audited) == 1
+        assert audited[0]["scope"] == "denied:kdump"
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# buildconfig.list (#751) — authenticated read; no bytes
+# ---------------------------------------------------------------------------
+
+
+def test_list_returns_all_rows_sorted_with_provenance_no_bytes(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await upsert_seed_build_config(conn, "kdump", "k1", "sha_seed", "seed desc")
+                await upsert_operator_build_config(conn, "alpha", "k2", "sha_op", "op desc")
+                await upsert_config_build_config(conn, "zeta", "k3", "sha_cfg", "cfg desc")
+            resp = await list_build_config_entries(pool, _ANON)
+        assert resp.status == "ok"
+        names = [item.object_id for item in resp.items]
+        assert names == ["alpha", "kdump", "zeta"]
+        by_name = {item.object_id: item for item in resp.items}
+        assert by_name["alpha"].data["source"] == "operator"
+        assert by_name["kdump"].data["source"] == "seed"
+        assert by_name["zeta"].data["sha256"] == "sha_cfg"
+        assert set(by_name["alpha"].data) == {"name", "sha256", "source", "description"}
+        assert "content" not in by_name["alpha"].data
+
+    asyncio.run(_run())
+
+
+def test_list_empty_catalog_is_empty_ok(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await list_build_config_entries(pool, _ANON)
+        assert resp.status == "ok"
+        assert resp.items == []
+        assert resp.data["count"] == 0
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# buildconfig.delete (#751) — platform_admin, audited; operator-only
+# ---------------------------------------------------------------------------
+
+
+def test_delete_operator_row_removes_and_audits(
+    migrated_url: str, minio_store: ObjectStore
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await set_build_config(
+                pool,
+                lambda: minio_store,
+                _PLATFORM_ADMIN,
+                name="kdump",
+                content="X\n",
+                description="d",
+            )
+            resp = await delete_build_config(pool, _PLATFORM_ADMIN, name="kdump")
+            async with pool.connection() as conn:
+                gone = await build_configs.get_build_config(conn, "kdump")
+            audited = await _platform_audit_rows(pool, "buildconfig.delete")
+        assert resp.status == "deleted"
+        assert resp.suggested_next_actions == ["buildconfig.list", "buildconfig.set"]
+        assert gone is None
+        assert len(audited) == 1
+        assert audited[0]["scope"] == "kdump"
+
+    asyncio.run(_run())
+
+
+def test_delete_seed_row_is_refused_and_left_intact(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await upsert_seed_build_config(conn, "kdump", "k", "sha_seed", "seed desc")
+            resp = await delete_build_config(pool, _PLATFORM_ADMIN, name="kdump")
+            async with pool.connection() as conn:
+                still = await build_configs.get_build_config(conn, "kdump")
+            audited = await _platform_audit_rows(pool, "buildconfig.delete")
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert resp.data["reason"] == "not_operator_source"
+        assert resp.data["source"] == "seed"
+        assert resp.suggested_next_actions == ["buildconfig.list"]
+        assert still is not None
+        assert audited == []  # nothing changed -> no audit row
+
+    asyncio.run(_run())
+
+
+def test_delete_config_row_is_refused(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await upsert_config_build_config(conn, "kdump", "k", "sha_cfg", "cfg desc")
+            resp = await delete_build_config(pool, _PLATFORM_ADMIN, name="kdump")
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert resp.data["reason"] == "not_operator_source"
+        assert resp.data["source"] == "config"
+
+    asyncio.run(_run())
+
+
+def test_delete_unknown_name_is_not_found_no_audit(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await delete_build_config(pool, _PLATFORM_ADMIN, name="nope")
+            audited = await _platform_audit_rows(pool, "buildconfig.delete")
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert resp.data["reason"] == "not_found"
+        assert audited == []
+
+    asyncio.run(_run())
+
+
+def test_delete_requires_platform_admin(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await upsert_operator_build_config(conn, "kdump", "k", "sha_op", "op desc")
+            resp = await delete_build_config(pool, _PLATFORM_OPERATOR, name="kdump")
+            async with pool.connection() as conn:
+                still = await build_configs.get_build_config(conn, "kdump")
+            audited = await _platform_audit_rows(pool, "buildconfig.delete")
+        assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
+        assert still is not None  # not removed
+        # denial audited because the caller holds *some* platform role
         assert len(audited) == 1
         assert audited[0]["scope"] == "denied:kdump"
 

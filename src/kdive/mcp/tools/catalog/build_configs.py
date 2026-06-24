@@ -23,7 +23,14 @@ from pydantic import Field
 
 import kdive.config as config
 from kdive.artifacts.storage import ArtifactWriteRequest
-from kdive.build_configs.catalog import get_build_config, upsert_operator_build_config
+from kdive.build_configs.catalog import (
+    BuildConfigDeleteOutcome,
+    BuildConfigEntry,
+    delete_operator_build_config,
+    get_build_config,
+    list_build_configs,
+    upsert_operator_build_config,
+)
 from kdive.build_configs.rules import exceeds_build_config_cap, validate_build_config_name
 from kdive.config.core_settings import MAX_BUILD_CONFIG_BYTES
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -41,6 +48,8 @@ from kdive.store.objectstore import ObjectStore, object_store_from_env
 
 _TOOL = "buildconfig.get"
 _SET_TOOL = "buildconfig.set"
+_LIST_TOOL = "buildconfig.list"
+_DELETE_TOOL = "buildconfig.delete"
 
 _MAX_DESCRIPTION_BYTES = 1024
 
@@ -199,12 +208,126 @@ async def set_build_config(
         )
 
 
+def _entry_envelope(entry: BuildConfigEntry) -> ToolResponse:
+    """One catalog row as a sub-envelope: identity + provenance, no fragment bytes."""
+    return ToolResponse.success(
+        entry.name,
+        "ok",
+        data={
+            "name": entry.name,
+            "sha256": entry.sha256,
+            "source": entry.source,
+            "description": entry.description,
+        },
+    )
+
+
+async def list_build_config_entries(pool: AsyncConnectionPool, ctx: RequestContext) -> ToolResponse:
+    """List every build-config fragment as a sorted catalog index (authenticated; no RBAC).
+
+    Returns identity + provenance (``name``, ``sha256``, ``source``, ``description``) per row,
+    never the fragment bytes — ``buildconfig.get`` serves those by name. An empty catalog is an
+    empty ``ok`` collection. The catalog is shared, non-sensitive infra, so any authenticated
+    caller may read it (the ``buildconfig.get`` / ``images.list`` / ``shapes.list`` precedent).
+
+    Args:
+        pool: The async connection pool.
+        ctx: The caller's request context (authenticated; no project scope needed).
+
+    Returns:
+        A collection :class:`ToolResponse` of per-row sub-envelopes, sorted by ``name``.
+    """
+    with bind_context(principal=ctx.principal):
+        async with pool.connection() as conn:
+            entries = await list_build_configs(conn)
+        items = [_entry_envelope(entry) for entry in entries]
+        return ToolResponse.collection(
+            "build-configs",
+            "ok",
+            items,
+            suggested_next_actions=[_TOOL, _SET_TOOL],
+        )
+
+
+async def delete_build_config(
+    pool: AsyncConnectionPool, ctx: RequestContext, *, name: str
+) -> ToolResponse:
+    """Delete an operator-published fragment (``platform_admin``; audited).
+
+    Mirrors :func:`set_build_config`'s gate exactly: a non-``platform_admin`` caller is denied
+    and, when it holds some platform role, the denial is audited. Serialized per ``name`` on
+    :attr:`LockScope.BUILD_CONFIG` (the same lock ``set``/seed take), so the source-scoped
+    delete and its provenance-for-reason read cannot interleave with a concurrent ``set``.
+    Removes only a ``source='operator'`` row; a ``seed``/``config`` row is refused with
+    ``CONFIGURATION_ERROR`` + ``data.reason='not_operator_source'`` (a ``config`` row is
+    re-asserted by the reconcile pass; a ``seed`` is the packaged baseline), and a missing name
+    is ``CONFIGURATION_ERROR`` + ``data.reason='not_found'``. Only a successful removal writes a
+    success audit row. The fragment's object-store bytes are left in place (ADR-0231).
+
+    Args:
+        pool: The async connection pool.
+        ctx: The caller's request context.
+        name: The fragment name to remove.
+
+    Returns:
+        A ``deleted`` :class:`ToolResponse` on success, or a failure envelope
+        (``AUTHORIZATION_DENIED`` / ``CONFIGURATION_ERROR``).
+    """
+    try:
+        require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)
+    except AuthorizationError:
+        await audit_platform_denial(
+            pool, ctx, tool=_DELETE_TOOL, scope=f"denied:{name}", args={"name": name}
+        )
+        return ToolResponse.failure(
+            name, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[_DELETE_TOOL]
+        )
+    with bind_context(principal=ctx.principal):
+        async with (
+            pool.connection() as conn,
+            conn.transaction(),
+            advisory_xact_lock(conn, LockScope.BUILD_CONFIG, name),
+        ):
+            outcome, source = await delete_operator_build_config(conn, name)
+            if outcome is BuildConfigDeleteOutcome.NOT_FOUND:
+                return ToolResponse.failure(
+                    name,
+                    ErrorCategory.CONFIGURATION_ERROR,
+                    suggested_next_actions=[_LIST_TOOL],
+                    data={"reason": BuildConfigDeleteOutcome.NOT_FOUND.value, "name": name},
+                )
+            if outcome is BuildConfigDeleteOutcome.NOT_OPERATOR:
+                return ToolResponse.failure(
+                    name,
+                    ErrorCategory.CONFIGURATION_ERROR,
+                    suggested_next_actions=[_LIST_TOOL],
+                    data={
+                        "reason": BuildConfigDeleteOutcome.NOT_OPERATOR.value,
+                        "source": source or "",
+                        "name": name,
+                    },
+                )
+            await audit.record_platform(
+                conn,
+                principal=ctx.principal,
+                agent_session=ctx.agent_session,
+                event=audit.PlatformAuditEvent(
+                    tool=_DELETE_TOOL,
+                    scope=name,
+                    args={"name": name},
+                    platform_role=held_platform_roles(ctx),
+                    actor=actor_for(ctx),
+                ),
+            )
+        return ToolResponse.success(name, "deleted", suggested_next_actions=[_LIST_TOOL, _SET_TOOL])
+
+
 def register(
     app: FastMCP,
     pool: AsyncConnectionPool,
     store_factory: Callable[[], ObjectStore] | None = None,
 ) -> None:
-    """Register the ``buildconfig.get`` / ``buildconfig.set`` tools, bound to ``pool``."""
+    """Register the ``buildconfig.{get,set,list,delete}`` tools, bound to ``pool``."""
     store_factory = store_factory or object_store_from_env
     _store: ObjectStore | None = None
 
@@ -216,6 +339,38 @@ def register(
 
     _register_buildconfig_get(app, pool, _resolved_store)
     _register_buildconfig_set(app, pool, _resolved_store)
+    _register_buildconfig_list(app, pool)
+    _register_buildconfig_delete(app, pool)
+
+
+def _register_buildconfig_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
+    @app.tool(
+        name=_LIST_TOOL,
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def buildconfig_list_tool() -> ToolResponse:
+        """List build-config fragments with name, sha256, source, and description. Auth only."""
+        return await list_build_config_entries(pool, current_context())
+
+
+def _register_buildconfig_delete(app: FastMCP, pool: AsyncConnectionPool) -> None:
+    @app.tool(
+        name=_DELETE_TOOL,
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
+    async def buildconfig_delete_tool(
+        name: Annotated[
+            str,
+            Field(description="Operator-published fragment name to remove (e.g. kdump)."),
+        ],
+    ) -> ToolResponse:
+        """Delete an operator-published fragment. Requires platform_admin; audited."""
+        try:
+            return await delete_build_config(pool, current_context(), name=name)
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(name, exc, suggested_next_actions=[_DELETE_TOOL])
 
 
 def _register_buildconfig_get(
