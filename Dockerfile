@@ -5,7 +5,7 @@
 # local-libvirt stays a venv-on-a-libvirt-host dev/CI provider, not containerized.
 
 # Builder: resolve the uv environment (deps first for layer caching, then project).
-FROM python:3.14.6-slim-bookworm@sha256:a70519002c49552ea0a853de47599cf40479b001bd7a624f1112eaf44dcaccc7 AS builder
+FROM python:3.14.6-slim-bookworm@sha256:4ff4b92a68355dbdb52584ab3391dff8d371a61d4e063468bfd0130e3189c6d9 AS builder
 COPY --from=ghcr.io/astral-sh/uv:0.11.19@sha256:b46b03ddfcfbf8f547af7e9eaefdf8a39c8cebcba7c98858d3162bd28cf536f6 /uv /usr/local/bin/uv
 # libvirt-python ships no wheels; it compiles against the libvirt headers via
 # pkg-config (AGENTS.md). These build-only deps stay in the builder stage and never
@@ -24,7 +24,7 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --group live
 
 # Final: slim base + worker toolchain (drives remote-libvirt over the network).
-FROM python:3.14.6-slim-bookworm@sha256:a70519002c49552ea0a853de47599cf40479b001bd7a624f1112eaf44dcaccc7
+FROM python:3.14.6-slim-bookworm@sha256:4ff4b92a68355dbdb52584ab3391dff8d371a61d4e063468bfd0130e3189c6d9
 # All real bookworm packages. drgn is installed from the locked `live`
 # dependency group, not apt: bookworm ships only the python3-drgn library,
 # whose CLI/version is unproven for the `drgn --version` build check. libelf1,
