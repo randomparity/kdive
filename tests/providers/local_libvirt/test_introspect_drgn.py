@@ -645,3 +645,81 @@ def test_real_seam_missing_managed_key_is_configuration_error_before_ssh(
             "ssh://127.0.0.1:2222", "tasks", secret_registry=SecretRegistry()
         )
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+# --- LocalLibvirtLiveIntrospect.run_script (ADR-0240, arbitrary drgn over SSH stdin) ---------
+
+
+def _live_script_introspector(
+    *,
+    stdout: str = "",
+    seam_raises: Exception | None = None,
+    seen: list[tuple[str, str, float]] | None = None,
+) -> LocalLibvirtLiveIntrospect:
+    """A live introspector whose run-script seam is a fake (no SSH, no drgn)."""
+
+    def _run_script(transport_handle: str, script: str, timeout_sec: float) -> str:
+        if seen is not None:
+            seen.append((transport_handle, script, timeout_sec))
+        if seam_raises is not None:
+            raise seam_raises
+        return stdout
+
+    return LocalLibvirtLiveIntrospect(secret_registry=SecretRegistry(), run_live_script=_run_script)
+
+
+def test_run_script_returns_redacted_capped_stdout() -> None:
+    out = _live_script_introspector(stdout="d_hash_shift = 0x14\n").run_script(
+        transport_handle="ssh://127.0.0.1:22", script="print(prog['d_hash_shift'])", timeout_sec=5.0
+    )
+    assert "0x14" in out.output
+    assert out.truncated is False
+
+
+def test_run_script_threads_handle_script_and_timeout_into_the_seam() -> None:
+    seen: list[tuple[str, str, float]] = []
+    _live_script_introspector(stdout="ok", seen=seen).run_script(
+        transport_handle="ssh://127.0.0.1:2222", script="print(1)", timeout_sec=12.0
+    )
+    assert seen == [("ssh://127.0.0.1:2222", "print(1)", 12.0)]
+
+
+def test_run_script_off_gate_is_missing_dependency() -> None:
+    off_gate = LocalLibvirtLiveIntrospect(secret_registry=SecretRegistry(), run_live_script=None)
+    with pytest.raises(CategorizedError) as exc:
+        off_gate.run_script(
+            transport_handle="ssh://127.0.0.1:22", script="print(1)", timeout_sec=5.0
+        )
+    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+
+
+def test_run_script_transport_failure_propagates_typed() -> None:
+    boom = CategorizedError("ssh dropped", category=ErrorCategory.TRANSPORT_FAILURE)
+    with pytest.raises(CategorizedError) as exc:
+        _live_script_introspector(seam_raises=boom).run_script(
+            transport_handle="ssh://127.0.0.1:22", script="print(1)", timeout_sec=5.0
+        )
+    assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
+
+
+def test_run_script_arbitrary_seam_error_becomes_debug_attach_failure() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        _live_script_introspector(seam_raises=RuntimeError("drgn died")).run_script(
+            transport_handle="ssh://127.0.0.1:22", script="boom", timeout_sec=5.0
+        )
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+
+
+def test_run_script_byte_caps_and_sets_truncated() -> None:
+    introspector = _live_script_introspector(stdout="y" * 5000)
+    introspector._live_script_byte_cap = 64
+    out = introspector.run_script(
+        transport_handle="ssh://127.0.0.1:22", script="print('y'*5000)", timeout_sec=5.0
+    )
+    assert out.truncated is True
+    assert len(out.output.encode("utf-8")) <= 64
+
+
+def test_run_script_from_env_wires_the_real_seam() -> None:
+    introspector = LocalLibvirtLiveIntrospect.from_env(secret_registry=SecretRegistry())
+    assert introspector._run_live_script is not None
