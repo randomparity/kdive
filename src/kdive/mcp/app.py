@@ -48,6 +48,7 @@ from kdive.mcp.tools.catalog import (
     jobs,
     projects,
     resources,
+    session,
     shapes,
 )
 from kdive.mcp.tools.catalog import images as catalog_images
@@ -341,6 +342,7 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _register_catalog_resources,
     _pool_only_plane_registrar(availability.register),
     _pool_only_plane_registrar(projects.register),
+    _pool_only_plane_registrar(session.register),
     _pool_only_plane_registrar(shapes.register),
     _pool_only_plane_registrar(register_accounting_estimate),
     _pool_only_plane_registrar(register_accounting_usage),
