@@ -229,10 +229,12 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_PYTHON` | `python3` | Python interpreter the setup-*-libvirt.sh scripts invoke (set to the project venv, e.g. /opt/kdive/.venv/bin/python, when not running inside the venv). |
 | `KDIVE_REMOTE_PKI_DIR` | `/etc/pki/libvirt` | TLS PKI directory `check-remote-libvirt.sh` validates. |
 | `KDIVE_REMOTE_SSH_PORT` | `22` | SSH port `check-remote-libvirt.sh` connects on. |
+| `KDIVE_ROOTFS_DIR` | `/var/lib/kdive/rootfs` | Per-System qcow2 overlay directory for the local-libvirt provider; `scripts/live-stack/lib.sh` reads this to locate and create guest disk overlays. |
 | `KDIVE_SETUP_AUDITED` | `0` | When 1, setup-local-libvirt.sh onboards via the audited MCP admin tools instead of seed-project (requires KDIVE_MCP_BASE and a project-admin KDIVE_TOKEN). |
-| `KDIVE_STACK_LOG_DIR` | `<repo>/.live-stack-logs` | Log directory the live-stack `start.sh` script writes process logs to. |
-| `KDIVE_STACK_PID_FILE` | `<repo>/.live-stack.pid` | PID file the live-stack `start.sh`/`stop.sh` scripts manage. |
-| `KDIVE_WORKER_AS_ROOT` | `1` | Whether `restart-stack.sh` restarts the worker as root via sudo (1) or as the current user (0). |
+| `KDIVE_SKIP_OBS` | `0` | When set to 1, `scripts/live-stack/up.sh` skips the prometheus/grafana observability tier; the essential backend services (postgres, minio, oidc) still start. |
+| `KDIVE_STACK_LOG_DIR` | `<repo>/.live-stack-logs` | Log directory written by `scripts/live-stack/lib.sh`; also consumed by `examples/local-libvirt/up.sh`, which overrides the default to an XDG state path via `examples/local-libvirt/env.sh`. |
+| `KDIVE_STACK_PID_FILE` | `~/.local/state/kdive/local-stack.pid` | PID file managed by `examples/local-libvirt/up.sh` (written) and `examples/local-libvirt/down.sh` (read); path is example-scoped, defaulting to `$XDG_STATE_HOME/kdive/local-stack.pid`. |
+| `KDIVE_WORKER_AS_ROOT` | `1` | Whether `restart_host_processes()` in `scripts/live-stack/lib.sh` starts the worker as root via sudo (1) or as the current user (0). |
 
 ## In-guest helpers
 

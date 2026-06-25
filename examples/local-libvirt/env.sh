@@ -47,10 +47,11 @@ export KDIVE_GUEST_IMAGE="${KDIVE_GUEST_IMAGE:-/var/lib/kdive/rootfs/local/fedor
 # repo venv; override for an installed deployment (e.g. /opt/kdive/.venv/bin/python).
 export KDIVE_PYTHON="${KDIVE_PYTHON:-${repo_root}/.venv/bin/python}"
 
-# Runtime state (pid file + per-process logs) for the processes up.sh starts. This is state,
-# not config: per the XDG base-dir spec pid/logs belong under $XDG_STATE_HOME, and that is
+# Runtime state (pid file + per-process logs) for the processes up.sh/down.sh manage. This is
+# state, not config: per the XDG base-dir spec it belongs under $XDG_STATE_HOME, and that is
 # already where the kdive login token cache lives (kdive.cli.login). Never inside the repo.
-# The KDIVE_STACK_* names match scripts/live-stack/start.sh so the convention is shared.
+# KDIVE_STACK_PID_FILE is consumed by examples/local-libvirt/up.sh (written) and down.sh (read).
+# KDIVE_STACK_LOG_DIR is consumed by examples/local-libvirt/up.sh and scripts/live-stack/lib.sh.
 state_home="${XDG_STATE_HOME:-${HOME}/.local/state}/kdive"
 export KDIVE_STACK_PID_FILE="${KDIVE_STACK_PID_FILE:-${state_home}/local-stack.pid}"
 export KDIVE_STACK_LOG_DIR="${KDIVE_STACK_LOG_DIR:-${state_home}/local-stack-logs}"

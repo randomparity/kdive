@@ -126,3 +126,31 @@ from the image signature `cosign verify` checks. Inspect them with `buildx image
 docker buildx imagetools inspect ghcr.io/randomparity/kdive:vX.Y.Z \
   --format '{{ json .SBOM }}'        # or '{{ json .Provenance }}'
 ```
+
+## Local lifecycle scripts (this dev host)
+
+For a hand-rolled local stack (host-run server/reconciler/worker against compose backends),
+use the lifecycle scripts under `scripts/live-stack/`. They self-elevate with `sudo` for the
+root worker and libvirt, so run them via the `!` prefix in the agent or directly in a shell:
+
+- `up.sh` — full bring-up in order: backends → host migrations → libvirt → host processes →
+  status. `--skip-obs` omits prometheus/grafana; `--reset-db` runs a full `down.sh --wipe` first
+  (drops the Postgres volume AND reaps all `kdive-*` libvirt domains/overlays — live VMs are
+  destroyed); recovery from migration drift — see below.
+- `down.sh` — stop host processes + compose backends, keeping state. `--wipe` is a full reset:
+  drops the Postgres volume and reaps `kdive-*` libvirt domains + their `/var/lib/kdive/rootfs`
+  overlays.
+- `status.sh` — read-only per-layer health (backends, host daemons + build stamps, server,
+  database, libvirt + provision prereqs).
+
+The scripts never start the compose `kdive:dev` app tier (`migrate`/`server`/`worker`/
+`reconciler`); the host processes own that tier and `apply-migrations.sh` (current checkout) is
+the authoritative migrator.
+
+**Migration drift:** the ADR-0015 immutable-migration guard fires when the persisted DB's
+applied-migration history diverges from your checkout (e.g. after switching branches). `up.sh`
+aborts at the migrations step with a clear message; recover with `up.sh --reset-db`.
+
+**Grafana:** `up.sh` brings up Grafana (obs profile) at http://localhost:3000 with the
+kdive-overview dashboard auto-provisioned against Prometheus. Anonymous access is enabled for
+local convenience only.

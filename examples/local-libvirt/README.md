@@ -34,6 +34,11 @@ and the [four-method live run](../../docs/operating/runbooks/four-method-live-ru
 `up.sh` runs the preflight first and stops with an actionable message if anything is
 missing.
 
+> **Day-to-day development?** If you already have the stack seeded and just want to start/stop
+> the kdive processes, use `scripts/live-stack/up.sh` / `down.sh` / `status.sh` — the
+> host-lifecycle scripts that manage the running processes without re-seeding. This example
+> (`examples/local-libvirt/`) is the **first-run onboarding** path.
+
 ## Files
 
 | File | Purpose |

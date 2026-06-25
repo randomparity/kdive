@@ -190,21 +190,39 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
     ExternalEnvVar(
         "KDIVE_STACK_PID_FILE",
         "script",
-        "<repo>/.live-stack.pid",
-        "PID file the live-stack `start.sh`/`stop.sh` scripts manage.",
+        "~/.local/state/kdive/local-stack.pid",
+        "PID file managed by `examples/local-libvirt/up.sh` (written) and "
+        "`examples/local-libvirt/down.sh` (read); path is example-scoped, defaulting to "
+        "`$XDG_STATE_HOME/kdive/local-stack.pid`.",
     ),
     ExternalEnvVar(
         "KDIVE_STACK_LOG_DIR",
         "script",
         "<repo>/.live-stack-logs",
-        "Log directory the live-stack `start.sh` script writes process logs to.",
+        "Log directory written by `scripts/live-stack/lib.sh`; also consumed by "
+        "`examples/local-libvirt/up.sh`, which overrides the default to an XDG state path "
+        "via `examples/local-libvirt/env.sh`.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_ROOTFS_DIR",
+        "script",
+        "/var/lib/kdive/rootfs",
+        "Per-System qcow2 overlay directory for the local-libvirt provider; `scripts/live-stack/"
+        "lib.sh` reads this to locate and create guest disk overlays.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_SKIP_OBS",
+        "script",
+        "0",
+        "When set to 1, `scripts/live-stack/up.sh` skips the prometheus/grafana observability "
+        "tier; the essential backend services (postgres, minio, oidc) still start.",
     ),
     ExternalEnvVar(
         "KDIVE_WORKER_AS_ROOT",
         "script",
         "1",
-        "Whether `restart-stack.sh` restarts the worker as root via sudo (1) or as the "
-        "current user (0).",
+        "Whether `restart_host_processes()` in `scripts/live-stack/lib.sh` starts the worker "
+        "as root via sudo (1) or as the current user (0).",
     ),
     ExternalEnvVar(
         "KDIVE_DEMO_NAMESPACE",
