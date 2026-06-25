@@ -36,37 +36,38 @@
 
 **Files:**
 - Modify: `src/kdive/db/artifact_queries.py`
-- Test: `tests/db/test_artifact_queries.py` (create if absent; otherwise append)
+- Test: `tests/mcp/catalog/test_raw_fetch_tool.py` (reader tests live with the handler tests, sharing the testcontainers pool fixture — no separate `tests/db` fixture tree)
 
 **Interfaces:**
 - Consumes: existing `raw_vmcore_key(conn, system_id) -> str | None` (already in this file).
 - Produces: `async def run_fetch_context(conn, run_id: UUID) -> RunFetchContext | None` returning a frozen dataclass/NamedTuple `RunFetchContext(project: str, system_id: UUID | None, debuginfo_ref: str | None)`. Returns `None` when the Run row is absent. Also `async def system_project(conn, system_id: UUID) -> str | None`.
 
-- [ ] **Step 1: Write the failing test** — seed a Run + System, assert `run_fetch_context` returns the row's `project`, `system_id`, `debuginfo_ref`, and `None` for an absent run; `system_project` returns the System's project and `None` for an absent system.
+**Test setup (real helpers — these exist):** seed with `tests.mcp._seed.seed_run_on_system(pool, ..., debuginfo_ref=...)` (inserts an Investigation + `succeeded` Run on a System, carrying `debuginfo_ref`) and `tests.mcp._seed.seed_crashed_system(pool)` (a `crashed` System). The handler tests reuse the testcontainers `pool` fixture + the `_pool`/db-url pattern from `tests/mcp/catalog/test_artifacts_tools.py`. The DB readers take a `conn`, so acquire one from the pool: `async with pool.connection() as conn: ...`.
+
+- [ ] **Step 1: Write the failing test** — put it in `tests/mcp/catalog/test_raw_fetch_tool.py` (same testcontainers fixtures as the sibling artifacts test; avoids inventing a `tests/db` fixture tree). Seed a Run-on-System, assert the readers return its `project`/`system_id`/`debuginfo_ref`, and `None` for absent ids.
 
 ```python
-# tests/db/test_artifact_queries.py
 import pytest
+from uuid import UUID, uuid4
 from kdive.db.artifact_queries import run_fetch_context, system_project
 
 @pytest.mark.asyncio
-async def test_run_fetch_context_returns_row_fields(seeded_run_conn):
-    conn, run_id, system_id, project = seeded_run_conn
-    ctx = await run_fetch_context(conn, run_id)
-    assert ctx is not None
-    assert ctx.project == project
-    assert ctx.system_id == system_id
-    assert await system_project(conn, system_id) == project
-
-@pytest.mark.asyncio
-async def test_run_fetch_context_absent_run_is_none(db_conn):
-    from uuid import uuid4
-    assert await run_fetch_context(db_conn, uuid4()) is None
+async def test_run_fetch_context_returns_row_fields(pg_pool):  # pg_pool: the testcontainers pool fixture
+    run_id = await seed_run_on_system(pg_pool, debuginfo_ref="proj/runs/r/vmlinux")
+    async with pg_pool.connection() as conn:
+        ctx = await run_fetch_context(conn, UUID(run_id))
+        assert ctx is not None and ctx.project == "proj"
+        assert ctx.debuginfo_ref == "proj/runs/r/vmlinux"
+        assert ctx.system_id is not None
+        assert await system_project(conn, ctx.system_id) == "proj"
+        assert await run_fetch_context(conn, uuid4()) is None
 ```
+
+(`seed_run_on_system` returns the run id; resolve its System id from `run_fetch_context`. Match the exact pool fixture name used in `test_artifacts_tools.py` — adapt `pg_pool` to that fixture.)
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `uv run python -m pytest tests/db/test_artifact_queries.py -q`
+Run: `uv run python -m pytest tests/mcp/catalog/test_raw_fetch_tool.py -q`
 Expected: FAIL with `ImportError: cannot import name 'run_fetch_context'`.
 
 - [ ] **Step 3: Write minimal implementation** — add to `src/kdive/db/artifact_queries.py`:
@@ -109,13 +110,13 @@ async def system_project(conn: AsyncConnection, system_id: UUID) -> str | None:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `uv run python -m pytest tests/db/test_artifact_queries.py -q`
+Run: `uv run python -m pytest tests/mcp/catalog/test_raw_fetch_tool.py -q`
 Expected: PASS. Then `just lint && just type`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/kdive/db/artifact_queries.py tests/db/test_artifact_queries.py
+git add src/kdive/db/artifact_queries.py tests/mcp/catalog/test_raw_fetch_tool.py
 git commit -m "feat(artifacts): add run_fetch_context + system_project readers (#781)"
 ```
 
@@ -138,30 +139,88 @@ git commit -m "feat(artifacts): add run_fetch_context + system_project readers (
 4. `vmcore` branch: if `run.system_id is None` → `config_error(run_id, data={"reason": "vmcore_unavailable"})`; else `sysproj = system_project(conn, system_id)`; if `None` or `sysproj not in ctx.projects` → `not_found(run_id)`; `require_role(ctx, sysproj, Role.CONTRIBUTOR)`; key = `raw_vmcore_key(conn, system_id)`; if `None` → `config_error(run_id, data={"reason": "vmcore_unavailable"})`.
 5. `head = store.head(key)` (in `asyncio.to_thread`); `None` → `config_error(run_id, data={"reason": f"{asset.value}_unavailable"})`.
 6. `url = store.presign_get(key, expires_in=ttl)` (`asyncio.to_thread`).
-7. `audit.record(conn, ctx, AuditEvent(tool="artifacts.fetch_raw", object_kind="runs", object_id=uid, transition="fetch_raw", args={"run_id": run_id, "asset": asset.value}, project=run.project))`.
+7. **Audit inside its own transaction** — `audit.record` does not open a transaction (its docstring: the caller composes it with the audited transition in one `conn.transaction()`). This tool has no state transition, so wrap the audit write explicitly so the row commits:
+   ```python
+   async with conn.transaction():
+       await audit.record(conn, ctx, AuditEvent(
+           tool="artifacts.fetch_raw", object_kind="runs", object_id=uid,
+           transition="fetch_raw", args={"run_id": run_id, "asset": asset.value},
+           project=run.project))
+   ```
+   The audited `project` is always `run.project` (which step 2 confirmed is in `ctx.projects`, so `audit.record`'s misattribution guard passes for both assets).
 8. Return `ToolResponse.success(run_id, "available", suggested_next_actions=["artifacts.fetch_raw"], refs={"download_uri": url}, data={"asset": asset.value, "size_bytes": str(head.size_bytes), "ttl": str(ttl)})`.
 
 Store-factory/`CategorizedError` failures map via `ToolResponse.failure_from_error(run_id, exc)` (mirror `reads.py`).
 
-- [ ] **Step 1: Write the failing test** — vmlinux + vmcore happy paths with a fake store. Use `_ctx(Role.CONTRIBUTOR)` and a seeded Run/System whose `debuginfo_ref` and raw vmcore key resolve. Assert `refs["download_uri"]` is the fake's URL, `data["asset"]`, `data["size_bytes"]`, and that **no inline content** field is present.
+**Shared test fixtures (define once at the top of the test module):**
 
 ```python
-# tests/mcp/catalog/test_raw_fetch_tool.py (sketch — mirror test_artifacts_tools.py fixtures)
-import pytest
-from kdive.mcp.tools.catalog.artifacts.raw_fetch import RawAsset, fetch_raw
+from kdive.artifacts.storage import HeadResult
+from kdive.mcp.auth import RequestContext
 from kdive.security.authz.rbac import Role
+from tests.mcp._seed import seed_crashed_system, seed_run_on_system
+
+class _FakeStore:
+    """A fake object store with head + presign_get (mirrors test_artifacts_tools._SearchStore)."""
+    url = "https://signed.example/download"
+    def __init__(self, *, exists: bool = True, size: int = 4096) -> None:
+        self._head = HeadResult(size_bytes=size, checksum_sha256=None, etag="e",
+                                sensitivity=None) if exists else None
+        self.presigned_keys: list[str] = []
+    def head(self, key: str) -> HeadResult | None:
+        return self._head
+    def presign_get(self, key: str, *, expires_in: int) -> str:
+        self.presigned_keys.append(key)
+        return self.url
+
+def _ctx(role: Role | None = Role.CONTRIBUTOR, *, projects=("proj",)) -> RequestContext:
+    roles = {"proj": role} if role is not None else {}
+    return RequestContext(principal="u", agent_session="s", projects=projects, roles=roles)
+
+async def _seed_raw_vmcore_row(pool, system_id: str, project: str = "proj") -> None:
+    """Insert a raw vmcore artifact row for a System (no seed helper does this)."""
+    key = f"{project}/systems/{system_id}/vmcore-host_dump"
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+            "retention_class) VALUES ('systems', %s, %s, 'e', 'sensitive', 'vmcore')",
+            (system_id, key),
+        )
+```
+
+- [ ] **Step 1: Write the failing test** — vmlinux + vmcore happy paths. Seed a Run-on-System with a `debuginfo_ref`; for vmcore, also insert the raw vmcore row. Assert `refs["download_uri"]`, `data["asset"]`/`data["size_bytes"]`, and **no inline `content`** field.
+
+```python
+import pytest
+from uuid import UUID
+from kdive.mcp.tools.catalog.artifacts.raw_fetch import RawAsset, fetch_raw
 
 @pytest.mark.asyncio
-async def test_fetch_raw_vmlinux_presigns_url(seeded_run_with_vmlinux, fake_store):
-    pool, run_id, project = seeded_run_with_vmlinux
-    ctx = _ctx(Role.CONTRIBUTOR, projects=(project,))
-    resp = await fetch_raw(pool, ctx, run_id=run_id, asset=RawAsset.VMLINUX,
-                           store_factory=lambda: fake_store)
+async def test_fetch_raw_vmlinux_presigns_url(pg_pool):
+    run_id = await seed_run_on_system(pg_pool, debuginfo_ref="proj/runs/r/vmlinux")
+    store = _FakeStore()
+    resp = await fetch_raw(pg_pool, _ctx(), run_id=run_id, asset=RawAsset.VMLINUX,
+                           store_factory=lambda: store)
     assert resp.status == "available"
-    assert resp.refs["download_uri"] == fake_store.url
+    assert resp.refs["download_uri"] == store.url
     assert resp.data["asset"] == "vmlinux"
     assert "content" not in resp.data
+
+@pytest.mark.asyncio
+async def test_fetch_raw_vmcore_presigns_url(pg_pool):
+    run_id = await seed_run_on_system(pg_pool, debuginfo_ref="proj/runs/r/vmlinux")
+    async with pg_pool.connection() as conn:
+        ctx = await __import__("kdive.db.artifact_queries", fromlist=["run_fetch_context"]).run_fetch_context(conn, UUID(run_id))
+    await _seed_raw_vmcore_row(pg_pool, str(ctx.system_id))
+    store = _FakeStore()
+    resp = await fetch_raw(pg_pool, _ctx(), run_id=run_id, asset=RawAsset.VMCORE,
+                           store_factory=lambda: store)
+    assert resp.status == "available"
+    assert resp.data["asset"] == "vmcore"
+    assert store.presigned_keys == [f"proj/systems/{ctx.system_id}/vmcore-host_dump"]
 ```
+
+(Replace `pg_pool` with the exact testcontainers pool fixture name from `test_artifacts_tools.py`; the messy inline import is just to resolve the System id in the test — use a clean top-level import in the real file.)
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -200,8 +259,9 @@ Cover every branch of the handler contract:
   - **vmlinux unavailable:** Run with `debuginfo_ref = NULL` → `config_error` with `data["reason"] == "vmlinux_unavailable"`.
   - **vmcore unavailable (no core):** Run bound to a System with no raw vmcore → `data["reason"] == "vmcore_unavailable"`.
   - **vmcore, system_id NULL:** unbound Run + `RawAsset.VMCORE` → `data["reason"] == "vmcore_unavailable"`.
-  - **store HEAD returns None:** fake store `head -> None` → `config_error` with the `*_unavailable` reason; assert `presign_get` was **not** called.
+  - **store HEAD returns None:** `_FakeStore(exists=False)` → `config_error` with the `*_unavailable` reason; assert `store.presigned_keys == []` (presign **not** called).
   - **malformed run_id:** `"not-a-uuid"` → `config_error`.
+  - **audit row written:** a successful `fetch_raw` writes exactly one `audit_log` row with `tool='artifacts.fetch_raw'` and `project='proj'`. Assert by querying `SELECT count(*) ... WHERE tool='artifacts.fetch_raw'` after the call (proves the audit transaction committed — the verification that step 7's boundary is correct).
 
 - [ ] **Step 2: Run to verify they fail / then pass after any small handler fixes**
 
