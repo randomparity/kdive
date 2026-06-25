@@ -56,7 +56,10 @@ discovery, selection, provenance, and the trust gate unchanged.
 2. **`toolchain_desc`** (new optional registration field, persisted on the build-host row): operator-
    asserted prose so the catalog is self-describing (not verified against image contents).
 3. **Selection reuses `build_profile.build_host`** to name the env (no new field); an unknown/disabled
-   env is a `configuration_error` enumerating valid env names.
+   env is a `configuration_error` enumerating valid env names. A git-source build rejected on the
+   default non-isolated `worker-local` lane (non-allowlisted remote) has its ADR-0162 message extended
+   to also name the self-service alternative (`build_envs.list` / select an isolated env), so the most
+   common URL-build mistake surfaces the one-field fix rather than only an operator action.
 4. **Bare-URL guard (supersedes ADR-0136):** a bare-string `kernel_source_ref` beginning with a
    recognized git clone-URL scheme — `git+ssh://`, `git://`, `ssh://`, `https://`, `http://`, `git:`
    — is rejected at the `ServerBuildProfile` parse boundary, pointing at the structured form +

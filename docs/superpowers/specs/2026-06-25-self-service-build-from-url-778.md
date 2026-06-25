@@ -217,8 +217,12 @@ All failures use the existing `configuration_error` envelope, self-correcting an
 - unknown/disabled `build_host` → enumerates valid env names;
 - bare cloneable-URL `kernel_source_ref` → names the structured form + `build_envs.list`, echoes only
   the matched scheme;
-- non-isolated env (`worker-local`) + non-allowlisted remote → the existing ADR-0162 "ask the
-  operator to allowlist this host" message, unchanged;
+- non-isolated env (`worker-local`, the default when `build_host` is omitted) + non-allowlisted
+  remote → the ADR-0162 rejection, **extended** to also name the self-service alternative ("or select
+  an isolated build environment from `build_envs.list`") alongside the existing operator-allowlist
+  guidance — so the most common URL-build mistake (forgetting to pick an isolated env) surfaces the
+  one-field self-service fix instead of steering the developer to an operator action. The allowlist
+  guidance stays for the genuinely worker-local-intended case;
 - clone failures (bad ref, unreachable remote) → the existing redacted `git fetch` errors;
 - `make` failures → ADR-0238 build-log artifact.
 
@@ -232,6 +236,10 @@ Boundary-driven units (no `live_vm` for the unit surface):
 - **Descriptor:** registration round-trips `toolchain_desc`; omitting it stores `NULL`.
 - **Selection:** an unknown/disabled `build_host` → `configuration_error` enumerating valid envs, no
   submitted value leaked.
+- **Self-service discoverability:** a git-source build rejected on the non-isolated `worker-local`
+  lane (non-allowlisted remote) → the rejection names `build_envs.list` / "select an isolated build
+  environment" alongside the operator-allowlist guidance, so the self-service fix is reachable from
+  the failure.
 - **Bare-URL guard:** each rejected scheme (`git:`, `git://`, `git+ssh://`, `ssh://`, `https://`,
   `http://`, plus an uppercase `HTTPS://`) → `configuration_error` naming the structured form, with a
   **`runs.create` tool-boundary no-leak test** (a planted-token userinfo URL → neither host nor token
