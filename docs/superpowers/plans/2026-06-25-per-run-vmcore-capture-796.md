@@ -254,7 +254,7 @@ existing adversarial capture test if one exists — grep `tests/adversarial` fir
 **Interfaces consumed:** `raw_vmcore_key(conn, run_id)`, the `capture_handler`, `precheck_run`,
 `finalize_capture`, `CaptureVmcorePayload`.
 
-- [ ] **Step 3.1 — Write the concurrency test.** Drive two concurrent
+- [ ] **Step 2.1 — Write the concurrency test.** Drive two concurrent
   `capture_handler` invocations for the **same** `run_id` + method against a disposable Postgres
   (testcontainers, the `migrated_url` fixture pattern used in `tests/db`), with a fake retriever that
   writes a deterministic `owner_kind='runs'` core. Assert exactly **one** raw `owner_kind='runs'`
@@ -262,10 +262,10 @@ existing adversarial capture test if one exists — grep `tests/adversarial` fir
   the race). Also assert two **distinct** `run_id`s each capturing yield two distinct rows. Follow
   the existing adversarial-suite structure (hypothesis/async harness) — mirror the nearest existing
   capture/idempotency adversarial test.
-- [ ] **Step 3.2 — Run it** (`uv run python -m pytest
+- [ ] **Step 2.2 — Run it** (`uv run python -m pytest
   tests/adversarial/test_vmcore_capture_idempotency.py -q`) → PASS; break the `finalize` re-check
   locally to confirm the test catches a double-insert, then restore.
-- [ ] **Step 3.3 — Commit.**
+- [ ] **Step 2.3 — Commit.**
   ```bash
   git add tests/adversarial/test_vmcore_capture_idempotency.py
   git commit -m "test(vmcore): per-Run capture idempotency under concurrency (#796)
@@ -279,13 +279,13 @@ existing adversarial capture test if one exists — grep `tests/adversarial` fir
 
 **Files:** Extend the `artifacts.fetch_raw` test module (the one touched in Step 1.8).
 
-- [ ] **Step 4.1 — Write the test.** Seed a Run in project A bound to a System in project A with a
+- [ ] **Step 3.1 — Write the test.** Seed a Run in project A bound to a System in project A with a
   Run-owned `vmcore` core, and a caller holding only project B. Assert `fetch_raw(run_id, "vmcore")`
   returns the existence-masking `not_found` envelope (no project-A leak). Add a member-but-below-
   `contributor` case asserting the audited denial. This guards the `run.project == system.project`
   invariant the egress gate move relies on.
-- [ ] **Step 4.2 — Run it** → PASS.
-- [ ] **Step 4.3 — Commit.**
+- [ ] **Step 3.2 — Run it** → PASS.
+- [ ] **Step 3.3 — Commit.**
   ```bash
   git add tests/mcp/catalog/artifacts/
   git commit -m "test(vmcore): fetch_raw vmcore cross-project denial (#796)
@@ -302,12 +302,12 @@ state exists at per-System or per-Run keys to unwind (M0/M1 carries no productio
 
 ## Self-review notes
 
-- Spec coverage: AC#1 → Task 1 (db/providers) + Task 3 (distinct rows); AC#2 → Step 1.7 + tests;
-  AC#3 → Step 1.6 `ensure_method_match` + handler test; AC#4 → Task 3; AC#5 → unchanged
+- Spec coverage: AC#1 → Task 1 (db/providers) + Task 2 (distinct rows); AC#2 → Step 1.7 + tests;
+  AC#3 → Step 1.6 `ensure_method_match` + handler test; AC#4 → Task 2; AC#5 → unchanged
   (`keyed_mutation`, exercised by existing idempotency test, re-verified in Step 1.7); AC#6 → Step
   1.8; AC#7 → Step 1.8 (`_vmcore_targets`, shared by `introspect.from_vmcore`) + Step 1.9
-  (`vmcore.list`); AC#8 → Task 2 (covers both `vmcore.fetch` and `vmcore.list`).
-- Cross-project denial (spec design note) → Task 4.
+  (`vmcore.list`); AC#8 → Step 1.11 (tool reference regenerated in the core commit).
+- Cross-project denial (spec design note) → Task 3.
 - `vmcore.list` redacted-sibling regression (forced by the `owner_kind='runs'` move) → Step 1.9.
 - Type consistency: `raw_vmcore_key(conn, run_id)`, `capture(system_id, run_id, method)`,
   `CaptureVmcorePayload(run_id, method)` used identically in every referencing step.
