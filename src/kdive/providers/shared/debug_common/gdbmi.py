@@ -1,9 +1,11 @@
 """The gdb-MI tier: a persistent ``gdb --interpreter=mi3`` engine over the gdbstub (ADR-0034).
 
 The supported command surface is intentionally narrow: breakpoints (set/clear/list),
-``read_registers``, ``read_memory`` with a 4096-byte cap, ``continue_``, and
-``interrupt``. Attach and symbol resolution are separate seams; module loading, stack
-walking, watchpoints, and expression evaluation are outside this engine's contract.
+``read_registers``, ``read_memory`` with a 4096-byte cap, ``resolve_symbol`` (a gated
+symbol→address lookup), ``continue_``, and ``interrupt``. ``resolve_symbol`` evaluates exactly
+one form, ``&<identifier>`` (address-of-a-name, ADR-0248) — a narrowing, not a reversal, of the
+"no expression evaluation" rule: general expression evaluation, module loading, stack walking,
+and watchpoints remain outside this engine's contract.
 
 All **textual** MI transcript/record output passes through the :class:`Redactor` before it is
 persisted to the per-session transcript or returned in a response. The exception is
@@ -47,6 +49,7 @@ from kdive.providers.shared.debug_common.mi_controller import PygdbmiController
 from kdive.providers.shared.debug_common.mi_protocol import (
     MiRecord,
     breakpoint_rows,
+    evaluate_value,
     memory_segments,
     mi_int,
     parse_mi_records,
@@ -92,6 +95,10 @@ _CONNECT_RETRY_BACKOFF_SEC = 0.5
 # A bare C identifier. The name-shape gate keeps a breakpoint location an address-of-a-name,
 # never an arbitrary expression — so `-break-insert` is non-injectable.
 _SYMBOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# The first hex token in a `-data-evaluate-expression &name` value. gdb renders a pointer as
+# `<optional type cast> 0xADDR <optional symbol>`, so a leftmost search yields the address even
+# past a `(int *)` cast; the address always precedes the `<symbol>` annotation.
+_SYMBOL_ADDR_RE = re.compile(r"0x[0-9a-fA-F]+")
 # A register name (passed to -data-list-register-names lookup).
 _REGISTER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 # A breakpoint location: a bare C identifier (function/symbol).
@@ -110,7 +117,7 @@ def _config_error(
 
 
 class GdbMiEngine:
-    """Persistent ``gdb --interpreter=mi3`` engine for the seven Debug-plane ops (ADR-0034)."""
+    """Persistent ``gdb --interpreter=mi3`` engine for the Debug-plane ops (ADR-0034, ADR-0248)."""
 
     def __init__(
         self,
@@ -345,6 +352,48 @@ class GdbMiEngine:
                 },
             )
         return blob
+
+    # --- symbol resolution ----------------------------------------------------------------
+
+    def resolve_symbol(self, attachment: GdbMiAttachment, name: str) -> int:
+        """Resolve a bare C symbol ``name`` to its address via ``-data-evaluate-expression``.
+
+        The Run's DWARF ``vmlinux`` is already loaded at attach, so the symbol table is present.
+        ``name`` is gated to a bare C identifier (``_SYMBOL_NAME_RE``) so the only expression
+        ever evaluated is ``&<identifier>`` — address-of-a-name, never an arbitrary expression
+        (non-injectable, the same property the breakpoint-location gate relies on). ``&name``
+        resolves both data globals (e.g. ``d_hash_shift``) and functions, unlike
+        ``-break-insert`` (a code location only). This is a symtab lookup, so it is valid whether
+        or not the inferior is stopped.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_symbol_name`` for a non-identifier
+                name (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` for a gdb error
+                (an unknown or addressless symbol — e.g. an enum/macro constant — yields a gdb
+                ``^error`` mapped by ``execute_mi_command``) or a present-but-unparseable address
+                value (``bad_symbol_value``, with the value redacted).
+        """
+        if not _SYMBOL_NAME_RE.match(name):
+            raise _config_error(
+                f"symbol name must be a bare C identifier, got {name!r}",
+                code="bad_symbol_name",
+                details={"name": name},
+            )
+        value = evaluate_value(
+            self.execute_mi_command(attachment, f"-data-evaluate-expression &{name}")
+        )
+        match = _SYMBOL_ADDR_RE.search(value) if isinstance(value, str) else None
+        if match is None:
+            raise CategorizedError(
+                "gdb/MI returned no parseable symbol address",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={
+                    "code": "bad_symbol_value",
+                    "name": name,
+                    "value": self._redactor().redact_value(value),
+                },
+            )
+        return int(match.group(0), 16)
 
     # --- interactive execution ------------------------------------------------------------
 

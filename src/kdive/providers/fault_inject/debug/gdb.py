@@ -78,6 +78,10 @@ class FaultInjectDebugEngine:
     ) -> dict[str, object]:
         return {name: 0 for name in register_names}
 
+    def resolve_symbol(self, attachment: GdbMiAttachment, name: str) -> int:
+        del attachment, name
+        return 0xFFFFFFFF81000000
+
     def continue_(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
         return GdbStopRecord(reason="breakpoint-hit", stopped_thread="1")
 
