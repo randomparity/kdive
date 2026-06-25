@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Shared helpers for the local live-stack lifecycle scripts (up.sh, down.sh, status.sh,
-# restart-stack.sh). SOURCED, never executed: it defines variables and functions and must
-# have no side effects beyond that. Consumers source env.sh themselves when they need the
-# KDIVE_* runtime config.
+# Shared helpers for the local live-stack lifecycle scripts (up.sh, down.sh, status.sh).
+# SOURCED, never executed: it defines variables and functions and must have no side effects
+# beyond that. Consumers source env.sh themselves when they need the KDIVE_* runtime config.
 
-# scripts/live-stack/ -> repo root is two levels up (matches start.sh / restart-stack.sh).
+# scripts/live-stack/ -> repo root is two levels up (matches the other scripts in this directory).
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-# shellcheck disable=SC2034 # consumed by sourcing scripts
 py="${repo_root}/.venv/bin/python"
 log_dir="${KDIVE_STACK_LOG_DIR:-${repo_root}/.live-stack-logs}"
 
@@ -52,6 +50,38 @@ stop_daemons() {
     sleep 0.5
   done
   echo "WARN: daemons still running after stop: $(daemon_pids | tr '\n' ' ')" >&2
+}
+
+# Restart the host-run kdive daemons with the code in THIS checkout: server + reconciler as the
+# invoking user, worker as root (unless KDIVE_WORKER_AS_ROOT=0) for install-staging + VM ops.
+# Stops live daemons found in the process table first. Assumes env.sh is already sourced and the
+# compose backends are up. Env: KDIVE_WORKER_AS_ROOT (default 1), KDIVE_BUILD_USER (default
+# invoking user; a root worker REFUSES the local build lane without it — ADR-0214), KDIVE_KERNEL_SRC.
+restart_host_processes() {
+  local worker_as_root="${KDIVE_WORKER_AS_ROOT:-1}"
+  local build_user="${KDIVE_BUILD_USER:-$(id -un)}"
+  local kernel_src="${KDIVE_KERNEL_SRC:-${HOME}/src/linux}"
+  [[ -x "$py" ]] || {
+    echo "no venv python at ${py}; run 'just setup' first" >&2
+    return 1
+  }
+  mkdir -p "$log_dir"
+  stop_daemons
+  echo "starting kdive host processes @ $(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?') ..."
+  setsid nohup "$py" -m kdive server >"${log_dir}/server.log" 2>&1 </dev/null &
+  setsid nohup "$py" -m kdive reconciler >"${log_dir}/reconciler.log" 2>&1 </dev/null &
+  if [[ "$worker_as_root" == "1" && "$(id -un)" != "root" ]]; then
+    # The worker needs root (install staging + libvirt/VM ops). Export KDIVE_KERNEL_SRC *before*
+    # sourcing env.sh so env.sh honors it verbatim instead of defaulting to ${HOME}/src/linux,
+    # which under sudo (HOME=/root) would silently point at a nonexistent /root/src/linux.
+    sudo bash -c "cd '${repo_root}' \
+      && export KDIVE_KERNEL_SRC='${kernel_src}' KDIVE_BUILD_USER='${build_user}' \
+      && source scripts/live-stack/env.sh \
+      && setsid nohup '${py}' -m kdive worker >>'${log_dir}/worker-root.log' 2>&1 </dev/null &"
+  else
+    KDIVE_KERNEL_SRC="$kernel_src" setsid nohup "$py" -m kdive worker >"${log_dir}/worker.log" 2>&1 </dev/null &
+  fi
+  sleep 5
 }
 
 # worker-root.log is append-only, so report the LAST stamp of each service's own log.

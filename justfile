@@ -82,18 +82,9 @@ stack-up:
     ./scripts/live-stack/apply-migrations.sh
     @echo "Backends healthy and schema migrated."
     @echo "Start the app tier with: docker compose up -d migrate server worker reconciler"
-    @echo "(or, for a source checkout of the local-libvirt host path: just stack-start)"
+    @echo "(or, for the full local-libvirt host path: scripts/live-stack/up.sh)"
     @echo "MCP URL: http://127.0.0.1:8000/mcp"
     @echo "Full runbook: docs/operating/runbooks/live-stack.md"
-
-stack-start:
-    ./scripts/live-stack/start.sh
-
-stack-start-daemon:
-    ./scripts/live-stack/start.sh --daemon
-
-stack-stop:
-    ./scripts/live-stack/stop.sh
 
 # Print a bearer token from the bundled Helm-demo mock-OIDC issuer (Kubernetes):
 #   export KDIVE_TOKEN=$(just demo-token)                  # full admin grant (default)

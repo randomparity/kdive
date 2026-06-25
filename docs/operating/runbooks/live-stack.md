@@ -166,15 +166,11 @@ The `live_stack` preflight skips with an actionable reason when either is missin
 From a source checkout, run the convenience wrapper:
 
 ```bash
-just stack-start
+scripts/live-stack/up.sh
 ```
 
-Or start it in the background and stop it by pid file:
-
-```bash
-just stack-start-daemon
-just stack-stop
-```
+`up.sh` is idempotent and also ensures the backends and libvirt are up; for a no-VM, no-sudo
+API-only loop use `KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-libvirt`.
 
 Installed package — migrate and seed on the host, then run the app tier from the compose
 reference ([`deploy/compose/README.md`](../../../deploy/compose/README.md)):
@@ -242,17 +238,10 @@ Patched kernels can boot and reach the readiness marker.
 
 ## 7. Teardown
 
-Stop the foreground stack with Ctrl-C, or stop a daemonized source-tree stack with:
-
 ```bash
-just stack-stop
+scripts/live-stack/down.sh          # stop host processes + backends, keep state
+scripts/live-stack/down.sh --wipe   # full reset: drop DB/MinIO volumes AND reap kdive-* domains/overlays
 ```
 
-Then remove the backends and their volumes:
-
-```bash
-docker compose down -v
-```
-
-`down -v` drops the Postgres and MinIO volumes, so the next `just stack-up` starts from a
-clean schema and an empty bucket.
+`down.sh --wipe` drops the Postgres and MinIO volumes and reaps all `kdive-*` libvirt domains
+and their overlay disks, so the next `up.sh` starts from a clean schema and an empty bucket.

@@ -8,6 +8,9 @@
 #   scripts/live-stack/up.sh                 full bring-up
 #   scripts/live-stack/up.sh --reset-db      wipe the DB first (recovery from migration drift)
 #   scripts/live-stack/up.sh --skip-obs      skip prometheus/grafana
+#   scripts/live-stack/up.sh --skip-libvirt  backends + host processes only (no VM provisioning)
+#
+# No-VM, no-sudo dev loop: KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-libvirt
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,12 +22,14 @@ cd "$repo_root"
 
 reset_db=0
 skip_obs="${KDIVE_SKIP_OBS:-0}"
+skip_libvirt=0
 for arg in "$@"; do
   case "$arg" in
   --reset-db) reset_db=1 ;;
   --skip-obs) skip_obs=1 ;;
+  --skip-libvirt) skip_libvirt=1 ;;
   *)
-    echo "unknown argument: $arg (accepts --reset-db, --skip-obs)" >&2
+    echo "unknown argument: $arg (accepts --reset-db, --skip-obs, --skip-libvirt)" >&2
     exit 2
     ;;
   esac
@@ -78,29 +83,33 @@ if ! bash "${here}/apply-migrations.sh"; then
   exit 1
 fi
 
-banner "libvirt"
-# The provider uses user-mode SLIRP networking (no libvirt network), so only virtqemud is
-# needed — do NOT manage virtnetworkd. virtqemud is socket-activated, so `libvirt_ok` (a
-# `virsh list`) activates it on connect; gate on that, not `systemctl is-active` (which reports
-# the *service* inactive on a healthy socket-activated host and would re-sudo every run).
-if ! libvirt_ok; then
-  echo "libvirt unreachable; enabling virtqemud.socket (sudo) ..."
-  sudo systemctl enable --now virtqemud.socket
+if [[ "$skip_libvirt" != "1" ]]; then
+  banner "libvirt"
+  # The provider uses user-mode SLIRP networking (no libvirt network), so only virtqemud is
+  # needed — do NOT manage virtnetworkd. virtqemud is socket-activated, so `libvirt_ok` (a
+  # `virsh list`) activates it on connect; gate on that, not `systemctl is-active` (which reports
+  # the *service* inactive on a healthy socket-activated host and would re-sudo every run).
+  if ! libvirt_ok; then
+    echo "libvirt unreachable; enabling virtqemud.socket (sudo) ..."
+    sudo systemctl enable --now virtqemud.socket
+  fi
+  libvirt_ok || {
+    echo "libvirt daemon not reachable at ${KDIVE_LIBVIRT_URI}" >&2
+    exit 1
+  }
+  # Create the provision dirs (idempotent) so a clean host isn't gated on dirs nothing made.
+  # The root worker owns/writes them at provision time; existence is all up.sh requires.
+  sudo mkdir -p "$KDIVE_ROOTFS_DIR" "${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
+  provision_prereqs_ok || {
+    echo "libvirt reachable but provision prerequisites are missing (see MISSING lines)" >&2
+    exit 1
+  }
+else
+  banner "libvirt (skipped)"
 fi
-libvirt_ok || {
-  echo "libvirt daemon not reachable at ${KDIVE_LIBVIRT_URI}" >&2
-  exit 1
-}
-# Create the provision dirs (idempotent) so a clean host isn't gated on dirs nothing made.
-# The root worker owns/writes them at provision time; existence is all up.sh requires.
-sudo mkdir -p "$KDIVE_ROOTFS_DIR" "${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
-provision_prereqs_ok || {
-  echo "libvirt reachable but provision prerequisites are missing (see MISSING lines)" >&2
-  exit 1
-}
 
 banner "host processes"
-"${here}/restart-stack.sh"
+restart_host_processes
 
 banner "status"
 "${here}/status.sh"
