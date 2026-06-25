@@ -38,19 +38,34 @@ _REFRESH_ETAG_SQL = "UPDATE artifacts SET etag = %s WHERE id = %s"
 class RemoteLibvirtConsoleSnapshotter:
     """Assemble the System's S3 console parts into an immutable per-Run console artifact."""
 
-    async def snapshot(
-        self, conn: AsyncConnection, system_id: UUID, run_id: UUID
-    ) -> ConsoleSnapshot | None:
-        """Persist a ``console-<run>`` artifact from the parts captured so far for ``system_id``.
+    async def mark_boot_window(self, system_id: UUID) -> int:
+        """Return the next part index for ``system_id`` — this boot's window starts here.
 
-        Returns ``None`` when no console bytes have been streamed yet. The blocking S3 work runs
-        in a worker thread; the row is upserted on ``conn`` so it commits with the boot step.
+        Read from the S3 part-index list (not the collector's memory), so it is unaffected by a
+        collector restart/reconnect: ``_take_index`` keeps part indices monotonic (ADR-0241).
+        """
+
+        def _next_index() -> int:
+            store = object_store_from_env()
+            parts = RemoteConsolePartStore(store, "")
+            existing = parts.list_part_indices(system_id)
+            return (max(existing) + 1) if existing else 0
+
+        return await asyncio.to_thread(_next_index)
+
+    async def snapshot(
+        self, conn: AsyncConnection, system_id: UUID, run_id: UUID, start_index: int = 0
+    ) -> ConsoleSnapshot | None:
+        """Persist a ``console-<run>`` artifact from this boot's parts (index ``>= start_index``).
+
+        Returns ``None`` when the boot window has no parts yet. The blocking S3 work runs in a
+        worker thread; the row is upserted on ``conn`` so it commits with the boot step.
         """
         store = object_store_from_env()
         # The conninfo is unused on this path: this snapshotter writes the per-Run `artifacts` row
         # on the boot handler's `conn` (below), never via the part store's own teardown row path.
         parts = RemoteConsolePartStore(store, "")
-        data = await asyncio.to_thread(parts.assemble, system_id)
+        data = await asyncio.to_thread(parts.assemble, system_id, start_index)
         if not data:
             return None
         stored = await asyncio.to_thread(parts.put_run_console, system_id, run_id, data)
