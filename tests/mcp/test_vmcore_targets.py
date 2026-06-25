@@ -41,12 +41,12 @@ async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
         await pool.close()
 
 
-async def _seed_vmcore_row(pool: AsyncConnectionPool, system_id: str) -> None:
+async def _seed_vmcore_row(pool: AsyncConnectionPool, run_id: str) -> None:
     async with pool.connection() as conn:
         await conn.execute(
             "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
-            "retention_class) VALUES ('systems', %s, %s, 'e', 'sensitive', 'vmcore')",
-            (system_id, f"local/systems/{system_id}/vmcore-host_dump"),
+            "retention_class) VALUES ('runs', %s, %s, 'e', 'sensitive', 'vmcore')",
+            (run_id, f"local/runs/{run_id}/vmcore-host_dump"),
         )
 
 
@@ -58,7 +58,7 @@ async def _built_run_with_core(pool: AsyncConnectionPool) -> str:
         debuginfo_ref="k/runs/r/vmlinux",
         build_id="deadbeef",
     )
-    await _seed_vmcore_row(pool, system_id)
+    await _seed_vmcore_row(pool, run_id)
     return run_id
 
 
@@ -102,7 +102,7 @@ def test_resolve_run_vmcore_target_missing_build_id_is_not_found(migrated_url: s
                 debuginfo_ref="k/runs/r/vmlinux",
                 build_id=None,
             )
-            await _seed_vmcore_row(pool, system_id)
+            await _seed_vmcore_row(pool, run_id)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as exc:
                     await resolve_run_vmcore_target(conn, _ctx(), run_id)
@@ -124,7 +124,7 @@ def test_resolve_run_vmcore_target_null_debuginfo_reason(migrated_url: str) -> N
             run_id = await seed_run_on_system(
                 pool, system_id, debuginfo_ref=None, build_id="deadbeef"
             )
-            await _seed_vmcore_row(pool, system_id)
+            await _seed_vmcore_row(pool, run_id)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as exc:
                     await resolve_run_vmcore_target(conn, _ctx(), run_id)

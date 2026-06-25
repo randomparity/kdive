@@ -75,7 +75,7 @@ async def resolve_run_vmcore_target(
     if run is None or run.project not in ctx.projects:
         raise _target_not_found()
     require_role(ctx, run.project, Role.VIEWER)
-    vmcore_ref = await raw_vmcore_key(conn, run.require_system_id())
+    vmcore_ref = await raw_vmcore_key(conn, uid)
     if vmcore_ref is None:
         raise _no_vmcore_not_found(run)
     if run.debuginfo_ref is None:

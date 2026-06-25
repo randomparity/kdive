@@ -1,8 +1,9 @@
 """Local-libvirt Retrieve plane: capture a kdump vmcore and run crash postmortem (ADR-0031).
 
 `LocalLibvirtRetrieve` realizes two seam-injected ports, mirroring `LocalLibvirtBuild`:
-`Retriever.capture(system_id, method)` dispatches to the appropriate seam, stores the raw
-`sensitive` core and a `redacted` dmesg derivative, and returns both refs plus the core's build-id;
+`Retriever.capture(system_id, run_id, method)` dispatches to the appropriate seam, stores the raw
+`sensitive` core and a `redacted` dmesg derivative under the crashing Run (ADR-0244), and returns
+both refs plus the core's build-id;
 `CrashPostmortem.run_crash_postmortem(...)` symbolizes the core against the Run's
 `debuginfo_ref` over an injected `crash` subprocess. The slow, host-bound operations are
 `live_vm`-gated seams, so the orchestration and the full error contract are unit-tested with
@@ -135,13 +136,14 @@ class LocalLibvirtRetrieve:
             secret_registry=secret_registry,
         )
 
-    def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
+    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
         """Capture a core via ``method``; store raw + redacted; return refs + build-id.
 
-        Both ``KDUMP`` (the ADR-0203 overlay harvest) and ``HOST_DUMP`` (the ADR-0211 libvirt
-        domain core dump) stream the captured core from a worker temp file straight to the object
-        store, never holding the whole core in one in-memory buffer (#657); they differ only in the
-        seam that produces that file.
+        ``system_id`` locates the live domain/overlay; ``run_id`` owns the stored core
+        (``owner_kind='runs'``, ADR-0244). Both ``KDUMP`` (the ADR-0203 overlay harvest) and
+        ``HOST_DUMP`` (the ADR-0211 libvirt domain core dump) stream the captured core from a worker
+        temp file straight to the object store, never holding the whole core in one in-memory buffer
+        (#657); they differ only in the seam that produces that file.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for capture/build-id provenance or
@@ -151,11 +153,13 @@ class LocalLibvirtRetrieve:
                 propagated from a failed artifact store.
         """
         if method is CaptureMethod.HOST_DUMP:
-            return self._capture_via_file(system_id, method, self._host_dump_capture(system_id))
-        return self._capture_via_file(system_id, method, self._wait_for_vmcore(system_id))
+            return self._capture_via_file(
+                system_id, run_id, method, self._host_dump_capture(system_id)
+            )
+        return self._capture_via_file(system_id, run_id, method, self._wait_for_vmcore(system_id))
 
     def _capture_via_file(
-        self, system_id: UUID, method: CaptureMethod, core: Path | None
+        self, system_id: UUID, run_id: UUID, method: CaptureMethod, core: Path | None
     ) -> CaptureOutput:
         """Stream ``core`` (a worker temp file) to the store as raw + redacted; own its cleanup.
 
@@ -166,9 +170,9 @@ class LocalLibvirtRetrieve:
             raise self._no_core(system_id)
         try:
             build_id = self._read_vmcore_build_id_from_file(core)
-            raw = self._put_stream(system_id, f"vmcore-{method.value}", core)
+            raw = self._put_stream(run_id, f"vmcore-{method.value}", core)
             redacted = self._put(
-                system_id,
+                run_id,
                 f"vmcore-{method.value}-redacted",
                 self._extract_redacted_from_file(core),
                 Sensitivity.REDACTED,
@@ -204,15 +208,15 @@ class LocalLibvirtRetrieve:
             details={"system_id": str(system_id)},
         )
 
-    def _put_stream(self, system_id: UUID, name: str, core: Path) -> StoredArtifact:
-        """Stream ``core`` to the object store and verify the stored checksum (ADR-0094)."""
+    def _put_stream(self, run_id: UUID, name: str, core: Path) -> StoredArtifact:
+        """Stream ``core`` to the object store (Run-owned) and verify the checksum (ADR-0094)."""
         sha256_b64 = file_sha256_b64(core)
         store = self._ensure_store()
         stored = store.put_stream(
             ArtifactStreamRequest(
                 tenant=self._tenant,
-                owner_kind="systems",
-                owner_id=str(system_id),
+                owner_kind="runs",
+                owner_id=str(run_id),
                 name=name,
                 path=core,
                 sha256_b64=sha256_b64,
@@ -220,22 +224,22 @@ class LocalLibvirtRetrieve:
                 retention_class=_RETENTION_CLASS,
             )
         )
-        self._verify_stored(stored.key, sha256_b64, system_id)
+        self._verify_stored(stored.key, sha256_b64, run_id)
         return stored
 
-    def _verify_stored(self, key: str, sha256_b64: str, system_id: UUID) -> None:
+    def _verify_stored(self, key: str, sha256_b64: str, run_id: UUID) -> None:
         head = self._ensure_store().head(key)
         if head is None:
             raise CategorizedError(
                 "stored kdump core is absent after a success-reporting put",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"system_id": str(system_id), "key": key},
+                details={"run_id": str(run_id), "key": key},
             )
         if head.checksum_sha256 is not None and head.checksum_sha256 != sha256_b64:
             raise CategorizedError(
                 "stored kdump core checksum does not match the streamed core",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"system_id": str(system_id), "key": key},
+                details={"run_id": str(run_id), "key": key},
             )
 
     def _ensure_store(self) -> _StorePort:
@@ -243,12 +247,12 @@ class LocalLibvirtRetrieve:
             self._store = self._store_factory()
         return self._store
 
-    def _put(self, system_id: UUID, name: str, data: bytes, sens: Sensitivity) -> StoredArtifact:
+    def _put(self, run_id: UUID, name: str, data: bytes, sens: Sensitivity) -> StoredArtifact:
         return self._ensure_store().put_artifact(
             ArtifactWriteRequest(
                 tenant=self._tenant,
-                owner_kind="systems",
-                owner_id=str(system_id),
+                owner_kind="runs",
+                owner_id=str(run_id),
                 name=name,
                 data=data,
                 sensitivity=sens,

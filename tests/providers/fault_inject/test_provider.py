@@ -267,7 +267,7 @@ def test_capture_stores_a_synthetic_vmcore_with_raw_and_redacted_artifacts() -> 
     store = _FakeStore()
     retrieve = FaultInjectRetrieve(store_factory=lambda: store)
 
-    output = retrieve.capture(_SYSTEM, CaptureMethod.HOST_DUMP)
+    output = retrieve.capture(_SYSTEM, _RUN, CaptureMethod.HOST_DUMP)
 
     sensitivities = {w.sensitivity for w in store.writes}
     assert Sensitivity.SENSITIVE in sensitivities  # the raw core
@@ -281,7 +281,7 @@ def test_capture_build_id_matches_the_builder_so_provenance_holds() -> None:
         FaultInjectBuild(store_factory=lambda: store).build(_RUN, profile=_BUILD_PROFILE).build_id
     )
     captured = FaultInjectRetrieve(store_factory=lambda: store).capture(
-        _SYSTEM, CaptureMethod.HOST_DUMP
+        _SYSTEM, _RUN, CaptureMethod.HOST_DUMP
     )
 
     # A mock spine installs the built kernel then captures its core; a fixed synthetic

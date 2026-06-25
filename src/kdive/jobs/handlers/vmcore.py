@@ -11,10 +11,10 @@ from psycopg import AsyncConnection
 
 from kdive.db.artifact_queries import raw_vmcore_key
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ARTIFACTS, SYSTEMS
+from kdive.db.repositories import ARTIFACTS, RUNS, SYSTEMS
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import System
+from kdive.domain.lifecycle import Run, System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
@@ -40,65 +40,77 @@ def captured_method(object_key: str) -> str:
     return method
 
 
-def ensure_method_match(existing_key: str, method: CaptureMethod, system_id: UUID) -> None:
+def ensure_method_match(existing_key: str, method: CaptureMethod, run_id: UUID) -> None:
     """Raise `configuration_error` when an existing core used another capture method."""
     captured = captured_method(existing_key)
     if captured != method.value:
         raise CategorizedError(
-            "a vmcore captured via a different method already exists for this System",
+            "a vmcore captured via a different method already exists for this Run",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={
-                "system_id": str(system_id),
+                "run_id": str(run_id),
                 "existing_method": captured,
                 "requested_method": method.value,
             },
         )
 
 
-async def precheck_system(
-    conn: AsyncConnection, system_id: UUID, method: CaptureMethod
-) -> System | str:
-    """Under the per-System lock, return an existing same-method key, or the System to capture."""
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        system = await SYSTEMS.get(conn, system_id)
+async def precheck_run(
+    conn: AsyncConnection, run_id: UUID, method: CaptureMethod
+) -> tuple[Run, System] | str:
+    """Under the per-Run lock, return an existing same-method key, or the Run + bound System.
+
+    Run-addressed (ADR-0244): the core is owned by the crashing Run, so the dedup guard and the
+    advisory lock are scoped to ``run_id``. ``system`` is resolved from the Run's binding so the
+    provider can locate the live domain/overlay/volume.
+    """
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
+        run = await RUNS.get(conn, run_id)
+        if run is None or run.system_id is None:
+            raise CategorizedError(
+                "capture target run is gone or not bound to a system",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"run_id": str(run_id)},
+            )
+        system = await SYSTEMS.get(conn, run.system_id)
         if system is None:
             raise CategorizedError(
                 "capture target system is gone",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"system_id": str(system_id)},
+                details={"system_id": str(run.system_id)},
             )
-        existing = await raw_vmcore_key(conn, system_id)
+        existing = await raw_vmcore_key(conn, run_id)
         if existing is not None:
-            ensure_method_match(existing, method, system_id)
+            ensure_method_match(existing, method, run_id)
             return existing
-        return system
+        return run, system
 
 
 async def finalize_capture(
-    conn: AsyncConnection, job: Job, system: System, method: CaptureMethod, output: Any
+    conn: AsyncConnection, job: Job, run: Run, method: CaptureMethod, output: Any
 ) -> str:
-    """Insert both artifact rows + audit under the per-System lock."""
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
-        existing = await raw_vmcore_key(conn, system.id)
+    """Insert both Run-owned artifact rows + audit under the per-Run lock (ADR-0244)."""
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
+        existing = await raw_vmcore_key(conn, run.id)
         if existing is not None:
-            ensure_method_match(existing, method, system.id)
+            ensure_method_match(existing, method, run.id)
             return existing
         await ARTIFACTS.insert(
-            conn, register_artifact_row(output.raw, owner_kind="systems", owner_id=system.id)
+            conn, register_artifact_row(output.raw, owner_kind="runs", owner_id=run.id)
         )
         await ARTIFACTS.insert(
-            conn, register_artifact_row(output.redacted, owner_kind="systems", owner_id=system.id)
+            conn, register_artifact_row(output.redacted, owner_kind="runs", owner_id=run.id)
         )
         await audit.record(
             conn,
-            job_context_from_job(job, system.project),
+            job_context_from_job(job, run.project),
             audit.AuditEvent(
                 tool="vmcore.fetch",
-                object_kind="systems",
-                object_id=system.id,
+                object_kind="runs",
+                object_id=run.id,
                 transition="capture_vmcore",
-                args={"system_id": str(system.id)},
-                project=system.project,
+                args={"run_id": str(run.id)},
+                project=run.project,
             ),
         )
     return str(output.raw.key)
@@ -113,18 +125,19 @@ async def capture_handler(
 ) -> str | None:
     """Capture the System's vmcore and store the raw + redacted rows."""
     payload = load_payload(job, CaptureVmcorePayload)
-    system_id = UUID(payload.system_id)
+    run_id = UUID(payload.run_id)
     method = payload.method
-    precheck = await precheck_system(conn, system_id, method)
+    precheck = await precheck_run(conn, run_id, method)
     if isinstance(precheck, str):
         return precheck
-    binding = await resolver.binding_for_system(conn, system_id)
+    run, system = precheck
+    binding = await resolver.binding_for_system(conn, system.id)
     set_provider_kind(binding.kind.value)
     retriever = binding.runtime.retriever
     started = time.perf_counter()
     try:
-        output = await asyncio.to_thread(retriever.capture, system_id, method)
-        result = await finalize_capture(conn, job, precheck, method, output)
+        output = await asyncio.to_thread(retriever.capture, system.id, run.id, method)
+        result = await finalize_capture(conn, job, run, method, output)
     except Exception:
         elapsed = time.perf_counter() - started
         telemetry.record(method.value, binding.kind.value, "error", seconds=elapsed)

@@ -13,6 +13,7 @@ import asyncio
 from collections.abc import Callable
 from enum import StrEnum
 from typing import Protocol
+from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
@@ -24,7 +25,6 @@ from kdive.db.artifact_queries import (
     RunFetchContext,
     raw_vmcore_key,
     run_fetch_context,
-    system_project,
 )
 from kdive.domain.errors import CategorizedError
 from kdive.log import bind_context
@@ -55,27 +55,24 @@ async def _resolve_key(
     ctx: RequestContext,
     run: RunFetchContext,
     asset: RawAsset,
-    run_id: str,
+    run_uid: UUID,
 ) -> str | ToolResponse:
     """Authorize and resolve the object key for ``asset``, or return a failure envelope.
 
-    Each asset is gated on its **own** owning project: ``vmlinux`` on the Run's project, the raw
-    ``vmcore`` on the System's project (the core is the System's asset). A genuinely-absent asset
-    in the caller's own project is a ``configuration_error`` with a ``*_unavailable`` reason; a
-    cross-project System masks existence as ``not_found``.
+    Both assets are gated on the **Run's** project: ``vmlinux`` is the Run's ``debuginfo_ref`` and
+    the raw ``vmcore`` is Run-owned (``owner_kind='runs'``, ADR-0244). A bound Run always shares its
+    System's project (enforced at ``services/runs/admission.py`` and ``services/runs/bind.py``), so
+    gating on ``run.project`` preserves the cross-project isolation ADR-0243's System-project
+    re-check provided, with no System indirection. A genuinely-absent asset is a
+    ``configuration_error`` with a ``*_unavailable`` reason.
     """
+    run_id = str(run_uid)
+    require_role(ctx, run.project, Role.CONTRIBUTOR)
     if asset is RawAsset.VMLINUX:
-        require_role(ctx, run.project, Role.CONTRIBUTOR)
         if run.debuginfo_ref is None:
             return _config_error(run_id, data={"reason": "vmlinux_unavailable"})
         return run.debuginfo_ref
-    if run.system_id is None:
-        return _config_error(run_id, data={"reason": "vmcore_unavailable"})
-    sysproj = await system_project(conn, run.system_id)
-    if sysproj is None or sysproj not in ctx.projects:
-        return _not_found(run_id)
-    require_role(ctx, sysproj, Role.CONTRIBUTOR)
-    key = await raw_vmcore_key(conn, run.system_id)
+    key = await raw_vmcore_key(conn, run_uid)
     if key is None:
         return _config_error(run_id, data={"reason": "vmcore_unavailable"})
     return key
@@ -104,7 +101,7 @@ async def fetch_raw(
             run = await run_fetch_context(conn, uid)
             if run is None or run.project not in ctx.projects:
                 return _not_found(run_id)
-            resolved = await _resolve_key(conn, ctx, run, asset, run_id)
+            resolved = await _resolve_key(conn, ctx, run, asset, uid)
             if isinstance(resolved, ToolResponse):
                 return resolved
             try:

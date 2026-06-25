@@ -169,7 +169,7 @@ class _ControllerProvider:
 
 
 class _RetrieveProvider:
-    def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
+    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
         artifact = StoredArtifact("key", "etag", Sensitivity.SENSITIVE, "vmcore")
         return CaptureOutput(
             raw=artifact, redacted=artifact, vmcore_build_id="deadbeef", raw_size_bytes=0

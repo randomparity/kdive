@@ -84,7 +84,13 @@ class PowerPayload(SystemPayload):
     action: PowerAction
 
 
-class CaptureVmcorePayload(SystemPayload):
+class CaptureVmcorePayload(RunPayload):
+    """A `capture_vmcore` job: the crashing Run + core method (ADR-0244).
+
+    Run-addressed (not System-addressed): the core is owned by the Run that crashed, and the
+    worker resolves the bound System from ``run_id`` to locate the live resource.
+    """
+
     method: CaptureMethod
 
 
@@ -166,6 +172,7 @@ _RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.BUILD: BuildPayload,
     JobKind.INSTALL: RunPayload,
     JobKind.BOOT: RunPayload,
+    JobKind.CAPTURE_VMCORE: CaptureVmcorePayload,
 }
 
 

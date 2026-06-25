@@ -117,12 +117,16 @@ class RemoteLibvirtRetrieve:
         """Build from the shared worker env; opens no connection and mints no URL here."""
         return cls(secret_registry=secret_registry, config_factory=config_factory)
 
-    def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
-        """Capture a vmcore by dispatching to the selected remote-libvirt workflow."""
+    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
+        """Capture a vmcore by dispatching to the selected remote-libvirt workflow.
+
+        ``system_id`` locates the live domain/dump volume; ``run_id`` owns the stored core
+        (``owner_kind='runs'``, ADR-0244).
+        """
         if method is CaptureMethod.HOST_DUMP:
-            return self._host_dump.capture(system_id)
+            return self._host_dump.capture(system_id, run_id)
         if method is CaptureMethod.KDUMP:
-            return self._kdump.capture(system_id)
+            return self._kdump.capture(system_id, run_id)
         raise CategorizedError(
             "remote-libvirt capture supports only the kdump and host_dump methods",
             category=ErrorCategory.CONFIGURATION_ERROR,

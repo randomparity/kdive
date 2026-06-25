@@ -21,7 +21,7 @@ from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
-from kdive.db.repositories import SYSTEMS
+from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -52,7 +52,7 @@ from kdive.mcp.tools._common import (
 from kdive.mcp.tools._common import (
     config_error_reason as _config_error_reason,
 )
-from kdive.mcp.tools._runtime_resolution import with_runtime_for_run, with_runtime_for_system
+from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools._vmcore_targets import (
     CONSOLE_CRASH,
     EXPECTED_CONSOLE_CRASH,
@@ -69,7 +69,7 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.artifacts.listing import RedactedArtifact, list_redacted_system_artifacts
+from kdive.services.artifacts.listing import RedactedArtifact, list_redacted_run_artifacts
 from kdive.services.idempotency.envelope import keyed_mutation
 
 _log = logging.getLogger(__name__)
@@ -112,19 +112,19 @@ class VmcoreHandlers:
         pool: AsyncConnectionPool,
         ctx: RequestContext,
         *,
-        system_id: str,
+        run_id: str,
         method: CaptureMethod | str | None = None,
         idempotency_key: str | None = None,
     ) -> ToolResponse:
-        return await with_runtime_for_system(
+        return await with_runtime_for_run(
             pool,
             self.resolver,
             ctx,
-            system_id,
+            run_id,
             lambda runtime: _fetch_vmcore(
                 pool,
                 ctx,
-                system_id=system_id,
+                run_id=run_id,
                 method=method,
                 runtime=runtime,
                 idempotency_key=idempotency_key,
@@ -193,33 +193,34 @@ def _supported_method_values(runtime: ProviderRuntime) -> list[str]:
 
 
 def _resolve_capture_method(
-    system_id: str,
+    object_id: str,
     method: CaptureMethod | str | None,
     system: System,
     runtime: ProviderRuntime,
 ) -> CaptureMethod | ToolResponse:
     """Resolve the capture method to admit, or a typed rejection (ADR-0209).
 
-    An explicit method must parse, be core-producing (``_VMCORE_METHODS``), and be advertised by
-    the bound provider's descriptor (else ``capability_unsupported``). An omitted method resolves
-    through the System profile's ``capture_method`` clamped to the core-producing set; if that
-    yields no descriptor-supported core method the call needs an explicit ``method``
-    (``missing_required_field`` — the provider may support core methods, the caller omitted one).
+    ``object_id`` is the Run id the envelope is keyed on (ADR-0244). An explicit method must parse,
+    be core-producing (``_VMCORE_METHODS``), and be advertised by the bound provider's descriptor
+    (else ``capability_unsupported``). An omitted method resolves through the System profile's
+    ``capture_method`` clamped to the core-producing set; if that yields no descriptor-supported
+    core method the call needs an explicit ``method`` (``missing_required_field`` — the provider may
+    support core methods, the caller omitted one).
     """
     if method is not None:
         try:
             explicit = method if isinstance(method, CaptureMethod) else CaptureMethod(method)
         except ValueError:
             return _config_error(
-                system_id, data={"method": method, "reason": "unknown capture method"}
+                object_id, data={"method": method, "reason": "unknown capture method"}
             )
         if explicit not in _VMCORE_METHODS:
             return _config_error(
-                system_id, data={"method": method, "reason": "method does not produce a vmcore"}
+                object_id, data={"method": method, "reason": "method does not produce a vmcore"}
             )
         if explicit not in runtime.supported_capture_methods:
             return _capability_unsupported(
-                system_id,
+                object_id,
                 capability=f"capture_method:{explicit.value}",
                 provider=runtime.component_sources.provider,
                 supported=_supported_method_values(runtime),
@@ -228,12 +229,12 @@ def _resolve_capture_method(
     try:
         profile = ProvisioningProfile.parse(system.provisioning_profile)
     except CategorizedError as exc:
-        return ToolResponse.failure_from_error(system_id, exc)
+        return ToolResponse.failure_from_error(object_id, exc)
     resolved = runtime.profile_policy.capture_method(profile)
     if resolved in _VMCORE_METHODS and resolved in runtime.supported_capture_methods:
         return resolved
     return _config_error_reason(
-        system_id,
+        object_id,
         ConfigErrorReason.MISSING_REQUIRED_FIELD,
         accepted_values=_supported_method_values(runtime),
         detail=(
@@ -247,32 +248,42 @@ async def _fetch_vmcore(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
-    system_id: str,
+    run_id: str,
     method: CaptureMethod | str | None = None,
     runtime: ProviderRuntime,
     idempotency_key: str | None = None,
 ) -> ToolResponse:
-    """Admit a `capture_vmcore` job on a `crashed` System (contributor); return the job handle.
+    """Admit a `capture_vmcore` job for a Run whose bound System is `crashed` (contributor).
 
-    The capture method is admitted against the bound provider's ADR-0208 descriptor (ADR-0209):
-    an explicit method the provider does not support is rejected up front with
-    ``capability_unsupported``; an omitted method is resolved through the System profile's
-    ``ProfilePolicy.capture_method`` clamped to the core-producing set, and a System whose profile
-    yields no implicit core method requires an explicit ``method``. No job row is created on any
-    rejection.
+    Run-addressed (ADR-0244): the core is owned by the crashing Run. The handler resolves the Run,
+    derives its bound System, and applies the unchanged precondition — the System must be `CRASHED`.
+    The capture method is admitted against the bound provider's ADR-0208 descriptor (ADR-0209): an
+    explicit method the provider does not support is rejected with ``capability_unsupported``; an
+    omitted method resolves through the System profile's ``ProfilePolicy.capture_method`` clamped to
+    the core-producing set, and a profile yielding no implicit core method requires an explicit
+    ``method``. No job row is created on any rejection.
     """
-    uid = _as_uuid(system_id)
+    uid = _as_uuid(run_id)
     if uid is None:
-        return _config_error(system_id)
+        return _config_error(run_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
-            system = await SYSTEMS.get(conn, uid)
-            if system is None or system.project not in ctx.projects:
-                return _config_error(system_id)
-            require_role(ctx, system.project, Role.CONTRIBUTOR)
+            run = await RUNS.get(conn, uid)
+            if run is None or run.project not in ctx.projects:
+                return _config_error(run_id)
+            require_role(ctx, run.project, Role.CONTRIBUTOR)
+            if run.system_id is None:
+                return _config_error(
+                    run_id,
+                    detail="run is not bound to a system; cannot capture a vmcore",
+                    data={"reason": "run_unbound"},
+                )
+            system = await SYSTEMS.get(conn, run.system_id)
+            if system is None:
+                return _config_error(run_id)
             if system.state is not SystemState.CRASHED:
                 return _config_error(
-                    system_id,
+                    run_id,
                     detail=(
                         "system must be in CRASHED state to capture a vmcore; current state = "
                         f"{system.state.value}"
@@ -280,7 +291,7 @@ async def _fetch_vmcore(
                     data={"current_status": system.state.value},
                 )
 
-            resolved = _resolve_capture_method(system_id, method, system, runtime)
+            resolved = _resolve_capture_method(run_id, method, system, runtime)
             if isinstance(resolved, ToolResponse):
                 return resolved
             capture_method = resolved
@@ -289,17 +300,17 @@ async def _fetch_vmcore(
                 job = await queue.enqueue(
                     conn,
                     JobKind.CAPTURE_VMCORE,
-                    CaptureVmcorePayload(system_id=system_id, method=capture_method),
-                    job_authorizing(ctx, system.project),
-                    f"{system_id}:capture_vmcore:{capture_method.value}",
+                    CaptureVmcorePayload(run_id=run_id, method=capture_method),
+                    job_authorizing(ctx, run.project),
+                    f"{run_id}:capture_vmcore:{capture_method.value}",
                 )
-                return job_envelope(job, "system_id", uid)
+                return job_envelope(job, "run_id", uid)
 
             return await keyed_mutation(
                 conn,
                 idempotency_key=idempotency_key,
                 principal=ctx.principal,
-                project=system.project,
+                project=run.project,
                 kind=_VMCORE_FETCH_KIND,
                 do_work=_enqueue,
             )
@@ -313,13 +324,13 @@ def _is_redacted_vmcore(object_key: str) -> bool:
 
 
 async def list_vmcores(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, system_id: str
+    pool: AsyncConnectionPool, ctx: RequestContext, *, run_id: str
 ) -> ToolResponse:
-    """Return the System's `redacted` vmcore artifacts in one collection envelope."""
-    listed = await list_redacted_system_artifacts(pool, ctx, system_id=system_id)
+    """Return the Run's `redacted` vmcore artifacts in one collection envelope (ADR-0244)."""
+    listed = await list_redacted_run_artifacts(pool, ctx, run_id=run_id)
     items = [_vmcore_item(row) for row in listed if _is_redacted_vmcore(row.object_key)]
     return ToolResponse.collection(
-        system_id,
+        run_id,
         "ok",
         items,
         suggested_next_actions=["artifacts.get", "postmortem.crash"],
@@ -444,7 +455,7 @@ def register(
         meta={"maturity": "implemented"},
     )
     async def vmcore_fetch(
-        system_id: Annotated[str, Field(description="The crashed System whose vmcore to capture.")],
+        run_id: Annotated[str, Field(description="The crashed Run whose vmcore to capture.")],
         method: Annotated[
             CaptureMethod | None,
             Field(
@@ -464,7 +475,7 @@ def register(
         return await handlers.fetch_vmcore(
             pool,
             current_context(),
-            system_id=system_id,
+            run_id=run_id,
             method=method,
             idempotency_key=idempotency_key,
         )
@@ -476,7 +487,7 @@ def register(
             "partial",
             reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
             detail=(
-                "Lists a System's redacted vmcore artifacts; those rows only exist after a "
+                "Lists a Run's redacted vmcore artifacts; those rows only exist after a "
                 "live capture path runs, exercised under the gated live markers."
             ),
             promotion=(
@@ -486,13 +497,13 @@ def register(
         ),
     )
     async def vmcore_list(
-        system_id: Annotated[
+        run_id: Annotated[
             str,
-            Field(description="The System whose redacted vmcore artifacts to list."),
+            Field(description="The Run whose redacted vmcore artifacts to list."),
         ],
     ) -> ToolResponse:
-        """List vmcore artifacts for one system."""
-        return await list_vmcores(pool, current_context(), system_id=system_id)
+        """List vmcore artifacts for one run."""
+        return await list_vmcores(pool, current_context(), run_id=run_id)
 
     @app.tool(
         name="postmortem.crash",

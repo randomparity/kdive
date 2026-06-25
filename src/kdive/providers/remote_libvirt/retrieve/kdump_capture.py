@@ -87,8 +87,11 @@ class KdumpCapturer:
         self._sleep = sleep
         self._monotonic = monotonic
 
-    def capture(self, system_id: UUID) -> CaptureOutput:
+    def capture(self, system_id: UUID, run_id: UUID) -> CaptureOutput:
         """Inspect the guest's kdump core and upload it via a presigned PUT.
+
+        ``system_id`` locates the live domain; ``run_id`` owns the stored core
+        (``owner_kind='runs'``, ADR-0244).
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` when ``KDIVE_S3_ENDPOINT_URL`` is a
@@ -99,7 +102,7 @@ class KdumpCapturer:
         config = self._config_factory()
         validate_guest_routable_endpoint()
         method = CaptureMethod.KDUMP
-        raw_key = artifact_key(TENANT, OWNER_KIND, str(system_id), f"vmcore-{method.value}")
+        raw_key = artifact_key(TENANT, OWNER_KIND, str(run_id), f"vmcore-{method.value}")
         with connection(
             config, self._secret_backend_factory, self._open_connection, self._pki_base_dir
         ) as conn:
@@ -115,10 +118,10 @@ class KdumpCapturer:
                     expires_in=self._put_expiry_s,
                 )
             )
-            self._upload(domain, system_id, upload)
+            self._upload(domain, system_id, run_id, upload)
         raw = self._reference(raw_key, info.sha256, system_id)
         redacted = persist_redacted(
-            self._store_factory, self._secret_registry, system_id, method, info.dmesg
+            self._store_factory, self._secret_registry, run_id, method, info.dmesg
         )
         return CaptureOutput(
             raw=raw,
@@ -175,7 +178,7 @@ class KdumpCapturer:
             )
         return CoreInfo(sha256=sha256, size_bytes=size_bytes, build_id=build_id, dmesg=dmesg)
 
-    def _upload(self, domain: Domain, system_id: UUID, upload: Any) -> None:
+    def _upload(self, domain: Domain, system_id: UUID, run_id: UUID, upload: Any) -> None:
         argv = [HELPER, "upload", "--url", upload.url]
         for key, value in upload.required_headers.items():
             argv += ["--header", f"{key}:{value}"]
@@ -190,7 +193,7 @@ class KdumpCapturer:
             capability_url=upload.url,
             argv=argv,
             owner_kind=OWNER_KIND,
-            owner_id=str(system_id),
+            owner_id=str(run_id),
         )
         if output.result.exit_status != 0:
             raise CategorizedError(

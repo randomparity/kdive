@@ -74,23 +74,16 @@ async def _seed_run_with_vmlinux(pool: AsyncConnectionPool) -> str:
     return await seed_run_on_system(pool, sys_id, debuginfo_ref=_VMLINUX_REF, build_id="deadbeef")
 
 
-async def _seed_raw_vmcore_row(pool: AsyncConnectionPool, system_id: str) -> str:
-    """Insert a raw vmcore artifact row for a System; return the object key."""
-    key = f"proj/systems/{system_id}/vmcore-host_dump"
+async def _seed_raw_vmcore_row(pool: AsyncConnectionPool, run_id: str) -> str:
+    """Insert a raw Run-owned vmcore artifact row (ADR-0244); return the object key."""
+    key = f"proj/runs/{run_id}/vmcore-host_dump"
     async with pool.connection() as conn:
         await conn.execute(
             "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
-            "retention_class) VALUES ('systems', %s, %s, 'e', 'sensitive', 'vmcore')",
-            (system_id, key),
+            "retention_class) VALUES ('runs', %s, %s, 'e', 'sensitive', 'vmcore')",
+            (run_id, key),
         )
     return key
-
-
-async def _system_id_of(pool: AsyncConnectionPool, run_id: str) -> str:
-    async with pool.connection() as conn:
-        ctx = await run_fetch_context(conn, UUID(run_id))
-    assert ctx is not None and ctx.system_id is not None
-    return str(ctx.system_id)
 
 
 # --- DB readers (Task 1) ------------------------------------------------------------------
@@ -138,8 +131,7 @@ def test_fetch_raw_vmcore_presigns_url(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_run_with_vmlinux(pool)
-            sys_id = await _system_id_of(pool, run_id)
-            key = await _seed_raw_vmcore_row(pool, sys_id)
+            key = await _seed_raw_vmcore_row(pool, run_id)
             store = _FakeStore()
             resp = await fetch_raw(
                 pool, _ctx(), run_id=run_id, asset=RawAsset.VMCORE, store_factory=lambda: store
@@ -148,6 +140,29 @@ def test_fetch_raw_vmcore_presigns_url(migrated_url: str) -> None:
         assert resp.data["asset"] == "vmcore"
         assert resp.refs["download_uri"] == store.url
         assert store.presigned_keys == [key]
+
+    asyncio.run(_run())
+
+
+def test_fetch_raw_vmcore_cross_project_is_not_found(migrated_url: str) -> None:
+    # The Run-owned vmcore is gated on the Run's project (ADR-0244); a caller in another project
+    # gets the existence-masking not_found, never the core. Guards the egress gate move from the
+    # System's project to the Run's (run.project == system.project is enforced at admission/bind).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run_with_vmlinux(pool)
+            await _seed_raw_vmcore_row(pool, run_id)
+            store = _FakeStore()
+            resp = await fetch_raw(
+                pool,
+                _ctx(projects=("other",)),
+                run_id=run_id,
+                asset=RawAsset.VMCORE,
+                store_factory=lambda: store,
+            )
+        assert resp.status == "error"
+        assert "download_uri" not in resp.refs
+        assert store.presigned_keys == []
 
     asyncio.run(_run())
 
