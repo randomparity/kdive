@@ -95,8 +95,8 @@ class _FakeTransport:
     def write_bytes(self, path: str, data: bytes) -> None:  # pragma: no cover - unused
         return None
 
-    def clone(self, remote: str, ref: str, dest: str) -> None:  # pragma: no cover - unused
-        return None
+    def clone(self, remote: str, ref: str, dest: str) -> str:  # pragma: no cover - unused
+        return ""
 
     def cleanup(self, path: str) -> None:  # pragma: no cover - unused
         return None

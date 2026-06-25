@@ -41,6 +41,20 @@ def _optional_str_list(value: object) -> list[str] | None:
     return [item for item in value if isinstance(item, str)]
 
 
+def _optional_str_map(value: object) -> dict[str, str] | None:
+    """Coerce a persisted JSON value to a ``dict[str, str]``; ``None`` on any other shape (#778).
+
+    Accepts only a mapping whose every key and value is a string, so a malformed persisted
+    ``build_provenance`` degrades to ``None`` rather than carrying mistyped fields forward.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    items = cast("Mapping[object, object]", value).items()
+    if not all(isinstance(k, str) and isinstance(v, str) for k, v in items):
+        return None
+    return {k: v for k, v in items if isinstance(k, str) and isinstance(v, str)}
+
+
 @dataclass(frozen=True, slots=True)
 class BuildStepResult:
     """Typed boundary for the `run_steps(step='build').result` JSON payload."""
@@ -50,6 +64,7 @@ class BuildStepResult:
     build_id: str | None
     initrd_ref: str | None = None
     cmdline: str | None = None
+    build_provenance: dict[str, str] | None = None
 
     @classmethod
     def load(cls, value: object) -> BuildStepResult | None:
@@ -62,10 +77,11 @@ class BuildStepResult:
             build_id=_optional_str(result.get("build_id")),
             initrd_ref=_optional_str(result.get("initrd_ref")),
             cmdline=_optional_str(result.get("cmdline")),
+            build_provenance=_optional_str_map(result.get("build_provenance")),
         )
 
-    def dump(self) -> dict[str, str]:
-        result: dict[str, str] = {}
+    def dump(self) -> dict[str, str | dict[str, str]]:
+        result: dict[str, str | dict[str, str]] = {}
         if self.kernel_ref is not None:
             result["kernel_ref"] = self.kernel_ref
         if self.debuginfo_ref is not None:
@@ -76,6 +92,8 @@ class BuildStepResult:
             result["build_id"] = self.build_id
         if self.cmdline is not None:
             result["cmdline"] = self.cmdline
+        if self.build_provenance is not None:
+            result["build_provenance"] = dict(self.build_provenance)
         return result
 
     def refs(self) -> dict[str, str]:

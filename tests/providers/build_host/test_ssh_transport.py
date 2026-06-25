@@ -102,12 +102,12 @@ def test_run_builds_ssh_wrapper_argv() -> None:
 
 
 def test_clone_issues_commands_in_order() -> None:
-    """clone() runs git init, fetch --depth 1, rev-parse --verify, checkout FETCH_HEAD."""
+    """clone() runs git init, fetch --depth 1, rev-parse --verify, checkout, rev-parse HEAD."""
     remote = "https://git.kernel.org/pub/scm/linux.git"
     ref = "v6.9"
     dest = "/build/src"
 
-    # All four sub-commands succeed (returncode 0); rev-parse prints the resolved sha.
+    # All sub-commands succeed (returncode 0); each rev-parse prints the resolved sha.
     def side_effect(argv: list[str], **kwargs: object) -> MagicMock:
         return _completed(returncode=0, stdout="deadbeef\n")
 
@@ -117,9 +117,11 @@ def test_clone_issues_commands_in_order() -> None:
             identity_path=_FAKE_IDENTITY,
             secret_registry=SecretRegistry(),
         )
-        transport.clone(remote, ref, dest)
+        resolved = transport.clone(remote, ref, dest)
 
-    assert mock_run.call_count == 4
+    # The final `rev-parse HEAD` output is returned as the resolved commit.
+    assert resolved == "deadbeef"
+    assert mock_run.call_count == 5
     calls = mock_run.call_args_list
 
     # Extract the remote command (last positional element of the ssh argv).
@@ -136,6 +138,8 @@ def test_clone_issues_commands_in_order() -> None:
     assert "FETCH_HEAD" in remote_cmd(calls[2])
     assert "checkout" in remote_cmd(calls[3])
     assert "FETCH_HEAD" in remote_cmd(calls[3])
+    assert "rev-parse" in remote_cmd(calls[4])
+    assert "HEAD" in remote_cmd(calls[4])
 
 
 def test_clone_non_zero_checkout_raises_configuration_error() -> None:

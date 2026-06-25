@@ -116,9 +116,11 @@ class LocalLibvirtBuild:
         allowed_component_roots: list[Path] | None = None,
         workspace_cleanup: WorkspaceCleanup | None = None,
         sandbox_provider: SandboxProvider | None = None,
+        build_provenance_sink: dict[str, str] | None = None,
     ) -> None:
         self._tenant = tenant
         self._sandbox_provider = sandbox_provider
+        self._build_provenance_sink = build_provenance_sink
         self._workspace_root = workspace_root
         self._allowed_component_roots = allowed_component_roots or [
             Path(_build_config.DEFAULT_BUILD_COMPONENT_ROOT)
@@ -158,6 +160,9 @@ class LocalLibvirtBuild:
         kernel_src = config.require(KERNEL_SRC)
         allowed_component_roots = _build_config.build_component_roots_from_env()
         sandbox_provider = resolve_build_sandbox_provider()
+        # The worker-local git lane (ADR-0162) records {remote, ref, resolved_commit} here; the
+        # build handler reads it back off BuildOutput and dispatch adds build_host (#778).
+        build_provenance_sink: dict[str, str] = {}
         return cls(
             tenant="local",
             workspace_root=workspace_root,
@@ -167,6 +172,7 @@ class LocalLibvirtBuild:
                 secret_registry,
                 allowlist=local_build_remote_allowlist_from_env(),
                 sandbox_provider=sandbox_provider,
+                provenance_sink=build_provenance_sink,
             ),
             run_olddefconfig=lambda ws: _build_exec.real_run_olddefconfig(
                 ws, sandbox=sandbox_provider.get()
@@ -185,6 +191,7 @@ class LocalLibvirtBuild:
             allowed_component_roots=allowed_component_roots,
             secret_registry=secret_registry,
             sandbox_provider=sandbox_provider,
+            build_provenance_sink=build_provenance_sink,
         )
 
     def over_transport(
@@ -195,6 +202,7 @@ class LocalLibvirtBuild:
         git_remote: str,
         git_ref: str,
         secret_registry: SecretRegistry,
+        provenance_sink: dict[str, str] | None = None,
     ) -> LocalLibvirtBuild:
         """Return a sibling builder whose build runs ON ``transport``'s host (ADR-0101).
 
@@ -222,7 +230,9 @@ class LocalLibvirtBuild:
             tenant=self._tenant,
             workspace_root=host_root,
             store_factory=self._store_factory,
-            checkout=transport_git_checkout(transport, git_remote, git_ref, secret_registry),
+            checkout=transport_git_checkout(
+                transport, git_remote, git_ref, secret_registry, provenance_sink=provenance_sink
+            ),
             run_olddefconfig=transport_run_olddefconfig(transport),
             read_config=transport_read_config(transport),
             run_make=transport_run_make(transport),
@@ -258,6 +268,12 @@ class LocalLibvirtBuild:
                 on a non-zero ``make``/``modules_install`` exit, a missing bzImage, or a missing
                 build-id; ``INFRASTRUCTURE_FAILURE`` propagated from a failed artifact store.
         """
+        # `from_env` runs once per worker process, so this builder (and its checkout closure's
+        # provenance_sink) is reused across every build the worker handles. Clear the sink up
+        # front — BEFORE the checkout fills it — so a build only ever attaches provenance its own
+        # clone recorded; a clone that records nothing must not inherit the prior build's (#778).
+        if self._build_provenance_sink is not None:
+            self._build_provenance_sink.clear()
         workspace = self._orchestrator.workspace_path(run_id)
         try:
             build_workspace_capturing_log(
@@ -284,10 +300,13 @@ class LocalLibvirtBuild:
                     vmlinux = self.publish(run_id, "vmlinux", self._read_vmlinux_source(workspace))
             finally:
                 self._staging_cleanup(mod_root)
-            return BuildOutput(
-                kernel_ref=kernel.key,
-                debuginfo_ref=vmlinux.key,
-                build_id=build_id,
+            return _build_workspace.attach_clone_provenance(
+                BuildOutput(
+                    kernel_ref=kernel.key,
+                    debuginfo_ref=vmlinux.key,
+                    build_id=build_id,
+                ),
+                self._build_provenance_sink,
             )
         finally:
             self._orchestrator.cleanup_workspace(workspace)

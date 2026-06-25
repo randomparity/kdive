@@ -8,6 +8,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.shared.build_host.configuration.git_source import (
     parse_remote,
     remote_allowed,
+    strip_userinfo,
     validate_git_arg,
 )
 
@@ -134,3 +135,35 @@ def test_remote_allowed_rejects(remote: str) -> None:
 
 def test_remote_allowed_empty_allowlist_denies_all() -> None:
     assert remote_allowed("https://github.com/myorg/linux", ()) is False
+
+
+# --- strip_userinfo (drop credentials before provenance) ---------------------------
+
+
+def test_strip_userinfo_drops_user_and_token_from_url() -> None:
+    assert strip_userinfo("https://u:p@h/r") == "https://h/r"
+
+
+def test_strip_userinfo_drops_user_only() -> None:
+    assert strip_userinfo("https://git@github.com/myorg/linux") == "https://github.com/myorg/linux"
+
+
+def test_strip_userinfo_preserves_port_and_path() -> None:
+    credentialed = "ssh://git:tok@host:2222/team/linux.git"  # pragma: allowlist secret
+    assert strip_userinfo(credentialed) == "ssh://host:2222/team/linux.git"
+
+
+def test_strip_userinfo_leaves_a_clean_url_unchanged() -> None:
+    assert (
+        strip_userinfo("https://github.com/torvalds/linux") == "https://github.com/torvalds/linux"
+    )
+
+
+def test_strip_userinfo_leaves_scp_form_unchanged() -> None:
+    # scp-style [user@]host:path is not a URL form; returned unchanged (no false rewrite).
+    scp = "git@git.example.com:team/linux.git"
+    assert strip_userinfo(scp) == scp
+
+
+def test_strip_userinfo_leaves_a_bare_label_unchanged() -> None:
+    assert strip_userinfo("linux-6.9") == "linux-6.9"

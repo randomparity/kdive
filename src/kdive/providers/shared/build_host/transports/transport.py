@@ -114,7 +114,7 @@ class LocalBuildTransport:
                 path=path,
             ) from exc
 
-    def clone(self, remote: str, ref: str, dest: str) -> None:  # noqa: ARG002
+    def clone(self, remote: str, ref: str, dest: str) -> str:  # noqa: ARG002
         """Reject git clone — local builds use the warm tree, not a fresh clone.
 
         Raises:

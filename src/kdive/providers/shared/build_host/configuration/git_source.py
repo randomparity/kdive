@@ -9,7 +9,7 @@ option or smuggle a control character) and the deny-by-default remote allowlist
 from __future__ import annotations
 
 from collections.abc import Sequence
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import kdive.config as config
 from kdive.config.core_settings import LOCAL_BUILD_REMOTE_ALLOWLIST
@@ -60,6 +60,24 @@ def parse_remote(remote: str) -> tuple[str, str, str]:
         location, path = remote.split(":", 1)
         return "ssh", location.rsplit("@", 1)[-1].lower(), "/" + path
     return "", "", ""
+
+
+def strip_userinfo(remote: str) -> str:
+    """Return *remote* with any ``user[:token]@`` userinfo dropped from its URL form.
+
+    A URL form (``scheme://[userinfo@]host[:port]/path``) is reassembled without its userinfo so
+    a credentialed clone URL never reaches provenance, logs, or error details. The scheme, host,
+    port, and path are preserved verbatim. A non-URL form — the scp-style ``[user@]host:path`` or
+    a bare warm-tree label — has no URL userinfo to strip and is returned unchanged (rewriting it
+    would corrupt a legitimate ``user@`` host segment).
+    """
+    if "://" not in remote:
+        return remote
+    parts = urlsplit(remote)
+    host = parts.hostname or ""
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
 
 
 def _entry_matches(host: str, path: str, entry: str) -> bool:

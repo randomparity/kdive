@@ -142,8 +142,9 @@ class FakeBuildTransport:
     def write_bytes(self, path: str, data: bytes) -> None:
         self._record("write_bytes", path, data=data)
 
-    def clone(self, remote: str, ref: str, dest: str) -> None:
+    def clone(self, remote: str, ref: str, dest: str) -> str:
         self._record("clone", remote, ref, dest)
+        return "deadbeef"
 
     def upload_file(self, path: str, presigned: Any) -> str:  # pragma: no cover
         self._record("upload_file", path, presigned=presigned)
