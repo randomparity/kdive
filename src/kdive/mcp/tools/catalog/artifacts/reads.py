@@ -43,6 +43,16 @@ from kdive.store.objectstore import (
 _log = logging.getLogger(__name__)
 
 _MAX_SEARCHABLE_ARTIFACT_BYTES = 1024 * 1024
+# The largest object `artifacts.get` pulls whole into memory to slice a window from.
+# Intentionally equal to `_MAX_SEARCHABLE_ARTIFACT_BYTES` (both byte-reading read tools
+# share the 1 MiB in-memory ceiling), but a distinct constant so the two can diverge
+# later without surprise (ADR-0247). Larger objects omit inline content; the
+# always-present `refs.download_uri` serves them.
+_MAX_WINDOWED_FETCH_BYTES = 1024 * 1024
+# The default inline window `artifacts.get` returns when the caller names no `max_bytes`
+# (ADR-0247): 16 KiB ≈ 4k–5k tokens, sized to the tool-result token budget rather than the
+# 64 KiB `KDIVE_ARTIFACT_INLINE_MAX_BYTES` byte cap (which still bounds the per-call window).
+ARTIFACT_GET_WINDOW_DEFAULT_BYTES = 16 * 1024
 _GET_SQL: LiteralString = (
     "SELECT id, object_key, owner_kind, owner_id FROM artifacts "
     "WHERE id = %s AND owner_kind IN ('systems', 'runs') AND sensitivity = %s"
@@ -208,21 +218,32 @@ async def artifacts_get(
     ctx: RequestContext,
     *,
     artifact_id: str,
+    byte_offset: int = 0,
+    max_bytes: int = ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
     store_factory: Callable[[], _SearchStore] = object_store_from_env,
 ) -> ToolResponse:
-    """Return one `redacted` artifact's content, or a not-found-shaped config error.
+    """Return one `redacted` artifact's content window, or a not-found-shaped config error.
 
-    On success the envelope carries the object ref plus, best-effort, the redacted
-    bytes inline (`data["content"]`, capped at ``KDIVE_ARTIFACT_INLINE_MAX_BYTES``)
-    and a presigned download URL (`refs["download_uri"]`). A store outage degrades
-    the content/URI enrichment to a ``data["content_unavailable"]`` reason; the
-    metadata envelope still returns (ADR-0140).
+    On success the envelope carries the object ref plus, best-effort, a byte window of
+    the redacted bytes inline (`data["content"]`) and a presigned download URL
+    (`refs["download_uri"]`). The window is ``data[byte_offset : byte_offset +
+    effective_max]`` where ``effective_max = min(max_bytes,
+    KDIVE_ARTIFACT_INLINE_MAX_BYTES)``; ``data["content_truncated"]`` is ``"true"`` and
+    ``data["next_offset"]`` carries the byte offset to resume paging when bytes remain
+    after the window. A negative ``byte_offset`` reads from the start and a
+    ``max_bytes <= 0`` floors to a 1-byte window (clamped, never rejected). Objects
+    larger than ``_MAX_WINDOWED_FETCH_BYTES`` omit inline content
+    (``content_omitted``) and are retrieved via ``refs["download_uri"]``. A store
+    outage degrades the content/URI enrichment to a ``data["content_unavailable"]``
+    reason; the metadata envelope still returns (ADR-0140, ADR-0247).
     """
     authorized = await _authorized_redacted_artifact(pool, ctx, artifact_id=artifact_id)
     if isinstance(authorized, ToolResponse):
         return authorized
     refs: dict[str, str] = {"object": authorized.key}
-    data = await _artifact_content(authorized.key, store_factory, refs)
+    data = await _artifact_content(
+        authorized.key, store_factory, refs, byte_offset=byte_offset, max_bytes=max_bytes
+    )
     if data is None:  # fetched object's sensitivity is not REDACTED (the redaction gate)
         return _config_error(artifact_id)
     return ToolResponse.success(
@@ -238,14 +259,17 @@ async def _artifact_content(
     key: str,
     store_factory: Callable[[], _SearchStore],
     refs: dict[str, str],
+    *,
+    byte_offset: int,
+    max_bytes: int,
 ) -> dict[str, str] | None:
-    """Enrich ``refs`` with a download URI and return the inline-content data fields.
+    """Enrich ``refs`` with a download URI and return the inline byte-window data fields.
 
     Best-effort: any store failure yields a ``content_unavailable`` reason and leaves
     ``refs`` without a ``download_uri`` rather than failing the tool. Returns ``None``
     when the fetched object's sensitivity is not `REDACTED` (the caller maps that to a
     not-found-shaped config error — the same redaction gate `artifacts_search_text`
-    applies).
+    applies). ``byte_offset``/``max_bytes`` are clamped here (ADR-0247), never rejected.
     """
     try:
         store = store_factory()
@@ -253,6 +277,8 @@ async def _artifact_content(
         return {"content_unavailable": "store_unconfigured"}
     inline_cap = config.require(ARTIFACT_INLINE_MAX_BYTES)
     ttl = config.require(ARTIFACT_DOWNLOAD_TTL_SECONDS)
+    byte_offset = max(byte_offset, 0)
+    effective_max = min(max(max_bytes, 1), inline_cap)
     try:
         head = await asyncio.to_thread(store.head, key)
         if head is None:
@@ -262,7 +288,7 @@ async def _artifact_content(
         if head.sensitivity is not Sensitivity.REDACTED:
             return None
         refs["download_uri"] = await asyncio.to_thread(store.presign_get, key, expires_in=ttl)
-        if head.size_bytes > inline_cap:
+        if head.size_bytes > _MAX_WINDOWED_FETCH_BYTES:
             return {"size_bytes": str(head.size_bytes), "content_omitted": "artifact_too_large"}
         fetched = await asyncio.to_thread(store.get_artifact, key, head.etag)
     except CategorizedError:
@@ -270,11 +296,16 @@ async def _artifact_content(
         return {"content_unavailable": "store_error"}
     if fetched.sensitivity is not Sensitivity.REDACTED:
         return None
-    return {
+    window = fetched.data[byte_offset : byte_offset + effective_max]
+    next_offset = byte_offset + len(window)
+    data = {
         "size_bytes": str(head.size_bytes),
-        "content": fetched.data.decode("utf-8", errors="replace"),
-        "content_truncated": "false",
+        "content": window.decode("utf-8", errors="replace"),
+        "content_truncated": str(next_offset < head.size_bytes).lower(),
     }
+    if next_offset < head.size_bytes:
+        data["next_offset"] = str(next_offset)
+    return data
 
 
 async def _artifacts_search_text(

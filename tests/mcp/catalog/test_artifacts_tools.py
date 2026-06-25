@@ -19,6 +19,8 @@ from kdive.mcp.app import build_app
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog.artifacts.reads import (
+    _MAX_WINDOWED_FETCH_BYTES,
+    ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
     ArtifactReadHandlers,
     ArtifactSearchRequest,
     artifacts_get,
@@ -43,15 +45,20 @@ _CONTEXT_BOUNDS = {
 }
 
 
-def _search_text_param_schema() -> dict[str, dict[str, object]]:
-    """The `artifacts.search_text` parameter schema from a DB-free built app."""
+def _tool_param_schema(tool_name: str) -> dict[str, dict[str, object]]:
+    """One tool's advertised parameter schema from a DB-free built app."""
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     kp = make_keypair()
     verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
     app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
-    tool = asyncio.run(app.get_tool("artifacts.search_text"))
+    tool = asyncio.run(app.get_tool(tool_name))
     assert tool is not None
     return tool.parameters["properties"]
+
+
+def _search_text_param_schema() -> dict[str, dict[str, object]]:
+    """The `artifacts.search_text` parameter schema from a DB-free built app."""
+    return _tool_param_schema("artifacts.search_text")
 
 
 def _ctx(
@@ -444,6 +451,7 @@ def test_artifacts_get_inlines_small_redacted_content(migrated_url: str) -> None
         assert resp.status == "available"
         assert data_str(resp, "content") == "panic: redacted log\n"
         assert data_str(resp, "content_truncated") == "false"
+        assert "next_offset" not in resp.data  # whole object fits the window
         assert data_str(resp, "size_bytes") == str(len(b"panic: redacted log\n"))
         assert resp.refs["download_uri"].endswith("?token=stub")
         # default TTL reaches presign_get with no env set
@@ -452,11 +460,199 @@ def test_artifacts_get_inlines_small_redacted_content(migrated_url: str) -> None
     asyncio.run(_run())
 
 
+def test_artifacts_get_default_window_caps_large_console(migrated_url: str) -> None:
+    # Criterion 1: a >16 KiB (but in-ceiling) object returns at most the default
+    # window inline, flags truncation, and advances next_offset.
+    async def _run() -> None:
+        body = b"L" * 20_000
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            store = _SearchStore(body)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
+            )
+        assert resp.status == "available"
+        assert len(data_str(resp, "content")) == ARTIFACT_GET_WINDOW_DEFAULT_BYTES
+        assert data_str(resp, "content_truncated") == "true"
+        assert data_str(resp, "next_offset") == str(ARTIFACT_GET_WINDOW_DEFAULT_BYTES)
+        assert data_str(resp, "size_bytes") == "20000"
+        assert resp.refs["download_uri"].endswith("?token=stub")
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_pages_to_completion(migrated_url: str) -> None:
+    # Criterion 2: paging by next_offset yields each window; concatenation equals
+    # the source and the final window has no next_offset.
+    async def _run() -> None:
+        body = bytes((i % 26) + 65 for i in range(5_000))  # ASCII A–Z, byte==char
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+
+            collected = b""
+            offset = 0
+            seen_final = False
+            for _ in range(100):  # bound the loop defensively
+                store = _SearchStore(body)
+                resp = await artifacts_get(
+                    pool,
+                    _ctx(),
+                    artifact_id=red_id,
+                    store_factory=lambda bound=store: bound,
+                    byte_offset=offset,
+                    max_bytes=2_000,
+                )
+                collected += data_str(resp, "content").encode("utf-8")
+                if data_str(resp, "content_truncated") == "false":
+                    assert "next_offset" not in resp.data
+                    seen_final = True
+                    break
+                offset = int(data_str(resp, "next_offset"))
+        assert seen_final
+        assert collected == body
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_offset_past_end_is_empty(migrated_url: str) -> None:
+    # Criterion 3: byte_offset at/past the object end terminates paging cleanly.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            for offset in (5, 99):  # at end and well past end
+                store = _SearchStore(b"hello")
+                resp = await artifacts_get(
+                    pool,
+                    _ctx(),
+                    artifact_id=red_id,
+                    store_factory=lambda bound=store: bound,
+                    byte_offset=offset,
+                )
+                assert resp.status == "available"
+                assert data_str(resp, "content") == ""
+                assert data_str(resp, "content_truncated") == "false"
+                assert "next_offset" not in resp.data
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_multibyte_split_decodes_with_replacement(migrated_url: str) -> None:
+    # Criterion 4: a window edge splitting a 2-byte char decodes (replacement), never raises.
+    async def _run() -> None:
+        body = "é".encode() * 100  # 200 bytes, each char 2 bytes
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            store = _SearchStore(body)
+            resp = await artifacts_get(
+                pool,
+                _ctx(),
+                artifact_id=red_id,
+                store_factory=lambda: store,
+                max_bytes=15,  # odd → lands mid-character
+            )
+        assert resp.status == "available"
+        content = data_str(resp, "content")
+        assert content.startswith("é" * 7)
+        assert content.endswith("�")  # the split byte
+        assert data_str(resp, "content_truncated") == "true"
+        assert data_str(resp, "next_offset") == "15"
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_clamps_out_of_range_window(migrated_url: str) -> None:
+    # Criterion 5: a negative byte_offset reads from the start; max_bytes<=0 floors
+    # to a 1-byte window. Neither raises.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            store = _SearchStore(b"abcdef")
+            neg = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, byte_offset=-3
+            )
+            store2 = _SearchStore(b"abcdef")
+            zero = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store2, max_bytes=0
+            )
+        assert data_str(neg, "content") == "abcdef"  # negative offset → from start
+        assert data_str(neg, "content_truncated") == "false"
+        assert data_str(zero, "content") == "a"  # max_bytes<=0 → 1-byte window
+        assert data_str(zero, "content_truncated") == "true"
+        assert data_str(zero, "next_offset") == "1"
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_clamps_window_to_lowered_inline_cap(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Criterion 6: the configured inline cap bounds the window even when max_bytes is larger.
+    monkeypatch.setenv("KDIVE_ARTIFACT_INLINE_MAX_BYTES", "8192")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            store = _SearchStore(b"Z" * 32_768)
+            resp = await artifacts_get(
+                pool,
+                _ctx(),
+                artifact_id=red_id,
+                store_factory=lambda: store,
+                max_bytes=64 * 1024,
+            )
+        assert len(data_str(resp, "content")) == 8192  # clamped to the configured cap
+        assert data_str(resp, "content_truncated") == "true"
+        assert data_str(resp, "next_offset") == "8192"
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_over_ceiling_omits_even_with_window(migrated_url: str) -> None:
+    # Criterion 7: an object above the fetch ceiling omits content (download_uri only),
+    # even when a window is requested; it is never fetched.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            store = _SearchStore(b"", size=_MAX_WINDOWED_FETCH_BYTES + 1)
+            resp = await artifacts_get(
+                pool,
+                _ctx(),
+                artifact_id=red_id,
+                store_factory=lambda: store,
+                byte_offset=10,
+                max_bytes=100,
+            )
+        assert resp.status == "available"
+        assert "content" not in resp.data
+        assert data_str(resp, "content_omitted") == "artifact_too_large"
+        assert resp.refs["download_uri"].endswith("?token=stub")
+        assert store.got is False
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_at_ceiling_is_windowed(migrated_url: str) -> None:
+    # Edge: an object exactly at the fetch ceiling is windowed (fetched), not omitted.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            store = _SearchStore(b"X" * 100, size=_MAX_WINDOWED_FETCH_BYTES)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
+            )
+        assert resp.status == "available"
+        assert "content" in resp.data
+        assert "content_omitted" not in resp.data
+        assert store.got is True
+
+    asyncio.run(_run())
+
+
 def test_artifacts_get_omits_oversized_content_keeps_uri(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            store = _SearchStore(b"", size=64 * 1024 + 1)
+            store = _SearchStore(b"", size=_MAX_WINDOWED_FETCH_BYTES + 1)
             resp = await artifacts_get(
                 pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
             )
@@ -508,7 +704,9 @@ def test_artifacts_get_oversized_honors_head_redaction_gate(migrated_url: str) -
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             # An oversized object whose metadata says sensitive: no URI, not-found-shaped.
-            store = _SearchStore(b"", size=64 * 1024 + 1, head_sensitivity=Sensitivity.SENSITIVE)
+            store = _SearchStore(
+                b"", size=_MAX_WINDOWED_FETCH_BYTES + 1, head_sensitivity=Sensitivity.SENSITIVE
+            )
             resp = await artifacts_get(
                 pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
             )
@@ -678,6 +876,18 @@ def test_search_text_schema_advertises_context_caps() -> None:
         assert schema["maximum"] == high, field
         # The description states the range so the cap is discoverable in the schema text.
         assert f"{low}–{high}" in str(schema["description"]), field
+
+
+def test_artifacts_get_schema_advertises_window_params() -> None:
+    # Criterion 10: byte_offset/max_bytes are discoverable integer params whose
+    # descriptions name the effective bound + the paging field.
+    props = _tool_param_schema("artifacts.get")
+    assert props["byte_offset"]["type"] == "integer"
+    assert props["byte_offset"]["default"] == 0
+    assert "next_offset" in str(props["byte_offset"]["description"])
+    assert props["max_bytes"]["type"] == "integer"
+    assert props["max_bytes"]["default"] == ARTIFACT_GET_WINDOW_DEFAULT_BYTES
+    assert "KDIVE_ARTIFACT_INLINE_MAX_BYTES" in str(props["max_bytes"]["description"])
 
 
 def test_search_text_model_bounds_equal_runtime_bounds() -> None:
