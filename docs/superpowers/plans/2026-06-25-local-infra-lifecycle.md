@@ -133,15 +133,21 @@ libvirt_ok() {
   virsh -c "$KDIVE_LIBVIRT_URI" list >/dev/null 2>&1
 }
 
-# The host prerequisites a local-libvirt provision actually needs. Returns 0 iff all present.
+# The host prerequisites a local-libvirt provision actually needs. Returns 0 iff all are
+# PRESENT (existence only — ownership/writability is the root worker's concern, not testable
+# reliably as the invoking user). up.sh creates the dirs before calling this.
 provision_prereqs_ok() {
-  local rc=0
+  local rc=0 staging="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
   command -v qemu-img >/dev/null 2>&1 || {
     echo "  MISSING: qemu-img on PATH (needed for rootfs overlays)" >&2
     rc=1
   }
   [[ -d "$KDIVE_ROOTFS_DIR" ]] || {
     echo "  MISSING: ${KDIVE_ROOTFS_DIR} (per-System qcow2 overlay dir)" >&2
+    rc=1
+  }
+  [[ -d "$staging" ]] || {
+    echo "  MISSING: ${staging} (KDIVE_INSTALL_STAGING)" >&2
     rc=1
   }
   return "$rc"
@@ -223,7 +229,9 @@ sleep 5
 
 echo
 echo "=== running kdive daemons ==="
-ps -eo pid,user,lstart,args | awk -v re="$_daemon_match" '$0 ~ re && $2 ~ /^[0-9]+$/'
+# $1 is the numeric PID column, so this both matches real daemons and drops the awk self-line
+# and any header. (Do NOT test $2 — that is the username, never numeric.)
+ps -eo pid,user,lstart,args | awk -v re="$_daemon_match" '$0 ~ re && $1 ~ /^[0-9]+$/'
 echo
 report_build_stamps
 echo
@@ -280,7 +288,8 @@ docker compose ps --format 'table {{.Service}}\t{{.Status}}' \
 
 echo
 echo "=== host daemons ==="
-ps -eo pid,user,args | awk -v re="$_daemon_match" '$0 ~ re && $2 ~ /^[0-9]+$/' || true
+# $1 is the numeric PID column (drops the awk self-line + header); $2 is the username.
+ps -eo pid,user,args | awk -v re="$_daemon_match" '$0 ~ re && $1 ~ /^[0-9]+$/' || true
 echo
 report_build_stamps
 
@@ -527,14 +536,21 @@ if ! bash "${here}/apply-migrations.sh"; then
 fi
 
 banner "libvirt"
-if ! systemctl is-active --quiet virtqemud || ! systemctl is-active --quiet virtnetworkd; then
-  echo "starting + enabling virtqemud/virtnetworkd (sudo) ..."
-  sudo systemctl enable --now virtqemud.socket virtnetworkd.socket
+# The provider uses user-mode SLIRP networking (no libvirt network), so only virtqemud is
+# needed — do NOT manage virtnetworkd. virtqemud is socket-activated, so `libvirt_ok` (a
+# `virsh list`) activates it on connect; gate on that, not `systemctl is-active` (which reports
+# the *service* inactive on a healthy socket-activated host and would re-sudo every run).
+if ! libvirt_ok; then
+  echo "libvirt unreachable; enabling virtqemud.socket (sudo) ..."
+  sudo systemctl enable --now virtqemud.socket
 fi
 libvirt_ok || {
   echo "libvirt daemon not reachable at ${KDIVE_LIBVIRT_URI}" >&2
   exit 1
 }
+# Create the provision dirs (idempotent) so a clean host isn't gated on dirs nothing made.
+# The root worker owns/writes them at provision time; existence is all up.sh requires.
+sudo mkdir -p "$KDIVE_ROOTFS_DIR" "${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
 provision_prereqs_ok || {
   echo "libvirt reachable but provision prerequisites are missing (see MISSING lines)" >&2
   exit 1
@@ -620,6 +636,12 @@ done
 if [[ "$wipe" == "1" && "$assume_yes" != "1" ]]; then
   echo "WARNING: --wipe drops the Postgres volume and destroys all kdive-* libvirt domains" >&2
   echo "and their overlay disks. This is irreversible." >&2
+  # An interactive prompt needs a tty; under the agent `!` prefix (or any piped stdin) `read`
+  # gets EOF and would silently abort. Require --yes instead of hanging/aborting confusingly.
+  if [[ ! -t 0 ]]; then
+    echo "non-interactive stdin: re-run as 'down.sh --wipe --yes' to confirm" >&2
+    exit 1
+  fi
   read -r -p "Type 'wipe' to proceed: " confirm
   [[ "$confirm" == "wipe" ]] || {
     echo "aborted"
@@ -663,7 +685,8 @@ Expected: daemons stopped, backends down, but the kdive Postgres named volume st
 
 - [ ] **Step 4: `--wipe` produces a clean slate (live, on this host)**
 
-Run: `! scripts/live-stack/down.sh --wipe` (type `wipe` at the prompt), then `scripts/live-stack/up.sh`
+In a real terminal: `scripts/live-stack/down.sh --wipe` (type `wipe` at the prompt). Through the
+agent `!` prefix (non-tty), use `! scripts/live-stack/down.sh --wipe --yes` instead. Then `scripts/live-stack/up.sh`.
 Expected: the Postgres volume is recreated empty (migrations re-apply from scratch), no `kdive-*` domains remain (`virsh -c qemu:///system list --all --name | grep kdive` → empty), and no `*-overlay.qcow2` files remain under `/var/lib/kdive/rootfs`.
 
 - [ ] **Step 5: Commit**
@@ -695,11 +718,14 @@ the host processes own that tier and the host apply-migrations.sh is the authori
 migrator. These are text-level guards because the scripts are not import-testable.
 """
 
+import re
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _UP = _REPO_ROOT / "scripts" / "live-stack" / "up.sh"
 _APP_TIER = ("migrate", "server", "worker", "reconciler")
+# Any `compose ... up ...` invocation, regardless of intervening flags (e.g. `--profile obs`).
+_COMPOSE_UP = re.compile(r"compose\b.*\bup\b")
 
 
 def test_up_reconciles_app_tier_before_start() -> None:
@@ -710,10 +736,13 @@ def test_up_reconciles_app_tier_before_start() -> None:
 def test_up_never_starts_the_app_tier() -> None:
     text = _UP.read_text()
     for line in text.splitlines():
-        if "compose up" not in line:
+        # Match `compose up` even with flags between (`compose --profile obs up`); a naive
+        # "compose up" substring check would miss the profile-flag form and let the very
+        # regression this guard exists to catch slip through.
+        if not _COMPOSE_UP.search(line):
             continue
         for svc in _APP_TIER:
-            assert f" {svc}" not in line, f"up.sh starts app-tier service in: {line!r}"
+            assert not re.search(rf"\b{svc}\b", line), f"up.sh starts app-tier service in: {line!r}"
 
 
 def test_up_uses_the_canonical_backend_list() -> None:
@@ -728,9 +757,14 @@ Expected: 3 passed. (up.sh from Task 4 already satisfies the invariants — this
 
 - [ ] **Step 3: Verify the guard actually catches a regression**
 
-Temporarily edit a copy: change up.sh's backends line to `docker compose up -d server` in a scratch edit, re-run the test, confirm `test_up_never_starts_the_app_tier` FAILS, then revert.
+Temporarily edit a copy and confirm BOTH regression forms fail (the plain and the profile-flag
+form the naive substring check used to miss):
+- change a backends line to `docker compose up -d server` → expect FAIL.
+- change it to `docker compose --profile obs up -d server` → expect FAIL (this is the form the
+  old `"compose up" in line` check let slip).
+Revert after each.
 Run: `uv run pytest tests/live_stack/test_up_invariants.py::test_up_never_starts_the_app_tier -v`
-Expected: FAIL while broken, PASS after revert. (Confirms the guard has teeth, per the "verify tests catch failures" standard.)
+Expected: FAIL while broken (both forms), PASS after revert. (Confirms the guard has teeth, per the "verify tests catch failures" standard.)
 
 - [ ] **Step 4: Commit**
 
@@ -818,3 +852,10 @@ git commit -m "docs(compose): document the local-stack lifecycle scripts + grafa
 **Decisions defaulted (flag if you disagree):**
 - Grafana auth = anonymous, org role Admin (local-only, frictionless). Documented as localhost-only.
 - `--reset-db` = explicit opt-in flag; `up.sh` never auto-wipes on drift, only suggests it.
+
+**Adversarial-review fixes applied (verified):**
+- Daemon-status awk filters on `$1` (numeric PID), not `$2` (username) — table no longer renders empty.
+- libvirt step manages only `virtqemud` (provider uses user-mode SLIRP) and gates on `libvirt_ok`, not `systemctl is-active` — no spurious `sudo` on every run (confirmed: `virtnetworkd.service` is inactive while its socket is active on a healthy host).
+- Invariant guard matches `compose … up` across intervening flags (regex), closing the `--profile obs up -d server` blind spot; logic validated (no false positives, both regression forms caught).
+- `up.sh` `sudo mkdir -p`s the rootfs + install-staging dirs before asserting; `provision_prereqs_ok` checks existence honestly (incl. `KDIVE_INSTALL_STAGING`) and no longer over-claims writability.
+- `down.sh --wipe` rejects non-tty stdin with a `--yes` hint instead of EOF-aborting under the `!` prefix.
