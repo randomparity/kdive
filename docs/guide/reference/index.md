@@ -24,6 +24,7 @@
 | [`artifacts.list`](artifacts.md#artifactslist) | `partial` |
 | [`artifacts.search_text`](artifacts.md#artifactssearch_text) | `partial` |
 | [`audit.query`](audit.md#auditquery) | `implemented` |
+| [`build_envs.list`](build_envs.md#build_envslist) | `implemented` |
 | [`build_hosts.disable`](build_hosts.md#build_hostsdisable) | `implemented` |
 | [`build_hosts.list`](build_hosts.md#build_hostslist) | `implemented` |
 | [`build_hosts.register_ephemeral_libvirt`](build_hosts.md#build_hostsregister_ephemeral_libvirt) | `implemented` |

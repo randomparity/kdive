@@ -33,6 +33,7 @@ Register an ephemeral-libvirt build host.
 - `name` (`string`, required) — Unique human-readable identifier for the new host.
 - `workspace_root` (`string`, required) — Absolute path where builds are staged.
 - `max_concurrent` (`integer`, required) — Maximum simultaneous build leases this host may hold (> 0).
+- `toolchain_desc` (`string (nullable)`, optional) — Operator-asserted toolchain summary shown to developers in build_envs.list, e.g. 'gcc11, binutils2.40; suits rhel9/5.14'. Not verified against the image.
 - `base_image_volume` (`string`, required) — Base build-image volume name in the remote storage pool.
 
 ## `build_hosts.register_ssh`
@@ -50,6 +51,7 @@ Register an SSH build host.
 - `name` (`string`, required) — Unique human-readable identifier for the new host.
 - `workspace_root` (`string`, required) — Absolute path where builds are staged.
 - `max_concurrent` (`integer`, required) — Maximum simultaneous build leases this host may hold (> 0).
+- `toolchain_desc` (`string (nullable)`, optional) — Operator-asserted toolchain summary shown to developers in build_envs.list, e.g. 'gcc11, binutils2.40; suits rhel9/5.14'. Not verified against the image.
 - `address` (`string`, required) — SSH hostname or IP address.
 - `ssh_credential_ref` (`string`, required) — Credential secret reference, e.g. 'ssh://build-host-key'. Only the reference string is stored; secret bytes are never fetched.
 

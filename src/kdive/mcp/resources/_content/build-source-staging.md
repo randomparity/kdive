@@ -18,11 +18,32 @@ from `runs.create`/`runs.build` name the step that is missing and point here.
 | Git-clone (local) | the structured object `{"git": {"remote": "…", "ref": "…"}}` | the seeded `worker-local` host | allowlist the remote in `KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST` |
 | Git-clone (remote) | the structured object `{"git": {"remote": "…", "ref": "…"}}` | a registered **remote** build host | register the host with `build_hosts.register_ssh` (or `…_ephemeral_libvirt`) |
 
-A **bare string is always warm-tree provenance metadata**, never git-clone provenance —
-even one that looks like a git URI (`git:…`, `git+ssh://…`, `https://…`). Those URI-looking
-bare strings are rejected at `runs.create` with a message pointing at the structured form,
-because they would otherwise be silently routed to the local warm-tree lane and fail later.
-For a git build you must pass the structured `{"git": {...}}` object.
+A **bare string is warm-tree provenance metadata** (a label), with one exception: a bare
+string that begins with a recognized git clone-URL scheme is **rejected at the build-profile
+parse boundary** (which fires when `runs.create` parses the profile). The rejected schemes
+are: `git:`, `git://`, `git+ssh://`, `ssh://`, `http://`, and `https://`. The rejection
+message names only the matched scheme — never the submitted value, which may carry
+credentials — and points the caller at the structured `{"git": {...}}` form and at
+`build_envs.list` to choose a build environment.
+
+Two URI-looking shapes are deliberately left as warm-tree labels: `git+https://` (the
+entrenched kernel.org label convention) and `file://`. Scp-style `git@host:path` carries no
+scheme and is also unmatched, so it stays a warm-tree label.
+
+For a git build, pass the structured object:
+
+```json
+"kernel_source_ref": {"git": {"remote": "https://github.com/torvalds/linux", "ref": "v6.12"}}
+```
+
+Select the build environment via the build profile's `build_host` field. Use
+**`build_envs.list`** to discover available environments — it returns each env's `name`,
+`kind`, `toolchain_desc`, and `enabled` without exposing host addresses or credentials. This
+is the self-service path for building an arbitrary git URL on an isolated build environment.
+
+After a successful git build, **`runs.get` reports `data.build_provenance`** =
+`{remote, ref, resolved_commit, build_host}`, where `remote` is recorded with any
+credentials stripped, so a caller can confirm exactly what was built.
 
 ## Warm-tree lane: stage `KDIVE_KERNEL_SRC`
 
