@@ -85,6 +85,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "debug.list_sessions": ("tests/mcp/debug/test_debug_session_read.py",),
     "debug.read_memory": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.read_registers": ("tests/mcp/debug/test_debug_ops.py",),
+    "debug.resolve_symbol": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.set_breakpoint": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.start_session": ("tests/mcp/debug/test_debug_tools.py",),
     "fixtures.list": ("tests/mcp/catalog/test_fixtures_list.py",),

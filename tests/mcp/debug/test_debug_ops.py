@@ -259,7 +259,7 @@ async def _seed_live_session(pool: AsyncConnectionPool, *, state: DebugSessionSt
     return str(session.id)
 
 
-def _op_for(name: str, runtime: DebugEngineRuntime, session_id: str, **kwargs: Any) -> Any:
+def _op_for(op: str, runtime: DebugEngineRuntime, session_id: str, **kwargs: Any) -> Any:
     del runtime
     factory = {
         "set_breakpoint": debug_ops._set_breakpoint_op,
@@ -267,9 +267,10 @@ def _op_for(name: str, runtime: DebugEngineRuntime, session_id: str, **kwargs: A
         "list_breakpoints": debug_ops._list_breakpoints_op,
         "read_memory": debug_ops._read_memory_op,
         "read_registers": debug_ops._read_registers_op,
+        "resolve_symbol": debug_ops._resolve_symbol_op,
         "continue": debug_ops._continue_op,
         "interrupt": debug_ops._interrupt_op,
-    }[name]
+    }[op]
     return factory(session_id, **kwargs)
 
 
@@ -419,6 +420,59 @@ def test_continue_returns_stopped(migrated_url: str) -> None:
         assert resp.status == "error"
         assert resp.error_category == "infrastructure_failure"
         assert resp.data["code"] == "transport_stall"
+
+    asyncio.run(_run())
+
+
+def test_resolve_symbol_returns_resolved(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-data-evaluate-expression &d_hash_shift": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {"value": "(int *) 0x1234 <d_hash_shift>"},
+                        }
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for("resolve_symbol", runtime, session_id, name="d_hash_shift"),
+            )
+        assert resp.status == "resolved"
+        assert resp.data["symbol"] == "d_hash_shift"
+        assert resp.data["address"] == "0x1234"
+        assert "debug.read_memory" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+def test_resolve_symbol_bad_name_rejected_without_command(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            attach = _CountingAttach()
+            runtime = _runtime(attach)
+            resp = await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for("resolve_symbol", runtime, session_id, name="not a name"),
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["code"] == "bad_symbol_name"
+        # The bad name is rejected in the engine op before any MI command is written.
+        assert attach.controller.written == []
 
     asyncio.run(_run())
 

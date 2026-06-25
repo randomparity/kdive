@@ -27,6 +27,7 @@ from kdive.providers.shared.debug_common.gdbmi import (
     PygdbmiController,
     parse_mi_records,
 )
+from kdive.providers.shared.debug_common.mi_protocol import evaluate_value
 from kdive.providers.shared.debug_common.transcript import append_transcript
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -902,6 +903,152 @@ def test_interrupt_returns_none_when_no_stop(tmp_path: Path) -> None:
         reads=[],
     )
     assert _engine().interrupt(_attachment(controller, tmp_path)) is None
+
+
+# --- evaluate_value helper -----------------------------------------------------------------
+
+
+def test_evaluate_value_returns_value_string() -> None:
+    records = [MiRecord(type="result", message="done", payload={"value": "(int *) 0x10 <s>"})]
+    assert evaluate_value(records) == "(int *) 0x10 <s>"
+
+
+def test_evaluate_value_returns_none_without_value_key() -> None:
+    assert evaluate_value([MiRecord(type="result", message="done", payload={})]) is None
+
+
+def test_evaluate_value_returns_none_for_non_result_records() -> None:
+    assert evaluate_value([MiRecord(type="notify", message="stopped")]) is None
+
+
+def test_evaluate_value_returns_none_for_non_string_value() -> None:
+    records = [MiRecord(type="result", message="done", payload={"value": 16})]
+    assert evaluate_value(records) is None
+
+
+# --- symbol resolution ---------------------------------------------------------------------
+
+
+def test_resolve_symbol_returns_data_global_address(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-data-evaluate-expression &d_hash_shift": [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {"value": "(int *) 0xffffffff82a1b3c0 <d_hash_shift>"},
+                }
+            ]
+        }
+    )
+    address = _engine().resolve_symbol(_attachment(controller, tmp_path), "d_hash_shift")
+    assert address == 0xFFFFFFFF82A1B3C0
+    # The only expression ever sent is &<identifier> (address-of-a-name); non-injectable.
+    assert "-data-evaluate-expression &d_hash_shift" in controller.written
+
+
+def test_resolve_symbol_returns_function_address(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-data-evaluate-expression &panic": [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {"value": "(void (*)(void)) 0xffffffff81000000 <panic>"},
+                }
+            ]
+        }
+    )
+    # &name resolves a function too, unlike -break-insert (a code location only).
+    address = _engine().resolve_symbol(_attachment(controller, tmp_path), "panic")
+    assert address == 0xFFFFFFFF81000000
+
+
+def test_resolve_symbol_accepts_zero_address(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-data-evaluate-expression &weak_sym": [
+                {"type": "result", "message": "done", "payload": {"value": "0x0"}}
+            ]
+        }
+    )
+    # A weak/absent symbol resolving to 0x0 is a valid address, not an error.
+    assert _engine().resolve_symbol(_attachment(controller, tmp_path), "weak_sym") == 0
+
+
+def test_resolve_symbol_parses_plain_hex_without_cast(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-data-evaluate-expression &x": [
+                {"type": "result", "message": "done", "payload": {"value": "0xdead"}}
+            ]
+        }
+    )
+    assert _engine().resolve_symbol(_attachment(controller, tmp_path), "x") == 0xDEAD
+
+
+def test_resolve_symbol_rejects_non_identifier(tmp_path: Path) -> None:
+    controller = _FakeMiController()
+    with pytest.raises(CategorizedError) as exc:
+        _engine().resolve_symbol(_attachment(controller, tmp_path), "d_hash_shift; rm -rf /")
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"code": "bad_symbol_name", "name": "d_hash_shift; rm -rf /"}
+    assert str(exc.value) == "symbol name must be a bare C identifier, got 'd_hash_shift; rm -rf /'"
+    assert controller.written == []  # no MI command issued for a bad name
+
+
+def test_resolve_symbol_rejects_empty_name(tmp_path: Path) -> None:
+    controller = _FakeMiController()
+    with pytest.raises(CategorizedError) as exc:
+        _engine().resolve_symbol(_attachment(controller, tmp_path), "")
+    assert exc.value.details["code"] == "bad_symbol_name"
+    assert controller.written == []
+
+
+def test_resolve_symbol_maps_gdb_error_to_attach_failure(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-data-evaluate-expression &nope": [
+                {"type": "result", "message": "error", "payload": {"msg": 'No symbol "nope"'}}
+            ]
+        }
+    )
+    # An unknown symbol surfaces as DEBUG_ATTACH_FAILURE via execute_mi_command, the same
+    # contract set_breakpoint has for a bad symbol today.
+    with pytest.raises(CategorizedError) as exc:
+        _engine().resolve_symbol(_attachment(controller, tmp_path), "nope")
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["command"] == "-data-evaluate-expression &nope"
+
+
+def test_resolve_symbol_rejects_missing_value(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-data-evaluate-expression &s": [{"type": "result", "message": "done", "payload": {}}]
+        }
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _engine().resolve_symbol(_attachment(controller, tmp_path), "s")
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "bad_symbol_value"
+    assert exc.value.details["name"] == "s"
+
+
+def test_resolve_symbol_rejects_unparseable_value_and_redacts_it(tmp_path: Path) -> None:
+    secret = "supersecretvalue"  # pragma: allowlist secret - fake test value
+    controller = _FakeMiController(
+        responses={
+            "-data-evaluate-expression &s": [
+                {"type": "result", "message": "done", "payload": {"value": f"void {secret}"}}
+            ]
+        }
+    )
+    engine = _engine(Redactor(secret_values=[secret]))
+    with pytest.raises(CategorizedError) as exc:
+        engine.resolve_symbol(_attachment(controller, tmp_path), "s")
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "bad_symbol_value"
+    assert secret not in str(exc.value.details["value"])  # echoed value is redacted
 
 
 # --- error mapping ------------------------------------------------------------------------

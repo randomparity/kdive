@@ -92,6 +92,12 @@ def memory_segments(records: list[MiRecord]) -> list[dict[str, Any]]:
     return _dict_rows(result_payload_dict(records).get("memory"))
 
 
+def evaluate_value(records: list[MiRecord]) -> str | None:
+    """The ``value`` string from a ``-data-evaluate-expression`` result, or None if absent."""
+    value = result_payload_dict(records).get("value")
+    return value if isinstance(value, str) else None
+
+
 def parse_mi_records(text: str) -> list[MiRecord]:
     """Parse newline-delimited MI output into typed records."""
     records: list[MiRecord] = []

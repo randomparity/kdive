@@ -153,6 +153,16 @@ class GdbMiEngine(Protocol):
         """
         ...
 
+    def resolve_symbol(self, attachment: GdbMiAttachment, name: str) -> int:
+        """Resolve a bare C symbol name to its address through gdb/MI.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` for a non-identifier name,
+                ``DEBUG_ATTACH_FAILURE`` for a gdb error or an unparseable address value, or
+                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+
     def continue_(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
         """Resume execution and return a stop record.
 
