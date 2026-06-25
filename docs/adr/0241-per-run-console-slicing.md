@@ -50,8 +50,12 @@ the capture scopes the gate.
 ### 2. Per-provider mark mechanism (the issue's prescription)
 
 - **Local — byte offset.** Mark = current size of `<sys>.log` (`0` if absent). Capture and gates
-  read `read_console_log(path, offset=mark)`. Byte-precise: the serial log is a single append-only
-  file written synchronously by libvirt/virtlogd.
+  read `read_console_log(path, offset=mark)`, precise to the byte between virtlogd rotations. The
+  `<serial><log file=…>` is virtlogd-managed and rotates at a host `max_size` (default ~2 MiB), so
+  `read_console_log` carries a **rotation guard**: if the mark exceeds the file's current size
+  (rotated/truncated since the mark) it ignores the stale offset and reads the whole current file —
+  degrading to cumulative for that one capture rather than an empty slice that would drop this
+  boot's panic on the failure path.
 - **Remote — next part index.** Mark = `max(list_part_indices(system_id)) + 1` (or `0`) at boot
   start, read from the **S3 part-index list** (not the collector's memory). `snapshot` assembles
   only parts with `index >= mark`. Reading the mark from S3 keeps it stable across collector
@@ -82,7 +86,10 @@ the bytes written under it. A same-Run re-boot recomputes the mark and refreshes
   `_CRASH_MARKER` flush, so the panic lands in a part **below** the mark and is excluded; the
   residual non-panic tail the gates might see is benign.
 - **Remote pump latency (pre-existing, ADR-0235).** A just-emitted line the collector has not pumped
-  may be absent; unchanged here.
+  may be absent; unchanged here. The same window is a residual race for the prior-panic exclusion: on
+  a very fast reboot a prior boot's panic may still be in the collector's buffer at mark time and
+  flush into a part `>= mark`, so the prior-panic exclusion is best-effort under normal collector
+  liveness (byte-exact on local), closed fully by the synchronous-completeness refinement.
 - **Remote ready-path completeness (accepted, deferred).** A short healthy boot whose bytes never
   cross the 64 KiB rotation threshold and never hit a crash flush yields an empty slice → no per-Run
   artifact for that ready boot (a normal kernel boot emits well over 64 KiB). Tightening this is the
