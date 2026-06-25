@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -3432,16 +3432,40 @@ class _FakeInstaller:
 
 
 class _FakeBooter:
-    """Records boot() calls; returns or raises a canned category."""
+    """Records boot() calls; optionally writes the console during boot, then returns or raises.
 
-    def __init__(self, *, error: ErrorCategory | None = None) -> None:
+    ``on_boot`` models libvirt writing the serial console *during* the boot (after the boot
+    handler has recorded its boot-window mark, ADR-0241), so a test's console bytes land inside
+    this boot's window. It runs before any canned error, matching a crash whose oops reaches the
+    console before readiness fails.
+    """
+
+    def __init__(
+        self,
+        *,
+        error: ErrorCategory | None = None,
+        on_boot: Callable[[UUID], None] | None = None,
+    ) -> None:
         self.calls: list[UUID] = []
         self._error = error
+        self._on_boot = on_boot
 
     def boot(self, system_id: UUID) -> None:
         self.calls.append(system_id)
+        if self._on_boot is not None:
+            self._on_boot(system_id)
         if self._error is not None:
             raise CategorizedError("boom", category=self._error)
+
+
+def _append_console(tmp_path: Path, data: bytes) -> Callable[[UUID], None]:
+    """An ``on_boot`` hook that appends ``data`` to the System's serial log during boot."""
+
+    def _write(system_id: UUID) -> None:
+        with (tmp_path / f"{system_id}.log").open("ab") as fh:
+            fh.write(data)
+
+    return _write
 
 
 async def _seed_succeeded_run(
@@ -4201,10 +4225,12 @@ def test_boot_handler_registers_console_on_success(
         async with _pool(migrated_url) as pool:
             run_id = await _seed_succeeded_run(pool)
             await _record_install_step(pool, run_id)
-            sid = await _system_id_of(pool, run_id)
-            (tmp_path / f"{sid}.log").write_bytes(b"[    0.0] KDIVE-BUSYBOX-READY\n")
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
-            booter = _FakeBooter()  # clean success, no error
+            # The clean-boot console is written during boot (after the mark), so it falls in
+            # this Run's window.
+            booter = _FakeBooter(
+                on_boot=_append_console(tmp_path, b"[    0.0] KDIVE-BUSYBOX-READY\n")
+            )
             async with pool.connection() as conn:
                 result = await runs_handlers.boot_handler(
                     conn,
@@ -4244,10 +4270,11 @@ def test_boot_handler_registers_console_even_on_failure(
         async with _pool(migrated_url) as pool:
             run_id = await _seed_succeeded_run(pool)
             await _record_install_step(pool, run_id)
-            sid = await _system_id_of(pool, run_id)
-            (tmp_path / f"{sid}.log").write_bytes(b"Kernel panic - not syncing: __d_lookup\n")
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
-            booter = _FakeBooter(error=ErrorCategory.BOOT_TIMEOUT)
+            booter = _FakeBooter(
+                error=ErrorCategory.BOOT_TIMEOUT,
+                on_boot=_append_console(tmp_path, b"Kernel panic - not syncing: __d_lookup\n"),
+            )
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError):
                     await runs_handlers.boot_handler(
@@ -4281,9 +4308,11 @@ def test_boot_handler_records_expected_crash_observed(
             await _set_expected_boot_failure(pool, run_id)
             await _record_install_step(pool, run_id)
             sid = await _system_id_of(pool, run_id)
-            (tmp_path / f"{sid}.log").write_bytes(b"Kernel panic\nRIP: __d_lookup+0x1\n")
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
-            booter = _FakeBooter(error=ErrorCategory.READINESS_FAILURE)
+            booter = _FakeBooter(
+                error=ErrorCategory.READINESS_FAILURE,
+                on_boot=_append_console(tmp_path, b"Kernel panic\nRIP: __d_lookup+0x1\n"),
+            )
             async with pool.connection() as conn:
                 result = await runs_handlers.boot_handler(
                     conn,
@@ -4327,9 +4356,11 @@ def test_expected_crash_observed_system_can_host_next_run(
             await _set_expected_boot_failure(pool, run_id)
             await _record_install_step(pool, run_id)
             sys_id = await _system_id_of(pool, run_id)
-            (tmp_path / f"{sys_id}.log").write_bytes(b"Kernel panic\nRIP: __d_lookup+0x1\n")
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
-            booter = _FakeBooter(error=ErrorCategory.READINESS_FAILURE)
+            booter = _FakeBooter(
+                error=ErrorCategory.READINESS_FAILURE,
+                on_boot=_append_console(tmp_path, b"Kernel panic\nRIP: __d_lookup+0x1\n"),
+            )
             async with pool.connection() as conn:
                 await runs_handlers.boot_handler(
                     conn,
@@ -4365,10 +4396,11 @@ def test_boot_handler_expected_crash_requires_matching_console(
             run_id = await _seed_succeeded_run(pool)
             await _set_expected_boot_failure(pool, run_id, pattern="__d_lookup")
             await _record_install_step(pool, run_id)
-            sid = await _system_id_of(pool, run_id)
-            (tmp_path / f"{sid}.log").write_bytes(b"Kernel panic\nRIP: other_symbol\n")
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
-            booter = _FakeBooter(error=ErrorCategory.READINESS_FAILURE)
+            booter = _FakeBooter(
+                error=ErrorCategory.READINESS_FAILURE,
+                on_boot=_append_console(tmp_path, b"Kernel panic\nRIP: other_symbol\n"),
+            )
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
                     await runs_handlers.boot_handler(
@@ -4437,7 +4469,7 @@ def test_boot_handler_preserves_console_read_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 
-    def fail_read_console_log(_path: Path) -> bytes:
+    def fail_read_console_log(_path: Path, _offset: int = 0) -> bytes:
         raise CategorizedError(
             "failed to read console log",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -4497,9 +4529,10 @@ def test_boot_handler_console_is_readable_via_artifacts(
             run_id = await _seed_succeeded_run(pool)
             await _record_install_step(pool, run_id)
             system_id = await _system_id_of(pool, run_id)
-            (tmp_path / f"{system_id}.log").write_bytes(b"[    0.0] KDIVE-BUSYBOX-READY\n")
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
-            booter = _FakeBooter()  # clean success
+            booter = _FakeBooter(
+                on_boot=_append_console(tmp_path, b"[    0.0] KDIVE-BUSYBOX-READY\n")
+            )
             async with pool.connection() as conn:
                 result = await runs_handlers.boot_handler(
                     conn,
@@ -4547,28 +4580,33 @@ def test_boot_handler_reboot_preserves_prior_run_console(
             run1 = await _seed_succeeded_run(pool)
             await _record_install_step(pool, run1)
             sid = await _system_id_of(pool, run1)
-            (tmp_path / f"{sid}.log").write_bytes(b"[    0.0] FIRST-BOOT-MARKER ready\n")
             job1 = await _enqueue_job(pool, JobKind.BOOT, run1, "boot")
+            first_boot = _FakeBooter(
+                on_boot=_append_console(tmp_path, b"FIRST-BOOT-MARKER ready\n")
+            )
             async with pool.connection() as conn:
                 await runs_handlers.boot_handler(
                     conn,
                     job1,
-                    resolver=provider_resolver(booter=_FakeBooter()),
+                    resolver=provider_resolver(booter=first_boot),
                     secret_registry=SecretRegistry(),
                     artifact_store=minio_store,
                 )
 
-            # Second boot of the SAME System (new Run): the host console log holds different
-            # content, written under run2's own per-Run object key.
+            # Second boot of the SAME System (new Run): libvirt appends to the same serial log
+            # (never truncated per-boot); the per-Run boot-window mark slices run2's capture to its
+            # own appended bytes, written under run2's own per-Run object key.
             run2 = await _seed_succeeded_run_on_system(pool, sid)
             await _record_install_step(pool, run2)
-            (tmp_path / f"{sid}.log").write_bytes(b"[    0.0] SECOND-BOOT-MARKER oops\n")
             job2 = await _enqueue_job(pool, JobKind.BOOT, run2, "boot")
+            second_boot = _FakeBooter(
+                on_boot=_append_console(tmp_path, b"SECOND-BOOT-MARKER oops\n")
+            )
             async with pool.connection() as conn:
                 await runs_handlers.boot_handler(
                     conn,
                     job2,
-                    resolver=provider_resolver(booter=_FakeBooter()),
+                    resolver=provider_resolver(booter=second_boot),
                     secret_registry=SecretRegistry(),
                     artifact_store=minio_store,
                 )
