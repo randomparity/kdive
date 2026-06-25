@@ -88,6 +88,11 @@ upload owner-kind before any upload attempt, mirroring `runs.profile_examples`:
   literal `artifacts.create_run_upload` / `artifacts.create_system_upload` identifier),
   and a per-name `descriptions` map (e.g. `kernel` → "Boot kernel image (bzImage)";
   `vmlinux` → "Uncompressed kernel ELF with DWARF for debug").
+  - **Superseded by [ADR-0234](0234-external-build-default-and-contributor-role.md) §5 (#769):**
+    the per-name `descriptions` map is replaced by a structured per-name `contracts` map
+    (required-vs-optional, format/magic, tar layout) so an external builder learns the exact byte
+    contract from MCP alone. The owner-kind item shape (`owner_kind`, `accepted_names`,
+    `create_tool`) is otherwise unchanged.
 
 ## Alternatives considered
 
