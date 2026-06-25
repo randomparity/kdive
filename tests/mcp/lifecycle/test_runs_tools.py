@@ -40,6 +40,7 @@ from kdive.jobs.handlers import runs_common as run_handler_common
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
+from kdive.mcp.tools.lifecycle import vmcore
 from kdive.mcp.tools.lifecycle.runs import common as runs_common
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest, bind_run
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
@@ -902,6 +903,26 @@ def test_get_expected_crash_surfaces_capture_disclosure(migrated_url: str) -> No
             resp = await get_run(pool, _ctx(), run_id)
         assert resp.data["available_capture"] == ["console"]
         assert resp.data["inert_capture"] == ["gdbstub", "host_dump"]
+        assert resp.data["inert_capture_reason"] == vmcore.CONSOLE_CRASH_GUIDANCE
+
+    asyncio.run(_run())
+
+
+def test_get_inert_capture_reason_only_for_expected_crash(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _insert_step(
+                pool,
+                run_id,
+                "boot",
+                "succeeded",
+                {"boot_outcome": "ready", "inert_capture": ["gdbstub"]},
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["inert_capture"] == ["gdbstub"]
+        assert "inert_capture_reason" not in resp.data
 
     asyncio.run(_run())
 
