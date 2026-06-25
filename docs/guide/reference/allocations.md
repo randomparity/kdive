@@ -66,7 +66,7 @@ Request capacity and create an allocation grant.
 
 - `vcpus` (`integer (nullable)`, optional)
 - `memory_gb` (`integer (nullable)`, optional)
-- `window` (`any (nullable)`, optional)
+- `window` (`number \| string \| null`, optional) — Lease window length in hours, e.g. 24.
 - `shape` (`string (nullable)`, optional) — Named size from `shapes.list`; mutually exclusive with vcpus/memory_gb/disk_gb (supply exactly one sizing source).
 - `disk_gb` (`integer (nullable)`, optional)
 - `resource` (`object(mode=id) \| object(mode=kind) \| object(mode=pool)`, optional)

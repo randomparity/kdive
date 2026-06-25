@@ -246,13 +246,17 @@ def test_c1_over_budget_denied_no_durable_row(migrated_url: str) -> None:
         (0, 4, 3),  # vcpus < 1
         (2, -1, 3),  # memory_gb < 0
         (99, 4, 3),  # over the fake host's 8-vcpu ceiling
-        (2, 4, 0),  # window <= 0
     ],
 )
 def test_c1_malformed_request_is_config_error_no_row(
     migrated_url: str, vcpus: int, memory_gb: int, window: int
 ) -> None:
-    """#1: a malformed selector/window is configuration_error with no durable row."""
+    """#1: a malformed selector is configuration_error with no durable row.
+
+    A non-positive window is rejected earlier, at the typed payload boundary (#807); see
+    ``tests/mcp/test_allocation_request_payload.py`` for that rejection and
+    ``tests/services/test_admission_budget_quota.py`` for the admission-layer guard.
+    """
 
     async def _run() -> None:
         async with open_pool(migrated_url) as pool:

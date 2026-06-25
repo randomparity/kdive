@@ -127,48 +127,6 @@ def test_estimate_zero_vcpus_is_config_error(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_estimate_zero_window_is_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await estimate(pool, _ctx(), project="proj", request=_request(window=0))
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-
-    asyncio.run(_run())
-
-
-def test_estimate_negative_window_is_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await estimate(pool, _ctx(), project="proj", request=_request(window=-3))
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-
-    asyncio.run(_run())
-
-
-def test_estimate_unparseable_window_is_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await estimate(
-                pool, _ctx(), project="proj", request=_request(window="not-a-number")
-            )
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-
-    asyncio.run(_run())
-
-
-def test_estimate_nan_window_is_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await estimate(pool, _ctx(), project="proj", request=_request(window="NaN"))
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-
-    asyncio.run(_run())
-
-
 def test_estimate_huge_finite_window_fails_closed(migrated_url: str) -> None:
     # validate_window has no upper bound (clamping is admission-only), so a viewer can
     # price an arbitrarily large finite window. The quantize boundary must map the
