@@ -23,54 +23,23 @@
 # Assumes the compose backends (Postgres/MinIO/OIDC) are already up (`just compose-up`).
 set -euo pipefail
 
-# This script lives in scripts/live-stack/, so the repo root is two levels up (matches start.sh).
-repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Shared helpers (repo_root, py, log_dir, daemon_pids, stop_daemons, report_build_stamps,
+# server_health). lib.sh resolves repo_root from its own location.
+# shellcheck source=scripts/live-stack/lib.sh
+# shellcheck disable=SC1091 # path resolved at runtime; shellcheck -x follows it correctly
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 cd "$repo_root"
 
-py="${repo_root}/.venv/bin/python"
-log_dir="${KDIVE_STACK_LOG_DIR:-${repo_root}/.live-stack-logs}"
 worker_as_root="${KDIVE_WORKER_AS_ROOT:-1}"
 # The unprivileged account a root worker drops to for local builds; without it the root worker
 # refuses the local build lane (deny-by-default, ADR-0214). Defaults to whoever runs this script.
 build_user="${KDIVE_BUILD_USER:-$(id -un)}"
-# Matches the real daemon argv, e.g. ".venv/bin/python -m kdive server". `[.]` is a literal dot
-# without a backslash escape, so awk's dynamic-regex engine does not warn about it.
-match='[.]venv/bin/python -m kdive (server|worker|reconciler)'
 
 [[ -x "$py" ]] || {
   echo "no venv python at ${py}; run 'just setup' first" >&2
   exit 1
 }
 mkdir -p "$log_dir"
-
-# PIDs of the real python daemons only — comm must be python, so a `bash -c '... kdive worker'`
-# launcher wrapper (whose argv also contains the pattern) is excluded.
-daemon_pids() {
-  ps -eo pid=,comm=,args= | awk -v re="$match" '$2 ~ /^python/ && $0 ~ re {print $1}'
-}
-
-stop_daemons() {
-  local pids pid owner
-  mapfile -t pids < <(daemon_pids)
-  ((${#pids[@]})) || {
-    echo "no kdive daemons running"
-    return 0
-  }
-  echo "stopping kdive daemons: ${pids[*]}"
-  for pid in "${pids[@]}"; do
-    owner="$(ps -o user= -p "$pid" 2>/dev/null || true)"
-    if [[ "$owner" == "root" && "$(id -un)" != "root" ]]; then
-      sudo kill "$pid" 2>/dev/null || true
-    else
-      kill "$pid" 2>/dev/null || true
-    fi
-  done
-  for _ in {1..20}; do
-    [[ -z "$(daemon_pids)" ]] && return 0
-    sleep 0.5
-  done
-  echo "WARN: daemons still running after stop: $(daemon_pids | tr '\n' ' ')" >&2
-}
 
 start_user_daemon() {
   local name="$1"
@@ -94,7 +63,7 @@ start_worker() {
 
 stop_daemons
 
-echo "starting kdive stack @ $(git rev-parse --short HEAD 2>/dev/null || echo '?') ..."
+echo "starting kdive stack @ $(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?') ..."
 # shellcheck disable=SC1091 # repo-relative env script resolved from this script's location
 source scripts/live-stack/env.sh
 start_user_daemon server
@@ -103,24 +72,12 @@ start_worker
 
 sleep 5
 
-head_sha="$(git rev-parse --short HEAD 2>/dev/null || echo '?')"
-# worker-root.log is append-only, so report the LAST stamp of each service's own log (not a
-# tail of the concatenation, which old appended worker lines would dominate).
-worker_log="${log_dir}/worker.log"
-[[ "$worker_as_root" == "1" && "$(id -un)" != "root" ]] && worker_log="${log_dir}/worker-root.log"
-
 echo
 echo "=== running kdive daemons ==="
-ps -eo pid,user,lstart,args | awk -v re="$match" '$0 ~ re && $0 !~ /awk -v re=/'
+# $1 is the numeric PID column, so this both matches real daemons and drops the awk self-line
+# and any header. (Do NOT test $2 — that is the username, never numeric.)
+ps -eo pid,user,lstart,args | awk -v re="$_daemon_match" '$0 ~ re && $1 ~ /^[0-9]+$/'
 echo
-echo "=== build stamps (expect g${head_sha}) ==="
-for entry in "server:${log_dir}/server.log" "reconciler:${log_dir}/reconciler.log" "worker:${worker_log}"; do
-  stamp="$(grep -h "starting kdive" "${entry#*:}" 2>/dev/null | tail -1 |
-    grep -oE 'g[0-9a-f]+ [(][a-z]+[)]' || true)"
-  printf '  %-11s %s\n' "${entry%%:*}" "${stamp:-<no startup log line>}"
-done
+report_build_stamps
 echo
-host="${KDIVE_HTTP_HOST:-127.0.0.1}"
-port="${KDIVE_HTTP_PORT:-8000}"
-printf 'server http://%s:%s/mcp -> %s (401 = up, auth required)\n' "$host" "$port" \
-  "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://${host}:${port}/mcp" || echo 000)"
+server_health || true
