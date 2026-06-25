@@ -117,3 +117,33 @@ def test_read_console_log_other_oserror_is_infrastructure_failure(
         "path": str(path),
         "error": "OSError",
     }
+
+
+def test_read_console_log_offset_returns_tail(tmp_path: Path) -> None:
+    path = tmp_path / "console.log"
+    path.write_bytes(b"prior boot\nthis boot\n")
+
+    assert read_console_log(path, offset=len(b"prior boot\n")) == b"this boot\n"
+
+
+def test_read_console_log_offset_zero_returns_whole_file(tmp_path: Path) -> None:
+    path = tmp_path / "console.log"
+    path.write_bytes(b"whole\n")
+
+    assert read_console_log(path, offset=0) == b"whole\n"
+
+
+def test_read_console_log_offset_past_eof_reads_whole_file(tmp_path: Path) -> None:
+    # virtlogd rotated the log between the mark and the capture: the live file is now shorter
+    # than the recorded offset. Degrade to cumulative for this capture rather than empty (ADR-0241).
+    path = tmp_path / "console.log"
+    path.write_bytes(b"rotated fresh\n")
+
+    assert read_console_log(path, offset=10_000) == b"rotated fresh\n"
+
+
+def test_read_console_log_offset_equal_to_size_is_empty(tmp_path: Path) -> None:
+    path = tmp_path / "console.log"
+    path.write_bytes(b"exactly\n")
+
+    assert read_console_log(path, offset=len(b"exactly\n")) == b""

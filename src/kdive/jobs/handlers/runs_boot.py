@@ -78,11 +78,12 @@ async def _capture_console_artifact(
     run_id: UUID,
     secret_registry: SecretRegistry,
     artifact_store: ObjectStore | None,
+    offset: int = 0,
 ) -> _ConsoleArtifact | None:
     try:
         if artifact_store is None:
             return None
-        redacted = await _read_redacted_console(system_id, secret_registry)
+        redacted = await _read_redacted_console(system_id, secret_registry, offset)
         if redacted is None:
             return None
         stored = await _store_console_artifact(artifact_store, system_id, run_id, redacted)
@@ -112,16 +113,18 @@ async def _capture_run_console(
     secret_registry: SecretRegistry,
     artifact_store: ObjectStore | None,
     snapshotter: ConsoleSnapshotter | None,
+    mark: int,
 ) -> _ConsoleArtifact | None:
-    """Persist this Run's console (ADR-0235), dispatching to the provider's capture shape.
+    """Persist this Run's boot-window console (ADR-0235/0241), dispatching to the provider shape.
 
-    A provider that captures its console out-of-band supplies a ``snapshotter`` (remote-libvirt:
-    assemble S3 parts); otherwise the boot worker reads the local console log. Both write an
-    immutable per-Run artifact and return its id + bytes; both are best-effort and never raise.
+    ``mark`` (read before ``booter.boot``) scopes the capture to this boot: a part index for the
+    out-of-band ``snapshotter`` (remote-libvirt), or a console-log byte offset for the worker-local
+    read (local-libvirt). Both write an immutable per-Run artifact and return its id + bytes; both
+    are best-effort and never raise.
     """
     if snapshotter is not None:
         try:
-            snap = await snapshotter.snapshot(conn, system_id, run_id)
+            snap = await snapshotter.snapshot(conn, system_id, run_id, mark)
         except Exception:
             _log.warning(
                 "console snapshot failed for system %s run %s; boot outcome unaffected",
@@ -131,11 +134,42 @@ async def _capture_run_console(
             )
             return None
         return None if snap is None else _ConsoleArtifact(snap.id, snap.object_key, snap.data)
-    return await _capture_console_artifact(conn, system_id, run_id, secret_registry, artifact_store)
+    return await _capture_console_artifact(
+        conn, system_id, run_id, secret_registry, artifact_store, mark
+    )
 
 
-async def _read_redacted_console(system_id: UUID, secret_registry: SecretRegistry) -> bytes | None:
-    raw = await asyncio.to_thread(read_console_log, console_log_path(system_id))
+async def _mark_boot_window(system_id: UUID, snapshotter: ConsoleSnapshotter | None) -> int:
+    """The boot-window start mark, read before ``booter.boot`` (ADR-0241).
+
+    Remote: the snapshotter's next part index. Local: the current console-log byte size. Best-effort
+    — any failure degrades to ``0`` (cumulative, the pre-slicing behavior) and never fails the boot.
+    """
+    try:
+        if snapshotter is not None:
+            return await snapshotter.mark_boot_window(system_id)
+        return await asyncio.to_thread(_console_log_size, system_id)
+    except Exception:
+        _log.warning(
+            "reading the console boot-window mark for system %s failed; "
+            "capturing the cumulative console for this boot",
+            system_id,
+            exc_info=True,
+        )
+        return 0
+
+
+def _console_log_size(system_id: UUID) -> int:
+    try:
+        return console_log_path(system_id).stat().st_size
+    except FileNotFoundError:
+        return 0
+
+
+async def _read_redacted_console(
+    system_id: UUID, secret_registry: SecretRegistry, offset: int = 0
+) -> bytes | None:
+    raw = await asyncio.to_thread(read_console_log, console_log_path(system_id), offset)
     if not raw:
         _log.warning(
             "console log for system %s is empty or unreadable; registering no console artifact",
@@ -289,6 +323,7 @@ async def _record_crash_halted_live(
     secret_registry: SecretRegistry,
     artifact_store: ObjectStore | None,
     snapshotter: ConsoleSnapshotter | None,
+    mark: int,
 ) -> dict[str, Any] | None:
     """Record ``crashed_halted_live`` iff gdbstub-provisioned, console panics, stub reachable.
 
@@ -301,7 +336,7 @@ async def _record_crash_halted_live(
     if not profile_policy.gdbstub_provisioned(profile):
         return None
     artifact = await _capture_run_console(
-        conn, system_id, run.id, secret_registry, artifact_store, snapshotter
+        conn, system_id, run.id, secret_registry, artifact_store, snapshotter, mark
     )
     if artifact is None or not artifact.data or not _generic_panic_matches(artifact.data):
         return None
@@ -400,6 +435,7 @@ async def _run_boot_and_capture_outcome(
     secret_registry: SecretRegistry,
     artifact_store: ObjectStore | None,
     snapshotter: ConsoleSnapshotter | None,
+    mark: int,
 ) -> dict[str, Any]:
     system_id = run.require_system_id()
     try:
@@ -411,7 +447,7 @@ async def _run_boot_and_capture_outcome(
             and run.expected_boot_failure is not None
         ):
             artifact = await _capture_run_console(
-                conn, system_id, run.id, secret_registry, artifact_store, snapshotter
+                conn, system_id, run.id, secret_registry, artifact_store, snapshotter, mark
             )
         if artifact is not None and artifact.data and _expected_crash_matches(run, artifact.data):
             return await _record_expected_crash(
@@ -428,12 +464,13 @@ async def _run_boot_and_capture_outcome(
                 secret_registry,
                 artifact_store,
                 snapshotter,
+                mark,
             )
             if crash is not None:
                 return crash
         raise
     artifact = await _capture_run_console(
-        conn, system_id, run.id, secret_registry, artifact_store, snapshotter
+        conn, system_id, run.id, secret_registry, artifact_store, snapshotter, mark
     )
     await _record_boot_audit(conn, job_ctx, run)
     return {
@@ -469,6 +506,7 @@ async def boot_handler(
     booter = binding.runtime.booter
     snapshotter = binding.runtime.console_snapshotter
     system_id = run.require_system_id()
+    mark = await _mark_boot_window(system_id, snapshotter)
 
     try:
         result = await _run_boot_and_capture_outcome(
@@ -481,12 +519,13 @@ async def boot_handler(
             secret_registry,
             artifact_store,
             snapshotter,
+            mark,
         )
     except CategorizedError:
         await abandon_run_step_best_effort(conn, run_id, "boot")
         try:
             await _capture_run_console(
-                conn, system_id, run_id, secret_registry, artifact_store, snapshotter
+                conn, system_id, run_id, secret_registry, artifact_store, snapshotter, mark
             )
         finally:
             raise

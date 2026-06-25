@@ -53,10 +53,18 @@ def console_log_path(system_id: UUID) -> Path:
     return Path(_CONSOLE_DIR) / f"{system_id}.log"
 
 
-def read_console_log(path: Path) -> bytes:
-    """Read a System console log; absent logs are treated as empty."""
+def read_console_log(path: Path, offset: int = 0) -> bytes:
+    """Read a System console log; absent logs are treated as empty.
+
+    ``offset`` slices the read to one boot window (ADR-0241): bytes appended at/after ``offset``
+    are returned. As a rotation guard, ``offset <= 0`` or an ``offset`` past the file's current end
+    — which happens when virtlogd rotated/truncated the log between the mark read and this capture —
+    returns the whole current file (degrade to cumulative for this one capture rather than an empty
+    slice that would drop this boot's evidence). The size comparison does not detect a rotation that
+    regrew past ``offset`` (an accepted residual, ADR-0241 caveat 4).
+    """
     try:
-        return path.read_bytes()
+        data = path.read_bytes()
     except FileNotFoundError:
         return b""
     except PermissionError as err:
@@ -83,3 +91,6 @@ def read_console_log(path: Path) -> bytes:
                 "error": type(err).__name__,
             },
         ) from err
+    if 0 < offset <= len(data):
+        return data[offset:]
+    return data
