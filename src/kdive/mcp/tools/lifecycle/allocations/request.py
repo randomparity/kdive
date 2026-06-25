@@ -34,6 +34,10 @@ from kdive.services.allocation.admission.request import (
 
 _log = logging.getLogger(__name__)
 _DISCOVERY_NEXT_ACTIONS = ["resources.list", "shapes.list"]
+_DENIAL_NEXT_ACTIONS = ["allocations.list"]
+# Admin tools that resolve a funding denial (ADR-0245). Both are registered in mcp/exposure.py.
+_QUOTA_REMEDY_TOOL = "accounting.set_quota"
+_BUDGET_REMEDY_TOOL = "accounting.set_budget"
 
 
 def _outcome_for_metrics(result: RequestAdmissionResult) -> AdmissionOutcome | None:
@@ -172,18 +176,35 @@ def _denial_response(resource_id: UUID, project: str, outcome: AdmissionOutcome)
         str(resource_id),
         category,
         detail=_denial_detail(outcome),
-        suggested_next_actions=["allocations.list"],
+        suggested_next_actions=_denial_next_actions(outcome),
         data=data,
     )
 
 
+def _denial_next_actions(outcome: AdmissionOutcome) -> list[str]:
+    """Lead a funding denial with the admin tool that resolves it (ADR-0245).
+
+    A quota or budget denial otherwise points only at ``allocations.list``, which on a denied
+    first request returns an empty list. Host-capacity, affinity, and generic denials keep the
+    plain breadcrumb. Branch precedence mirrors :func:`_denial_detail`.
+    """
+    if outcome.reason == BUDGET_DENIAL_REASON:
+        return [_BUDGET_REMEDY_TOOL, *_DENIAL_NEXT_ACTIONS]
+    if outcome.category is ErrorCategory.QUOTA_EXCEEDED:
+        return [_QUOTA_REMEDY_TOOL, *_DENIAL_NEXT_ACTIONS]
+    return list(_DENIAL_NEXT_ACTIONS)
+
+
 def _denial_detail(outcome: AdmissionOutcome) -> str:
     if outcome.reason == BUDGET_DENIAL_REASON:
-        return "project budget exhausted for the requested window"
+        return (
+            "project budget exhausted for the requested window; "
+            f"raise it with {_BUDGET_REMEDY_TOOL}"
+        )
     if outcome.reason == AFFINITY_DENIAL_REASON:
         return "the project is not permitted to place on the selected resource"
     if outcome.category is ErrorCategory.QUOTA_EXCEEDED:
-        return "project concurrency quota exhausted"
+        return f"project concurrency quota exhausted; raise it with {_QUOTA_REMEDY_TOOL}"
     if outcome.reason == "at_capacity":
         cap = "?" if outcome.cap is None else str(outcome.cap)
         in_use = "?" if outcome.in_use is None else str(outcome.in_use)

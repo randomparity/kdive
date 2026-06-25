@@ -379,10 +379,44 @@ def test_capacity_denial_detail_is_prose_not_token(migrated_url: str) -> None:
         assert "capacity" in resp.detail.lower()
         assert resp.detail != "at_capacity"
         assert resp.suggested_next_actions == ["allocations.list"]
+        # #801: a host-cap denial is NOT a quota/budget funding problem — it must not name an
+        # accounting remedy tool (the quota/budget branch does not leak into other categories).
+        assert "accounting." not in resp.detail
         # The structured reason token stays in `data` for machine consumers.
         assert resp.data["reason"] == "at_capacity"
 
     asyncio.run(_run())
+
+
+def test_quota_denial_names_set_quota_remedy(migrated_url: str) -> None:
+    # #801/ADR-0245: a fresh project's concurrency-quota denial points at the admin tool that
+    # resolves it (accounting.set_quota), not just the empty allocations.list.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2, quota=0)  # quota row present but exhausted at 0
+            return await _request(pool, _ctx())
+
+    resp = asyncio.run(_run())
+    assert resp.error_category == "quota_exceeded"
+    assert resp.suggested_next_actions[0] == "accounting.set_quota"
+    assert "allocations.list" in resp.suggested_next_actions
+    assert resp.detail is not None and "accounting.set_quota" in resp.detail
+
+
+def test_budget_denial_names_set_budget_remedy(migrated_url: str) -> None:
+    # #801/ADR-0245: a budget denial (the second step of the fresh-project trap, surfaced after
+    # quota is raised) points at accounting.set_budget.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2, limit="0")  # generous quota, no budget
+            return await _request(pool, _ctx())
+
+    resp = asyncio.run(_run())
+    assert resp.error_category == "allocation_denied"
+    assert resp.data["reason"] == "budget_exceeded"
+    assert resp.suggested_next_actions[0] == "accounting.set_budget"
+    assert "allocations.list" in resp.suggested_next_actions
+    assert resp.detail is not None and "accounting.set_budget" in resp.detail
 
 
 def test_get_own_allocation_returns_state(migrated_url: str) -> None:
