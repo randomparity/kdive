@@ -76,17 +76,25 @@ best-effort store-outage degradation (`content_unavailable`) are all unchanged.
    `content_truncated="false"`, no `next_offset`, status `available`.
 4. A `max_bytes` window whose start/end splits a multi-byte UTF-8 sequence decodes
    without error (replacement characters at the split), never raising.
-5. `max_bytes` is clamped to the configured `KDIVE_ARTIFACT_INLINE_MAX_BYTES`; a
-   request above the configured cap returns at most the cap.
-6. `refs.download_uri` remains present for every in-ceiling and over-ceiling
+5. The schema rejects `max_bytes` above its static maximum (65536) at arg-binding
+   (boundary test), and `byte_offset` below 0; neither reaches the handler.
+6. When the operator lowers `KDIVE_ARTIFACT_INLINE_MAX_BYTES` below the requested
+   window, the handler clamps to that configured cap (`effective_max =
+   min(max_bytes, configured_cap)`) and returns at most the cap
+   (direct-handler test with a lowered cap).
+7. An object above the 1 MiB fetch ceiling returns
+   `content_omitted="artifact_too_large"` + `refs.download_uri` even when
+   `byte_offset`/`max_bytes` are set — windowing is unavailable above the ceiling
+   (the download URI is the path for larger objects).
+8. `refs.download_uri` remains present for every in-ceiling and over-ceiling
    redacted object (existing behavior).
-7. Every existing gate is preserved: sensitive/quarantined/cross-project ids stay
+9. Every existing gate is preserved: sensitive/quarantined/cross-project ids stay
    not-found-shaped; a drifted `head`/`fetched` sensitivity is rejected before the
    bytes reach the response; viewer role is still required; a store outage still
    degrades to `content_unavailable` with the metadata envelope intact.
-8. The schema advertises the `byte_offset`/`max_bytes` bounds (`minimum`/`maximum`)
-   and the generated tool reference (`docs/guide/reference/artifacts.md`) is
-   regenerated to match.
+10. The schema advertises the `byte_offset`/`max_bytes` bounds (`minimum`/`maximum`)
+    and the generated tool reference (`docs/guide/reference/artifacts.md`) is
+    regenerated to match.
 
 ## Edge cases enumerated
 
@@ -101,6 +109,12 @@ best-effort store-outage degradation (`content_unavailable`) are all unchanged.
   `next_offset = byte_offset + max_bytes`.
 - Empty (zero-byte) object → empty `content`, `content_truncated="false"`.
 - Multi-byte UTF-8 boundary split at either window edge → `errors="replace"`.
+- A multi-byte sequence split *across* two paged windows is lossy: it decodes to a
+  replacement char at the end of window N and the start of window N+1, so
+  concatenating decoded windows is a best-effort text view, not byte-exact.
+  `download_uri` is authoritative for exact bytes (consistent with ADR-0140's
+  `errors="replace"` text view). Byte offsets/`next_offset` stay byte-exact, so
+  paging never skips or repeats bytes.
 
 ## Out of scope
 
