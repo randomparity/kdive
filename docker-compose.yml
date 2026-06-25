@@ -231,6 +231,25 @@ services:
     ports:
       - "9090:9090"
 
+  # Grafana for the kdive-overview dashboard (deploy/grafana/README.md). Behind the `obs`
+  # profile alongside prometheus. Anonymous access is enabled for a frictionless LOCAL dev box
+  # only — do not reuse this posture off localhost. Datasource + dashboard are provisioned, so
+  # state is declarative on every start (no named volume).
+  grafana:
+    image: grafana/grafana:13.0.3
+    profiles: ["obs"]
+    depends_on:
+      - prometheus
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/compose/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/kdive-overview.json:/var/lib/grafana/dashboards/kdive-overview.json:ro
+    ports:
+      - "3000:3000"
+
 volumes:
   kdive-build:
   kdive-install:

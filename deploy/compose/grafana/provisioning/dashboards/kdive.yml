@@ -1,0 +1,11 @@
+# File-based dashboard provider. Loads every dashboard JSON mounted under the options.path dir;
+# kdive-overview.json is mounted there read-only by the compose grafana service.
+apiVersion: 1
+providers:
+  - name: kdive
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
