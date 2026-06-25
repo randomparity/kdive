@@ -56,6 +56,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "artifacts.create_run_upload": ("tests/mcp/lifecycle/test_create_upload_tool.py",),
     "artifacts.create_system_upload": ("tests/mcp/lifecycle/test_create_upload_tool.py",),
     "artifacts.expected_uploads": ("tests/mcp/catalog/test_expected_uploads_tool.py",),
+    "artifacts.fetch_raw": ("tests/mcp/catalog/test_raw_fetch_tool.py",),
     "artifacts.get": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "artifacts.list": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "artifacts.search_text": ("tests/mcp/catalog/test_artifacts_tools.py",),
