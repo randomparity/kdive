@@ -227,13 +227,21 @@ class LocalLibvirtInstall:
             initrd_path = staging_dir / "initrd"
             self._fetch_initrd(request.initrd_ref, initrd_path)
         modules_injected = False
-        if request.method is CaptureMethod.KDUMP or request.debuginfo_ref is not None:
-            modules_tar = staging_dir / "modules.tar.gz"
-            if repack_modules_subtree(combined_tar, modules_tar):
-                self._inject_built_modules(
-                    request.system_id, modules_tar, kernel_path, request.debuginfo_ref, staging_dir
-                )
-                modules_injected = True
+        modules_tar = staging_dir / "modules.tar.gz"
+        needs_modules = request.method is CaptureMethod.KDUMP or request.debuginfo_ref is not None
+        if needs_modules and repack_modules_subtree(combined_tar, modules_tar):
+            self._inject_built_modules(
+                request.system_id, modules_tar, kernel_path, request.debuginfo_ref, staging_dir
+            )
+            modules_injected = True
+        # The combined tar and the repacked modules tar are intermediates: boot/vmlinuz is already
+        # extracted to kernel_path (the <kernel> element) and the modules tree is injected in-guest,
+        # so neither is needed past this point. Reclaim them best-effort so the per-Run staging dir
+        # does not retain a redundant copy of the kernel bytes for the System's lifetime; a retried
+        # install re-fetches the combined tar (temp-then-rename), so removal is retry-safe.
+        for intermediate in (combined_tar, modules_tar):
+            with contextlib.suppress(OSError):
+                intermediate.unlink(missing_ok=True)
         kdump_env_absent = request.method is CaptureMethod.KDUMP and not (
             modules_injected or initrd_path is not None
         )
@@ -612,7 +620,13 @@ def repack_modules_subtree(combined_tar: Path, dest: Path) -> bool:
     try:
         with tarfile.open(combined_tar, "r:gz") as src, tarfile.open(tmp, "w:gz") as out:
             for member in src.getmembers():
-                if _tar_member_path(member.name).startswith(_MODULES_MEMBER_PREFIX):
+                normalized = _tar_member_path(member.name)
+                # Skip path-traversal members: a ``..`` segment in an externally-uploaded kernel
+                # tar (ADR-0234 §2 makes the uploaded `kernel` carry contributor-supplied modules)
+                # must not be carried into the in-guest libguestfs extract.
+                if ".." in normalized.split("/"):
+                    continue
+                if normalized.startswith(_MODULES_MEMBER_PREFIX):
                     out.addfile(member, src.extractfile(member) if member.isfile() else None)
                     found = True
         if found:

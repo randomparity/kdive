@@ -121,6 +121,7 @@ class _FakeKernelWriter:
     fail: bool = False
     kernel_image: Path | None = None
     modules_tar: Path | None = None
+    modules_tar_existed: bool = False
     vmlinux: Path | None = None
 
     def inject(
@@ -129,6 +130,7 @@ class _FakeKernelWriter:
         self.events.append("inject")
         self.kernel_image = kernel_image
         self.modules_tar = modules_tar
+        self.modules_tar_existed = modules_tar.exists()  # captured before install reclaims it
         self.vmlinux = vmlinux
         if self.fail:
             raise CategorizedError(
@@ -256,6 +258,53 @@ def test_install_stages_kernel_and_initrd_to_per_run_path(tmp_path: Path) -> Non
     assert list(staged_dir.glob("*.part")) == []
 
 
+def test_install_reclaims_the_redundant_combined_tar(tmp_path: Path) -> None:
+    # boot/vmlinuz is extracted to staging/kernel (the <kernel> element), so the fetched combined
+    # tar is dead weight afterward — install must not retain a redundant copy of the kernel bytes
+    # for the System's lifetime.
+    conn = _conn_with_existing()
+    inst = _install(conn=conn, staging_root=tmp_path)
+    inst.install(_request(initrd_ref=_INITRD_REF))
+
+    staged_dir = tmp_path / str(_SYS) / str(_RUN)
+    assert (staged_dir / "kernel").exists()  # the <kernel> image persists
+    assert not (staged_dir / "kernel.tar.gz").exists()  # the combined tar is reclaimed
+
+
+def test_install_kdump_reclaims_the_repacked_modules_tar(tmp_path: Path) -> None:
+    # The repacked modules tar is injected in-guest during install and is unused afterward.
+    events: list[str] = []
+    conn = _conn_with_existing(events=events)
+    writer = _FakeKernelWriter(events)
+    inst = _install(conn=conn, staging_root=tmp_path, kernel_writer=writer)
+
+    inst.install(_request(method=CaptureMethod.KDUMP))
+
+    staged_dir = tmp_path / str(_SYS) / str(_RUN)
+    assert writer.injected
+    assert not (staged_dir / "modules.tar.gz").exists()
+    assert not (staged_dir / "kernel.tar.gz").exists()
+
+
+def test_repack_modules_subtree_skips_path_traversal_members(tmp_path: Path) -> None:
+    # An externally-uploaded kernel tar whose lib/modules member escapes via ``..`` must not be
+    # carried into the in-guest extract; the traversal member is dropped, the legit one kept.
+    combined = tmp_path / "kernel.tar.gz"
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        _tar_add(tar, "boot/vmlinuz", b"bz")
+        _tar_add(tar, "lib/modules/6.9.0/../../../etc/evil", b"pwn")
+        _tar_add(tar, "lib/modules/6.9.0/kernel/ok.ko", b"mod")
+    combined.write_bytes(buf.getvalue())
+
+    out = tmp_path / "modules.tar.gz"
+    assert install.repack_modules_subtree(combined, out)
+    with tarfile.open(out, "r:gz") as repacked:
+        names = set(repacked.getnames())
+    assert "lib/modules/6.9.0/kernel/ok.ko" in names
+    assert not any(".." in n.split("/") for n in names)
+
+
 def test_install_does_not_inject_xml_from_cmdline(tmp_path: Path) -> None:
     # A hostile cmdline value must be carried as text, not parsed as markup.
     hostile = "crashkernel=256M </cmdline><evil/>"
@@ -373,7 +422,7 @@ def test_install_kdump_injects_modules_from_combined_tar_and_no_initrd_rendered(
     assert writer.kernel_image == tmp_path / str(_SYS) / str(_RUN) / "kernel"
     assert writer.kernel_image is not None and writer.kernel_image.exists()
     assert writer.modules_tar == tmp_path / str(_SYS) / str(_RUN) / "modules.tar.gz"
-    assert writer.modules_tar is not None and writer.modules_tar.exists()
+    assert writer.modules_tar_existed  # the repacked tar was present when handed to the injector
     # force-off precedes the inject (no debuginfo fetch here).
     assert events.index("destroy") < events.index("inject")
     assert "fetch" not in events
