@@ -28,12 +28,22 @@ the fetched bytes' sensitivity is re-verified before they reach the response.
 
 ## Decision
 
-Add two optional parameters to `artifacts.get`, advertised in the schema:
+Add two optional parameters to `artifacts.get`:
 
-- `byte_offset: int = 0` (`ge=0`) — the window's start byte.
-- `max_bytes: int = 16384` (`ge=1`, `le=65536`) — the window's maximum length.
-  The default (16 KiB ≈ 4k–5k tokens) is sized to the token budget, not the
-  64 KiB byte cap; the schema maximum equals the inline-cap default (64 KiB).
+- `byte_offset: int = 0` — the window's start byte.
+- `max_bytes: int = 16384` — the window's maximum length. The default
+  (16 KiB ≈ 4k–5k tokens) is sized to the token budget, not the 64 KiB byte cap.
+
+Both are plain `int` params (no hard `ge`/`le` schema constraint) normalized in
+the handler rather than rejected at arg-binding: `artifacts.get` is not on the
+`BindingErrorMiddleware` allowlist (`mcp/middleware/binding_errors.py`), so a hard
+schema bound would surface an out-of-range value as a raw pydantic
+`ValidationError` instead of the uniform `ToolResponse` envelope — the leak
+ADR-0225 added the middleware to prevent for `search_text`. Extending that
+middleware is out of this change's file scope. The handler clamps
+`byte_offset = max(byte_offset, 0)` and
+`effective_max = min(max(max_bytes, 1), KDIVE_ARTIFACT_INLINE_MAX_BYTES)`; the
+parameter descriptions state the effective bounds for discoverability.
 
 The handler keeps the existing `head`-then-`get_artifact` structure and adds an
 in-process slice:
@@ -50,9 +60,8 @@ in-process slice:
 4. Otherwise fetch the whole object via `get_artifact(key, head.etag)` (etag
    stale-handle check unchanged), re-verify `fetched.sensitivity is REDACTED`
    (unchanged), then slice `data[byte_offset : byte_offset + effective_max]`
-   **before** the UTF-8 decode, where
-   `effective_max = min(max_bytes, KDIVE_ARTIFACT_INLINE_MAX_BYTES)`. Decode the
-   slice with `errors="replace"`.
+   **before** the UTF-8 decode (with the clamped `byte_offset`/`effective_max`).
+   Decode the slice with `errors="replace"`.
 
 Returned `data` on the windowed branch:
 
@@ -65,8 +74,7 @@ Returned `data` on the windowed branch:
 `byte_offset` at or past the object end yields an empty window,
 `content_truncated="false"`, no `next_offset` — clean paging termination.
 `effective_max` clamps to the configured inline cap so lowering
-`KDIVE_ARTIFACT_INLINE_MAX_BYTES` is honored even though the schema maximum is the
-static default.
+`KDIVE_ARTIFACT_INLINE_MAX_BYTES` is honored.
 
 ## Consequences
 
@@ -117,3 +125,13 @@ static default.
   server payload ceiling; the defect is the lack of a *caller* control, not the
   cap value. Windowing decouples "how much the caller asked for" from "how much
   the server will inline".
+- **Hard `ge`/`le` schema bounds + a `BindingErrorMiddleware` conversion.** The
+  `search_text` context caps (ADR-0225) advertise `ge`/`le` and pair them with a
+  `_BINDING_CONVERSIONS` entry so an over-cap value returns a uniform envelope.
+  Rejected here: `artifacts.get` is not on that allowlist, and adding an entry
+  means editing `mcp/middleware/binding_errors.py` — outside this change's owned
+  file scope and a cross-agent conflict zone. Handler clamping keeps the change in
+  `reads.py`/`registrar.py`, emits no raw `ValidationError`, and (unlike
+  `max_matches`, which ADR-0225 rejected clamping) is not a silent-success trap:
+  the windowing contract signals an over-cap `max_bytes` through
+  `content_truncated`/`next_offset`, so the caller sees the clamp and pages.
