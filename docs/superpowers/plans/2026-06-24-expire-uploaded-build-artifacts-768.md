@@ -70,12 +70,12 @@ def _apply_before(conn: psycopg.Connection, version: str) -> None:
     for m in migrate.discover_migrations():
         if m.version >= version:
             break
-        conn.execute(m.sql)
+        conn.execute(m.sql.encode())  # bytes: a dynamic str fails ty (see migrate.py:135-138)
 
 
 def _apply_version(conn: psycopg.Connection, version: str) -> None:
     sql = next(m.sql for m in migrate.discover_migrations() if m.version == version)
-    conn.execute(sql)
+    conn.execute(sql.encode())  # bytes: a dynamic str fails ty (see migrate.py:135-138)
 
 
 def _insert_investigation(conn: psycopg.Connection, inv_id, state: str) -> None:
