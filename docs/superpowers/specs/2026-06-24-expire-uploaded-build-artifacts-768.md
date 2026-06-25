@@ -68,14 +68,20 @@ Rationale, ground-truthed against the codebase:
 
 ### Migration 0048 — the cleanup marker
 
-Add one nullable column to `investigations`:
+Add one nullable column to `investigations` and back-mark already-closed rows:
 
 ```sql
 ALTER TABLE investigations ADD COLUMN cleanup_pending_at timestamptz;
+UPDATE investigations SET cleanup_pending_at = updated_at WHERE state = 'closed';
 ```
 
-- Additive, forward-only (ADR-0015). Existing rows get `NULL` (not pending).
+- Additive, forward-only (ADR-0015). Open/active rows get `NULL` (not pending).
 - `NULL` ⇒ not marked for cleanup; a timestamp ⇒ marked at that instant, grace measured from it.
+- **Backfill:** investigations already `closed` at migration time are back-marked with their
+  `updated_at` (which equals their close instant — `closed` is terminal and `link`/`set`/`unlink`
+  refuse terminal rows, so a closed row's `updated_at` is frozen at close). Without this, historical
+  closed investigations would never be swept by clear-on-close and would rely solely on the TTL
+  backstop; the backfill gives every closed investigation the same close-driven cleanup.
 
 Chosen over a per-artifact `expires_at` column (ADR-0234 rejected that for the close case): linkage
 `artifact → run → investigation` already lets the reconciler find what a closed investigation owns,
@@ -91,8 +97,11 @@ destructive evidence operation). The existing close audit record stands; the mar
 audited transition.
 
 `closed` is terminal (`domain/capacity/state.py` — empty transition set) and `link`/`set`/`unlink`
-refuse terminal investigations, so once closed an investigation's `updated_at` never moves again and
-`cleanup_pending_at` is never re-stamped.
+refuse terminal investigations, so `cleanup_pending_at` is stamped exactly once (on the
+open|active → closed transition) and never re-stamped by a tool. (The reconciler's marker-clear in
+sweep 1 *does* write the row and bump `updated_at` via the `investigations_set_updated_at` trigger —
+nothing keys on a closed investigation's `updated_at`, so this is inert, but it means "frozen
+`updated_at`" holds only until the post-grace sweep clears the marker.)
 
 ### Reconciler sweep 1 — `gc_investigation_artifacts` (clear-on-close)
 
@@ -128,6 +137,27 @@ Deletes the same run-owned build row set where `created_at < now() - retention`,
 investigation state. Per-object isolation identical to `gc_report_artifacts`. No new column — sweeps
 `artifacts.created_at`. The TTL is deliberately generous (default 30 days) because it can reap the
 kernel of a **still-open** long-running investigation; it is a leak backstop, not the primary path.
+
+#### Why reaping an in-use build artifact is safe (the load-bearing assumption)
+
+Install **reads `kernel_ref` from the object store once** and stages it under
+`{staging_root}/{system_id}/{run_id}/kernel` (`providers/local_libvirt/lifecycle/install.py`); the
+libvirt domain's `<kernel>` element then points at that **staged host file**, so subsequent **boots
+re-use the staged copy and never re-fetch S3**. The S3 object is therefore only re-read by a *fresh
+install / reprovision*. Consequences of reaping a build artifact that is still referenced by a
+`kernel_ref`:
+
+- A later boot of an already-installed System: unaffected (uses the staged kernel).
+- A fresh install/reprovision after the reap: the fetch returns a clean typed `STALE_HANDLE`
+  (`store/objectstore.py` maps the S3 404 to `STALE_HANDLE`), surfaced as a normal install failure —
+  **not** silent corruption or a partially-written guest. The kernel is reproducible; the agent
+  re-builds and re-uploads (the default external-build loop).
+
+This is why the deletion predicate intentionally does **not** gate on run/system state: a run-state
+guard would never reap a never-closed investigation's artifacts (its runs stay non-terminal
+indefinitely), defeating the backstop. The trade accepted here is "a >TTL-old, never-closed upload
+may force one re-upload on a late reprovision," against "uploads accumulate forever." The grace-gated
+close sweep is the primary, intentional path; the TTL is the abandoned-upload backstop.
 
 ### Wiring
 
@@ -169,7 +199,8 @@ Mirror `tests/reconciler/test_gc_report_artifacts.py`:
   - leaves fresh ones; leaves `console`/`build-log`/system-owned untouched;
   - per-object failure isolation.
 - `_close_locked` sets `cleanup_pending_at`; a re-close (idempotent) does not move it.
-- Migration 0048: column exists, defaults NULL on a pre-existing row.
+- Migration 0048: column exists; an open row stays `NULL`; a pre-existing `closed` row is
+  back-marked with its `updated_at` (the backfill).
 - Loop wiring: `ALL_REPAIR_KINDS` equals the fully-populated plan's names; `ReconcileReport` carries
   the two new counts.
 
