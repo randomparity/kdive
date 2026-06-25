@@ -1,0 +1,4 @@
+# Allow `source` to follow files specified via `# shellcheck source=` directives.
+# Without this, the pre-commit shellcheck hook (which runs without -x) cannot track
+# variables exported by sourced helpers (lib.sh → SC2154 false positives).
+external-sources=true
