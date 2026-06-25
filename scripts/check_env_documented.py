@@ -44,6 +44,9 @@ _NOT_ENV: frozenset[str] = frozenset(
         "KDIVE_ROOTFS_AUTHORIZED_KEY",  # secret-ref label, not an env var
         # A config-validation error message token in tests/mcp/core/test_app.py.
         "KDIVE_S3_ENDPOINT",
+        # Internal bash array constant in scripts/live-stack/lib.sh (unconditional assignment,
+        # never read as an env var by any process; consumers reference the array directly).
+        "KDIVE_BACKEND_SERVICES",
         # Retired remote-libvirt inventory singletons (M2.6 #395); tests/guards/ asserts they
         # never reappear in code, so they are intentionally undocumented and must stay ignored.
         "KDIVE_REMOTE_LIBVIRT_URI",

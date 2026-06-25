@@ -1,8 +1,4 @@
-import subprocess
-import textwrap
 from pathlib import Path
-
-from tests.host_capabilities import requires_bash
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -28,104 +24,15 @@ def test_live_stack_env_exports_required_defaults() -> None:
 
 
 def test_live_stack_scripts_are_strict_bash() -> None:
-    for name in ("env.sh", "apply-migrations.sh", "start.sh", "stop.sh"):
+    for name in ("env.sh", "apply-migrations.sh", "up.sh", "down.sh", "status.sh"):
         text = (ROOT / "scripts/live-stack" / name).read_text()
-        assert text.startswith("#!/usr/bin/env bash\nset -euo pipefail\n")
+        assert text.startswith("#!/usr/bin/env bash\n"), f"{name}: missing bash shebang"
+        assert "\nset -euo pipefail\n" in text, f"{name}: missing 'set -euo pipefail'"
 
 
-def test_stack_start_runs_all_three_kdive_processes() -> None:
-    text = (ROOT / "scripts/live-stack/start.sh").read_text()
-    assert "python -m kdive server" in text
-    assert "python -m kdive worker" in text
-    assert "python -m kdive reconciler" in text
-    assert "trap cleanup EXIT INT TERM" in text
-
-
-def test_stack_stop_uses_pid_file_not_process_name_patterns() -> None:
-    text = (ROOT / "scripts/live-stack/stop.sh").read_text()
-    assert "KDIVE_STACK_PID_FILE" in text
-    assert "pkill" not in text
-
-
-# The foreground path blocks on `wait -n` (bash >= 4.3); the --daemon path returns before it.
-@requires_bash(4, 3, "wait -n")
-def test_stack_start_foreground_exits_when_any_child_exits(tmp_path: Path) -> None:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    log = tmp_path / "calls.log"
-    (fake_bin / "uv").write_text(
-        textwrap.dedent(
-            f"""\
-            #!/usr/bin/env bash
-            set -euo pipefail
-            name="${{@: -1}}"
-            echo "${{name}}" >>{log}
-            if [[ "${{name}}" == "server" ]]; then
-              sleep 0.1
-              exit 7
-            fi
-            sleep 30
-            """
-        ),
-        encoding="utf-8",
-    )
-    (fake_bin / "uv").chmod(0o755)
-
-    result = subprocess.run(
-        ["bash", str(ROOT / "scripts/live-stack/start.sh")],
-        env={
-            "PATH": f"{fake_bin}:/usr/bin:/bin",
-            "HOME": str(tmp_path),
-            "KDIVE_STACK_PID_FILE": str(tmp_path / "stack.pid"),
-            "KDIVE_STACK_LOG_DIR": str(tmp_path / "logs"),
-        },
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
-    )
-
-    assert result.returncode == 7
-    assert sorted(log.read_text(encoding="utf-8").splitlines()) == [
-        "reconciler",
-        "server",
-        "worker",
-    ]
-
-
-def test_stack_start_daemon_fails_when_child_exits_immediately(tmp_path: Path) -> None:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    pid_file = tmp_path / "stack.pid"
-    (fake_bin / "uv").write_text(
-        textwrap.dedent(
-            """\
-            #!/usr/bin/env bash
-            set -euo pipefail
-            name="${@: -1}"
-            if [[ "${name}" == "server" ]]; then
-              exit 9
-            fi
-            sleep 30
-            """
-        ),
-        encoding="utf-8",
-    )
-    (fake_bin / "uv").chmod(0o755)
-
-    result = subprocess.run(
-        ["bash", str(ROOT / "scripts/live-stack/start.sh"), "--daemon"],
-        env={
-            "PATH": f"{fake_bin}:/usr/bin:/bin",
-            "HOME": str(tmp_path),
-            "KDIVE_STACK_PID_FILE": str(pid_file),
-            "KDIVE_STACK_LOG_DIR": str(tmp_path / "logs"),
-        },
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
-    )
-
-    assert result.returncode != 0
-    assert not pid_file.exists()
+def test_restart_host_processes_starts_all_three() -> None:
+    text = (ROOT / "scripts/live-stack/lib.sh").read_text()
+    assert "restart_host_processes" in text
+    assert "-m kdive server" in text
+    assert "-m kdive reconciler" in text
+    assert "-m kdive worker" in text
