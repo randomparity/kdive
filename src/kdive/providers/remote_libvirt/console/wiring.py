@@ -102,10 +102,17 @@ class RemoteConsolePartStore:
     def delete_part(self, system_id: UUID, index: int) -> None:
         self._store.delete(self._part_key(system_id, index))
 
-    def assemble(self, system_id: UUID) -> bytes:
-        """Concatenate the System's numbered console parts in index order (no DB access)."""
+    def assemble(self, system_id: UUID, start_index: int = 0) -> bytes:
+        """Concatenate the System's numbered console parts in index order (no DB access).
+
+        ``start_index`` slices to one boot window (ADR-0241): only parts with index
+        ``>= start_index`` are included. Default ``0`` is the whole history (the teardown
+        ``finalize()`` assembly).
+        """
         return b"".join(
-            self.read_part(system_id, index) for index in self.list_part_indices(system_id)
+            self.read_part(system_id, index)
+            for index in self.list_part_indices(system_id)
+            if index >= start_index
         )
 
     def put_run_console(self, system_id: UUID, run_id: UUID, data: bytes) -> StoredArtifact:
