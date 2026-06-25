@@ -312,3 +312,63 @@ def test_existing_server_profile_without_build_host_back_compat() -> None:
     profile = BuildProfile.parse(data)
     assert isinstance(profile, ServerBuildProfile)
     assert profile.build_host is None
+
+
+# ---------------------------------------------------------------------------
+# Task 3: bare git-URL guard on kernel_source_ref (ADR-0241)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "git:abc",
+        "git://h/r",
+        "git+ssh://h/r",
+        "ssh://h/r",
+        "https://h/r",
+        "http://h/r",
+        "HTTPS://h/r",
+    ],
+)
+def test_bare_uri_kernel_source_ref_rejected(ref: str) -> None:
+    data = {"schema_version": 1, "kernel_source_ref": ref}
+    with pytest.raises(CategorizedError) as e:
+        BuildProfile.parse(data)
+    assert e.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "linux-6.9",
+        "/srv/linux",
+        "git+https://git.kernel.org/linux.git#v6.9",
+        "file:///src/linux",
+        "git@github.com:torvalds/linux",
+        "git-6.9",
+    ],
+)
+def test_bare_label_kernel_source_ref_accepted(ref: str) -> None:
+    data = {"schema_version": 1, "kernel_source_ref": ref}
+    profile = BuildProfile.parse(data)
+    assert isinstance(profile, ServerBuildProfile)
+    assert profile.kernel_source_ref == ref
+
+
+def test_structured_git_with_https_remote_not_rejected() -> None:
+    data = {
+        "schema_version": 1,
+        "kernel_source_ref": {"git": {"remote": "https://h/r", "ref": "v6.9"}},
+    }
+    profile = BuildProfile.parse(data)
+    assert isinstance(profile, ServerBuildProfile)
+    assert isinstance(profile.kernel_source_ref, GitKernelSource)
+    assert profile.kernel_source_ref.git.remote == "https://h/r"
+
+
+def test_rejected_uri_error_does_not_leak_value() -> None:
+    data = {"schema_version": 1, "kernel_source_ref": "https://USER-PLANTED-TOKEN@h/r"}
+    with pytest.raises(CategorizedError) as e:
+        BuildProfile.parse(data)
+    assert "PLANTED-TOKEN" not in str(e.value.details)

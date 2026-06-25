@@ -31,6 +31,7 @@ from pydantic import (
     ConfigDict,
     StringConstraints,
     ValidationError,
+    field_validator,
 )
 
 from kdive.components.references import ComponentRef
@@ -83,6 +84,18 @@ class GitKernelSource(BaseModel):
     git: GitSourceRef
 
 
+_URI_SCHEME_PREFIXES = ("git+ssh://", "git://", "ssh://", "https://", "http://", "git:")
+
+
+def _match_uri_scheme(value: str) -> str | None:
+    """Return the recognized git clone-URL scheme prefix ``value`` begins with, else None."""
+    lowered = value.strip().lower()
+    for prefix in _URI_SCHEME_PREFIXES:
+        if lowered.startswith(prefix):
+            return prefix
+    return None
+
+
 class ServerBuildProfile(_BuildProfileBase):
     """Server-build lane: names a source tree, an optional config, and an optional patch.
 
@@ -102,6 +115,28 @@ class ServerBuildProfile(_BuildProfileBase):
     profile_requirements: ProfileRequirementsRef | None = None
     patch_ref: NonEmptyStr | None = None
     build_host: NonEmptyStr | None = None
+
+    @field_validator("kernel_source_ref", mode="after")
+    @classmethod
+    def _reject_uri_bare_source(
+        cls, value: NonEmptyStr | GitKernelSource
+    ) -> NonEmptyStr | GitKernelSource:
+        """Reject a bare-string ref that looks like a git clone URL (ADR-0241).
+
+        A bare string is warm-tree provenance metadata, never cloned; a developer who means
+        to clone a URL must pass the structured ``{"git": {...}}`` form. Only the matched
+        scheme token appears in the message — never the submitted value.
+        """
+        if isinstance(value, str):
+            scheme = _match_uri_scheme(value)
+            if scheme is not None:
+                raise ValueError(
+                    f"a bare kernel_source_ref that looks like a git URL (scheme {scheme!r}) is "
+                    "warm-tree provenance metadata and will not be cloned; for a git build pass "
+                    'the structured {"git": {"remote": ..., "ref": ...}} object, and select a '
+                    "build environment from build_envs.list"
+                )
+        return value
 
 
 class ExternalBuildProfile(_BuildProfileBase):

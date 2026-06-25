@@ -1836,6 +1836,37 @@ def test_create_non_dict_build_profile_is_config_error(migrated_url: str) -> Non
     asyncio.run(_run())
 
 
+def test_create_bare_url_build_profile_does_not_leak_token(migrated_url: str) -> None:
+    # ADR-0241 / ADR-0029: a bare-URL kernel_source_ref that carries a credential must not
+    # appear anywhere in the response — neither in data, detail, nor as a literal "input" key.
+    # The error propagates through BuildProfile.parse (include_input=False) → RunCreateError →
+    # ToolResponse.failure_from_error; this test asserts the full pipeline is leak-free.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool)
+            sys_id = await _seed_system(pool)
+            resp = await create_run(
+                pool,
+                _ctx(),
+                RunCreateRequest(
+                    investigation_id=inv_id,
+                    system_id=sys_id,
+                    build_profile={
+                        "schema_version": 1,
+                        "kernel_source_ref": "https://PLANTED-TOKEN@h/r",
+                    },
+                ),
+                resolver=provider_resolver(),
+            )
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        serialized = str(resp.model_dump(mode="json"))
+        assert "PLANTED-TOKEN" not in serialized
+        assert "h/r" not in serialized
+        assert '"input"' not in serialized
+
+    asyncio.run(_run())
+
+
 def test_create_without_operator_raises(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
