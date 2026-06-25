@@ -11,13 +11,13 @@ Price a hypothetical selector over a window without writing anything. Requires v
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `project` | string | yes | Project to price the estimate for. |
-| `request` | object | yes | Estimate request payload: size, lease window, cost class. |
+| `request` | object | yes | Estimate request payload: size, lease window in hours, cost class. |
 
 `request` fields:
 
 - `vcpus` (`integer`, required)
 - `memory_gb` (`integer`, required)
-- `window` (`any`, required)
+- `window` (`number \| string`, required) — Lease window length in hours, e.g. 24.
 - `cost_class` (`string`, optional)
 
 ## `accounting.report_all_projects`

@@ -8,8 +8,10 @@ snapshot that would silently disable the size unification (ADR-0067).
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.mcp.tool_payloads import (
@@ -138,3 +140,51 @@ def test_estimate_payload_keeps_custom_only_sizing() -> None:
     assert "shape" not in EstimateRequestPayload.model_fields
     with pytest.raises(ValidationError):
         EstimateRequestPayload.model_validate({"window": 1})
+
+
+def _assert_window_renders_typed_positive_hours(model: type[BaseModel]) -> None:
+    window = model.model_json_schema()["properties"]["window"]
+    branch_types = {branch.get("type") for branch in window["anyOf"]}
+    assert "number" in branch_types
+    assert window["examples"] == [24]
+    assert "hours" in window["description"].lower()
+
+
+def test_estimate_window_schema_is_typed_positive_hours() -> None:
+    # #807: `window` must render with a numeric type and an example so a black-box caller
+    # sees a positive number of lease hours, not an opaque `{}` (and not an ISO pair).
+    _assert_window_renders_typed_positive_hours(EstimateRequestPayload)
+
+
+def test_allocation_window_schema_is_typed_positive_hours() -> None:
+    # The shared SelectorPayload window is tightened the same way so admission also exposes
+    # a typed, documented window (optional on the allocation request).
+    _assert_window_renders_typed_positive_hours(AllocationRequestPayload)
+
+
+@pytest.mark.parametrize("bad", [0, -3, "not-a-number", "NaN", "Infinity"])
+def test_estimate_payload_rejects_non_positive_or_nonfinite_window(bad: object) -> None:
+    # The typed `gt=0` finite window rejects zero, negative, unparseable, and non-finite
+    # values at the wire boundary (the binding middleware maps this to the caller).
+    with pytest.raises(ValidationError):
+        EstimateRequestPayload.model_validate({"vcpus": 1, "memory_gb": 1, "window": bad})
+
+
+@pytest.mark.parametrize("bad", [0, -3, "not-a-number", "NaN", "Infinity"])
+def test_allocation_payload_rejects_non_positive_or_nonfinite_window(bad: object) -> None:
+    # A supplied allocation window is rejected at the same boundary (the field stays
+    # optional, so an omitted window still takes the configured default at admission).
+    with pytest.raises(ValidationError):
+        AllocationRequestPayload.model_validate(
+            {"vcpus": 1, "memory_gb": 1, "disk_gb": 10, "window": bad}
+        )
+
+
+def test_estimate_payload_accepts_fractional_and_string_window() -> None:
+    # A numeric string and a fractional value are accepted and coerced to Decimal.
+    assert EstimateRequestPayload.model_validate(
+        {"vcpus": 1, "memory_gb": 1, "window": "24"}
+    ).window == Decimal("24")
+    assert EstimateRequestPayload.model_validate(
+        {"vcpus": 1, "memory_gb": 1, "window": 1.5}
+    ).window == Decimal("1.5")

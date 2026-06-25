@@ -115,7 +115,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         project: Annotated[str, Field(description="Project to price the estimate for.")],
         request: Annotated[
             EstimateRequestPayload,
-            Field(description="Estimate request payload: size, lease window, cost class."),
+            Field(description="Estimate request payload: size, lease window in hours, cost class."),
         ],
     ) -> ToolResponse:
         """Price a hypothetical selector over a window without writing anything. Requires viewer."""

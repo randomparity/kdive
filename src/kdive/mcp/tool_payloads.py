@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -10,6 +11,9 @@ from pydantic_core import PydanticCustomError
 from kdive.domain.catalog.resources import ResourceKind
 
 _DEFAULT_COST_CLASS = "local"
+
+_WINDOW_DESCRIPTION = "Lease window length in hours, e.g. 24."
+_WINDOW_EXAMPLE = 24
 
 # Stable error type for the shape-XOR-custom violation. The binding middleware (ADR-0132)
 # keys on this to distinguish the XOR violation from a field-level error and to surface the
@@ -34,7 +38,9 @@ class SelectorPayload(ToolPayload):
 
     vcpus: int | None = None
     memory_gb: int | None = None
-    window: object | None = None
+    window: Decimal | None = Field(
+        default=None, gt=0, description=_WINDOW_DESCRIPTION, examples=[_WINDOW_EXAMPLE]
+    )
 
 
 class ResourceById(ToolPayload):
@@ -114,5 +120,5 @@ class AllocationRequestPayload(SelectorPayload):
 class EstimateRequestPayload(SelectorPayload):
     vcpus: int
     memory_gb: int
-    window: object
+    window: Decimal = Field(gt=0, description=_WINDOW_DESCRIPTION, examples=[_WINDOW_EXAMPLE])
     cost_class: str = _DEFAULT_COST_CLASS
