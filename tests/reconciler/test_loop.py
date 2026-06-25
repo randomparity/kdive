@@ -1006,3 +1006,9 @@ def test_all_repair_kinds_matches_a_fully_populated_plan() -> None:
         reaper=NullReaper(), config=config, image_publish_grace=timedelta(seconds=1)
     )
     assert {spec.name for spec in plan} == set(loop.ALL_REPAIR_KINDS)
+
+
+def test_build_artifact_repairs_are_in_all_repair_kinds() -> None:
+    """The two build-artifact GC sweeps emit their own repair kinds (#768)."""
+    assert "investigation_artifacts_gc_count" in loop.ALL_REPAIR_KINDS
+    assert "expired_build_artifacts_gc_count" in loop.ALL_REPAIR_KINDS
