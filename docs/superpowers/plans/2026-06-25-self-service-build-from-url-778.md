@@ -32,8 +32,11 @@
 | `src/kdive/profiles/build.py` | bare-URL guard validator | 3 |
 | `src/kdive/services/runs/admission.py` (+ message site) | extend worker-local git rejection to name `build_envs.list` | 4 |
 | `src/kdive/providers/shared/build_host/transports/shell_transport.py` | `clone(...) -> str` (resolved commit) | 5 |
-| `src/kdive/providers/shared/build_host/workspaces/workspace.py` + dispatch/orchestration + build result type | thread `resolved_commit` into the build result | 5 |
-| `src/kdive/mcp/tools/lifecycle/runs/common.py` | surface `data.build_provenance` on `runs.get` | 6 |
+| `src/kdive/build_artifacts/results.py` | `BuildOutput.build_provenance` | 5 |
+| `src/kdive/providers/shared/build_host/configuration/git_source.py` | `strip_userinfo` helper | 5 |
+| `src/kdive/services/runs/steps.py` | `BuildStepResult.build_provenance` (load/dump) | 5 |
+| `src/kdive/jobs/handlers/runs_build.py` | pass provenance into `BuildStepResult(...)` | 5 |
+| `src/kdive/mcp/tools/lifecycle/runs/common.py` | surface `data.build_provenance` via `existing_build_result` | 6 |
 | `src/kdive/mcp/resources/_content/build-source-staging.md` | document the lane + guard + `build_envs.list` | 7 |
 
 ---
@@ -275,12 +278,13 @@ git commit -m "feat(build): name build_envs.list in the worker-local clone rejec
 
 **Files:**
 - Modify: `src/kdive/providers/shared/build_host/transports/shell_transport.py` (`clone` → return resolved commit)
-- Modify: callers of `.clone(` (find via `rg -n "\.clone\(" src/kdive/providers/shared/build_host/`) + the build result type to carry `resolved_commit`/`remote`/`ref`
-- Modify: `src/kdive/providers/shared/build_host/workspaces/workspace.py` (local lane: capture its existing `FETCH_HEAD` rev-parse output)
-- Test: `tests/providers/build_host/test_transport_seams.py`, `tests/providers/.../test_build*.py`
+- Modify: callers of `.clone(` (find via `rg -n "\.clone\(" src/kdive/providers/shared/build_host/`) + `src/kdive/build_artifacts/results.py` (`BuildOutput` → carry provenance) + `src/kdive/providers/shared/build_host/workspaces/workspace.py` (local lane: return its existing `FETCH_HEAD` rev-parse output)
+- Modify: `src/kdive/providers/shared/build_host/configuration/git_source.py` (`strip_userinfo` helper)
+- Test: `tests/providers/build_host/test_transport_seams.py`, `tests/providers/.../test_build*.py`, `tests/providers/.../test_git_source.py`
 
 **Interfaces:**
-- Produces: build result carries `build_provenance: {remote (userinfo-stripped), ref, resolved_commit, build_host} | None`.
+- Produces: `BuildOutput` (`build_artifacts/results.py`) carries `build_provenance: dict[str, str] | None` with keys `{remote, ref, resolved_commit, build_host}` (remote userinfo-stripped). Task 6 reads it back through `BuildStepResult`.
+- **Note (the success channel, not the failure one):** a *succeeded* build records via `BuildStepResult` (`services/runs/steps.py:44-78`, `load`/`dump`), written by `finalize_build` (`jobs/handlers/runs_shared.py:19-26`) from the `BuildStepResult(...)` constructed in `jobs/handlers/runs_build.py:~325`, and read back by `existing_build_result()` (`steps.py:92`). Do **not** use the ADR-0238 `build_log_ref` failure-context path — that fires only on failure.
 
 - [ ] **Step 1: Write the failing transport test.** Assert `ShellTransport.clone(remote, ref, dest)` returns the resolved commit SHA (a fake `_run_remote` returns a canned SHA for `rev-parse HEAD`).
 
@@ -303,7 +307,7 @@ Update the docstring `Returns:`. Update every `.clone(` caller to capture the re
 
 - [ ] **Step 4: Add a `strip_userinfo(remote: str) -> str` helper** beside `parse_remote` in `configuration/git_source.py` (drops any `…@` userinfo from a URL form; returns scp-style/label forms unchanged) with unit tests (`https://u:p@h/r` → `https://h/r`; `https://h/r` unchanged; `linux-6.9` unchanged).
 
-- [ ] **Step 5: Thread provenance into the build result.** Add an optional `build_provenance` field to the build-output/step-result type the worker records (follow the ADR-0238 `build_log_ref` precedent in `mcp/tools/lifecycle/runs/common.py:69-94,216-222` for how a build detail reaches `runs.get`). Populate `{remote: strip_userinfo(remote), ref, resolved_commit, build_host}` for a git source; for warm-tree, best-effort `rev-parse HEAD` of the staged tree, else `{label}` with no commit. Wrap capture in try/except so a failure degrades to recording what is known and never fails the build.
+- [ ] **Step 5: Thread provenance through the success channel.** (a) Add `build_provenance: dict[str, str] | None = None` to `BuildOutput` (`build_artifacts/results.py`); the builder/transport dispatch populates it `{remote: strip_userinfo(remote), ref, resolved_commit, build_host}` for a git source, and for warm-tree best-effort `rev-parse HEAD` of the staged tree (`{label, resolved_commit?}`), wrapped in try/except so capture failure degrades and never fails the build. (b) Add a `build_provenance: dict[str, str] | None = None` field to `BuildStepResult` (`services/runs/steps.py:44-78`) and round-trip it in `load` (read `result.get("build_provenance")` when it is a `Mapping[str,str]`) and `dump` (emit when not `None`). (c) In `jobs/handlers/runs_build.py:~295-325`, where the `BuildStepResult(...)` is constructed from the `BuildOutput`, pass `build_provenance=output.build_provenance`. `finalize_build` (`runs_shared.py:19-26`) already persists `result.dump()`, so no change there.
 
 - [ ] **Step 6: Tests.** Transport returns SHA; git build records full provenance; warm-tree degrades to `{label}`; a forced rev-parse failure does not fail the build; `strip_userinfo` drops credentials.
 
@@ -319,18 +323,18 @@ git commit -m "feat(build): capture resolved-commit provenance on both clone pat
 ### Task 6: Surface `data.build_provenance` on `runs.get`
 
 **Files:**
-- Modify: `src/kdive/mcp/tools/lifecycle/runs/common.py` (envelope) + `src/kdive/services/runs/steps.py` if the read model needs it
+- Modify: `src/kdive/mcp/tools/lifecycle/runs/common.py` (envelope) — reads `BuildStepResult.build_provenance` via `existing_build_result()`/`step_progress`
 - Test: `tests/mcp/lifecycle/test_runs_tools.py`
 
 **Interfaces:**
-- Consumes: the build result `build_provenance` (Task 5).
+- Consumes: `BuildStepResult.build_provenance` (Task 5) via `existing_build_result(conn, run_id)` (`services/runs/steps.py:92`).
 - Produces: `runs.get` `data.build_provenance` present when the build recorded it.
 
 - [ ] **Step 1: Write the failing test.** A Run whose build recorded provenance → `runs.get` envelope `data["build_provenance"] == {"remote": ..., "ref": ..., "resolved_commit": ..., "build_host": ...}`; absent when no provenance recorded.
 
 - [ ] **Step 2: Run, expect FAIL.**
 
-- [ ] **Step 3: Implement.** In `common.py`, read the build step's provenance (mirror `build_log_ref` plumbing at lines 216-222) and add it to the envelope `data` when present (the envelope `data` is free-form, #565 — no outputSchema change). Omit the key when `None`.
+- [ ] **Step 3: Implement.** In `common.py`'s SUCCEEDED-run envelope, call `existing_build_result(conn, run.id)` (the same reader used at `steps.py:202/214/252`) and add `data["build_provenance"] = result.build_provenance` when it is not `None` (the envelope `data` is free-form, #565 — no outputSchema change). Omit the key when `None`. This is the success channel — not the failure-only `build_log_ref` path.
 
 - [ ] **Step 4: Run, expect PASS** + `just lint && just type`.
 
