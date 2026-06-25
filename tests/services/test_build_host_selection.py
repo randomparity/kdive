@@ -35,6 +35,7 @@ def _host(
         max_concurrent=1,
         enabled=enabled,
         state=state,
+        toolchain_desc=None,
     )
 
 

@@ -61,6 +61,7 @@ def _local_host() -> BuildHost:
         max_concurrent=1,
         enabled=True,
         state=BuildHostState.READY,
+        toolchain_desc=None,
     )
 
 
@@ -144,6 +145,7 @@ def _ephemeral_host() -> BuildHost:
         max_concurrent=2,
         enabled=True,
         state=BuildHostState.READY,
+        toolchain_desc=None,
     )
 
 
@@ -287,6 +289,7 @@ def _ephemeral_host() -> BuildHost:
         max_concurrent=2,
         enabled=True,
         state=BuildHostState.READY,
+        toolchain_desc=None,
     )
 
 

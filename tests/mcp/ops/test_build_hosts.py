@@ -808,3 +808,56 @@ def test_remove_runtime_host_writes_no_ledger_entry(migrated_url: str) -> None:
         assert await _build_host_override(migrated_url, "rt-build") is None
 
     asyncio.run(_run())
+
+
+# --- toolchain_desc round-trip (#778) ---
+
+
+async def _toolchain_desc(url: str, name: str) -> str | None:
+    conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
+    async with conn, conn.cursor() as cur:
+        await cur.execute("SELECT toolchain_desc FROM build_hosts WHERE name = %s", (name,))
+        row = await cur.fetchone()
+    assert row is not None
+    return row[0]  # type: ignore[return-value]
+
+
+def test_register_ssh_toolchain_desc_stored(migrated_url: str) -> None:
+    """register_ssh_build_host persists toolchain_desc when supplied."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await register_ssh_build_host(
+                pool,
+                _admin_ctx(),
+                SshBuildHostRegistration(
+                    name="bh-with-desc",
+                    address="10.0.0.5",
+                    ssh_credential_ref=_CRED_REF,
+                    workspace_root="/build",
+                    max_concurrent=1,
+                    toolchain_desc="gcc11, binutils2.40; suits rhel9/5.14",
+                ),
+            )
+        assert resp.status == "registered"
+        assert await _toolchain_desc(migrated_url, "bh-with-desc") == (
+            "gcc11, binutils2.40; suits rhel9/5.14"
+        )
+
+    asyncio.run(_run())
+
+
+def test_register_ssh_toolchain_desc_defaults_none(migrated_url: str) -> None:
+    """register_ssh_build_host stores NULL for toolchain_desc when omitted."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await register_ssh_build_host(
+                pool,
+                _admin_ctx(),
+                _ssh_request(name="bh-no-desc"),
+            )
+        assert resp.status == "registered"
+        assert await _toolchain_desc(migrated_url, "bh-no-desc") is None
+
+    asyncio.run(_run())

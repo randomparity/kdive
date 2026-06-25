@@ -56,6 +56,7 @@ def _host(name: str, kind: BuildHostKind) -> BuildHost:
         max_concurrent=1,
         enabled=True,
         state=BuildHostState.READY,
+        toolchain_desc=None,
     )
 
 

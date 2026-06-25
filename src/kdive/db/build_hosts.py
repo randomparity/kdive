@@ -60,6 +60,9 @@ class BuildHost:
         max_concurrent: Maximum simultaneous build leases this host may hold.
         enabled: Whether the scheduler may select this host.
         state: Operational reachability state.
+        toolchain_desc: Operator-asserted toolchain summary shown to developers in
+            ``build_envs.list`` (e.g. ``'gcc11, binutils2.40; suits rhel9/5.14'``). Not
+            verified against the image. ``None`` when no description was supplied.
     """
 
     id: UUID
@@ -72,6 +75,7 @@ class BuildHost:
     max_concurrent: int
     enabled: bool
     state: BuildHostState
+    toolchain_desc: str | None
 
 
 def _row_to_host(row: dict[str, object]) -> BuildHost:
@@ -86,6 +90,7 @@ def _row_to_host(row: dict[str, object]) -> BuildHost:
         max_concurrent=cast(int, row["max_concurrent"]),
         enabled=cast(bool, row["enabled"]),
         state=BuildHostState(str(row["state"])),
+        toolchain_desc=cast("str | None", row["toolchain_desc"]),
     )
 
 

@@ -44,6 +44,13 @@ class BuildHostRegistration(BaseModel):
     max_concurrent: int = Field(
         description="Maximum simultaneous build leases this host may hold (> 0)."
     )
+    toolchain_desc: str | None = Field(
+        default=None,
+        description=(
+            "Operator-asserted toolchain summary shown to developers in build_envs.list, "
+            "e.g. 'gcc11, binutils2.40; suits rhel9/5.14'. Not verified against the image."
+        ),
+    )
 
 
 class SshBuildHostRegistration(BuildHostRegistration):
@@ -104,13 +111,13 @@ def _validate_credential_ref(ref: str | None) -> bool:
 # LiteralString — no dynamic SQL) plus its bound values; or a typed failure envelope.
 _SSH_INSERT: LiteralString = (
     "INSERT INTO build_hosts "
-    "  (name, kind, address, ssh_credential_ref, workspace_root, max_concurrent) "
-    "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id"
+    "  (name, kind, address, ssh_credential_ref, workspace_root, max_concurrent, toolchain_desc) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id"
 )
 _EPHEMERAL_INSERT: LiteralString = (
     "INSERT INTO build_hosts "
-    "  (name, kind, base_image_volume, workspace_root, max_concurrent) "
-    "VALUES (%s, %s, %s, %s, %s) RETURNING id"
+    "  (name, kind, base_image_volume, workspace_root, max_concurrent, toolchain_desc) "
+    "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id"
 )
 
 
@@ -139,6 +146,7 @@ def _ssh_plan(
             request.ssh_credential_ref,
             request.workspace_root,
             request.max_concurrent,
+            request.toolchain_desc,
         ),
         kind=BuildHostKind.SSH,
     )
@@ -170,6 +178,7 @@ def _ephemeral_plan(
             request.base_image_volume,
             request.workspace_root,
             request.max_concurrent,
+            request.toolchain_desc,
         ),
         kind=BuildHostKind.EPHEMERAL_LIBVIRT,
     )
