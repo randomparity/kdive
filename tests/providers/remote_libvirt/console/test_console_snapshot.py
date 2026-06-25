@@ -41,6 +41,65 @@ async def _count_rows(migrated_url: str, system_id: UUID, object_key: str) -> in
     return 0 if row is None else int(row[0])
 
 
+async def _run_mark(system_id: UUID) -> int:
+    return await RemoteLibvirtConsoleSnapshotter().mark_boot_window(system_id)
+
+
+async def _run_snapshot_sliced(migrated_url: str, system_id: UUID, run_id: UUID, start_index: int):
+    async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+        return await RemoteLibvirtConsoleSnapshotter().snapshot(
+            conn, system_id, run_id, start_index
+        )
+
+
+def test_mark_boot_window_is_next_part_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = FakeObjectStore()
+    monkeypatch.setattr(snapshot_mod, "object_store_from_env", lambda: store)
+    system_id = uuid4()
+    _seed_parts(store, system_id, [b"a", b"b"])  # parts 0, 1
+    assert asyncio.run(_run_mark(system_id)) == 2
+
+
+def test_mark_boot_window_zero_when_no_parts(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = FakeObjectStore()
+    monkeypatch.setattr(snapshot_mod, "object_store_from_env", lambda: store)
+    assert asyncio.run(_run_mark(uuid4())) == 0
+
+
+def test_snapshot_slices_to_boot_window(migrated_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Prior boot wrote parts 0..1 (ending in a panic); this boot's window starts at the mark.
+    store = FakeObjectStore()
+    monkeypatch.setattr(snapshot_mod, "object_store_from_env", lambda: store)
+    system_id, run_id = uuid4(), uuid4()
+    _seed_parts(store, system_id, [b"prior ", b"Kernel panic\n"])  # parts 0, 1
+
+    mark = asyncio.run(_run_mark(system_id))  # == 2
+    _seed_parts(store, system_id, [b"prior ", b"Kernel panic\n", b"this boot READY\n"])  # +part 2
+
+    snap = asyncio.run(_run_snapshot_sliced(migrated_url, system_id, run_id, mark))
+
+    assert snap is not None
+    assert snap.data == b"this boot READY\n"  # no prior-boot panic in the window
+    assert asyncio.run(_count_rows(migrated_url, system_id, snap.object_key)) == 1
+
+
+def test_snapshot_empty_window_returns_none(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Healthy boot whose bytes never rotated into a part: the window is empty -> no artifact.
+    store = FakeObjectStore()
+    monkeypatch.setattr(snapshot_mod, "object_store_from_env", lambda: store)
+    system_id, run_id = uuid4(), uuid4()
+    _seed_parts(store, system_id, [b"prior boot"])  # part 0
+    mark = asyncio.run(_run_mark(system_id))  # == 1, nothing at/after it
+
+    snap = asyncio.run(_run_snapshot_sliced(migrated_url, system_id, run_id, mark))
+
+    assert snap is None
+    key = f"remote-libvirt/systems/{system_id}/console-{run_id}"
+    assert asyncio.run(_count_rows(migrated_url, system_id, key)) == 0
+
+
 def test_snapshot_assembles_parts_into_per_run_artifact(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -313,6 +313,7 @@ def _record(
             cast(SecretRegistry, object()),
             None,
             None,  # console_snapshotter — local dispatch falls through to _capture_console_artifact
+            0,  # boot-window mark (ADR-0241); unused here since _capture_console_artifact is faked
         )
 
     return asyncio.run(_run()), audits
@@ -471,3 +472,77 @@ def test_local_console_artifact_is_per_run_immutable(migrated_url: str) -> None:
     assert a2.id == a1.id  # same Run re-boot -> refreshes its own row, no duplicate
     assert a1.object_key.endswith(f"console-{run_a}")
     assert b1.object_key.endswith(f"console-{run_b}")
+
+
+def test_mark_boot_window_local_is_file_size(tmp_path, monkeypatch) -> None:
+    # Local (no snapshotter): the mark is the current console-log byte size.
+    system_id = uuid4()
+    log = tmp_path / f"{system_id}.log"
+    log.write_bytes(b"prior boot bytes\n")
+    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: log)
+
+    mark = asyncio.run(runs_boot._mark_boot_window(system_id, None))
+
+    assert mark == len(b"prior boot bytes\n")
+
+
+def test_mark_boot_window_local_zero_when_log_absent(tmp_path, monkeypatch) -> None:
+    system_id = uuid4()
+    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / "missing.log")
+
+    assert asyncio.run(runs_boot._mark_boot_window(system_id, None)) == 0
+
+
+def test_mark_boot_window_remote_uses_snapshotter() -> None:
+    class _Snap:
+        async def mark_boot_window(self, system_id):
+            return 7
+
+        async def snapshot(self, conn, system_id, run_id, start_index=0):
+            return None
+
+    assert asyncio.run(runs_boot._mark_boot_window(uuid4(), _Snap())) == 7
+
+
+def test_mark_boot_window_degrades_to_zero_on_failure() -> None:
+    class _Boom:
+        async def mark_boot_window(self, system_id):
+            raise RuntimeError("s3 down")
+
+        async def snapshot(self, conn, system_id, run_id, start_index=0):
+            return None
+
+    # Best-effort: a mark-read failure must not propagate; it degrades to cumulative (0).
+    assert asyncio.run(runs_boot._mark_boot_window(uuid4(), _Boom())) == 0
+
+
+def test_read_redacted_console_honors_offset(tmp_path, monkeypatch) -> None:
+    system_id = uuid4()
+    log = tmp_path / f"{system_id}.log"
+    log.write_bytes(b"prior\nthis boot panic\n")
+    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: log)
+
+    redacted = asyncio.run(
+        runs_boot._read_redacted_console(system_id, SecretRegistry(), len(b"prior\n"))
+    )
+
+    assert redacted == b"this boot panic\n"
+
+
+def test_local_slice_excludes_prior_boot_panic(tmp_path, monkeypatch) -> None:
+    system_id = uuid4()
+    log = tmp_path / f"{system_id}.log"
+    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: log)
+
+    # Run A boots and panics; bytes are appended to the System's serial log.
+    log.write_bytes(b"[run A] Kernel panic - not syncing: A\n")
+
+    # Run B's boot-window mark is taken before its boot appends a clean log.
+    mark_b = asyncio.run(runs_boot._mark_boot_window(system_id, None))
+    with log.open("ab") as fh:
+        fh.write(b"[run B] booted clean READY\n")
+
+    redacted_b = asyncio.run(runs_boot._read_redacted_console(system_id, SecretRegistry(), mark_b))
+
+    assert redacted_b == b"[run B] booted clean READY\n"
+    assert not runs_boot._generic_panic_matches(redacted_b)  # prior panic is out of B's window

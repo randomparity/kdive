@@ -52,6 +52,36 @@ def test_parts_roundtrip_and_index_listing() -> None:
     assert part_store.list_part_indices(sid) == [0, 10]
 
 
+def test_assemble_concatenates_all_parts_by_default() -> None:
+    store = FakeObjectStore()
+    part_store = RemoteConsolePartStore(store, "unused")
+    sid = uuid4()
+    part_store.put_part(sid, 0, b"a")
+    part_store.put_part(sid, 1, b"b")
+    part_store.put_part(sid, 2, b"c")
+    assert part_store.assemble(sid) == b"abc"
+
+
+def test_assemble_start_index_slices_to_boot_window() -> None:
+    # Parts 0..1 are a prior boot; this boot's window starts at part index 2.
+    store = FakeObjectStore()
+    part_store = RemoteConsolePartStore(store, "unused")
+    sid = uuid4()
+    part_store.put_part(sid, 0, b"prior ")
+    part_store.put_part(sid, 1, b"boot ")
+    part_store.put_part(sid, 2, b"this ")
+    part_store.put_part(sid, 3, b"boot")
+    assert part_store.assemble(sid, start_index=2) == b"this boot"
+
+
+def test_assemble_start_index_past_all_parts_is_empty() -> None:
+    store = FakeObjectStore()
+    part_store = RemoteConsolePartStore(store, "unused")
+    sid = uuid4()
+    part_store.put_part(sid, 0, b"prior")
+    assert part_store.assemble(sid, start_index=1) == b""
+
+
 def test_parts_do_not_shadow_the_console_artifact_prefix() -> None:
     # The single console artifact key must not be picked up as a numbered part.
     store = FakeObjectStore()
