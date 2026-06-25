@@ -23,6 +23,7 @@ from kdive.artifacts.uploads import (
     ChunkEntry,
     ManifestEntry,
 )
+from kdive.build_artifacts.validation import EFFECTIVE_CONFIG_MAX_BYTES
 from kdive.config.core_settings import MAX_UPLOAD_BYTES, UPLOAD_TTL_SECONDS
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -60,7 +61,6 @@ RUN_ARTIFACT_NAMES = frozenset({"effective_config", "kernel", "initrd", "vmlinux
 _ROOTFS_NAME = "rootfs"
 SYSTEM_ARTIFACT_NAMES = frozenset({_ROOTFS_NAME})
 _RETENTION_CLASS = "build"
-_EFFECTIVE_CONFIG_MAX_UPLOAD_BYTES = 1024 * 1024
 
 # Upper bound on an offending artifact-name string echoed back in an error's ``data.value``
 # (ADR-0166). The name is user-supplied; echoing a short string makes the rejection
@@ -231,7 +231,7 @@ def _validate_artifact_declarations(
         if isinstance(validated_decl, ToolResponse):
             return validated_decl
         name, sha256, size = validated_decl
-        artifact_cap = _EFFECTIVE_CONFIG_MAX_UPLOAD_BYTES if name == "effective_config" else cap
+        artifact_cap = EFFECTIVE_CONFIG_MAX_BYTES if name == "effective_config" else cap
         raw_chunks = art.get("chunks")
         if raw_chunks is None:
             if size <= 0 or size > min(SINGLE_PUT_MAX_BYTES, artifact_cap):

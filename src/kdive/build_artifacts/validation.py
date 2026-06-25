@@ -7,14 +7,16 @@ import struct
 import tarfile
 import zlib
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from kdive.artifacts.storage import HeadResult, chunk_key
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.components.requirements import ConfigRequirements, validate_config_requirements
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.serialization import JsonValue
 
 _NT_GNU_BUILD_ID = 3
 _ELF_MAGIC = b"\x7fELF"
@@ -23,7 +25,10 @@ _BZIMAGE_MAGIC = b"HdrS"
 _BZIMAGE_MAGIC_OFFSET = 0x202
 _SHT_NOTE = 7
 _MAX_SECTION_BYTES = 16 * 1024 * 1024
-_MAX_EFFECTIVE_CONFIG_BYTES = 1024 * 1024
+# The effective_config readable/upload cap (1 MiB). This module owns the single canonical value;
+# the upload-admission path (mcp uploads tool) imports it so the advertised cap, the admission gate,
+# and the validation gate cannot drift (#769, ADR-0234 §5). Imports flow mcp -> build_artifacts.
+EFFECTIVE_CONFIG_MAX_BYTES = 1024 * 1024
 
 # The combined `kernel` artifact is a gzip tar of boot/vmlinuz + lib/modules/<ver>/ (ADR-0234 §2).
 _KERNEL_BOOT_MEMBER = "boot/vmlinuz"
@@ -34,6 +39,160 @@ _MODULES_MEMBER_PREFIX = "lib/modules/"
 # gigabytes of tar) is stopped here rather than decompressing unbounded.
 _KERNEL_TAR_SCAN_MAX_BYTES = 128 * 1024 * 1024
 _RANGE_CHUNK_BYTES = 4 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class MagicPin:
+    """A magic-byte signature: lowercase-hex bytes expected at a fixed byte ``offset``."""
+
+    offset: int
+    hex: str
+
+    def to_json(self) -> dict[str, JsonValue]:
+        """Return a JSON-safe view of this magic pin."""
+        return {"offset": self.offset, "hex": self.hex}
+
+
+@dataclass(frozen=True, slots=True)
+class FormatContract:
+    """The byte-format contract for an artifact or a member inside a container artifact."""
+
+    container: str
+    magic: tuple[MagicPin, ...] = ()
+    max_bytes: int | None = None
+
+    def to_json(self) -> dict[str, JsonValue]:
+        """Return a JSON-safe view; ``max_bytes`` is present only when a cap applies."""
+        data: dict[str, JsonValue] = {
+            "container": self.container,
+            "magic": [pin.to_json() for pin in self.magic],
+        }
+        if self.max_bytes is not None:
+            data["max_bytes"] = self.max_bytes
+        return data
+
+
+@dataclass(frozen=True, slots=True)
+class LayoutMember:
+    """One member inside a container artifact (e.g. a path inside the combined kernel tar)."""
+
+    path: str
+    required: bool
+    note: str
+    format: FormatContract | None = None
+
+    def to_json(self) -> dict[str, JsonValue]:
+        """Return a JSON-safe view; the nested ``format`` is present only when the member has it."""
+        data: dict[str, JsonValue] = {
+            "path": self.path,
+            "required": self.required,
+            "note": self.note,
+        }
+        if self.format is not None:
+            data["format"] = self.format.to_json()
+        return data
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactContract:
+    """The full upload contract for one externally uploaded build artifact (#769, ADR-0234 §5)."""
+
+    name: str
+    requirement: Literal["required", "optional", "conditional"]
+    summary: str
+    format: FormatContract
+    layout: tuple[LayoutMember, ...] = ()
+    notes: tuple[str, ...] = ()
+
+    def to_json(self) -> dict[str, JsonValue]:
+        """Return a JSON-safe view; ``layout`` and ``notes`` are present only when non-empty."""
+        data: dict[str, JsonValue] = {
+            "name": self.name,
+            "requirement": self.requirement,
+            "summary": self.summary,
+            "format": self.format.to_json(),
+        }
+        if self.layout:
+            data["layout"] = [member.to_json() for member in self.layout]
+        if self.notes:
+            data["notes"] = list(self.notes)
+        return data
+
+
+# The provider-neutral external-build upload contract, keyed by artifact name (ADR-0234 §5). The
+# byte details (magic, layout member paths, the effective_config cap) are taken from this module's
+# own validator constants, so the advertised contract cannot drift from what the validator enforces.
+EXTERNAL_BUILD_CONTRACTS: Mapping[str, ArtifactContract] = {
+    "kernel": ArtifactContract(
+        name="kernel",
+        requirement="required",
+        summary=(
+            "Combined kernel+modules tar (gzip): boot/vmlinuz (the bzImage, NOT the vmlinux ELF) "
+            "plus lib/modules/<release>/. One artifact for both; there is no separate 'modules' "
+            "upload."
+        ),
+        format=FormatContract(
+            container="gzip tar",
+            magic=(MagicPin(offset=0, hex=_GZIP_MAGIC.hex()),),
+        ),
+        layout=(
+            LayoutMember(
+                path=_KERNEL_BOOT_MEMBER,
+                required=True,
+                note="The bzImage (arch/x86/boot/bzImage), renamed to boot/vmlinuz in the tar.",
+                format=FormatContract(
+                    container="bzImage",
+                    magic=(MagicPin(offset=_BZIMAGE_MAGIC_OFFSET, hex=_BZIMAGE_MAGIC.hex()),),
+                ),
+            ),
+            LayoutMember(
+                path=_MODULES_MEMBER_PREFIX,
+                required=True,
+                note=(
+                    "The `make modules_install` tree: one or more lib/modules/<release>/ dirs. "
+                    "Exclude the `build` and `source` back-reference symlinks."
+                ),
+            ),
+        ),
+        notes=(
+            "Must be gzip specifically; a plain .tar, .tar.xz, or .tar.zst is rejected.",
+            "List boot/vmlinuz before lib/modules: validation scans at most the first 128 MiB of "
+            "decompressed output (a gzip-bomb guard), so the lib/modules header must be within it.",
+        ),
+    ),
+    "vmlinux": ArtifactContract(
+        name="vmlinux",
+        requirement="optional",
+        summary="Uncompressed kernel ELF with DWARF debug info; enables kernel debugging.",
+        format=FormatContract(
+            container="ELF (uncompressed)",
+            magic=(MagicPin(offset=0, hex=_ELF_MAGIC.hex()),),
+        ),
+        notes=(
+            "If uploaded you MUST pass a matching build_id to runs.complete_build; it must equal "
+            "the ELF's GNU build-id note (e.g. from `readelf -n vmlinux`), or it is rejected.",
+        ),
+    ),
+    "initrd": ArtifactContract(
+        name="initrd",
+        requirement="optional",
+        summary="Initial ramdisk / initramfs image; upload when boot needs a specific initramfs.",
+        format=FormatContract(container="initramfs image"),
+    ),
+    "effective_config": ArtifactContract(
+        name="effective_config",
+        requirement="conditional",
+        summary="The kernel .config used for the build.",
+        format=FormatContract(
+            container="kernel .config (text)",
+            max_bytes=EFFECTIVE_CONFIG_MAX_BYTES,
+        ),
+        notes=(
+            "Required when the Run's build profile carries profile_requirements; validated against "
+            "that profile's required Kconfig symbols — the config install/boot expect to match.",
+        ),
+    ),
+}
 
 
 class HeadStore(Protocol):
@@ -185,14 +344,14 @@ def _validate_effective_config(
             "external build profile requirements need an effective_config artifact",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    if head.size_bytes > _MAX_EFFECTIVE_CONFIG_BYTES:
+    if head.size_bytes > EFFECTIVE_CONFIG_MAX_BYTES:
         raise CategorizedError(
             "effective_config exceeds the readable size cap",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={
                 "name": "effective_config",
                 "size_bytes": head.size_bytes,
-                "max_size_bytes": _MAX_EFFECTIVE_CONFIG_BYTES,
+                "max_size_bytes": EFFECTIVE_CONFIG_MAX_BYTES,
             },
         )
     data = store.get_range(key, start=0, length=head.size_bytes)

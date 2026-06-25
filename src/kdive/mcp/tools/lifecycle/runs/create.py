@@ -11,6 +11,8 @@ from pydantic import JsonValue
 
 from kdive.domain.errors import CategorizedError
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.catalog.artifacts.expected_uploads import EXPECTED_UPLOADS_TOOL
+from kdive.mcp.tools.catalog.artifacts.uploads import CREATE_RUN_UPLOAD_TOOL
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.services.idempotency.envelope import (
@@ -121,10 +123,16 @@ def _created_response(result: RunCreateResult) -> ToolResponse:
     }
     if result.expected_boot_failure_kind is not None:
         data["expected_boot_failure"] = result.expected_boot_failure_kind
+    # An external build does not use the warm-tree runs.build lane; it uploads prebuilt artifacts.
+    # Point it at the format advisory + upload tool so the loop is self-describing (ADR-0234 §5).
+    if result.is_external:
+        next_actions = ["runs.get", EXPECTED_UPLOADS_TOOL, CREATE_RUN_UPLOAD_TOOL]
+    else:
+        next_actions = ["runs.get", "runs.build"]
     return ToolResponse.success(
         str(result.run_id),
         "created",
-        suggested_next_actions=["runs.get", "runs.build"],
+        suggested_next_actions=next_actions,
         data=data,
     )
 
