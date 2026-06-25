@@ -129,6 +129,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "debug.clear_breakpoint": _CONTRIBUTOR,
     "debug.read_memory": _CONTRIBUTOR,
     "debug.read_registers": _CONTRIBUTOR,
+    "debug.resolve_symbol": _CONTRIBUTOR,
     # images
     "images.build": _PLAT_OP,
     "images.publish": _PLAT_OP,

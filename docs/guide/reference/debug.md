@@ -101,6 +101,17 @@ Read named registers from a live DebugSession. Requires contributor.
 | `registers` | array<string> | yes | Register names to read (e.g. ["rip", "rsp"]). |
 | `session_id` | string | yes | The live DebugSession to read registers from. |
 
+## `debug.resolve_symbol`
+
+`implemented` · `read-only`
+
+Resolve a kernel symbol to its address on a live DebugSession. Requires contributor.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | yes | Bare C global or function symbol name to resolve to its address (e.g. 'd_hash_shift'). Read its value with debug.read_memory. |
+| `session_id` | string | yes | The live DebugSession to resolve the symbol on. |
+
 ## `debug.set_breakpoint`
 
 `implemented`

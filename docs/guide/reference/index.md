@@ -46,6 +46,7 @@
 | [`debug.list_sessions`](debug.md#debuglist_sessions) | `implemented` |
 | [`debug.read_memory`](debug.md#debugread_memory) | `implemented` |
 | [`debug.read_registers`](debug.md#debugread_registers) | `implemented` |
+| [`debug.resolve_symbol`](debug.md#debugresolve_symbol) | `implemented` |
 | [`debug.set_breakpoint`](debug.md#debugset_breakpoint) | `implemented` |
 | [`debug.start_session`](debug.md#debugstart_session) | `implemented` |
 | [`fixtures.list`](fixtures.md#fixtureslist) | `implemented` |
