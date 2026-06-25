@@ -607,6 +607,28 @@ def test_artifacts_get_clamps_window_to_lowered_inline_cap(
     asyncio.run(_run())
 
 
+def test_artifacts_get_degenerate_zero_cap_does_not_loop(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A nonsensical inline cap of 0 yields an empty window; truncation requires forward
+    # progress, so no next_offset is advertised and a paging caller cannot loop.
+    monkeypatch.setenv("KDIVE_ARTIFACT_INLINE_MAX_BYTES", "0")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            store = _SearchStore(b"some redacted body")
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
+            )
+        assert resp.status == "available"
+        assert data_str(resp, "content") == ""
+        assert data_str(resp, "content_truncated") == "false"
+        assert "next_offset" not in resp.data
+
+    asyncio.run(_run())
+
+
 def test_artifacts_get_over_ceiling_omits_even_with_window(migrated_url: str) -> None:
     # Criterion 7: an object above the fetch ceiling omits content (download_uri only),
     # even when a window is requested; it is never fetched.
