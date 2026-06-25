@@ -48,6 +48,7 @@ from kdive.mcp.tools.ops.build_hosts.register import (
     register_ephemeral_libvirt_build_host,
     register_ssh_build_host,
 )
+from kdive.mcp.tools.ops.build_hosts.registrar import BUILD_ENVS_LIST_TOOL
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 
@@ -257,9 +258,11 @@ def test_registrar_exposes_annotations_and_invokes_wrappers(
             LIST_TOOL,
             DISABLE_TOOL,
             REMOVE_TOOL,
+            BUILD_ENVS_LIST_TOOL,
         }
         assert _destructive_hint(tools[REGISTER_SSH_TOOL]) is False
         assert _read_only_hint(tools[LIST_TOOL]) is True
+        assert _read_only_hint(tools[BUILD_ENVS_LIST_TOOL]) is True
         assert _destructive_hint(tools[REMOVE_TOOL]) is False
 
         request = _ssh_request(
