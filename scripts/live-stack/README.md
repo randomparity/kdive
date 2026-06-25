@@ -31,3 +31,7 @@ Brings up only the compose backends (Postgres/MinIO/OIDC) and migrates the schem
 ## Shared
 
 `env.sh` and `lib.sh` are sourced (not run); `apply-migrations.sh` is the host migrator.
+
+> **Note:** `examples/local-libvirt/` has its own `up.sh` / `down.sh` — a guided onboarding
+> walkthrough that seeds a project, merges the MCP client config, and tracks processes via a pid
+> file. Those are distinct from the host-lifecycle scripts here.
