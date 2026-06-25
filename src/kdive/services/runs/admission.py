@@ -29,6 +29,7 @@ from kdive.domain.profile_documents import SerializedExpectedBootFailure
 from kdive.log import bind_context
 from kdive.profiles.build import (
     BuildProfile,
+    ExternalBuildProfile,
     ParsedBuildProfile,
     ServerBuildProfile,
     dump_build_profile,
@@ -135,6 +136,8 @@ class RunCreateResult:
     target_kind: ResourceKind
     system_id: UUID | None = None
     expected_boot_failure_kind: str | None = None
+    is_external: bool = False
+    """True for a source='external' build: the response chains into the upload loop, not build."""
 
 
 type RunCreateRecorder = Callable[[AsyncConnection, RunCreateResult], Awaitable[None]]
@@ -517,7 +520,12 @@ async def _create_locked(
             target_kind=target_kind,
         )
         await _flip_investigation_if_open(conn, ctx, inv, targets.investigation_id, project)
-        result = _created_result(run, expected_boot_failure, project)
+        result = _created_result(
+            run,
+            expected_boot_failure,
+            project,
+            is_external=isinstance(build_profile, ExternalBuildProfile),
+        )
         if recorder is not None:
             await recorder(conn, result)
     return result
@@ -599,6 +607,8 @@ def _created_result(
     run: Run,
     expected_boot_failure: SerializedExpectedBootFailure | None,
     project: str,
+    *,
+    is_external: bool,
 ) -> RunCreateResult:
     kind = str(expected_boot_failure["kind"]) if expected_boot_failure is not None else None
     return RunCreateResult(
@@ -608,6 +618,7 @@ def _created_result(
         target_kind=run.target_kind,
         system_id=run.system_id,
         expected_boot_failure_kind=kind,
+        is_external=is_external,
     )
 
 
@@ -676,7 +687,12 @@ async def _create_unbound(
             conn, ctx, investigation_id, build_profile, expected_boot_failure, project, target_kind
         )
         await _flip_investigation_if_open(conn, ctx, locked_inv, investigation_id, project)
-        result = _created_result(run, expected_boot_failure, project)
+        result = _created_result(
+            run,
+            expected_boot_failure,
+            project,
+            is_external=isinstance(build_profile, ExternalBuildProfile),
+        )
         if recorder is not None:
             await recorder(conn, result)
     return result

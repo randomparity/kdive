@@ -48,12 +48,14 @@ from kdive.mcp.tools.lifecycle.runs.create import (
     RunReuseRequirementInput,
     create_run,
 )
+from kdive.mcp.tools.lifecycle.runs.create import _created_response as _created_response
 from kdive.mcp.tools.lifecycle.runs.server_build import BuildRunHandlers
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.runs import steps as run_steps
+from kdive.services.runs.admission import RunCreateResult
 from kdive.services.runs.steps import StepProgress, step_progress
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.mcp.systems_support import provider_resolver
@@ -1323,6 +1325,56 @@ def test_get_run_exposes_expected_boot_failure(migrated_url: str) -> None:
             resp = await get_run(pool, _ctx(), run_id)
         assert resp.data["expected_boot_failure"] == "console_crash"
         assert resp.data["expected_boot_failure_detail"] == expected
+
+    asyncio.run(_run())
+
+
+def _create_result(*, is_external: bool) -> RunCreateResult:
+    return RunCreateResult(
+        run_id=uuid4(),
+        project="proj",
+        investigation_id=uuid4(),
+        target_kind=ResourceKind.LOCAL_LIBVIRT,
+        system_id=None,
+        is_external=is_external,
+    )
+
+
+def test_created_response_external_chains_to_the_upload_loop() -> None:
+    resp = _created_response(_create_result(is_external=True))
+    assert resp.status == "created"
+    assert resp.suggested_next_actions == [
+        "runs.get",
+        "artifacts.expected_uploads",
+        "artifacts.create_run_upload",
+    ]
+
+
+def test_created_response_server_chains_to_build() -> None:
+    resp = _created_response(_create_result(is_external=False))
+    assert resp.suggested_next_actions == ["runs.get", "runs.build"]
+
+
+def test_create_external_run_chains_to_upload_loop(migrated_url: str) -> None:
+    """The build_profile source flows to the response: external create points at the upload loop."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            resp = await _create(
+                pool,
+                _ctx(),
+                inv_id,
+                sys_id,
+                profile={"schema_version": 1, "source": "external"},
+            )
+        assert resp.status == "created"
+        assert resp.suggested_next_actions == [
+            "runs.get",
+            "artifacts.expected_uploads",
+            "artifacts.create_run_upload",
+        ]
 
     asyncio.run(_run())
 

@@ -32,6 +32,10 @@ from kdive.serialization import JsonValue
 
 _OBJECT_ID = "expected-uploads"
 
+# The literal tool name, shared so callers that chain into the upload loop (runs.create external,
+# runs.complete_build validation failure) point at the same name this tool registers under.
+EXPECTED_UPLOADS_TOOL = "artifacts.expected_uploads"
+
 # The human recipe for the combined kernel tar, surfaced so an agent can follow it after learning
 # the contract. Kept as a literal resource URI (not a markdown link) — it is a pointer, not a file
 # reference resolved by the docs-link guard.
