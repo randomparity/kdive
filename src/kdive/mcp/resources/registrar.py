@@ -63,6 +63,19 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
         ),
     ),
     DocResource(
+        uri="resource://kdive/docs/operating/external-build-upload.md",
+        source="docs/operating/external-build-upload.md",
+        content_file="external-build-upload.md",
+        name="external-build-upload",
+        title="Preparing artifacts for the external-build lane",
+        description=(
+            "How to shape the upload artifacts for the external-build lane: the combined "
+            "kernel+modules gzip tar (boot/vmlinuz bzImage + lib/modules/<release>/), the exact "
+            "tar recipe, and the optional vmlinux/effective_config/initrd. Cited by the "
+            "runs.create build_profile schema and artifacts.expected_uploads."
+        ),
+    ),
+    DocResource(
         uri="resource://kdive/adr/0080",
         source="docs/adr/0080-remote-provisioning-disk-image-profile.md",
         content_file="0080-remote-provisioning-disk-image-profile.md",
