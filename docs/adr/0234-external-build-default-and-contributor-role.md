@@ -1,6 +1,6 @@
 # ADR 0234 — External upload as the default build path; a `contributor` role (#771)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-24
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0048](0048-external-build-artifact-ingestion.md) (the
@@ -132,8 +132,10 @@ layout — provider-neutral after decision 2 (one combined `kernel` tar; optiona
 required matching `build_id`; optional `initrd`; conditional `effective_config`). An agent can
 learn exactly what bytes to produce from MCP alone. (Implemented in #769, after #766.)
 
-This PR implements **decision 3** (the `contributor` role) and documents decisions 1, 2, 4, 5 for
-the sibling PRs; the ADR stays **Proposed** until they land.
+Decision 3 (the `contributor` role) landed in #765, decision 2 (the unified combined kernel tar)
+in #766, and the base-role access in #767; the ADR is **Accepted** as those core decisions are in
+effect. Decisions 4 (retention TTL + clear-on-close, #768) and 5 (the enriched format advisory,
+#769) are additive follow-ups that build on the now-ratified contract.
 
 ## Consequences
 
