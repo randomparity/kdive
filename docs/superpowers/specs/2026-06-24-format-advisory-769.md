@@ -23,7 +23,10 @@ is therefore not fully self-describing over MCP.
 2. The advisory matches the unified format: one combined `kernel` tar (`boot/vmlinuz` bzImage +
    `lib/modules/<release>/`); optional `vmlinux` (requires a matching `build_id`); optional `initrd`;
    conditional `effective_config`. The contract is stated as provider-neutral.
-3. The advisory cannot drift from what the validator actually enforces.
+3. The advertised **byte contract** (magic bytes, layout member paths, size caps) cannot drift from
+   the validator/admission constants. The required-vs-optional **semantics** are a hand-maintained
+   mapping, backed by a behavioral test that exercises the validator (see Test strategy), not a
+   constant comparison.
 
 ## Design
 
@@ -39,10 +42,16 @@ built from those same constants, so the validator and the advisory share one sou
   `effective_config` config-source pointer). `to_json()` returns a JSON-safe mapping.
 - `FormatContract`: `container` (e.g. `"gzip tar"`, `"ELF (uncompressed)"`, `"kernel .config (text)"`)
   and `magic` — a list of `{offset, hex}` taken verbatim from the validator constants
-  (`_GZIP_MAGIC`, `_BZIMAGE_MAGIC`/`_BZIMAGE_MAGIC_OFFSET`, `_ELF_MAGIC`). `max_bytes` where the
-  validator enforces one (`effective_config` → `_MAX_EFFECTIVE_CONFIG_BYTES`).
-- `LayoutMember`: `path` (e.g. `boot/vmlinuz`, `lib/modules/<release>/`), `required`, `note`, and an
-  optional nested `FormatContract` (the `boot/vmlinuz` member carries the bzImage `HdrS` magic).
+  (`_GZIP_MAGIC`, `_BZIMAGE_MAGIC`/`_BZIMAGE_MAGIC_OFFSET`, `_ELF_MAGIC`). `max_bytes` where a cap
+  applies. For `effective_config` the cap is the **upload-admission** cap
+  `_EFFECTIVE_CONFIG_MAX_UPLOAD_BYTES` (`uploads.py`) — the first gate an upload hits — not the
+  later `validation.py` cap; a unit assertion pins the two equal so the choice cannot silently drift.
+- `LayoutMember`: `path`, `required`, `note`, and an optional nested `FormatContract`. The member
+  `path` is the **drift-checked** value derived from the validator constant — `boot/vmlinuz`
+  (`_KERNEL_BOOT_MEMBER`) and `lib/modules/` (`_MODULES_MEMBER_PREFIX`). The human `<release>/`
+  subdir hint lives in the member's `note` ("one or more `lib/modules/<release>/` trees"), never in
+  the structured `path`, so the drift guard can assert `path` equality against the constants. The
+  `boot/vmlinuz` member carries the bzImage `HdrS` magic as its nested `FormatContract`.
 
 `EXTERNAL_BUILD_CONTRACTS: Mapping[str, ArtifactContract]` covers the run build artifacts
 (`kernel`, `vmlinux`, `initrd`, `effective_config`), keyed by name. The `requirement` values encode
@@ -88,10 +97,16 @@ enforces no magic at this seam).
 
 ## Test strategy
 
-- **Drift guard (unit):** assert each projected `FormatContract.magic` hex/offset equals the
-  validator's own constants, and the `kernel` layout members equal `_KERNEL_BOOT_MEMBER` /
-  `_MODULES_MEMBER_PREFIX`, and the `effective_config` `max_bytes` equals
-  `_MAX_EFFECTIVE_CONFIG_BYTES`. This is what makes "cannot drift" falsifiable.
+- **Byte-contract drift guard (unit):** assert each projected `FormatContract.magic` hex/offset
+  equals the validator's own constants; the `kernel` layout member `path`s equal `_KERNEL_BOOT_MEMBER`
+  and `_MODULES_MEMBER_PREFIX` (literal equality — the `<release>` hint is in `note`, not `path`); the
+  `effective_config` `max_bytes` equals `_EFFECTIVE_CONFIG_MAX_UPLOAD_BYTES`; and
+  `_EFFECTIVE_CONFIG_MAX_UPLOAD_BYTES == _MAX_EFFECTIVE_CONFIG_BYTES` (the two caps stay in lockstep).
+- **Requirement-semantics drift guard (unit):** because `requirement` is hand-encoded, exercise the
+  real `validate_external_artifacts` to prove each value: a manifest missing `kernel` is rejected
+  (`kernel` is `required`); a manifest with `vmlinux` but no `build_id` is rejected (the `build_id`
+  dependency note is real); a manifest with only `kernel` is accepted (`vmlinux`/`initrd` are
+  `optional`). This backs the requirement mapping against validator behavior, not a constant.
 - **Advisory shape (unit):** `expected_uploads` returns `contracts` for both owner kinds; `kernel`
   is `required` with a gzip magic and the two layout members; `vmlinux`/`initrd` optional;
   `effective_config` conditional with the config-source note and size cap; `provider_neutral` and
