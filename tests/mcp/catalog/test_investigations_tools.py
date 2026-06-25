@@ -237,6 +237,29 @@ def test_close_open_investigation(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_close_stamps_cleanup_pending_at_once(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, InvestigationState.OPEN)
+            await inv_tools.close_investigation(pool, _ctx(), inv_id)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT cleanup_pending_at FROM investigations WHERE id = %s", (inv_id,)
+                )
+                first = await cur.fetchone()
+            # A re-close is idempotent (returns before the state flip), so the marker is unchanged.
+            await inv_tools.close_investigation(pool, _ctx(), inv_id)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT cleanup_pending_at FROM investigations WHERE id = %s", (inv_id,)
+                )
+                second = await cur.fetchone()
+        assert first is not None and first["cleanup_pending_at"] is not None
+        assert second is not None and second["cleanup_pending_at"] == first["cleanup_pending_at"]
+
+    asyncio.run(_run())
+
+
 def test_close_active_investigation(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

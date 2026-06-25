@@ -82,6 +82,9 @@ class Investigation(DomainModel, Attribution):
     external_refs: list[ExternalRef] = Field(default_factory=list)
     state: InvestigationState
     last_run_at: datetime | None = None
+    #: Set when the investigation closes; the reconciler `gc_investigation_artifacts` sweep reclaims
+    #: its run-owned build artifacts after a grace window, then clears it (ADR-0234 §4, #768).
+    cleanup_pending_at: datetime | None = None
 
 
 class ExpectedBootFailure(DomainBase):

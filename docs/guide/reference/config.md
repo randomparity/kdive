@@ -159,6 +159,8 @@
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
+| `KDIVE_BUILD_ARTIFACT_RETENTION_DAYS` | reconciler, server, worker | `30` | no | Age in days after which the reconciler `gc_expired_build_artifacts` sweep deletes a run-owned uploaded build artifact regardless of investigation close — the backstop for investigations that never close. ADR-0234 §4. |
+| `KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS` | reconciler, server, worker | `1` | no | Grace window in days between an investigation closing and the reconciler `gc_investigation_artifacts` sweep reclaiming its run-owned uploaded build artifacts (kernel/vmlinux/initrd; never console or crash evidence). ADR-0234 §4. |
 | `KDIVE_REPORT_ARTIFACT_RETENTION_DAYS` | reconciler, server, worker | `7` | no | Age in days after which the reconciler `gc_report_artifacts` sweep deletes a generated report's spreadsheet artifact (object + row). Reports are ephemeral and re-runnable (ADR-0212). |
 | `KDIVE_REPORT_INLINE_MAX_BYTES` | server | `65536` | no | Total byte budget for the inline report payload `reports.generate_*` returns in `items[].data.rows_json`. A section whose serialized rows exceed the remaining budget degrades to a bounded preview plus `inline_truncated`; the full set is in the spreadsheet artifact (ADR-0212). |
 

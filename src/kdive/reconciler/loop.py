@@ -88,10 +88,14 @@ DEFAULT_QUEUE_MAX_WAIT = allocation_repairs.DEFAULT_QUEUE_MAX_WAIT
 DEFAULT_IDEMPOTENCY_RETENTION = gc_repairs.DEFAULT_IDEMPOTENCY_RETENTION
 DEFAULT_DUMP_VOLUME_GRACE = gc_repairs.DEFAULT_DUMP_VOLUME_GRACE
 DEFAULT_REPORT_ARTIFACT_RETENTION = gc_repairs.DEFAULT_REPORT_ARTIFACT_RETENTION
+DEFAULT_INVESTIGATION_CLEANUP_GRACE = gc_repairs.DEFAULT_INVESTIGATION_CLEANUP_GRACE
+DEFAULT_BUILD_ARTIFACT_RETENTION = gc_repairs.DEFAULT_BUILD_ARTIFACT_RETENTION
 
 _expire_one = allocation_repairs._expire_one
 _gc_idempotency_keys = gc_repairs.gc_idempotency_keys
 _gc_report_artifacts = gc_repairs.gc_report_artifacts
+_gc_investigation_artifacts = gc_repairs.gc_investigation_artifacts
+_gc_expired_build_artifacts = gc_repairs.gc_expired_build_artifacts
 _promote_pending = allocation_repairs.promote_pending
 _reap_console_collectors = gc_repairs.reap_console_collectors
 _reap_orphaned_dump_volumes = gc_repairs.reap_orphaned_dump_volumes
@@ -111,7 +115,9 @@ __all__ = [
     "ReconcileReport",
     "Reconciler",
     "_expire_one",
+    "_gc_expired_build_artifacts",
     "_gc_idempotency_keys",
+    "_gc_investigation_artifacts",
     "_gc_report_artifacts",
     "_probe_build_host_reachability",
     "_promote_pending",
@@ -195,6 +201,8 @@ class ReconcileReport:
     reclaimed_build_host_leases: int = 0
     build_host_states_changed: int = 0
     reaped_runtime_resources: int = 0
+    investigation_artifacts_gc_count: int = 0
+    expired_build_artifacts_gc_count: int = 0
     #: The raw per-kind repair counts, keyed by ``_RepairSpec.name`` (ADR-0190 A). The scalar
     #: fields above feed callers that read named categories; this dict feeds the repairs
     #: counter with the exact spec names so ``repair_kind`` == ``ALL_REPAIR_KINDS``. Excluded
@@ -219,6 +227,8 @@ class ReconcileConfig:
     debug_session_stale_after: timedelta = DEFAULT_DEBUG_SESSION_STALE_AFTER
     idempotency_retention: timedelta = DEFAULT_IDEMPOTENCY_RETENTION
     report_artifact_retention: timedelta = DEFAULT_REPORT_ARTIFACT_RETENTION
+    investigation_cleanup_grace: timedelta = DEFAULT_INVESTIGATION_CLEANUP_GRACE
+    build_artifact_retention: timedelta = DEFAULT_BUILD_ARTIFACT_RETENTION
     queue_max_wait: timedelta = DEFAULT_QUEUE_MAX_WAIT
     dump_volume_grace: timedelta = DEFAULT_DUMP_VOLUME_GRACE
     heartbeat: Heartbeat | None = None
@@ -315,6 +325,23 @@ def _repair_plan(
                 lambda conn: _gc_report_artifacts(conn, upload_store, report_retention),
             )
         )
+        # Reclaim run-owned uploaded build artifacts: clear-on-close (grace-gated by the
+        # investigation cleanup marker) and a TTL backstop for never-closed investigations
+        # (ADR-0234 §4, #768). Never touch console/crash evidence (system-owned).
+        cleanup_grace = config.investigation_cleanup_grace
+        build_retention = config.build_artifact_retention
+        repairs.append(
+            _RepairSpec(
+                "investigation_artifacts_gc_count",
+                lambda conn: _gc_investigation_artifacts(conn, upload_store, cleanup_grace),
+            )
+        )
+        repairs.append(
+            _RepairSpec(
+                "expired_build_artifacts_gc_count",
+                lambda conn: _gc_expired_build_artifacts(conn, upload_store, build_retention),
+            )
+        )
     if config.console_registry is not None:
         console_registry = config.console_registry
         repairs.append(
@@ -367,6 +394,8 @@ ALL_REPAIR_KINDS: tuple[str, ...] = (
     "build_host_states_changed",
     "abandoned_uploads",
     "report_artifacts_gc_count",
+    "investigation_artifacts_gc_count",
+    "expired_build_artifacts_gc_count",
     "console_collectors_reaped",
     "reconcile_inventory",
     "leaked_images",
@@ -431,6 +460,8 @@ async def reconcile_once(
         reclaimed_build_host_leases=counts["reclaimed_build_host_leases"],
         build_host_states_changed=counts.get("build_host_states_changed", 0),
         reaped_runtime_resources=counts["reaped_runtime_resources"],
+        investigation_artifacts_gc_count=counts.get("investigation_artifacts_gc_count", 0),
+        expired_build_artifacts_gc_count=counts.get("expired_build_artifacts_gc_count", 0),
         repair_counts=dict(counts),
     )
 

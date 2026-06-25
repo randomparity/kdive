@@ -245,6 +245,32 @@ REPORT_ARTIFACT_RETENTION_DAYS = Setting(
     ),
     suggest="an integer number of days, e.g. 7",
 )
+INVESTIGATION_CLEANUP_GRACE_DAYS = Setting(
+    name="KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS",
+    parse=_int,
+    default="1",
+    group="reports",
+    processes=_STORE_USERS,
+    help=(
+        "Grace window in days between an investigation closing and the reconciler "
+        "`gc_investigation_artifacts` sweep reclaiming its run-owned uploaded build artifacts "
+        "(kernel/vmlinux/initrd; never console or crash evidence). ADR-0234 §4."
+    ),
+    suggest="an integer number of days, e.g. 1",
+)
+BUILD_ARTIFACT_RETENTION_DAYS = Setting(
+    name="KDIVE_BUILD_ARTIFACT_RETENTION_DAYS",
+    parse=_int,
+    default="30",
+    group="reports",
+    processes=_STORE_USERS,
+    help=(
+        "Age in days after which the reconciler `gc_expired_build_artifacts` sweep deletes a "
+        "run-owned uploaded build artifact regardless of investigation close — the backstop for "
+        "investigations that never close. ADR-0234 §4."
+    ),
+    suggest="an integer number of days, e.g. 30",
+)
 
 MAX_BUILD_CONFIG_BYTES = Setting(
     name="KDIVE_MAX_BUILD_CONFIG_BYTES",
@@ -602,6 +628,8 @@ SETTINGS = [
     ARTIFACT_DOWNLOAD_TTL_SECONDS,
     REPORT_INLINE_MAX_BYTES,
     REPORT_ARTIFACT_RETENTION_DAYS,
+    INVESTIGATION_CLEANUP_GRACE_DAYS,
+    BUILD_ARTIFACT_RETENTION_DAYS,
     MAX_BUILD_CONFIG_BYTES,
     DEBUG_DIR,
     CRASH_DIR,

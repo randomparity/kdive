@@ -25,8 +25,10 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.config.core_settings import (
+    BUILD_ARTIFACT_RETENTION_DAYS,
     HTTP_HOST,
     HTTP_PORT,
+    INVESTIGATION_CLEANUP_GRACE_DAYS,
     LOG_LEVEL,
     REPORT_ARTIFACT_RETENTION_DAYS,
     S3_BUCKET,
@@ -526,6 +528,12 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
                     image_store=upload_store,
                     report_artifact_retention=timedelta(
                         days=config.require(REPORT_ARTIFACT_RETENTION_DAYS)
+                    ),
+                    investigation_cleanup_grace=timedelta(
+                        days=config.require(INVESTIGATION_CLEANUP_GRACE_DAYS)
+                    ),
+                    build_artifact_retention=timedelta(
+                        days=config.require(BUILD_ARTIFACT_RETENTION_DAYS)
                     ),
                     console_registry=console_hosting.registry if console_hosting else None,
                     resetter=provider_composition.build_reconciler_transport_resetter(),
