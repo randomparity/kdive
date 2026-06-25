@@ -158,7 +158,8 @@ def _register_runs_create(
                     "fragment. Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set "
                     "here: append them via runs.build.cmdline (bound on the first build). "
                     "See resource://kdive/docs/operating/build-source-staging.md for "
-                    "staging the source."
+                    "staging the source, or resource://kdive/docs/operating/"
+                    "external-build-upload.md for shaping a source='external' upload."
                 )
             ),
         ],

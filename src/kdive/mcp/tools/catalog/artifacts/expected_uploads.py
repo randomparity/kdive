@@ -29,8 +29,9 @@ _NEXT_ACTIONS = [CREATE_RUN_UPLOAD_TOOL, CREATE_SYSTEM_UPLOAD_TOOL]
 # One-line purpose per accepted artifact name, so a cold agent knows which file maps to
 # which name (the issue's core confusion: a boot bzImage must be declared ``kernel``).
 _NAME_DESCRIPTIONS: dict[str, str] = {
-    "kernel": "Combined kernel+modules tar (gzip): boot/vmlinuz + lib/modules/<ver>/, "
-    "declared as 'kernel'.",
+    "kernel": "Combined kernel+modules tar (gzip): boot/vmlinuz (the bzImage, NOT the vmlinux "
+    "ELF) + lib/modules/<release>/, declared as 'kernel'. No separate 'modules' upload. "
+    "See resource://kdive/docs/operating/external-build-upload.md for the tar recipe.",
     "vmlinux": "Uncompressed kernel ELF with DWARF debug info, declared as 'vmlinux'.",
     "initrd": "Initial ramdisk / initramfs image.",
     "effective_config": "The kernel .config used for the build (<= 1 MiB).",
