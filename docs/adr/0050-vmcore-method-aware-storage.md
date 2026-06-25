@@ -31,7 +31,11 @@ metadata column, so the capturing method has nowhere to live **except the object
 
 ## Decisions
 
-1. **One vmcore per System; the first method to capture wins.** A System holds at most one raw
+1. ~~**One vmcore per System; the first method to capture wins.**~~ *Superseded by
+   [ADR-0244](0244-per-run-vmcore-capture.md) — multiplicity is now **per Run**: a reused System
+   that crashes under two Runs retains two cores. The first-method-wins-then-reject contract below
+   is unchanged but **Run-scoped** (one core per Run); read "System" as "Run" throughout this ADR.*
+   A System holds at most one raw
    core. A second `vmcore.fetch` whose method differs from the stored core's does **not**
    re-capture and does **not** silently substitute — it fails with a typed `configuration_error`
    that names the existing method and the requested method. This matches the established
