@@ -109,7 +109,9 @@ core (race backstop), inserts both rows `owner_kind='runs'`, and audits `object_
 - Same Run, second different method → `configuration_error` (both methods named), at `precheck` and
   the `finalize` backstop.
 - Concurrent same-Run/method → one core, one job (per-Run lock + dedup).
-- Two distinct Runs on one System → two cores, distinct keys, each fetchable.
+- Two Run-owned cores (distinct Runs on distinct Systems, or two cores inserted directly) → distinct
+  keys, each resolvable by its `run_id`, neither shadowing the other (artifact-ownership level; two
+  crashes on one `system_id` are not reachable — see AC#1).
 - `fetch_raw` for a Run with no captured core → `configuration_error` `vmcore_unavailable`.
 
 ## Rollback
