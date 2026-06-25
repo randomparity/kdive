@@ -1351,6 +1351,9 @@ def test_start_session_drgn_live_local_missing_ref_is_config_error(migrated_url:
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert resp.data == {"reason": "ssh_credential_ref_missing"}
+        assert resp.detail is not None
+        assert "ssh_credential_ref" in resp.detail
+        assert "reprovision" in resp.detail.lower()
         assert connector.opened == []
 
     asyncio.run(_run())
