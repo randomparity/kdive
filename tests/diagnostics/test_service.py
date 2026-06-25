@@ -417,6 +417,7 @@ class _StubPool:
             "base_image_volume": None,
             "workspace_root": "/srv/kdive",
             "max_concurrent": 1,
+            "toolchain_desc": None,
             "enabled": enabled,
             "state": "ready",
         }

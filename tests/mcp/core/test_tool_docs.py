@@ -60,6 +60,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "artifacts.list": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "artifacts.search_text": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "audit.query": ("tests/mcp/ops/test_audit_query.py",),
+    "build_envs.list": ("tests/mcp/ops/build_hosts/test_build_envs.py",),
     "build_hosts.disable": ("tests/mcp/ops/test_build_hosts.py",),
     "build_hosts.list": ("tests/mcp/ops/test_build_hosts.py",),
     "build_hosts.register_ephemeral_libvirt": ("tests/mcp/ops/test_build_hosts.py",),
@@ -372,6 +373,7 @@ def test_build_host_register_tools_are_variant_specific() -> None:
         "max_concurrent",
         "name",
         "ssh_credential_ref",
+        "toolchain_desc",
         "workspace_root",
     }
 
@@ -384,6 +386,7 @@ def test_build_host_register_tools_are_variant_specific() -> None:
         "base_image_volume",
         "max_concurrent",
         "name",
+        "toolchain_desc",
         "workspace_root",
     }
 
