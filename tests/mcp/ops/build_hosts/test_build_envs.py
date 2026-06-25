@@ -105,7 +105,7 @@ def test_list_build_envs_projection(migrated_url: str) -> None:
 
         # Verify the four expected keys are present for each
         for env in (ssh_env, eph_env):
-            assert set(env.keys()) >= _EXPECTED_KEYS, f"missing keys in {env!r}"
+            assert set(env.keys()) == _EXPECTED_KEYS, f"unexpected keys in {env!r}"
 
         # Verify no secret keys leak into any projected item
         for env in envs:
