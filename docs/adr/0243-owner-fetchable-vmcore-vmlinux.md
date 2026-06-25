@@ -54,9 +54,10 @@ sensitivity. The raw vmcore and vmlinux stay classified `SENSITIVE`.
    `artifact_id`, which only the external path backs with a row.
 3. **Membership + `contributor`; cross-project isolation preserved.** The handler resolves
    `run.project`; a non-member receives a not-found-shaped response (existence masked), and a member
-   below `contributor` is denied and audited. The `vmcore` branch independently confirms the
-   System's project membership (defense in depth). This is the cross-project boundary the
-   `REDACTED`-only gate was conflating with self-protection.
+   below `contributor` is denied and audited. The `vmcore` branch gates on the System's **own**
+   project — `require_role(contributor, system.project)` — since the core is the System's asset, not
+   an assumed Run/System project invariant. This is the cross-project boundary the `REDACTED`-only
+   gate was conflating with self-protection.
 4. **URL-only, no inline bytes.** These are multi-GB binaries; the tool returns a presigned download
    URL (TTL `KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS`) plus size metadata. The inline-content and
    `search_text` paths stay `REDACTED`-only and untouched.

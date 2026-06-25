@@ -58,9 +58,11 @@ silently fail server builds.
    (existence masked — the cross-project boundary).
 2. `require_role(ctx, run.project, Role.CONTRIBUTOR)` (a sub-`contributor` member is denied and the
    denial is audited via the existing `RoleDenied` path).
-3. For `asset == "vmcore"`: resolve the System and independently confirm
-   `system.project ∈ ctx.projects` before resolving its core (defense in depth — the System and Run
-   projects should match, but the vmcore boundary is checked on its own owner).
+3. For `asset == "vmcore"`: resolve the System and gate on **its own** project —
+   `require_role(ctx, system.project, Role.CONTRIBUTOR)` — rather than reusing the Run's project.
+   A Run and the System it booted share a project by construction, but the vmcore is the System's
+   asset, so its egress is authorized against the System's owning project (the check tracks the true
+   owner, not an assumed invariant).
 
 ### Output
 
@@ -76,8 +78,17 @@ silently fail server builds.
 ### What stays unchanged
 
 - The `REDACTED`-only gate on `artifacts.get` / `artifacts.search_text` / `artifacts.list`.
-- The `SecretRegistry` / `Redactor` machinery (inline console/gdb/OTel redaction). Secrets are
-  by-reference values never stored as vmcore/vmlinux artifacts, so this egress cannot expose them.
+- The `SecretRegistry` / `Redactor` machinery (inline console/gdb/OTel redaction) is not on this
+  path and is unmodified. The acceptance criterion is about *platform* secrets, and a raw vmcore is
+  a full kernel-memory image, so the real question is whether platform secrets land in the captured
+  memory — not whether they are stored as separate artifacts. They do not, for three reasons: (1)
+  the managed SSH **private** key stays host/worker-side and is used to connect *into* the guest
+  (the guest holds only the corresponding public key in `authorized_keys`, which is not secret), so
+  it is never in the guest kernel memory the core captures; (2) registered secrets belong to the
+  requesting project itself, not to the platform; and (3) per ADR-0240 a `contributor` who can run
+  live drgn against this kernel already reads 100% of that memory, so offline egress of the same
+  bytes adds no platform-secret exposure beyond what the live path already grants. This would only
+  be violated if the platform ever placed a *platform-owned* secret into guest memory; it does not.
 - The capture and build write paths; the `artifacts` schema; config and env.
 
 ## Lifecycle & multiplicity
@@ -105,8 +116,9 @@ directly.
   URLs for both assets of an owned Run.
 - *Other project cannot fetch* → non-member Run lookup returns not-found; the vmcore branch also
   re-checks the System's project.
-- *Platform-secret redaction unaffected* → the redaction machinery is not on this path and secrets
-  are never these artifacts.
+- *Platform-secret redaction unaffected* → the redaction machinery is not on this path, and no
+  platform secret is in the captured memory (managed SSH private key is host-side; registered
+  secrets are the project's own) — see "What stays unchanged".
 
 ## Test plan (behavior + edges)
 
@@ -124,8 +136,9 @@ directly.
 ## Security considerations
 
 - The egress allow-list is the closed `asset` enum; widening it is a reviewed code change.
-- Cross-project isolation is enforced at the owner (`run.project`, and independently `system.project`
-  for vmcore), mirroring the existing `_authorized_redacted_artifact` pattern.
+- Cross-project isolation is enforced at each asset's true owner: `vmlinux` against `run.project`,
+  `vmcore` against `system.project` (its own owner), each via `require_role(..., CONTRIBUTOR)`,
+  mirroring the existing `_authorized_redacted_artifact` pattern.
 - Presigned URLs are short-lived (`KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS`) and minted only after an
   existence `HEAD`, so the tool never hands out a URL to a missing object.
 - Every successful egress is audited.
