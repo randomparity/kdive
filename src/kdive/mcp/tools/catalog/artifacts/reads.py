@@ -298,12 +298,16 @@ async def _artifact_content(
         return None
     window = fetched.data[byte_offset : byte_offset + effective_max]
     next_offset = byte_offset + len(window)
+    # Truncation requires forward progress: an empty window (offset past the end, or a
+    # degenerate inline cap <= 0) advertises no `next_offset`, so a paging caller never
+    # loops on a non-advancing cursor.
+    truncated = len(window) > 0 and next_offset < head.size_bytes
     data = {
         "size_bytes": str(head.size_bytes),
         "content": window.decode("utf-8", errors="replace"),
-        "content_truncated": str(next_offset < head.size_bytes).lower(),
+        "content_truncated": str(truncated).lower(),
     }
-    if next_offset < head.size_bytes:
+    if truncated:
         data["next_offset"] = str(next_offset)
     return data
 
