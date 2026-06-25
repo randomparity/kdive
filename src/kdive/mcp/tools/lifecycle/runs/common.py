@@ -12,6 +12,7 @@ from kdive.domain.operations.jobs import Job
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools.lifecycle._recovery import build_profile_summary
+from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
 from kdive.services.runs import states as run_states
 from kdive.services.runs.steps import BootAttempt, StepProgress
 
@@ -187,6 +188,14 @@ def envelope_for_run(
         data["available_capture"] = cast(JsonValue, step_progress.available_capture)
     if step_progress is not None and step_progress.inert_capture is not None:
         data["inert_capture"] = cast(JsonValue, step_progress.inert_capture)
+        if step_progress.boot_outcome == "expected_crash_observed":
+            # The reason the inert methods cannot fire on a console_crash boot: the panic
+            # precedes kexec, so live attach/vmcore are impossible by design (#802). Reuse the
+            # one shared constant that debug.start_session/vmcore.fetch surface as their failure
+            # detail so the wordings cannot drift; it interpolates no guest output, so surfacing
+            # it on the success path is redaction-safe. Gated on the outcome so the
+            # console_crash-specific wording stays accurate.
+            data["inert_capture_reason"] = CONSOLE_CRASH_GUIDANCE
     if build_provenance is not None:
         # The build-step provenance recorded at write time (Task 5, #778): remote, ref,
         # resolved_commit, build_host. Passed through verbatim — userinfo-stripped at write time.
