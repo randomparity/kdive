@@ -48,7 +48,9 @@ advisory locks; S3-compatible object store.
 - `src/kdive/mcp/tools/_vmcore_targets.py` — `raw_vmcore_key(conn, uid)` (per-Run).
 - `src/kdive/mcp/tools/catalog/artifacts/raw_fetch.py` — `vmcore` branch resolves by `run_id`, gates
   on `run.project`.
-- `docs/guide/reference/vmcore.md` — regenerated.
+- `src/kdive/services/artifacts/listing.py` — add `list_redacted_run_artifacts` (`owner_kind='runs'`).
+- `src/kdive/mcp/tools/lifecycle/vmcore.py` — `vmcore.list(run_id)` lists the Run's redacted cores.
+- `docs/guide/reference/vmcore.md` — regenerated (covers both `vmcore.fetch` and `vmcore.list`).
 
 ---
 
@@ -124,13 +126,16 @@ together or `ty`/tests go red. Work the sub-steps in order; only run guardrails 
     owner stays via the key; `persist_redacted(... run_id ...)`.
   - `remote_libvirt/retrieve/host_dump_capture.py`: `capture(system_id, run_id)`; `_store_core`,
     `_stream_put` use `owner_kind=OWNER_KIND_RUNS, owner_id=str(run_id)`.
-  - `remote_libvirt/retrieve/common.py`: add `OWNER_KIND_RUNS = "runs"`; `persist_redacted(...,
-    run_id, ...)` sets `owner_kind=OWNER_KIND_RUNS, owner_id=str(run_id)` and key name unchanged.
-    Keep the volume/domain names keyed on `system_id`.
+  - `remote_libvirt/retrieve/common.py`: add `OWNER_KIND_RUNS = "runs"`; in `persist_redacted`
+    **replace** the `system_id: UUID` parameter with `run_id: UUID` (it is used only for `owner_id`)
+    and set `owner_kind=OWNER_KIND_RUNS, owner_id=str(run_id)`, key name unchanged — so the redacted
+    sibling co-owns with the raw core. Keep the volume/domain names keyed on `system_id`.
   Update the three providers' retrieve tests to call `capture(system_id, run_id, method)` and assert
   the stored key is `.../runs/{run_id}/vmcore-{method}`.
 
-- [ ] **Step 1.6 — Worker handler (implement).** In `src/kdive/jobs/handlers/vmcore.py`:
+- [ ] **Step 1.6 — Worker handler (implement).** In `src/kdive/jobs/handlers/vmcore.py`. First add
+  the imports this step needs: `RUNS` to the existing `from kdive.db.repositories import ARTIFACTS,
+  SYSTEMS` line, and `Run` to the existing `from kdive.domain.lifecycle import System`.
   - `captured_method`/`ensure_method_match` unchanged (still parse `/vmcore-`).
   - `precheck` is now Run-addressed under `LockScope.RUN`:
     ```python
@@ -191,17 +196,32 @@ together or `ty`/tests go red. Work the sub-steps in order; only run guardrails 
   `_resolve_key` (it currently takes `run_id: str`; pass the parsed `uid`). Update the fetch_raw
   egress tests to seed an `owner_kind='runs'` core.
 
-- [ ] **Step 1.9 — `RunFetchContext.system_id` dead-code check.** After Step 1.8, grep
+- [ ] **Step 1.9 — `vmcore.list(run_id)` Run-addressed (test + implement).** Moving the redacted
+  sibling to `owner_kind='runs'` makes the System-scoped `list_redacted_system_artifacts` return no
+  vmcores, so `vmcore.list` must address the Run. In `src/kdive/services/artifacts/listing.py` add
+  `list_redacted_run_artifacts(pool, ctx, *, run_id: str) -> list[RedactedArtifact]`, a mirror of
+  `list_redacted_system_artifacts` that resolves the **Run's** project (reject absent/cross-project
+  with empty list, then `require_role(ctx, run.project, Role.VIEWER)`) and runs
+  `SELECT id, object_key FROM artifacts WHERE owner_kind='runs' AND owner_id=%s AND sensitivity=%s`
+  with `Sensitivity.REDACTED.value`. In `src/kdive/mcp/tools/lifecycle/vmcore.py`: `list_vmcores`
+  takes `run_id`, calls `list_redacted_run_artifacts(...)`, keeps the `_is_redacted_vmcore` filter;
+  the `@app.tool` `vmcore_list` first arg becomes `run_id` (description "The Run whose redacted
+  vmcore artifacts to list."). Update `tests/mcp/lifecycle/test_vmcore_tools.py`: seed a Run-owned
+  redacted vmcore and assert `vmcore.list(run_id)` surfaces it (this is the test that would have
+  caught the silent-empty regression). Run the vmcore tools test module → PASS.
+
+- [ ] **Step 1.10 — `RunFetchContext.system_id` dead-code check.** After Step 1.8, grep
   `rg -n "\.system_id" src/kdive/mcp/tools/catalog/artifacts/raw_fetch.py` and
   `rg -n "system_id" src/kdive/db/artifact_queries.py`. If `RunFetchContext.system_id` is unused
   across `src/` and `tests/` (it likely remains used by the `vmlinux`/not-found path — verify), keep
   it; if fully unused, remove the field, its SQL column, and its docstring line (no dead code).
   Record the decision in the commit message.
 
-- [ ] **Step 1.10 — Guardrails + commit.** `just lint && just type` then the focused suites:
+- [ ] **Step 1.11 — Guardrails + commit.** `just lint && just type` then the focused suites:
   `uv run python -m pytest tests/jobs/test_payloads.py tests/db/test_artifact_queries.py
   tests/mcp/lifecycle/test_vmcore_tools.py tests/mcp/test_vmcore_targets.py
-  tests/providers -m "not live_vm and not live_stack" -q` and the fetch_raw test module. All green.
+  tests/services/artifacts tests/providers -m "not live_vm and not live_stack" -q` and the fetch_raw
+  test module. All green.
   ```bash
   git add -A
   git commit -m "feat(vmcore): Run-addressed capture, Run-owned cores (#796)
@@ -293,7 +313,9 @@ state exists at per-System or per-Run keys to unwind (M0/M1 carries no productio
 - Spec coverage: AC#1 → Task 1 (db/providers) + Task 3 (distinct rows); AC#2 → Step 1.7 + tests;
   AC#3 → Step 1.6 `ensure_method_match` + handler test; AC#4 → Task 3; AC#5 → unchanged
   (`keyed_mutation`, exercised by existing idempotency test, re-verified in Step 1.7); AC#6 → Step
-  1.8; AC#7 → Step 1.8 (`_vmcore_targets`, shared by `introspect.from_vmcore`); AC#8 → Task 2.
+  1.8; AC#7 → Step 1.8 (`_vmcore_targets`, shared by `introspect.from_vmcore`) + Step 1.9
+  (`vmcore.list`); AC#8 → Task 2 (covers both `vmcore.fetch` and `vmcore.list`).
 - Cross-project denial (spec design note) → Task 4.
+- `vmcore.list` redacted-sibling regression (forced by the `owner_kind='runs'` move) → Step 1.9.
 - Type consistency: `raw_vmcore_key(conn, run_id)`, `capture(system_id, run_id, method)`,
   `CaptureVmcorePayload(run_id, method)` used identically in every referencing step.

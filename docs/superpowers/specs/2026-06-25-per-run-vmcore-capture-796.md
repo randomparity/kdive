@@ -59,7 +59,10 @@ same-Run `vmcore.fetch`.
 6. `artifacts.fetch_raw(run_id, "vmcore")` resolves the Run's own core (`raw_vmcore_key(run_id)`),
    gated on `run.project`, with no `run.system_id → raw_vmcore_key` indirection.
 7. `postmortem.crash`/`.triage` and `introspect.from_vmcore` resolve the Run's own core via the
-   per-Run lookup; their tool surface is unchanged.
+   per-Run lookup; their tool surface is unchanged. `vmcore.list` becomes Run-addressed
+   (`vmcore.list(run_id)`) and lists the Run's redacted vmcore artifacts — required because the
+   redacted sibling moves to `owner_kind='runs'`, so the System-scoped listing would otherwise
+   return empty.
 8. The generated tool reference (`docs/guide/reference/vmcore.md`) reflects the `run_id` argument.
 
 ## Design
@@ -99,6 +102,10 @@ core (race backstop), inserts both rows `owner_kind='runs'`, and audits `object_
   regression). If `RunFetchContext.system_id` becomes unused after this, remove it (no dead code).
 - `_vmcore_targets.resolve_run_vmcore_target`: `raw_vmcore_key(run_id)` (was
   `raw_vmcore_key(run.require_system_id())`).
+- `vmcore.list`: Run-addressed (`vmcore.list(run_id)`) via a new `list_redacted_run_artifacts`
+  (`owner_kind='runs'`), mirroring `list_redacted_system_artifacts`. Both the raw core and its
+  redacted sibling move to `owner_kind='runs'` together, so a System-scoped redacted listing would
+  return nothing — `vmcore.list` follows the core to the Run.
 
 ## Failure modes & edges (test these)
 
@@ -128,7 +135,8 @@ unwind (the per-Run object keys are new; no production cores exist at per-System
 - `src/kdive/providers/{local_libvirt,fault_inject}/retrieve.py`,
   `src/kdive/providers/remote_libvirt/retrieve/{facade,kdump_capture,host_dump_capture,common}.py` —
   thread `run_id`; `owner_kind='runs'`.
-- `src/kdive/mcp/tools/lifecycle/vmcore.py` — `vmcore.fetch(run_id, …)` admission.
+- `src/kdive/mcp/tools/lifecycle/vmcore.py` — `vmcore.fetch(run_id, …)` admission; `vmcore.list(run_id)`.
+- `src/kdive/services/artifacts/listing.py` — add `list_redacted_run_artifacts`.
 - `src/kdive/mcp/tools/_vmcore_targets.py` — per-Run resolution.
 - `src/kdive/mcp/tools/catalog/artifacts/raw_fetch.py` — Run-keyed `vmcore` egress.
 - `docs/guide/reference/vmcore.md` — regenerated.

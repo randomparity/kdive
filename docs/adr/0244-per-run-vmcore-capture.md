@@ -86,6 +86,11 @@ within one Run is rejected for the same reason ADR-0050 rejected it per System (
 distinct core per *crash* is achieved because each crash belongs to a distinct Run (a Run is one
 build→boot lifecycle; a re-crash on a reused System is a new Run).
 
+`vmcore.list` follows the core to its owner: it becomes `vmcore.list(run_id)` and lists the Run's
+redacted vmcore artifacts (a new `list_redacted_run_artifacts`, `owner_kind='runs'`). The redacted
+dmesg derivative co-owns with the raw core (both `owner_kind='runs'`), so the System-scoped redacted
+listing would otherwise return nothing — the tool must address the Run.
+
 ### 4. The idempotency / concurrency boundary moves to the Run
 
 - **Admission dedup key:** `{run_id}:capture_vmcore:{method}` (was `{system_id}:…`). Distinct Runs
