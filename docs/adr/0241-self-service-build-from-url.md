@@ -4,10 +4,10 @@
 - **Date:** 2026-06-25
 - **Deciders:** kdive maintainers
 - **Supersedes:** [ADR-0136](0136-runs-build-reachability.md) (its decision to add *no* create-time
-  URI guard and to treat every URI-looking bare string as a warm-tree label) and
-  [ADR-0162](0162-local-git-build-lane.md) (its global deny-by-default remote allowlist as the only
-  gate on a git-clone build).
-- **Builds on (does not supersede):** [ADR-0029](0029-build-plane-local-make.md) (build profile +
+  URI guard and to treat every URI-looking bare string as a warm-tree label).
+- **Builds on (does not supersede):** [ADR-0162](0162-local-git-build-lane.md) (the worker-local
+  remote allowlist, **unchanged** — it gates only the control-plane-adjacent `worker-local` clone),
+  [ADR-0029](0029-build-plane-local-make.md) (build profile +
   parse boundary), [ADR-0234](0234-external-build-default-and-contributor-role.md) (`contributor`
   role), [ADR-0238](0238-build-log-artifact-capture.md) (build-log artifact on failure),
   [ADR-0148](0148-rbac-scoped-tool-exposure.md) (RBAC tool exposure), [ADR-0123](0123-tool-error-detail-surfacing.md)
@@ -24,15 +24,18 @@ for it (the worker always builds from the one staged tree regardless of the labe
 is multi-tree: a developer builds a distro tree derived from RHEL SRPMs, a personal feature branch,
 or mainline — each at a chosen ref, often on an internal GitHub Enterprise. ADR-0136 leaned on the
 single-tree assumption to keep the bare label "good enough" and to reject any create-time URI guard
-as breaking the bare-label convention; ADR-0162 gated the only URL path (the structured
-`{"git": {...}}` form) behind a global operator allowlist. Neither gives a developer a self-service
-"build this URL at this ref on a toolchain that fits it" path, and the unverified label means an MCP
-client cannot learn what was actually built.
+as breaking the bare-label convention. The structured `{"git": {...}}` form already clones a URL on a
+registered build host; the worker-local remote allowlist (ADR-0162) gates **only** the `worker-local`
+lane (`git_source.remote_allowed`; `dispatch.py` applies it solely on the `BuildHostKind.LOCAL`
+branch), so an `ephemeral_libvirt`/`ssh` host already clones an arbitrary remote with no allowlist.
+The blocker to self-service is therefore not the gate but **discovery** — a developer cannot learn
+which build host carries which toolchain (`build_hosts.list` is `platform_auditor`) — plus the
+unverified label (an MCP client cannot learn what was built) and the bare-URL footgun.
 
 The clone+`make` of developer-named source is **build-time** code execution (Kbuild, host tools,
 Makefiles run on the build host); the compiled kernel binary is never executed on the worker — it
-boots in an isolated guest. The relevant risk axis is therefore *whose code, on how-isolated an
-environment*, not a global URL allowlist.
+boots in an isolated guest. The gate is already shaped by that isolation (the control-plane-adjacent
+`worker-local` lane is allowlisted; isolated hosts are not), and this ADR keeps it as is.
 
 ## Decision
 
@@ -62,18 +65,26 @@ discovery, selection, provenance, and the trust gate unchanged.
    `git+https://` (the entrenched kernel.org label idiom, not a transport git clones) and `file://`
    (a local path, rejected as a git remote anyway); scp-style `git@h:p` has no scheme and is unmatched.
    The few fixtures using a rejected scheme as a bare label migrate to plain labels.
-5. **Build provenance (no migration):** at `clone_tree` (which already runs `rev-parse FETCH_HEAD`)
-   record `{remote (userinfo-stripped), ref, resolved_commit, build_host}`, surfaced on `runs.get` as
-   `data.build_provenance` via the free-form `data` envelope; warm-tree records best-effort
+5. **Build provenance (no migration), both clone paths:** record
+   `{remote (userinfo-stripped), ref, resolved_commit, build_host}`, surfaced on `runs.get` as
+   `data.build_provenance` via the free-form `data` envelope. The local lane reuses `clone_tree`'s
+   existing `rev-parse FETCH_HEAD`; the **remote/transport lane** (the *primary* path for isolated
+   URL builds) extends `ShellTransport.clone` — which today returns `None` — to `rev-parse HEAD` and
+   return the resolved commit so the worker records it. Warm-tree records best-effort
    `{label, resolved_commit?}`; capture failure degrades and never fails the build.
-6. **Trust gate keyed on isolation (supersedes ADR-0162):** clone any remote when
-   `env.provides_isolation` (an `ephemeral_libvirt` throwaway VM, a dedicated remote `ssh` host, or a
-   future `container` at its declared level); keep the ADR-0162 allowlist + `KDIVE_BUILD_USER`
-   demotion only for the non-isolated `worker-local` lane (which shares the control plane).
-   `provides_isolation` is a resolved env property, not a kind literal at the call site.
+6. **Trust gate — unchanged, documented:** the gate is already isolation-shaped, verified against the
+   code — `dispatch.py` applies the ADR-0162 allowlist + `KDIVE_BUILD_USER` demotion only on the
+   `BuildHostKind.LOCAL` (`worker-local`) branch; `ephemeral_libvirt`/`ssh` route to the transport
+   and clone arbitrary remotes ungated already. This ADR makes **no functional change**: it keeps
+   `worker-local` gated, expose a read-only `provides_isolation` property derived from `host.kind`
+   (descriptive, for the future `container` kind), and records the registration obligation that an
+   isolated build host must carry no platform secrets and constrain egress. The decision stays at the
+   worker/`dispatch.py` boundary, where `KDIVE_*` worker config is in scope (the ADR-0136 layering
+   constraint; admission cannot see it).
 
-One additive schema change (nullable `toolchain_desc` column, no backfill). The trust-gate change
-goes through `security-review` before ship.
+One additive schema change (nullable `toolchain_desc` column, no backfill). The security-sensitive
+new surface is the **discovery exposure widening** (decision 1, `build_hosts` → `contributor`
+projection), which goes through `security-review` before ship — not the unchanged trust gate.
 
 ## Consequences
 
@@ -82,16 +93,16 @@ goes through `security-review` before ship.
   isolated `ephemeral_libvirt` env with no operator allowlist step.
 - `runs.get` reports the exact remote + resolved commit + env that produced a build, replacing the
   decorative-label hole with verified provenance.
-- The control-plane-adjacent `worker-local` lane is unchanged (allowlist + demotion retained); the
-  allowlist is dropped only where the env isolates the build, with an explicit operator obligation
-  that an isolated env carries no platform secrets and constrains egress.
+- The trust gate is unchanged: `worker-local` stays allowlisted + demoted, and isolated build hosts
+  keep cloning arbitrary remotes ungated (as they already do). The registration obligation that an
+  isolated env carries no platform secrets and constrains egress is now stated explicitly.
 - The bare-URL footgun the original #778 filed is closed coherently — now that URL builds are first
   class, a bare cloneable-URL string is a recognizable mistake, not the established convention.
-- Discovery, selection, provenance, and the trust gate are kind-agnostic, so a future `container`
-  build environment lands without touching them.
-- Cost: a new read tool, a new optional field + migration, a parse-boundary validator, the
-  isolation-aware gate, and a mechanical migration of the cloneable-scheme URI-looking fixtures to
-  plain labels.
+- Discovery, selection, and provenance are kind-agnostic and the gate keys on `host.kind`, so a
+  future `container` build environment lands without touching them.
+- Cost: a new read tool, a new optional field + migration, a parse-boundary validator, a one-line
+  extension to the transport clone seam (return the resolved commit), and a mechanical migration of
+  the cloneable-scheme URI-looking fixtures to plain labels. No gate logic changes.
 
 ## Considered & rejected
 
