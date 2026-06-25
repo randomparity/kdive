@@ -200,6 +200,13 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "Log directory the live-stack `start.sh` script writes process logs to.",
     ),
     ExternalEnvVar(
+        "KDIVE_WORKER_AS_ROOT",
+        "script",
+        "1",
+        "Whether `restart-stack.sh` restarts the worker as root via sudo (1) or as the "
+        "current user (0).",
+    ),
+    ExternalEnvVar(
         "KDIVE_DEMO_NAMESPACE",
         "script",
         "kdive-demo",

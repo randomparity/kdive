@@ -230,6 +230,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_SETUP_AUDITED` | `0` | When 1, setup-local-libvirt.sh onboards via the audited MCP admin tools instead of seed-project (requires KDIVE_MCP_BASE and a project-admin KDIVE_TOKEN). |
 | `KDIVE_STACK_LOG_DIR` | `<repo>/.live-stack-logs` | Log directory the live-stack `start.sh` script writes process logs to. |
 | `KDIVE_STACK_PID_FILE` | `<repo>/.live-stack.pid` | PID file the live-stack `start.sh`/`stop.sh` scripts manage. |
+| `KDIVE_WORKER_AS_ROOT` | `1` | Whether `restart-stack.sh` restarts the worker as root via sudo (1) or as the current user (0). |
 
 ## In-guest helpers
 
