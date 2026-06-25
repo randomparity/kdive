@@ -68,6 +68,25 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 # that import them suppress `unresolved-import` with a
 # scoped per-site ignore rather than downgrading the rule for the whole tree.
 
+[[tool.ty.overrides]]
+# drgn and libguestfs are operator-provided C extensions (the `live` dependency-group and the
+# system libguestfs binding) absent from CI and most environments, but present on a worker/host
+# that runs the live_vm + local-libvirt operations (this dev host does). When they ARE installed,
+# ty resolves them, and the per-site `# ty: ignore[unresolved-import]`/`[unresolved-attribute]`
+# directives flip from "used" (CI) to "unused" (host with the extensions). `unused-ignore-comment`
+# is the one rule that cannot be satisfied in both environments at once, so it is scoped off for
+# exactly these four C-extension wrapper files; every other rule stays strict here. This keeps
+# `just type` consistent whether or not the extensions are installed — no `SKIP=ty` ritual.
+include = [
+  "src/kdive/providers/local_libvirt/lifecycle/install.py",
+  "src/kdive/providers/local_libvirt/retrieve.py",
+  "src/kdive/providers/shared/debug_common/core_file.py",
+  "src/kdive/providers/shared/debug_common/drgn_program.py",
+]
+
+[tool.ty.overrides.rules]
+unused-ignore-comment = "ignore"
+
 [tool.pyright]
 # `ty` (above) is the authoritative type checker — it runs in CI (`just type`) and resolves the
 # venv via `uv run`. This stanza is only for the editor/IDE language server (Pyright/Pylance/

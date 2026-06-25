@@ -371,7 +371,7 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
             ) from exc
         guest = guestfs.GuestFS(python_return_dict=True)
         try:
-            guest.add_drive_opts(overlay, readonly=1)
+            guest.add_drive_opts(overlay, readonly=True)
             guest.launch()
             roots = guest.inspect_os()
         except Exception as exc:

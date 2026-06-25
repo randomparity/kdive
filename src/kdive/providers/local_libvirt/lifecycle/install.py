@@ -35,7 +35,7 @@ import xml.etree.ElementTree as ET  # noqa: S405 - constructs/edits self-owned d
 from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
-from typing import NamedTuple, Protocol
+from typing import NamedTuple, Protocol, cast
 from uuid import UUID
 
 import libvirt
@@ -708,7 +708,9 @@ def _verify_kernel_size(size: int, overlay: str, dest: str) -> None:
 class _GuestFS(Protocol):  # pragma: no cover - live_vm (libguestfs binding surface)
     """The subset of the libguestfs handle the kernel writer drives (typing only)."""
 
-    def add_drive_opts(self, filename: str, *, format: str, readonly: int) -> None: ...
+    def add_drive_opts(
+        self, filename: str, *, format: str, readonly: bool | None = None
+    ) -> None: ...
     def launch(self) -> None: ...
     def inspect_os(self) -> list[str]: ...
     def mount(self, device: str, mountpoint: str) -> None: ...
@@ -727,7 +729,7 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
     """Stage the built kernel into a System overlay rw via libguestfs (ADR-0203/0207).
 
     Mirrors ``retrieve.py``'s ``_LibguestfsCoreReader`` idioms but mounts read-WRITE
-    (``readonly=0``). One rw session writes both the modules tree and the kernel image so the
+    (``readonly=False``). One rw session writes both the modules tree and the kernel image so the
     kernel can never pair with a stale module tree (or vice versa). Injection is idempotent: the
     module version directory is clobbered before the tarball is extracted, ``depmod`` is run, and
     a ``modules.dep``-present sentinel is verified (an all-builtin kdump kernel leaves a valid
@@ -763,9 +765,13 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
                 "libguestfs (the guestfs Python binding) is required to stage the built kernel",
                 category=ErrorCategory.MISSING_DEPENDENCY,
             ) from exc
-        guest = guestfs.GuestFS(python_return_dict=True)
+        # The real libguestfs handle is an untyped C-extension object; treat it as the `_GuestFS`
+        # subset we document and drive, so our code type-checks against that protocol whether or not
+        # the binding is installed (ty otherwise cross-checks the real handle's signatures — e.g.
+        # `mount`'s `mountable` vs our `device` — only when it happens to be present).
+        guest = cast("_GuestFS", guestfs.GuestFS(python_return_dict=True))
         try:
-            guest.add_drive_opts(overlay, format="qcow2", readonly=0)
+            guest.add_drive_opts(overlay, format="qcow2", readonly=False)
             guest.launch()
             roots = guest.inspect_os()
         except Exception as exc:
