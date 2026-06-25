@@ -217,13 +217,20 @@ together or `ty`/tests go red. Work the sub-steps in order; only run guardrails 
   it; if fully unused, remove the field, its SQL column, and its docstring line (no dead code).
   Record the decision in the commit message.
 
-- [ ] **Step 1.11 — Guardrails + commit.** `just lint && just type` then the focused suites:
-  `uv run python -m pytest tests/jobs/test_payloads.py tests/db/test_artifact_queries.py
+- [ ] **Step 1.11 — Regenerate the tool reference (same commit).** The `vmcore.fetch`/`vmcore.list`
+  signature + docstring changes make `docs/guide/reference/vmcore.md` stale, and `just ci` hard-gates
+  `docs-check` (it diffs the committed reference against a fresh generation). So the reference MUST be
+  regenerated in *this* commit, not a later one. Run `just docs` (`uv run python
+  scripts/gen_tool_reference.py`), then `just docs-check` → expect clean. Confirm the diff is limited
+  to `vmcore.fetch`/`vmcore.list` (`run_id` argument + wording); no unrelated tool churn.
+
+- [ ] **Step 1.12 — Guardrails + commit.** `just lint && just type && just docs-check` then the
+  focused suites: `uv run python -m pytest tests/jobs/test_payloads.py tests/db/test_artifact_queries.py
   tests/mcp/lifecycle/test_vmcore_tools.py tests/mcp/test_vmcore_targets.py
   tests/services/artifacts tests/providers -m "not live_vm and not live_stack" -q` and the fetch_raw
   test module. All green.
   ```bash
-  git add -A
+  git add -A   # includes docs/guide/reference/vmcore.md
   git commit -m "feat(vmcore): Run-addressed capture, Run-owned cores (#796)
 
   vmcore.fetch(run_id, method); cores keyed owner_kind='runs'; raw_vmcore_key
@@ -233,28 +240,13 @@ together or `ty`/tests go red. Work the sub-steps in order; only run guardrails 
   Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
   ```
 
----
-
-## Task 2: Regenerate the agent-facing tool reference
-
-**Files:** Modify (generated): `docs/guide/reference/vmcore.md`.
-
-- [ ] **Step 2.1 — Regenerate.** Run `just docs` (i.e.
-  `uv run python scripts/gen_tool_reference.py`).
-- [ ] **Step 2.2 — Verify the diff** shows only the `vmcore.fetch` argument change
-  (`system_id` → `run_id`) and any wording derived from the new docstring; no unrelated churn. Then
-  run `just docs-check` to confirm the committed reference matches a fresh generation (the CI gate).
-- [ ] **Step 2.3 — Commit.**
-  ```bash
-  git add docs/guide/reference/vmcore.md
-  git commit -m "docs(vmcore): regenerate tool reference for run_id argument (#796)
-
-  Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
-  ```
+> **Note:** The tool reference (`docs/guide/reference/vmcore.md`) is regenerated *inside* Task 1
+> (Step 1.11) so the signature-change commit stays green on the `docs-check` CI gate. There is no
+> separate tool-reference task.
 
 ---
 
-## Task 3: Adversarial same-Run concurrency test
+## Task 2: Adversarial same-Run concurrency test
 
 **Files:** Create/extend: `tests/adversarial/test_vmcore_capture_idempotency.py` (or extend the
 existing adversarial capture test if one exists — grep `tests/adversarial` first).
@@ -283,7 +275,7 @@ existing adversarial capture test if one exists — grep `tests/adversarial` fir
 
 ---
 
-## Task 4: Cross-project egress denial test
+## Task 3: Cross-project egress denial test
 
 **Files:** Extend the `artifacts.fetch_raw` test module (the one touched in Step 1.8).
 
