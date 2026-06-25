@@ -80,12 +80,12 @@ class _FakeIntrospector:
         return self._output
 
 
-async def _seed_vmcore_row(pool: AsyncConnectionPool, sys_id: str) -> None:
+async def _seed_vmcore_row(pool: AsyncConnectionPool, run_id: str) -> None:
     async with pool.connection() as conn:
         await conn.execute(
             "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
-            "retention_class) VALUES ('systems', %s, %s, 'e', 'sensitive', 'vmcore')",
-            (sys_id, f"local/systems/{sys_id}/vmcore-host_dump"),
+            "retention_class) VALUES ('runs', %s, %s, 'e', 'sensitive', 'vmcore')",
+            (run_id, f"local/runs/{run_id}/vmcore-host_dump"),
         )
 
 
@@ -94,7 +94,7 @@ async def _built_run_with_core(pool: AsyncConnectionPool) -> str:
     run_id = await seed_run_on_system(
         pool, sys_id, debuginfo_ref="k/runs/r/vmlinux", build_id="deadbeef"
     )
-    await _seed_vmcore_row(pool, sys_id)
+    await _seed_vmcore_row(pool, run_id)
     return run_id
 
 
@@ -177,7 +177,7 @@ def test_from_vmcore_core_present_null_debuginfo_is_no_debuginfo(migrated_url: s
         async with _pool(migrated_url) as pool:
             sys_id = await seed_crashed_system(pool)
             run_id = await seed_run_on_system(pool, sys_id, debuginfo_ref=None, build_id="deadbeef")
-            await _seed_vmcore_row(pool, sys_id)
+            await _seed_vmcore_row(pool, run_id)
             resp = await introspect_tools.introspect_from_vmcore(
                 pool, _ctx(), run_id=run_id, introspector=_FakeIntrospector()
             )
@@ -195,7 +195,7 @@ def test_from_vmcore_no_build_step_is_not_found(migrated_url: str) -> None:
             run_id = await seed_run_on_system(
                 pool, sys_id, debuginfo_ref="k/runs/r/vmlinux", build_id=None
             )
-            await _seed_vmcore_row(pool, sys_id)
+            await _seed_vmcore_row(pool, run_id)
             resp = await introspect_tools.introspect_from_vmcore(
                 pool, _ctx(), run_id=run_id, introspector=_FakeIntrospector()
             )
