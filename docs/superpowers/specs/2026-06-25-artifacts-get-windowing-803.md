@@ -33,17 +33,27 @@ existing authorization/redaction gate.
 
 Add two optional parameters to `artifacts.get`:
 
-- `byte_offset: int = 0` (`ge=0`) — the start byte of the window.
-- `max_bytes: int = 16384` (`ge=1`, `le=65536`) — the maximum window length;
-  default sized to the token budget (16 KiB ≈ 4k–5k tokens), schema max equal to
-  the inline-cap default (64 KiB).
+- `byte_offset: int = 0` — the start byte of the window.
+- `max_bytes: int = 16384` — the maximum window length; default sized to the token
+  budget (16 KiB ≈ 4k–5k tokens).
 
-The handler fetches the object once (bounded by a 1 MiB fetch ceiling, matching
-`search_text`'s `_MAX_SEARCHABLE_ARTIFACT_BYTES`), slices
+Both are declared as plain `int` (no hard `ge`/`le` schema bound) and normalized
+in the handler, **not** rejected at arg-binding. `artifacts.get` is not on the
+`BindingErrorMiddleware` allowlist, so a hard schema bound would leak a raw
+pydantic `ValidationError` rather than the uniform envelope (the leak ADR-0225's
+middleware prevents for `search_text`); editing that middleware is out of this
+change's scope. The parameter descriptions state the effective bounds in prose for
+discoverability.
+
+The handler clamps `byte_offset` to `max(byte_offset, 0)` and computes
+`effective_max = min(max(max_bytes, 1), KDIVE_ARTIFACT_INLINE_MAX_BYTES)`, then
+fetches the object once (bounded by a 1 MiB fetch ceiling, matching
+`search_text`'s `_MAX_SEARCHABLE_ARTIFACT_BYTES`) and slices
 `data[byte_offset : byte_offset + effective_max]` **before** the UTF-8 decode,
-and decodes the slice with `errors="replace"`. `effective_max` is
-`min(max_bytes, KDIVE_ARTIFACT_INLINE_MAX_BYTES)` so an operator who lowers the
-configured inline cap is never overrun.
+decoding the slice with `errors="replace"`. The `min(..., inline_cap)` term means
+an operator who lowers the configured inline cap is never overrun. Over-cap
+clamping is not a silent-success trap: `content_truncated`/`next_offset` signal
+the clamp so the caller can page.
 
 Returned `data` on the windowed-content branch:
 
@@ -76,11 +86,13 @@ best-effort store-outage degradation (`content_unavailable`) are all unchanged.
    `content_truncated="false"`, no `next_offset`, status `available`.
 4. A `max_bytes` window whose start/end splits a multi-byte UTF-8 sequence decodes
    without error (replacement characters at the split), never raising.
-5. The schema rejects `max_bytes` above its static maximum (65536) at arg-binding
-   (boundary test), and `byte_offset` below 0; neither reaches the handler.
-6. When the operator lowers `KDIVE_ARTIFACT_INLINE_MAX_BYTES` below the requested
-   window, the handler clamps to that configured cap (`effective_max =
-   min(max_bytes, configured_cap)`) and returns at most the cap
+5. Out-of-range inputs are normalized in the handler, never rejected at
+   arg-binding (no raw `ValidationError` escapes): a negative `byte_offset` clamps
+   to 0 (reads from the start); a `max_bytes <= 0` floors to a 1-byte window.
+6. `max_bytes` is clamped to the configured `KDIVE_ARTIFACT_INLINE_MAX_BYTES`
+   (`effective_max = min(max(max_bytes, 1), configured_cap)`): a request above the
+   configured cap, or above the default when the operator lowered the cap, returns
+   at most the cap with `content_truncated="true"` + `next_offset`
    (direct-handler test with a lowered cap).
 7. An object above the 1 MiB fetch ceiling returns
    `content_omitted="artifact_too_large"` + `refs.download_uri` even when
@@ -92,9 +104,9 @@ best-effort store-outage degradation (`content_unavailable`) are all unchanged.
    not-found-shaped; a drifted `head`/`fetched` sensitivity is rejected before the
    bytes reach the response; viewer role is still required; a store outage still
    degrades to `content_unavailable` with the metadata envelope intact.
-10. The schema advertises the `byte_offset`/`max_bytes` bounds (`minimum`/`maximum`)
-    and the generated tool reference (`docs/guide/reference/artifacts.md`) is
-    regenerated to match.
+10. The `artifacts.get` schema advertises `byte_offset`/`max_bytes` (with the
+    effective bounds stated in their descriptions) and the generated tool
+    reference (`docs/guide/reference/artifacts.md`) is regenerated to match.
 
 ## Edge cases enumerated
 
