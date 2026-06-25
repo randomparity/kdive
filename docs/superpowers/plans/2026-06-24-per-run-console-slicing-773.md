@@ -439,7 +439,7 @@ Design (matches the spec): `boot_handler` computes `mark` after resolving `snaps
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/jobs/handlers/test_runs_boot.py` (it already imports the module under test; add imports it lacks at the top — `from uuid import uuid4`, `from pathlib import Path`, and the module alias if not present). These two unit tests drive the helpers directly with injected deps (no transport):
+Append to `tests/jobs/handlers/test_runs_boot.py`. This file already imports everything these tests need — `asyncio`, `uuid4` (`from uuid import uuid4`), `SecretRegistry`, and the `runs_boot` module — so add no new imports. These unit tests drive the helpers directly with injected deps (no transport):
 
 ```python
 def test_mark_boot_window_local_is_file_size(tmp_path, monkeypatch) -> None:
@@ -492,10 +492,12 @@ def test_mark_boot_window_degrades_to_zero_on_failure(monkeypatch) -> None:
     assert asyncio.run(runs_boot._mark_boot_window(uuid4(), _Boom())) == 0
 ```
 
-For the local capture-offset wiring, add a test that the offset reaches `read_console_log`:
+For the local capture-offset wiring, add a self-contained test that the offset reaches
+`read_console_log` through `_read_redacted_console` (a real `SecretRegistry()` redacts nothing for
+unregistered values, so the bytes pass through unchanged):
 
 ```python
-def test_capture_console_artifact_reads_from_offset(tmp_path, monkeypatch) -> None:
+def test_read_redacted_console_honors_offset(tmp_path, monkeypatch) -> None:
     from kdive.jobs.handlers import runs_boot
 
     system_id = uuid4()
@@ -503,26 +505,16 @@ def test_capture_console_artifact_reads_from_offset(tmp_path, monkeypatch) -> No
     log.write_bytes(b"prior\nthis boot panic\n")
     monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: log)
 
-    seen = {}
-
-    async def fake_capture(system_id_arg, secret_registry, offset):
-        seen["offset"] = offset
-        return b"this boot panic\n"
-
-    monkeypatch.setattr(runs_boot, "_read_redacted_console", fake_capture)
-    # Drive _capture_console_artifact with a no-op store path; assert the offset is forwarded.
-    runs_boot  # marker; the real assertion is below via _read_redacted_console offset
     redacted = asyncio.run(
-        runs_boot._read_redacted_console(system_id, _NoSecrets(), len(b"prior\n"))
+        runs_boot._read_redacted_console(system_id, SecretRegistry(), len(b"prior\n"))
     )
+
     assert redacted == b"this boot panic\n"
 ```
 
-where `_NoSecrets` is a minimal `SecretRegistry` stand-in already used elsewhere in this test file (reuse the file's existing secret-registry fixture/helper; if none exists, construct `SecretRegistry()` — it redacts nothing for unregistered values). Confirm the helper name by reading the top of `tests/jobs/handlers/test_runs_boot.py` before writing this test.
-
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run python -m pytest tests/jobs/handlers/test_runs_boot.py -q -k "mark_boot_window or reads_from_offset"`
+Run: `uv run python -m pytest tests/jobs/handlers/test_runs_boot.py -q -k "mark_boot_window or honors_offset"`
 Expected: FAIL — `_mark_boot_window` undefined / `_read_redacted_console` takes no offset.
 
 - [ ] **Step 3: Implement the mark + thread it through**
