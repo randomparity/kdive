@@ -19,6 +19,15 @@ _log = logging.getLogger(__name__)
 DEFAULT_IDEMPOTENCY_RETENTION = timedelta(days=7)
 DEFAULT_DUMP_VOLUME_GRACE = timedelta(minutes=30)
 DEFAULT_REPORT_ARTIFACT_RETENTION = timedelta(days=7)
+DEFAULT_INVESTIGATION_CLEANUP_GRACE = timedelta(days=1)
+DEFAULT_BUILD_ARTIFACT_RETENTION = timedelta(days=30)
+
+#: Run-owned artifact retention classes the build-artifact sweeps reclaim (ADR-0234 §4, #768): the
+#: uploaded combined kernel tar / vmlinux / initrd (``build``) and an internally-built run kernel
+#: (``kernel-build``). Deliberately excludes ``build-log`` (run-owned build evidence, ADR-0238) and
+#: ``console``/``vmcore`` (system-owned crash evidence). Both sweeps also pin ``owner_kind='runs'``,
+#: so operator base-image uploads (system-owned) are out of scope.
+_BUILD_RETENTION_CLASSES: tuple[str, ...] = ("build", "kernel-build")
 
 
 class ArtifactObjectDeleter(Protocol):
@@ -72,6 +81,97 @@ async def gc_report_artifacts(
         deleted += 1
     if deleted:
         _log.info("reconciler: GC'd %d report artifact(s) past retention", deleted)
+    return deleted
+
+
+async def gc_investigation_artifacts(
+    conn: AsyncConnection, store: ArtifactObjectDeleter, grace: timedelta
+) -> int:
+    """Reclaim run-owned build artifacts of closed investigations past ``grace`` (ADR-0234 §4).
+
+    Deletes object + row for ``owner_kind='runs'`` artifacts whose ``retention_class`` is in
+    :data:`_BUILD_RETENTION_CLASSES`, linked via ``runs.investigation_id`` to an investigation whose
+    ``cleanup_pending_at`` is older than ``grace``. The marker is cleared once an investigation's
+    build artifacts are fully drained, so a reclaimed investigation drops out of the worklist; a
+    per-object store failure is logged and retried next pass (leaving the marker set) and never
+    aborts the sweep — the deferred, evidence-safe form ADR-0234 constraint (a)/(b) requires.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id FROM investigations "
+            "WHERE cleanup_pending_at IS NOT NULL AND cleanup_pending_at < now() - %s",
+            (grace,),
+        )
+        investigation_ids = [row[0] for row in await cur.fetchall()]
+    deleted = 0
+    for investigation_id in investigation_ids:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT a.id, a.object_key FROM artifacts a JOIN runs r ON r.id = a.owner_id "
+                "WHERE a.owner_kind = 'runs' AND a.retention_class = ANY(%s) "
+                "AND r.investigation_id = %s",
+                (list(_BUILD_RETENTION_CLASSES), investigation_id),
+            )
+            candidates = [(row[0], str(row[1])) for row in await cur.fetchall()]
+        drained = True
+        for artifact_id, object_key in candidates:
+            try:
+                await asyncio.to_thread(store.delete, object_key)
+            except Exception:  # noqa: BLE001 - one object failure must not starve the rest
+                _log.warning(
+                    "reconciler: deleting investigation artifact object %s failed; retry next pass",
+                    object_key,
+                    exc_info=True,
+                )
+                drained = False
+                continue
+            async with conn.transaction(), conn.cursor() as cur:
+                await cur.execute("DELETE FROM artifacts WHERE id = %s", (artifact_id,))
+            deleted += 1
+        if drained:
+            async with conn.transaction(), conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE investigations SET cleanup_pending_at = NULL WHERE id = %s",
+                    (investigation_id,),
+                )
+    if deleted:
+        _log.info("reconciler: GC'd %d closed-investigation build artifact(s)", deleted)
+    return deleted
+
+
+async def gc_expired_build_artifacts(
+    conn: AsyncConnection, store: ArtifactObjectDeleter, retention: timedelta
+) -> int:
+    """Reclaim run-owned build artifacts older than ``retention`` regardless of close (ADR-0234 §4).
+
+    The TTL backstop for investigations that never close (#768). Same row scope as
+    :func:`gc_investigation_artifacts` (``owner_kind='runs'`` and a build ``retention_class``) but
+    gated on ``artifacts.created_at`` rather than the close marker. A per-object store failure is
+    logged and retried next pass rather than aborting the sweep (like :func:`gc_report_artifacts`).
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id, object_key FROM artifacts "
+            "WHERE owner_kind = 'runs' AND retention_class = ANY(%s) AND created_at < now() - %s",
+            (list(_BUILD_RETENTION_CLASSES), retention),
+        )
+        candidates = [(row[0], str(row[1])) for row in await cur.fetchall()]
+    deleted = 0
+    for artifact_id, object_key in candidates:
+        try:
+            await asyncio.to_thread(store.delete, object_key)
+        except Exception:  # noqa: BLE001 - one object failure must not starve the rest
+            _log.warning(
+                "reconciler: deleting expired build artifact object %s failed; retry next pass",
+                object_key,
+                exc_info=True,
+            )
+            continue
+        async with conn.transaction(), conn.cursor() as cur:
+            await cur.execute("DELETE FROM artifacts WHERE id = %s", (artifact_id,))
+        deleted += 1
+    if deleted:
+        _log.info("reconciler: GC'd %d build artifact(s) past TTL", deleted)
     return deleted
 
 
