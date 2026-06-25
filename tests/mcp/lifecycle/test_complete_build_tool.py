@@ -21,7 +21,9 @@ from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.catalog.artifacts.expected_uploads import EXPECTED_UPLOADS_TOOL
 from kdive.mcp.tools.catalog.artifacts.uploads import (
+    CREATE_RUN_UPLOAD_TOOL,
     ArtifactDeclaration,
 )
 from kdive.mcp.tools.catalog.artifacts.uploads import (
@@ -246,6 +248,22 @@ def test_complete_build_maps_validation_build_failure(migrated_url: str) -> None
                 pool, _ctx(), str(run_id), build_id=None, cmdline="x"
             )
         assert resp.error_category == ErrorCategory.BUILD_FAILURE.value
+        # A format/shape rejection is self-correcting: it points back at the contract (#769).
+        assert resp.suggested_next_actions == [EXPECTED_UPLOADS_TOOL, CREATE_RUN_UPLOAD_TOOL]
+
+    asyncio.run(_run())
+
+
+def test_complete_build_success_does_not_carry_the_format_advisory(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            resp = await _build_handlers(validator).complete_build(
+                pool, _ctx(), str(run_id), build_id=None, cmdline="x"
+            )
+        assert resp.status == "succeeded"
+        assert EXPECTED_UPLOADS_TOOL not in resp.suggested_next_actions
 
     asyncio.run(_run())
 

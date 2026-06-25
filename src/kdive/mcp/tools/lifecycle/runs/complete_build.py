@@ -35,6 +35,8 @@ from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools.catalog.artifacts.expected_uploads import EXPECTED_UPLOADS_TOOL
+from kdive.mcp.tools.catalog.artifacts.uploads import CREATE_RUN_UPLOAD_TOOL
 from kdive.profiles.build import BuildProfile, ExternalBuildProfile
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
@@ -143,7 +145,13 @@ class CompleteBuildHandlers:
                 prepared.requirements,
             )
         except CategorizedError as exc:
-            return ToolResponse.failure_from_error(run_id, exc)
+            # A format/shape rejection is self-correcting: point back at the contract and the
+            # upload tool so the agent can re-shape the bytes and re-upload (#769, ADR-0234 §5).
+            return ToolResponse.failure_from_error(
+                run_id,
+                exc,
+                suggested_next_actions=[EXPECTED_UPLOADS_TOOL, CREATE_RUN_UPLOAD_TOOL],
+            )
 
         return _ExternalBuildFinalization(
             prepared.run,
