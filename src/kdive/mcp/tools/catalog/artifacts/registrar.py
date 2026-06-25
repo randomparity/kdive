@@ -12,6 +12,7 @@ from pydantic import Field
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools.catalog.artifacts import raw_fetch as artifact_raw_fetch
 from kdive.mcp.tools.catalog.artifacts import reads as artifact_reads
 from kdive.mcp.tools.catalog.artifacts import uploads as artifact_uploads
 from kdive.mcp.tools.catalog.artifacts.expected_uploads import (
@@ -47,6 +48,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     """Register the `artifacts.*` tools on ``app``, bound to ``pool``."""
     _register_artifacts_list(app, pool)
     _register_artifacts_get(app, pool)
+    _register_artifacts_fetch_raw(app, pool)
     _register_artifacts_search_text(app, pool)
     _register_artifacts_create_run_upload(app, pool, resolver)
     _register_artifacts_create_system_upload(app, pool, resolver)
@@ -111,6 +113,41 @@ def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
         presigned `refs.download_uri`. Requires viewer; sensitive ids are not-found.
         """
         return await artifact_reads.artifacts_get(pool, current_context(), artifact_id=artifact_id)
+
+
+def _register_artifacts_fetch_raw(app: FastMCP, pool: AsyncConnectionPool) -> None:
+    @app.tool(
+        name="artifacts.fetch_raw",
+        annotations=_docmeta.read_only(),
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Presigns a Run's raw vmcore/vmlinux; those objects only exist after a live "
+                "build/capture path runs, exercised under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test presigns an asset a real run produced, or a recorded "
+                "live_stack run does."
+            ),
+        ),
+    )
+    async def artifacts_fetch_raw(
+        run_id: Annotated[str, Field(description="The Run whose raw asset to fetch.")],
+        asset: Annotated[
+            artifact_raw_fetch.RawAsset,
+            Field(description="Which raw asset to fetch: vmcore or vmlinux."),
+        ],
+    ) -> ToolResponse:
+        """Mint a presigned download URL for a Run's raw vmcore or vmlinux. Requires contributor.
+
+        Returns the URL under `refs.download_uri` with `data.asset`/`data.size_bytes`; never
+        inline bytes (these are large binaries). The asset stays sensitive — egress is gated by
+        project membership + contributor on the asset's owning project, not by redaction.
+        """
+        return await artifact_raw_fetch.fetch_raw(
+            pool, current_context(), run_id=run_id, asset=asset
+        )
 
 
 def _register_artifacts_search_text(app: FastMCP, pool: AsyncConnectionPool) -> None:

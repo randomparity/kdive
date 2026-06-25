@@ -112,6 +112,25 @@ Examples for `artifacts`:
 
 Return the accepted upload-artifact names per owner-kind. Requires a token.
 
+## `artifacts.fetch_raw`
+
+`partial` · `read-only`
+
+**Maturity:** live_dependency — Presigns a Run's raw vmcore/vmlinux; those objects only exist after a live build/capture path runs, exercised under the gated live markers.
+
+**Promotion:** A non-gated test presigns an asset a real run produced, or a recorded live_stack run does.
+
+Mint a presigned download URL for a Run's raw vmcore or vmlinux. Requires contributor.
+
+Returns the URL under `refs.download_uri` with `data.asset`/`data.size_bytes`; never
+inline bytes (these are large binaries). The asset stays sensitive — egress is gated by
+project membership + contributor on the asset's owning project, not by redaction.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `asset` | `vmcore`, `vmlinux` | yes | Which raw asset to fetch: vmcore or vmlinux. |
+| `run_id` | string | yes | The Run whose raw asset to fetch. |
+
 ## `artifacts.get`
 
 `partial` · `read-only`
