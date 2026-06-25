@@ -191,20 +191,20 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "KDIVE_STACK_PID_FILE",
         "script",
         "<repo>/.live-stack.pid",
-        "PID file the live-stack `start.sh`/`stop.sh` scripts manage.",
+        "PID file managed by `examples/local-libvirt/up.sh` (written) and `down.sh` (read).",
     ),
     ExternalEnvVar(
         "KDIVE_STACK_LOG_DIR",
         "script",
         "<repo>/.live-stack-logs",
-        "Log directory the live-stack `start.sh` script writes process logs to.",
+        "Log directory written by `scripts/live-stack/lib.sh` (via `up.sh`).",
     ),
     ExternalEnvVar(
         "KDIVE_WORKER_AS_ROOT",
         "script",
         "1",
-        "Whether `restart-stack.sh` restarts the worker as root via sudo (1) or as the "
-        "current user (0).",
+        "Whether `restart_host_processes()` in `scripts/live-stack/lib.sh` starts the worker "
+        "as root via sudo (1) or as the current user (0).",
     ),
     ExternalEnvVar(
         "KDIVE_DEMO_NAMESPACE",

@@ -230,9 +230,9 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_REMOTE_PKI_DIR` | `/etc/pki/libvirt` | TLS PKI directory `check-remote-libvirt.sh` validates. |
 | `KDIVE_REMOTE_SSH_PORT` | `22` | SSH port `check-remote-libvirt.sh` connects on. |
 | `KDIVE_SETUP_AUDITED` | `0` | When 1, setup-local-libvirt.sh onboards via the audited MCP admin tools instead of seed-project (requires KDIVE_MCP_BASE and a project-admin KDIVE_TOKEN). |
-| `KDIVE_STACK_LOG_DIR` | `<repo>/.live-stack-logs` | Log directory the live-stack `start.sh` script writes process logs to. |
-| `KDIVE_STACK_PID_FILE` | `<repo>/.live-stack.pid` | PID file the live-stack `start.sh`/`stop.sh` scripts manage. |
-| `KDIVE_WORKER_AS_ROOT` | `1` | Whether `restart-stack.sh` restarts the worker as root via sudo (1) or as the current user (0). |
+| `KDIVE_STACK_LOG_DIR` | `<repo>/.live-stack-logs` | Log directory written by `scripts/live-stack/lib.sh` (via `up.sh`). |
+| `KDIVE_STACK_PID_FILE` | `<repo>/.live-stack.pid` | PID file managed by `examples/local-libvirt/up.sh` (written) and `down.sh` (read). |
+| `KDIVE_WORKER_AS_ROOT` | `1` | Whether `restart_host_processes()` in `scripts/live-stack/lib.sh` starts the worker as root via sudo (1) or as the current user (0). |
 
 ## In-guest helpers
 
