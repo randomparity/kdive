@@ -188,7 +188,8 @@ def clone_tree(
     if not remote_allowed(source.remote, allowlist):
         raise CategorizedError(
             "the git remote is not on KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST "
-            "(see resource://kdive/docs/operating/build-source-staging.md)",
+            "(see resource://kdive/docs/operating/build-source-staging.md), "
+            "or select an isolated build environment from build_envs.list to clone any remote",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     if shutil.which("git") is None:

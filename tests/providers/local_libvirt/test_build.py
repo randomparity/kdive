@@ -1836,6 +1836,9 @@ def test_clone_tree_rejects_disallowed_remote(tmp_path: Path) -> None:
     # No URL echo into either the message or the details (details may be None).
     assert "gitlab.com" not in str(exc.value)
     assert "gitlab.com" not in repr(exc.value.details)
+    # Must name the allowlist guidance AND the self-service alternative (#778).
+    assert "KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST" in str(exc.value)
+    assert "build_envs.list" in str(exc.value)
 
 
 def test_clone_tree_empty_allowlist_reports_lane_disabled(tmp_path: Path) -> None:
