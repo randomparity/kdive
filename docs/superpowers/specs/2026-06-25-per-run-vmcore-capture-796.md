@@ -7,18 +7,28 @@
 
 ## Problem
 
-Raw vmcores are stored per System (`…/systems/{system_id}/vmcore-{method}`), one core per System
-(ADR-0050). A reused System that crashes under a second Run never captures that Run's core — the
-storage guard returns the first Run's core. The operator wants each crashing Run's core retained and
-independently fetchable. `vmcore.fetch` is System-addressed and `CaptureVmcorePayload` carries no
-`run_id`, so the capture job cannot associate a core with the crashing Run.
+Raw vmcores are stored and owned per System (`…/systems/{system_id}/vmcore-{method}`, ADR-0050),
+not per the Run that crashed. The capture job has no `run_id`: `vmcore.fetch(system_id, method)` is
+System-addressed and `CaptureVmcorePayload` carries no `run_id`, so a core cannot be attributed to
+the crashing Run. #781's egress had to carry that indirection
+(`run.system_id → raw_vmcore_key(system_id)`) with a note that it would address by `run_id` directly
+once per-Run capture landed.
+
+**Reachability.** The issue frames this as "a reused System crashing under a later Run loses the
+second core." Under the current System state machine that case is not yet reachable: `CRASHED`
+transitions only to `TORN_DOWN`/`FAILED` (`src/kdive/domain/capacity/state.py`), with no edge back
+to `READY`/`REPROVISIONING`, so a `system_id` reaches `CRASHED` — and produces a vmcore — at most
+once. Per-System keying does not drop a core today. The reachable value of this change is correct
+Run attribution (so #781 resolves by `run_id` with no System indirection) plus forward-compatibility
+if a later ADR makes a `CRASHED` System reprovisionable.
 
 ## Goal
 
 Make raw vmcore capture **Run-addressed** and cores **Run-owned**: `vmcore.fetch(run_id, method)`
-writes a core owned by the Run (`owner_kind='runs'`), so a System that crashes under two Runs keeps
-two cores. The #781 egress resolves the per-Run core by `run_id` directly. Capture idempotency stays
-correct under concurrent same-Run `vmcore.fetch`.
+writes a core owned by the Run (`owner_kind='runs'`). The captured core is attributed to its Run;
+should a System ever crash under successive Runs, each retains its own core. The #781 egress
+resolves the per-Run core by `run_id` directly. Capture idempotency stays correct under concurrent
+same-Run `vmcore.fetch`.
 
 ## Non-goals
 
@@ -29,8 +39,13 @@ correct under concurrent same-Run `vmcore.fetch`.
 
 ## Acceptance criteria
 
-1. A System that crashes under two different Runs retains **two** distinct raw vmcores, each
-   addressable to its Run (`owner_kind='runs'`, distinct `owner_id`).
+1. A core captured under a Run is owned by that Run (`owner_kind='runs'`, `owner_id={run_id}`) and
+   resolvable by `run_id`; two Runs that each capture a core (e.g. distinct Runs on distinct
+   Systems, or — once reachable — successive Runs on one reused System) retain distinct cores at
+   distinct keys, neither shadowing the other. (Two crashes on a single `system_id` are not
+   reachable under the current state machine — `CRASHED` is terminal, `state.py` — so this is
+   asserted at the artifact-ownership level, exercised by inserting two Run-owned cores, not by an
+   end-to-end double-crash run.)
 2. `vmcore.fetch(run_id, method)` admits a `capture_vmcore` job on a Run whose bound System is
    `CRASHED`; it rejects (no job row) for a malformed/absent/cross-project Run (`not_found` /
    `configuration_error`), a Run not bound to a System, and a non-`CRASHED` System — with the same
@@ -76,8 +91,12 @@ core (race backstop), inserts both rows `owner_kind='runs'`, and audits `object_
 ### Egress & readers (ADR-0244 §6, §3)
 
 - `raw_fetch._resolve_key` `vmcore` branch: `require_role(ctx, run.project, CONTRIBUTOR)` +
-  `raw_vmcore_key(run_id)`; remove the `run.system_id`/`system_project` use on this path. If
-  `RunFetchContext.system_id` becomes unused after this, remove it (no dead code).
+  `raw_vmcore_key(run_id)`; remove the `run.system_id`/`system_project` use on this path. Gating on
+  `run.project` preserves cross-project isolation because a bound Run always shares its System's
+  project — enforced at `services/runs/admission.py` (`system.project != inv.project` → reject) and
+  `services/runs/bind.py` (`system.project != run.project` → reject). Add a test asserting
+  `fetch_raw('vmcore')` is denied for a Run whose System is cross-project (guards a future bind
+  regression). If `RunFetchContext.system_id` becomes unused after this, remove it (no dead code).
 - `_vmcore_targets.resolve_run_vmcore_target`: `raw_vmcore_key(run_id)` (was
   `raw_vmcore_key(run.require_system_id())`).
 

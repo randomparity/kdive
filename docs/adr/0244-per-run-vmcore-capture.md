@@ -25,16 +25,26 @@ enforces this under a per-System advisory lock — a second capture on the same 
 (a same-method re-dispatch returns the existing key; a different method raises
 `configuration_error`), never overwritten. There is no data-loss bug today.
 
-But a System hosts many Runs over its life (`System ──< Run`). A reused System can crash again
-under a *later* Run. With per-System keying, that second crash's core is **never captured** — the
-storage guard finds the first Run's core and returns it. For a multi-crash investigation on one
-reused System, the operator wants each crashing Run's core retained and independently fetchable.
+But a System hosts many Runs over its life (`System ──< Run`), and the core is keyed and owned by
+the **System**, not the **Run** that actually crashed. The capture job has no `run_id` at all:
+`vmcore.fetch(system_id, method)` is **System-addressed** and `CaptureVmcorePayload` carries
+`system_id + method` and **no `run_id`**, so the core cannot be attributed to the crashing Run.
+This is the indirection ADR-0243's egress had to carry (`run.system_id → raw_vmcore_key(system_id)`,
+with a forward-compat note that it would "swap to addressing by `run_id` directly" once per-Run
+capture landed).
 
-The block is structural, not cosmetic. `vmcore.fetch(system_id, method)` is **System-addressed**:
-`CaptureVmcorePayload` carries `system_id + method` and **no `run_id`**, so the capture job cannot
-associate a core with the Run that produced the crash. Making cores per-Run is not a key rename —
-it requires designing the Run association, re-owning the artifact, and moving a concurrency
-invariant from the System to the Run.
+**Reachability of the multi-core case.** The issue frames this as "a reused System that crashes
+under a later Run loses the second core." Under the *current* System state machine that case is not
+yet reachable: `CRASHED` transitions only to `TORN_DOWN`/`FAILED` (`domain/capacity/state.py`), with
+no edge back to `READY`/`REPROVISIONING`, so a given `system_id` reaches `CRASHED` — and produces a
+vmcore — **at most once** in its lifetime. So per-System keying does not actually drop a core today.
+The reachable, concrete value of this change is therefore (1) **correct Run attribution** of the one
+core, which lets the #781 egress resolve it by `run_id` with no System indirection, and (2)
+**forward-compatibility**: if a later ADR makes a `CRASHED` System reprovisionable (so one System
+can crash under successive Runs), each crashing Run already retains its own core with no further
+change to the capture/egress contract. Making cores per-Run is not a key rename — it requires
+designing the Run association, re-owning the artifact, and moving the capture concurrency boundary
+from the System to the Run.
 
 ADR-0243 (#781) made the raw core owner-fetchable and explicitly deferred this, resolving the
 `vmcore` egress through `run.system_id → raw_vmcore_key(system_id)` with a note that the resolver
@@ -42,8 +52,9 @@ would "swap to addressing by `run_id` directly" when per-Run capture landed. Thi
 
 ## Decision
 
-Capture is **Run-addressed** and cores are **Run-owned**. One core per crashing Run; a reused
-System that crashes under two Runs retains two distinct, independently-fetchable cores.
+Capture is **Run-addressed** and cores are **Run-owned**. One core per crashing Run: the captured
+core is owned by the Run that crashed, and if a System ever crashes under successive Runs (see
+"Reachability" above) each Run retains its own distinct, independently-fetchable core.
 
 ### 1. `vmcore.fetch` is Run-addressed
 
@@ -86,13 +97,16 @@ build→boot lifecycle; a re-crash on a reused System is a new Run).
 - **Envelope replay:** the `vmcore.fetch` idempotency-store kind (ADR-0193) is unchanged — still the
   tool name; a keyed retry replays the identical job envelope.
 
-**Load-bearing concurrency invariant.** A System hosts **at most one `CRASHED` Run at any instant**:
-to crash again it must first leave `CRASHED` (reprovision/reboot), which ends the prior Run's
-liveness on that System. So two Runs never capture against the *same live domain* concurrently — the
-multi-core scenario is strictly **sequential** (crash A → capture A → reprovision → crash B →
-capture B). The only real concurrency is same-Run `vmcore.fetch` races, which the per-Run lock +
-dedup serialize. This is why the lock moves wholesale from System to Run rather than co-holding
-both: the System scope is redundant for capture under this invariant.
+**Load-bearing concurrency invariant.** A given `system_id` reaches `CRASHED` **at most once** in
+its lifetime: `CRASHED` transitions only to `TORN_DOWN`/`FAILED` (`domain/capacity/state.py`), with
+no edge back to a bootable state. So there is never a second capture against the same live domain —
+the only real concurrency is same-Run `vmcore.fetch` races (a client retrying), which the per-Run
+lock + dedup serialize. This is why the lock moves wholesale from System to Run rather than
+co-holding both: the System scope is redundant for capture. (Were a future ADR to make a `CRASHED`
+System reprovisionable, successive crashes would still be **sequential** — separated by the
+reprovision that returns the System to `READY` — so the per-Run boundary remains correct; if
+concurrent live captures of one domain ever became possible, re-adding the System lock as the outer
+scope is the documented next step, §"Considered & rejected".)
 
 ### 5. The `Retriever.capture` port gains `run_id`
 
@@ -104,11 +118,15 @@ domain (`domain_name_for(system_id)`), the local overlay, the remote dump volume
 ### 6. The #781 egress resolves by `run_id` directly
 
 `artifacts.fetch_raw`'s `vmcore` branch resolves `raw_vmcore_key(run_id)` and gates on **the Run's
-project** — the Run owns the core, so the asset's project is unambiguously `run.project` (a bound
-Run and its System always share a project: admission resolves the Run's project from the System's
-allocation). This drops the `run.system_id → system_project → raw_vmcore_key(system_id)` indirection
-ADR-0243 carried as a forward-compatibility shim. The closed `RawAsset` allow-list, the URL-only
-contract, and the audit are unchanged.
+project** — the Run owns the core, so the asset's project is unambiguously `run.project`. ADR-0243
+deliberately re-checked the *System's* project instead, calling `run.project == system.project` an
+invariant it would "not assume". That invariant is in fact **enforced**: `runs.create` rejects a
+System whose project differs from the Run's investigation project (`services/runs/admission.py`,
+`system.project != inv.project`), and `runs.bind` rejects `system.project != run.project`
+(`services/runs/bind.py`). A bound Run therefore always shares its System's project, so gating on
+`run.project` preserves exactly the cross-project isolation ADR-0243's System-project re-check
+provided, and drops the now-redundant `run.system_id → system_project → raw_vmcore_key(system_id)`
+indirection. The closed `RawAsset` allow-list, the URL-only contract, and the audit are unchanged.
 
 ### 7. Payload, attribution, audit
 
@@ -119,8 +137,10 @@ audit event records `object_kind='runs'`, `object_id={run_id}`.
 
 ## Consequences
 
-- A reused System that crashes under two Runs retains **two** cores, each fetchable by its Run —
-  the issue's primary acceptance criterion.
+- The captured core is attributed to the Run that crashed and fetchable by `run_id`. If a System
+  ever crashes under successive Runs (a future state-machine capability — see "Reachability"), each
+  Run retains its own core with no further contract change; today, where a `system_id` crashes at
+  most once, the concrete win is correct Run attribution.
 - The #781 egress is simpler: one Run-keyed lookup, gated on `run.project`, with no System
   indirection. `raw_fetch`'s `system_project`/`run.system_id` use for `vmcore` is removed.
 - **No migration.** `owner_kind='runs'` is an existing artifact shape; M0/M1 carries no persisted
