@@ -54,8 +54,11 @@ the capture scopes the gate.
   `<serial><log file=…>` is virtlogd-managed and rotates at a host `max_size` (default ~2 MiB), so
   `read_console_log` carries a **rotation guard**: if the mark exceeds the file's current size
   (rotated/truncated since the mark) it ignores the stale offset and reads the whole current file —
-  degrading to cumulative for that one capture rather than an empty slice that would drop this
-  boot's panic on the failure path.
+  degrading to cumulative for that one capture rather than an empty slice. The guard is a size
+  comparison, so it does not catch rotation-with-regrowth-past-the-mark (a narrow accepted residual
+  that drops this boot's pre-offset bytes; it fails safe for mislabeling — a missed panic abandons
+  to FAILED). Tracking file identity to make local byte-exact across rotation was rejected as
+  disproportionate to remote's coarser part-granularity.
 - **Remote — next part index.** Mark = `max(list_part_indices(system_id)) + 1` (or `0`) at boot
   start, read from the **S3 part-index list** (not the collector's memory). `snapshot` assembles
   only parts with `index >= mark`. Reading the mark from S3 keeps it stable across collector

@@ -67,11 +67,16 @@ Per provider the mark is an `int` with a provider-specific meaning:
 - **Local — byte offset.** Mark = current size of `<sys>.log` (`0` if absent). Capture and gates
   read `read_console_log(path, offset=mark)` → only bytes appended after boot start, precise to the
   byte between virtlogd rotations. **Rotation guard:** if `mark` exceeds the file's current size at
-  capture time (virtlogd rotated/truncated the log between the mark read and the capture), the read
-  ignores the stale offset and returns the **whole** current file (degrade to cumulative for that
-  one capture — exactly today's behavior — rather than an empty slice that would silently drop this
-  boot's panic on the failure path). This keeps the failure-direction safe: a rotated-mid-window
-  boot loses slicing for that capture, never its console evidence.
+  capture time (virtlogd rotated/truncated the log so the live file is now shorter than the mark),
+  the read ignores the stale offset and returns the **whole** current file (degrade to cumulative
+  for that one capture — exactly today's behavior — rather than an empty slice). The guard is a
+  size comparison, so it catches the shrink-below-offset case but **not** rotation-with-regrowth:
+  if virtlogd rotated mid-window and this boot then wrote more than `mark` bytes into the fresh
+  file, the size is back above `mark`, the guard stays silent, and `seek(mark)` returns only the
+  tail past `mark` — dropping this boot's pre-offset bytes. This is a narrow accepted residual
+  (caveat 4); it fails safe for mislabeling (a panic missed this way abandons the Run to FAILED
+  rather than borrowing a prior boot's panic), and it requires a System already near the ~2 MiB
+  `max_size` plus a boot emitting more than `mark` bytes.
 - **Remote — next part index.** Mark = `max(list_part_indices(system_id)) + 1` (or `0` if none) at
   boot start. `snapshot` assembles only parts with `index >= mark`. The mark is read from the **S3
   part index list**, not the collector's memory, so it is unaffected by a collector
@@ -137,6 +142,13 @@ object key is unchanged — slicing changes only the **bytes** written under it,
    **synchronous-completeness** refinement also pointed at #773 (second issue comment), **out of
    scope** here. Local has no such gap (synchronous file read). The mark-read failure fallback to
    `0` likewise degrades to cumulative, never to a hard failure.
+4. **Local virtlogd rotation-with-regrowth.** The local rotation guard is a size comparison
+   (`mark > current size → read whole file`), so it cannot distinguish "rotated mid-window and
+   regrew past `mark`" from ordinary same-file growth. In that narrow case the slice drops this
+   boot's pre-offset bytes (see the local-mark note). It fails safe for mislabeling: a panic in the
+   dropped span is missed, so the gate fails closed and the Run abandons to FAILED rather than
+   matching a prior boot's panic. Accepted rather than tracked by inode identity (see rejected
+   alternatives), to keep local's precision proportionate to remote's coarser part-granularity.
 
 These keep local and remote **behaviorally identical at the outcome level** — both scope the gate
 to the current boot window (ADR-0235's acceptance bar). The byte-offset (local) vs. part-index
@@ -176,3 +188,10 @@ remote's out-of-band collector and predates this change.
 - **Fall back to the cumulative slice when the remote window is empty.** Rejected: it reintroduces
   prior-boot bytes into the gate input — the exact defect this issue closes — to paper over the
   ready-path quiet-boot gap, which belongs to the synchronous-completeness refinement.
+- **Inode/identity-tracked local mark** (record `(offset, st_ino, st_dev)` at boot start; read from
+  `0` whenever the file identity changes, making local byte-exact across virtlogd rotation).
+  Rejected as disproportionate: it would make local bulletproof against rotation while remote still
+  drops whole ready-boot consoles (caveat 3) and carries the part-granularity/pump-latency residue
+  (caveats 1–2). The size-comparison guard plus the accepted rotation-with-regrowth residual
+  (caveat 4) keeps local's precision in line with remote's; byte-exactness across rotation is not
+  worth a second stat-and-compare on every capture for this feature's best-effort bar.
