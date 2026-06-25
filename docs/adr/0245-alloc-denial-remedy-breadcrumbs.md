@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-25
 - **Deciders:** kdive maintainers
-- **Builds on (does not supersede):** [ADR-0174](0174-config-error-detail.md) (actionable
+- **Builds on (does not supersede):** [ADR-0174](0174-config-error-actionable-detail.md) (actionable
   denial `detail`/`reason`), the #471 discovery-action denial breadcrumbs
   (`mcp/tools/lifecycle/allocations/request.py`).
 - **Issue:** [#801](https://github.com/randomparity/kdive/issues/801) (part of epic #800).
