@@ -29,6 +29,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 _ALLOW = frozenset({"bt", "log", "ps", "p", "rd"})
 
 _SYS = UUID("33333333-3333-3333-3333-333333333333")
+_RUN = UUID("44444444-4444-4444-4444-444444444444")
 _TENANT = "local"
 
 
@@ -128,10 +129,10 @@ def _spooled_core(tmp_path: Path, data: bytes) -> Path:
 def test_capture_streams_raw_core_and_returns_build_id(tmp_path: Path) -> None:
     core = _spooled_core(tmp_path, b"RAWCORE")
     store = _FakeStore()
-    out = _kdump_retriever(store, core_path=core).capture(_SYS, CaptureMethod.KDUMP)
+    out = _kdump_retriever(store, core_path=core).capture(_SYS, _RUN, CaptureMethod.KDUMP)
     assert isinstance(out, CaptureOutput)
-    assert out.raw.key == f"{_TENANT}/systems/{_SYS}/vmcore-kdump"
-    assert out.redacted.key == f"{_TENANT}/systems/{_SYS}/vmcore-kdump-redacted"
+    assert out.raw.key == f"{_TENANT}/runs/{_RUN}/vmcore-kdump"
+    assert out.redacted.key == f"{_TENANT}/runs/{_RUN}/vmcore-kdump-redacted"
     assert out.vmcore_build_id == "deadbeef"
     assert out.raw_size_bytes == len(b"RAWCORE")
     # raw core went through the streaming put (a path), not a bytes put.
@@ -147,7 +148,7 @@ def test_capture_streams_raw_core_and_returns_build_id(tmp_path: Path) -> None:
 
 def test_capture_removes_the_spool_dir_on_success(tmp_path: Path) -> None:
     core = _spooled_core(tmp_path, b"RAWCORE")
-    _kdump_retriever(_FakeStore(), core_path=core).capture(_SYS, CaptureMethod.KDUMP)
+    _kdump_retriever(_FakeStore(), core_path=core).capture(_SYS, _RUN, CaptureMethod.KDUMP)
     assert not core.exists()
     assert not core.parent.exists()
 
@@ -156,7 +157,7 @@ def test_capture_removes_the_spool_dir_on_store_failure(tmp_path: Path) -> None:
     core = _spooled_core(tmp_path, b"RAWCORE")
     retr = _kdump_retriever(_FakeStore(fail_on="vmcore-kdump"), core_path=core)
     with pytest.raises(CategorizedError) as exc:
-        retr.capture(_SYS, CaptureMethod.KDUMP)
+        retr.capture(_SYS, _RUN, CaptureMethod.KDUMP)
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert not core.exists()
     assert not core.parent.exists()
@@ -164,7 +165,7 @@ def test_capture_removes_the_spool_dir_on_store_failure(tmp_path: Path) -> None:
 
 def test_capture_no_core_is_readiness_failure() -> None:
     with pytest.raises(CategorizedError) as exc:
-        _kdump_retriever(_FakeStore(), core_path=None).capture(_SYS, CaptureMethod.KDUMP)
+        _kdump_retriever(_FakeStore(), core_path=None).capture(_SYS, _RUN, CaptureMethod.KDUMP)
     assert exc.value.category is ErrorCategory.READINESS_FAILURE
 
 
@@ -172,7 +173,7 @@ def test_capture_store_failure_is_infrastructure_failure(tmp_path: Path) -> None
     core = _spooled_core(tmp_path, b"X")
     with pytest.raises(CategorizedError) as exc:
         _kdump_retriever(_FakeStore(fail_on="vmcore-kdump"), core_path=core).capture(
-            _SYS, CaptureMethod.KDUMP
+            _SYS, _RUN, CaptureMethod.KDUMP
         )
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
@@ -194,7 +195,9 @@ def test_capture_verifies_stored_checksum(tmp_path: Path) -> None:
             )
 
     with pytest.raises(CategorizedError) as exc:
-        _kdump_retriever(_CorruptingStore(), core_path=core).capture(_SYS, CaptureMethod.KDUMP)
+        _kdump_retriever(_CorruptingStore(), core_path=core).capture(
+            _SYS, _RUN, CaptureMethod.KDUMP
+        )
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert not core.exists()
 
@@ -286,10 +289,10 @@ def _host_dump_retriever(
 def test_capture_host_dump_streams_raw_core_and_returns_build_id(tmp_path: Path) -> None:
     core = _spooled_core(tmp_path, b"\x7fELFcore")
     store = _FakeStore()
-    out = _host_dump_retriever(store, core_path=core).capture(_SYS, CaptureMethod.HOST_DUMP)
+    out = _host_dump_retriever(store, core_path=core).capture(_SYS, _RUN, CaptureMethod.HOST_DUMP)
     assert isinstance(out, CaptureOutput)
-    assert out.raw.key == f"{_TENANT}/systems/{_SYS}/vmcore-host_dump"
-    assert out.redacted.key == f"{_TENANT}/systems/{_SYS}/vmcore-host_dump-redacted"
+    assert out.raw.key == f"{_TENANT}/runs/{_RUN}/vmcore-host_dump"
+    assert out.redacted.key == f"{_TENANT}/runs/{_RUN}/vmcore-host_dump-redacted"
     assert out.vmcore_build_id == "hostbid"
     assert out.raw_size_bytes == len(b"\x7fELFcore")
     # the raw core is streamed (a path), not held as bytes.
@@ -304,7 +307,7 @@ def test_capture_host_dump_streams_raw_core_and_returns_build_id(tmp_path: Path)
 
 def test_capture_host_dump_removes_the_spool_dir_on_success(tmp_path: Path) -> None:
     core = _spooled_core(tmp_path, b"\x7fELFcore")
-    _host_dump_retriever(_FakeStore(), core_path=core).capture(_SYS, CaptureMethod.HOST_DUMP)
+    _host_dump_retriever(_FakeStore(), core_path=core).capture(_SYS, _RUN, CaptureMethod.HOST_DUMP)
     assert not core.exists()
     assert not core.parent.exists()
 
@@ -313,7 +316,7 @@ def test_capture_host_dump_removes_the_spool_dir_on_store_failure(tmp_path: Path
     core = _spooled_core(tmp_path, b"\x7fELFcore")
     retr = _host_dump_retriever(_FakeStore(fail_on="vmcore-host_dump"), core_path=core)
     with pytest.raises(CategorizedError) as exc:
-        retr.capture(_SYS, CaptureMethod.HOST_DUMP)
+        retr.capture(_SYS, _RUN, CaptureMethod.HOST_DUMP)
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert not core.exists()
     assert not core.parent.exists()
@@ -321,7 +324,9 @@ def test_capture_host_dump_removes_the_spool_dir_on_store_failure(tmp_path: Path
 
 def test_capture_host_dump_no_core_is_readiness_failure() -> None:
     with pytest.raises(CategorizedError) as exc:
-        _host_dump_retriever(_FakeStore(), core_path=None).capture(_SYS, CaptureMethod.HOST_DUMP)
+        _host_dump_retriever(_FakeStore(), core_path=None).capture(
+            _SYS, _RUN, CaptureMethod.HOST_DUMP
+        )
     assert exc.value.category is ErrorCategory.READINESS_FAILURE
 
 
@@ -351,7 +356,7 @@ def test_capture_host_dump_unreadable_core_is_configuration_error(tmp_path: Path
     core = _spooled_core(tmp_path, b"\x7fELFcore")
     retr = _retriever_with_build_id_seam(_FakeStore(), core_path=core, build_id_seam=deny)
     with pytest.raises(CategorizedError) as exc:
-        retr.capture(_SYS, CaptureMethod.HOST_DUMP)
+        retr.capture(_SYS, _RUN, CaptureMethod.HOST_DUMP)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details["operation"] == "read_spooled_core"
     assert exc.value.details["remediation"] == WORKER_READABILITY_REMEDIATION
@@ -373,7 +378,7 @@ def test_capture_host_dump_missing_dependency_is_not_remapped(tmp_path: Path) ->
     core = _spooled_core(tmp_path, b"\x7fELFcore")
     retr = _retriever_with_build_id_seam(_FakeStore(), core_path=core, build_id_seam=no_drgn)
     with pytest.raises(CategorizedError) as exc:
-        retr.capture(_SYS, CaptureMethod.HOST_DUMP)
+        retr.capture(_SYS, _RUN, CaptureMethod.HOST_DUMP)
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
     assert not core.parent.exists()
 
@@ -396,7 +401,7 @@ def test_capture_host_dump_verifies_stored_checksum(tmp_path: Path) -> None:
 
     with pytest.raises(CategorizedError) as exc:
         _host_dump_retriever(_CorruptingStore(), core_path=core).capture(
-            _SYS, CaptureMethod.HOST_DUMP
+            _SYS, _RUN, CaptureMethod.HOST_DUMP
         )
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert not core.exists()

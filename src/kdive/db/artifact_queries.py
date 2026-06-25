@@ -11,7 +11,7 @@ from psycopg.rows import dict_row
 
 _RAW_VMCORE_KEY_SQL: LiteralString = (
     "SELECT object_key FROM artifacts "
-    "WHERE owner_kind = 'systems' AND owner_id = %s "
+    "WHERE owner_kind = 'runs' AND owner_id = %s "
     "AND object_key LIKE %s AND object_key NOT LIKE %s"
 )
 _RAW_VMCORE_KEY_LIKE = "%/vmcore-%"
@@ -63,12 +63,16 @@ async def system_project(conn: AsyncConnection, system_id: UUID) -> str | None:
     return None if row is None else str(row["project"])
 
 
-async def raw_vmcore_key(conn: AsyncConnection, system_id: UUID) -> str | None:
-    """Return the System's raw ``vmcore-{method}`` object key, or ``None``."""
+async def raw_vmcore_key(conn: AsyncConnection, run_id: UUID) -> str | None:
+    """Return the Run's raw ``vmcore-{method}`` object key, or ``None`` (ADR-0244).
+
+    Cores are owned by the Run that crashed (``owner_kind='runs'``); the redacted dmesg sibling
+    (``-redacted``) is excluded so only the raw core resolves.
+    """
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             _RAW_VMCORE_KEY_SQL,
-            (system_id, _RAW_VMCORE_KEY_LIKE, _REDACTED_VMCORE_LIKE),
+            (run_id, _RAW_VMCORE_KEY_LIKE, _REDACTED_VMCORE_LIKE),
         )
         row = await cur.fetchone()
     return None if row is None else str(row["object_key"])

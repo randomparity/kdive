@@ -22,13 +22,11 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 class _Capturer:
     def __init__(self, label: str) -> None:
         self.label = label
-        self.calls: list[UUID] = []
+        self.calls: list[tuple[UUID, UUID]] = []
 
-    def capture(self, system_id: UUID) -> CaptureOutput:
-        self.calls.append(system_id)
-        artifact = StoredArtifact(
-            f"{self.label}/{system_id}", "etag", Sensitivity.SENSITIVE, "vmcore"
-        )
+    def capture(self, system_id: UUID, run_id: UUID) -> CaptureOutput:
+        self.calls.append((system_id, run_id))
+        artifact = StoredArtifact(f"{self.label}/{run_id}", "etag", Sensitivity.SENSITIVE, "vmcore")
         return CaptureOutput(
             raw=artifact, redacted=artifact, vmcore_build_id=self.label, raw_size_bytes=0
         )
@@ -44,10 +42,11 @@ def test_facade_dispatches_supported_capture_methods() -> None:
         host_dump_capturer=cast(HostDumpCapturer, host_dump),
     )
 
-    assert retrieve.capture(system_id, CaptureMethod.KDUMP).vmcore_build_id == "kdump"
-    assert retrieve.capture(system_id, CaptureMethod.HOST_DUMP).vmcore_build_id == "host"
-    assert kdump.calls == [system_id]
-    assert host_dump.calls == [system_id]
+    run_id = UUID("00000000-0000-0000-0000-00000000facd")
+    assert retrieve.capture(system_id, run_id, CaptureMethod.KDUMP).vmcore_build_id == "kdump"
+    assert retrieve.capture(system_id, run_id, CaptureMethod.HOST_DUMP).vmcore_build_id == "host"
+    assert kdump.calls == [(system_id, run_id)]
+    assert host_dump.calls == [(system_id, run_id)]
 
 
 def test_facade_rejects_unsupported_capture_method() -> None:
@@ -58,7 +57,11 @@ def test_facade_rejects_unsupported_capture_method() -> None:
     )
 
     with pytest.raises(CategorizedError) as exc:
-        retrieve.capture(UUID("00000000-0000-0000-0000-00000000facb"), CaptureMethod.CONSOLE)
+        retrieve.capture(
+            UUID("00000000-0000-0000-0000-00000000facb"),
+            UUID("00000000-0000-0000-0000-00000000face"),
+            CaptureMethod.CONSOLE,
+        )
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert str(exc.value) == "remote-libvirt capture supports only the kdump and host_dump methods"

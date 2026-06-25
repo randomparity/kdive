@@ -36,6 +36,7 @@ from tests.providers.remote_libvirt.conftest import RecordingBackend
 from tests.providers.remote_libvirt.fakes import FakeControlConn, FakeDomain
 
 _SID = UUID("00000000-0000-0000-0000-0000000000bb")
+_RID = UUID("00000000-0000-0000-0000-0000000000cc")
 _SHA = base64.b64encode(b"\x11" * 32).decode()
 
 
@@ -152,7 +153,7 @@ def _retrieve(
 def test_capture_two_phase_happy_path(tmp_path: Path) -> None:
     agent = FakeAgentExec(inspect=_inspect_json())
     store = FakeStore(head=HeadResult(size_bytes=4096, checksum_sha256=_SHA, etag="etag-raw"))
-    out = _retrieve(agent, store, tmp_path).capture(_SID, CaptureMethod.KDUMP)
+    out = _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
 
     assert out.vmcore_build_id == "deadbeef"
     assert out.raw.etag == "etag-raw"
@@ -177,7 +178,7 @@ def test_capture_loopback_endpoint_fails_before_touching_the_guest(
     agent = FakeAgentExec(inspect=_inspect_json())
     store = FakeStore(head=HeadResult(size_bytes=4096, checksum_sha256=_SHA, etag="etag-raw"))
     with pytest.raises(CategorizedError) as excinfo:
-        _retrieve(agent, store, tmp_path).capture(_SID, CaptureMethod.KDUMP)
+        _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert excinfo.value.details["env_var"] == "KDIVE_S3_ENDPOINT_URL"
     assert agent.argvs == []  # never reached the guest
@@ -187,7 +188,7 @@ def test_capture_loopback_endpoint_fails_before_touching_the_guest(
 def test_capture_waits_out_a_rebooting_agent(tmp_path: Path) -> None:
     agent = FakeAgentExec(inspect=_inspect_json(), unreachable_before=2)
     store = FakeStore(head=HeadResult(size_bytes=4096, checksum_sha256=_SHA, etag="etag-raw"))
-    out = _retrieve(agent, store, tmp_path).capture(_SID, CaptureMethod.KDUMP)
+    out = _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
     assert out.vmcore_build_id == "deadbeef"
 
 
@@ -196,7 +197,7 @@ def test_capture_readiness_window_exhausted_is_readiness_failure(tmp_path: Path)
     store = FakeStore(head=None)
     rt = _retrieve(agent, store, tmp_path, readiness_timeout_s=0.0)
     with pytest.raises(CategorizedError) as exc:
-        rt.capture(_SID, CaptureMethod.KDUMP)
+        rt.capture(_SID, _RID, CaptureMethod.KDUMP)
     assert exc.value.category is ErrorCategory.READINESS_FAILURE
 
 
@@ -204,7 +205,7 @@ def test_capture_no_core_present_is_readiness_failure(tmp_path: Path) -> None:
     agent = FakeAgentExec(inspect=_inspect_json(present=False))
     store = FakeStore(head=None)
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(agent, store, tmp_path).capture(_SID, CaptureMethod.KDUMP)
+        _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
     assert exc.value.category is ErrorCategory.READINESS_FAILURE
 
 
@@ -212,7 +213,7 @@ def test_capture_oversized_core_is_configuration_error(tmp_path: Path) -> None:
     agent = FakeAgentExec(inspect=_inspect_json(size=6 * 1024**3))
     store = FakeStore(head=None)
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(agent, store, tmp_path).capture(_SID, CaptureMethod.KDUMP)
+        _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
@@ -220,7 +221,7 @@ def test_capture_upload_failure_is_infrastructure_failure(tmp_path: Path) -> Non
     agent = FakeAgentExec(inspect=_inspect_json(), upload_exit=22)
     store = FakeStore(head=None)
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(agent, store, tmp_path).capture(_SID, CaptureMethod.KDUMP)
+        _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
@@ -228,7 +229,7 @@ def test_capture_missing_object_after_upload_is_infrastructure_failure(tmp_path:
     agent = FakeAgentExec(inspect=_inspect_json())
     store = FakeStore(head=None)  # head returns None despite an exit-0 upload
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(agent, store, tmp_path).capture(_SID, CaptureMethod.KDUMP)
+        _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
@@ -238,7 +239,7 @@ def test_capture_rejects_a_non_vmcore_method(tmp_path: Path) -> None:
     agent = FakeAgentExec(inspect=_inspect_json())
     store = FakeStore(head=None)
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(agent, store, tmp_path).capture(_SID, CaptureMethod.CONSOLE)
+        _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.CONSOLE)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
@@ -261,7 +262,7 @@ def test_capture_non_rebooting_inspect_error_propagates_immediately(tmp_path: Pa
     agent = _RaisingInspectAgent(ErrorCategory.INFRASTRUCTURE_FAILURE)
     store = FakeStore(head=None)
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(agent, store, tmp_path).capture(_SID, CaptureMethod.KDUMP)
+        _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert agent.calls == 1  # no readiness spin on a non-rebooting error
 
@@ -275,7 +276,7 @@ def test_capture_nonzero_inspect_exit_is_infrastructure_failure(tmp_path: Path) 
 
     store = FakeStore(head=None)
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(_NonZeroInspect(), store, tmp_path).capture(_SID, CaptureMethod.KDUMP)
+        _retrieve(_NonZeroInspect(), store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 

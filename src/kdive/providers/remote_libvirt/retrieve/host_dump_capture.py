@@ -103,8 +103,12 @@ class HostDumpCapturer:
         self._pki_base_dir = pki_base_dir
         self._options = options
 
-    def capture(self, system_id: UUID) -> CaptureOutput:
-        """Host-side core-dump -> storage-pool volume -> stream download -> upload."""
+    def capture(self, system_id: UUID, run_id: UUID) -> CaptureOutput:
+        """Host-side core-dump -> storage-pool volume -> stream download -> upload.
+
+        ``system_id`` locates the live domain/dump volume; ``run_id`` owns the stored core
+        (``owner_kind='runs'``, ADR-0244).
+        """
         config = self._config_factory()
         with connection(
             config, self._secret_backend_factory, self._open_connection, self._pki_base_dir
@@ -115,10 +119,10 @@ class HostDumpCapturer:
             vol_name = host_dump_volume_name(system_id)
             self._delete_stale_volume(pool, vol_name)
             self._core_dump(domain, str(pool_dir / vol_name), system_id)
-            return self._stream_and_store(conn, pool, vol_name, system_id)
+            return self._stream_and_store(conn, pool, vol_name, system_id, run_id)
 
     def _stream_and_store(
-        self, conn: Any, pool: Any, vol_name: str, system_id: UUID
+        self, conn: Any, pool: Any, vol_name: str, system_id: UUID, run_id: UUID
     ) -> CaptureOutput:
         pool.refresh(0)
         volume = self._resolve_volume(pool, vol_name, system_id)
@@ -126,7 +130,7 @@ class HostDumpCapturer:
         spool = Path(tempfile.mkdtemp(prefix="kdive-host-dump-")) / vol_name
         try:
             self._download_to_file(conn, volume, spool, system_id)
-            return self._store_core(system_id, spool)
+            return self._store_core(system_id, run_id, spool)
         finally:
             spool.unlink(missing_ok=True)
             with contextlib.suppress(Exception):
@@ -256,7 +260,7 @@ class HostDumpCapturer:
                 details={"system_id": str(system_id)},
             ) from exc
 
-    def _store_core(self, system_id: UUID, spool: Path) -> CaptureOutput:
+    def _store_core(self, system_id: UUID, run_id: UUID, spool: Path) -> CaptureOutput:
         try:
             build_id = self._options.core_build_id_from_file(spool)
         except CategorizedError:
@@ -284,12 +288,12 @@ class HostDumpCapturer:
                 },
             ) from exc
         raw_size_bytes = spool.stat().st_size
-        raw = self._stream_put(system_id, spool, sha256_b64)
+        raw = self._stream_put(run_id, spool, sha256_b64)
         self._verify_stored(raw.key, sha256_b64, system_id)
         redacted = persist_redacted(
             self._store_factory,
             self._secret_registry,
-            system_id,
+            run_id,
             CaptureMethod.HOST_DUMP,
             dmesg,
         )
@@ -319,12 +323,12 @@ class HostDumpCapturer:
             )
             return DMESG_UNAVAILABLE
 
-    def _stream_put(self, system_id: UUID, spool: Path, sha256_b64: str) -> StoredArtifact:
+    def _stream_put(self, run_id: UUID, spool: Path, sha256_b64: str) -> StoredArtifact:
         return self._store_factory().put_stream(
             ArtifactStreamRequest(
                 tenant=TENANT,
                 owner_kind=OWNER_KIND,
-                owner_id=str(system_id),
+                owner_id=str(run_id),
                 name=f"vmcore-{CaptureMethod.HOST_DUMP.value}",
                 path=spool,
                 sha256_b64=sha256_b64,

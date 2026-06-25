@@ -249,7 +249,8 @@ def test_live_vm_kdump_capture_arc_no_staging() -> None:  # pragma: no cover - l
     # Step 3: harvest the core via the real seam — libguestfs reads the overlay read-only,
     # streams the core to a worker spool dir, then uploads it to the object store.
     retriever = LocalLibvirtRetrieve.from_env(secret_registry=SecretRegistry())
-    out = retriever.capture(system_id, CaptureMethod.KDUMP)
+    run_id = UUID("44444444-4444-4444-4444-444444444444")
+    out = retriever.capture(system_id, run_id, CaptureMethod.KDUMP)
 
     # The core was real: non-empty build-id and positive byte count.
     assert out.vmcore_build_id, "vmcore_build_id is empty — core may be corrupt or wrong method"

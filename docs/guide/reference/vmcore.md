@@ -12,18 +12,18 @@ Capture and persist a vmcore.
 |---|---|---|---|
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `method` | `console`, `host_dump`, `gdbstub`, `kdump` (nullable) | no | Core-producing capture method (KDUMP/HOST_DUMP) the bound provider must advertise. Omit to resolve the System profile's method; a profile with no implicit core method requires an explicit one. |
-| `system_id` | string | yes | The crashed System whose vmcore to capture. |
+| `run_id` | string | yes | The crashed Run whose vmcore to capture. |
 
 ## `vmcore.list`
 
 `partial` · `read-only`
 
-**Maturity:** live_dependency — Lists a System's redacted vmcore artifacts; those rows only exist after a live capture path runs, exercised under the gated live markers.
+**Maturity:** live_dependency — Lists a Run's redacted vmcore artifacts; those rows only exist after a live capture path runs, exercised under the gated live markers.
 
 **Promotion:** A non-gated test or recorded live_stack run lists vmcore artifacts a real capture produced.
 
-List vmcore artifacts for one system.
+List vmcore artifacts for one run.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `system_id` | string | yes | The System whose redacted vmcore artifacts to list. |
+| `run_id` | string | yes | The Run whose redacted vmcore artifacts to list. |

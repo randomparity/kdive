@@ -78,23 +78,23 @@ class _RecordingBuilder:
 class _SecretBearingRetriever:
     """Returns a capture output whose redacted derivative is the response-eligible row (#3)."""
 
-    def __init__(self, system_id: str) -> None:
-        self._system_id = system_id
+    def __init__(self, run_id: str) -> None:
+        self._run_id = run_id
         self.calls = 0
 
-    def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
+    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
         from kdive.artifacts.storage import StoredArtifact
         from kdive.domain.catalog.artifacts import Sensitivity
 
         self.calls += 1
         raw = StoredArtifact(
-            f"local/systems/{self._system_id}/vmcore-host_dump",
+            f"local/runs/{self._run_id}/vmcore-host_dump",
             "e1",
             Sensitivity.SENSITIVE,
             "vmcore",
         )
         red = StoredArtifact(
-            f"local/systems/{self._system_id}/vmcore-host_dump-redacted",
+            f"local/runs/{self._run_id}/vmcore-host_dump-redacted",
             "e2",
             Sensitivity.REDACTED,
             "vmcore",
@@ -251,15 +251,15 @@ def test_completed_step_replay_does_not_re_execute(
 
 
 async def _enqueue_capture(
-    pool: AsyncConnectionPool, system_id: str, method: str = "host_dump"
+    pool: AsyncConnectionPool, run_id: str, method: str = "host_dump"
 ) -> Job:
     async with pool.connection() as conn:
         return await queue.enqueue(
             conn,
             JobKind.CAPTURE_VMCORE,
-            CaptureVmcorePayload(system_id=system_id, method=CaptureMethod(method)),
+            CaptureVmcorePayload(run_id=run_id, method=CaptureMethod(method)),
             _AUTH,
-            f"{system_id}:capture_vmcore:{method}",
+            f"{run_id}:capture_vmcore:{method}",
         )
 
 
@@ -269,10 +269,10 @@ def test_planted_secret_is_redacted(migrated_url: str) -> None:
     async def _run() -> None:
         async with open_pool(migrated_url) as pool:
             sys_id, run_id = await seed_crashed_system_with_run(pool)
-            job = await _enqueue_capture(pool, sys_id)
+            job = await _enqueue_capture(pool, run_id)
             async with pool.connection() as conn:
                 await vmcore_plane.capture_handler(
-                    conn, job, resolver=provider_resolver(retriever=_SecretBearingRetriever(sys_id))
+                    conn, job, resolver=provider_resolver(retriever=_SecretBearingRetriever(run_id))
                 )
             secret_registry = SecretRegistry()
             secret_registry.register(_SecretBearingCrash.PLANTED_SECRET, scope="test")
@@ -302,15 +302,15 @@ def test_raw_vmcore_is_sensitive_and_unreachable(migrated_url: str) -> None:
 
     async def _run() -> None:
         async with open_pool(migrated_url) as pool:
-            sys_id, _ = await seed_crashed_system_with_run(pool)
-            job = await _enqueue_capture(pool, sys_id)
+            sys_id, run_id = await seed_crashed_system_with_run(pool)
+            job = await _enqueue_capture(pool, run_id)
             async with pool.connection() as conn:
                 await vmcore_plane.capture_handler(
-                    conn, job, resolver=provider_resolver(retriever=_SecretBearingRetriever(sys_id))
+                    conn, job, resolver=provider_resolver(retriever=_SecretBearingRetriever(run_id))
                 )
             ctx = request_context()
             refs: list[str] = []
-            vmcores = await vmcore_tools.list_vmcores(pool, ctx, system_id=sys_id)
+            vmcores = await vmcore_tools.list_vmcores(pool, ctx, run_id=run_id)
             for r in vmcores.items:
                 refs.extend(r.refs.values())
             listed = await artifacts_list(pool, ctx, system_id=sys_id)
@@ -323,7 +323,7 @@ def test_raw_vmcore_is_sensitive_and_unreachable(migrated_url: str) -> None:
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
                     "SELECT id FROM artifacts WHERE owner_id = %s AND sensitivity = 'sensitive'",
-                    (sys_id,),
+                    (run_id,),
                 )
                 raw_row = await cur.fetchone()
             assert raw_row is not None

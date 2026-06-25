@@ -25,9 +25,9 @@ class FaultInjectRetrieve:
 
     _SYNTHETIC_DATA = b"fault-inject-vmcore"
 
-    def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
-        raw = self._put(system_id, f"vmcore-{method.value}", Sensitivity.SENSITIVE)
-        redacted = self._put(system_id, f"vmcore-{method.value}-redacted", Sensitivity.REDACTED)
+    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
+        raw = self._put(run_id, f"vmcore-{method.value}", Sensitivity.SENSITIVE)
+        redacted = self._put(run_id, f"vmcore-{method.value}-redacted", Sensitivity.REDACTED)
         return CaptureOutput(
             raw=raw,
             redacted=redacted,
@@ -53,14 +53,14 @@ class FaultInjectRetrieve:
         results: dict[str, object] = {command: "synthetic" for command in commands}
         return CrashOutput(results=results, transcript="fault-inject postmortem", truncated=False)
 
-    def _put(self, system_id: UUID, name: str, sens: Sensitivity) -> StoredArtifact:
+    def _put(self, run_id: UUID, name: str, sens: Sensitivity) -> StoredArtifact:
         if self._store is None:
             self._store = self._store_factory()
         return self._store.put_artifact(
             ArtifactWriteRequest(
                 tenant=TENANT,
-                owner_kind="systems",
-                owner_id=str(system_id),
+                owner_kind="runs",
+                owner_id=str(run_id),
                 name=name,
                 data=b"fault-inject-vmcore",
                 sensitivity=sens,

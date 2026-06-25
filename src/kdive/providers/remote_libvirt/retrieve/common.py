@@ -31,7 +31,9 @@ from kdive.security.secrets.secrets import SecretBackend
 HELPER = "/usr/local/sbin/kdive-capture-vmcore"
 TENANT = "remote-libvirt"
 RETENTION = "vmcore"
-OWNER_KIND = "systems"
+# Cores are owned by the crashing Run, not the System (ADR-0244): the raw + redacted objects
+# live under `runs/{run_id}/`.
+OWNER_KIND = "runs"
 
 
 class CoreInfo(NamedTuple):
@@ -114,7 +116,7 @@ def readiness_failure(system_id: UUID, reason: str) -> CategorizedError:
 def persist_redacted(
     store_factory: Callable[[], StorePort],
     secret_registry: SecretRegistry,
-    system_id: UUID,
+    run_id: UUID,
     method: CaptureMethod,
     dmesg: bytes,
 ) -> StoredArtifact:
@@ -124,7 +126,7 @@ def persist_redacted(
         ArtifactWriteRequest(
             tenant=TENANT,
             owner_kind=OWNER_KIND,
-            owner_id=str(system_id),
+            owner_id=str(run_id),
             name=f"vmcore-{method.value}-redacted",
             data=redacted.encode("utf-8"),
             sensitivity=Sensitivity.REDACTED,

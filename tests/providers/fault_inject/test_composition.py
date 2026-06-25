@@ -327,7 +327,8 @@ def test_capture_writes_sensitive_and_redacted_vmcore_artifacts() -> None:
     retrieve = FaultInjectRetrieve(store_factory=lambda: store)
     system_id = uuid4()
 
-    output = retrieve.capture(system_id, CaptureMethod.HOST_DUMP)
+    run_id = uuid4()
+    output = retrieve.capture(system_id, run_id, CaptureMethod.HOST_DUMP)
 
     raw_req, redacted_req = store.requests
     assert raw_req.name == "vmcore-host_dump"
@@ -337,8 +338,8 @@ def test_capture_writes_sensitive_and_redacted_vmcore_artifacts() -> None:
 
     for req in store.requests:
         assert req.tenant == TENANT
-        assert req.owner_kind == "systems"
-        assert req.owner_id == str(system_id)
+        assert req.owner_kind == "runs"
+        assert req.owner_id == str(run_id)
         assert req.data == b"fault-inject-vmcore"
         assert req.retention_class == "vmcore"
 

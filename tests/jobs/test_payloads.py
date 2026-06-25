@@ -139,6 +139,13 @@ def test_run_id_from_payload_returns_uuid_for_run_jobs() -> None:
     )
     assert run_id_from_payload(JobKind.INSTALL, {"run_id": str(run_id)}) == run_id
     assert run_id_from_payload(JobKind.BOOT, {"run_id": str(run_id)}) == run_id
+    assert (
+        run_id_from_payload(
+            JobKind.CAPTURE_VMCORE,
+            {"run_id": str(run_id), "method": "kdump"},
+        )
+        == run_id
+    )
 
 
 def test_run_id_from_payload_returns_none_for_system_jobs() -> None:
@@ -164,12 +171,12 @@ def test_reprovision_payload_includes_profile_digest() -> None:
 
 
 def test_capture_payload_dumps_json_and_loads_enum() -> None:
-    system_id = uuid4()
+    run_id = uuid4()
     now = datetime.now(UTC)
 
     payload = dump_payload(
         JobKind.CAPTURE_VMCORE,
-        {"system_id": str(system_id), "method": "host_dump"},
+        {"run_id": str(run_id), "method": "host_dump"},
     )
     job = Job(
         id=uuid4(),
@@ -185,7 +192,8 @@ def test_capture_payload_dumps_json_and_loads_enum() -> None:
 
     decoded = load_payload(job, CaptureVmcorePayload)
 
-    assert payload == {"system_id": str(system_id), "method": "host_dump"}
+    assert payload == {"run_id": str(run_id), "method": "host_dump"}
+    assert decoded.run_id == str(run_id)
     assert decoded.method is CaptureMethod.HOST_DUMP
 
 
