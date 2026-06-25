@@ -123,6 +123,7 @@ def envelope_for_run(
     active_debug_session_ids: list[str] | None = None,
     step_progress: StepProgress | None = None,
     boot_readiness: BootAttempt | None = None,
+    build_provenance: dict[str, str] | None = None,
 ) -> ToolResponse:
     """Render a Run; `failed` becomes a failure envelope carrying its `failure_category`.
 
@@ -186,6 +187,11 @@ def envelope_for_run(
         data["available_capture"] = cast(JsonValue, step_progress.available_capture)
     if step_progress is not None and step_progress.inert_capture is not None:
         data["inert_capture"] = cast(JsonValue, step_progress.inert_capture)
+    if build_provenance is not None:
+        # The build-step provenance recorded at write time (Task 5, #778): remote, ref,
+        # resolved_commit, build_host. Passed through verbatim — userinfo-stripped at write time.
+        # Key is absent entirely when no provenance was recorded (not present-as-null).
+        data["build_provenance"] = cast(JsonValue, build_provenance)
     data.update(_run_recovery(run))
     console_ref = step_progress.console_evidence_artifact_id if step_progress is not None else None
     return ToolResponse.success(
