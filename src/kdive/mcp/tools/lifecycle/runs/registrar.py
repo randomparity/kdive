@@ -151,7 +151,11 @@ def _register_runs_create(
                 description=(
                     "Build profile for the Run's kernel. source='server' builds from a kernel "
                     "tree (kernel_source_ref required); source='external' ingests a prebuilt "
-                    "artifact. The optional 'config' is a catalog ComponentRef "
+                    "artifact. For a local build host a warm-tree kernel_source_ref is a "
+                    "provenance label only — it does not select the tree; the operator stages "
+                    "the actual source via KDIVE_KERNEL_SRC on the worker, and runs.get echoes "
+                    "the label and resolved commit in data.build_provenance. The optional "
+                    "'config' is a catalog ComponentRef "
                     "(e.g. {'kind':'catalog','provider':'system','name':'kdump'}); OMIT it to get "
                     "the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) "
                     "for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named "
