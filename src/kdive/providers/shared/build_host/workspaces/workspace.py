@@ -198,7 +198,8 @@ def clone_tree(
         raise CategorizedError(
             "local git builds are disabled: the operator has not set "
             "KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST "
-            "(see resource://kdive/docs/operating/build-source-staging.md)",
+            "(see resource://kdive/docs/operating/build-source-staging.md), "
+            "or select an isolated build environment from build_envs.list to clone any remote",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     if not remote_allowed(source.remote, allowlist):

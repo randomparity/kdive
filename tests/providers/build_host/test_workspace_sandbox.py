@@ -106,6 +106,23 @@ def test_clone_tree_owns_empty_dir_before_first_git(
     assert order[1] == "git:init sandbox=set"
 
 
+def test_clone_tree_empty_allowlist_message_names_self_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An empty allowlist (local git lane off, the common fresh-deploy state) points the developer
+    # at the self-service alternative, same as the not-allowlisted message (#778).
+    monkeypatch.setattr(ws, "validate_git_arg", lambda v, n: None)
+    with pytest.raises(Exception, match="build_envs.list") as exc:
+        ws.clone_tree(
+            GitSourceRef(remote="https://h/r", ref="main"),
+            tmp_path / "run",
+            [],
+            run_id=uuid.uuid4(),
+            secret_registry=SecretRegistry(),
+        )
+    assert "KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST" in str(exc.value)
+
+
 def test_clone_tree_fills_provenance_sink_userinfo_stripped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
