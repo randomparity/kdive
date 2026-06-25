@@ -134,8 +134,9 @@ use the lifecycle scripts under `scripts/live-stack/`. They self-elevate with `s
 root worker and libvirt, so run them via the `!` prefix in the agent or directly in a shell:
 
 - `up.sh` — full bring-up in order: backends → host migrations → libvirt → host processes →
-  status. `--skip-obs` omits prometheus/grafana; `--reset-db` wipes the DB first (recovery from
-  migration drift — see below).
+  status. `--skip-obs` omits prometheus/grafana; `--reset-db` runs a full `down.sh --wipe` first
+  (drops the Postgres volume AND reaps all `kdive-*` libvirt domains/overlays — live VMs are
+  destroyed); recovery from migration drift — see below.
 - `down.sh` — stop host processes + compose backends, keeping state. `--wipe` is a full reset:
   drops the Postgres volume and reaps `kdive-*` libvirt domains + their `/var/lib/kdive/rootfs`
   overlays.
