@@ -121,7 +121,7 @@ class ServerBuildProfile(_BuildProfileBase):
     def _reject_uri_bare_source(
         cls, value: NonEmptyStr | GitKernelSource
     ) -> NonEmptyStr | GitKernelSource:
-        """Reject a bare-string ref that looks like a git clone URL (ADR-0241).
+        """Reject a bare-string ref that looks like a git clone URL (ADR-0242).
 
         A bare string is warm-tree provenance metadata, never cloned; a developer who means
         to clone a URL must pass the structured ``{"git": {...}}`` form. Only the matched

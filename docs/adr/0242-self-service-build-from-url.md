@@ -1,4 +1,4 @@
-# ADR 0241 — Self-service kernel build from a developer-named git URL (#778)
+# ADR 0242 — Self-service kernel build from a developer-named git URL (#778)
 
 - **Status:** Accepted
 - **Date:** 2026-06-25

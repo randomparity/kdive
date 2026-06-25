@@ -1,4 +1,4 @@
-"""The build_envs.list discovery tool (ADR-0241): a contributor-readable projection of
+"""The build_envs.list discovery tool (ADR-0242): a contributor-readable projection of
 build hosts as selectable build environments, omitting infra/secret detail."""
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ async def list_build_envs(conn: AsyncConnection) -> ToolResponse:
     """Project registered build hosts into developer-facing build environments.
 
     Returns name, kind, the operator-asserted toolchain description, and enabled — never
-    address, credential reference, or base-image volume (ADR-0241 §1).
+    address, credential reference, or base-image volume (ADR-0242 §1).
     """
     hosts = await list_all_hosts(conn)
     envs: list[JsonValue] = [

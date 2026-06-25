@@ -1837,7 +1837,7 @@ def test_create_non_dict_build_profile_is_config_error(migrated_url: str) -> Non
 
 
 def test_create_bare_url_build_profile_does_not_leak_token(migrated_url: str) -> None:
-    # ADR-0241 / ADR-0029: a bare-URL kernel_source_ref that carries a credential must not
+    # ADR-0242 / ADR-0029: a bare-URL kernel_source_ref that carries a credential must not
     # appear anywhere in the response — neither in data, detail, nor as a literal "input" key.
     # The error propagates through BuildProfile.parse (include_input=False) → RunCreateError →
     # ToolResponse.failure_from_error; this test asserts the full pipeline is leak-free.

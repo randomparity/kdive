@@ -1,4 +1,4 @@
-"""``build_hosts.*`` and ``build_envs.*`` MCP tool registration (ADR-0099, ADR-0241).
+"""``build_hosts.*`` and ``build_envs.*`` MCP tool registration (ADR-0099, ADR-0242).
 
 Registers six tools on the FastMCP ``app``:
 
@@ -7,7 +7,7 @@ Registers six tools on the FastMCP ``app``:
 * ``build_hosts.list``    — enumerate all hosts (read-only).
 * ``build_hosts.disable`` — set enabled=false on a host (platform_admin, mutating).
 * ``build_hosts.remove``  — delete a host row (platform_admin, mutating).
-* ``build_envs.list``     — contributor-readable projection of build hosts (ADR-0241).
+* ``build_envs.list``     — contributor-readable projection of build hosts (ADR-0242).
 """
 
 from __future__ import annotations
@@ -127,7 +127,7 @@ def _register_build_envs_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def build_envs_list() -> ToolResponse:
-        """List build environments available for kernel builds (ADR-0241)."""
+        """List build environments available for kernel builds (ADR-0242)."""
         async with pool.connection() as conn:
             return await list_build_envs(conn)
 

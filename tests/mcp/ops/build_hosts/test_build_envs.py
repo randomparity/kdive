@@ -1,4 +1,4 @@
-"""``build_envs.list`` projection handler and exposure classification (#778, ADR-0241).
+"""``build_envs.list`` projection handler and exposure classification (#778, ADR-0242).
 
 Coverage:
 * Two seeded hosts (ssh with toolchain_desc, ephemeral_libvirt without) → the projection

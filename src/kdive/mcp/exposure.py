@@ -102,7 +102,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "artifacts.create_system_upload": _OPERATOR,
     # audit (dual: project admin or platform auditor)
     "audit.query": frozenset({ExposureScope.PROJECT_ADMIN, ExposureScope.PLATFORM_AUDITOR}),
-    # build envs (contributor-readable projection of build hosts, ADR-0241)
+    # build envs (contributor-readable projection of build hosts, ADR-0242)
     "build_envs.list": _CONTRIBUTOR,
     # build hosts
     "build_hosts.list": _PLAT_AUDITOR,

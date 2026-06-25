@@ -6,4 +6,4 @@
 
 `implemented` · `read-only`
 
-List build environments available for kernel builds (ADR-0241).
+List build environments available for kernel builds (ADR-0242).

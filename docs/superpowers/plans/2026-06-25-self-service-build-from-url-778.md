@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Spec: `docs/superpowers/specs/2026-06-25-self-service-build-from-url-778.md`. ADR: `docs/adr/0241-self-service-build-from-url.md`.
+- Spec: `docs/superpowers/specs/2026-06-25-self-service-build-from-url-778.md`. ADR: `docs/adr/0242-self-service-build-from-url.md`.
 - Guardrails before every commit: `just lint` (ruff check + format), `just type` (whole tree), and the focused tests for the task. Run `just ci` once before the first push.
 - Ruff line length 100; lint set `E,F,I,UP,B,SIM`. Google-style docstrings on public APIs. No relative imports.
 - Errors use `ToolResponse.failure` / `CategorizedError` with the most specific `ErrorCategory`; **never echo a submitted value** into an error (ADR-0123 redaction).
@@ -58,7 +58,7 @@
 
 - [ ] **Step 3: Write the migration.**
 ```sql
--- 0049_build_host_toolchain_desc.sql — operator-asserted build-env toolchain description (ADR-0241).
+-- 0049_build_host_toolchain_desc.sql — operator-asserted build-env toolchain description (ADR-0242).
 -- Additive, forward-only (ADR-0015). Nullable; existing rows read as NULL ("no description").
 ALTER TABLE build_hosts ADD COLUMN toolchain_desc text;
 ```
@@ -97,7 +97,7 @@ git commit -m "feat(build-hosts): add toolchain_desc column + registration field
 
 - [ ] **Step 3: Write the handler.**
 ```python
-"""The build_envs.list discovery tool (ADR-0241): a contributor-readable projection of
+"""The build_envs.list discovery tool (ADR-0242): a contributor-readable projection of
 build hosts as selectable build environments, omitting infra/secret detail."""
 from __future__ import annotations
 
@@ -113,7 +113,7 @@ async def list_build_envs(conn: AsyncConnection) -> ToolResponse:
     """Project registered build hosts into developer-facing build environments.
 
     Returns name, kind, the operator-asserted toolchain description, and enabled — never
-    address, credential reference, or base-image volume (ADR-0241 §1).
+    address, credential reference, or base-image volume (ADR-0242 §1).
     """
     hosts = await list_all_hosts(conn)
     envs = [
@@ -213,7 +213,7 @@ Inside `ServerBuildProfile`, add:
     def _reject_uri_bare_source(
         cls, value: NonEmptyStr | GitKernelSource
     ) -> NonEmptyStr | GitKernelSource:
-        """Reject a bare-string ref that looks like a git clone URL (ADR-0241).
+        """Reject a bare-string ref that looks like a git clone URL (ADR-0242).
 
         A bare string is warm-tree provenance metadata, never cloned; a developer who means
         to clone a URL must pass the structured ``{"git": {...}}`` form. Only the matched

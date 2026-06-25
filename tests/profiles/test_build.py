@@ -315,7 +315,7 @@ def test_existing_server_profile_without_build_host_back_compat() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 3: bare git-URL guard on kernel_source_ref (ADR-0241)
+# Task 3: bare git-URL guard on kernel_source_ref (ADR-0242)
 # ---------------------------------------------------------------------------
 
 

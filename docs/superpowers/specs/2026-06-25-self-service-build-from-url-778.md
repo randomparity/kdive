@@ -4,7 +4,7 @@
 - **Date:** 2026-06-25
 - **Issue:** [#778](https://github.com/randomparity/kdive/issues/778) (re-scoped from a doc-vs-behavior
   bug into the build-source redesign it exposed)
-- **ADR:** [ADR-0241](../../adr/0241-self-service-build-from-url.md)
+- **ADR:** [ADR-0242](../../adr/0242-self-service-build-from-url.md)
 - **Supersedes:** [ADR-0136](../../adr/0136-runs-build-reachability.md) (its decision to add *no*
   create-time URI guard and treat every URI-looking bare string as a warm-tree label).
 - **Builds on:** [ADR-0029](../../adr/0029-build-plane-local-make.md) (build profile + parse
