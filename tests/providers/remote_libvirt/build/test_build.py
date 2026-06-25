@@ -1297,7 +1297,7 @@ def test_real_checkout_git_lane_clones_with_run_id_and_registry(
     monkeypatch.setattr(
         build_host_workspace,
         "clone_tree",
-        lambda src, ws, allow, *, run_id, secret_registry: calls.update(
+        lambda src, ws, allow, *, run_id, secret_registry, sandbox=None: calls.update(
             clone=(ws, run_id, secret_registry)
         ),
     )
@@ -1305,12 +1305,12 @@ def test_real_checkout_git_lane_clones_with_run_id_and_registry(
     monkeypatch.setattr(
         build_host_workspace,
         "merge_config",
-        lambda frag, ws, run_id: calls.update(merge=(ws, run_id)),
+        lambda frag, ws, run_id, sandbox=None: calls.update(merge=(ws, run_id)),
     )
     monkeypatch.setattr(
         build_host_workspace,
         "apply_patch",
-        lambda ref, ws, reg: calls.update(patch=(ref, ws, reg)),
+        lambda ref, ws, reg, sandbox=None: calls.update(patch=(ref, ws, reg)),
     )
     registry = SecretRegistry()
     workspace = tmp_path / "ws"
@@ -1342,7 +1342,7 @@ def test_real_checkout_warm_lane_syncs_and_skips_patch_when_absent(
     monkeypatch.setattr(
         build_host_workspace,
         "sync_tree",
-        lambda src, ws, reg: calls.update(sync=(src, ws, reg)),
+        lambda src, ws, reg, sandbox=None: calls.update(sync=(src, ws, reg)),
     )
     monkeypatch.setattr(
         build_host_workspace, "merge_config", lambda *a, **k: calls.update(merge=True)
