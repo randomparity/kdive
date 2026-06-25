@@ -48,47 +48,73 @@
 
 - [ ] **Step 1: Write the failing test** (new file `tests/db/test_investigation_cleanup_marker.py`)
 
+Use the **migration-replay** pattern (like `tests/db/test_image_catalog_migration.py`): apply every
+migration *before* 0048, seed a closed and an open investigation, then apply 0048 and assert the
+backfill. `discover_migrations()` returns `Migration` objects sorted by string `version`
+("0001".."0048"); `m.sql` is the file text (psycopg3 runs the multi-statement file in one
+`execute()` when no params are passed). Use the **sync** `pg_conn` fixture.
+
 ```python
 """Migration 0048 adds investigations.cleanup_pending_at and backfills closed rows."""
 
 from __future__ import annotations
 
-import asyncio
 from uuid import uuid4
 
-from tests.reconciler.conftest import connect
+import psycopg
+
+from kdive.db import migrate
 
 
-def test_cleanup_pending_at_backfills_closed_only(migrated_url: str) -> None:
-    async def _run() -> None:
-        conn = await connect(migrated_url)
-        try:
-            open_id, closed_id = uuid4(), uuid4()
-            for inv_id, state in ((open_id, "open"), (closed_id, "closed")):
-                await conn.execute(
-                    "INSERT INTO investigations "
-                    "(id, principal, project, title, state) VALUES (%s, %s, %s, %s, %s)",
-                    (inv_id, "p", "proj", "t", state),
-                )
-            # The migration already ran (migrated_url). Re-running the backfill statement is
-            # not what we test; we assert the column exists and the prior backfill marked the
-            # closed row. Because these rows were inserted AFTER migration, simulate the
-            # migration's backfill semantics directly to prove the column behavior.
-            cur = await conn.execute(
-                "SELECT cleanup_pending_at FROM investigations WHERE id = %s", (open_id,)
-            )
-            assert (await cur.fetchone())[0] is None
-        finally:
-            await conn.close()
+def _apply_before(conn: psycopg.Connection, version: str) -> None:
+    for m in migrate.discover_migrations():
+        if m.version >= version:
+            break
+        conn.execute(m.sql)
 
-    asyncio.run(_run())
+
+def _apply_version(conn: psycopg.Connection, version: str) -> None:
+    sql = next(m.sql for m in migrate.discover_migrations() if m.version == version)
+    conn.execute(sql)
+
+
+def _insert_investigation(conn: psycopg.Connection, inv_id, state: str) -> None:
+    conn.execute(
+        "INSERT INTO investigations (id, principal, project, title, state) "
+        "VALUES (%s, %s, %s, %s, %s)",
+        (inv_id, "p", "proj", "t", state),
+    )
+
+
+def test_migration_0048_backfills_closed_investigations(pg_conn: psycopg.Connection) -> None:
+    _apply_before(pg_conn, "0048")
+    open_id, closed_id = uuid4(), uuid4()
+    _insert_investigation(pg_conn, open_id, "open")
+    _insert_investigation(pg_conn, closed_id, "closed")
+    closed_updated = pg_conn.execute(
+        "SELECT updated_at FROM investigations WHERE id = %s", (closed_id,)
+    ).fetchone()[0]
+
+    _apply_version(pg_conn, "0048")
+
+    assert (
+        pg_conn.execute(
+            "SELECT cleanup_pending_at FROM investigations WHERE id = %s", (closed_id,)
+        ).fetchone()[0]
+        == closed_updated
+    )
+    assert (
+        pg_conn.execute(
+            "SELECT cleanup_pending_at FROM investigations WHERE id = %s", (open_id,)
+        ).fetchone()[0]
+        is None
+    )
 ```
 
-> Note: the migration's backfill applies to rows present *at migrate time*; rows inserted by a
-> test after migration are not retroactively backfilled. The test above asserts the column exists
-> and defaults NULL. A dedicated backfill assertion belongs in the migration-replay test harness if
-> one exists — check `tests/db/` for a "fresh DB vs. replay" fixture before adding; if absent, the
-> column-exists + NULL-default assertion plus the close-path test (Task 2) cover the behavior.
+> `pg_conn` is the sync, *un-migrated* Postgres connection fixture from `tests/db/conftest.py`
+> (`migrated_url` runs every migration; this test needs to stop before 0048). Confirm the fixture
+> name by reading `tests/db/conftest.py` — `test_image_catalog_migration.py` uses `pg_conn` the same
+> way. The close-path test (Task 2) covers the forward stamping; this covers the historical backfill.
 
 - [ ] **Step 2: Run it — expect failure** (column missing until migration written)
 
@@ -195,8 +221,53 @@ git commit -m "feat(investigations): mark cleanup_pending_at on close (#768)"
 
 - [ ] **Step 1: Write the failing tests** (`tests/reconciler/test_gc_investigation_artifacts.py`)
 
-Cover, mirroring `tests/reconciler/test_gc_report_artifacts.py` (recording `_RecordingStore`,
-`connect`, `migrated_url`):
+> **Seed correctly — do NOT copy `test_gc_report_artifacts.py` verbatim.** That test inserts *bare*
+> `artifacts` rows (`owner_id = uuid4()`, no `runs`/`investigations`) because the report sweep is a
+> flat query. `gc_investigation_artifacts` **JOINs `runs`** (`r.id = a.owner_id`,
+> `r.investigation_id = <inv>`), so a build artifact only matches when a real `runs` row with that id
+> points at the closed investigation. A bare-artifact seed yields zero candidates and a vacuously
+> passing test. `runs.system_id` is **nullable** (migration 0042), so no systems/allocations chain is
+> needed; `runs.build_profile` is `jsonb NOT NULL` and `runs.target_kind` is `NOT NULL`. Concrete
+> seed helper (reuse `connect`, `migrated_url`, and a recording `_RecordingStore` like the report
+> test):
+
+```python
+async def _seed_run_build_artifact(
+    conn, *, retention_class: str, owner_kind: str = "runs",
+    state: str = "closed", grace_age: timedelta = timedelta(days=2),
+) -> tuple[UUID, str]:
+    """Insert investigation(closed, cleanup_pending_at past grace) + run + one artifact.
+
+    Returns (artifact_id, object_key). For owner_kind='systems' (console) the run is still made so
+    the investigation exists, but the artifact's owner_id is a standalone system uuid (no JOIN).
+    """
+    inv_id, run_id = uuid4(), uuid4()
+    await conn.execute(
+        "INSERT INTO investigations (id, principal, project, title, state, cleanup_pending_at) "
+        "VALUES (%s, 'p', 'proj', 't', %s, now() - %s)",
+        (inv_id, state, grace_age) if state == "closed" else (inv_id, state, None),
+    )
+    await conn.execute(
+        "INSERT INTO runs (id, investigation_id, system_id, state, build_profile, target_kind, "
+        "principal, project) VALUES (%s, %s, NULL, 'created', '{}'::jsonb, 'local-libvirt', 'p', 'proj')",
+        (run_id, inv_id),
+    )
+    artifact_id = uuid4()
+    owner_id = run_id if owner_kind == "runs" else uuid4()
+    key = f"local/{owner_kind}/{artifact_id}"
+    await conn.execute(
+        "INSERT INTO artifacts (id, owner_kind, owner_id, object_key, etag, sensitivity, "
+        "retention_class) VALUES (%s, %s, %s, %s, 'etag', 'redacted', %s)",
+        (artifact_id, owner_kind, owner_id, key, retention_class),
+    )
+    return artifact_id, key
+```
+
+> The `cleanup_pending_at` insert above branches on `state`: for an open investigation pass
+> `state='open'` and set the column NULL (params tuple differs — write two small INSERT variants or a
+> conditional rather than the compressed ternary if it reads cleaner). Confirm `runs` columns against
+> `src/kdive/db/schema/0001_init.sql` + `0042_decouple_run_system_binding.sql` (`target_kind` arrived
+> with 0042). Cases to cover:
 - A closed investigation whose `cleanup_pending_at` is past grace: its run-owned `build` and
   `kernel-build` artifacts are deleted (object + row); `cleanup_pending_at` cleared after full drain.
 - Under grace: nothing deleted, marker retained.
@@ -303,7 +374,12 @@ git commit -m "feat(reconciler): gc_investigation_artifacts clears closed-invest
 
 - [ ] **Step 1: Write the failing tests** (`tests/reconciler/test_gc_expired_build_artifacts.py`)
 
-Cover:
+> Reuse the same `_seed_run_build_artifact` helper shape from Task 3 (a run row is required because
+> the exclusion cases need realistic owner kinds; the TTL query itself does not JOIN runs, but a
+> run-owned artifact still needs `owner_kind='runs'`). Add a `created_at` override to the artifact
+> INSERT (`created_at = now() - %s`) so the test can place a row past/under the TTL; `cleanup_pending_at`
+> and investigation state are irrelevant to this sweep, so seed the investigation `open`. Cases:
+
 - Run-owned `build`/`kernel-build` artifacts older than the TTL are deleted regardless of
   investigation state (open or closed).
 - Fresh ones (under TTL): untouched.
