@@ -8,12 +8,15 @@ from kdive.artifacts.storage import HeadResult
 
 
 class BuildOutput(NamedTuple):
-    """Stored kernel build artifacts and the produced kernel build id."""
+    """Stored kernel build artifacts and the produced kernel build id.
+
+    ``kernel_ref`` is the combined kernel+modules tar (``boot/vmlinuz`` + ``lib/modules/<ver>/``),
+    the one artifact shape both providers produce and consume (ADR-0234 §2).
+    """
 
     kernel_ref: str
     debuginfo_ref: str
     build_id: str
-    modules_ref: str | None = None
 
 
 class ValidatedUpload(NamedTuple):

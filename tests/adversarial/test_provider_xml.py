@@ -14,6 +14,8 @@ The install-plane entity-expansion test guards the provider boundary against XXE
 
 from __future__ import annotations
 
+import io
+import tarfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from uuid import UUID
@@ -36,6 +38,20 @@ _RUN = UUID("22222222-2222-2222-2222-222222222222")
 
 def _request(*, cmdline: str) -> InstallRequest:
     return InstallRequest(system_id=_SYS, run_id=_RUN, kernel_ref="kref", cmdline=cmdline)
+
+
+def _combined_kernel_tar() -> bytes:
+    """The unified `kernel` artifact: a gzip tar of boot/vmlinuz + lib/modules/<ver>/."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, data in (
+            ("boot/vmlinuz", b"\x00" * 0x202 + b"HdrS" + b"\x00" * 16),
+            ("lib/modules/6.9.0/modules.dep", b""),
+        ):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
 
 
 # A DOCTYPE + nested-entity document: the seed of a billion-laughs expansion. stdlib
@@ -120,7 +136,7 @@ def test_console_log_element_does_not_enable_append() -> None:
 def _installer(conn: FakeLibvirtConn, staging_root: Path) -> LocalLibvirtInstall:
     return LocalLibvirtInstall(
         connect=lambda: conn,
-        fetch_kernel=lambda ref, dest: dest.write_bytes(b"k"),
+        fetch_kernel=lambda ref, dest: dest.write_bytes(_combined_kernel_tar()),
         fetch_initrd=lambda ref, dest: dest.write_bytes(b"i"),
         readiness=lambda system_id: ReadinessResult(answered=True, ok=True),
         staging_root=staging_root,

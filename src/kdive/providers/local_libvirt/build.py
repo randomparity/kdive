@@ -1,19 +1,21 @@
-"""Local-libvirt Build plane: make a kernel and store artifacts (ADR-0029/0101).
+"""Local-libvirt Build plane: make a kernel and store artifacts (ADR-0029/0101/0234).
 
 `LocalLibvirtBuild` checks out a kernel source tree (warm tree + the profile's optional patch,
 or — over a transport — a git clone), preflights the resolved ``.config`` for the
-kdump/debuginfo prerequisites, runs ``make``, extracts the produced ``vmlinux``'s GNU build-id,
-and stores up to three ``sensitive`` artifacts under deterministic Run-keyed object keys — the
-bootable kernel image (`kernel`, the raw ``bzImage``), the ``vmlinux``/debuginfo (`vmlinux`), and
-when the resolved ``.config`` is crash-dump-capable, a ``/lib/modules`` tarball (`modules`). It
-returns all keys plus the build-id (:class:`BuildOutput`). A local System direct-kernel-boots,
-so the modules bundle is only produced when kdump is enabled (unlike remote-libvirt which always
-needs modules for in-guest install).
+kdump/debuginfo prerequisites, runs ``make`` then ``make modules_install``, extracts the produced
+``vmlinux``'s GNU build-id, and stores two ``sensitive`` artifacts under deterministic Run-keyed
+object keys — the **combined kernel+modules bundle** (`kernel`, a gzip tar of ``boot/vmlinuz`` +
+``lib/modules/<ver>/``) and the ``vmlinux``/debuginfo (`vmlinux`). It returns both keys plus the
+build-id (:class:`BuildOutput`). This is the same single artifact shape remote-libvirt produces;
+both providers consume one format and there is no provider-specific carve-out (ADR-0234 §2, #766).
+The install plane extracts ``boot/vmlinuz`` from the bundle host-side for the direct-kernel
+``<kernel>`` element and feeds ``lib/modules/`` to its libguestfs injector.
 
-Each artifact is produced as an :class:`ArtifactSource`: the worker-local default reads the file
-into memory (:class:`ArtifactBytes`, PUT directly), while :meth:`LocalLibvirtBuild.over_transport`
-leaves it on the build host (:class:`ArtifactRemoteFile`, published via a presigned PUT whose
-checksum is computed host-side, so the worker never reads the bytes — ADR-0101).
+Each artifact is produced as an :class:`ArtifactSource`: the worker-local default packages the
+bundle in memory (:class:`ArtifactBytes`, PUT directly), while
+:meth:`LocalLibvirtBuild.over_transport` leaves it on the build host (:class:`ArtifactRemoteFile`,
+published via a presigned PUT whose checksum is computed host-side, so the worker never reads the
+bytes — ADR-0101). The combined-bundle packaging is the shared :mod:`kernel_bundle` seam.
 
 The slow, environment-bound operations are **injected seams** that default to the real
 implementations, so unit tests cover the orchestration/error contract without a toolchain; the
@@ -23,9 +25,7 @@ build handler offloads the whole call via ``asyncio.to_thread``.
 
 from __future__ import annotations
 
-import io
 import shutil
-import tarfile
 from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID
@@ -43,7 +43,6 @@ from kdive.components.references import (
 from kdive.config.core_settings import BUILD_WORKSPACE, KERNEL_SRC
 from kdive.domain.build_phase import BuildPhase
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.ports.build_transport import BuildTransport
@@ -61,6 +60,11 @@ from kdive.providers.shared.build_host.publishing.artifact_publish import (
     publish_artifact_source,
 )
 from kdive.providers.shared.build_host.publishing.build_log import build_workspace_capturing_log
+from kdive.providers.shared.build_host.publishing.kernel_bundle import (
+    MakeKernelBundle,
+    local_kernel_bundle,
+    transport_kernel_bundle,
+)
 from kdive.providers.shared.build_host.sandbox import (
     SandboxProvider,
     resolve_build_sandbox_provider,
@@ -78,26 +82,18 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import object_store_from_env
 
 _RETENTION_CLASS = "build"
-_MODULE_BACKREF_LINKS = frozenset({"build", "source"})
-_MODULES_BUNDLE_NAME = "kdive-modules.tar.gz"
 
 
 type _Checkout = Callable[[UUID, ServerBuildProfile, Path, bytes], None]
 type _RunOlddefconfig = _build_exec.RunStep
 type _RunMake = _build_exec.RunStep
 type _ReadArtifactSource = Callable[[Path], ArtifactSource]
-type _MakeModulesBundle = Callable[[Path, Path], ArtifactSource]
 type _StagingFactory = Callable[[], Path]
 type _StagingCleanup = Callable[[Path], None]
 
 
-def _config_is_kdump_capable(config_text: str) -> bool:
-    """True when the resolved ``.config`` enables crash-dump (a kdump modules artifact applies)."""
-    return "CONFIG_CRASH_DUMP=y" in config_text
-
-
 class LocalLibvirtBuild:
-    """The realized Build port: ``make`` + two-artifact store (ADR-0029/0101 §5)."""
+    """The realized Build port: ``make`` + a combined kernel+modules bundle (ADR-0234 §2)."""
 
     def __init__(
         self,
@@ -109,11 +105,10 @@ class LocalLibvirtBuild:
         run_olddefconfig: _RunOlddefconfig,
         read_config: _build_exec.ReadConfig,
         run_make: _RunMake,
-        read_kernel_source: _ReadArtifactSource,
+        make_bundle: MakeKernelBundle,
         read_vmlinux_source: _ReadArtifactSource,
         read_build_id: _build_exec.ReadBuildId,
         run_modules_install: _build_exec.RunModulesInstall,
-        make_modules_bundle: _MakeModulesBundle,
         staging_factory: _StagingFactory,
         staging_cleanup: _StagingCleanup,
         secret_registry: SecretRegistry,
@@ -140,11 +135,10 @@ class LocalLibvirtBuild:
         )
         self._store_factory = store_factory
         self._store: StorePort | None = None
-        self._read_kernel_source = read_kernel_source
+        self._make_bundle = make_bundle
         self._read_vmlinux_source = read_vmlinux_source
         self._read_build_id = read_build_id
         self._run_modules_install = run_modules_install
-        self._make_modules_bundle = make_modules_bundle
         self._staging_factory = staging_factory
         self._staging_cleanup = staging_cleanup
         self._secret_registry = secret_registry
@@ -179,13 +173,12 @@ class LocalLibvirtBuild:
             ),
             read_config=_build_exec.real_read_config,
             run_make=lambda ws: _build_exec.real_run_make(ws, sandbox=sandbox_provider.get()),
-            read_kernel_source=_local_kernel_source,
+            make_bundle=local_kernel_bundle,
             read_vmlinux_source=_local_vmlinux_source,
             read_build_id=_build_exec.real_read_build_id,
             run_modules_install=lambda ws, mr: _build_exec.real_run_modules_install(
                 ws, mr, sandbox=sandbox_provider.get()
             ),
-            make_modules_bundle=_local_modules_bundle,
             staging_factory=_real_staging_factory,
             staging_cleanup=lambda p: shutil.rmtree(p, ignore_errors=True),
             catalog_fetch=build_config_fetch_from_env(),
@@ -233,13 +226,10 @@ class LocalLibvirtBuild:
             run_olddefconfig=transport_run_olddefconfig(transport),
             read_config=transport_read_config(transport),
             run_make=transport_run_make(transport),
-            read_kernel_source=lambda ws: ArtifactRemoteFile(
-                str(ws / "arch/x86/boot/bzImage"), transport
-            ),
+            make_bundle=transport_kernel_bundle(transport),
             read_vmlinux_source=lambda ws: ArtifactRemoteFile(str(ws / "vmlinux"), transport),
             read_build_id=transport_read_build_id(transport),
             run_modules_install=transport_run_modules_install(transport),
-            make_modules_bundle=transport_modules_bundle(transport),
             staging_factory=lambda: host_root / "modroot",
             staging_cleanup=lambda p: transport.cleanup(str(p)),
             secret_registry=secret_registry,
@@ -256,16 +246,17 @@ class LocalLibvirtBuild:
         recorder: BuildPhaseRecorder = DISABLED_RECORDER,
         provider: str = "",
     ) -> BuildOutput:
-        """Build a kernel and store up to three artifacts; return their refs and the build-id.
+        """Build a kernel and store the combined ``kernel`` bundle + ``vmlinux``; return refs + id.
 
-        When the resolved ``.config`` contains ``CONFIG_CRASH_DUMP=y``, also runs
-        ``make modules_install`` and publishes a ``modules`` tarball artifact.
+        Always runs ``make modules_install`` and packages ``boot/vmlinuz`` + ``lib/modules/<ver>/``
+        into one ``kernel`` bundle (the unified artifact shape, ADR-0234 §2). The demoted
+        ``modules_install`` writes into a build-user-owned staging dir under the sandbox (ADR-0214).
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` if the resolved ``.config`` omits a
                 kdump/debuginfo prerequisite (checked before ``make``); ``BUILD_FAILURE``
-                on a non-zero ``make``/``modules_install`` exit or a missing build-id;
-                ``INFRASTRUCTURE_FAILURE`` propagated from a failed artifact store.
+                on a non-zero ``make``/``modules_install`` exit, a missing bzImage, or a missing
+                build-id; ``INFRASTRUCTURE_FAILURE`` propagated from a failed artifact store.
         """
         workspace = self._orchestrator.workspace_path(run_id)
         try:
@@ -277,38 +268,29 @@ class LocalLibvirtBuild:
                 run_id,
                 tenant=self._tenant,
             )
-            with recorder.phase(BuildPhase.ARTIFACT, provider):
-                build_id = self._read_build_id(workspace)
-                kernel = self.publish(run_id, "kernel", self._read_kernel_source(workspace))
-                vmlinux = self.publish(run_id, "vmlinux", self._read_vmlinux_source(workspace))
-            modules_ref = self._maybe_publish_modules(run_id, workspace, recorder, provider)
+            mod_root = self._staging_factory()
+            sandbox = self._sandbox_provider.get() if self._sandbox_provider is not None else None
+            if sandbox is not None:
+                sandbox.own(mod_root)  # demoted modules_install writes a build-user dir (ADR-0214)
+            try:
+                with recorder.phase(BuildPhase.MODULES, provider):
+                    if self._run_modules_install(workspace, mod_root) != 0:
+                        raise _build_exec.build_failure(
+                            "make modules_install exited non-zero", run_id
+                        )
+                with recorder.phase(BuildPhase.ARTIFACT, provider):
+                    build_id = self._read_build_id(workspace)
+                    kernel = self.publish(run_id, "kernel", self._make_bundle(workspace, mod_root))
+                    vmlinux = self.publish(run_id, "vmlinux", self._read_vmlinux_source(workspace))
+            finally:
+                self._staging_cleanup(mod_root)
             return BuildOutput(
                 kernel_ref=kernel.key,
                 debuginfo_ref=vmlinux.key,
                 build_id=build_id,
-                modules_ref=modules_ref,
             )
         finally:
             self._orchestrator.cleanup_workspace(workspace)
-
-    def _maybe_publish_modules(
-        self, run_id: UUID, workspace: Path, recorder: BuildPhaseRecorder, provider: str
-    ) -> str | None:
-        """Run modules_install + publish a modules tarball iff the kernel is crash-dump-capable."""
-        if not _config_is_kdump_capable(self._orchestrator.read_config(workspace)):
-            return None
-        mod_root = self._staging_factory()
-        sandbox = self._sandbox_provider.get() if self._sandbox_provider is not None else None
-        if sandbox is not None:
-            sandbox.own(mod_root)  # demoted modules_install writes into a build-user dir (ADR-0214)
-        try:
-            with recorder.phase(BuildPhase.MODULES, provider):
-                if self._run_modules_install(workspace, mod_root) != 0:
-                    raise _build_exec.build_failure("make modules_install exited non-zero", run_id)
-                source = self._make_modules_bundle(workspace, mod_root)
-                return self.publish(run_id, "modules", source).key
-        finally:
-            self._staging_cleanup(mod_root)
 
     def validate_config_ref(self, ref: ComponentRef) -> None:
         """Validate a build config ref's shape at run-creation (local path or catalog kind).
@@ -343,73 +325,9 @@ class LocalLibvirtBuild:
         )
 
 
-def _local_kernel_source(workspace: Path) -> ArtifactSource:  # pragma: no cover - live_vm
-    """Worker-local kernel seam: read the ``bzImage`` into memory as :class:`ArtifactBytes`."""
-    return ArtifactBytes(_build_exec.real_read_kernel_image(workspace))
-
-
 def _local_vmlinux_source(workspace: Path) -> ArtifactSource:  # pragma: no cover - live_vm
     """Worker-local vmlinux seam: read ``vmlinux`` into memory as :class:`ArtifactBytes`."""
     return ArtifactBytes(_build_exec.real_read_vmlinux(workspace))
-
-
-def _local_modules_bundle(workspace: Path, mod_root: Path) -> ArtifactSource:
-    """Worker-local modules seam: tar ``<mod_root>/lib/modules`` to gzip bytes.
-
-    Drops the absolute back-reference symlinks ``make modules_install`` plants (``build`` and
-    ``source``), which point at absolute paths in the worker's build tree and must not enter the
-    in-guest bundle.
-    """
-    modules_root = mod_root / "lib" / "modules"
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for path in sorted(modules_root.rglob("*")):
-            if path.is_symlink() and path.name in _MODULE_BACKREF_LINKS:
-                continue
-            tar.add(
-                path,
-                arcname="lib/modules/" + str(path.relative_to(modules_root)),
-                recursive=False,
-            )
-    return ArtifactBytes(buf.getvalue())
-
-
-def transport_modules_bundle(t: BuildTransport) -> _MakeModulesBundle:
-    """Return a seam that tars ``lib/modules`` ON the build host (ADR-0101).
-
-    The archive stays on the host; an :class:`ArtifactRemoteFile` referencing it is returned so
-    :meth:`LocalLibvirtBuild.publish` uploads it via a presigned PUT without the worker reading
-    its bytes.
-
-    Args:
-        t: The build transport to run ``tar`` through.
-
-    Returns:
-        A callable ``(workspace, mod_root) -> ArtifactRemoteFile`` matching ``_MakeModulesBundle``.
-    """
-
-    def _make(workspace: Path, mod_root: Path) -> ArtifactSource:
-        bundle_path = str(workspace / _MODULES_BUNDLE_NAME)
-        argv = [
-            "tar",
-            "-czf",
-            bundle_path,
-            "--exclude=*/build",
-            "--exclude=*/source",
-            "-C",
-            str(mod_root),
-            "lib/modules",
-        ]
-        result = t.run(argv, cwd=str(workspace), timeout_s=_build_exec.MAKE_TIMEOUT_S)
-        if result.returncode != 0:
-            raise CategorizedError(
-                "tar failed to package the kernel modules on the build host",
-                category=ErrorCategory.BUILD_FAILURE,
-                details={"output": "modules bundle", "stderr": result.stderr[-512:]},
-            )
-        return ArtifactRemoteFile(path=bundle_path, transport=t)
-
-    return _make
 
 
 def _real_staging_factory() -> Path:  # pragma: no cover - live_vm
@@ -420,5 +338,4 @@ def _real_staging_factory() -> Path:  # pragma: no cover - live_vm
 
 __all__ = [
     "LocalLibvirtBuild",
-    "transport_modules_bundle",
 ]

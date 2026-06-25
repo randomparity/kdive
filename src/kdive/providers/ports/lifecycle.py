@@ -76,7 +76,6 @@ class InstallRequest:
     cmdline: str
     method: CaptureMethod = CaptureMethod.HOST_DUMP
     initrd_ref: str | None = None
-    modules_ref: str | None = None
     debuginfo_ref: str | None = None
 
 

@@ -29,9 +29,7 @@ offloads the whole call via ``asyncio.to_thread``.
 
 from __future__ import annotations
 
-import io
 import shutil
-import tarfile
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -48,7 +46,6 @@ from kdive.components.references import ComponentRef
 from kdive.config.core_settings import BUILD_WORKSPACE, KERNEL_SRC
 from kdive.domain.build_phase import BuildPhase
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.ports.build_transport import BuildTransport
@@ -63,6 +60,11 @@ from kdive.providers.shared.build_host.publishing.artifact_publish import (
     publish_artifact_source,
 )
 from kdive.providers.shared.build_host.publishing.build_log import build_workspace_capturing_log
+from kdive.providers.shared.build_host.publishing.kernel_bundle import (
+    MakeKernelBundle,
+    local_kernel_bundle,
+    transport_kernel_bundle,
+)
 from kdive.providers.shared.build_host.transports.transport_seams import (
     transport_git_checkout,
     transport_read_build_id,
@@ -72,19 +74,14 @@ from kdive.providers.shared.build_host.transports.transport_seams import (
     transport_run_olddefconfig,
 )
 from kdive.providers.shared.build_host.workspaces import workspace as _build_workspace
-from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import object_store_from_env
 
 _TENANT = "remote-libvirt"
 _RETENTION_CLASS = "build"
 _SENSITIVITY = Sensitivity.SENSITIVE
-# The back-reference symlinks make modules_install plants in /lib/modules/<ver>/; they point
-# at absolute paths in the worker's build tree and must not enter the in-guest bundle.
-_MODULE_BACKREF_LINKS = frozenset({"build", "source"})
 
 
-type _MakeBundle = Callable[[Path, Path], ArtifactSource]
 type _ReadVmlinuxSource = Callable[[Path], ArtifactSource]
 type _StagingFactory = Callable[[], Path]
 type _StagingCleanup = Callable[[Path], None]
@@ -108,7 +105,7 @@ class RemoteLibvirtBuild:
         read_config: _build_exec.ReadConfig,
         run_make: _build_exec.RunStep,
         run_modules_install: _build_exec.RunModulesInstall,
-        make_bundle: _MakeBundle,
+        make_bundle: MakeKernelBundle,
         read_vmlinux_source: _ReadVmlinuxSource,
         read_build_id: _build_exec.ReadBuildId,
         staging_factory: _StagingFactory,
@@ -163,7 +160,7 @@ class RemoteLibvirtBuild:
             read_config=_build_exec.real_read_config,
             run_make=_build_exec.real_run_make,
             run_modules_install=_build_exec.real_run_modules_install,
-            make_bundle=_local_make_bundle,
+            make_bundle=local_kernel_bundle,
             read_vmlinux_source=_local_vmlinux_source,
             read_build_id=_build_exec.real_read_build_id,
             staging_factory=_real_staging_factory,
@@ -211,7 +208,7 @@ class RemoteLibvirtBuild:
             read_config=transport_read_config(transport),
             run_make=transport_run_make(transport),
             run_modules_install=transport_run_modules_install(transport),
-            make_bundle=transport_make_bundle(transport),
+            make_bundle=transport_kernel_bundle(transport),
             read_vmlinux_source=transport_vmlinux_source(transport),
             read_build_id=transport_read_build_id(transport),
             staging_factory=lambda: mod_root,
@@ -302,63 +299,9 @@ class RemoteLibvirtBuild:
         return self._store
 
 
-def _local_make_bundle(workspace: Path, mod_root: Path) -> ArtifactSource:
-    """Worker-local bundle seam: package the bundle in memory as :class:`ArtifactBytes`."""
-    return ArtifactBytes(_real_build_bundle(workspace, mod_root))
-
-
 def _local_vmlinux_source(workspace: Path) -> ArtifactSource:  # pragma: no cover - live_vm
     """Worker-local vmlinux seam: read ``vmlinux`` into memory as :class:`ArtifactBytes`."""
     return ArtifactBytes(_build_exec.real_read_vmlinux(workspace))
-
-
-_REMOTE_BUNDLE_NAME = "kdive-bundle.tar.gz"
-_BUNDLE_TAR_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
-
-
-def transport_make_bundle(t: BuildTransport) -> _MakeBundle:
-    """Return a ``_MakeBundle`` that tars the install bundle ON the build host (ADR-0099).
-
-    The returned seam runs one ``tar`` over the transport that renames ``arch/x86/boot/bzImage``
-    to ``boot/vmlinuz`` and stores the staged ``lib/modules`` tree, excluding the ``build`` and
-    ``source`` back-reference symlinks (the same exclusion :func:`_real_build_bundle` applies
-    in memory). The archive stays on the host; an :class:`ArtifactRemoteFile` referencing it is
-    returned so :meth:`RemoteLibvirtBuild.publish` uploads it via a presigned PUT without the
-    worker reading its bytes.
-
-    Args:
-        t: The build transport to run ``tar`` through.
-
-    Returns:
-        A callable ``(workspace, mod_root) -> ArtifactRemoteFile`` matching ``_MakeBundle``.
-    """
-
-    def _make(workspace: Path, mod_root: Path) -> ArtifactSource:
-        bundle_path = str(workspace / _REMOTE_BUNDLE_NAME)
-        argv = [
-            "tar",
-            "-czf",
-            bundle_path,
-            "--exclude=*/build",
-            "--exclude=*/source",
-            "--transform=s|^arch/x86/boot/bzImage$|boot/vmlinuz|",
-            "-C",
-            str(workspace),
-            "arch/x86/boot/bzImage",
-            "-C",
-            str(mod_root),
-            "lib/modules",
-        ]
-        result = t.run(argv, cwd=str(workspace), timeout_s=_BUNDLE_TAR_TIMEOUT_S)
-        if result.returncode != 0:
-            raise CategorizedError(
-                "tar failed to package the kernel bundle on the build host",
-                category=ErrorCategory.BUILD_FAILURE,
-                details={"output": "module bundle", "stderr": result.stderr[-512:]},
-            )
-        return ArtifactRemoteFile(path=bundle_path, transport=t)
-
-    return _make
 
 
 def transport_vmlinux_source(t: BuildTransport) -> _ReadVmlinuxSource:
@@ -381,52 +324,6 @@ def transport_vmlinux_source(t: BuildTransport) -> _ReadVmlinuxSource:
     return _source
 
 
-def _build_bundle_member_dirs(modules_root: Path) -> list[Path]:
-    """Sorted paths under ``modules_root``, dropping the absolute back-reference symlinks."""
-    members: list[Path] = []
-    for path in sorted(modules_root.rglob("*")):
-        if path.is_symlink() and path.name in _MODULE_BACKREF_LINKS:
-            continue
-        members.append(path)
-    return members
-
-
-def _real_build_bundle(workspace: Path, mod_root: Path) -> bytes:
-    """Package ``boot/vmlinuz`` + ``lib/modules/<ver>/…`` into one gzip-compressed tar (bytes).
-
-    The bzImage is renamed to ``boot/vmlinuz`` and every real file under the staging tree's
-    ``lib/modules`` is added under a ``lib/modules/…`` arcname; the ``build``/``source``
-    back-reference symlinks ``make modules_install`` plants (absolute worker paths) are
-    excluded so the in-guest extract carries no dangling links. The whole object is held in
-    memory for the single PUT — the same whole-object model local already uses, kept small by
-    gzip (ADR-0081).
-    """
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        # A zero-exit make can still leave no bzImage, and a module file can vanish mid-pack;
-        # both must surface as a typed BUILD_FAILURE, not a bare OSError that escapes the
-        # provider error contract (the local-libvirt parity guard).
-        _add_bundle_member(tar, workspace / "arch/x86/boot/bzImage", "boot/vmlinuz", "bzImage")
-        modules_root = mod_root / "lib" / "modules"
-        for path in _build_bundle_member_dirs(modules_root):
-            arcname = "lib/modules/" + str(path.relative_to(modules_root))
-            _add_bundle_member(tar, path, arcname, "module bundle", recursive=False)
-    return buf.getvalue()
-
-
-def _add_bundle_member(
-    tar: tarfile.TarFile, path: Path, arcname: str, output: str, *, recursive: bool = True
-) -> None:
-    try:
-        tar.add(path, arcname=arcname, recursive=recursive)
-    except OSError as exc:
-        raise CategorizedError(
-            "kernel bundle could not be packaged",
-            category=ErrorCategory.BUILD_FAILURE,
-            details={"output": output},
-        ) from exc
-
-
 def _real_staging_factory() -> Path:  # pragma: no cover - live_vm
     return Path(tempfile.mkdtemp(prefix="kdive-mod-"))
 
@@ -436,6 +333,5 @@ __all__ = [
     "ArtifactRemoteFile",
     "ArtifactSource",
     "RemoteLibvirtBuild",
-    "transport_make_bundle",
     "transport_vmlinux_source",
 ]

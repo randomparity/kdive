@@ -17,23 +17,18 @@ def test_optional_str_list_rejects_non_string_member() -> None:
     assert _optional_str_list(["console", 3]) is None
 
 
-def test_modules_ref_round_trips_through_dump_and_load() -> None:
+def test_initrd_ref_round_trips_through_dump_and_load() -> None:
     result = BuildStepResult(
-        kernel_ref="k", debuginfo_ref="d", build_id="b", modules_ref="runs/r/modules"
+        kernel_ref="k", debuginfo_ref="d", build_id="b", initrd_ref="runs/r/initrd"
     )
     dumped = result.dump()
-    assert dumped["modules_ref"] == "runs/r/modules"
+    assert dumped["initrd_ref"] == "runs/r/initrd"
     assert BuildStepResult.load(dumped) == result
 
 
-def test_modules_ref_absent_is_omitted_and_loads_none() -> None:
-    result = BuildStepResult(kernel_ref="k", debuginfo_ref="d", build_id="b")
-    assert "modules_ref" not in result.dump()
-    loaded = BuildStepResult.load(result.dump())
-    assert loaded is not None
-    assert loaded.modules_ref is None
-
-
-def test_refs_exposes_modules_under_modules_key() -> None:
-    result = BuildStepResult(kernel_ref="k", debuginfo_ref="d", build_id="b", modules_ref="m")
-    assert result.refs()["modules"] == "m"
+def test_refs_carry_no_modules_key_under_the_unified_format() -> None:
+    # The combined `kernel` tar carries modules inside it; there is no separate modules ref to
+    # expose (ADR-0234 §2). refs() advertises only kernel, vmlinux, and (when set) initrd.
+    result = BuildStepResult(kernel_ref="k", debuginfo_ref="d", build_id="b", initrd_ref="i")
+    assert result.refs() == {"kernel": "k", "vmlinux": "d", "initrd": "i"}
+    assert "modules" not in result.refs()

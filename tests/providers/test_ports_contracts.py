@@ -114,7 +114,6 @@ def test_build_output_and_validated_upload_are_stable_namedtuples() -> None:
         "kernel_ref": "kernel",
         "debuginfo_ref": "vmlinux",
         "build_id": "deadbeef",
-        "modules_ref": None,
     }
     assert validated.output is output
     assert validated.heads["kernel"].etag == "etag"
