@@ -859,3 +859,16 @@ git commit -m "docs(compose): document the local-stack lifecycle scripts + grafa
 - Invariant guard matches `compose … up` across intervening flags (regex), closing the `--profile obs up -d server` blind spot; logic validated (no false positives, both regression forms caught).
 - `up.sh` `sudo mkdir -p`s the rootfs + install-staging dirs before asserting; `provision_prereqs_ok` checks existence honestly (incl. `KDIVE_INSTALL_STAGING`) and no longer over-claims writability.
 - `down.sh --wipe` rejects non-tty stdin with a `--yes` hint instead of EOF-aborting under the `!` prefix.
+
+## Post-implementation amendment — Task 8 consolidation
+
+After Tasks 1-7 the user flagged overlap between the pre-existing `start.sh`/`stop.sh` (user
+worker, pid-file) and `restart-stack.sh` (root worker) and the new family. Resolution (Task 8,
+commits `e51ee8cf` + `bdcdf0e3`): `restart-stack.sh`'s logic moved into `lib.sh`
+(`restart_host_processes()`); `up.sh` calls it and gained `--skip-libvirt`; `start.sh`,
+`stop.sh`, and `restart-stack.sh` were deleted; `just stack-start*`/`stack-stop` recipes
+removed; the runbook, `examples/local-libvirt/env.sh`, and the generated config reference
+(`src/kdive/config/external_env.py` → `docs/guide/reference/config.md`) were rewired; and
+`scripts/live-stack/README.md` added the decision table. References in `restart-stack.sh`'s
+description (Task 1) and `up.sh`'s `"${here}/restart-stack.sh"` delegation (Task 5) are
+superseded by this amendment — the host-process logic now lives in `lib.sh`.

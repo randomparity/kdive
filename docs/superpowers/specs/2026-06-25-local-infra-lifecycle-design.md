@@ -216,3 +216,22 @@ testing has low value. Verification is:
   documented in `deploy/compose/README.md`.
 - Ensure the provisioned Prometheus datasource is `isDefault: true` so the dashboard's
   `${datasource}` template variable resolves without manual selection.
+
+## Post-implementation amendment — script consolidation
+
+During implementation the user flagged that `scripts/live-stack/` had **three** overlapping
+host-process families: `start.sh`/`stop.sh` (user-mode worker, pid-file, `just`-driven),
+`restart-stack.sh` (root worker, process-table), and the new `up.sh`/`down.sh`/`status.sh`.
+Per the "replace, don't deprecate" principle we consolidated to **one** family:
+
+- `restart-stack.sh`'s host-process logic moved into `lib.sh` as `restart_host_processes()`;
+  `up.sh` calls that instead of delegating to `restart-stack.sh`.
+- `start.sh`, `stop.sh`, and `restart-stack.sh` were **deleted**.
+- `up.sh` gained `--skip-libvirt` so the no-VM/no-sudo dev loop is
+  `KDIVE_WORKER_AS_ROOT=0 up.sh --skip-libvirt` (this replaces start.sh's user-mode role;
+  foreground mode is dropped — run `uv run python -m kdive server` directly if needed).
+- `just stack-start`/`stack-start-daemon`/`stack-stop` recipes removed; `just stack-up`
+  (backends-only, no sudo) stays as the complementary "backends for the test suite / compose
+  app tier" path.
+- New `scripts/live-stack/README.md` carries the decision table (full host = `up.sh`;
+  backends-only = `just stack-up`).
