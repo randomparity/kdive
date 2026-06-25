@@ -17,6 +17,11 @@ class BuildOutput(NamedTuple):
     kernel_ref: str
     debuginfo_ref: str
     build_id: str
+    build_provenance: dict[str, str] | None = None
+    """What was actually built: ``{remote, ref, resolved_commit, build_host}`` for a git source
+    (``remote`` userinfo-stripped), or best-effort ``{label, resolved_commit?}`` for a warm tree;
+    ``None`` when provenance capture was unavailable. Recorded via ``BuildStepResult`` and surfaced
+    on ``runs.get`` (#778). Defaulted so the three-positional construction sites stay valid."""
 
 
 class ValidatedUpload(NamedTuple):

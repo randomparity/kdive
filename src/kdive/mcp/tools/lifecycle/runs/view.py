@@ -16,6 +16,7 @@ from kdive.mcp.tools.lifecycle.runs.common import envelope_for_run
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.runs.steps import existing_build_result as _existing_build_result
 from kdive.services.runs.steps import failed_boot_attempt as _failed_boot_attempt
 from kdive.services.runs.steps import install_method_for as _install_method_for
 from kdive.services.runs.steps import step_progress as _step_progress
@@ -50,6 +51,11 @@ async def get_run(
             progress = (
                 await _step_progress(conn, run.id) if run.state is RunState.SUCCEEDED else None
             )
+            build_result = (
+                await _existing_build_result(conn, run.id)
+                if run.state is RunState.SUCCEEDED
+                else None
+            )
             boot_attempt = (
                 await _failed_boot_attempt(conn, run.id)
                 if progress is not None and progress.boot != "succeeded"
@@ -69,4 +75,5 @@ async def get_run(
             active_debug_session_ids=active_sessions,
             step_progress=progress,
             boot_readiness=boot_attempt,
+            build_provenance=build_result.build_provenance if build_result is not None else None,
         )

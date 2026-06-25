@@ -1,12 +1,13 @@
-"""``build_hosts.*`` MCP tool registration (ADR-0099, issue #342).
+"""``build_hosts.*`` and ``build_envs.*`` MCP tool registration (ADR-0099, ADR-0242).
 
-Registers five tools on the FastMCP ``app``:
+Registers six tools on the FastMCP ``app``:
 
 * ``build_hosts.register_ssh`` — add a new SSH build host (platform_admin, mutating).
 * ``build_hosts.register_ephemeral_libvirt`` — add a new ephemeral-libvirt build host.
 * ``build_hosts.list``    — enumerate all hosts (read-only).
 * ``build_hosts.disable`` — set enabled=false on a host (platform_admin, mutating).
 * ``build_hosts.remove``  — delete a host row (platform_admin, mutating).
+* ``build_envs.list``     — contributor-readable projection of build hosts (ADR-0242).
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from pydantic import Field
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools.ops.build_hosts.build_envs import list_build_envs
 from kdive.mcp.tools.ops.build_hosts.lifecycle import (
     DISABLE_TOOL,
     LIST_TOOL,
@@ -37,14 +39,17 @@ from kdive.mcp.tools.ops.build_hosts.register import (
     register_ssh_build_host,
 )
 
+BUILD_ENVS_LIST_TOOL = "build_envs.list"
+
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
-    """Register the ``build_hosts.*`` tools on ``app``, bound to ``pool``."""
+    """Register the ``build_hosts.*`` and ``build_envs.*`` tools on ``app``, bound to ``pool``."""
     _register_build_hosts_register_ssh(app, pool)
     _register_build_hosts_register_ephemeral_libvirt(app, pool)
     _register_build_hosts_list(app, pool)
     _register_build_hosts_disable(app, pool)
     _register_build_hosts_remove(app, pool)
+    _register_build_envs_list(app, pool)
 
 
 def _register_build_hosts_register_ssh(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -113,6 +118,18 @@ def _register_build_hosts_remove(app: FastMCP, pool: AsyncConnectionPool) -> Non
     ) -> ToolResponse:
         """Remove a registered build host."""
         return await remove_build_host(pool, current_context(), name=name, reason=reason)
+
+
+def _register_build_envs_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
+    @app.tool(
+        name=BUILD_ENVS_LIST_TOOL,
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def build_envs_list() -> ToolResponse:
+        """List build environments available for kernel builds (ADR-0242)."""
+        async with pool.connection() as conn:
+            return await list_build_envs(conn)
 
 
 __all__ = ["register"]

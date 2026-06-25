@@ -48,6 +48,7 @@ from kdive.mcp.tools.ops.build_hosts.register import (
     register_ephemeral_libvirt_build_host,
     register_ssh_build_host,
 )
+from kdive.mcp.tools.ops.build_hosts.registrar import BUILD_ENVS_LIST_TOOL
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 
@@ -257,9 +258,11 @@ def test_registrar_exposes_annotations_and_invokes_wrappers(
             LIST_TOOL,
             DISABLE_TOOL,
             REMOVE_TOOL,
+            BUILD_ENVS_LIST_TOOL,
         }
         assert _destructive_hint(tools[REGISTER_SSH_TOOL]) is False
         assert _read_only_hint(tools[LIST_TOOL]) is True
+        assert _read_only_hint(tools[BUILD_ENVS_LIST_TOOL]) is True
         assert _destructive_hint(tools[REMOVE_TOOL]) is False
 
         request = _ssh_request(
@@ -806,5 +809,58 @@ def test_remove_runtime_host_writes_no_ledger_entry(migrated_url: str) -> None:
         assert resp.status == "removed", resp.model_dump()
         assert await _host_exists(migrated_url, "rt-build") is False
         assert await _build_host_override(migrated_url, "rt-build") is None
+
+    asyncio.run(_run())
+
+
+# --- toolchain_desc round-trip (#778) ---
+
+
+async def _toolchain_desc(url: str, name: str) -> str | None:
+    conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
+    async with conn, conn.cursor() as cur:
+        await cur.execute("SELECT toolchain_desc FROM build_hosts WHERE name = %s", (name,))
+        row = await cur.fetchone()
+    assert row is not None
+    return row[0]  # type: ignore[return-value]
+
+
+def test_register_ssh_toolchain_desc_stored(migrated_url: str) -> None:
+    """register_ssh_build_host persists toolchain_desc when supplied."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await register_ssh_build_host(
+                pool,
+                _admin_ctx(),
+                SshBuildHostRegistration(
+                    name="bh-with-desc",
+                    address="10.0.0.5",
+                    ssh_credential_ref=_CRED_REF,
+                    workspace_root="/build",
+                    max_concurrent=1,
+                    toolchain_desc="gcc11, binutils2.40; suits rhel9/5.14",
+                ),
+            )
+        assert resp.status == "registered"
+        assert await _toolchain_desc(migrated_url, "bh-with-desc") == (
+            "gcc11, binutils2.40; suits rhel9/5.14"
+        )
+
+    asyncio.run(_run())
+
+
+def test_register_ssh_toolchain_desc_defaults_none(migrated_url: str) -> None:
+    """register_ssh_build_host stores NULL for toolchain_desc when omitted."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await register_ssh_build_host(
+                pool,
+                _admin_ctx(),
+                _ssh_request(name="bh-no-desc"),
+            )
+        assert resp.status == "registered"
+        assert await _toolchain_desc(migrated_url, "bh-no-desc") is None
 
     asyncio.run(_run())

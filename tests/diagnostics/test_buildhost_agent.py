@@ -41,6 +41,7 @@ def _host(*, name: str = "eph", base_image_volume: str | None = "base.qcow2") ->
         max_concurrent=1,
         enabled=True,
         state=BuildHostState.READY,
+        toolchain_desc=None,
     )
 
 

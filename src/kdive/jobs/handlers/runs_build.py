@@ -327,4 +327,5 @@ async def _build_and_record(
         debuginfo_ref=output.debuginfo_ref,
         build_id=output.build_id,
         cmdline=payload.cmdline,
+        build_provenance=output.build_provenance,
     )

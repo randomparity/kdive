@@ -621,6 +621,7 @@ def _ephemeral_host() -> BuildHost:
         max_concurrent=2,
         enabled=True,
         state=BuildHostState.READY,
+        toolchain_desc=None,
     )
 
 
@@ -671,6 +672,7 @@ def test_unsupported_build_host_kind_fails_before_ephemeral_session(
                 max_concurrent=1,
                 enabled=True,
                 state=BuildHostState.READY,
+                toolchain_desc=None,
             )
             async with pool.connection() as conn:
                 run = await RUNS.get(conn, UUID(run_id))

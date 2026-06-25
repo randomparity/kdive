@@ -349,6 +349,72 @@ def test_build_rejects_config_missing_prereq_before_make(tmp_path: Path, config_
     assert store.puts == []  # nothing stored on a config rejection
 
 
+# --- provenance sink reset across sequential builds (#778) ----------------------------
+
+
+def _builder_with_sink(
+    store: _FakeStore,
+    seams: _Seams,
+    tmp_path: Path,
+    sink: dict[str, str],
+    checkout: Any,
+) -> LocalLibvirtBuild:
+    """A real builder whose checkout closure shares ``sink`` with the instance (provider shape).
+
+    Mirrors ``from_env``: the same ``sink`` dict is both baked into the checkout closure (where
+    ``clone_tree`` would fill it) and stored on the instance for ``attach_clone_provenance`` to
+    read back. Reusing one such builder across two builds reproduces the worker's serial reuse.
+    """
+    return LocalLibvirtBuild(
+        tenant=_TENANT,
+        workspace_root=tmp_path,
+        store_factory=lambda: store,
+        checkout=checkout,
+        run_olddefconfig=seams.run_olddefconfig,
+        read_config=seams.read_config,
+        run_make=seams.run_make,
+        make_bundle=seams.make_bundle,
+        read_vmlinux_source=seams.read_vmlinux_source,
+        read_build_id=seams.read_build_id,
+        run_modules_install=seams.run_modules_install,
+        staging_factory=lambda: tmp_path / "modroot",
+        staging_cleanup=lambda _p: None,
+        secret_registry=SecretRegistry(),
+        catalog_fetch=lambda _name: _FRAGMENT_BYTES,
+        workspace_cleanup=seams.workspace_cleanups.append,
+        build_provenance_sink=sink,
+    )
+
+
+def test_build_does_not_inherit_prior_builds_provenance(tmp_path: Path) -> None:
+    # One builder instance (its provenance sink reused across builds, like the worker's process)
+    # runs two sequential builds: build 1's clone records git provenance, build 2's clone records
+    # nothing. Build 2 must NOT inherit build 1's {remote, ref, resolved_commit} (#778).
+    store, seams = _FakeStore(), _Seams()
+    sink: dict[str, str] = {}
+    resolved = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"  # pragma: allowlist secret
+
+    def _checkout(_run: UUID, _profile: ServerBuildProfile, _ws: Path, _fragment: bytes) -> None:
+        # clone_tree fills the sink only when this build's clone records something.
+        if _run == _RUN:
+            sink["remote"] = "https://git.example/linux.git"
+            sink["ref"] = "v6.9"
+            sink["resolved_commit"] = resolved
+
+    builder = _builder_with_sink(store, seams, tmp_path, sink, _checkout)
+
+    first = builder.build(_RUN, _profile())
+    assert first.build_provenance == {
+        "remote": "https://git.example/linux.git",
+        "ref": "v6.9",
+        "resolved_commit": resolved,
+    }
+
+    second_run = UUID("33333333-3333-3333-3333-333333333333")
+    second = builder.build(second_run, _profile())
+    assert second.build_provenance is None
+
+
 def test_build_rejects_config_missing_profile_requirements_before_store(tmp_path: Path) -> None:
     profile = BuildProfile.parse(
         {
@@ -570,8 +636,9 @@ class _RemoteTransport:
     def write_bytes(self, path: str, data: bytes) -> None:
         self.files[path] = data
 
-    def clone(self, remote: str, ref: str, dest: str) -> None:
+    def clone(self, remote: str, ref: str, dest: str) -> str:
         self.clones.append((remote, ref, dest))
+        return "deadbeef"
 
     def upload_file(self, path: str, presigned: Any) -> str:
         self.uploaded.append(path)
@@ -1743,8 +1810,9 @@ def test_from_env_threads_remote_allowlist(monkeypatch: pytest.MonkeyPatch) -> N
         *,
         allowlist: Sequence[str],
         sandbox_provider: object = None,
+        provenance_sink: object = None,
     ) -> object:
-        del kernel_src, secret_registry, sandbox_provider
+        del kernel_src, secret_registry, sandbox_provider, provenance_sink
         captured["allow"] = tuple(allowlist)
         return lambda *_a, **_k: None
 
@@ -1796,8 +1864,9 @@ def test_real_checkout_git_source_invokes_clone_tree(
         run_id: UUID,
         secret_registry: SecretRegistry,
         sandbox: object = None,
+        provenance_sink: object = None,
     ) -> None:
-        del ws, run_id, secret_registry, sandbox
+        del ws, run_id, secret_registry, sandbox, provenance_sink
         seen["remote"] = source.remote
         seen["allow"] = tuple(allow)
 
@@ -1836,6 +1905,9 @@ def test_clone_tree_rejects_disallowed_remote(tmp_path: Path) -> None:
     # No URL echo into either the message or the details (details may be None).
     assert "gitlab.com" not in str(exc.value)
     assert "gitlab.com" not in repr(exc.value.details)
+    # Must name the allowlist guidance AND the self-service alternative (#778).
+    assert "KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST" in str(exc.value)
+    assert "build_envs.list" in str(exc.value)
 
 
 def test_clone_tree_empty_allowlist_reports_lane_disabled(tmp_path: Path) -> None:

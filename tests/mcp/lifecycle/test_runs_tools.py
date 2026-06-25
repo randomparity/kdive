@@ -1836,6 +1836,37 @@ def test_create_non_dict_build_profile_is_config_error(migrated_url: str) -> Non
     asyncio.run(_run())
 
 
+def test_create_bare_url_build_profile_does_not_leak_token(migrated_url: str) -> None:
+    # ADR-0242 / ADR-0029: a bare-URL kernel_source_ref that carries a credential must not
+    # appear anywhere in the response — neither in data, detail, nor as a literal "input" key.
+    # The error propagates through BuildProfile.parse (include_input=False) → RunCreateError →
+    # ToolResponse.failure_from_error; this test asserts the full pipeline is leak-free.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool)
+            sys_id = await _seed_system(pool)
+            resp = await create_run(
+                pool,
+                _ctx(),
+                RunCreateRequest(
+                    investigation_id=inv_id,
+                    system_id=sys_id,
+                    build_profile={
+                        "schema_version": 1,
+                        "kernel_source_ref": "https://PLANTED-TOKEN@h/r",
+                    },
+                ),
+                resolver=provider_resolver(),
+            )
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        serialized = str(resp.model_dump(mode="json"))
+        assert "PLANTED-TOKEN" not in serialized
+        assert "h/r" not in serialized
+        assert '"input"' not in serialized
+
+    asyncio.run(_run())
+
+
 def test_create_without_operator_raises(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -5219,3 +5250,57 @@ def test_failed_run_envelope_keeps_investigation_and_artifacts() -> None:
     assert resp.status == "error"
     assert "investigation_id" in resp.data
     assert resp.refs == {"kernel": "s3://bucket/vmlinuz"}
+
+
+def test_get_succeeded_run_surfaces_build_provenance(migrated_url: str) -> None:
+    # A SUCCEEDED run whose build step recorded provenance → data["build_provenance"] present
+    # with all four fields verbatim, so an agent can trace exactly what was built (#778).
+    provenance = {
+        "remote": "https://github.com/torvalds/linux",
+        "ref": "v6.9",
+        "resolved_commit": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",  # pragma: allowlist secret
+        "build_host": "build-worker-1",
+    }
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(
+                pool,
+                run_id,
+                "build",
+                "succeeded",
+                {
+                    "kernel_ref": f"local/runs/{run_id}/kernel",
+                    "debuginfo_ref": f"local/runs/{run_id}/vmlinux",
+                    "build_id": "abc123",
+                    "build_provenance": provenance,
+                },
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["build_provenance"] == provenance
+
+    asyncio.run(_run())
+
+
+def test_get_succeeded_run_omits_build_provenance_key_when_absent(migrated_url: str) -> None:
+    # A SUCCEEDED run whose build step recorded no provenance → "build_provenance" key must be
+    # entirely absent from data (not present-as-null), so callers can key off its presence (#778).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(
+                pool,
+                run_id,
+                "build",
+                "succeeded",
+                {
+                    "kernel_ref": f"local/runs/{run_id}/kernel",
+                    "debuginfo_ref": f"local/runs/{run_id}/vmlinux",
+                    "build_id": "abc123",
+                },
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert "build_provenance" not in resp.data
+
+    asyncio.run(_run())

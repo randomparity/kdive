@@ -36,6 +36,7 @@ def _ssh_host(
         max_concurrent=2,
         state=BuildHostState.READY,
         enabled=True,
+        toolchain_desc=None,
     )
 
 

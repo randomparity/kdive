@@ -153,7 +153,8 @@ def test_read_bytes_malformed_base64_is_infrastructure_failure() -> None:
 
 
 def test_clone_issues_init_fetch_verify_checkout_in_order() -> None:
-    t = _RecordingTransport([_ok(), _ok(), _ok(stdout="deadbeef\n"), _ok()])
+    # init, fetch, verify, checkout, then the final rev-parse HEAD provenance read.
+    t = _RecordingTransport([_ok(), _ok(), _ok(stdout="deadbeef\n"), _ok(), _ok(stdout="c0ffee\n")])
     t.clone("https://git.example/linux.git", "v6.9", "/src")
     argvs = [c[0] for c in t.calls]
     assert argvs[0] == ["git", "init", "/src"]
@@ -169,9 +170,29 @@ def test_clone_issues_init_fetch_verify_checkout_in_order() -> None:
     ]
     assert argvs[2] == ["git", "-C", "/src", "rev-parse", "--verify", "--quiet", "FETCH_HEAD"]
     assert argvs[3] == ["git", "-C", "/src", "checkout", "FETCH_HEAD"]
+    assert argvs[4] == ["git", "-C", "/src", "rev-parse", "HEAD"]
     # Every clone step runs from / with the clone timeout budget.
     assert all(cwd == "/" for _, cwd, _ in t.calls)
     assert all(timeout_s == _CLONE_TIMEOUT_S for *_, timeout_s in t.calls)
+
+
+def test_clone_returns_the_resolved_head_commit() -> None:
+    # After checkout, clone resolves and returns `git rev-parse HEAD` (stripped) as the SHA.
+    sha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"  # pragma: allowlist secret
+    t = _RecordingTransport([_ok(), _ok(), _ok(stdout="deadbeef\n"), _ok(), _ok(stdout=sha + "\n")])
+    assert t.clone("https://git.example/linux.git", "v6.9", "/src") == sha
+
+
+def test_clone_rev_parse_head_failure_is_transport_failure() -> None:
+    # A failed final rev-parse HEAD surfaces as TRANSPORT_FAILURE with redacted stderr.
+    t = _RecordingTransport(
+        [_ok(), _ok(), _ok(stdout="deadbeef\n"), _ok(), _ok(returncode=1, stderr="HEAD boom")]
+    )
+    with pytest.raises(CategorizedError) as exc:
+        t.clone("https://git.example/linux.git", "v6.9", "/src")
+    assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert str(exc.value) == "git rev-parse HEAD failed on remote"
+    assert "HEAD boom" in str(exc.value.details["stderr"])
 
 
 def test_clone_init_non_zero_is_infrastructure_failure() -> None:

@@ -104,3 +104,64 @@ def test_clone_tree_owns_empty_dir_before_first_git(
     )
     assert order[0].startswith("own:")  # chown the empty dir BEFORE any git call
     assert order[1] == "git:init sandbox=set"
+
+
+def test_clone_tree_empty_allowlist_message_names_self_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An empty allowlist (local git lane off, the common fresh-deploy state) points the developer
+    # at the self-service alternative, same as the not-allowlisted message (#778).
+    monkeypatch.setattr(ws, "validate_git_arg", lambda v, n: None)
+    with pytest.raises(Exception, match="build_envs.list") as exc:
+        ws.clone_tree(
+            GitSourceRef(remote="https://h/r", ref="main"),
+            tmp_path / "run",
+            [],
+            run_id=uuid.uuid4(),
+            secret_registry=SecretRegistry(),
+        )
+    assert "KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST" in str(exc.value)
+
+
+def test_clone_tree_fills_provenance_sink_userinfo_stripped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The worker-local git lane records {remote, ref, resolved_commit} into a caller sink (#778):
+    # remote userinfo-stripped, resolved_commit from the FETCH_HEAD rev-parse (_R.stdout).
+    monkeypatch.setattr(ws, "_run_git", lambda *a, **k: _R())
+    monkeypatch.setattr(ws, "remote_allowed", lambda r, a: True)
+    monkeypatch.setattr(ws, "validate_git_arg", lambda v, n: None)
+    monkeypatch.setattr(ws.shutil, "which", lambda t: "/usr/bin/git")
+    sink: dict[str, str] = {}
+    ws.clone_tree(
+        GitSourceRef(remote="https://u:tok@h/r", ref="v6.9"),  # pragma: allowlist secret
+        tmp_path / "run",
+        ["h"],
+        run_id=uuid.uuid4(),
+        secret_registry=SecretRegistry(),
+        provenance_sink=sink,
+    )
+    assert sink == {"remote": "https://h/r", "ref": "v6.9", "resolved_commit": "FETCH_HEAD"}
+
+
+def test_clone_tree_provenance_fill_failure_does_not_abort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A sink that raises on assignment must never fail the clone (capture is best-effort).
+    monkeypatch.setattr(ws, "_run_git", lambda *a, **k: _R())
+    monkeypatch.setattr(ws, "remote_allowed", lambda r, a: True)
+    monkeypatch.setattr(ws, "validate_git_arg", lambda v, n: None)
+    monkeypatch.setattr(ws.shutil, "which", lambda t: "/usr/bin/git")
+
+    class _Hostile(dict):
+        def __setitem__(self, key: object, value: object) -> None:
+            raise RuntimeError("boom")
+
+    ws.clone_tree(
+        GitSourceRef(remote="https://h/r", ref="v6.9"),
+        tmp_path / "run",
+        ["h"],
+        run_id=uuid.uuid4(),
+        secret_registry=SecretRegistry(),
+        provenance_sink=_Hostile(),  # the clone completes despite the fill raising
+    )

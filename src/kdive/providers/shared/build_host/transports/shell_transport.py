@@ -165,8 +165,8 @@ class ShellBuildTransport:
                 details={"path": path},
             ) from exc
 
-    def clone(self, remote: str, ref: str, dest: str) -> None:
-        """Clone *remote* at *ref* into *dest* using a shallow fetch.
+    def clone(self, remote: str, ref: str, dest: str) -> str:
+        """Clone *remote* at *ref* into *dest* using a shallow fetch; return the resolved commit.
 
         Validates *remote* and *ref* for control characters and leading dashes before issuing
         any host command. Uses ``git init`` + ``git fetch --depth 1`` + ``git checkout
@@ -180,11 +180,16 @@ class ShellBuildTransport:
         ``pathspec 'FETCH_HEAD' did not match`` and the actionable network error in the fetch's
         own stderr is lost. The guard surfaces the fetch's stderr instead.
 
+        Returns:
+            The full 40-char commit SHA that ``ref`` resolved to (``git rev-parse HEAD`` after
+            the checkout), threaded into the build's provenance record.
+
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for an unsafe remote/ref, a failed
                 ``git fetch``, or a failed ``git checkout FETCH_HEAD``; ``TRANSPORT_FAILURE``
                 when the fetch reported success but produced no ``FETCH_HEAD`` (the fetch's own
-                stderr is surfaced, not masked behind a later FETCH_HEAD pathspec error);
+                stderr is surfaced, not masked behind a later FETCH_HEAD pathspec error), or
+                when the final ``git rev-parse HEAD`` fails;
                 ``MISSING_DEPENDENCY`` when ``git init`` is a ``git: not found``-class failure
                 (the base image lacks the build toolchain; ADR-0196), carrying a
                 ``details["diagnostic"]`` pointer to the build-host agent check;
@@ -242,6 +247,16 @@ class ShellBuildTransport:
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"stderr": redacted_tail(result.stderr, self._secret_registry)},
             )
+        head = self._run_remote(
+            ["git", "-C", dest, "rev-parse", "HEAD"], cwd="/", timeout_s=_CLONE_TIMEOUT_S
+        )
+        if head.returncode != 0:
+            raise CategorizedError(
+                "git rev-parse HEAD failed on remote",
+                category=ErrorCategory.TRANSPORT_FAILURE,
+                details={"stderr": redacted_tail(head.stderr, self._secret_registry)},
+            )
+        return head.stdout.strip()
 
     def upload_file(self, path: str, presigned: PresignedUpload) -> str:
         """Upload *path* from the host to *presigned* URL via ``curl``; return the ETag.

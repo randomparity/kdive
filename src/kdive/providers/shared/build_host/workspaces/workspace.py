@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from uuid import UUID
 
+from kdive.build_artifacts.results import BuildOutput
 from kdive.build_artifacts.validation import patch_target_paths, snapshot_file_bytes
 from kdive.db.build_host_policy import warm_tree_source_error
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -16,6 +17,7 @@ from kdive.profiles.build import GitSourceRef, ServerBuildProfile, git_source_of
 from kdive.providers.shared.build_host.configuration.config import resolve_local_ref
 from kdive.providers.shared.build_host.configuration.git_source import (
     remote_allowed,
+    strip_userinfo,
     validate_git_arg,
 )
 from kdive.providers.shared.build_host.execution import (
@@ -65,6 +67,7 @@ def make_checkout(
     *,
     allowlist: Sequence[str] = (),
     sandbox_provider: SandboxProvider | None = None,
+    provenance_sink: dict[str, str] | None = None,
 ) -> Checkout:
     """Create the default checkout seam (warm tree or, for a git source, an allowlisted clone).
 
@@ -74,6 +77,9 @@ def make_checkout(
         allowlist: Remotes the local git-clone lane may clone (ADR-0162); empty disables it.
         sandbox_provider: Resolves the build-user demotion lazily at checkout time (ADR-0214); a
             root worker with no ``KDIVE_BUILD_USER`` fails closed here, before any subprocess.
+        provenance_sink: When given, the worker-local git lane records the clone's
+            ``{remote, ref, resolved_commit}`` (remote userinfo-stripped) into it (#778); the
+            dispatch layer reads it back and adds ``build_host``. Best-effort: never fails a build.
     """
 
     def _checkout(
@@ -89,6 +95,7 @@ def make_checkout(
             secret_registry=secret_registry,
             allowlist=allowlist,
             sandbox=sandbox,
+            provenance_sink=provenance_sink,
         )
 
     return _checkout
@@ -104,12 +111,14 @@ def real_checkout(
     secret_registry: SecretRegistry,
     allowlist: Sequence[str] = (),
     sandbox: BuildSandbox | None = None,
+    provenance_sink: dict[str, str] | None = None,
 ) -> None:
     """Materialize a per-run workspace, merge config, and apply an optional patch.
 
     Dispatches on the profile's source provenance: a git ``kernel_source_ref`` clones the
     allowlisted remote (ADR-0162), a bare string mirrors the warm tree. When ``sandbox`` is set
     every build subprocess runs demoted and the workspace is handed to the build user (ADR-0214).
+    ``provenance_sink``, when given, receives the git lane's resolved-commit provenance (#778).
     """
     git_source = git_source_of(profile)
     if git_source is not None:
@@ -120,6 +129,7 @@ def real_checkout(
             run_id=run_id,
             secret_registry=secret_registry,
             sandbox=sandbox,
+            provenance_sink=provenance_sink,
         )
     else:
         sync_tree(kernel_src, workspace, secret_registry, sandbox=sandbox)
@@ -161,6 +171,7 @@ def clone_tree(
     run_id: UUID,
     secret_registry: SecretRegistry,
     sandbox: BuildSandbox | None = None,
+    provenance_sink: dict[str, str] | None = None,
 ) -> None:
     """Clone ``source.remote`` at ``source.ref`` into a clean ``workspace`` (ADR-0162).
 
@@ -168,6 +179,11 @@ def clone_tree(
     init+shallow-fetch+verify+checkout recipe as the remote transport (ADR-0154). ``ref`` must
     be a server-advertised tag or branch; a bare commit SHA is not guaranteed fetchable
     shallowly and surfaces as the ``git fetch`` failure below.
+
+    When ``provenance_sink`` is supplied, the clone's ``{remote, ref, resolved_commit}`` — remote
+    userinfo-stripped, ``resolved_commit`` from the ``FETCH_HEAD`` rev-parse — is recorded into it
+    (#778); the dispatch layer reads it back and adds ``build_host``. The fill is best-effort: a
+    failure to record provenance never aborts the clone.
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` for an unsafe/disallowed remote-ref (incl. an
@@ -182,13 +198,15 @@ def clone_tree(
         raise CategorizedError(
             "local git builds are disabled: the operator has not set "
             "KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST "
-            "(see resource://kdive/docs/operating/build-source-staging.md)",
+            "(see resource://kdive/docs/operating/build-source-staging.md), "
+            "or select an isolated build environment from build_envs.list to clone any remote",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     if not remote_allowed(source.remote, allowlist):
         raise CategorizedError(
             "the git remote is not on KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST "
-            "(see resource://kdive/docs/operating/build-source-staging.md)",
+            "(see resource://kdive/docs/operating/build-source-staging.md), "
+            "or select an isolated build environment from build_envs.list to clone any remote",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     if shutil.which("git") is None:
@@ -233,6 +251,7 @@ def clone_tree(
             category=ErrorCategory.TRANSPORT_FAILURE,
             details={"stderr": redacted_tail(fetch.stderr, secret_registry)},
         )
+    _fill_clone_provenance(provenance_sink, source, verify.stdout.strip())
     checkout = _run_git(
         ["-C", str(workspace), "checkout", "FETCH_HEAD"], cwd=None, run_id=run_id, sandbox=sandbox
     )
@@ -242,6 +261,37 @@ def clone_tree(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"stderr": redacted_tail(checkout.stderr, secret_registry)},
         )
+
+
+def _fill_clone_provenance(
+    sink: dict[str, str] | None, source: GitSourceRef, resolved_commit: str
+) -> None:
+    """Record ``{remote, ref, resolved_commit}`` into ``sink`` (remote userinfo-stripped) (#778).
+
+    Best-effort: a ``None`` sink is a no-op and any failure to record is swallowed so provenance
+    capture can never abort an otherwise-successful clone. A credentialed clone URL is
+    userinfo-stripped before it enters the sink, so it never reaches provenance, logs, or details.
+    """
+    if sink is None:
+        return
+    try:
+        sink["remote"] = strip_userinfo(source.remote)
+        sink["ref"] = source.ref
+        sink["resolved_commit"] = resolved_commit
+    except Exception:  # noqa: BLE001 - best-effort provenance must never fail the build (#778)
+        return
+
+
+def attach_clone_provenance(result: BuildOutput, sink: dict[str, str] | None) -> BuildOutput:
+    """Attach the worker-local git clone's provenance from ``sink`` onto ``result`` (#778).
+
+    A non-empty sink (the git lane recorded ``{remote, ref, resolved_commit}``) is snapshotted onto
+    ``build_provenance``; the dispatch layer adds ``build_host`` afterward. A ``None``/empty sink
+    (warm-tree build, or a clone that recorded nothing) leaves ``build_provenance`` untouched.
+    """
+    if not sink:
+        return result
+    return result._replace(build_provenance=dict(sink))
 
 
 def _write_fragment(fragment_bytes: bytes, workspace: Path, sandbox: BuildSandbox | None) -> None:

@@ -40,8 +40,8 @@ class BuildTransport(Protocol):
         """Write *data* to *path*, creating or overwriting the file."""
         ...
 
-    def clone(self, remote: str, ref: str, dest: str) -> None:
-        """Clone *remote* at *ref* into *dest*."""
+    def clone(self, remote: str, ref: str, dest: str) -> str:
+        """Clone *remote* at *ref* into *dest*; return the resolved commit SHA."""
         ...
 
     def upload_file(self, path: str, presigned: PresignedUpload) -> str:

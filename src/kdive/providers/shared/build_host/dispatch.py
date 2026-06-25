@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess  # noqa: S404 - fixed argv, no shell, best-effort provenance read
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from uuid import UUID
@@ -68,13 +69,17 @@ async def run_build_on_host(
     admission. ``kernel_src`` is ignored for non-``LOCAL`` (git/remote) hosts.
     """
     if host.kind is BuildHostKind.LOCAL:
-        if not is_git_source(parsed):
+        warm_tree = not is_git_source(parsed)
+        if warm_tree:
             await asyncio.to_thread(
                 check_warm_tree_source_admission, kernel_src, host_kind=host.kind
             )
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             lambda: builder.build(run_id, parsed, recorder=recorder, provider=provider)
         )
+        if warm_tree:
+            return _with_warm_tree_provenance(result, parsed, kernel_src)
+        return _with_local_git_build_host(result, host)
     capable = _require_transport_capable(builder, host, run_id)
     factories = _transport_factories(transport_factories)
     factory = factories.get(host.kind)
@@ -108,6 +113,59 @@ async def run_build_on_host(
     )
 
 
+def _with_local_git_build_host(result: BuildOutput, host: BuildHost) -> BuildOutput:
+    """Add ``build_host`` to the worker-local git lane's clone provenance (ADR-0162, #778).
+
+    The builder's checkout seam (``clone_tree``) already filled ``build_provenance`` with
+    ``{remote, ref, resolved_commit}`` (remote userinfo-stripped); the build host is known here, not
+    in the seam, so it is added last — symmetric to :func:`_with_git_provenance` on the transport
+    path. A ``None`` provenance (the clone recorded nothing) is left untouched.
+    """
+    if result.build_provenance is None:
+        return result
+    return result._replace(build_provenance={**result.build_provenance, "build_host": host.name})
+
+
+def _with_warm_tree_provenance(
+    result: BuildOutput, parsed: ServerBuildProfile, kernel_src: str
+) -> BuildOutput:
+    """Attach best-effort ``{label, resolved_commit?}`` warm-tree provenance to ``result`` (#778).
+
+    A warm-tree build rsyncs from ``$KDIVE_KERNEL_SRC`` and carries only a decorative label (the
+    bare ``kernel_source_ref``), not a remote. The label is always recorded; ``resolved_commit`` is
+    added only when ``git -C $KDIVE_KERNEL_SRC rev-parse HEAD`` succeeds against a staged git tree.
+    Capture is best-effort and never fails the build.
+    """
+    label = parsed.kernel_source_ref
+    if not isinstance(label, str):
+        return result
+    provenance: dict[str, str] = {"label": label}
+    commit = _rev_parse_head(kernel_src)
+    if commit is not None:
+        provenance["resolved_commit"] = commit
+    return result._replace(build_provenance=provenance)
+
+
+def _rev_parse_head(tree: str) -> str | None:
+    """Return ``git -C <tree> rev-parse HEAD`` output, or ``None`` on any failure (best-effort)."""
+    if not tree:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", tree, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except OSError, subprocess.SubprocessError:
+        return None
+    if proc.returncode != 0:
+        return None
+    commit = proc.stdout.strip()
+    return commit or None
+
+
 def _transport_factories(
     injected: BuildHostTransportFactories | None,
 ) -> dict[BuildHostKind, BuildHostTransportFactory]:
@@ -125,14 +183,20 @@ def bind_over_transport(
     git_remote: str,
     git_ref: str,
     secret_registry: SecretRegistry,
+    provenance_sink: dict[str, str] | None = None,
 ) -> Builder:
-    """Rebind ``builder`` onto ``transport`` with the host workspace and git coordinates."""
+    """Rebind ``builder`` onto ``transport`` with the host workspace and git coordinates.
+
+    ``provenance_sink``, when given, is forwarded to the builder's git-checkout seam, which fills
+    it with the clone's resolved-commit provenance (#778).
+    """
     return builder.over_transport(
         transport,
         host_workspace_root=host_workspace_root,
         git_remote=git_remote,
         git_ref=git_ref,
         secret_registry=secret_registry,
+        provenance_sink=provenance_sink,
     )
 
 
@@ -159,6 +223,7 @@ def _build_over_transport_session(
     transport_ctx = factory(host, secret_registry, run_id, source)
     with recorder.phase(BuildPhase.PROVISION, provider):
         transport = transport_ctx.__enter__()
+    provenance_sink: dict[str, str] = {}
     try:
         git_remote, git_ref = _git_coords(parsed, run_id)
         bound = bind_over_transport(
@@ -168,6 +233,7 @@ def _build_over_transport_session(
             git_remote=git_remote,
             git_ref=git_ref,
             secret_registry=secret_registry,
+            provenance_sink=provenance_sink,
         )
         result = bound.build(run_id, parsed, recorder=recorder, provider=provider)
     except BaseException as exc:
@@ -179,7 +245,21 @@ def _build_over_transport_session(
         raise
     else:
         transport_ctx.__exit__(None, None, None)
-    return result
+    return _with_git_provenance(result, provenance_sink, host)
+
+
+def _with_git_provenance(
+    result: BuildOutput, provenance_sink: dict[str, str], host: BuildHost
+) -> BuildOutput:
+    """Attach ``{**clone-provenance, build_host}`` to ``result`` when the clone recorded any.
+
+    The checkout seam fills ``provenance_sink`` with ``{remote, ref, resolved_commit}`` (remote
+    userinfo-stripped); the build host is known here, not in the seam, so it is added last. An
+    empty sink (the checkout recorded nothing) leaves ``build_provenance`` ``None`` (#778).
+    """
+    if not provenance_sink:
+        return result
+    return result._replace(build_provenance={**provenance_sink, "build_host": host.name})
 
 
 def _git_coords(parsed: ServerBuildProfile, run_id: UUID) -> tuple[str, str]:
