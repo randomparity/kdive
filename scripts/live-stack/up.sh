@@ -55,7 +55,9 @@ docker compose rm -sf migrate server worker reconciler >/dev/null 2>&1 || true
 banner "backends"
 docker compose up -d "${KDIVE_BACKEND_SERVICES[@]}"
 if [[ "$skip_obs" != "1" ]]; then
-  docker compose --profile obs up -d prometheus grafana
+  if ! docker compose --profile obs up -d prometheus grafana; then
+    echo "WARNING: observability tier (prometheus/grafana) failed to start; essential stack continues" >&2
+  fi
 fi
 echo "waiting for postgres to report healthy ..."
 for _ in {1..30}; do
