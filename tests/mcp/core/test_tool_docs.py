@@ -315,6 +315,20 @@ def test_run_lifecycle_tools_cross_reference_build_cmdline() -> None:
         assert "runs.build.cmdline" in (tools[tool_name].description or "")
 
 
+def test_runs_create_documents_warm_tree_is_provenance_only() -> None:
+    # D5 (#806): a warm-tree kernel_source_ref is a provenance label only — it does not
+    # select the tree; the operator stages the real source via KDIVE_KERNEL_SRC on the
+    # worker, and runs.get echoes the label and resolved commit in data.build_provenance.
+    # The build_profile schema text must state this inline so a cold agent need not open
+    # the build-source-staging resource to understand the field.
+    tools = {t.name: t for t in TOOLS}
+    description = tools["runs.create"].parameters["properties"]["build_profile"]["description"]
+    lowered = description.lower()
+    assert "provenance" in lowered
+    assert "KDIVE_KERNEL_SRC" in description
+    assert "build_provenance" in description
+
+
 def test_expected_boot_failure_documents_match_contract() -> None:
     # D7 (#763): the expected_boot_failure pattern is matched by
     # security.artifacts.artifact_search.search_text (a case-sensitive literal substring, applied

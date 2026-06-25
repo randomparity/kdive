@@ -137,6 +137,20 @@ def test_local_uses_string_remote_uses_git_object() -> None:
         assert set(ref["git"]) == {"remote", "ref"}
 
 
+def test_note_discloses_warm_tree_is_provenance_only() -> None:
+    # D5 (#806): the warm-tree string is a provenance label only — it does not select the
+    # tree. The note must say so inline, name KDIVE_KERNEL_SRC as where the operator stages
+    # the real source, and cross-reference the post-build data.build_provenance echo so a
+    # cold agent need not open the build-source-staging resource to understand the field.
+    resp = build_host_profile_examples(_ALL_KINDS, declared_instances=["eph-host"])
+    note = _items(resp)["worker-local"]["note"]
+    assert isinstance(note, str)
+    lowered = note.lower()
+    assert "provenance" in lowered
+    assert "KDIVE_KERNEL_SRC" in note
+    assert "build_provenance" in note
+
+
 def test_collection_chains_into_runs_create_and_build() -> None:
     resp = build_host_profile_examples(_ALL_KINDS, declared_instances=["eph-host"])
     assert resp.suggested_next_actions == ["runs.create", "runs.build"]

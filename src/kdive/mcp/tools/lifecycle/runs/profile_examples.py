@@ -44,7 +44,10 @@ _PLACEHOLDER_GIT_REF = "REPLACE_ME-git-ref"
 _NOTE = (
     "Example shape only; replace every REPLACE_ME placeholder in kernel_source_ref with a "
     "real value before building. A local build host takes a warm-tree string; an "
-    "ssh/ephemeral_libvirt host takes a git {remote, ref} object."
+    "ssh/ephemeral_libvirt host takes a git {remote, ref} object. The warm-tree string is a "
+    "provenance label only — it does not select the tree; the operator stages the actual "
+    "source via KDIVE_KERNEL_SRC on the worker. After a build, runs.get reports the label and "
+    "resolved commit in data.build_provenance."
 )
 
 
