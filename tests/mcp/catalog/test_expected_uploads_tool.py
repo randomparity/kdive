@@ -15,9 +15,13 @@ import pytest
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.build_artifacts.validation import EFFECTIVE_CONFIG_MAX_BYTES
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog.artifacts import registrar as artifacts_registrar
-from kdive.mcp.tools.catalog.artifacts.expected_uploads import expected_uploads
+from kdive.mcp.tools.catalog.artifacts.expected_uploads import (
+    EXTERNAL_BUILD_UPLOAD_DOC,
+    expected_uploads,
+)
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     CREATE_RUN_UPLOAD_TOOL,
     CREATE_SYSTEM_UPLOAD_TOOL,
@@ -43,14 +47,50 @@ def test_expected_uploads_projects_both_owner_vocabularies() -> None:
     assert run["owner_kind"] == "run"
     assert run["accepted_names"] == sorted(RUN_ARTIFACT_NAMES)
     assert run["create_tool"] == CREATE_RUN_UPLOAD_TOOL
-    assert "kernel" in run["descriptions"]
-    assert set(run["descriptions"]) == set(run["accepted_names"])
+    # A contract for exactly each accepted name — the advisory can never name an artifact the
+    # upload validator does not accept, nor omit one it does.
+    assert set(run["contracts"]) == set(run["accepted_names"])
 
     system = items["system"]
     assert system["owner_kind"] == "system"
     assert system["accepted_names"] == sorted(SYSTEM_ARTIFACT_NAMES)
     assert system["create_tool"] == CREATE_SYSTEM_UPLOAD_TOOL
     assert system["accepted_names"] == ["rootfs"]
+    assert set(system["contracts"]) == set(system["accepted_names"])
+
+
+def test_run_item_states_the_unified_provider_neutral_contract() -> None:
+    run = _items(expected_uploads())["run"]
+    assert run["provider_neutral"] is True
+    assert run["doc"] == EXTERNAL_BUILD_UPLOAD_DOC
+
+    kernel = run["contracts"]["kernel"]
+    assert kernel["requirement"] == "required"
+    assert kernel["format"]["container"] == "gzip tar"
+    assert kernel["format"]["magic"] == [{"offset": 0, "hex": "1f8b"}]
+    member_paths = {member["path"] for member in kernel["layout"]}
+    assert member_paths == {"boot/vmlinuz", "lib/modules/"}
+    boot = next(m for m in kernel["layout"] if m["path"] == "boot/vmlinuz")
+    assert boot["format"]["magic"] == [{"offset": 0x202, "hex": "48647253"}]  # "HdrS"
+
+    assert run["contracts"]["vmlinux"]["requirement"] == "optional"
+    assert run["contracts"]["initrd"]["requirement"] == "optional"
+    assert "build_id" in " ".join(run["contracts"]["vmlinux"]["notes"])
+
+    effective = run["contracts"]["effective_config"]
+    assert effective["requirement"] == "conditional"
+    assert effective["format"]["max_bytes"] == EFFECTIVE_CONFIG_MAX_BYTES
+    assert "profile_requirements" in " ".join(effective["notes"])
+
+
+def test_system_rootfs_contract_is_minimal() -> None:
+    system = _items(expected_uploads())["system"]
+    rootfs = system["contracts"]["rootfs"]
+    assert rootfs["requirement"] == "required"
+    assert rootfs["format"]["container"] == "filesystem image"
+    # The combined-tar discoverability fields are run-only; the system item omits them.
+    assert "provider_neutral" not in system
+    assert "doc" not in system
 
 
 def test_expected_uploads_items_carry_ok_status() -> None:
