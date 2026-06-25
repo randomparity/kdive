@@ -446,7 +446,15 @@ def _resolve_credential(
         return None
     ref = profile_policy.ssh_credential_ref(profile)
     if ref is None:
-        return _config_error(str(system.id), data={"reason": "ssh_credential_ref_missing"})
+        return _config_error(
+            str(system.id),
+            detail=(
+                "System not provisioned for drgn-live; reprovision with "
+                "`provider.local-libvirt.ssh_credential_ref` set — see the "
+                "local-libvirt walkthrough."
+            ),
+            data={"reason": "ssh_credential_ref_missing"},
+        )
     if secret_backend is None:
         return ToolResponse.failure(str(system.id), ErrorCategory.MISSING_DEPENDENCY)
     try:
