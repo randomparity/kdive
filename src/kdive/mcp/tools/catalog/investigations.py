@@ -314,6 +314,11 @@ async def _close_locked(
             )
         old = current.state
         updated = await INVESTIGATIONS.update_state(conn, uid, InvestigationState.CLOSED)
+        # Mark for deferred build-artifact cleanup; the reconciler sweep reclaims run-owned build
+        # artifacts after a grace window (ADR-0234 §4, #768). Never a synchronous delete here.
+        await conn.execute(
+            "UPDATE investigations SET cleanup_pending_at = now() WHERE id = %s", (uid,)
+        )
         await audit.record(
             conn,
             ctx,
