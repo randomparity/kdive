@@ -29,7 +29,7 @@ def open_core_program(core: Path) -> Any:  # pragma: no cover - live_vm (drgn)
             "drgn is not installed on this worker host; core build-id/dmesg needs it",
             category=ErrorCategory.MISSING_DEPENDENCY,
         ) from exc
-    prog = drgn.Program()
+    prog = drgn.Program()  # ty: ignore[unresolved-attribute]  # drgn ships no stubs (C extension)
     prog.set_core_dump(os.fspath(core))
     return prog
 
