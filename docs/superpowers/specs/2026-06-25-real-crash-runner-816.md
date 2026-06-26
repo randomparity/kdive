@@ -138,12 +138,12 @@ transcript.
 
 ### Maturity
 
-The stub is gone, so a live_stack/live_vm run over a real core can now exercise the real
-path. Per the chosen scope (drive a full live proof, then promote): if the live proof
-passes, `postmortem.crash` and `postmortem.triage` are promoted to `implemented`
-(`maturity_detail` removed) and the maturity guard in
-`tests/mcp/core/test_tool_docs.py` updated. If the live proof does not complete, the tools
-stay `partial` with corrected, now-satisfiable text.
+The stub is gone, so a live run over a real core exercises the real path. The live proof
+(below) drove the production worker path to a real `sys`+`log` transcript over a real
+captured core, so `postmortem.crash` and `postmortem.triage` are promoted to `implemented`
+(`maturity_detail` removed) and the maturity guard in `tests/mcp/core/test_tool_docs.py`
+adds a promotion check. The worker's `crash(8)` must support the kernel under test — a host
+prerequisite, documented alongside `drgn`/`libguestfs`.
 
 ## Acceptance criteria
 
@@ -171,6 +171,38 @@ stay `partial` with corrected, now-satisfiable text.
   transcript instead of discarding it.
 - **stderr contains a secret/path** → redacted + capped before it reaches the response.
 - **invalid UTF-8 in stdout/stderr** → `decode(errors="replace")`, unchanged for stdout.
+
+## Live proof (2026-06-25)
+
+Run on this dev host (`crash 9.0.1-2.fc43`, GCC 15.2.1, KVM).
+
+**Step 1 — invocation correctness (kdive's default kernel 7.0.0).** Against a real captured
+`host_dump` core + matching `vmlinux` from a prior live run (run `d26709b2-…`, vmlinux
+build-id `c8be067b…` == the core's VMCOREINFO `BUILD-ID`), `_real_run_crash` **invoked
+`/usr/bin/crash` correctly** — it launched, loaded the build-id-matched 2 GB ELF core + 457 MB
+`vmlinux`, resolved symbols, and reached crash's memory init. crash 9.0.1 then **could not
+analyze the kernel-7.0.0 core** (`invalid structure member offset: kmem_cache_s_num` in
+`kmem_cache_init()`, then a libc abort) — a `crash(8)` forward-compat limitation with kernel
+7.0, **not** a kdive defect (the same core walks fully under `drgn`: 137 tasks). The real
+failure (exit 1, empty stdout) is exactly the `infrastructure_failure` shape the conservative
+exit-status guard surfaces — validating that design.
+
+**Step 2 — green end-to-end transcript (crash-supported kernel 6.19).** Built kernel `v6.19`
+(`make defconfig` + `DEBUG_INFO`/`DWARF5`, `RANDOMIZE_BASE=n`) in an external worktree, booted
+it under QEMU/KVM with a freestanding init, dumped guest memory via QMP `dump-guest-memory`
+(2.1 GB ELF core), and ran the production worker path over it:
+
+- The `live_vm` test (`_real_run_crash` → real `/usr/bin/crash -s`) returned `exit_status=0`
+  with a `sys` banner (`RELEASE: 6.19.0`, `CPUS: 2`, `TASKS: 59`).
+- The full shared helper `run_crash_postmortem` (validate → fetch → build-id → real crash →
+  redact → exit guard) returned a redacted transcript for `["sys", "log"]`
+  (`results={'sys': {'ran': True}, 'log': {'ran': True}}`), the full dmesg included.
+
+**Outcome:** the production worker-side postmortem produces a real crash transcript
+end-to-end. `postmortem.crash`/`triage` are promoted to `implemented`. The usable-kernel range
+is bounded by the worker's `crash(8)` version, not by kdive: `crash(8)` must support the
+kernel under test — a host prerequisite alongside `drgn`/`libguestfs` (and the reason kdive's
+current default 7.0 build needs a newer `crash` than 9.0.1).
 
 ## Considered & rejected
 

@@ -58,10 +58,12 @@ the exit-status check load-bearing in the shared helper.
 3. **Wire it.** `LocalLibvirtRetrieve.from_env` and `RemoteLibvirtRetrieve.__init__` pass
    `run_crash=_real_run_crash`.
 
-4. **Maturity.** With the stub gone, a live run over a real core can exercise the real path.
-   On a passing live proof, `postmortem.crash`/`triage` promote to `implemented`
-   (`maturity_detail` removed, the `tests/mcp/core/test_tool_docs.py` guard updated). Absent
-   a completed proof they stay `partial` with corrected, now-satisfiable text.
+4. **Maturity.** With the stub gone, a live run over a real core exercises the real path. The
+   live proof drove the production worker path (`run_crash_postmortem` → `_real_run_crash` →
+   real `/usr/bin/crash`) to a `sys`+`log` transcript over a real captured core, so
+   `postmortem.crash`/`triage` promote to `implemented` (`maturity_detail` removed, a
+   promotion check added to `tests/mcp/core/test_tool_docs.py`). The worker's `crash(8)` must
+   support the kernel under test — a host prerequisite, not a kdive limitation.
 
 No tool surface, parameter, RBAC, schema, env var, or persistence change; no migration.
 
@@ -71,9 +73,13 @@ No tool surface, parameter, RBAC, schema, env var, or persistence change; no mig
   present; absence is reported honestly as `missing_dependency` naming the binary.
 - `crash(8)` failures (non-zero exit, timeout) surface as typed `infrastructure_failure`
   with redacted stderr instead of an empty "successful" transcript.
-- The real path gains an executable proof (a `live_vm` test driving `/usr/bin/crash`), and
-  the worker host now needs `crash(8)` installed for postmortem to function — a host
-  prerequisite alongside `drgn`/`libguestfs`.
+- The real path gains an executable proof (a `live_vm` test driving `/usr/bin/crash`, plus a
+  recorded end-to-end run), and the worker host now needs `crash(8)` installed for postmortem
+  to function — a host prerequisite alongside `drgn`/`libguestfs`. The live proof established
+  that `crash(8)` must also support the *kernel under test*: `crash 9.0.1` analyzed a `v6.19`
+  core end-to-end but could not analyze a kernel-`7.0.0` core (it failed in its own
+  `kmem_cache_init`), so an operator running kdive's current default 7.0 build needs a newer
+  `crash` than 9.0.1 (see the spec's "Live proof").
 - `default_run_crash` is removed; remote's `default_read_vmcore_build_id` stays (a separate
   remote-only gap, out of scope).
 
