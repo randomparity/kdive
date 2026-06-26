@@ -197,10 +197,7 @@ def _denial_next_actions(outcome: AdmissionOutcome) -> list[str]:
 
 def _denial_detail(outcome: AdmissionOutcome) -> str:
     if outcome.reason == BUDGET_DENIAL_REASON:
-        return (
-            "project budget exhausted for the requested window; "
-            f"raise it with {_BUDGET_REMEDY_TOOL}"
-        )
+        return _budget_denial_detail(outcome)
     if outcome.reason == AFFINITY_DENIAL_REASON:
         return "the project is not permitted to place on the selected resource"
     if outcome.category is ErrorCategory.QUOTA_EXCEEDED:
@@ -210,3 +207,24 @@ def _denial_detail(outcome: AdmissionOutcome) -> str:
         in_use = "?" if outcome.in_use is None else str(outcome.in_use)
         return f"host capacity exhausted (cap {cap}, in use {in_use})"
     return "allocation denied"
+
+
+def _budget_denial_detail(outcome: AdmissionOutcome) -> str:
+    """Name the budget shortfall so the agent can size the increase (#838).
+
+    The estimate and remaining figures ride in ``outcome.details`` (populated by the gate);
+    when present the prose names them. A project with no budget row carries only the estimate,
+    so the remaining clause is dropped rather than printing a placeholder.
+    """
+    estimate = outcome.details.get("estimate_kcu")
+    remaining = outcome.details.get("budget_remaining_kcu")
+    if estimate is not None and remaining is not None:
+        shortfall = f"requested {estimate} kcu, {remaining} kcu remaining; "
+    elif estimate is not None:
+        shortfall = f"requested {estimate} kcu; "
+    else:
+        shortfall = ""
+    return (
+        f"project budget exhausted for the requested window; {shortfall}"
+        f"raise it with {_BUDGET_REMEDY_TOOL}"
+    )

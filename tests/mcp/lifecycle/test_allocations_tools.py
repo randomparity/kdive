@@ -30,7 +30,10 @@ from kdive.mcp.tools.lifecycle.allocations.lifecycle import (
     _renew_response,
     release_allocation,
 )
-from kdive.mcp.tools.lifecycle.allocations.request import request_allocation
+from kdive.mcp.tools.lifecycle.allocations.request import (
+    _budget_denial_detail,
+    request_allocation,
+)
 from kdive.mcp.tools.lifecycle.allocations.view import (
     get_allocation,
     list_allocations,
@@ -38,6 +41,10 @@ from kdive.mcp.tools.lifecycle.allocations.view import (
 )
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.rbac import AuthorizationError, Role
+from kdive.services.allocation.admission.core import (
+    BUDGET_DENIAL_REASON,
+    AdmissionOutcome,
+)
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -417,6 +424,54 @@ def test_budget_denial_names_set_budget_remedy(migrated_url: str) -> None:
     assert resp.suggested_next_actions[0] == "accounting.set_budget"
     assert "allocations.list" in resp.suggested_next_actions
     assert resp.detail is not None and "accounting.set_budget" in resp.detail
+
+
+def test_budget_denial_reports_cost_and_remaining(migrated_url: str) -> None:
+    # #838: a budget denial echoes the priced estimate and the budget figures into `data`, and
+    # names the shortfall in the prose, so the agent can size accounting.set_budget rather than
+    # over-setting the budget blind.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2, limit="0")  # generous quota, zero budget
+            return await _request(pool, _ctx())
+
+    resp = asyncio.run(_run())
+    estimate_kcu = str(resp.data["estimate_kcu"])
+    assert resp.data["reason"] == "budget_exceeded"
+    assert Decimal(estimate_kcu) > 0
+    assert Decimal(str(resp.data["limit_kcu"])) == Decimal("0")
+    assert Decimal(str(resp.data["spent_kcu"])) == Decimal("0")
+    assert Decimal(str(resp.data["budget_remaining_kcu"])) == Decimal("0")
+    assert resp.detail is not None
+    assert estimate_kcu in resp.detail  # the prose names the shortfall
+    assert "accounting.set_budget" in resp.detail
+
+
+def test_budget_denial_detail_without_figures_drops_shortfall_clause() -> None:
+    # Defensive: a budget denial whose details lack the figures still yields valid prose (no
+    # KeyError, no placeholder), naming only the remedy tool.
+    outcome = AdmissionOutcome(
+        granted=False,
+        allocation=None,
+        category=ErrorCategory.ALLOCATION_DENIED,
+        reason=BUDGET_DENIAL_REASON,
+    )
+    detail = _budget_denial_detail(outcome)
+    assert "accounting.set_budget" in detail
+    assert "remaining" not in detail
+
+
+def test_budget_denial_detail_with_estimate_only_names_estimate() -> None:
+    outcome = AdmissionOutcome(
+        granted=False,
+        allocation=None,
+        category=ErrorCategory.ALLOCATION_DENIED,
+        reason=BUDGET_DENIAL_REASON,
+        details={"estimate_kcu": "6.0000"},
+    )
+    detail = _budget_denial_detail(outcome)
+    assert "requested 6.0000 kcu" in detail
+    assert "remaining" not in detail
 
 
 def test_get_own_allocation_returns_state(migrated_url: str) -> None:
