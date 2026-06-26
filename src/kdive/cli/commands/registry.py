@@ -131,6 +131,7 @@ REGISTRY: tuple[Verb, ...] = (
         read_only=False,
     ),
     Verb("images", "list", images.images_list, "images.list"),
+    Verb("images", "describe", reads.images_describe, "images.describe", ("image_id",)),
     Verb(
         "images",
         "upload",

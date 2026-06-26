@@ -88,6 +88,20 @@ def test_list_calls_images_list_read_tool(monkeypatch: pytest.MonkeyPatch, capsy
     assert "fedora" in capsys.readouterr().out
 
 
+def test_describe_calls_images_describe_read_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _install(
+        monkeypatch, {"object_id": "img-1", "status": "registered", "data": {"name": "fedora"}}
+    )
+    code = asyncio.run(reads.images_describe(_args(image_id="img-1")))
+    assert code == 0
+    assert client.calls == [("images.describe", {"image_id": "img-1"})]
+
+
+def test_describe_verb_registered_read_only() -> None:
+    by_tool = {verb.tool: verb for verb in REGISTRY if verb.group == "images"}
+    assert by_tool["images.describe"].read_only is True
+
+
 def test_upload_calls_images_upload_with_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _install(monkeypatch)
     asyncio.run(

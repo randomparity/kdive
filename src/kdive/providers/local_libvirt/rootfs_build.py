@@ -27,6 +27,7 @@ is synchronous — the worker offloads the whole call via ``asyncio.to_thread`` 
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -43,6 +44,8 @@ from kdive.images.families._fedora_customize import (
 )
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.planes._build_common import (
+    DEFAULT_VERSION_INSPECT,
+    VersionInspectSeam,
     build_workspace,
     digest_file,
     publish_qcow2,
@@ -63,6 +66,8 @@ from kdive.prereqs.managed_ssh_key import (
     managed_public_key_path,
 )
 from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
+
+_log = logging.getLogger(__name__)
 
 _DEFAULT_WORKSPACE = "/var/lib/kdive/build/images"
 _DEFAULT_IMAGE_SIZE = "6G"
@@ -157,6 +162,7 @@ class RootfsBuildTools:
     customize: Customize = _real_virt_customize
     repack_whole_disk_ext4: RepackWholeDiskExt4 = _real_repack_whole_disk_ext4
     family_for: FamilyResolver = family_for
+    inspect_versions: VersionInspectSeam = DEFAULT_VERSION_INSPECT
 
 
 def _resolve_entry(spec: RootfsBuildSpec) -> RootfsCatalogEntry:
@@ -252,15 +258,37 @@ class LocalLibvirtRootfsBuildPlane:
             staged = work_dir / f"{spec.name}.qcow2"
             self._tools.repack_whole_disk_ext4(scratch=scratch, qcow2=staged, size=self._size)
             family.normalize(staged)
+            package_versions = self._capture_versions(scratch, spec.packages)
             qcow2 = publish_qcow2(self._workspace, image_name=spec.name, scratch=staged)
         digest = digest_file(qcow2)
         return RootfsBuildOutput(
             qcow2_path=qcow2,
             digest=digest,
             provenance=_provenance(
-                spec, entry, family, size=self._size, authorized_key=authorized_key
+                spec,
+                entry,
+                family,
+                size=self._size,
+                authorized_key=authorized_key,
+                package_versions=package_versions,
             ),
         )
+
+    def _capture_versions(self, scratch: Path, requested: tuple[str, ...]) -> dict[str, str]:
+        """Installed versions for the requested packages; ``{}`` (logged) on inspector failure.
+
+        Inspects the customized scratch image (a normal bootable OS disk, still present in the
+        workspace) and filters to the requested set. Version capture is advisory: a categorized
+        inspector failure degrades to an empty map so the build still publishes (ADR-0252).
+        """
+        try:
+            installed = self._tools.inspect_versions(scratch)
+        except CategorizedError:
+            _log.warning(
+                "package-version capture failed; provenance omits package_versions", exc_info=True
+            )
+            return {}
+        return {name: installed[name] for name in requested if name in installed}
 
     def _customize(
         self,
@@ -301,6 +329,7 @@ def _provenance(
     *,
     size: str,
     authorized_key: Path,
+    package_versions: dict[str, str],
 ) -> dict[str, object]:
     """Record the pinned inputs and build args that produced the image (falsifiable contract).
 
@@ -309,9 +338,11 @@ def _provenance(
     identity is the output qcow2 content digest
     (:func:`kdive.images.planes._build_common.digest_file`), per ADR-0092. ``guest_mac`` is the
     family's mandatory-access-control posture (``selinux-permissive`` for rhel, ``apparmor`` for
-    debian), so the record stays falsifiable across families (#824).
+    debian), so the record stays falsifiable across families (#824). ``package_versions`` (the
+    installed version of each requested package) is added only when capture succeeded — an empty
+    map is omitted so a degraded build's row is byte-identical to a pre-feature one (ADR-0252).
     """
-    return {
+    record: dict[str, object] = {
         "plane": "local-libvirt",
         "distro": spec.distro,
         "releasever": spec.releasever,
@@ -325,3 +356,6 @@ def _provenance(
         "layout": "whole-disk-ext4-qcow2",
         "guest_mac": family.guest_mac,
     }
+    if package_versions:
+        record["package_versions"] = package_versions
+    return record

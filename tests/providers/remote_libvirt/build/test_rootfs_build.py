@@ -22,11 +22,17 @@ from pathlib import Path
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.planes._build_common import VersionInspectSeam
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildPlane, RootfsBuildSpec
 from kdive.providers.remote_libvirt.rootfs_build import (
     RemoteLibvirtRootfsBuildPlane,
     RemoteRootfsBuildTools,
 )
+
+
+def _no_versions(_qcow2: Path) -> dict[str, str]:
+    return {}
+
 
 # The remote base-image name is operator inventory (a `staged` [[image]] in systems.toml,
 # ADR-0112), no longer a code constant. The build plane is name-agnostic — it builds whatever
@@ -62,10 +68,14 @@ class _RecordingTools:
         self.builder_calls.append({"releasever": releasever, "packages": packages, "size": size})
 
 
-def _plane(tmp_path: Path, tools: _RecordingTools) -> RemoteLibvirtRootfsBuildPlane:
+def _plane(
+    tmp_path: Path, tools: _RecordingTools, inspect_versions: VersionInspectSeam = _no_versions
+) -> RemoteLibvirtRootfsBuildPlane:
     return RemoteLibvirtRootfsBuildPlane(
         workspace=tmp_path / "work",
-        tools=RemoteRootfsBuildTools(virt_builder=tools.virt_builder),
+        tools=RemoteRootfsBuildTools(
+            virt_builder=tools.virt_builder, inspect_versions=inspect_versions
+        ),
     )
 
 
@@ -90,7 +100,9 @@ def test_build_records_pinned_provenance(tmp_path: Path) -> None:
     plane = RemoteLibvirtRootfsBuildPlane(
         workspace=tmp_path / "work",
         size="20G",
-        tools=RemoteRootfsBuildTools(virt_builder=_RecordingTools().virt_builder),
+        tools=RemoteRootfsBuildTools(
+            virt_builder=_RecordingTools().virt_builder, inspect_versions=_no_versions
+        ),
     )
     out = plane.build(
         _spec(
@@ -116,12 +128,34 @@ def test_build_records_pinned_provenance(tmp_path: Path) -> None:
     }
 
 
+def test_remote_provenance_records_versions_including_guest_agent(tmp_path: Path) -> None:
+    # The remote plane always injects qemu-guest-agent into the install set; its version is
+    # captured too, so package_versions matches the wider set recorded in provenance["packages"].
+    versions = {"drgn": "0.0.28", "qemu-guest-agent": "9.0", "glibc": "2.39"}
+    tools = _RecordingTools()
+    out = _plane(tmp_path, tools, inspect_versions=lambda _q: versions).build(
+        _spec(packages=("drgn",))
+    )
+    assert out.provenance["package_versions"] == {"drgn": "0.0.28", "qemu-guest-agent": "9.0"}
+
+
+def test_remote_provenance_omits_versions_on_failure(tmp_path: Path) -> None:
+    def _boom(_q: Path) -> dict[str, str]:
+        raise CategorizedError("no tool", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    tools = _RecordingTools()
+    out = _plane(tmp_path, tools, inspect_versions=_boom).build(_spec(packages=("drgn",)))
+    assert "package_versions" not in out.provenance
+
+
 def test_build_passes_configured_size_and_releasever_to_builder(tmp_path: Path) -> None:
     tools = _RecordingTools()
     plane = RemoteLibvirtRootfsBuildPlane(
         workspace=tmp_path / "work",
         size="30G",
-        tools=RemoteRootfsBuildTools(virt_builder=tools.virt_builder),
+        tools=RemoteRootfsBuildTools(
+            virt_builder=tools.virt_builder, inspect_versions=_no_versions
+        ),
     )
     out = plane.build(_spec(releasever="41"))
 

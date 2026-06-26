@@ -92,6 +92,10 @@ async def resources_describe(args: argparse.Namespace) -> int:
     return await _record("resources.describe", args, {"resource_id": args.resource_id})
 
 
+async def images_describe(args: argparse.Namespace) -> int:
+    return await _record("images.describe", args, {"image_id": args.image_id})
+
+
 async def allocations_list(args: argparse.Namespace) -> int:
     return await _list("allocations.list", args, ["id", "project", "system", "state"], "project")
 

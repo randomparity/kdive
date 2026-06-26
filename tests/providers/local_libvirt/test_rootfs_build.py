@@ -20,6 +20,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families._fedora_customize import SSH_NIC_KEYFILE_CONTENT
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.families.rhel import RhelFamily
+from kdive.images.planes._build_common import VersionInspectSeam
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
 from kdive.images.rootfs_catalog import (
     CloudImageSource,
@@ -119,18 +120,27 @@ class _Recorder:
         return _FakeFamily(self, kdump_unit=self.family_kdump_unit)
 
 
-def _tools(rec: _Recorder) -> RootfsBuildTools:
+def _no_versions(_qcow2: Path) -> dict[str, str]:
+    return {}
+
+
+def _tools(rec: _Recorder, inspect_versions: VersionInspectSeam = _no_versions) -> RootfsBuildTools:
     return RootfsBuildTools(
         resolve_authorized_key=rec.resolve_authorized_key,
         acquire_base=rec.acquire_base,
         customize=rec.customize,
         repack_whole_disk_ext4=rec.repack_whole_disk_ext4,
         family_for=rec.family_for,
+        inspect_versions=inspect_versions,
     )
 
 
-def _plane(tmp_path: Path, rec: _Recorder) -> LocalLibvirtRootfsBuildPlane:
-    return LocalLibvirtRootfsBuildPlane(workspace=tmp_path / "work", tools=_tools(rec))
+def _plane(
+    tmp_path: Path, rec: _Recorder, inspect_versions: VersionInspectSeam = _no_versions
+) -> LocalLibvirtRootfsBuildPlane:
+    return LocalLibvirtRootfsBuildPlane(
+        workspace=tmp_path / "work", tools=_tools(rec, inspect_versions)
+    )
 
 
 def _key(tmp_path: Path) -> Path:
@@ -235,6 +245,33 @@ def test_provenance_source_digest_for_cloud_image_entry(tmp_path: Path) -> None:
     expected = f"cloud-image:{entry.source.url}@sha256:{entry.source.sha256}"
     assert out.provenance["source_image_digest"] == expected
     assert rec.acquired_sources == [entry.source]
+
+
+def test_provenance_records_package_versions(tmp_path: Path) -> None:
+    # The inspector reports a superset; provenance keeps only the requested packages' versions.
+    rec = _Recorder(authorized_key=_key(tmp_path))
+    versions = {"openssh-server": "9.6", "drgn": "0.0.28", "glibc": "2.39"}
+    out = _plane(tmp_path, rec, inspect_versions=lambda _q: versions).build(_spec())
+    assert out.provenance["package_versions"] == {"openssh-server": "9.6", "drgn": "0.0.28"}
+    assert out.provenance["packages"] == ["openssh-server", "drgn"], "the name list is unchanged"
+
+
+def test_provenance_omits_versions_on_inspector_failure(tmp_path: Path) -> None:
+    def _boom(_q: Path) -> dict[str, str]:
+        raise CategorizedError("no tool", category=ErrorCategory.MISSING_DEPENDENCY)
+
+    rec = _Recorder(authorized_key=_key(tmp_path))
+    out = _plane(tmp_path, rec, inspect_versions=_boom).build(_spec())
+    assert "package_versions" not in out.provenance, "a failed capture degrades to an omitted field"
+
+
+def test_provenance_versions_absent_for_unreported_request(tmp_path: Path) -> None:
+    # A requested package the inspector does not report is absent from the map (not null/empty).
+    rec = _Recorder(authorized_key=_key(tmp_path))
+    out = _plane(tmp_path, rec, inspect_versions=lambda _q: {"drgn": "0.0.28"}).build(_spec())
+    assert out.provenance["package_versions"] == {"drgn": "0.0.28"}
+    # openssh-server is still requested (in packages), just unversioned (not in the map).
+    assert out.provenance["packages"] == ["openssh-server", "drgn"]
 
 
 def test_build_falls_back_to_virt_builder_for_uncataloged_name(tmp_path: Path) -> None:

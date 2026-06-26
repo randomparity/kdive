@@ -225,6 +225,7 @@ PUBLIC_TOOLS: frozenset[str] = frozenset(
         "buildconfig.list",
         "fixtures.list",
         "fixtures.validate",
+        "images.describe",
         "images.list",
         "projects.list",
         "resources.availability",

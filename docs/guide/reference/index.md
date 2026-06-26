@@ -53,6 +53,7 @@
 | [`fixtures.validate`](fixtures.md#fixturesvalidate) | `implemented` |
 | [`images.build`](images.md#imagesbuild) | `implemented` |
 | [`images.delete`](images.md#imagesdelete) | `implemented` |
+| [`images.describe`](images.md#imagesdescribe) | `implemented` |
 | [`images.extend`](images.md#imagesextend) | `implemented` |
 | [`images.list`](images.md#imageslist) | `implemented` |
 | [`images.prune_expired`](images.md#imagesprune_expired) | `implemented` |
