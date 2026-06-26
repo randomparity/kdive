@@ -87,6 +87,24 @@ aws s3api put-bucket-lifecycle-configuration --bucket "$KDIVE_S3_BUCKET" \
   "Filter":{"Prefix":""},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":1}}]}'
 ```
 
+## Fund the demo project — `just onboard`
+
+`allocations.request` is funding-walled until a project has a budget **and** a quota row, keyed
+by the same string the token's `projects`/`roles` claim carries. `just onboard` collapses that
+into one idempotent command against the same `env.sh` database the stack uses:
+
+```bash
+just onboard                 # project "demo" (override with KDIVE_PROJECT=acme)
+```
+
+It runs an advisory provider preflight, then `migrate` → `seed-project` → `verify-project` (the
+hard funding gate — it fails loudly if the rows are absent and echoes the credential-redacted
+target DB), then mints a 24 h token and prints the **binding contract** (`projects`, `roles`, and
+the `project` arg, all the same string). Export the printed `KDIVE_TOKEN` and re-run when it
+expires. This is the dev/demo path; production onboards via the audited admin tools
+([project onboarding](../project-onboarding.md)). It can run any time after the backends and
+migrations are up (it does not need the host processes).
+
 ## 2. Review the host-process env
 
 The source-tree wrappers source `scripts/live-stack/env.sh`, which exports the local
