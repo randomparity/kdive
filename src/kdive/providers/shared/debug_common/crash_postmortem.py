@@ -6,7 +6,8 @@ run a validated `crash` command batch over an injected subprocess, and return th
 redacted transcript. Lifted out of `local_libvirt/retrieve.py` so `remote_libvirt`
 reuses it without a private copy (the ADR-0083 `debug_common` home for shared
 worker-side postmortem code). Slow seams (`fetch_object`, `run_crash`, `read_build_id`)
-are injected; the defaults are `live_vm`-only.
+are injected: `run_crash` defaults to the real `crash(8)` runner (only its subprocess exec
+is `live_vm`-gated), while `fetch_object` and `read_build_id` stay `live_vm`-only.
 """
 
 from __future__ import annotations
@@ -31,6 +32,10 @@ type CrashPathFinder = Callable[[str], str | None]
 
 # Cap the redacted crash(8) stderr carried in an error envelope; stderr is unbounded.
 _STDERR_CAP = 2048
+# Byte-cap the redacted transcript returned inline (a verbose verb over a big core can emit
+# megabytes). Mirrors the introspect report cap (ADR-0033); redact-then-cap so the cap bounds
+# the *returned* payload and `truncated` signals the trim.
+_TRANSCRIPT_BYTE_CAP = 1 << 20  # 1 MiB
 # Bound a wedged crash(8) so it never pins a worker thread. A batch of allowlisted read verbs
 # over a multi-GB core can take minutes.
 _CRASH_TIMEOUT_S = 300.0
@@ -93,11 +98,24 @@ def run_crash_postmortem(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"exit_status": crash.exit_status, "stderr": stderr[:_STDERR_CAP]},
         )
+    transcript, truncated = _byte_cap_text(transcript, _TRANSCRIPT_BYTE_CAP)
     return CrashOutput(
         results={cmd: {"ran": True} for cmd in commands},
         transcript=transcript,
-        truncated=False,
+        truncated=truncated,
     )
+
+
+def _byte_cap_text(text: str, byte_cap: int) -> tuple[str, bool]:
+    """Trim ``text`` to at most ``byte_cap`` UTF-8 bytes; return it and whether it was trimmed.
+
+    Caps the already-redacted transcript so the cap bounds the returned payload exactly. The
+    slice can split a multibyte char, so the decode drops the partial tail (``errors="ignore"``).
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= byte_cap:
+        return text, False
+    return encoded[:byte_cap].decode("utf-8", "ignore"), True
 
 
 def default_fetch_object(ref: str) -> bytes:  # pragma: no cover - live_vm

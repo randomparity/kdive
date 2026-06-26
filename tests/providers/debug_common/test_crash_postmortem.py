@@ -193,6 +193,39 @@ def test_rejected_command_batch_is_configuration_error() -> None:
     assert exc.value.details["reason"]
 
 
+def test_large_transcript_is_byte_capped_and_marked_truncated() -> None:
+    # A verbose verb (log/foreach bt) over a big core can emit megabytes; the inline transcript
+    # is byte-capped (redact-then-cap) and flagged truncated so it never overflows the response.
+    big = b"A" * (2 * 1024 * 1024)  # 2 MiB > the 1 MiB cap
+    out = run_crash_postmortem(
+        vmcore_ref="core-ref",
+        debuginfo_ref="debug-ref",
+        expected_build_id="deadbeef",
+        commands=["log"],
+        fetch_object=lambda ref: b"CORE",
+        read_build_id=lambda data: "deadbeef",
+        run_crash=lambda v, c, s: CrashResult(exit_status=0, stdout=big, stderr=b""),
+        secret_registry=SecretRegistry(),
+    )
+    assert out.truncated is True
+    assert len(out.transcript.encode("utf-8")) <= 1 << 20
+
+
+def test_small_transcript_is_not_truncated() -> None:
+    out = run_crash_postmortem(
+        vmcore_ref="core-ref",
+        debuginfo_ref="debug-ref",
+        expected_build_id="deadbeef",
+        commands=["sys"],
+        fetch_object=lambda ref: b"CORE",
+        read_build_id=lambda data: "deadbeef",
+        run_crash=lambda v, c, s: CrashResult(exit_status=0, stdout=b"short", stderr=b""),
+        secret_registry=SecretRegistry(),
+    )
+    assert out.truncated is False
+    assert out.transcript == "short"
+
+
 def test_real_run_crash_missing_binary_is_missing_dependency() -> None:
     # No crash(8) on the worker host: surface a missing_dependency naming the binary, not the
     # old stub's misleading "runs only under the live_vm gate" message.
