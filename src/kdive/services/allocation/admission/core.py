@@ -57,6 +57,7 @@ from kdive.services.accounting import ledger as accounting
 from kdive.services.allocation.admission.affinity import project_may_place
 from kdive.services.allocation.error_details import categorized_details
 from kdive.services.allocation.idempotency import (
+    budget_snapshot,
     record_key,
     resolve_replay,
     within_budget,
@@ -303,6 +304,7 @@ async def admission_gate(
                 allocation=None,
                 category=ErrorCategory.ALLOCATION_DENIED,
                 reason=BUDGET_DENIAL_REASON,
+                details=await _budget_denial_details(conn, request.project, estimate),
             ),
             devices=[],
         )
@@ -313,6 +315,28 @@ async def admission_gate(
     if claim.denial is not None:
         return _GateResult(denial=claim.denial, devices=[])
     return _GateResult(denial=None, devices=claim.devices)
+
+
+async def _budget_denial_details(
+    conn: AsyncConnection, project: str, estimate: Decimal
+) -> dict[str, Any]:
+    """Echo the priced estimate and the project's budget figures into a budget denial (#838).
+
+    Mirrors the host-cap denial's ``cap``/``in_use`` echo so the agent can size a budget
+    increase instead of guessing. Values are stringified to match how ``denial_details``
+    surfaces every detail. The figures are re-read here on the cold denial path rather than
+    widening :func:`within_budget`'s bool contract; the project lock is held, so the read is
+    consistent with the gating check above. A project with no budget row has no figures to
+    report, so only the estimate is echoed (the fail-closed denial still stands).
+    """
+    details: dict[str, Any] = {"estimate_kcu": str(estimate)}
+    snapshot = await budget_snapshot(conn, project)
+    if snapshot is not None:
+        limit_kcu, spent_kcu = snapshot
+        details["limit_kcu"] = str(limit_kcu)
+        details["spent_kcu"] = str(spent_kcu)
+        details["budget_remaining_kcu"] = str(limit_kcu - spent_kcu)
+    return details
 
 
 async def _admit_under_project_lock(

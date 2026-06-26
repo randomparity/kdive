@@ -30,6 +30,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import RequestContext
 from kdive.services.allocation import idempotency as allocation_idempotency
 from kdive.services.allocation.admission.core import (
+    BUDGET_DENIAL_REASON,
     AllocationRequest,
     admit,
 )
@@ -193,6 +194,62 @@ def test_exactly_at_budget_grants(migrated_url: str) -> None:
             outcome = await _admit(conn, resource=res)
             assert outcome.granted is True
             assert await _spent(conn) == Decimal("6.0000")
+
+    asyncio.run(_run())
+
+
+def test_budget_denial_details_carry_estimate_and_remaining(migrated_url: str) -> None:
+    # #838: an over-budget denial echoes the priced estimate and the budget figures so the
+    # caller can size accounting.set_budget instead of guessing.
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            res = await _seed_resource(conn)
+            await _seed_budget(conn, limit="5")  # estimate 6.0 > remaining 5
+            await _seed_quota(conn)
+            outcome = await _admit(conn, resource=res)
+            assert outcome.granted is False
+            assert outcome.reason == BUDGET_DENIAL_REASON
+            assert Decimal(outcome.details["estimate_kcu"]) == Decimal("6")
+            assert Decimal(outcome.details["limit_kcu"]) == Decimal("5")
+            assert Decimal(outcome.details["spent_kcu"]) == Decimal("0")
+            assert Decimal(outcome.details["budget_remaining_kcu"]) == Decimal("5")
+
+    asyncio.run(_run())
+
+
+def test_budget_denial_details_omit_figures_without_budget_row(migrated_url: str) -> None:
+    # #838: a project with no budget row is fail-closed; only the estimate is known, so the
+    # absent budget figures are omitted rather than reported as zero.
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            res = await _seed_resource(conn)
+            await _seed_quota(conn)  # quota present, budget absent
+            outcome = await _admit(conn, resource=res)
+            assert outcome.granted is False
+            assert outcome.reason == BUDGET_DENIAL_REASON
+            assert Decimal(outcome.details["estimate_kcu"]) == Decimal("6")
+            assert "limit_kcu" not in outcome.details
+            assert "spent_kcu" not in outcome.details
+            assert "budget_remaining_kcu" not in outcome.details
+
+    asyncio.run(_run())
+
+
+def test_budget_snapshot_returns_limit_and_spent(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            await _seed_budget(conn, limit="10")
+            await conn.execute("UPDATE budgets SET spent_kcu = %s WHERE project = %s", (6, "proj"))
+            snapshot = await allocation_idempotency.budget_snapshot(conn, "proj")
+            assert snapshot == (Decimal("10"), Decimal("6"))
+
+    asyncio.run(_run())
+
+
+def test_budget_snapshot_is_none_without_budget_row(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            assert await allocation_idempotency.budget_snapshot(conn, "proj") is None
 
     asyncio.run(_run())
 
