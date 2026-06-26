@@ -24,6 +24,7 @@ from kdive.images.families._fedora_customize import (
     READINESS_MARKER,
     SEED_MACHINE_ID,
     debug_image_args,
+    makedumpfile_version_marker_args,
 )
 from kdive.images.families.base import CustomizeContext
 from kdive.images.planes._build_common import run_guestfs_tool
@@ -113,6 +114,8 @@ class RhelFamily:
                 f"/etc/machine-id:{SEED_MACHINE_ID}",  # pragma: allowlist secret
             ]
         argv += debug_image_args(ctx.packages, ctx.cleanup)
+        if ctx.kind == "debug":
+            argv += makedumpfile_version_marker_args()
         argv += [
             "--ssh-inject",
             f"root:file:{ctx.authorized_key}",

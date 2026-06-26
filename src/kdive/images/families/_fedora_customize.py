@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.planes._build_common import MAKEDUMPFILE_MARKER_GUEST_PATH
 
 # Today's debug/guest rootfs: the in-target crash + introspection toolchain. ``keyutils`` provides
 # ``keyctl``, which Fedora ``kdumpctl`` invokes building the crash environment (ADR-0213, #688).
@@ -172,6 +173,24 @@ def _ssh_nic_keyfile_args(cleanup: list[Path]) -> list[str]:
         f"{keyfile_path}:{SSH_NIC_KEYFILE_PATH}",
         "--run-command",
         f"chmod 0600 {SSH_NIC_KEYFILE_PATH}",
+    ]
+
+
+def makedumpfile_version_marker_args() -> list[str]:
+    """virt-customize fragment recording ``makedumpfile --version`` to a guest marker file.
+
+    Read back at build time into ``provenance["makedumpfile_version"]`` (ADR-0253), the per-image
+    operand of the computed kdump-capability predicate. Best-effort: the command never fails the
+    build (``|| true``); an image without makedumpfile (or with it off ``PATH``) leaves an empty
+    marker, which the probe treats as "absent". ``PATH`` is tried first, then the canonical
+    ``/usr/sbin`` location, so a run-command shell with a thin ``PATH`` still populates the marker.
+    """
+    return [
+        "--run-command",
+        "mkdir -p /usr/lib/kdive && "
+        "{ command -v makedumpfile >/dev/null 2>&1 && makedumpfile --version "
+        "|| /usr/sbin/makedumpfile --version ; } "
+        f"> {MAKEDUMPFILE_MARKER_GUEST_PATH} 2>/dev/null || true",
     ]
 
 

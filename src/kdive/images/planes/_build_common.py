@@ -16,6 +16,11 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 _DIGEST_CHUNK = 1024 * 1024
 _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
+# The in-guest marker file a debug build writes ``makedumpfile --version`` into, read back into
+# ``provenance["makedumpfile_version"]`` (ADR-0253). Lives here (not in a family module) so the
+# build plane and the family customizers share one definition without a families->build cycle.
+MAKEDUMPFILE_MARKER_GUEST_PATH = "/usr/lib/kdive/makedumpfile-version"
+
 # ADR-0222 (#694): two libguestfs stderr signatures get an actionable CONFIGURATION_ERROR
 # instead of the generic PROVISIONING_FAILURE. The kernel pattern binds the permission/read
 # failure to a vmlinuz path on one match so an unrelated permission error (an unwritable output
