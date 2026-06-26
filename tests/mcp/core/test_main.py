@@ -59,7 +59,9 @@ def test_build_fs_subcommand_parses_with_defaults() -> None:
     assert args.name == "fedora-kdive-ready-43"
     assert args.arch == "x86_64"
     assert args.releasever == "43"
-    assert args.dest == "/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2"
+    # --dest defaults to None; the handler derives /var/lib/kdive/rootfs/local/<name>.qcow2 (or
+    # the catalog name with --image) so an explicit --dest can override it.
+    assert args.dest is None
     assert args.packages is None  # falls back to the --kind's package set in the handler
 
 
@@ -204,29 +206,37 @@ def test_run_build_fs_build_kind_sets_build_packages_and_capabilities(
     assert seen_specs[0].capabilities == ("agent", "build")
 
 
-def test_run_build_fs_unsupported_distro_fails_not_implemented(
+def test_run_build_fs_default_path_synthesizes_distro_passthrough_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An unimplemented --distro fails with a clear not-implemented message before building."""
+    """The no-`--image` path passes `--distro`/`--releasever` straight to a virt-builder digest."""
+    produced = tmp_path / "plane-workspace" / "img.qcow2"
+    produced.parent.mkdir(parents=True)
+    produced.write_bytes(b"image-bytes")
+    seen_specs = []
 
-    class _UnusedPlane:
-        def build(self, spec: object) -> RootfsBuildOutput:  # pragma: no cover - never reached
-            raise AssertionError("build must not run for an unsupported distro")
+    class _FakePlane:
+        def build(self, spec: object) -> RootfsBuildOutput:
+            seen_specs.append(spec)
+            return RootfsBuildOutput(qcow2_path=produced, digest="sha256:abc", provenance={})
 
-    _patch_plane(monkeypatch, _UnusedPlane())
+    _patch_plane(monkeypatch, _FakePlane())
     args = build_parser().parse_args(
         [
             "build-fs",
             "--distro",
             "rocky",
+            "--releasever",
+            "9",
             "--workspace",
             str(tmp_path / "ws"),
             "--dest",
             str(tmp_path / "out.qcow2"),
         ]
     )
-    with pytest.raises(NotImplementedError, match="rocky"):
-        run_build_fs(args)
+    run_build_fs(args)
+    assert seen_specs[0].distro == "rocky"
+    assert seen_specs[0].source_image_digest == "virt-builder:rocky-9"
 
 
 def test_run_build_fs_unwritable_workspace_is_actionable(

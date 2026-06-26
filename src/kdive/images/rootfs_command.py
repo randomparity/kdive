@@ -11,30 +11,22 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.distros import SUPPORTED_DISTROS, resolve_base_template
+from kdive.images.families._fedora_customize import (
+    DEFAULT_BUILD_FS_PACKAGES,
+    DEFAULT_DEBUG_FS_PACKAGES,
+)
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildPlane, RootfsBuildSpec
+from kdive.images.rootfs_catalog import (
+    CloudImageSource,
+    RootfsSource,
+    resolve_rootfs_entry,
+)
 from kdive.providers.assembly.composition import build_local_rootfs_build_plane
 
 _log = logging.getLogger(__name__)
 
-# Today's debug/guest rootfs: the in-target crash + introspection toolchain. `keyutils` provides
-# `keyctl`, which Fedora `kdumpctl` invokes building the crash environment (ADR-0213, #688).
-DEFAULT_DEBUG_FS_PACKAGES = ("drgn", "kexec-tools", "makedumpfile", "kdump-utils", "keyutils")
-# A build-host toolchain image: the kernel-build deps a remote/ephemeral build target needs.
-DEFAULT_BUILD_FS_PACKAGES = (
-    "gcc",
-    "make",
-    "bc",
-    "bison",
-    "flex",
-    "openssl-devel",
-    "elfutils-libelf-devel",
-    "ncurses-devel",
-    "dwarves",
-    "rsync",
-    "git",
-)
 _DEFAULT_WORKSPACE = "/var/lib/kdive/build/images"
+_LOCAL_ROOTFS_DIR = "/var/lib/kdive/rootfs/local"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,9 +56,17 @@ def add_build_fs_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]
         help="debug = guest crash/introspection rootfs; build = kernel-build-host toolchain image",
     )
     build.add_argument(
+        "--image",
+        default=None,
+        help=(
+            "rootfs catalog image name (e.g. fedora-kdive-ready-44); when given, name/distro/"
+            "releasever/dest and the base source are resolved from the catalog"
+        ),
+    )
+    build.add_argument(
         "--distro",
         default="fedora",
-        help=f"base-OS family (extensibility seam; implemented: {', '.join(SUPPORTED_DISTROS)})",
+        help="base-OS family for the no-`--image` path (extensibility seam; implemented: fedora)",
     )
     build.add_argument(
         "--workspace",
@@ -78,8 +78,11 @@ def add_build_fs_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]
     )
     build.add_argument(
         "--dest",
-        default="/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2",
-        help="destination qcow2 path (the produced image is moved here)",
+        default=None,
+        help=(
+            "destination qcow2 path (the produced image is moved here); defaults to "
+            "/var/lib/kdive/rootfs/local/<name>.qcow2 (the catalog name with --image)"
+        ),
     )
     build.add_argument("--name", default="fedora-kdive-ready-43", help="catalog image name")
     build.add_argument("--arch", default="x86_64")
@@ -136,30 +139,76 @@ def _publish_rootfs(output: RootfsBuildOutput, dest: Path) -> None:
         ) from exc
 
 
+@dataclass(frozen=True, slots=True)
+class _BuildParams:
+    """The image identity and base-source provenance a ``build-fs`` invocation resolves to."""
+
+    name: str
+    distro: str
+    releasever: str
+    kind: str
+    dest: str
+    source_image_digest: str
+
+
+def _source_image_digest(source: RootfsSource) -> str:
+    """Render the provenance ``source_image_digest`` for a resolved catalog base source."""
+    if isinstance(source, CloudImageSource):
+        return f"cloud-image:{source.url}@sha256:{source.sha256}"
+    return f"virt-builder:{source.template}"
+
+
+def _resolve_build_params(args: argparse.Namespace) -> _BuildParams:
+    """Resolve the build identity from ``--image`` (catalog-authoritative) or the CLI flags.
+
+    With ``--image`` the catalog row owns ``name``/``distro``/``releasever``/``kind``/``dest`` and
+    the base-source digest; without it the ``--distro``/``--releasever``/``--name``/``--dest``/
+    ``--kind`` flags drive the legacy ``virt-builder:<distro>-<releasever>`` path.
+    """
+    if args.image is not None:
+        entry = resolve_rootfs_entry(args.image)
+        return _BuildParams(
+            name=entry.name,
+            distro=entry.distro,
+            releasever=entry.version,
+            kind=entry.kind,
+            dest=args.dest or f"{_LOCAL_ROOTFS_DIR}/{entry.name}.qcow2",
+            source_image_digest=_source_image_digest(entry.source),
+        )
+    return _BuildParams(
+        name=args.name,
+        distro=args.distro,
+        releasever=args.releasever,
+        kind=args.kind,
+        dest=args.dest or f"{_LOCAL_ROOTFS_DIR}/{args.name}.qcow2",
+        source_image_digest=f"virt-builder:{args.distro}-{args.releasever}",
+    )
+
+
 def run_build_fs(args: argparse.Namespace) -> None:
-    """Build a kdive-ready filesystem qcow2 via the local plane and move it to ``--dest``."""
-    kind = _FS_KINDS[args.kind]
+    """Build a kdive-ready filesystem qcow2 via the local plane and move it to its destination."""
+    params = _resolve_build_params(args)
+    kind = _FS_KINDS[params.kind]
     packages = tuple(args.packages) if args.packages else kind.packages
-    source_image_digest = f"virt-builder:{resolve_base_template(args.distro, args.releasever)}"
     spec = RootfsBuildSpec(
         provider="local-libvirt",
-        name=args.name,
+        name=params.name,
         arch=args.arch,
-        releasever=args.releasever,
+        releasever=params.releasever,
         packages=packages,
-        source_image_digest=source_image_digest,
+        source_image_digest=params.source_image_digest,
         capabilities=kind.capabilities,
-        distro=args.distro,
+        distro=params.distro,
     )
     workspace = Path(args.workspace).resolve()
     _ensure_workspace_writable(workspace)
     plane = _build_local_rootfs_plane(workspace)
     output: RootfsBuildOutput = plane.build(spec)
-    dest = Path(args.dest).resolve()
+    dest = Path(params.dest).resolve()
     _publish_rootfs(output, dest)
     _log.info(
         "built %s rootfs %s digest=%s; set KDIVE_GUEST_IMAGE to this path",
-        args.kind,
+        params.kind,
         dest,
         output.digest,
     )

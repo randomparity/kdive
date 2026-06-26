@@ -21,6 +21,7 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
+from kdive.providers.local_libvirt.retrieve_kdump import HarvestOutcome
 from kdive.providers.ports import CaptureOutput, CrashOutput, CrashResult
 from kdive.providers.shared.runtime_paths import WORKER_READABILITY_REMEDIATION
 from kdive.security.artifacts.crash_commands import crash_command_rejection_reason
@@ -108,7 +109,7 @@ def _kdump_retriever(
     return LocalLibvirtRetrieve(
         tenant=_TENANT,
         store_factory=lambda: store,
-        wait_for_vmcore=lambda system_id: core_path,
+        wait_for_vmcore=lambda system_id: HarvestOutcome(core=core_path, incomplete_found=False),
         read_vmcore_build_id=lambda data: pytest.fail("bytes build-id seam used on kdump path"),
         read_vmcore_build_id_from_file=lambda path: build_id,
         extract_redacted_from_file=lambda path: b"dmesg: password=[REDACTED]",
@@ -206,7 +207,7 @@ def _crash_retriever(*, observed_build_id: str, crash: CrashResult) -> LocalLibv
     return LocalLibvirtRetrieve(
         tenant=_TENANT,
         store_factory=_FakeStore,
-        wait_for_vmcore=lambda s: None,
+        wait_for_vmcore=lambda s: HarvestOutcome(core=None, incomplete_found=False),
         read_vmcore_build_id=lambda data: observed_build_id,
         read_vmcore_build_id_from_file=lambda path: observed_build_id,
         extract_redacted_from_file=lambda path: b"",
@@ -247,7 +248,7 @@ def test_run_rejects_bad_command_before_fetching_or_running_crash() -> None:
     retriever = LocalLibvirtRetrieve(
         tenant=_TENANT,
         store_factory=_FakeStore,
-        wait_for_vmcore=lambda s: None,
+        wait_for_vmcore=lambda s: HarvestOutcome(core=None, incomplete_found=False),
         read_vmcore_build_id=lambda data: "deadbeef",
         read_vmcore_build_id_from_file=lambda path: "deadbeef",
         extract_redacted_from_file=lambda path: b"",

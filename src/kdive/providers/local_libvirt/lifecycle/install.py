@@ -56,9 +56,14 @@ from kdive.store.objectstore import object_store_from_env
 
 _log = logging.getLogger(__name__)
 
-_DEFAULT_BOOT_WINDOW_POLLS = 30
-# The boot window is _DEFAULT_BOOT_WINDOW_POLLS × _POLL_INTERVAL_SECONDS = 150s (ADR-0055 §7):
-# boot()._await_ready loops the poll count; _real_readiness owns the per-poll cadence.
+_DEFAULT_BOOT_WINDOW_POLLS = 60
+# The boot window is _DEFAULT_BOOT_WINDOW_POLLS × _POLL_INTERVAL_SECONDS = 300s (ADR-0055 §7):
+# boot()._await_ready loops the poll count; _real_readiness owns the per-poll cadence. The window
+# accommodates the kdive-ready signal now ordering After=kdump.service (#817): a crash-capture
+# guest does not report ready until kdump.service has built the capture initramfs and kexec-loaded
+# it, which adds tens of seconds on the first dracut build. It is a timeout, not a fixed wait —
+# _await_ready returns the instant the marker appears, so the wider ceiling costs nothing on a fast
+# boot and the _CRASH_SIGNATURE fail-fast still surfaces a panicked boot immediately.
 _POLL_INTERVAL_SECONDS = 5.0
 _DOMSTATE_PROBE_TIMEOUT = 10
 _TERMINAL_DOMSTATES = frozenset({"shut off", "crashed"})

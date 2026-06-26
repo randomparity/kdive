@@ -1,0 +1,270 @@
+# Local multi-distro rootfs catalog (issue #817)
+
+- **Issue:** [#817](https://github.com/randomparity/kdive/issues/817)
+- **ADR:** [ADR-0251](../../adr/0251-local-multidistro-rootfs-catalog.md)
+- **Status:** Accepted design; MVP (Fedora 44 + mechanism + incomplete-core handling) lands under #817,
+  the other families as staged follow-ups in the same epic.
+
+## Problem
+
+On local-libvirt, `vmcore.fetch` with the default `kdump` method fails with `no complete core
+appeared within the capture window` for a from-source kernel, while the explicit `host_dump`
+method succeeds. Live diagnosis on the KVM host (2026-06-25) pinned the cause precisely:
+
+- The ready rootfs (`fedora-kdive-ready-43.qcow2`) ships **makedumpfile 1.7.8** (Fedora 43,
+  `LATEST_VERSION = 6.17.4`). For a kernel **7.0.0** it prints *"The kernel version is not
+  supported"* and cannot do `-d 31` page filtering, so on a large-RAM guest the unfiltered dump
+  overruns the capture window and stays `/var/crash/<ts>/vmcore-incomplete`.
+- The host-side harvest glob is exactly `/var/crash/*/vmcore`, which never matches
+  `vmcore-incomplete` → `READINESS_FAILURE` "no complete core appeared within the window."
+
+Everything else is healthy and was ruled out live: crashkernel=256M reserves, `kdumpctl` arms
+(`kexec_crash_loaded=1`), the capture kernel boots, mounts ext4, runs makedumpfile, and powers off
+(`final_action poweroff`). The **baseline Fedora 6.18.5 kernel captures a complete vmcore**; only
+the from-source 7.0 kernel fails. makedumpfile **1.7.9** (released 2026-04-20) is the first release
+to "Support kernels up to v7.0 (x86_64)" and ships in **Fedora 44** (GA 2026-04-28).
+
+The image is a bare ext4 whole-disk rootfs (no partition table or bootloader); the provider
+direct-kernel-boots it and injects `/boot/vmlinuz-<ver>` + `/lib/modules/<ver>` so in-guest
+`kdumpctl` can `kexec` a capture kernel.
+
+## Goal
+
+Two coupled outcomes:
+
+1. **Fix #817:** ship a Fedora 44 rootfs whose makedumpfile filters a 7.0 vmcore, proven live.
+2. **Generalize:** turn the single hardcoded Fedora rootfs build into a declarative multi-distro
+   catalog (Fedora, Rocky, CentOS Stream, Debian, openSUSE) so the lifecycle can be exercised
+   across base OSes, with kdump-capture available wherever a distro's makedumpfile is new enough.
+
+A distro whose makedumpfile is older than the kernel-under-test will reproduce the *same*
+`vmcore-incomplete` outcome; that is expected and surfaced clearly (see Incomplete-core handling),
+not hidden — `host_dump` remains the documented path there.
+
+## Scope
+
+### MVP (this issue, #817)
+
+1. **Catalog mechanism** — `fixtures/local-libvirt/rootfs_catalog.toml` (file-authoritative),
+   a loader/validator, a base-source acquirer (virt-builder template *or* cloud-image URL with a
+   pinned sha256), and a `FamilyCustomizer` seam.
+2. **Fedora 44 entry** (`fedora-kdive-ready-44`), built live and proven to capture a complete 7.0
+   vmcore via the default `kdump` method.
+3. **Retain** `fedora-kdive-ready-43` as a regression reference.
+4. **Incomplete-core handling** — detect `vmcore-incomplete` and return a categorized, actionable
+   `READINESS_FAILURE` instead of the opaque window-timeout message.
+
+Only the **`rhel`** family customizer ships in the MVP (covers Fedora 43/44 and the later
+Rocky/CentOS entries).
+
+**Build/de-risk ordering (MVP).** The cloud-image→bare-ext4 path for Fedora 44 was never exercised
+in diagnosis (which reused the existing 43 image), so it is proven *first*, as a manual/scripted
+spike (download → customize → repack → boot, the same way the diagnosis built and booted images by
+hand — no `build-fs` wiring yet), before the catalog/family abstraction is generalized:
+(1) hand-build a Fedora 44 bare-ext4 rootfs from the cloud qcow2 and boot + kdump-prove it, settling
+the btrfs/cloud-init/SELinux-relabel mechanics; (2) only then refactor the inline Fedora
+customization into the `rhel` customizer + catalog loader + base-source seam so `build-fs --image
+fedora-kdive-ready-44` reproduces the proven image; (3) add the incomplete-core handling
+(independently unit-testable). This front-loads the highest-risk unknown.
+
+### Follow-ups (same epic, same design)
+
+- RHEL family entries: Rocky 8/9/10 + CentOS Stream 9/10 (reuse `rhel`).
+- `debian` customizer + Debian 12/13 (apt, `kdump-tools`, `update-initramfs`, AppArmor).
+- `suse` customizer + openSUSE Tumbleweed (kdump-capable, newest makedumpfile) and Leap 15.6.
+
+Each follow-up entry is live-proven for its lifecycle; the makedumpfile-vs-kernel limitation is
+documented per release (and the first follow-up that renders it adds the structured capability flag).
+
+## Architecture
+
+All changes are in the shared `images` layer and the local-libvirt provider.
+
+### Catalog (`fixtures/local-libvirt/rootfs_catalog.toml`)
+
+```toml
+[[image]]
+name    = "fedora-kdive-ready-44"
+distro  = "fedora"
+version = "44"
+family  = "rhel"
+arch    = "x86_64"
+kind    = "debug"            # debug guest | build host
+source  = { kind = "cloud-image",
+            url  = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2",
+            sha256 = "<pinned>" }
+
+[[image]]
+name    = "fedora-kdive-ready-43"
+distro  = "fedora"
+version = "43"
+family  = "rhel"
+arch    = "x86_64"
+kind    = "debug"
+source  = { kind = "virt-builder", template = "fedora-43" }
+```
+
+`source.kind = "virt-builder"` carries a `template`; `source.kind = "cloud-image"` carries a
+`url` + `sha256`. The catalog is the single place an operator adds an image.
+
+### `images/rootfs_catalog.py`
+
+Loader/validator. Parses the catalog into typed `RootfsCatalogEntry`. Validates: unique `name`,
+known `family` (`rhel|debian|suse`), `source.kind ∈ {virt-builder, cloud-image}` with the matching
+required fields (template, or url+sha256). Resolves `--image <name>` to an entry. Replaces the
+single-purpose `images/distros.py` template resolver.
+
+### `images/base_source.py`
+
+Acquire the base qcow2 into a worker temp `scratch`:
+- `virt-builder <template> --output scratch` (existing mechanism, templated releases), or
+- download `url` → verify `sha256` (fail-closed `CONFIGURATION_ERROR` on mismatch) → `scratch`.
+  An unreachable URL (404 / network failure) raises a `CONFIGURATION_ERROR` naming the dead URL
+  and that the catalog pin must be repinned — distinct from the sha256-mismatch error.
+
+**Cloud-image base is NOT assumed equivalent to the virt-builder scratch.** A Fedora Cloud Base
+image differs materially from the single-ext4 virt-builder scratch the existing repack was
+validated against: its root filesystem is **btrfs with subvolumes**, it has a separate `/boot`
+(and EFI ESP), and **cloud-init is enabled**. The cloud-image lane therefore must:
+1. **disable/remove cloud-init** during customize (it otherwise waits on a datasource at boot —
+   like the zram stall seen in diagnosis — and can reset network/ssh, clobbering the injected key);
+1b. **seed `/etc/machine-id`** with a valid id (PROVEN in the Task-1 spike): Fedora Cloud ships
+   `machine-id="uninitialized"`, which makes systemd treat first boot specially and run
+   `systemctl preset-all`, resetting `kdump.service` to its vendor preset (**disabled**) so kdump
+   never arms — the `kexec_crash_loaded=0` / "Kdump is not operational" failure. The virt-builder
+   F43 scratch already carries a populated machine-id, which is why it was never reset. Seeding it
+   makes kdump auto-arm at boot. (A `system-preset` file enabling kdump is the alternative; seeding
+   machine-id is simpler and matches F43.)
+2. let the existing `virt-tar-out` (root tree → tar) / `virt-make-fs` (tar → bare ext4) collapse
+   the btrfs+multi-partition source into the one whole-disk ext4 the provider direct-kernel-boots,
+   then **SELinux-relabel** the result (tar→ext4 drops the source's security xattrs);
+3. be **proven first** (see Plan ordering): building `fedora-kdive-ready-44` from the cloud qcow2
+   and booting + kdump-proving it is a de-risking spike that runs *before* the catalog/family
+   abstraction is generalized — the cloud→bare-ext4 path was never exercised in diagnosis.
+
+### `images/families/`
+
+```python
+class FamilyCustomizer(Protocol):
+    family: str
+    def packages(self, kind: str) -> tuple[str, ...]: ...
+    def customize_argv(self, ctx: CustomizeContext) -> list[str]: ...
+    def normalize(self, qcow2: Path) -> None: ...   # per-family fstab/MAC normalize + SELinux/AppArmor
+```
+
+`customize_argv` returns the family-specific `virt-customize` fragment; the shared pipeline
+concatenates the universal bits (ssh-inject the managed key, upload + enable the `kdive-ready`
+oneshot unit, disable cloud-init on cloud-image sources). The MVP ships `rhel`; the existing inline
+Fedora customization in `rootfs_build.py` moves here. `debian` and `suse` are added by their
+follow-ups; the protocol exists now so those PRs are additive.
+
+**`kdump_capable` is deferred (YAGNI).** The MVP does *not* add a `kdump_capable` field/method or
+any operator-facing capability surface — it would be unused machinery. The makedumpfile-vs-kernel
+limitation is conveyed at runtime by the Incomplete-core handling remediation (which fires exactly
+when it matters) and in prose docs for the entries. A structured capability flag is added by the
+first follow-up that actually renders it (e.g. the operator image table for the Rocky/Debian
+entries), where it has a concrete surface and a guard test.
+
+| Concern | `rhel` | `debian` | `suse` |
+|---|---|---|---|
+| install | dnf | apt | zypper |
+| crash pkgs | `drgn kexec-tools makedumpfile kdump-utils keyutils` | `makedumpfile kdump-tools crash` | `makedumpfile kdump kexec-tools drgn` |
+| kdump enable | `systemctl enable kdump.service` | `kdump-tools` | `systemctl enable kdump.service` |
+| initramfs | dracut (kdumpctl) | `update-initramfs` | dracut |
+| final-action/NMI | kdump.conf `final_action poweroff` + `unknown_nmi_panic=1` | `/etc/default/kdump-tools` | `/etc/sysconfig/kdump` |
+| sshd | `sshd` | `ssh` | `sshd` |
+| MAC | SELinux permissive | AppArmor | SELinux permissive |
+
+### `rootfs_build.py`
+
+Pipeline: **acquire base (source) → virt-customize (family argv + ssh-inject + kdive-ready) →
+repack whole-disk ext4 (existing) → normalize (family hook) → publish + provenance**. Provenance
+records `source_image_digest = "cloud-image:<url>@sha256:<digest>"` or `"virt-builder:<template>"`.
+
+### `rootfs_command.py`
+
+`build-fs --image <name>` resolves a catalog entry (the primary path). The existing
+`--distro/--releasever/--name/--dest/--kind/--package` flags stay as overrides and back-compat for
+the default image.
+
+### Incomplete-core handling (`providers/local_libvirt/retrieve.py`)
+
+`_LibguestfsCoreReader.list_vmcores` additionally globs `/var/crash/*/vmcore-incomplete`. The
+harvest still prefers a complete `vmcore`; an incomplete core is **not** promoted (a truncated /
+unfiltered core is unreliable for `crash`/drgn). When no complete `vmcore` exists but an incomplete
+one does, `capture` raises `READINESS_FAILURE` with a structured, drift-proof `details`:
+
+```
+reason      = "kdump_core_incomplete"
+remediation = "an incomplete kdump core was found: the in-guest capture did not finish a complete
+               core. Common causes: in-guest makedumpfile is older than the kernel-under-test, or
+               the capture exceeded the window. Retry with method=\"host_dump\", or use a rootfs
+               image whose makedumpfile supports this kernel (e.g. fedora-kdive-ready-44)."
+```
+
+**The remediation is cause-neutral on purpose.** `vmcore-incomplete` is also the *transient* name
+kdump writes during a normal save, renaming to `vmcore` only on makedumpfile success (observed for
+both 43 and 44 in diagnosis). On the harvest timeout path (`_real_wait_for_vmcore` force-offs after
+the settle window), the host can read a still-being-written `vmcore-incomplete` from a capture that
+was merely slow, not toolchain-incompatible. So the single `kdump_core_incomplete` reason must not
+assert "makedumpfile too old" as fact — it names both likely causes and points at the two escapes
+(`host_dump`, newer image). The wording is one shared constant interpolating no guest output. The
+genuinely-empty `/var/crash` case keeps its existing `_no_core` message. Callers distinguish three
+outcomes: complete core → success; incomplete core → the cause-neutral remediation; no core →
+existing readiness failure.
+
+### Inventory
+
+The built image registers like `fedora-kdive-ready-43` today (systems.toml example +
+`admin/default_fixtures` / image_catalog seed), so a System can boot it as its rootfs.
+
+## Testing
+
+### Fast tests (CI, no host)
+
+- `rootfs_catalog.py`: good rows; unknown family; missing source fields; bad `kind`; virt-builder
+  vs cloud-image shape; duplicate name.
+- `base_source.py`: sha256 match passes; mismatch → `CONFIGURATION_ERROR` fail-closed; unreachable
+  URL (404/network) → distinct `CONFIGURATION_ERROR` naming the dead URL (mock the downloader; no
+  network in CI).
+- `rhel` customizer: `customize_argv` for a kdump debug image (package set, kdump enable, sysctl,
+  final_action) — behavior, not brittle string-exactness.
+- `rootfs_build.py`: orchestration with all seams faked — ordering, provenance content, family
+  normalize hook runs (not a hardcoded SELinux edit).
+- `retrieve.py` incomplete-core handling: fake reader for {only `vmcore`}, {only `vmcore-incomplete`},
+  {neither}, {both} → success / `kdump_core_incomplete` / existing `_no_core` / prefers complete.
+- Inventory/guard tests: `fedora-kdive-ready-44` validates like 43.
+
+### Live-proof gate (`live_vm`, this host, not CI)
+
+The proof must **distinguish the fix from the bug**, not merely observe a file named `vmcore` — in
+diagnosis, makedumpfile 1.7.8 still produced a complete `vmcore` on a small (4 GB) guest, because
+the window-overrun failure only manifests when the unfiltered dump is large. So both proofs run at
+a **pinned, large guest RAM** sized so 1.7.8 leaves `vmcore-incomplete`, and the pass/fail signal is
+**makedumpfile behavior on the in-guest console**, not file existence:
+
+1. **Reproduce the failure first.** On `fedora-kdive-ready-43` at the pinned RAM, force_crash +
+   default `kdump` `vmcore.fetch`, and confirm (a) the in-guest console shows *"The kernel version
+   is not supported"*, and (b) the fetch returns the `kdump_core_incomplete` remediation — i.e. the
+   harvest sees `vmcore-incomplete` and the incomplete-core handling path fires. This is the
+   negative-proof; if 43 captures cleanly the RAM is too small and the proof is invalid.
+2. **Prove the fix.** Build `fedora-kdive-ready-44` from the F44 cloud qcow2; at the *same* RAM,
+   force_crash + default `kdump` `vmcore.fetch`, and assert (a) the console shows **no** "kernel
+   version is not supported" line, (b) a **complete** filtered `vmcore` is harvested, and (c)
+   `postmortem.triage` runs on it.
+3. Capture the console + transcript evidence for both, the way the diagnosis did.
+
+## Considered & rejected
+
+- **Pin/limit the kernel-under-test to what makedumpfile supports** — defeats the purpose
+  (debugging arbitrary from-source kernels).
+- **Widen the capture window / promote `vmcore-incomplete` to a core** — masks a truncated,
+  unreliable dump as success; the newer makedumpfile is the real fix and the incomplete-core handling path
+  discloses honestly.
+- **Code registry in `distros.py`** — adding an image becomes a code change and drifts from the
+  project's file-authoritative catalog convention.
+- **Unify onto the ansible `kdive_image_catalog`** — that catalog is host-inventory (group_vars,
+  remote full-disk images), not app-level; local needs the bare-ext4 repack. Reuse the *shape*,
+  not the file.
+- **Only Fedora 44 (no catalog)** — leaves the next distro a one-off again; the user's goal is a
+  reusable multi-distro matrix.

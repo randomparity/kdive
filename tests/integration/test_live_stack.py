@@ -364,12 +364,11 @@ def test_spine_over_the_wire() -> None:
                 ok(await scalar(admin, "control.force_crash", system_id=system_id), "crash")
                 await await_system_state(admin, "crash", system_id, "crashed")
             async with phase("capture"):
-                env = ok(await scalar(op, "vmcore.fetch", system_id=system_id), "capture")
+                env = ok(await scalar(op, "vmcore.fetch", run_id=run_id), "capture")
                 await drain_job(op, "capture", env.object_id)
-                cores = await op.call_tool("vmcore.list", system_id=system_id)
-                assert isinstance(cores, list) and cores, "no vmcore artifact listed (#1)"
-                refs = [v for c in cores for v in c.refs.values()]
-                assert refs, "no vmcore refs (#1)"
+                listing = ok(await scalar(op, "vmcore.list", run_id=run_id), "capture")
+                refs = [v for item in listing.items for v in item.refs.values()]
+                assert refs, "no vmcore artifact listed (#1)"
                 # A raw core is `.../vmcore-{method}` (no `-redacted`); it must never surface.
                 assert all(not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs), (
                     "raw vmcore leaked (#1)"

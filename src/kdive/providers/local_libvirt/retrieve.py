@@ -38,6 +38,7 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
 from kdive.providers.local_libvirt.retrieve_kdump import (
+    HarvestOutcome,
     VmcoreEntry,
     file_sha256_b64,
     harvest_vmcore,
@@ -73,6 +74,18 @@ _log = logging.getLogger(__name__)
 
 _RETENTION_CLASS = "vmcore"
 
+# Cause-neutral operator guidance for an incomplete kdump core (ADR-0251). kdump writes
+# ``/var/crash/<ts>/vmcore-incomplete`` while saving and renames it to ``vmcore`` only on success,
+# so an ``-incomplete`` file that survives means the save never finished. The two field causes are
+# an in-guest ``makedumpfile`` older than the kernel under test, or a capture that ran past the
+# window — this guidance does not assert which, and interpolates no guest output.
+KDUMP_CORE_INCOMPLETE_REMEDIATION = (
+    "kdump left an incomplete core (vmcore-incomplete) and never finished a complete vmcore; "
+    "common causes are an in-guest makedumpfile older than the kernel under test, or a capture "
+    'that exceeded the window. Retry with method="host_dump", or use a rootfs image whose '
+    "makedumpfile supports this kernel (e.g. fedora-kdive-ready-44)"
+)
+
 
 class _StorePort(Protocol):
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact: ...
@@ -80,7 +93,7 @@ class _StorePort(Protocol):
     def head(self, key: str) -> HeadResult | None: ...
 
 
-type _WaitForVmcore = Callable[[UUID], Path | None]
+type _WaitForVmcore = Callable[[UUID], HarvestOutcome]
 type _HostDumpCapture = Callable[[UUID], Path | None]
 type _ReadBuildId = Callable[[bytes], str]
 type _ReadBuildIdFromFile = Callable[[Path], str]
@@ -156,7 +169,10 @@ class LocalLibvirtRetrieve:
             return self._capture_via_file(
                 system_id, run_id, method, self._host_dump_capture(system_id)
             )
-        return self._capture_via_file(system_id, run_id, method, self._wait_for_vmcore(system_id))
+        outcome = self._wait_for_vmcore(system_id)
+        if outcome.core is None and outcome.incomplete_found:
+            raise self._incomplete_core(system_id)
+        return self._capture_via_file(system_id, run_id, method, outcome.core)
 
     def _capture_via_file(
         self, system_id: UUID, run_id: UUID, method: CaptureMethod, core: Path | None
@@ -206,6 +222,25 @@ class LocalLibvirtRetrieve:
             "no complete core appeared within the capture window",
             category=ErrorCategory.READINESS_FAILURE,
             details={"system_id": str(system_id)},
+        )
+
+    @staticmethod
+    def _incomplete_core(system_id: UUID) -> CategorizedError:
+        """An incomplete ``vmcore-incomplete`` was harvested but no complete ``vmcore`` (ADR-0251).
+
+        Distinct from ``_no_core`` (a genuinely empty ``/var/crash``): here kdump produced a
+        partial core, so the readiness failure carries the cause-neutral
+        ``KDUMP_CORE_INCOMPLETE_REMEDIATION`` and a ``kdump_core_incomplete`` reason a caller can
+        branch on.
+        """
+        return CategorizedError(
+            "kdump left an incomplete core; no complete vmcore was captured",
+            category=ErrorCategory.READINESS_FAILURE,
+            details={
+                "reason": "kdump_core_incomplete",
+                "remediation": KDUMP_CORE_INCOMPLETE_REMEDIATION,
+                "system_id": str(system_id),
+            },
         )
 
     def _put_stream(self, run_id: UUID, name: str, core: Path) -> StoredArtifact:
@@ -299,6 +334,10 @@ class LocalLibvirtRetrieve:
 
 
 _VAR_CRASH_GLOB = "/var/crash/*/vmcore"
+# kdump writes ``vmcore-incomplete`` while saving and renames it to ``vmcore`` on success, so a
+# surviving ``-incomplete`` file means the save never finished. The glob is literal-suffixed, so
+# ``*/vmcore`` never matches ``vmcore-incomplete``; the two are listed separately (ADR-0251).
+_VAR_CRASH_INCOMPLETE_GLOB = "/var/crash/*/vmcore-incomplete"
 
 # After the force_crash NMI panics the guest, the in-guest kdump kexecs a crash kernel, boots
 # it, mounts root, and writes /var/crash/<ts>/vmcore before its kdumpctl ``final_action`` runs.
@@ -336,13 +375,21 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
         try:
             entries: list[VmcoreEntry] = []
             for path in self._guest.glob_expand(_VAR_CRASH_GLOB):
-                stat = self._guest.statns(path)
-                entries.append(
-                    VmcoreEntry(path=path, mtime=stat["st_mtime_sec"], size_bytes=stat["st_size"])
-                )
+                entries.append(self._entry(path, incomplete=False))
+            for path in self._guest.glob_expand(_VAR_CRASH_INCOMPLETE_GLOB):
+                entries.append(self._entry(path, incomplete=True))
             return entries
         except Exception as exc:
             raise self._io_failure("listing /var/crash cores", exc) from exc
+
+    def _entry(self, path: str, *, incomplete: bool) -> VmcoreEntry:
+        stat = self._guest.statns(path)
+        return VmcoreEntry(
+            path=path,
+            mtime=stat["st_mtime_sec"],
+            size_bytes=stat["st_size"],
+            incomplete=incomplete,
+        )
 
     def download_vmcore(self, overlay: str, path: str, dest: Path) -> None:
         """Stream the core at ``path`` to ``dest`` (constant memory), not into RAM (#657)."""
@@ -461,7 +508,7 @@ def _real_domain_settled(system_id: UUID) -> bool:  # pragma: no cover - live_vm
         conn.close()
 
 
-def _real_wait_for_vmcore(system_id: UUID) -> Path | None:  # pragma: no cover - live_vm
+def _real_wait_for_vmcore(system_id: UUID) -> HarvestOutcome:  # pragma: no cover - live_vm
     """Wait for in-guest kdump to finish, then harvest the newest overlay core (ADR-0217).
 
     Polls the domain for the kdump-complete signal (self-shut-off) within a bounded window
@@ -472,11 +519,12 @@ def _real_wait_for_vmcore(system_id: UUID) -> Path | None:  # pragma: no cover -
     anyway: a core already written persists on the overlay, and an absent core stays a
     ``READINESS_FAILURE`` exactly as before.
 
-    Owns the spool's lifecycle only up to a successful return: it creates a private temp
-    directory, streams the chosen core into it, and removes the directory if no core is found
-    or the harvest raises. On a successfully returned path the caller (``capture``) owns
-    cleanup, so the file survives this function's ``finally`` (it is on the host filesystem,
-    independent of the libguestfs appliance handle).
+    Returns the harvest outcome: the spooled complete core when one was written, plus whether a
+    ``vmcore-incomplete`` was seen so ``capture`` can disclose an incomplete-core readiness
+    failure (ADR-0251). Owns the spool's lifecycle only up to a complete core: it creates a
+    private temp directory, streams the chosen core into it, and removes the directory when no
+    complete core is found or the harvest raises. On a complete core the caller (``capture``)
+    owns cleanup, so the file survives this function's ``finally``.
     """
     _poll_until_settled(
         lambda: _real_domain_settled(system_id),
@@ -489,13 +537,13 @@ def _real_wait_for_vmcore(system_id: UUID) -> Path | None:  # pragma: no cover -
     spool_dir = Path(tempfile.mkdtemp(prefix="kdive-kdump-"))
     dest = spool_dir / "vmcore"
     reader = _LibguestfsCoreReader(overlay)
-    core: Path | None = None
+    outcome = HarvestOutcome(core=None, incomplete_found=False)
     try:
-        core = harvest_vmcore(reader, overlay, dest=dest, max_bytes=MAX_CORE_BYTES)
-        return core
+        outcome = harvest_vmcore(reader, overlay, dest=dest, max_bytes=MAX_CORE_BYTES)
+        return outcome
     finally:
         reader.close()
-        if core is None:
+        if outcome.core is None:
             _remove_spool(dest)
 
 
