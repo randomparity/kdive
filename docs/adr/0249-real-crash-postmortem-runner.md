@@ -4,8 +4,8 @@
 - **Date:** 2026-06-25
 - **Issue:** [#816](https://github.com/randomparity/kdive/issues/816)
 - **Spec:** [`../superpowers/specs/2026-06-25-real-crash-runner-816.md`](../superpowers/specs/2026-06-25-real-crash-runner-816.md)
-- **Depends on:** [ADR-0084](0084-shared-worker-crash-postmortem.md) (the provider-neutral
-  worker-side crash postmortem this completes), [ADR-0175](0175-tool-maturity-honesty.md)
+- **Depends on:** [ADR-0084](0084-remote-control-two-phase-vmcore-retrieve.md) (the provider-neutral
+  worker-side crash postmortem this completes), [ADR-0175](0175-partial-tool-maturity-reason.md)
   (the maturity/promotion contract the two tools carry).
 
 ## Context
@@ -47,9 +47,13 @@ the exit-status check load-bearing in the shared helper.
    `PygdbmiController.gdb_path_finder`.
 
 2. **Guard the exit status in `run_crash_postmortem`.** A non-zero `crash.exit_status`
-   raises `INFRASTRUCTURE_FAILURE` carrying `exit_status` and the **redacted, capped**
-   stderr. The check lives in the provider-neutral helper so both providers benefit and it
-   is unit-testable without `/usr/bin/crash`.
+   **with an empty/whitespace transcript** (the init-failure shape) raises
+   `INFRASTRUCTURE_FAILURE` carrying `exit_status` and the **redacted, capped** stderr. The
+   guard is conservative — `crash(8)` continues a batch past per-command errors, so a
+   non-zero exit that still produced a transcript returns it rather than discarding it. The
+   check lives in the provider-neutral helper so both providers benefit and it is
+   unit-testable without `/usr/bin/crash`. The runner sets `cwd` to a worker-owned temp dir
+   so crash never needs a writable process CWD.
 
 3. **Wire it.** `LocalLibvirtRetrieve.from_env` and `RemoteLibvirtRetrieve.__init__` pass
    `run_crash=_real_run_crash`.

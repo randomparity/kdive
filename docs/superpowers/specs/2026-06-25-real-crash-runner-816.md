@@ -85,28 +85,47 @@ argv = [crash_path, "-s", str(vmlinux), str(vmcore)]
     `details={"timeout_s": …}`.
   - `OSError` (launch failure after `which` succeeded) → `INFRASTRUCTURE_FAILURE`.
   - otherwise → `CrashResult(exit_status=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)`.
+- `crash(8)` may write session scratch state under its working directory, which a
+  constrained worker may not allow under the process CWD. `_exec_crash` runs with `cwd`
+  set to a per-call temp dir (the vmlinux/vmcore spool's parent, already worker-owned), so
+  crash never depends on a writable process CWD.
 
 Bound the run with `_CRASH_TIMEOUT_S` (default 300 s; a batch of allowlisted read verbs
 over a multi-GB core can take minutes) so a wedged `crash` never pins a worker thread.
 
+The exact invocation (`-s`, positional order, stdin batch delivery) is **not** falsifiable
+by CI — the unit tests cover argv *construction* against an injected path-finder but never
+spawn `crash`. Its correctness is proven only by the `live_vm` test and the recorded live
+proof (the chosen scope drives one); the proof records the `crash(8)` version it ran
+against so a future version skew is traceable.
+
 ### Exit-status check moves into the shared helper
 
 `run_crash_postmortem` gains an exit-status guard so the `CrashResult.exit_status` field is
-load-bearing and the check is provider-neutral and unit-testable:
+load-bearing and the check is provider-neutral and unit-testable. The guard is
+**conservative**: `crash(8)` continues a batch past a per-command error and (verified on
+the live proof, below) exits non-zero mainly when it cannot *initialize* over the
+core/namelist — but a version that returns the last command's status could exit non-zero
+with a full, useful transcript already on stdout. So the helper fails only when the exit is
+non-zero **and** stdout is empty/whitespace (the init-failure shape); a non-zero exit with
+real stdout returns the transcript rather than discarding it:
 
 ```
 crash = run_crash(...)
-if crash.exit_status != 0:
+redactor = Redactor(registry=secret_registry)
+transcript = redactor.redact_text(crash.stdout.decode("utf-8", "replace"))
+if crash.exit_status != 0 and not transcript.strip():
     raise CategorizedError(
-        "the crash(8) subprocess exited non-zero; the core could not be analyzed",
+        "the crash(8) subprocess exited non-zero with no output; the core could not be analyzed",
         category=INFRASTRUCTURE_FAILURE,
         details={"exit_status": crash.exit_status,
                  "stderr": redactor.redact_text(crash.stderr.decode("utf-8", "replace"))[:_STDERR_CAP]},
     )
 ```
 
-stderr is redacted (it can echo paths/values) and capped before it enters the response.
-The redactor is constructed once and reused for stderr + the transcript.
+stderr is redacted (it can echo paths/values) and capped (`_STDERR_CAP = 2048`) before it
+enters the response. The redactor is constructed once and reused for stderr + the
+transcript.
 
 ### Wiring
 
@@ -131,7 +150,8 @@ stay `partial` with corrected, now-satisfiable text.
 1. With `crash(8)` present and a real core, `postmortem.crash(commands=["sys"])` returns a
    redacted transcript (live_vm proof + recorded live run).
 2. With `crash(8)` absent, the tool returns `missing_dependency` naming the missing binary.
-3. A non-zero `crash(8)` exit returns `infrastructure_failure` with redacted, capped stderr.
+3. A non-zero `crash(8)` exit **with empty stdout** returns `infrastructure_failure` with
+   redacted, capped stderr; a non-zero exit that still produced a transcript returns it.
 4. `default_run_crash` no longer exists in the tree (`rg` finds no references).
 5. Unit tests cover: argv construction (fixed argv, stdin script), `which`→missing_dependency,
    timeout→infrastructure_failure, non-zero-exit→infrastructure_failure, success→CrashResult.
@@ -143,6 +163,12 @@ stay `partial` with corrected, now-satisfiable text.
 - **crash present, debuginfo/core mismatch** → already guarded by the build-id check before
   crash runs; if crash still fails, non-zero exit → `infrastructure_failure`.
 - **crash hangs** → `_CRASH_TIMEOUT_S` bound → `infrastructure_failure`.
+- **crash present but cannot write scratch state** (read-only/constrained worker CWD) → the
+  runner sets `cwd` to a worker-owned temp dir, so this does not occur for CWD; a deeper
+  sandbox failure still surfaces as a non-zero exit with empty stdout → `infrastructure_failure`.
+- **crash exits non-zero but produced a full transcript** (last batch verb errored, or a
+  version that returns the last command's status) → the conservative guard returns the
+  transcript instead of discarding it.
 - **stderr contains a secret/path** → redacted + capped before it reaches the response.
 - **invalid UTF-8 in stdout/stderr** → `decode(errors="replace")`, unchanged for stdout.
 
