@@ -1,0 +1,162 @@
+# Spec — wire a real `crash(8)` runner into the Retrieve postmortem (#816)
+
+- **Issue:** [#816](https://github.com/randomparity/kdive/issues/816)
+- **ADR:** [ADR-0249](../../adr/0249-real-crash-postmortem-runner.md)
+- **Status:** Draft
+
+## Problem
+
+`postmortem.crash` and `postmortem.triage` return `missing_dependency` over the deployed
+(live HTTP) server even when a real captured vmcore exists. The production provider
+assembly wires the crash subprocess seam to a no-op stub:
+
+- `src/kdive/providers/local_libvirt/retrieve.py` builds `LocalLibvirtRetrieve.from_env`
+  with `run_crash=default_run_crash`.
+- `src/kdive/providers/remote_libvirt/retrieve/facade.py` defaults
+  `run_crash: RunCrash = default_run_crash`.
+- `default_run_crash` (`providers/shared/debug_common/crash_postmortem.py:96`) raises
+  `CategorizedError(category=MISSING_DEPENDENCY)` unconditionally.
+
+Every other host-bound seam in the Retrieve plane (`_real_wait_for_vmcore`,
+`_real_read_build_id`, `_real_host_dump_capture` in local; the kdump/host-dump capturers
+in remote) has a real `# pragma: no cover - live_vm` implementation wired into production.
+The crash seam is the only one missing its real counterpart, so the deployed
+postmortem feature does not function. The two tools' `partial` promotion text — "a
+recorded live_stack run runs crash commands over a real captured core" — is unsatisfiable
+as written, because the live_stack server wires the stub.
+
+Separately, `CrashResult.exit_status` is dead: `run_crash_postmortem` reads only
+`crash.stdout`, so a `crash(8)` run that fails (non-zero exit, empty stdout) would be
+reported as a successful postmortem with an empty transcript — a silent failure.
+
+## Goals
+
+1. The deployed worker runs the real `crash(8)` over a captured core when the binary is
+   present on the worker host, returning the redacted transcript.
+2. When `crash(8)` is absent, the tool returns `missing_dependency` with an actionable
+   message naming the missing binary (not the misleading "runs only under the live_vm
+   gate" stub message).
+3. A non-zero `crash(8)` exit surfaces as a typed failure carrying redacted stderr, not a
+   silently-empty transcript.
+4. The new runner's command construction and failure mapping are unit-tested off the gate
+   (no `/usr/bin/crash` required); only the `subprocess.run` itself is `live_vm`-gated.
+5. A `live_vm` test drives the real `/usr/bin/crash` over a real captured core, so the
+   real path has at least one executable proof.
+6. The maturity metadata for `postmortem.crash`/`triage` reflects the new reality.
+
+## Non-goals
+
+- Changing the crash-command allowlist or the validator (`security/artifacts/crash_commands.py`).
+- Changing the build-id provenance check or the `read_build_id` seam.
+- Changing the tool surface, parameters, RBAC, schema, or any persistence — no migration.
+- Streaming a multi-GB core differently; the existing tempfile spool is unchanged.
+
+## Design
+
+### The real runner
+
+Add `_real_run_crash(vmlinux: Path, vmcore: Path, script: str) -> CrashResult` to
+`providers/shared/debug_common/crash_postmortem.py`, replacing `default_run_crash` as the
+production default (the stub is deleted — replace, don't deprecate).
+
+```
+crash_path = shutil.which("crash")
+if crash_path is None:
+    raise CategorizedError(
+        "the crash(8) utility is not installed on this worker host",
+        category=MISSING_DEPENDENCY,
+    )
+argv = [crash_path, "-s", str(vmlinux), str(vmcore)]
+# subprocess.run(argv, input=script.encode(), timeout=_CRASH_TIMEOUT_S,
+#                check=False, capture_output=True)
+```
+
+- `crash -s` (silent) suppresses the banner and the `crash>` prompt echo so the transcript
+  is the command output only. `vmlinux` and `vmcore` are the worker-owned temp paths the
+  shared helper already spools; the command batch (validated upstream, terminated with
+  `quit`) is fed on **stdin only**, never argv — so the argv is fixed (`S603`/`S607`
+  justified inline like `introspect.py`).
+- `shutil.which` is injected as `crash_path_finder: Callable[[str], str | None] = shutil.which`
+  so the "binary absent → missing_dependency" branch is unit-testable, mirroring
+  `PygdbmiController`'s `gdb_path_finder`.
+- The `subprocess.run` call is a thin `_exec_crash(...)` helper marked
+  `# pragma: no cover - live_vm`, mapping:
+  - `subprocess.TimeoutExpired` → `INFRASTRUCTURE_FAILURE` (local subprocess, not transport),
+    `details={"timeout_s": …}`.
+  - `OSError` (launch failure after `which` succeeded) → `INFRASTRUCTURE_FAILURE`.
+  - otherwise → `CrashResult(exit_status=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)`.
+
+Bound the run with `_CRASH_TIMEOUT_S` (default 300 s; a batch of allowlisted read verbs
+over a multi-GB core can take minutes) so a wedged `crash` never pins a worker thread.
+
+### Exit-status check moves into the shared helper
+
+`run_crash_postmortem` gains an exit-status guard so the `CrashResult.exit_status` field is
+load-bearing and the check is provider-neutral and unit-testable:
+
+```
+crash = run_crash(...)
+if crash.exit_status != 0:
+    raise CategorizedError(
+        "the crash(8) subprocess exited non-zero; the core could not be analyzed",
+        category=INFRASTRUCTURE_FAILURE,
+        details={"exit_status": crash.exit_status,
+                 "stderr": redactor.redact_text(crash.stderr.decode("utf-8", "replace"))[:_STDERR_CAP]},
+    )
+```
+
+stderr is redacted (it can echo paths/values) and capped before it enters the response.
+The redactor is constructed once and reused for stderr + the transcript.
+
+### Wiring
+
+- Local: `LocalLibvirtRetrieve.from_env` passes `run_crash=_real_run_crash`.
+- Remote: `RemoteLibvirtRetrieve.__init__` default becomes `run_crash: RunCrash = _real_run_crash`.
+- `default_run_crash` is removed from the module and its `__all__`; remote's `facade.py`
+  import is updated. `default_read_vmcore_build_id` is **out of scope** (still wired in
+  remote; the issue's claim about it is noted but not changed here — local already wires a
+  real build-id reader, and remote's real build-id reader is a separate gap).
+
+### Maturity
+
+The stub is gone, so a live_stack/live_vm run over a real core can now exercise the real
+path. Per the chosen scope (drive a full live proof, then promote): if the live proof
+passes, `postmortem.crash` and `postmortem.triage` are promoted to `implemented`
+(`maturity_detail` removed) and the maturity guard in
+`tests/mcp/core/test_tool_docs.py` updated. If the live proof does not complete, the tools
+stay `partial` with corrected, now-satisfiable text.
+
+## Acceptance criteria
+
+1. With `crash(8)` present and a real core, `postmortem.crash(commands=["sys"])` returns a
+   redacted transcript (live_vm proof + recorded live run).
+2. With `crash(8)` absent, the tool returns `missing_dependency` naming the missing binary.
+3. A non-zero `crash(8)` exit returns `infrastructure_failure` with redacted, capped stderr.
+4. `default_run_crash` no longer exists in the tree (`rg` finds no references).
+5. Unit tests cover: argv construction (fixed argv, stdin script), `which`→missing_dependency,
+   timeout→infrastructure_failure, non-zero-exit→infrastructure_failure, success→CrashResult.
+6. `just ci` is green; the live_vm test runs the real `/usr/bin/crash`.
+
+## Failure modes / edge cases
+
+- **crash absent on worker** → `missing_dependency` (covered).
+- **crash present, debuginfo/core mismatch** → already guarded by the build-id check before
+  crash runs; if crash still fails, non-zero exit → `infrastructure_failure`.
+- **crash hangs** → `_CRASH_TIMEOUT_S` bound → `infrastructure_failure`.
+- **stderr contains a secret/path** → redacted + capped before it reaches the response.
+- **invalid UTF-8 in stdout/stderr** → `decode(errors="replace")`, unchanged for stdout.
+
+## Considered & rejected
+
+- **Option 2 — declare the tools `live_vm`-only and keep the production stub.** Rejected:
+  the deployed MCP server is the product; a postmortem that only works inside pytest is a
+  phantom feature. The crash subprocess runs on the worker host exactly like `drgn`/`gdb`/
+  `libguestfs`, all of which run for real in production.
+- **Keep the exit-status check in the real runner only.** Rejected: putting it in the
+  shared helper makes it provider-neutral and unit-testable without `/usr/bin/crash`, and
+  makes the existing `CrashResult.exit_status` field load-bearing instead of dead.
+- **Feed the command batch via `crash -i <cmdfile>` or argv.** Rejected: stdin keeps the
+  argv fixed (no per-command argv injection surface) and matches the existing
+  `_exec_live_script` pattern; the upstream validator already sanitizes the batch.
+- **Fix remote's `default_read_vmcore_build_id` here too.** Deferred: out of this issue's
+  scope (a separate remote-only gap); this change is the crash-runner wiring.
