@@ -126,9 +126,14 @@ detect.
 ### In scope
 
 - `src/kdive/admin/bootstrap.py` — add `verify_project(project) -> ProjectFundingStatus` reusing the
-  canonical budget/quota reads; a small frozen result type carrying `(budget_present, quota_present,
-  limit_kcu, max_concurrent_allocations, max_concurrent_systems)`. (No `database_url_present` field:
-  `create_pool` raises when the URL is unset, so verify never reaches the result with it absent.)
+  canonical admission reads `budget_snapshot` (→ `(limit_kcu, spent_kcu) | None`) and `quota_status`
+  (→ `(max_concurrent_allocations | None, occupancy)`); a small frozen result type carrying
+  `(budget_present, quota_present, limit_kcu, spent_kcu, max_concurrent_allocations, occupancy)` —
+  exactly the figures those two reads return, which are what `allocations.request` gates on. (No
+  `max_concurrent_systems`: that is the `systems.create` gate, read by a different helper; including
+  it would mean a bespoke read, contradicting "reuse the exact admission reads." No
+  `database_url_present`: `create_pool` raises when the URL is unset, so verify never reaches the
+  result with it absent.)
 - `src/kdive/__main__.py` — register a `verify-project` command (`--project`, default `demo`) that
   prints the figures and exits non-zero when either row is absent.
 - `scripts/live-stack/onboard.sh` — the recipe body (sources `env.sh` + `lib.sh`; advisory preflight;
