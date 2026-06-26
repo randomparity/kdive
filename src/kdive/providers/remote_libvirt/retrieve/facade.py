@@ -41,9 +41,9 @@ from kdive.providers.shared.debug_common.crash_postmortem import (
     FetchObject,
     ReadBuildId,
     RunCrash,
+    _real_run_crash,
     default_fetch_object,
     default_read_vmcore_build_id,
-    default_run_crash,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
@@ -64,7 +64,7 @@ class RemoteLibvirtRetrieve:
         pki_base_dir: Path | None = None,
         fetch_object: FetchObject = default_fetch_object,
         read_build_id: ReadBuildId = default_read_vmcore_build_id,
-        run_crash: RunCrash = default_run_crash,
+        run_crash: RunCrash = _real_run_crash,
         kdump_capturer: KdumpCapturer | None = None,
         host_dump_capturer: HostDumpCapturer | None = None,
     ) -> None:

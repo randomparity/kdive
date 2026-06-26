@@ -56,8 +56,8 @@ from kdive.providers.shared.debug_common.core_file import (
     read_core_dmesg_from_file,
 )
 from kdive.providers.shared.debug_common.crash_postmortem import (
+    _real_run_crash,
     default_fetch_object,
-    default_run_crash,
 )
 from kdive.providers.shared.debug_common.crash_postmortem import (
     run_crash_postmortem as _run_crash_postmortem,
@@ -132,7 +132,7 @@ class LocalLibvirtRetrieve:
             ),
             host_dump_capture=_real_host_dump_capture,
             fetch_object=default_fetch_object,
-            run_crash=default_run_crash,
+            run_crash=_real_run_crash,
             secret_registry=secret_registry,
         )
 

@@ -113,15 +113,6 @@ def default_read_vmcore_build_id(data: bytes) -> str:  # pragma: no cover - live
     )
 
 
-def default_run_crash(  # pragma: no cover - live_vm
-    vmlinux: Path, vmcore: Path, script: str
-) -> CrashResult:
-    raise CategorizedError(
-        "the crash subprocess runs only under the live_vm gate",
-        category=ErrorCategory.MISSING_DEPENDENCY,
-    )
-
-
 def _real_run_crash(
     vmlinux: Path,
     vmcore: Path,
@@ -189,6 +180,5 @@ __all__ = [
     "RunCrash",
     "default_fetch_object",
     "default_read_vmcore_build_id",
-    "default_run_crash",
     "run_crash_postmortem",
 ]

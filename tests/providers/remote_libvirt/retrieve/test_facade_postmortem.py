@@ -149,3 +149,14 @@ def test_crash_postmortem_adapter_passes_injected_seams(
     assert calls[0]["fetch_object"] is fetch_object
     assert calls[0]["read_build_id"] is read_build_id
     assert calls[0]["run_crash"] is run_crash
+
+
+def test_remote_facade_defaults_to_real_crash_runner() -> None:
+    # The remote facade wraps run_crash inside CrashPostmortemAdapter (no `_run_crash` on the
+    # facade), so the constructor default is the wiring site to pin to the real runner.
+    import inspect
+
+    from kdive.providers.shared.debug_common.crash_postmortem import _real_run_crash
+
+    default = inspect.signature(RemoteLibvirtRetrieve.__init__).parameters["run_crash"].default
+    assert default is _real_run_crash
