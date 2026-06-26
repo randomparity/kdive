@@ -366,6 +366,50 @@ def test_format_verify_result_funded_returns_zero() -> None:
     assert "1000000" in message
 
 
+def test_verify_project_command_registered_with_project_arg() -> None:
+    from kdive import __main__ as main_mod
+
+    default_args = main_mod.build_parser().parse_args(["verify-project"])
+    assert default_args.command == "verify-project"
+    assert default_args.project == "demo"
+
+    explicit_args = main_mod.build_parser().parse_args(["verify-project", "--project", "acme"])
+    assert explicit_args.project == "acme"
+
+
+def test_verify_project_command_exits_nonzero_when_unseeded(
+    monkeypatch: pytest.MonkeyPatch, migrated_url: str
+) -> None:
+    # The funding gate rests on this wire: the handler must propagate format_verify_result's
+    # non-zero code via SystemExit so onboard's `set -e` aborts on an unseeded DB.
+    from kdive import __main__ as main_mod
+    from kdive.security.secrets.secret_registry import SecretRegistry
+
+    monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)
+    args = main_mod.build_parser().parse_args(["verify-project", "--project", "demo"])
+
+    with pytest.raises(SystemExit) as exc:
+        main_mod._COMMAND_BY_NAME["verify-project"].handler(args, SecretRegistry(), None)
+
+    assert exc.value.code != 0
+
+
+def test_verify_project_command_exits_zero_when_seeded(
+    monkeypatch: pytest.MonkeyPatch, migrated_url: str
+) -> None:
+    from kdive import __main__ as main_mod
+    from kdive.security.secrets.secret_registry import SecretRegistry
+
+    _seed_rows(migrated_url, budget=True, quota=True)
+    monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)
+    args = main_mod.build_parser().parse_args(["verify-project", "--project", "demo"])
+
+    with pytest.raises(SystemExit) as exc:
+        main_mod._COMMAND_BY_NAME["verify-project"].handler(args, SecretRegistry(), None)
+
+    assert exc.value.code == 0
+
+
 def test_format_verify_result_missing_row_returns_nonzero() -> None:
     from kdive.admin.bootstrap import ProjectFundingStatus, format_verify_result
 

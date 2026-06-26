@@ -200,6 +200,25 @@ def _handle_seed_project(
     )
 
 
+def _add_verify_project_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--project", default="demo")
+
+
+def _handle_verify_project(
+    args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
+) -> None:
+    del secret_registry, telemetry
+    from kdive.admin.bootstrap import format_verify_result, redact_database_url, verify_project
+    from kdive.db.pool import database_url
+
+    status = asyncio.run(verify_project(project=args.project))
+    message, code = format_verify_result(
+        status, project=args.project, redacted_url=redact_database_url(database_url())
+    )
+    print(message)
+    raise SystemExit(code)
+
+
 def _handle_build_fs(
     args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
 ) -> None:
@@ -277,6 +296,12 @@ _COMMANDS: tuple[_Command, ...] = (
         "seed a project's budget/quota and register discovered resources",
         _handle_seed_project,
         add_arguments=_add_seed_project_arguments,
+    ),
+    _Command(
+        "verify-project",
+        "read back a project's budget/quota rows; exit non-zero if either is absent",
+        _handle_verify_project,
+        add_arguments=_add_verify_project_arguments,
     ),
     _Command(
         "build-fs",
