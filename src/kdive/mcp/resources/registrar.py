@@ -51,28 +51,30 @@ class DocResource:
 
 DOC_RESOURCES: tuple[DocResource, ...] = (
     DocResource(
-        uri="resource://kdive/docs/operating/build-source-staging.md",
-        source="docs/operating/build-source-staging.md",
-        content_file="build-source-staging.md",
-        name="build-source-staging",
-        title="Staging kernel source for runs.build",
-        description=(
-            "Operator prerequisite for the server-build lane: how to stage a warm kernel "
-            "source tree (KDIVE_KERNEL_SRC) or register a remote build host. Cited by the "
-            "runs.create build_profile schema."
-        ),
-    ),
-    DocResource(
         uri="resource://kdive/docs/operating/external-build-upload.md",
         source="docs/operating/external-build-upload.md",
         content_file="external-build-upload.md",
         name="external-build-upload",
         title="Preparing artifacts for the external-build lane",
         description=(
-            "How to shape the upload artifacts for the external-build lane: the combined "
-            "kernel+modules gzip tar (boot/vmlinuz bzImage + lib/modules/<release>/), the exact "
-            "tar recipe, and the optional vmlinux/effective_config/initrd. Cited by the "
-            "runs.create build_profile schema and artifacts.expected_uploads."
+            "The default build lane (ADR-0234): build the kernel locally and upload it, no "
+            "operator-staged source tree or build host needed. How to shape the upload "
+            "artifacts: the combined kernel+modules gzip tar (boot/vmlinuz bzImage + "
+            "lib/modules/<release>/), the exact tar recipe, and the optional "
+            "vmlinux/effective_config/initrd. Cited by the runs.create build_profile schema "
+            "and artifacts.expected_uploads."
+        ),
+    ),
+    DocResource(
+        uri="resource://kdive/docs/operating/build-source-staging.md",
+        source="docs/operating/build-source-staging.md",
+        content_file="build-source-staging.md",
+        name="build-source-staging",
+        title="Staging kernel source for runs.build",
+        description=(
+            "Advanced single-host alternative to the default external-upload lane: how to "
+            "stage a warm kernel source tree (KDIVE_KERNEL_SRC) or register a remote build "
+            "host for the server-build lane. Cited by the runs.create build_profile schema."
         ),
     ),
     DocResource(

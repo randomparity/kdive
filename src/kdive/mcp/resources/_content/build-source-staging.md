@@ -10,6 +10,12 @@ This is an **operator** prerequisite: a caller cannot stage a warm tree, allowli
 git remote, or register a remote build host over the MCP surface alone. The error messages
 from `runs.create`/`runs.build` name the step that is missing and point here.
 
+> **Most callers should not use this lane.** The simplest path is to build in your own
+> checkout and upload the result — see
+> [the external-build lane](external-build-upload.md). The warm-tree/server lanes below
+> are a single-host convenience that requires operator setup (a pre-staged
+> `KDIVE_KERNEL_SRC` tree or a registered build host).
+
 ## The build lanes
 
 | Lane | `kernel_source_ref` form | Build host | Operator prerequisite |
@@ -188,6 +194,8 @@ root, so you can confirm from the worker log that builds run unprivileged.
 
 ## Related
 
+- [External-build lane](external-build-upload.md) — the default lane: build the kernel in
+  your own checkout and upload it, with no operator-staged source tree or build host.
 - [Config reference](../guide/reference/config.md) — `KDIVE_KERNEL_SRC`, `KDIVE_BUILD_USER`, and
   the other worker settings.
 - [Local libvirt](providers/local-libvirt.md) — the `worker-local` provider prerequisites.

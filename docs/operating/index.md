@@ -23,7 +23,8 @@ runbooks.
 | [Local libvirt walkthrough](providers/local-libvirt-walkthrough.md) | End-to-end local-libvirt setup: prepare, install, onboard, test |
 | [Remote libvirt](providers/remote-libvirt.md) | Remote libvirt host wiring and prerequisites |
 | [Remote libvirt walkthrough](providers/remote-libvirt-walkthrough.md) | End-to-end remote-libvirt setup: prepare, install, onboard, test |
-| [Kernel source staging](build-source-staging.md) | Staging `KDIVE_KERNEL_SRC` (warm-tree) vs the git-clone build lane for `runs.build` |
+| [External-build lane](external-build-upload.md) | The default build lane: build the kernel locally and upload it (no operator-staged source tree or build host) |
+| [Kernel source staging](build-source-staging.md) | Advanced single-host alternative: staging `KDIVE_KERNEL_SRC` (warm-tree) vs the git-clone build lane for `runs.build` |
 
 ## Tenancy
 

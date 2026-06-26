@@ -1,5 +1,10 @@
 # Preparing artifacts for the external-build lane
 
+**This is the default build lane (ADR-0234): build locally, upload, `runs.complete_build`.**
+No operator-staged source tree or build host is needed — most callers should start here. The
+warm-tree/server lanes in [kernel source staging](build-source-staging.md) are a single-host
+convenience that requires operator setup.
+
 The external-build lane (`runs.create` with a `build_profile` whose `source="external"`)
 ingests a kernel you built yourself instead of building one on a worker. You upload the
 artifacts, then call `runs.complete_build` to finalize the Run. This page is the recipe for
