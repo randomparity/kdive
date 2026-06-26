@@ -201,6 +201,14 @@ def envelope_for_run(
         if isinstance(kind, str):
             data["expected_boot_failure"] = kind
         data["expected_boot_failure_detail"] = cast(JsonValue, run.expected_boot_failure)
+        if step_progress is not None and step_progress.matched_line is not None:
+            # The actual console line that matched the configured pattern (#840, ADR-0260),
+            # surfaced alongside the configured `expected_boot_failure_detail` so an agent can
+            # confirm the boot reproduced the intended crash, not an unrelated pattern hit. The
+            # boot handler read it from the already-redacted console and `search_text` clipped it,
+            # so it is redaction-safe and length-bounded; present only when a crash actually
+            # matched.
+            data["expected_boot_failure_matched_line"] = step_progress.matched_line
     if step_progress is not None and step_progress.available_capture is not None:
         # The crash outcome's reachable-now capture methods, and the provisioned-but-inert ones,
         # so an agent learns which capture flags will not fire on this boot (#760, ADR-0239).

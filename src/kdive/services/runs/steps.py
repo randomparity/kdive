@@ -132,6 +132,7 @@ class StepProgress:
     console_evidence_artifact_id: str | None = None
     available_capture: list[str] | None = None
     inert_capture: list[str] | None = None
+    matched_line: str | None = None
 
     def steps_map(self) -> dict[str, str]:
         """The fixed-key `runs.get` `data.steps` map; `build` is `succeeded` by construction."""
@@ -175,13 +176,15 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
     surface ``refs.console`` on ``runs.get``; ``None`` when boot is unrecorded or captured no
     console evidence. ``available_capture`` / ``inert_capture`` are the capture-disclosure lists the
     boot handler recorded for a crash outcome (ADR-0239); ``None`` when the boot result carries
-    neither.
+    neither. ``matched_line`` is the console line that matched an ``expected_boot_failure``
+    (ADR-0260); ``None`` when boot recorded no match.
     """
     states = {step: "pending" for step in _PROGRESS_STEPS}
     boot_outcome: str | None = None
     console_evidence_artifact_id: str | None = None
     available_capture: list[str] | None = None
     inert_capture: list[str] | None = None
+    matched_line: str | None = None
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT step, state, result FROM run_steps WHERE run_id = %s AND step = ANY(%s)",
@@ -197,6 +200,7 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
             console_evidence_artifact_id = _optional_str(boot_result.get("evidence_artifact_id"))
             available_capture = _optional_str_list(boot_result.get("available_capture"))
             inert_capture = _optional_str_list(boot_result.get("inert_capture"))
+            matched_line = _optional_str(boot_result.get("matched_line"))
     return StepProgress(
         install=states["install"],
         boot=states["boot"],
@@ -204,6 +208,7 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
         console_evidence_artifact_id=console_evidence_artifact_id,
         available_capture=available_capture,
         inert_capture=inert_capture,
+        matched_line=matched_line,
     )
 
 
