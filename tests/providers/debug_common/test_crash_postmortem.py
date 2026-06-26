@@ -105,6 +105,69 @@ def test_build_id_mismatch_is_configuration_error() -> None:
     assert exc.value.details == {"vmcore_ref": "core-ref"}
 
 
+def test_nonzero_exit_with_empty_stdout_is_infrastructure_failure() -> None:
+    # crash(8) that cannot initialize over the core/namelist exits non-zero with no usable
+    # output; that must surface as a typed failure, not a success-reporting empty transcript.
+    with pytest.raises(CategorizedError) as exc:
+        run_crash_postmortem(
+            vmcore_ref="core-ref",
+            debuginfo_ref="debug-ref",
+            expected_build_id="deadbeef",
+            commands=["sys"],
+            fetch_object=lambda ref: b"CORE",
+            read_build_id=lambda data: "deadbeef",
+            run_crash=lambda v, c, s: CrashResult(
+                exit_status=1, stdout=b"  \n", stderr=b"cannot open core"
+            ),
+            secret_registry=SecretRegistry(),
+        )
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details["exit_status"] == 1
+    assert exc.value.details["stderr"] == "cannot open core"
+
+
+def test_nonzero_exit_with_transcript_is_returned_not_discarded() -> None:
+    # crash continues a batch past a per-command error and may still exit non-zero; the
+    # already-produced transcript must be returned, not thrown away.
+    out = run_crash_postmortem(
+        vmcore_ref="core-ref",
+        debuginfo_ref="debug-ref",
+        expected_build_id="deadbeef",
+        commands=["sys", "struct nope"],
+        fetch_object=lambda ref: b"CORE",
+        read_build_id=lambda data: "deadbeef",
+        run_crash=lambda v, c, s: CrashResult(
+            exit_status=1, stdout=b"SYSTEM MAP: ...\n", stderr=b"struct: invalid"
+        ),
+        secret_registry=SecretRegistry(),
+    )
+    assert out.transcript == "SYSTEM MAP: ...\n"
+
+
+def test_nonzero_exit_stderr_is_redacted_and_capped() -> None:
+    # stderr can echo secrets/paths; it is redacted against the supplied registry and capped
+    # before it enters the error envelope.
+    registry = SecretRegistry()
+    registry.register("hunter2-secret", scope=None)
+    with pytest.raises(CategorizedError) as exc:
+        run_crash_postmortem(
+            vmcore_ref="core-ref",
+            debuginfo_ref="debug-ref",
+            expected_build_id="deadbeef",
+            commands=["sys"],
+            fetch_object=lambda ref: b"CORE",
+            read_build_id=lambda data: "deadbeef",
+            run_crash=lambda v, c, s: CrashResult(
+                exit_status=2, stdout=b"", stderr=b"key=hunter2-secret " + b"x" * 4000
+            ),
+            secret_registry=registry,
+        )
+    stderr = exc.value.details["stderr"]
+    assert isinstance(stderr, str)
+    assert "hunter2-secret" not in stderr
+    assert len(stderr) <= 2048
+
+
 def test_rejected_command_batch_is_configuration_error() -> None:
     with pytest.raises(CategorizedError) as exc:
         run_crash_postmortem(

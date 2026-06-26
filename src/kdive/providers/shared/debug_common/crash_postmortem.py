@@ -26,6 +26,9 @@ type FetchObject = Callable[[str], bytes]
 type ReadBuildId = Callable[[bytes], str]
 type RunCrash = Callable[[Path, Path, str], CrashResult]
 
+# Cap the redacted crash(8) stderr carried in an error envelope; stderr is unbounded.
+_STDERR_CAP = 2048
+
 
 def run_crash_postmortem(
     *,
@@ -73,6 +76,17 @@ def run_crash_postmortem(
         crash = run_crash(Path(vmlinux_file.name), Path(core_file.name), script)
     redactor = Redactor(registry=secret_registry)
     transcript = redactor.redact_text(crash.stdout.decode("utf-8", "replace"))
+    if crash.exit_status != 0 and not transcript.strip():
+        # crash continues a batch past a per-command error, so a non-zero exit *with* output is
+        # kept (the transcript is still useful). A non-zero exit with no output is the
+        # init-failure shape (e.g. an incompatible core it could not open) — surface it instead
+        # of reporting a success with an empty transcript.
+        stderr = redactor.redact_text(crash.stderr.decode("utf-8", "replace"))
+        raise CategorizedError(
+            "the crash(8) subprocess exited non-zero with no output; the core was not analyzed",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"exit_status": crash.exit_status, "stderr": stderr[:_STDERR_CAP]},
+        )
     return CrashOutput(
         results={cmd: {"ran": True} for cmd in commands},
         transcript=transcript,
