@@ -95,13 +95,7 @@ Return a ready-to-edit example profile per configured provider. Requires a token
 
 ## `systems.provision`
 
-`partial`
-
-**Maturity:** live_dependency — Mints a System and enqueues a provision job the provider runs against real infrastructure; the provision path is exercised only under the gated live markers.
-
-**Promotion:** A non-gated test or recorded live_stack run provisions a System to ready on real infrastructure.
-
-**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: simulated.
+`implemented`
 
 Mint a System for a granted Allocation and enqueue provision directly (no upload
 window). Use `systems.define` then `systems.provision_defined` instead when the rootfs
@@ -174,13 +168,7 @@ Requires operator.
 
 ## `systems.reprovision`
 
-`partial` · `destructive`
-
-**Maturity:** live_dependency — Enqueues an in-place reprovision job the provider runs against real infrastructure; the reprovision path is exercised only under the gated live markers.
-
-**Promotion:** A non-gated test or recorded live_stack run reprovisions a real System back to ready.
-
-**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: simulated.
+`implemented` · `destructive`
 
 Enqueue in-place reprovision for a ready System; not for creating a new System —
 use `systems.provision` instead. Requires operator and opt-in.
@@ -234,13 +222,7 @@ use `systems.provision` instead. Requires operator and opt-in.
 
 ## `systems.teardown`
 
-`partial` · `destructive`
-
-**Maturity:** live_dependency — Enqueues a teardown job the provider runs against real infrastructure; the teardown path is exercised only under the gated live markers.
-
-**Promotion:** A non-gated test or recorded live_stack run tears a real System down and the reconciler observes it gone.
-
-**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: simulated.
+`implemented` · `destructive`
 
 Enqueue teardown for a System. Requires admin on the System's project.
 

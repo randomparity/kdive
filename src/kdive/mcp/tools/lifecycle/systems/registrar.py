@@ -125,20 +125,7 @@ def _register_systems_provision(
     @app.tool(
         name="systems.provision",
         annotations=_docmeta.mutating(),
-        meta=_docmeta.maturity_meta(
-            "partial",
-            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
-            detail=(
-                "Mints a System and enqueues a provision job the provider runs against real "
-                "infrastructure; the provision path is exercised only under the gated live "
-                "markers."
-            ),
-            promotion=(
-                "A non-gated test or recorded live_stack run provisions a System to ready on "
-                "real infrastructure."
-            ),
-            providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: simulated.",
-        ),
+        meta=_docmeta.maturity_meta("implemented"),
     )
     async def systems_provision(
         allocation_id: Annotated[
@@ -302,19 +289,7 @@ def _register_systems_teardown(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="systems.teardown",
         annotations=_docmeta.destructive(),
-        meta=_docmeta.maturity_meta(
-            "partial",
-            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
-            detail=(
-                "Enqueues a teardown job the provider runs against real infrastructure; the "
-                "teardown path is exercised only under the gated live markers."
-            ),
-            promotion=(
-                "A non-gated test or recorded live_stack run tears a real System down and the "
-                "reconciler observes it gone."
-            ),
-            providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: simulated.",
-        ),
+        meta=_docmeta.maturity_meta("implemented"),
     )
     async def systems_teardown(
         system_id: Annotated[str, Field(description="The System to tear down.")],
@@ -335,20 +310,7 @@ def _register_systems_reprovision(
     @app.tool(
         name="systems.reprovision",
         annotations=_docmeta.destructive(),
-        meta=_docmeta.maturity_meta(
-            "partial",
-            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
-            detail=(
-                "Enqueues an in-place reprovision job the provider runs against real "
-                "infrastructure; the reprovision path is exercised only under the gated "
-                "live markers."
-            ),
-            promotion=(
-                "A non-gated test or recorded live_stack run reprovisions a real System back "
-                "to ready."
-            ),
-            providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: simulated.",
-        ),
+        meta=_docmeta.maturity_meta("implemented"),
     )
     async def systems_reprovision(
         system_id: Annotated[str, Field(description="The ready System to reprovision in place.")],

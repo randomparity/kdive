@@ -483,18 +483,7 @@ def register(
     @app.tool(
         name="vmcore.list",
         annotations=_docmeta.read_only(),
-        meta=_docmeta.maturity_meta(
-            "partial",
-            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
-            detail=(
-                "Lists a Run's redacted vmcore artifacts; those rows only exist after a "
-                "live capture path runs, exercised under the gated live markers."
-            ),
-            promotion=(
-                "A non-gated test or recorded live_stack run lists vmcore artifacts a real "
-                "capture produced."
-            ),
-        ),
+        meta=_docmeta.maturity_meta("implemented"),
     )
     async def vmcore_list(
         run_id: Annotated[
