@@ -116,7 +116,10 @@ the kdump harvest disclose an incomplete core honestly.
   (`FamilyCustomizer.kdump_unit`, point 6) and the build-pipeline `guest_selinux` provenance field,
   now `guest_mac` (`selinux-permissive` for `rhel`, `apparmor` for `debian`). Both Debian entries ship
   makedumpfile < 1.7.9 (1.7.2 / 1.7.6), so both disclose the incomplete-core remediation like the #823
-  rows.
+  rows. A live boot (#824) surfaced one defect build inspection missed: disabling cloud-init removes
+  the per-instance sshd host-key generation Debian relies on (it has no `sshd-keygen@.service`), so the
+  `debian` lane stages a oneshot `kdive-sshd-keygen.service` (`ssh-keygen -A`, `Before=ssh.service`,
+  `ConditionPathExists`-gated) to restore per-boot keygen — without it `ssh.service` never starts.
 - A distro whose makedumpfile is older than the kernel-under-test still produces an incomplete
   core; the worker now returns a clear, actionable failure naming `host_dump`/newer-image rather
   than the opaque window-timeout message.

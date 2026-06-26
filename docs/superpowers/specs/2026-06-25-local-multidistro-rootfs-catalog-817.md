@@ -274,6 +274,17 @@ Notes on the non-obvious choices:
   vendor preset — the same hazard that disabled kdump on Fedora Cloud. The lane seeds the same fixed
   machine-id the `rhel` lane uses, so kdump stays armed on first boot.
 
+- **sshd host-key generation (a consequence of disabling cloud-init).** Debian genericcloud ships
+  `openssh-server` with **no host keys** — cloud-init's `ssh` module generates them per-instance on
+  first boot. Disabling cloud-init (above) removes that, and Debian has **no Fedora/RHEL
+  `sshd-keygen@.service`** to fall back on, so `ssh.service` fails its `sshd -t` preflight on every
+  boot and rate-limits — SSH (the drgn-live transport, a declared `ssh` capability) never comes up.
+  The `debian` lane therefore stages a oneshot `kdive-sshd-keygen.service` that runs `ssh-keygen -A`
+  ordered `Before=ssh.service`, gated `ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key` so keys are
+  generated **per-instance** at first boot and an existing identity is never overwritten — restoring
+  the per-boot keygen the `rhel` family gets for free from `sshd-keygen@.service`. (Found by live boot,
+  not build inspection: the staged image is correctly keyless; the keys only appear after a boot.)
+
 - **No NetworkManager keyfile.** Debian genericcloud uses ifupdown + cloud-init's
   `cloud-ifupdown-helper`, which DHCPs each NIC automatically; it does not ship NetworkManager, so the
   `rhel` SSH-NIC NM keyfile (ADR-0218) would be inert. The `debian` debug image stages the reviewed
@@ -357,6 +368,16 @@ documented matrix exactly** for both entries (1.7.2 / 1.7.6, both < 1.7.9 → `k
 correct against the real image). The remaining capture lifecycle (install plane → `force_crash` →
 `host_dump`, and the default `kdump` path landing on `kdump_core_incomplete`) runs through the operator
 live-stack harness as for #823.
+
+**Boot proof (2026-06-26, both entries).** Each image was registered in the host inventory
+(`~/.config/kdive/systems.toml` staged-path + `reconcile-systems`) and direct-kernel-booted on the KVM
+host (overlay-backed, serial captured). Both reached the **`kdive-ready` serial signal**, and on both
+`kdump-tools` ran *before* `kdive-ready` on the console — the `After=kdump-tools.service` ordering
+(point 6) holds live on Debian. The boot **surfaced a real defect build inspection missed**:
+`ssh.service` failed repeatedly with no host keys (cloud-init, the per-instance keygen, was disabled).
+The fix above (`kdive-sshd-keygen.service`) was added, both images rebuilt, and a re-boot confirmed the
+oneshot generates all three host-key pairs on the per-instance overlay (`ssh_host_{ed25519,rsa,ecdsa}_key`)
+while the staged image stays keyless — and the `ssh.service` failures are gone.
 
 ## Architecture
 
