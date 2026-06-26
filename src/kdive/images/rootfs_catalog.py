@@ -44,11 +44,12 @@ class RootfsCatalogEntry:
     """One resolved row of the local rootfs catalog.
 
     Attributes:
-        kdump_capable: Whether the makedumpfile the build installs from this release's repos is
-            new enough (>= 1.7.9) to filter a v7.0-class from-source kernel's vmcore — i.e. whether
-            the default ``kdump`` ``vmcore.fetch`` yields a complete filtered core or hits the
-            ``kdump_core_incomplete`` remediation. Kernel-relative (to the current default target)
-            and a curated build-time snapshot, not live upstream truth (ADR-0251, #823).
+        makedumpfile_version: The curated build-time makedumpfile version this release's repos
+            install (e.g. ``"1.7.9"``), verified against distro package indexes — the per-image
+            operand of the computed kdump-capability predicate (:mod:`kdive.images.kdump_support`,
+            ADR-0253). A snapshot, not live upstream truth; the actual built version is recorded in
+            the published image's ``provenance["makedumpfile_version"]``. The kdump capability for a
+            given target kernel is *computed* from this, not stored as a kernel-relative bit.
     """
 
     name: str
@@ -58,7 +59,7 @@ class RootfsCatalogEntry:
     arch: str
     kind: str
     source: RootfsSource
-    kdump_capable: bool
+    makedumpfile_version: str
 
 
 def _catalog_error(message: str, field: str) -> CategorizedError:
@@ -74,13 +75,6 @@ def _require_str(row: dict[Any, Any], field: str) -> str:
     value = row.get(field)
     if not isinstance(value, str) or not value:
         raise _catalog_error(f"rootfs catalog row is missing {field}", field)
-    return value
-
-
-def _require_bool(row: dict[Any, Any], field: str) -> bool:
-    value = row.get(field)
-    if not isinstance(value, bool):
-        raise _catalog_error(f"rootfs catalog row is missing a boolean {field}", field)
     return value
 
 
@@ -107,7 +101,7 @@ def _parse_entry(row: dict[str, Any]) -> RootfsCatalogEntry:
         arch=_require_str(row, "arch"),
         kind=_require_str(row, "kind"),
         source=_parse_source(row.get("source")),
-        kdump_capable=_require_bool(row, "kdump_capable"),
+        makedumpfile_version=_require_str(row, "makedumpfile_version"),
     )
 
 

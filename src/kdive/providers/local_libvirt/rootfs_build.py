@@ -187,9 +187,9 @@ def _resolve_entry(spec: RootfsBuildSpec) -> RootfsCatalogEntry:
         arch=spec.arch,
         kind=_kind_for(spec.capabilities),
         source=VirtBuilderSource(template=f"{spec.distro}-{spec.releasever}"),
-        # A synthesized legacy row makes no kdump-capability claim; default to the safe
-        # disclose-by-default (the runtime incomplete-core remediation is the ground truth).
-        kdump_capable=False,
+        # A synthesized legacy row makes no makedumpfile-version claim; an empty value makes the
+        # computed predicate yield ``unverified`` (the build-time probe records the real version).
+        makedumpfile_version="",
     )
 
 

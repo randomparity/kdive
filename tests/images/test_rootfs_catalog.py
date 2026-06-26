@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.kdump_support import DEFAULT_KERNEL_BASIS, kdump_capability
 from kdive.images.rootfs_catalog import (
     CloudImageSource,
     VirtBuilderSource,
@@ -16,23 +17,22 @@ from kdive.images.rootfs_catalog import (
 
 _CLOUD_URL = "https://example.test/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
 
-# The authoritative makedumpfile-version snapshot the kdump_capable guard asserts against
-# (build-time repo version per release, verified against distro package indexes 2026-06-26; see
-# docs/superpowers/specs/2026-06-25-local-multidistro-rootfs-catalog-817.md). A row's
-# ``kdump_capable`` must equal ``version >= (1, 7, 9)`` — the first makedumpfile supporting a
-# v7.0-class x86_64 kernel. Flip a flag without bumping the version here and the guard fails.
-_MAKEDUMPFILE_BY_NAME: dict[str, tuple[int, int, int]] = {
-    "fedora-kdive-ready-44": (1, 7, 9),
-    "fedora-kdive-ready-43": (1, 7, 8),
-    "rocky-kdive-ready-10": (1, 7, 8),
-    "rocky-kdive-ready-9": (1, 7, 6),
-    "rocky-kdive-ready-8": (1, 7, 2),
-    "centos-stream-kdive-ready-10": (1, 7, 8),
-    "centos-stream-kdive-ready-9": (1, 7, 6),
-    "debian-kdive-ready-12": (1, 7, 2),
-    "debian-kdive-ready-13": (1, 7, 6),
+# The curated build-time makedumpfile version per release (verified against distro package indexes
+# 2026-06-26; see docs/superpowers/specs/2026-06-25-local-multidistro-rootfs-catalog-817.md). This
+# is the per-image operand of the computed kdump-capability predicate (ADR-0253): it must match the
+# structured ``makedumpfile_version`` field in rootfs_catalog.toml. The capability itself is now
+# computed (kdump_support), not stored.
+_EXPECTED_MAKEDUMPFILE: dict[str, str] = {
+    "fedora-kdive-ready-44": "1.7.9",
+    "fedora-kdive-ready-43": "1.7.8",
+    "rocky-kdive-ready-10": "1.7.8",
+    "rocky-kdive-ready-9": "1.7.6",
+    "rocky-kdive-ready-8": "1.7.2",
+    "centos-stream-kdive-ready-10": "1.7.8",
+    "centos-stream-kdive-ready-9": "1.7.6",
+    "debian-kdive-ready-12": "1.7.2",
+    "debian-kdive-ready-13": "1.7.6",
 }
-_V7_THRESHOLD = (1, 7, 9)
 
 
 def _write_catalog(tmp_path: Path, body: str) -> Path:
@@ -66,7 +66,7 @@ def test_loads_debian_entries() -> None:
 
 def test_cloud_image_entries_are_sha256_pinned() -> None:
     cat = load_rootfs_catalog()
-    for name in _MAKEDUMPFILE_BY_NAME:
+    for name in _EXPECTED_MAKEDUMPFILE:
         if name.startswith("fedora-kdive-ready-43"):
             continue  # the lone virt-builder regression reference
         src = cat[name].source
@@ -75,27 +75,31 @@ def test_cloud_image_entries_are_sha256_pinned() -> None:
         assert len(src.sha256) == 64, name
 
 
-def test_kdump_capable_only_fedora_44_is_true() -> None:
+def test_catalog_makedumpfile_versions_match_snapshot() -> None:
     cat = load_rootfs_catalog()
-    assert cat["fedora-kdive-ready-44"].kdump_capable is True
-    for name in _MAKEDUMPFILE_BY_NAME:
-        if name != "fedora-kdive-ready-44":
-            assert cat[name].kdump_capable is False, name
+    for name, version in _EXPECTED_MAKEDUMPFILE.items():
+        assert cat[name].makedumpfile_version == version, name
 
 
-def test_kdump_capable_matches_documented_makedumpfile_version() -> None:
-    """Guard: each row's kdump_capable equals (its build-time makedumpfile >= 1.7.9)."""
+def test_only_fedora_44_is_capable_for_the_default_basis() -> None:
+    """Guard: against the characterized basis, only the >= 1.7.9 row computes ``capable``."""
     cat = load_rootfs_catalog()
-    for name, version in _MAKEDUMPFILE_BY_NAME.items():
-        assert cat[name].kdump_capable == (version >= _V7_THRESHOLD), name
+    for name in _EXPECTED_MAKEDUMPFILE:
+        cap = kdump_capability(
+            makedumpfile_version=cat[name].makedumpfile_version,
+            target_kernel=DEFAULT_KERNEL_BASIS,
+            kdump_tooling=True,
+        )
+        expected = "capable" if name == "fedora-kdive-ready-44" else "incapable"
+        assert cap.status == expected, name
 
 
-def test_missing_kdump_capable_is_config_error(tmp_path: Path) -> None:
+def test_missing_makedumpfile_version_is_config_error(tmp_path: Path) -> None:
     path = _write_catalog(
         tmp_path,
         """
 [[image]]
-name = "no-flag"
+name = "no-version"
 distro = "fedora"
 version = "44"
 family = "rhel"
@@ -107,28 +111,7 @@ source = { kind = "virt-builder", template = "fedora-44" }
     with pytest.raises(CategorizedError) as exc:
         load_rootfs_catalog(path=path)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert exc.value.details["field"] == "kdump_capable"
-
-
-def test_non_bool_kdump_capable_is_config_error(tmp_path: Path) -> None:
-    path = _write_catalog(
-        tmp_path,
-        """
-[[image]]
-name = "bad-flag"
-distro = "fedora"
-version = "44"
-family = "rhel"
-arch = "x86_64"
-kind = "debug"
-kdump_capable = "yes"
-source = { kind = "virt-builder", template = "fedora-44" }
-""",
-    )
-    with pytest.raises(CategorizedError) as exc:
-        load_rootfs_catalog(path=path)
-    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert exc.value.details["field"] == "kdump_capable"
+    assert exc.value.details["field"] == "makedumpfile_version"
 
 
 def test_virt_builder_and_cloud_image_sources_parse() -> None:
@@ -217,7 +200,7 @@ version = "43"
 family = "rhel"
 arch = "x86_64"
 kind = "debug"
-kdump_capable = false
+makedumpfile_version = "1.7.8"
 source = { kind = "virt-builder", template = "fedora-43" }
 
 [[image]]
@@ -227,7 +210,7 @@ version = "44"
 family = "rhel"
 arch = "x86_64"
 kind = "debug"
-kdump_capable = false
+makedumpfile_version = "1.7.9"
 source = { kind = "virt-builder", template = "fedora-44" }
 """,
     )
