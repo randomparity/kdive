@@ -58,7 +58,9 @@ equal *by construction* — the binding cannot drift within a run.
 
 A new token-less `kdive verify-project --project P` subcommand re-opens a fresh connection to
 `KDIVE_DATABASE_URL` and asserts **both** a `budgets` row and a `quotas` row exist for `P`, printing
-the figures and the resolved DB. It reuses the *exact* reads admission control uses —
+the figures and the **credential-redacted** target DB (host/port/dbname; the password is masked —
+the echo exists to spot a host skew, not to print a secret). It reuses the *exact* reads admission
+control uses —
 `budget_snapshot` (`services/allocation/idempotency.py`) and `quota_status`
 (`services/allocation/admission/core.py`) — so "verified" means "the funding reads admission
 performs will return rows," with no second copy of the lookup to drift. Either row absent →
@@ -112,8 +114,11 @@ when the server is brought up from the same env** — which the live-stack conve
 (`lib.sh restart_host_processes` sources `env.sh` before starting the host `server`). An operator
 who starts the server with an overriding `KDIVE_DATABASE_URL` not present when `just onboard` runs
 will fund a different DB than the server reads, and the agent stays walled despite a green onboard.
-The recipe therefore echoes the resolved `KDIVE_DATABASE_URL` it targeted so such a skew is visible
-rather than silent; reconciling it is the operator's job, not something the token-less recipe can
+The recipe therefore echoes the **credential-redacted** resolved `KDIVE_DATABASE_URL` it targeted
+(host/port/dbname, password masked) so such a skew is visible without printing a secret — important
+because the override case is exactly when the URL is likely to hold a real password pointed at
+managed Postgres, and the echo may land in a CI/job log. Reconciling a skew is the operator's job,
+not something the token-less recipe can
 detect.
 
 ## Scope

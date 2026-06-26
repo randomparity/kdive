@@ -43,7 +43,8 @@ into one idempotent, self-verifying, project-binding-explicit funding step for t
    the DB. verify resolves `KDIVE_DATABASE_URL` the same way the seed did in the same run, so its
    guarantee is that the rows are durably present and readable in the **targeted** DB (catching a
    rolled-back seed, a missing schema, or a silent no-op) — not that the targeted DB is the server's.
-   That identity comes from §5; the recipe echoes the resolved URL so a skew is visible.
+   That identity comes from §5; the recipe echoes the credential-redacted resolved URL (password
+   masked) so a skew is visible without printing a secret.
 
 3. **Token: a real 24 h token, best-effort, loud expiry warning.** The recipe mints a bearer token
    via the existing `mint_local_token` with `ttl_seconds=86400`, role `admin` (`KDIVE_ROLE`
@@ -62,8 +63,9 @@ into one idempotent, self-verifying, project-binding-explicit funding step for t
    verify. Advisory: preflight, mint. The targeted DB equals the server's DB only when the server is
    brought up from the same env (the live-stack convention: `lib.sh restart_host_processes` sources
    `env.sh`); a server started with an overriding `KDIVE_DATABASE_URL` absent at onboard time is a
-   skew the token-less recipe cannot detect, so it echoes the resolved URL rather than asserting
-   identity. The minted role must be ≥ contributor to pass the `allocations.request` gate; a
+   skew the token-less recipe cannot detect, so it echoes the credential-redacted resolved URL
+   (password masked — the override case is when the URL likely holds a real secret) rather than
+   asserting identity. The minted role must be ≥ contributor to pass the `allocations.request` gate; a
    sub-contributor `KDIVE_ROLE` (e.g. `viewer`) WARNs (the seed stays valid) rather than failing.
 
 The two existing seed paths are left unchanged: `setup-local-libvirt.sh` is the package-install /
