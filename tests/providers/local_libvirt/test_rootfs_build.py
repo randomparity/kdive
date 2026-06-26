@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.families import _fedora_customize
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
 from kdive.providers.local_libvirt import rootfs_build
 from kdive.providers.local_libvirt.rootfs_build import (
@@ -284,8 +285,8 @@ def test_virt_builder_stages_ssh_nic_dhcp_keyfile_for_a_debug_image(
     # An --upload arg targets the keyfile (the host source is a tempfile cleaned up post-run, so
     # assert on the staged content constant — what the upload writes — not the transient path).
     _upload_target(argv, keyfile)
-    assert "method=auto" in rootfs_build._SSH_NIC_KEYFILE_CONTENT, "the keyfile DHCPs the NIC"
-    assert "interface-name" not in rootfs_build._SSH_NIC_KEYFILE_CONTENT, (
+    assert "method=auto" in _fedora_customize.SSH_NIC_KEYFILE_CONTENT, "the keyfile DHCPs the NIC"
+    assert "interface-name" not in _fedora_customize.SSH_NIC_KEYFILE_CONTENT, (
         "no interface-name → applies to any ethernet NIC under direct-kernel boot"
     )
     assert f"chmod 0600 {keyfile}" in argv, "keyfile is mode 0600 so NM loads it"
@@ -315,7 +316,7 @@ def test_virt_builder_fails_loud_when_drgn_helper_source_is_absent(
         captured.append(argv)
 
     monkeypatch.setattr(rootfs_build, "run_guestfs_tool", _fake_run_guestfs_tool)
-    monkeypatch.setattr(rootfs_build, "_drgn_helper_source", lambda: tmp_path / "missing")
+    monkeypatch.setattr(_fedora_customize, "drgn_helper_source", lambda: tmp_path / "missing")
     key = tmp_path / "id.pub"
     key.write_text("ssh-ed25519 AAAA kdive\n")
     with pytest.raises(CategorizedError) as exc:

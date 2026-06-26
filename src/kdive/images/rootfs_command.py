@@ -12,28 +12,15 @@ from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.distros import SUPPORTED_DISTROS, resolve_base_template
+from kdive.images.families._fedora_customize import (
+    DEFAULT_BUILD_FS_PACKAGES,
+    DEFAULT_DEBUG_FS_PACKAGES,
+)
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildPlane, RootfsBuildSpec
 from kdive.providers.assembly.composition import build_local_rootfs_build_plane
 
 _log = logging.getLogger(__name__)
 
-# Today's debug/guest rootfs: the in-target crash + introspection toolchain. `keyutils` provides
-# `keyctl`, which Fedora `kdumpctl` invokes building the crash environment (ADR-0213, #688).
-DEFAULT_DEBUG_FS_PACKAGES = ("drgn", "kexec-tools", "makedumpfile", "kdump-utils", "keyutils")
-# A build-host toolchain image: the kernel-build deps a remote/ephemeral build target needs.
-DEFAULT_BUILD_FS_PACKAGES = (
-    "gcc",
-    "make",
-    "bc",
-    "bison",
-    "flex",
-    "openssl-devel",
-    "elfutils-libelf-devel",
-    "ncurses-devel",
-    "dwarves",
-    "rsync",
-    "git",
-)
 _DEFAULT_WORKSPACE = "/var/lib/kdive/build/images"
 
 

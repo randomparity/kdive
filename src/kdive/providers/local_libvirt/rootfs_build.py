@@ -31,6 +31,27 @@ from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.distros import resolve_base_template
+from kdive.images.families._fedora_customize import (
+    FSTAB as _FSTAB,
+)
+from kdive.images.families._fedora_customize import (
+    KDUMP_FINAL_ACTION_CMD as _KDUMP_FINAL_ACTION_CMD,
+)
+from kdive.images.families._fedora_customize import (
+    KDUMP_SYSCTL_CONTENT as _KDUMP_SYSCTL_CONTENT,
+)
+from kdive.images.families._fedora_customize import (
+    KDUMP_SYSCTL_PATH as _KDUMP_SYSCTL_PATH,
+)
+from kdive.images.families._fedora_customize import (
+    READINESS_MARKER as _READINESS_MARKER,
+)
+from kdive.images.families._fedora_customize import (
+    READINESS_UNIT as _READINESS_UNIT,
+)
+from kdive.images.families._fedora_customize import (
+    debug_image_args as _debug_image_args,
+)
 from kdive.images.planes._build_common import (
     build_workspace,
     digest_file,
@@ -48,73 +69,13 @@ from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
 
 _DEFAULT_WORKSPACE = "/var/lib/kdive/build/images"
 _DEFAULT_IMAGE_SIZE = "6G"
-_READINESS_MARKER = "kdive-ready"
 _VIRT_BUILDER_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 _REPACK_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 _GUESTFISH_TIMEOUT_S = 5 * 60
 
-_READINESS_UNIT = f"""[Unit]
-Description=Signal kdive serial readiness
-After=dev-ttyS0.device
-Wants=dev-ttyS0.device
-
-[Service]
-Type=oneshot
-ExecStart=/bin/sh -c 'echo {_READINESS_MARKER} > /dev/ttyS0'
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-"""
-_FSTAB = "/dev/vda / ext4 defaults 0 1\n"
+# The legacy virt-builder scratch is SELinux-disabled (no relabel on first boot); the proven F44
+# cloud-image path uses SELinux-permissive via the rhel FamilyCustomizer (ADR-0250) instead.
 _SELINUX_CONFIG = "SELINUX=disabled\nSELINUXTYPE=targeted\n"
-# Local `control.force_crash` injects an NMI; the guest must panic on it for kdump to trigger.
-# Staged only on the kdump image, the local equivalent of the remote base-image obligation
-# (ADR-0213, #688, mirrors ADR-0084).
-_KDUMP_SYSCTL_PATH = "/etc/sysctl.d/99-kdive-kdump.conf"
-_KDUMP_SYSCTL_CONTENT = "kernel.unknown_nmi_panic=1\n"
-# After dumping, the crash kernel runs kdump's ``final_action``. Pin it to ``poweroff`` so the
-# guest self-shuts-off (VIR_DOMAIN_SHUTOFF) the instant the dump completes — the reliable
-# completion signal the host-side harvest waits on (ADR-0217). Fedora's default is ``reboot``,
-# which never self-shuts-off and would force the harvest onto its bounded-timeout fallback. The
-# run-command strips any existing ``final_action`` line, then appends ours, so kdump.conf carries
-# exactly one.
-#
-# ``poweroff`` (NOT ``shutdown``): kdump.conf accepts only ``reboot``/``halt``/``poweroff``; any
-# other token makes kdumpctl reject the config (``Starting kdump: [FAILED]``) so kdump never arms
-# and no vmcore is written (#705 live regression).
-_KDUMP_FINAL_ACTION_CMD = (
-    "sed -i '/^[[:space:]]*final_action[[:space:]]/d' /etc/kdump.conf && "
-    "printf 'final_action poweroff\\n' >> /etc/kdump.conf"
-)
-# The live `introspect.run` path (ADR-0219) SSH-execs this fixed-argv in-guest helper; the debug
-# image must carry the repo's reviewed reference implementation, made read-executable. `build-fs`
-# runs `python -m kdive` from the source checkout, so the helper resolves relative to the source
-# tree. Staged only on the debug image (`drgn` in packages) (ADR-0220, #724).
-_DRGN_HELPER_GUEST_PATH = "/usr/local/sbin/kdive-drgn"
-_DRGN_HELPER_REPO_RELPATH = ("deploy", "remote-libvirt-guest-helpers", "kdive-drgn")
-# The drgn-live SSH transport (ADR-0218) renders a SLIRP NIC the guest must DHCP to be reachable.
-# An interface-name-independent NetworkManager keyfile DHCPs whatever ethernet device the SSH NIC
-# enumerates as under direct-kernel boot (no stable NIC naming). Written 0600 — NM ignores a
-# world-readable keyfile (ADR-0220, #724).
-_SSH_NIC_KEYFILE_PATH = "/etc/NetworkManager/system-connections/kdive-ssh-nic.nmconnection"
-_SSH_NIC_KEYFILE_CONTENT = """[connection]
-id=kdive-ssh-nic
-type=ethernet
-autoconnect=true
-autoconnect-priority=-100
-
-[ipv4]
-method=auto
-
-[ipv6]
-method=ignore
-"""
-
-
-def _drgn_helper_source() -> Path:
-    """Resolve the reviewed ``kdive-drgn`` reference helper from the source tree (ADR-0220)."""
-    return Path(__file__).parents[4].joinpath(*_DRGN_HELPER_REPO_RELPATH)
 
 
 def _resolve_managed_public_key() -> Path:
@@ -138,43 +99,6 @@ def _run(argv: list[str], *, stage: str, timeout_s: int) -> None:
         timeout_s=timeout_s,
         missing_message=f"{argv[0]} is not installed; cannot build the rootfs image",
     )
-
-
-def _debug_image_args(packages: tuple[str, ...], cleanup: list[Path]) -> list[str]:
-    """Stage the drgn helper + SSH-NIC DHCP keyfile for a debug image (ADR-0220, #724).
-
-    Returns the virt-builder argv fragment and appends any tempfiles to ``cleanup`` for the
-    caller to unlink. Non-debug images (no ``drgn`` in ``packages``) get an empty fragment.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` if the reviewed ``kdive-drgn`` helper is not a
-            readable file in the source tree — fail loud rather than ship a guest that cannot
-            introspect.
-    """
-    if "drgn" not in packages:
-        return []
-    helper = _drgn_helper_source()
-    if not helper.is_file():
-        raise CategorizedError(
-            "the kdive-drgn in-guest helper is missing from the source tree; cannot build a "
-            "debug rootfs that can be live-introspected",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"helper": str(helper)},
-        )
-    with tempfile.NamedTemporaryFile("w", suffix=".nmconnection", delete=False) as keyfile:
-        keyfile.write(_SSH_NIC_KEYFILE_CONTENT)
-        keyfile_path = Path(keyfile.name)
-    cleanup.append(keyfile_path)
-    return [
-        "--upload",
-        f"{helper}:{_DRGN_HELPER_GUEST_PATH}",
-        "--run-command",
-        f"chmod 0755 {_DRGN_HELPER_GUEST_PATH}",
-        "--upload",
-        f"{keyfile_path}:{_SSH_NIC_KEYFILE_PATH}",
-        "--run-command",
-        f"chmod 0600 {_SSH_NIC_KEYFILE_PATH}",
-    ]
 
 
 def _real_virt_builder(
