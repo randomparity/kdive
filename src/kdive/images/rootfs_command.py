@@ -78,8 +78,11 @@ def add_build_fs_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]
     )
     build.add_argument(
         "--dest",
-        default="/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2",
-        help="destination qcow2 path (the produced image is moved here)",
+        default=None,
+        help=(
+            "destination qcow2 path (the produced image is moved here); defaults to "
+            "/var/lib/kdive/rootfs/local/<name>.qcow2 (the catalog name with --image)"
+        ),
     )
     build.add_argument("--name", default="fedora-kdive-ready-43", help="catalog image name")
     build.add_argument("--arch", default="x86_64")
@@ -169,7 +172,7 @@ def _resolve_build_params(args: argparse.Namespace) -> _BuildParams:
             distro=entry.distro,
             releasever=entry.version,
             kind=entry.kind,
-            dest=f"{_LOCAL_ROOTFS_DIR}/{entry.name}.qcow2",
+            dest=args.dest or f"{_LOCAL_ROOTFS_DIR}/{entry.name}.qcow2",
             source_image_digest=_source_image_digest(entry.source),
         )
     return _BuildParams(
@@ -177,7 +180,7 @@ def _resolve_build_params(args: argparse.Namespace) -> _BuildParams:
         distro=args.distro,
         releasever=args.releasever,
         kind=args.kind,
-        dest=args.dest,
+        dest=args.dest or f"{_LOCAL_ROOTFS_DIR}/{args.name}.qcow2",
         source_image_digest=f"virt-builder:{args.distro}-{args.releasever}",
     )
 

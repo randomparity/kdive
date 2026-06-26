@@ -59,7 +59,9 @@ def test_build_fs_subcommand_parses_with_defaults() -> None:
     assert args.name == "fedora-kdive-ready-43"
     assert args.arch == "x86_64"
     assert args.releasever == "43"
-    assert args.dest == "/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2"
+    # --dest defaults to None; the handler derives /var/lib/kdive/rootfs/local/<name>.qcow2 (or
+    # the catalog name with --image) so an explicit --dest can override it.
+    assert args.dest is None
     assert args.packages is None  # falls back to the --kind's package set in the handler
 
 
