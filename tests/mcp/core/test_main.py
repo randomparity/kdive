@@ -168,6 +168,7 @@ def test_run_build_fs_debug_kind_sets_debug_packages_and_capabilities(
         "makedumpfile",
         "kdump-utils",
         "keyutils",
+        "openssh-server",
     )
     assert seen_specs[0].capabilities == ("agent", "kdump", "drgn")
     assert seen_specs[0].distro == "fedora"

@@ -42,31 +42,62 @@ _SELINUX_PERMISSIVE_SED = "sed -i 's/^SELINUX=.*/SELINUX=permissive/' /etc/selin
 _SELINUX_PERMISSIVE_CONFIG = "SELINUX=permissive\nSELINUXTYPE=targeted\n"
 _GUESTFISH_TIMEOUT_S = 5 * 60
 
+# EL 8/9 bundle makedumpfile + ``kdumpctl`` inside ``kexec-tools`` (no standalone ``makedumpfile``
+# / ``kdump-utils`` packages); installing those names fails the build. The debug set there is just
+# the crash/introspection tools plus the live-attach ``openssh-server``.
+_EL8_EL9_DEBUG_PACKAGES = ("drgn", "kexec-tools", "keyutils", "openssh-server")
+# ``drgn`` is not in EL 8 BaseOS/AppStream; it ships in EPEL. ``epel-release`` is in Rocky 8's
+# default-enabled ``extras`` repo. Run as a separate transaction *before* the ``drgn`` install so
+# the EPEL repo metadata is present (ADR-0251, #823).
+_ENABLE_EPEL_CMD = "dnf -y install epel-release"
+
+
+def _el_major(distro: str, version: str) -> int | None:
+    """Return the EL major for an EL-clone distro, or ``None`` for Fedora / an unparsable version.
+
+    ``None`` means "treat like Fedora": the modern layout where ``makedumpfile``/``kdump-utils``
+    are standalone packages (EL >= 10 and Fedora).
+    """
+    if distro == "fedora":
+        return None
+    head = version.split(".", 1)[0]
+    return int(head) if head.isdigit() else None
+
 
 class RhelFamily:
-    """The rhel-family (dnf + kdump-utils) :class:`FamilyCustomizer`."""
+    """The rhel-family (dnf + kdump) :class:`FamilyCustomizer`, EL-major-aware (#823)."""
 
     family = "rhel"
 
-    def packages(self, kind: str) -> tuple[str, ...]:
-        """Return the dnf package set for ``kind``.
+    def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
+        """Return the dnf package set for ``kind`` on ``distro``/``version``.
 
-        ``build`` returns the kernel-build toolchain; any other kind returns the debug
-        crash/introspection set plus ``openssh-server`` (the live-attach transport).
+        ``build`` returns the kernel-build toolchain (release-independent). A debug image returns
+        the crash/introspection set plus ``openssh-server`` (the live-attach transport); on EL 8/9
+        the standalone ``makedumpfile``/``kdump-utils`` are dropped (bundled in ``kexec-tools``),
+        on Fedora and EL >= 10 they are kept.
         """
         if kind == "build":
             return DEFAULT_BUILD_FS_PACKAGES
+        major = _el_major(distro, version)
+        if major is not None and major <= 9:
+            return _EL8_EL9_DEBUG_PACKAGES
         return (*DEFAULT_DEBUG_FS_PACKAGES, "openssh-server")
 
     def customize_argv(self, ctx: CustomizeContext) -> list[str]:
         """Build the virt-customize argv that turns the base image into a kdive-ready rootfs."""
-        argv: list[str] = [
+        argv: list[str] = []
+        if _el_major(ctx.distro, ctx.version) == 8 and "drgn" in ctx.packages:
+            argv += ["--run-command", _ENABLE_EPEL_CMD]
+        argv += [
             "--install",
             ",".join(ctx.packages),
             "--run-command",
             "systemctl enable sshd.service",
         ]
-        if "kdump-utils" in ctx.packages:
+        # Gate on ``kexec-tools`` (in every debug set, absent from the build set), not the
+        # Fedora-only ``kdump-utils`` — EL 8/9 get kdump from ``kexec-tools`` (#823).
+        if "kexec-tools" in ctx.packages:
             argv += [
                 "--run-command",
                 "systemctl enable kdump.service",

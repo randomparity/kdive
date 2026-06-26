@@ -55,7 +55,7 @@ class _FakeFamily:
     rec: _Recorder
     family: str = "rhel"
 
-    def packages(self, kind: str) -> tuple[str, ...]:
+    def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
         return ("marker-pkg",)
 
     def customize_argv(self, ctx: CustomizeContext) -> list[str]:
@@ -256,7 +256,12 @@ def test_family_for_resolves_rhel_and_rejects_unknown() -> None:
 
 
 def _rhel_argv(
-    tmp_path: Path, *, packages: tuple[str, ...], is_cloud_image: bool = False
+    tmp_path: Path,
+    *,
+    packages: tuple[str, ...],
+    is_cloud_image: bool = False,
+    distro: str = "fedora",
+    version: str = "44",
 ) -> list[str]:
     """Build the rhel customizer argv the plane feeds virt-customize, without running libguestfs."""
     ctx = CustomizeContext(
@@ -266,6 +271,8 @@ def _rhel_argv(
         readiness_unit_path=tmp_path / "kdive-ready.service",
         is_cloud_image=is_cloud_image,
         cleanup=[],
+        distro=distro,
+        version=version,
     )
     return RhelFamily().customize_argv(ctx)
 
@@ -280,7 +287,7 @@ def _upload_target(argv: list[str], guest_path: str) -> str:
 
 def test_family_argv_omits_nmi_panic_sysctl_for_a_non_kdump_image(tmp_path: Path) -> None:
     # A non-kdump (e.g. build-host) image never runs force_crash; a stray NMI must not panic it,
-    # so the sysctl is gated on the same kdump-utils condition that enables kdump.service.
+    # so the sysctl is gated on the same kexec-tools condition that enables kdump.service (#823).
     joined = " ".join(_rhel_argv(tmp_path, packages=("gcc", "make")))
     assert "unknown_nmi_panic" not in joined
     assert "99-kdive-kdump.conf" not in joined

@@ -1,6 +1,12 @@
 # Local-libvirt rootfs image catalog (ADR-0251). File-authoritative: build-fs --image <name>
 # resolves a row here. source.kind = "virt-builder" carries a template; "cloud-image" carries a
 # sha256-pinned url. family selects the FamilyCustomizer (rhel|debian|suse).
+#
+# kdump_capable: true iff the makedumpfile the build installs from this release's repos (>= 1.7.9)
+# can filter a v7.0-class from-source kernel's vmcore via the default `kdump` method; false rows hit
+# the cause-neutral kdump_core_incomplete remediation (host_dump still works). It is kernel-relative
+# (to the current default target) and a curated build-time snapshot verified against distro package
+# indexes (2026-06-26), guarded by tests/images/test_rootfs_catalog.py — not live upstream truth.
 
 [[image]]
 name = "fedora-kdive-ready-43"
@@ -9,6 +15,7 @@ version = "43"
 family = "rhel"
 arch = "x86_64"
 kind = "debug"
+kdump_capable = false  # makedumpfile 1.7.8 < 1.7.9; the #817 regression reference
 source = { kind = "virt-builder", template = "fedora-43" }
 
 [[image]]
@@ -18,4 +25,55 @@ version = "44"
 family = "rhel"
 arch = "x86_64"
 kind = "debug"
+kdump_capable = true  # makedumpfile 1.7.9 — the kdump-capable default
 source = { kind = "cloud-image", url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2", sha256 = "28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f" }  # pragma: allowlist secret
+
+[[image]]
+name = "rocky-kdive-ready-8"
+distro = "rocky"
+version = "8"
+family = "rhel"
+arch = "x86_64"
+kind = "debug"
+kdump_capable = false  # makedumpfile 1.7.2 (bundled in kexec-tools 2.0.26) < 1.7.9
+source = { kind = "cloud-image", url = "https://dl.rockylinux.org/pub/rocky/8/images/x86_64/Rocky-8-GenericCloud-Base-8.10-20240528.0.x86_64.qcow2", sha256 = "e56066c58606191e96184de9a9183a3af33c59bcbd8740d8b10ca054a7a89c14" }  # pragma: allowlist secret
+
+[[image]]
+name = "rocky-kdive-ready-9"
+distro = "rocky"
+version = "9"
+family = "rhel"
+arch = "x86_64"
+kind = "debug"
+kdump_capable = false  # makedumpfile 1.7.6 (bundled in kexec-tools 2.0.29) < 1.7.9
+source = { kind = "cloud-image", url = "https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base-9.8-20260525.0.x86_64.qcow2", sha256 = "92c206cc6f790c61583247eefe87890f8828420662c17cacf247cec78ab4eec8" }  # pragma: allowlist secret
+
+[[image]]
+name = "rocky-kdive-ready-10"
+distro = "rocky"
+version = "10"
+family = "rhel"
+arch = "x86_64"
+kind = "debug"
+kdump_capable = false  # makedumpfile 1.7.8 (separate pkg, el10) < 1.7.9
+source = { kind = "cloud-image", url = "https://dl.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-GenericCloud-Base-10.2-20260525.0.x86_64.qcow2", sha256 = "9fc9e9ff16888bb68ac39b0392e25c9c92684d50c85f1cce6ab549363bbc4b48" }  # pragma: allowlist secret
+
+[[image]]
+name = "centos-stream-kdive-ready-9"
+distro = "centos-stream"
+version = "9"
+family = "rhel"
+arch = "x86_64"
+kind = "debug"
+kdump_capable = false  # makedumpfile 1.7.6 (bundled in kexec-tools 2.0.29) < 1.7.9
+source = { kind = "cloud-image", url = "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-20260622.0.x86_64.qcow2", sha256 = "ed8421c7ce25d0e21cbeb561c906f52b2eed2a99aa3df88ec7616773ae1ebd1a" }  # pragma: allowlist secret
+
+[[image]]
+name = "centos-stream-kdive-ready-10"
+distro = "centos-stream"
+version = "10"
+family = "rhel"
+arch = "x86_64"
+kind = "debug"
+kdump_capable = false  # makedumpfile 1.7.8 (separate pkg, el10) < 1.7.9
+source = { kind = "cloud-image", url = "https://cloud.centos.org/centos/10-stream/x86_64/images/CentOS-Stream-GenericCloud-10-20260622.0.x86_64.qcow2", sha256 = "508a48761d1a28c98046256e8f77b0ea34d751791a5629bb216743ef98526d0b" }  # pragma: allowlist secret

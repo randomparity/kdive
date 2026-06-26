@@ -19,6 +19,9 @@ class CustomizeContext:
         is_cloud_image: True when the base is a cloud-image (needs cloud-init masking and a
             seeded ``/etc/machine-id``); False for a virt-builder scratch.
         cleanup: Mutable list the customizer appends tempfiles to for the caller to unlink.
+        distro: The base-OS distro (e.g. ``fedora`` / ``rocky`` / ``centos-stream``); with
+            ``version`` it drives the family's EL-major package and EPEL decisions (#823).
+        version: The base-OS release (e.g. ``44`` / ``8`` / ``10``).
     """
 
     kind: str
@@ -27,6 +30,8 @@ class CustomizeContext:
     readiness_unit_path: Path
     is_cloud_image: bool
     cleanup: list[Path]
+    distro: str
+    version: str
 
 
 class FamilyCustomizer(Protocol):
@@ -34,8 +39,8 @@ class FamilyCustomizer(Protocol):
 
     family: str
 
-    def packages(self, kind: str) -> tuple[str, ...]:
-        """Return the package set this family installs for ``kind`` (``debug``/``build``)."""
+    def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
+        """Return the package set this family installs for ``kind`` on ``distro``/``version``."""
         ...
 
     def customize_argv(self, ctx: CustomizeContext) -> list[str]:

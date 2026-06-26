@@ -11,10 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.families._fedora_customize import (
-    DEFAULT_BUILD_FS_PACKAGES,
-    DEFAULT_DEBUG_FS_PACKAGES,
-)
+from kdive.images.families import family_for
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildPlane, RootfsBuildSpec
 from kdive.images.rootfs_catalog import (
     CloudImageSource,
@@ -29,17 +26,11 @@ _DEFAULT_WORKSPACE = "/var/lib/kdive/build/images"
 _LOCAL_ROOTFS_DIR = "/var/lib/kdive/rootfs/local"
 
 
-@dataclass(frozen=True, slots=True)
-class _FsKind:
-    """The package set and guest-contract capabilities a ``--kind`` selects."""
-
-    packages: tuple[str, ...]
-    capabilities: tuple[str, ...]
-
-
-_FS_KINDS: dict[str, _FsKind] = {
-    "debug": _FsKind(DEFAULT_DEBUG_FS_PACKAGES, ("agent", "kdump", "drgn")),
-    "build": _FsKind(DEFAULT_BUILD_FS_PACKAGES, ("agent", "build")),
+# The guest-contract capability tags each ``--kind`` claims; the install package set is resolved
+# from the (EL-major-aware) FamilyCustomizer, not duplicated here (ADR-0251, #823).
+_KIND_CAPABILITIES: dict[str, tuple[str, ...]] = {
+    "debug": ("agent", "kdump", "drgn"),
+    "build": ("agent", "build"),
 }
 
 
@@ -51,7 +42,7 @@ def add_build_fs_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]
     )
     build.add_argument(
         "--kind",
-        choices=tuple(_FS_KINDS),
+        choices=tuple(_KIND_CAPABILITIES),
         default="debug",
         help="debug = guest crash/introspection rootfs; build = kernel-build-host toolchain image",
     )
@@ -149,6 +140,7 @@ class _BuildParams:
     kind: str
     dest: str
     source_image_digest: str
+    family: str
 
 
 def _source_image_digest(source: RootfsSource) -> str:
@@ -174,6 +166,7 @@ def _resolve_build_params(args: argparse.Namespace) -> _BuildParams:
             kind=entry.kind,
             dest=args.dest or f"{_LOCAL_ROOTFS_DIR}/{entry.name}.qcow2",
             source_image_digest=_source_image_digest(entry.source),
+            family=entry.family,
         )
     return _BuildParams(
         name=args.name,
@@ -182,14 +175,16 @@ def _resolve_build_params(args: argparse.Namespace) -> _BuildParams:
         kind=args.kind,
         dest=args.dest or f"{_LOCAL_ROOTFS_DIR}/{args.name}.qcow2",
         source_image_digest=f"virt-builder:{args.distro}-{args.releasever}",
+        family="rhel",
     )
 
 
 def run_build_fs(args: argparse.Namespace) -> None:
     """Build a kdive-ready filesystem qcow2 via the local plane and move it to its destination."""
     params = _resolve_build_params(args)
-    kind = _FS_KINDS[params.kind]
-    packages = tuple(args.packages) if args.packages else kind.packages
+    family = family_for(params.family)
+    default_packages = family.packages(params.kind, params.distro, params.releasever)
+    packages = tuple(args.packages) if args.packages else default_packages
     spec = RootfsBuildSpec(
         provider="local-libvirt",
         name=params.name,
@@ -197,7 +192,7 @@ def run_build_fs(args: argparse.Namespace) -> None:
         releasever=params.releasever,
         packages=packages,
         source_image_digest=params.source_image_digest,
-        capabilities=kind.capabilities,
+        capabilities=_KIND_CAPABILITIES[params.kind],
         distro=params.distro,
     )
     workspace = Path(args.workspace).resolve()

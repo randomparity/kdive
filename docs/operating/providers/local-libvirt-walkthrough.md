@@ -316,9 +316,69 @@ typed symbol.
 
 ## 6. Test the lifecycle
 
-The lifecycle steps are MCP tool calls. Issue them from an MCP client (e.g. an agent session)
-that connects to the server's HTTP transport at `http://127.0.0.1:8000/mcp`, authenticated with
-a project-scoped bearer token.
+The lifecycle steps below are MCP tool calls, but they need one **host-side prerequisite**: a
+bootable, kdive-ready rootfs qcow2 on disk at the path your `staged-path` `[[image]]` (Step 5)
+declares. Build that first, then connect a client and drive the MCP calls.
+
+### Build and install the rootfs image(s)
+
+Build images from the declarative rootfs catalog with `build-fs --image <name>` (ADR-0251). The
+catalog (`fixtures/local-libvirt/rootfs_catalog.toml`) ships these debug-guest entries:
+
+| `--image` | base | default `kdump` capture for a v7.0-class kernel |
+|---|---|---|
+| `fedora-kdive-ready-44` | Fedora 44 (makedumpfile 1.7.9) | **complete filtered core** |
+| `fedora-kdive-ready-43` | Fedora 43 (1.7.8) | incomplete → use `method="host_dump"` |
+| `rocky-kdive-ready-8` / `-9` / `-10` | Rocky 8/9/10 | incomplete → use `method="host_dump"` |
+| `centos-stream-kdive-ready-9` / `-10` | CentOS Stream 9/10 | incomplete → use `method="host_dump"` |
+
+Only Fedora 44 ships a makedumpfile new enough (≥ 1.7.9) to filter a v7.0 vmcore via the default
+`kdump` method; the others disclose `kdump_core_incomplete` and capture via `host_dump` instead (the
+rest of the lifecycle — provision/build/install/boot — is identical). The full per-release table is
+in the [image-lifecycle runbook](../runbooks/image-lifecycle.md).
+
+`--image` resolves the row's pinned base, EL-version-aware package set, and **destination**
+(`/var/lib/kdive/rootfs/local/<name>.qcow2` — exactly the `staged-path` your inventory declares), so
+no `--dest` is needed. Point `--workspace` at a **user-writable** path (the default
+`/var/lib/kdive/build/images` is root-owned); the build stages there and publishes the finished
+qcow2 to the catalog destination:
+
+```bash
+# the kdump-capable default; re-run per distro you want to exercise
+.venv/bin/python -m kdive build-fs --image fedora-kdive-ready-44 \
+  --workspace ~/.local/share/kdive/build/images
+.venv/bin/python -m kdive build-fs --image rocky-kdive-ready-9 \
+  --workspace ~/.local/share/kdive/build/images
+```
+
+The build needs the Step 1 libguestfs tooling and network access — the EL-family images
+`dnf install` their crash toolchain at customize time, and Rocky 8 enables EPEL for `drgn`
+automatically. (On Ubuntu 24.04 the libguestfs `--install` step may be blocked by the
+passt/libguestfs mismatch noted in Step 1; build on a Fedora host or stage a prebuilt qcow2.)
+
+**Label the image for `qemu:///system` — the easy step to miss.** When `--workspace` is under
+`$HOME`, the cross-filesystem publish move can leave the qcow2 with the home SELinux type
+(`data_home_t`), which the `qemu` user **cannot read** under SELinux Enforcing — provisioning then
+fails to open the disk with a permission error. Give the rootfs directory a persistent
+`virt_image_t` rule once, then relabel:
+
+```bash
+sudo semanage fcontext -a -t virt_image_t '/var/lib/kdive/rootfs/local(/.*)?'
+sudo restorecon -Rv /var/lib/kdive/rootfs/local
+```
+
+`semanage fcontext` makes the rule durable across a full system relabel (a bare `chcon` does not);
+`semanage` is in `policycoreutils-python-utils`. `restorecon` skips files already at a customizable
+virt type — both `virt_image_t` and `virt_content_t` are qemu-readable and left alone — and corrects
+a stray `data_home_t`. The published file is mode `0644` (world-readable), so its build-user
+ownership is fine for a read-only base image; only if libvirt's dynamic ownership complains on first
+provision would you also `sudo chown qemu:qemu` the file.
+
+**Register each image you built.** Add one `staged-path` `[[image]]` block per rootfs to
+`~/.config/kdive/systems.toml` (the Step 5 pattern) — `name` = the catalog `--image`, `path` =
+`/var/lib/kdive/rootfs/local/<name>.qcow2` — then re-run `reconcile-systems`. The repo-root
+`systems.toml.example` carries all the RHEL-family rows as a copy-paste reference. Each then seeds a
+`registered` catalog row a System can boot by `catalog` reference.
 
 ### Connect an MCP client
 
@@ -370,25 +430,11 @@ allocations.request project=demo request={
 # → status=granted; suggested_next_actions: [allocations.get, systems.provision, allocations.release]
 ```
 
-**Provision a System.** Provision boots a qcow2 rootfs from disk, so it needs a **bootable image**
-on the host. Get one by either:
-
-- building a kdive-ready rootfs with `build-fs` (uses libguestfs/virt-builder — needs the Step 1
-  Debian/Ubuntu libguestfs fixes; on Ubuntu 24.04 the `virt-builder --install` step may still be
-  blocked by the passt/libguestfs mismatch noted there):
-
-  ```bash
-  .venv/bin/python -m kdive build-fs --kind debug --distro fedora \
-    --workspace /var/lib/kdive/build \
-    --dest /var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2
-  ```
-
-- or staging any prebuilt bootable qcow2 (e.g. a Fedora/Cloud base image) at a world-readable path
-  under `/var/lib/kdive/rootfs/local/`. (The clean-room validation of this page used a staged base
-  qcow2, because `build-fs` was blocked by the Ubuntu 24.04 passt/libguestfs issue above.)
-
-The `staged-path` `[[image]]` you reconciled (Step 4) points at exactly that file, so once it
-exists the catalog row resolves it. Local-libvirt provisioning uses `boot_method: direct-kernel`
+**Provision a System.** Provision boots a qcow2 rootfs from disk, so it needs the **bootable image**
+you built and labeled in [Build and install the rootfs image(s)](#build-and-install-the-rootfs-images)
+above (or any prebuilt bootable qcow2 staged at a world-readable, `virt_image_t`-labeled path under
+`/var/lib/kdive/rootfs/local/`). The `staged-path` `[[image]]` you reconciled (Step 5) points at
+exactly that file, so once it exists the catalog row resolves it. Local-libvirt provisioning uses `boot_method: direct-kernel`
 (`kernel_source_ref` is required by the schema but only used by a later build Run; provision boots
 the rootfs's own kernel from disk). `disk_gb` must equal the allocation's (ADR-0205).
 

@@ -76,6 +76,149 @@ fedora-kdive-ready-44` reproduces the proven image; (3) add the incomplete-core 
 Each follow-up entry is live-proven for its lifecycle; the makedumpfile-vs-kernel limitation is
 documented per release (and the first follow-up that renders it adds the structured capability flag).
 
+## Follow-up realization: #823 — RHEL family entries (Rocky 8/9/10 + CentOS Stream 9/10)
+
+The first follow-up adds five catalog rows reusing the `rhel` `FamilyCustomizer`, sourced from their
+**GenericCloud qcow2s** (sha256-pinned `cloud-image` source, the same lane proven for Fedora 44),
+makes the `rhel` family **EL-version-aware** (the MVP's package set was Fedora-shaped), and
+**renders the structured capability flag** the MVP deferred.
+
+### EL-version-aware `rhel` packaging (the load-bearing change)
+
+"Reuse `rhel`" holds at the dnf level but the MVP's package set was Fedora-specific. Verified
+against the distro package indexes (2026-06-26):
+
+| EL major | makedumpfile + `kdumpctl` | `drgn` | kdump-enable unit |
+|---|---|---|---|
+| 8 (Rocky 8) | bundled in `kexec-tools` (no separate pkg) | EPEL only (`epel-release` is in the default-enabled `extras` repo) | `kdump.service` (kexec-tools) |
+| 9 (Rocky/CentOS Stream 9) | bundled in `kexec-tools` (no separate pkg) | BaseOS/AppStream | `kdump.service` (kexec-tools) |
+| 10 (Rocky/CentOS Stream 10) | **separate** `makedumpfile` pkg + `kdump-utils` (like Fedora) | BaseOS/AppStream | `kdump.service` (kdump-utils) |
+
+`RhelFamily.packages(kind, distro, version)` therefore returns an EL-major-aware debug set:
+
+- **Fedora and EL ≥ 10:** `drgn kexec-tools makedumpfile kdump-utils keyutils openssh-server`
+  (unchanged from the MVP — separate `makedumpfile`/`kdump-utils` exist).
+- **EL 8 / EL 9:** `drgn kexec-tools keyutils openssh-server` — `makedumpfile` and `kdumpctl` come
+  from `kexec-tools`; the standalone `makedumpfile`/`kdump-utils` packages do not exist, so
+  installing them by name would fail the build. **EL 8** additionally runs `dnf -y install
+  epel-release` (a separate transaction, before the `drgn` install, so the EPEL repo metadata is
+  present) because `drgn` is not in EL 8 BaseOS/AppStream.
+
+Two MVP gates that keyed on Fedora package names are corrected: the kdump-enable block now gates on
+`"kexec-tools" in packages` (present in every debug set, absent from the build set) rather than
+`"kdump-utils" in packages`; the install list (and provenance `packages`) is the actually-installed
+set, so provenance stays falsifiable. `CustomizeContext` gains `distro`/`version` so the family can
+emit the EL-8 EPEL step. The `build` kind set is generic toolchain packages available on every EL,
+unchanged.
+
+### `kdump_capable` flag (the rendered capability)
+
+`RootfsCatalogEntry` gains a required `kdump_capable: bool` field, parsed and validated by the
+loader. It describes the **makedumpfile the build installs from the release's repos at build time**
+(the bundled `kexec-tools` makedumpfile on EL 8/9, the separate `makedumpfile` pkg on EL ≥ 10 /
+Fedora) — **not** the frozen sha256-pinned base, which the build updates from. `true` iff that
+makedumpfile is **≥ 1.7.9**, the first release supporting an x86_64 **v7.0-class kernel**.
+
+Two explicit preconditions of the boolean, named so it is not over-read:
+
+- **Kernel-relative.** It is `true`/`false` *for the current default from-source kernel target*
+  (v7.0-class). It is not an absolute "kdump works" flag: the same makedumpfile 1.7.8 image that is
+  `false` here would produce a complete filtered core for an older (e.g. v6.x) kernel it does
+  support. The flag answers "does the default `kdump` `vmcore.fetch` produce a *complete filtered*
+  core for the v7.0-class kernel-under-test, or does it hit the incomplete-core remediation?"
+- **Snapshot, not live truth.** The documented makedumpfile version is a point-in-time snapshot of a
+  mutable upstream repo that the build re-pulls on every run. When a release ships makedumpfile
+  ≥ 1.7.9, a fresh build silently becomes capable while the curated flag still reads `false` until
+  re-verified. The flag is a curated default that can **lag** a distro's makedumpfile bump; the
+  runtime `kdump_core_incomplete` remediation (which fires on the actual harvest) is the ground
+  truth, not the flag.
+
+The flag is **rendered** in the operator image table in
+[`../../operating/runbooks/image-lifecycle.md`](../../operating/runbooks/image-lifecycle.md) and
+**guarded** by `tests/images/test_rootfs_catalog.py`, which carries the authoritative per-entry
+makedumpfile version (a documented snapshot, verified against distro package indexes 2026-06-26) and
+asserts each row's `kdump_capable == (makedumpfile_version ≥ 1.7.9)`. The guard catches an
+*internally inconsistent* edit (a flag flipped without bumping the documented version); it does not
+and cannot detect upstream drift — re-verification is a manual, dated step.
+
+### Verified makedumpfile matrix (2026-06-26)
+
+| catalog name | base | makedumpfile (build-time) | source | `kdump_capable` (v7.0) |
+|---|---|---|---|---|
+| `fedora-kdive-ready-44` | Fedora 44 | 1.7.9 | `mdapi.fedoraproject.org/f44` | **true** |
+| `fedora-kdive-ready-43` | Fedora 43 | 1.7.8 | `mdapi.fedoraproject.org/f43` | false |
+| `rocky-kdive-ready-10` | Rocky 10.2 | 1.7.8 | Rocky 10 BaseOS `makedumpfile-1.7.8-1.el10` | false |
+| `rocky-kdive-ready-9` | Rocky 9.8 | 1.7.6 | `kexec-tools-2.0.29` (bundled, c9s spec) | false |
+| `rocky-kdive-ready-8` | Rocky 8.10 | 1.7.2 | `kexec-tools-2.0.26` (bundled, c8s spec) | false |
+| `centos-stream-kdive-ready-10` | CentOS Stream 10 | 1.7.8 | c10s BaseOS `makedumpfile-1.7.8-1.el10` | false |
+| `centos-stream-kdive-ready-9` | CentOS Stream 9 | 1.7.6 | `kexec-tools-2.0.29` (bundled, c9s spec) | false |
+
+None of the EL releases ship makedumpfile ≥ 1.7.9 yet (1.7.9 published 2026-04-20, EL distros lag),
+so **every #823 entry is `kdump_capable = false`** for the v7.0-class kernel-under-test. That is the
+expected, disclosed outcome: their lifecycle proof covers provision/build/install/boot/`host_dump`,
+and the default `kdump` path lands on the cause-neutral `kdump_core_incomplete` remediation (which
+names `host_dump` and a newer image). Fedora 44 remains the only kdump-capable default.
+
+### Live-proof preconditions (carry the MVP's negative-proof rigor)
+
+A `kdump_capable = false` entry does **not** universally fail the default `kdump` path: per the
+MVP live-proof gate, makedumpfile 1.7.8 on a *small* (4 GB) guest can still write a complete
+**unfiltered** core that fits the window — the window-overrun only manifests at large RAM. So the
+false-entry proof reuses the MVP's pinned **large** guest RAM, and the disclosure assertion is "the
+default `kdump` path lands on `kdump_core_incomplete`" *at that RAM*; the pass signal is the
+remediation (and the in-guest "kernel version is not supported" console line), not file existence.
+The lifecycle planes (provision/build/install/boot/`host_dump`) are proven independently of RAM.
+
+### Naming and registration
+
+Rows follow the `fedora-kdive-ready-NN` convention: `rocky-kdive-ready-{8,9,10}` and
+`centos-stream-kdive-ready-{9,10}` (`distro = "rocky"` / `"centos-stream"`). `distro`/`version` are
+provenance metadata for a `cloud-image` row (the URL carries the base) and now also drive the
+family's EL-major package decision; no new `virt-builder` templates are involved. Each row registers
+in the inventory example the way Fedora 44 does.
+
+### Live-proof results (#823, KVM host, 2026-06-26)
+
+`build-fs --image <name>` was run live on the KVM host for all five entries (real
+download + sha256-verify + `virt-customize` + `virt-tar-out`/`virt-make-fs` repack + guestfish
+normalize + publish), and each built rootfs was inspected with guestfish. This exercises the
+**build** lifecycle plane and the novel EL-major-aware `rhel` packaging end-to-end:
+
+| entry | built digest (sha256, abbrev) | makedumpfile **in image** | drgn source | kdump/sshd/kdive-ready |
+|---|---|---|---|---|
+| `rocky-kdive-ready-8` | `5faef213…` | **1.7.2** (in `kexec-tools-2.0.26`) | `drgn-0.0.32-1.el8` from **EPEL** | all `enabled` |
+| `rocky-kdive-ready-9` | `e16538a8…` | **1.7.6** (in `kexec-tools-2.0.29`) | `drgn-0.0.33-2.el9` (AppStream) | all `enabled` |
+| `rocky-kdive-ready-10` | `80a035d9…` | **1.7.8** (`makedumpfile-1.7.8-1.el10` + `kdump-utils`) | `drgn-0.0.33-1.el10` | all `enabled` |
+| `centos-stream-kdive-ready-9` | `9a3667f8…` | **1.7.6** (in `kexec-tools-2.0.29`) | `drgn-0.0.33-2.el9` | all `enabled` |
+| `centos-stream-kdive-ready-10` | `4831fb80…` | **1.7.8** (`makedumpfile-1.7.8-1.el10` + `kdump-utils`) | `drgn-0.0.33-1.el10` | all `enabled` |
+
+Confirms: (1) the EL-8 `epel-release`-before-`drgn` ordering works in `virt-customize` (the `drgn`
+install would otherwise fail — drgn is not in EL 8 base); (2) EL 8/9 take makedumpfile + `kdumpctl`
+from `kexec-tools` while EL 10 installs the standalone `makedumpfile`/`kdump-utils`; (3) the
+**in-image makedumpfile version matches the documented matrix exactly** for every entry (all < 1.7.9
+→ `kdump_capable = false` is correct against the real image); (4) `kdump.service` arms via the
+`kexec-tools` gate (not the Fedora-only `kdump-utils`), and `sshd`/`kdive-ready` enable, the managed
+key injects, and SELinux is permissive on every entry.
+
+**Boot proof (EL9, direct-kernel on the v7.0.0 kernel-under-test).** `rocky-kdive-ready-9` was
+direct-kernel-booted on the from-source **kernel 7.0.0** (`-cpu max,la57=off`, the model the kdive
+libguestfs appliance uses — the default `qemu64` lacks the x86-64-v2 baseline EL9 glibc requires and
+SIGILLs PID1): the kernel mounts `/dev/vda` ext4 with no initramfs (built-in virtio_blk/ext4),
+pivots, `systemd 252-67.el9.rocky.0.1` reaches `Multi-User System`, the **`kdive-ready` serial
+signal fires**, and it reaches the `Rocky Linux 9.8 … Kernel 7.0.0` login prompt. `crashkernel=256M`
+reserved correctly. kdump.service's arming **failed** here because the ad-hoc boot skipped the kdive
+**install** plane that injects `/lib/modules/7.0.0` (dracut needs them to build the capture
+initramfs) — and notably `kdive-ready` **still fired**, confirming on an EL guest that the
+`After=kdump.service` ordering (ADR-0251 point 6) releases readiness on the unit's terminal state
+whether kdump arms or not.
+
+The remaining lifecycle (provision → install the v7.0 kernel + modules → `force_crash` →
+`host_dump`, and the default `kdump` path landing on `kdump_core_incomplete` at the pinned large RAM
+once modules are injected and kdump arms) runs through the operator live-stack harness (the
+env-gated, non-CI path the image-lifecycle runbook describes); the install/boot/kdump-capture
+machinery is distro-agnostic and was proven on Fedora in the #817 MVP — the #823-specific risk was
+the EL package divergence (and its boot), proven above.
+
 ## Architecture
 
 All changes are in the shared `images` layer and the local-libvirt provider.
