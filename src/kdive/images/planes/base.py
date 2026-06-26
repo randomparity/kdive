@@ -36,8 +36,8 @@ class RootfsBuildSpec:
         capabilities: The guest-contract tags the image is expected to satisfy (agent, kdump,
             drgn, allowlisted helpers).
         distro: The base-OS family the image is built from (the extensibility seam; only
-            ``"fedora"`` is implemented). Resolved to a ``virt-builder`` template by
-            :func:`kdive.images.distros.resolve_base_template`.
+            ``"fedora"`` is implemented). The build plane resolves the base source/family from
+            the rootfs catalog (:mod:`kdive.images.rootfs_catalog`).
     """
 
     provider: str
