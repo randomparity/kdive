@@ -76,6 +76,55 @@ fedora-kdive-ready-44` reproduces the proven image; (3) add the incomplete-core 
 Each follow-up entry is live-proven for its lifecycle; the makedumpfile-vs-kernel limitation is
 documented per release (and the first follow-up that renders it adds the structured capability flag).
 
+## Follow-up realization: #823 — RHEL family entries (Rocky 8/9/10 + CentOS Stream 9/10)
+
+The first follow-up adds five catalog rows reusing the shipped `rhel` `FamilyCustomizer`, sourced
+from their **GenericCloud qcow2s** (sha256-pinned `cloud-image` source, the same lane proven for
+Fedora 44), and **renders the structured capability flag** the MVP deferred.
+
+### `kdump_capable` flag (the rendered capability)
+
+`RootfsCatalogEntry` gains a required `kdump_capable: bool` field, parsed and validated by the
+loader. It is a **coarse, kernel-relative** fact: `true` iff the entry's base image ships a
+makedumpfile new enough (**≥ 1.7.9**, the first release supporting v7.0 x86_64 — the kernel-class
+under test) to filter the from-source kernel's vmcore. It is **not** an absolute kdump-works flag —
+it answers "does the default `kdump` `vmcore.fetch` produce a *complete* core for the current
+from-source kernel-under-test on this image, or does it hit the incomplete-core remediation?"
+
+The flag is **rendered** in the operator image table in
+[`../../operating/runbooks/image-lifecycle.md`](../../operating/runbooks/image-lifecycle.md) and
+**guarded** by `tests/images/test_rootfs_catalog.py`, which carries the authoritative per-entry
+makedumpfile version (verified against distro package indexes, 2026-06-26) and asserts each row's
+`kdump_capable == (makedumpfile_version ≥ 1.7.9)`. A flag flipped without a matching version bump
+fails the guard.
+
+### Verified makedumpfile matrix (2026-06-26)
+
+| catalog name | base | makedumpfile | source | `kdump_capable` |
+|---|---|---|---|---|
+| `fedora-kdive-ready-44` | Fedora 44 | 1.7.9 | `mdapi.fedoraproject.org/f44` | **true** |
+| `fedora-kdive-ready-43` | Fedora 43 | 1.7.8 | `mdapi.fedoraproject.org/f43` | false |
+| `rocky-kdive-ready-10` | Rocky 10.2 | 1.7.8 | Rocky 10 BaseOS `makedumpfile-1.7.8-1.el10` | false |
+| `rocky-kdive-ready-9` | Rocky 9.8 | 1.7.6 | `kexec-tools-2.0.29` (bundled, c9s spec) | false |
+| `rocky-kdive-ready-8` | Rocky 8.10 | 1.7.2 | `kexec-tools-2.0.26` (bundled, c8s spec) | false |
+| `centos-stream-kdive-ready-10` | CentOS Stream 10 | 1.7.8 | c10s BaseOS `makedumpfile-1.7.8-1.el10` | false |
+| `centos-stream-kdive-ready-9` | CentOS Stream 9 | 1.7.6 | `kexec-tools-2.0.29` (bundled, c9s spec) | false |
+
+None of the EL releases ship makedumpfile ≥ 1.7.9 yet (1.7.9 published 2026-04-20, EL distros lag),
+so **every #823 entry is `kdump_capable = false`** for the v7.0-class kernel-under-test. That is the
+expected, disclosed outcome: their lifecycle proof covers provision/build/install/boot/`host_dump`,
+and the default `kdump` path lands on the cause-neutral `kdump_core_incomplete` remediation (which
+names `host_dump` and a newer image). Fedora 44 remains the only kdump-capable default. As EL
+distros ship makedumpfile ≥ 1.7.9, flipping the flag is a one-line catalog edit plus the guard's
+version bump.
+
+### Naming and registration
+
+Rows follow the `fedora-kdive-ready-NN` convention: `rocky-kdive-ready-{8,9,10}` and
+`centos-stream-kdive-ready-{9,10}` (`distro = "rocky"` / `"centos-stream"`). `distro`/`version` are
+provenance metadata for a `cloud-image` row (the URL carries the base), so no new `virt-builder`
+templates are involved. Each row registers in the inventory example the way Fedora 44 does.
+
 ## Architecture
 
 All changes are in the shared `images` layer and the local-libvirt provider.
