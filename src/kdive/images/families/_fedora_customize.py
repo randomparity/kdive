@@ -1,4 +1,4 @@
-"""Fedora/rhel-family rootfs customization primitives (ADR-0250).
+"""Fedora/rhel-family rootfs customization primitives (ADR-0251).
 
 Single source of truth for the constants and argv fragments the local-libvirt rootfs build
 shares with the :mod:`kdive.images.families.rhel` FamilyCustomizer: the kdive-ready serial

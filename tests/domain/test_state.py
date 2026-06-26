@@ -117,7 +117,9 @@ LEGAL: dict[type[StrEnum], dict[StrEnum, set[StrEnum]]] = {
 def _legal_edges() -> Iterator[tuple[StrEnum, StrEnum]]:
     for table in LEGAL.values():
         for frm, tos in table.items():
-            for to in tos:
+            # Sort the set so collection order is independent of PYTHONHASHSEED; an
+            # unordered yield makes xdist workers disagree on the parametrize order.
+            for to in sorted(tos, key=lambda s: s.name):
                 yield frm, to
 
 

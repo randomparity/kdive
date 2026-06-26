@@ -1,7 +1,7 @@
 # Local multi-distro rootfs catalog (issue #817)
 
 - **Issue:** [#817](https://github.com/randomparity/kdive/issues/817)
-- **ADR:** [ADR-0250](../../adr/0250-local-multidistro-rootfs-catalog.md)
+- **ADR:** [ADR-0251](../../adr/0251-local-multidistro-rootfs-catalog.md)
 - **Status:** Accepted design; MVP (Fedora 44 + mechanism + incomplete-core handling) lands under #817,
   the other families as staged follow-ups in the same epic.
 

@@ -1,4 +1,4 @@
-"""Tests for the declarative local rootfs catalog loader (ADR-0250)."""
+"""Tests for the declarative local rootfs catalog loader (ADR-0251)."""
 
 from __future__ import annotations
 

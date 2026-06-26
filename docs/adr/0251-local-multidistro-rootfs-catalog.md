@@ -1,4 +1,4 @@
-# ADR 0250 — Local multi-distro rootfs catalog + kdump incomplete-core disclosure
+# ADR 0251 — Local multi-distro rootfs catalog + kdump incomplete-core disclosure
 
 - **Status:** Accepted
 - **Date:** 2026-06-25

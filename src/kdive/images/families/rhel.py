@@ -1,4 +1,4 @@
-"""The rhel-family (Fedora/RHEL) rootfs FamilyCustomizer (ADR-0250).
+"""The rhel-family (Fedora/RHEL) rootfs FamilyCustomizer (ADR-0251).
 
 Encodes the virt-customize argv PROVEN live on Fedora 44 in the #817 de-risk spike: install the
 dnf package set, enable ``sshd``/``kdump``, write the NMI-panic sysctl, pin kdump

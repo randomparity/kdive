@@ -74,7 +74,7 @@ _log = logging.getLogger(__name__)
 
 _RETENTION_CLASS = "vmcore"
 
-# Cause-neutral operator guidance for an incomplete kdump core (ADR-0250). kdump writes
+# Cause-neutral operator guidance for an incomplete kdump core (ADR-0251). kdump writes
 # ``/var/crash/<ts>/vmcore-incomplete`` while saving and renames it to ``vmcore`` only on success,
 # so an ``-incomplete`` file that survives means the save never finished. The two field causes are
 # an in-guest ``makedumpfile`` older than the kernel under test, or a capture that ran past the
@@ -226,7 +226,7 @@ class LocalLibvirtRetrieve:
 
     @staticmethod
     def _incomplete_core(system_id: UUID) -> CategorizedError:
-        """An incomplete ``vmcore-incomplete`` was harvested but no complete ``vmcore`` (ADR-0250).
+        """An incomplete ``vmcore-incomplete`` was harvested but no complete ``vmcore`` (ADR-0251).
 
         Distinct from ``_no_core`` (a genuinely empty ``/var/crash``): here kdump produced a
         partial core, so the readiness failure carries the cause-neutral
@@ -336,7 +336,7 @@ class LocalLibvirtRetrieve:
 _VAR_CRASH_GLOB = "/var/crash/*/vmcore"
 # kdump writes ``vmcore-incomplete`` while saving and renames it to ``vmcore`` on success, so a
 # surviving ``-incomplete`` file means the save never finished. The glob is literal-suffixed, so
-# ``*/vmcore`` never matches ``vmcore-incomplete``; the two are listed separately (ADR-0250).
+# ``*/vmcore`` never matches ``vmcore-incomplete``; the two are listed separately (ADR-0251).
 _VAR_CRASH_INCOMPLETE_GLOB = "/var/crash/*/vmcore-incomplete"
 
 # After the force_crash NMI panics the guest, the in-guest kdump kexecs a crash kernel, boots
@@ -521,7 +521,7 @@ def _real_wait_for_vmcore(system_id: UUID) -> HarvestOutcome:  # pragma: no cove
 
     Returns the harvest outcome: the spooled complete core when one was written, plus whether a
     ``vmcore-incomplete`` was seen so ``capture`` can disclose an incomplete-core readiness
-    failure (ADR-0250). Owns the spool's lifecycle only up to a complete core: it creates a
+    failure (ADR-0251). Owns the spool's lifecycle only up to a complete core: it creates a
     private temp directory, streams the chosen core into it, and removes the directory when no
     complete core is found or the harvest raises. On a complete core the caller (``capture``)
     owns cleanup, so the file survives this function's ``finally``.

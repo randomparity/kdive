@@ -186,7 +186,7 @@ cost_class = "local"
 # use `s3` instead only if you publish the qcow2 to the object store (the row then stays
 # `defined` and unbootable until the object exists).
 #
-# `fedora-kdive-ready-44` is the kdump-capable default (ADR-0250): its makedumpfile (1.7.9)
+# `fedora-kdive-ready-44` is the kdump-capable default (ADR-0251): its makedumpfile (1.7.9)
 # filters current from-source kernels, so the default `kdump` `vmcore.fetch` captures a complete
 # core.
 [[image]]
@@ -201,7 +201,7 @@ capabilities = ["kdive-ready-console", "ssh", "drgn"]
 kind = "staged-path"
 path = "/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2"
 
-# `fedora-kdive-ready-43` is retained as the #817 regression reference (ADR-0250): its
+# `fedora-kdive-ready-43` is retained as the #817 regression reference (ADR-0251): its
 # makedumpfile (1.7.8) cannot filter the newest kernels, so the default `kdump` method leaves an
 # incomplete core on a from-source kernel — use 44 for that capture.
 [[image]]

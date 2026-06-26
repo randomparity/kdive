@@ -78,7 +78,7 @@ The cloud-image→bare-ext4 path was never exercised in diagnosis. Prove it manu
 - [ ] **Step 1: Write the catalog file.**
 
 ```toml
-# Local-libvirt rootfs image catalog (ADR-0250). File-authoritative: build-fs --image <name>
+# Local-libvirt rootfs image catalog (ADR-0251). File-authoritative: build-fs --image <name>
 # resolves a row here. source.kind = "virt-builder" carries a template; "cloud-image" carries a
 # sha256-pinned url. family selects the FamilyCustomizer (rhel|debian|suse).
 
@@ -135,7 +135,7 @@ def test_resolve_unknown_name_is_config_error():
 
 - [ ] **Step 5: Run tests, verify pass.** Then `just lint && just type`.
 
-- [ ] **Step 6: Commit.** `feat(images): add declarative rootfs catalog loader (ADR-0250)`
+- [ ] **Step 6: Commit.** `feat(images): add declarative rootfs catalog loader (ADR-0251)`
 
 ---
 
@@ -190,7 +190,7 @@ def test_virt_builder_source_invokes_template(tmp_path):
 - [ ] **Step 2: Run, verify fail.**
 - [ ] **Step 3: Implement `base_source.py`.** Real default downloader = `urllib.request.urlopen` streamed to `dest` (separate `_real_download`, not covered by unit tests). sha256 via streaming read. Wrap the downloader call; map `URLError`/`HTTPError`/`FileNotFoundError`/`OSError` → `base_unreachable`.
 - [ ] **Step 4: Run, verify pass.** `just lint && just type`.
-- [ ] **Step 5: Commit.** `feat(images): add dual base-source acquirer (template + cloud-image) (ADR-0250)`
+- [ ] **Step 5: Commit.** `feat(images): add dual base-source acquirer (template + cloud-image) (ADR-0251)`
 
 ---
 
@@ -253,7 +253,7 @@ def test_rhel_virt_builder_source_skips_cloud_init(tmp_path):
 - [ ] **Step 2: Run, verify fail.**
 - [ ] **Step 3: Implement** the argv PROVEN in the Task-1 spike (see `scratchpad/SPIKE-RESULTS.md`). Move the inline Fedora argv-building from `rootfs_build.py::_real_virt_builder` into `RhelFamily.customize_argv` (dnf `--install drgn,kexec-tools,makedumpfile,kdump-utils,keyutils,openssh-server`, sshd enable, kdump enable + sysctl `kernel.unknown_nmi_panic=1` + `final_action poweroff`, `_debug_image_args`, ssh-inject, kdive-ready upload+enable, SELinux permissive). When `ctx.is_cloud_image`: **(a)** mask `cloud-init*.service`, and **(b) seed `/etc/machine-id`** with a valid 32-hex id (`--write /etc/machine-id:<id>`) — without it, Fedora Cloud's `machine-id="uninitialized"` triggers a first-boot `preset-all` that DISABLES kdump (proven: `kexec_crash_loaded=0`). `RhelFamily.normalize` moves `_real_normalize_guest` (fstab/crypttab/SELinux) here and adds a SELinux relabel. Relocate the shared constants into a module both `rhel.py` and `rootfs_build.py` import. Keep `RootfsBuildSpec.distro`/family mapping intact.
 - [ ] **Step 4: Run, verify pass.** `just lint && just type`.
-- [ ] **Step 5: Commit.** `feat(images): add rhel FamilyCustomizer; relocate Fedora customization (ADR-0250)`
+- [ ] **Step 5: Commit.** `feat(images): add rhel FamilyCustomizer; relocate Fedora customization (ADR-0251)`
 
 ---
 
@@ -271,7 +271,7 @@ def test_rhel_virt_builder_source_skips_cloud_init(tmp_path):
 - [ ] **Step 2: Run, verify fail.**
 - [ ] **Step 3: Implement, keeping the plane backward-compatible (green-commit rule).** Add a `family_for(name)` resolver (`{"rhel": RhelFamily()}`); thread the catalog entry's `source` + `family` into the build. Replace the inline virt-builder call with `acquire_base(...)` + a `virt-customize` invocation built from `family.customize_argv(ctx)`. **Do NOT change the `RootfsBuildSpec`/`RootfsBuildOutput` contract or remove `distros.py` in this task** — the existing CLI (`rootfs_command.py`) still builds the old spec and still imports `distros.py`, and must stay green: resolve `source`/`family` *inside the plane* (from the catalog by `spec.name`, falling back to `virt-builder:<distro>-<releasever>` for a spec built the old way). That keeps this commit's `just lint && just type && just test` green before Task 6 moves the CLI. State this constraint in the commit.
 - [ ] **Step 4: Run, verify pass — each commit green.** `uv run python -m pytest tests/providers/local_libvirt tests/images -q`; then `just lint && just type && just test`. All must pass on THIS commit.
-- [ ] **Step 5: Commit.** `feat(local-libvirt): build rootfs from catalog via base-source + family seam (ADR-0250)`
+- [ ] **Step 5: Commit.** `feat(local-libvirt): build rootfs from catalog via base-source + family seam (ADR-0251)`
 
 ---
 
@@ -285,7 +285,7 @@ def test_rhel_virt_builder_source_skips_cloud_init(tmp_path):
 - [ ] **Step 2: Run, verify fail.**
 - [ ] **Step 3: Implement.** Add `--image`; when present, resolve via `resolve_rootfs_entry` and derive `name/distro/version/dest`. Keep `--distro/--releasever/--name/--dest/--kind/--package` as overrides/back-compat for the default. Replace `resolve_base_template`-based `source_image_digest` with the entry's source digest. Now that the CLI no longer needs it, delete `images/distros.py` (replaced by the catalog) and update its importers (`rootfs_command.py` and the Task-5 plane fallback, any test) — no shim.
 - [ ] **Step 4: Run, verify pass — commit stays green.** `rg -n "distros|resolve_base_template|SUPPORTED_DISTROS" src/ tests/` returns nothing; then `just lint && just type && just test` all pass on this commit.
-- [ ] **Step 5: Commit.** `feat(images): build-fs --image resolves the rootfs catalog; drop distros.py (ADR-0250)`
+- [ ] **Step 5: Commit.** `feat(images): build-fs --image resolves the rootfs catalog; drop distros.py (ADR-0251)`
 
 ---
 
@@ -306,7 +306,7 @@ def test_rhel_virt_builder_source_skips_cloud_init(tmp_path):
 - [ ] **Step 2: Run, verify fail.**
 - [ ] **Step 3: Implement.** Extend the glob set (the harvest selection in `retrieve_kdump.harvest_vmcore`/`list_vmcores`) to surface incomplete entries separately; in `_real_wait_for_vmcore`/`capture`, when no complete core but an incomplete one exists, raise `_incomplete_core(...)`. Keep `_no_core` for the genuinely-empty case. Wording is one shared constant (cause-neutral; names makedumpfile-too-old OR window-overrun; points at `host_dump`/newer image), interpolating no guest output.
 - [ ] **Step 4: Run, verify pass.** `just lint && just type`; run `tests/providers/local_libvirt/ -q`.
-- [ ] **Step 5: Commit.** `feat(retrieve): disclose an incomplete kdump core with an actionable remedy (ADR-0250)`
+- [ ] **Step 5: Commit.** `feat(retrieve): disclose an incomplete kdump core with an actionable remedy (ADR-0251)`
 
 ---
 
@@ -324,7 +324,7 @@ image_catalog seed file.
 - [ ] **Step 2: Add the 44 entry** alongside 43 in exactly the files Step 1 surfaced, documenting 44 as the kdump-capable default and 43 as the regression reference (prose notes the makedumpfile-vs-kernel limitation; no `kdump_capable` field — deferred).
 - [ ] **Step 3: Run the guard/inventory tests** (`uv run python -m pytest tests/inventory tests/admin tests/guards -q`); fix until green.
 - [ ] **Step 4: Regenerate any committed config/tool reference** if these surfaces feed a generated doc (`just config-docs`, `just docs`); commit the regen with the change.
-- [ ] **Step 5: Commit.** `feat(inventory): register fedora-kdive-ready-44 alongside 43 (ADR-0250)`
+- [ ] **Step 5: Commit.** `feat(inventory): register fedora-kdive-ready-44 alongside 43 (ADR-0251)`
 
 ---
 

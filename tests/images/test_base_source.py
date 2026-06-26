@@ -1,4 +1,4 @@
-"""Tests for the dual base-source acquirer (ADR-0250)."""
+"""Tests for the dual base-source acquirer (ADR-0251)."""
 
 from __future__ import annotations
 

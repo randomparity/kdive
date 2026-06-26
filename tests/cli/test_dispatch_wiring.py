@@ -164,3 +164,23 @@ def test_dispatch_routes_doctor(monkeypatch: pytest.MonkeyPatch) -> None:
     args = argparse.Namespace(command="doctor")
     assert asyncio.run(dispatch.run(args)) == 0
     assert called == {"doctor": True}
+
+
+def test_report_all_parses_window_and_group_by() -> None:
+    args = build_parser().parse_args(
+        ["ledger", "report-all", "--group-by", "principal", "--since", "2026-01-01T00:00:00+00:00"]
+    )
+    assert args.command == "ledger" and args.subcommand == "report-all"
+    assert args.group_by == "principal"
+    assert args.since == "2026-01-01T00:00:00+00:00" and args.until is None
+
+
+def test_report_granted_parses_projects_flag() -> None:
+    args = build_parser().parse_args(["ledger", "report-granted", "--projects", "a,b"])
+    assert args.subcommand == "report-granted" and args.projects == "a,b"
+
+
+def test_report_all_rejects_projects_flag() -> None:
+    # report-all has no --projects (only report-granted scopes a subset).
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["ledger", "report-all", "--projects", "a,b"])

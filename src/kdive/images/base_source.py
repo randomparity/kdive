@@ -1,4 +1,4 @@
-"""Base-image acquirer for the local rootfs catalog (ADR-0250).
+"""Base-image acquirer for the local rootfs catalog (ADR-0251).
 
 A catalog row's :class:`~kdive.images.rootfs_catalog.RootfsSource` is materialized into a
 ``scratch`` qcow2 by either invoking ``virt-builder`` against a template or downloading a

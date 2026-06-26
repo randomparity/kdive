@@ -1,4 +1,4 @@
-"""Unit tests for the rhel FamilyCustomizer argv contract (ADR-0250).
+"""Unit tests for the rhel FamilyCustomizer argv contract (ADR-0251).
 
 These pin the virt-customize argv the rhel customizer builds without running libguestfs: the
 PROVEN Fedora-44 customization (kdump + sshd enable, NMI-panic sysctl, ssh-inject, kdive-ready

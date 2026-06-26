@@ -1,4 +1,4 @@
-"""Declarative local-libvirt rootfs catalog loader (ADR-0250).
+"""Declarative local-libvirt rootfs catalog loader (ADR-0251).
 
 The file-authoritative ``rootfs_catalog.toml`` maps a ``build-fs --image <name>`` to a
 typed row. Each row carries a base ``source`` that is either a virt-builder template or a

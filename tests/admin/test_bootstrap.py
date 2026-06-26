@@ -107,7 +107,7 @@ def test_default_fixture_files_include_catalog() -> None:
     assert "profiles/console-ready_x86_64.yaml" in fixture_files
 
 
-# fedora-kdive-ready-44 is the kdump-capable default (ADR-0250); 43 is retained as the #817
+# fedora-kdive-ready-44 is the kdump-capable default (ADR-0251); 43 is retained as the #817
 # regression reference (its older makedumpfile cannot filter the newest kernels).
 _BASELINE_SYSTEMS_TOML = """schema_version = 2
 

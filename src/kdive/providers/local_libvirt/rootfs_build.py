@@ -1,4 +1,4 @@
-"""The in-process local-libvirt rootfs build plane (M2.4/2, ADR-0052, ADR-0092, ADR-0250).
+"""The in-process local-libvirt rootfs build plane (M2.4/2, ADR-0052, ADR-0092, ADR-0251).
 
 `LocalLibvirtRootfsBuildPlane` builds a kdive-ready rootfs from the declarative rootfs catalog
 (`kdive.images.rootfs_catalog`) plus a per-family customizer seam, recording **pinned-input
@@ -8,7 +8,7 @@ provenance** into the :class:`RootfsBuildOutput`. The pipeline is:
    the connect-time ``ssh -i`` identity);
 2. resolve the catalog row for ``spec.name`` (its base ``source`` + ``family``); an uncataloged
    old-style spec falls back to a ``virt-builder:<distro>-<releasever>`` template + the rhel family
-   so the legacy ``build-fs`` CLI keeps working until it moves to ``--image`` (Task 6, ADR-0250);
+   so the legacy ``build-fs`` CLI keeps working until it moves to ``--image`` (Task 6, ADR-0251);
 3. :func:`kdive.images.base_source.acquire_base` materializes the base into a scratch qcow2 — a
    ``virt-builder`` template or a sha256-pinned cloud image;
 4. ``virt-customize`` applies the family's argv (``family.customize_argv``): install the package
@@ -70,7 +70,7 @@ _ACQUIRE_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 _CUSTOMIZE_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 _REPACK_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 
-# The rhel FamilyCustomizer (ADR-0250) sets SELinux permissive + a first-boot relabel; the
+# The rhel FamilyCustomizer (ADR-0251) sets SELinux permissive + a first-boot relabel; the
 # repacked image is permissive, recorded as the provenance ``guest_selinux``.
 _GUEST_SELINUX = "permissive"
 

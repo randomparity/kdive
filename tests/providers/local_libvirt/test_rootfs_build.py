@@ -1,4 +1,4 @@
-"""Unit tests for the in-process local-libvirt rootfs build plane (M2.4/2, ADR-0092, ADR-0250).
+"""Unit tests for the in-process local-libvirt rootfs build plane (M2.4/2, ADR-0092, ADR-0251).
 
 These cover the plane's orchestration and provenance contract without libguestfs, qemu, or the
 network: every slow/external seam (``acquire_base``, the ``virt-customize`` runner, the repack, and

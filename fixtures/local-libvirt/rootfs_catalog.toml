@@ -1,4 +1,4 @@
-# Local-libvirt rootfs image catalog (ADR-0250). File-authoritative: build-fs --image <name>
+# Local-libvirt rootfs image catalog (ADR-0251). File-authoritative: build-fs --image <name>
 # resolves a row here. source.kind = "virt-builder" carries a template; "cloud-image" carries a
 # sha256-pinned url. family selects the FamilyCustomizer (rhel|debian|suse).
 
