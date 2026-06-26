@@ -112,6 +112,25 @@ def test_each_prompt_renders_nonempty_body_naming_every_step_tool() -> None:
             assert step.tool in body, f"{spec.name} body omits {step.tool}"
 
 
+def test_build_boot_debug_leads_with_external_upload_loop() -> None:
+    # ADR-0234: the build_boot_debug journey leads with the external upload loop and notes
+    # that warm-tree server build is the secondary single-host path.
+    spec = next(s for s in CANONICAL_PROMPTS if s.name == "build_boot_debug")
+    tools = [step.tool for step in spec.steps]
+    upload_loop = [
+        "runs.create",
+        "artifacts.expected_uploads",
+        "artifacts.create_run_upload",
+        "runs.complete_build",
+    ]
+    assert tools[: len(upload_loop)] == upload_loop
+    # runs.build (the warm-tree enqueue verb) is no longer a step in the default journey.
+    assert "runs.build" not in tools
+    lowered = spec.summary.lower()
+    assert "external upload is the default" in lowered
+    assert "secondary single-host" in lowered
+
+
 def test_render_numbers_steps_sequentially_from_one_on_their_own_lines() -> None:
     spec = PromptSpec(
         name="probe",
