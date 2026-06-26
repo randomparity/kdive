@@ -32,6 +32,8 @@ from kdive.mcp.tools.lifecycle.allocations.lifecycle import (
 )
 from kdive.mcp.tools.lifecycle.allocations.request import (
     _budget_denial_detail,
+    _denial_detail,
+    _denial_next_actions,
     request_allocation,
 )
 from kdive.mcp.tools.lifecycle.allocations.view import (
@@ -395,13 +397,14 @@ def test_capacity_denial_detail_is_prose_not_token(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_quota_denial_names_set_quota_remedy(migrated_url: str) -> None:
+def test_quota_denial_names_set_quota_remedy_for_admin(migrated_url: str) -> None:
     # #801/ADR-0245: a fresh project's concurrency-quota denial points at the admin tool that
-    # resolves it (accounting.set_quota), not just the empty allocations.list.
+    # resolves it (accounting.set_quota), not just the empty allocations.list. #841: the tool is
+    # led with only for an admin caller, who can actually invoke it.
     async def _run() -> ToolResponse:
         async with _pool(migrated_url) as pool:
             await _register(pool, cap=2, quota=0)  # quota row present but exhausted at 0
-            return await _request(pool, _ctx())
+            return await _request(pool, _ctx(Role.ADMIN))
 
     resp = asyncio.run(_run())
     assert resp.error_category == "quota_exceeded"
@@ -410,13 +413,31 @@ def test_quota_denial_names_set_quota_remedy(migrated_url: str) -> None:
     assert resp.detail is not None and "accounting.set_quota" in resp.detail
 
 
-def test_budget_denial_names_set_budget_remedy(migrated_url: str) -> None:
+def test_quota_denial_omits_admin_tool_for_non_admin(migrated_url: str) -> None:
+    # #841: a quota denial to a non-admin caller (allocations.request needs only CONTRIBUTOR)
+    # must NOT name the admin-only accounting.set_quota tool; it points at the plain breadcrumb
+    # and tells the caller to ask a project admin.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2, quota=0)
+            return await _request(pool, _ctx(Role.CONTRIBUTOR))
+
+    resp = asyncio.run(_run())
+    assert resp.error_category == "quota_exceeded"
+    assert resp.suggested_next_actions == ["allocations.list"]
+    assert "accounting.set_quota" not in resp.suggested_next_actions
+    assert resp.detail is not None
+    assert "accounting." not in resp.detail
+    assert "ask your project admin" in resp.detail
+
+
+def test_budget_denial_names_set_budget_remedy_for_admin(migrated_url: str) -> None:
     # #801/ADR-0245: a budget denial (the second step of the fresh-project trap, surfaced after
-    # quota is raised) points at accounting.set_budget.
+    # quota is raised) points at accounting.set_budget for an admin caller (#841).
     async def _run() -> ToolResponse:
         async with _pool(migrated_url) as pool:
             await _register(pool, cap=2, limit="0")  # generous quota, no budget
-            return await _request(pool, _ctx())
+            return await _request(pool, _ctx(Role.ADMIN))
 
     resp = asyncio.run(_run())
     assert resp.error_category == "allocation_denied"
@@ -426,6 +447,26 @@ def test_budget_denial_names_set_budget_remedy(migrated_url: str) -> None:
     assert resp.detail is not None and "accounting.set_budget" in resp.detail
 
 
+def test_budget_denial_omits_admin_tool_for_non_admin(migrated_url: str) -> None:
+    # #841: a budget denial to a non-admin caller must drop accounting.set_budget and tell the
+    # caller to ask a project admin — while STILL naming the #838 shortfall figures so the admin
+    # can be asked for a sized increase.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2, limit="0")
+            return await _request(pool, _ctx(Role.CONTRIBUTOR))
+
+    resp = asyncio.run(_run())
+    assert resp.data["reason"] == "budget_exceeded"
+    assert resp.suggested_next_actions == ["allocations.list"]
+    assert "accounting.set_budget" not in resp.suggested_next_actions
+    estimate_kcu = str(resp.data["estimate_kcu"])
+    assert resp.detail is not None
+    assert "accounting." not in resp.detail
+    assert "ask your project admin" in resp.detail
+    assert estimate_kcu in resp.detail  # #838 shortfall still named for the non-admin
+
+
 def test_budget_denial_reports_cost_and_remaining(migrated_url: str) -> None:
     # #838: a budget denial echoes the priced estimate and the budget figures into `data`, and
     # names the shortfall in the prose, so the agent can size accounting.set_budget rather than
@@ -433,7 +474,7 @@ def test_budget_denial_reports_cost_and_remaining(migrated_url: str) -> None:
     async def _run() -> ToolResponse:
         async with _pool(migrated_url) as pool:
             await _register(pool, cap=2, limit="0")  # generous quota, zero budget
-            return await _request(pool, _ctx())
+            return await _request(pool, _ctx(Role.ADMIN))
 
     resp = asyncio.run(_run())
     estimate_kcu = str(resp.data["estimate_kcu"])
@@ -449,14 +490,14 @@ def test_budget_denial_reports_cost_and_remaining(migrated_url: str) -> None:
 
 def test_budget_denial_detail_without_figures_drops_shortfall_clause() -> None:
     # Defensive: a budget denial whose details lack the figures still yields valid prose (no
-    # KeyError, no placeholder), naming only the remedy tool.
+    # KeyError, no placeholder), naming only the remedy tool for an admin caller.
     outcome = AdmissionOutcome(
         granted=False,
         allocation=None,
         category=ErrorCategory.ALLOCATION_DENIED,
         reason=BUDGET_DENIAL_REASON,
     )
-    detail = _budget_denial_detail(outcome)
+    detail = _budget_denial_detail(outcome, caller_is_admin=True)
     assert "accounting.set_budget" in detail
     assert "remaining" not in detail
 
@@ -469,9 +510,50 @@ def test_budget_denial_detail_with_estimate_only_names_estimate() -> None:
         reason=BUDGET_DENIAL_REASON,
         details={"estimate_kcu": "6.0000"},
     )
-    detail = _budget_denial_detail(outcome)
+    detail = _budget_denial_detail(outcome, caller_is_admin=True)
     assert "requested 6.0000 kcu" in detail
     assert "remaining" not in detail
+
+
+def test_budget_denial_detail_non_admin_keeps_shortfall_drops_tool() -> None:
+    # #841: the non-admin budget detail names the shortfall figures (#838) but routes to a
+    # project admin instead of the uncallable accounting.set_budget tool.
+    outcome = AdmissionOutcome(
+        granted=False,
+        allocation=None,
+        category=ErrorCategory.ALLOCATION_DENIED,
+        reason=BUDGET_DENIAL_REASON,
+        details={"estimate_kcu": "6.0000", "budget_remaining_kcu": "0"},
+    )
+    detail = _budget_denial_detail(outcome, caller_is_admin=False)
+    assert "requested 6.0000 kcu, 0 kcu remaining" in detail
+    assert "accounting.set_budget" not in detail
+    assert "ask your project admin" in detail
+
+
+def test_denial_next_actions_role_awareness() -> None:
+    # #841: the next-action breadcrumb leads with the admin remedy tool only for an admin caller.
+    budget = AdmissionOutcome(
+        granted=False,
+        allocation=None,
+        category=ErrorCategory.ALLOCATION_DENIED,
+        reason=BUDGET_DENIAL_REASON,
+    )
+    quota = AdmissionOutcome(granted=False, allocation=None, category=ErrorCategory.QUOTA_EXCEEDED)
+    assert _denial_next_actions(budget, caller_is_admin=True)[0] == "accounting.set_budget"
+    assert _denial_next_actions(budget, caller_is_admin=False) == ["allocations.list"]
+    assert _denial_next_actions(quota, caller_is_admin=True)[0] == "accounting.set_quota"
+    assert _denial_next_actions(quota, caller_is_admin=False) == ["allocations.list"]
+
+
+def test_quota_denial_detail_role_awareness() -> None:
+    # #841: the quota denial prose names accounting.set_quota only for an admin caller.
+    quota = AdmissionOutcome(granted=False, allocation=None, category=ErrorCategory.QUOTA_EXCEEDED)
+    admin_detail = _denial_detail(quota, caller_is_admin=True)
+    non_admin_detail = _denial_detail(quota, caller_is_admin=False)
+    assert "accounting.set_quota" in admin_detail
+    assert "accounting." not in non_admin_detail
+    assert "ask your project admin" in non_admin_detail
 
 
 def test_get_own_allocation_returns_state(migrated_url: str) -> None:
