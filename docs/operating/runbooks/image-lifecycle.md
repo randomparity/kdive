@@ -147,6 +147,37 @@ kdivectl images list
 runbook drove inline, validates the guest contract (libguestfs inspection — a build missing
 agent/kdump/drgn/helpers is rejected, never published), and publishes row-first.
 
+## Local rootfs catalog entries and kdump capability (ADR-0251)
+
+`build-fs --image <name>` resolves a row from the file-authoritative
+`fixtures/local-libvirt/rootfs_catalog.toml`. Each row pins its base (a `virt-builder` template or
+a sha256-pinned cloud-image URL) and carries a `kdump_capable` flag. The RHEL-family entries
+(#823) reuse the `rhel` customizer; on EL 8/9 `makedumpfile`/`kdumpctl` come from `kexec-tools`
+(no standalone packages) and EL 8 pulls `drgn` from EPEL.
+
+`kdump_capable` is **kernel-relative** to the current default from-source target (a v7.0-class
+x86_64 kernel): it is `true` only when the makedumpfile the build installs from that release's
+repos is **≥ 1.7.9** (the first release that filters a v7.0 vmcore). It is a curated, dated
+snapshot of a mutable upstream, not live truth — when a release ships makedumpfile ≥ 1.7.9 a fresh
+build silently becomes capable while the flag lags until re-verified. The runtime
+`kdump_core_incomplete` remediation (raised on the actual harvest) is the ground truth.
+
+| catalog `--image` | base | makedumpfile (build-time) | `kdump_capable` (v7.0) | default `kdump` `vmcore.fetch` |
+|---|---|---|---|---|
+| `fedora-kdive-ready-44` | Fedora 44 | 1.7.9 | **yes** | complete filtered core |
+| `fedora-kdive-ready-43` | Fedora 43 | 1.7.8 | no | `kdump_core_incomplete` → `host_dump` |
+| `rocky-kdive-ready-8` | Rocky 8.10 | 1.7.2 (in `kexec-tools`) | no | `kdump_core_incomplete` → `host_dump` |
+| `rocky-kdive-ready-9` | Rocky 9.8 | 1.7.6 (in `kexec-tools`) | no | `kdump_core_incomplete` → `host_dump` |
+| `rocky-kdive-ready-10` | Rocky 10.2 | 1.7.8 | no | `kdump_core_incomplete` → `host_dump` |
+| `centos-stream-kdive-ready-9` | CentOS Stream 9 | 1.7.6 (in `kexec-tools`) | no | `kdump_core_incomplete` → `host_dump` |
+| `centos-stream-kdive-ready-10` | CentOS Stream 10 | 1.7.8 | no | `kdump_core_incomplete` → `host_dump` |
+
+Versions verified against distro package indexes on 2026-06-26 (the guard test
+`tests/images/test_rootfs_catalog.py` asserts each row's flag matches its documented makedumpfile
+version). A `kdump_capable = no` entry still completes the rest of the lifecycle
+(provision/build/install/boot) and captures via the explicit `host_dump` method; only the default
+in-guest `kdump` filtered-core path is affected for a v7.0-class kernel.
+
 ## Operator verbs (`kdivectl images`)
 
 | verb | actor | authz | what it does |

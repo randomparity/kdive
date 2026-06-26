@@ -75,6 +75,72 @@ kind = "s3"
 object_key = "rootfs/local/fedora-kdive-ready-43.qcow2"
 # digest = "sha256:…"   # uncomment once published to mark the row `registered`
 
+# RHEL-family rootfs entries (Rocky 8/9/10 + CentOS Stream 9/10, ADR-0251 / #823), built via
+# `build-fs --image <name>` from their sha256-pinned GenericCloud bases. NONE ship makedumpfile
+# >= 1.7.9 yet, so the default `kdump` `vmcore.fetch` lands on the `kdump_core_incomplete`
+# remediation for a v7.0-class kernel — use `method="host_dump"` (or fedora-kdive-ready-44) there.
+# See docs/operating/runbooks/image-lifecycle.md for the per-release makedumpfile/kdump_capable
+# table. Declared `s3`; each reaches `registered` once its object is published and a `digest` set.
+[[image]]
+provider = "local-libvirt"
+name = "rocky-kdive-ready-8"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["kdive-ready-console", "ssh", "drgn"]
+[image.source]
+kind = "s3"
+object_key = "rootfs/local/rocky-kdive-ready-8.qcow2"
+
+[[image]]
+provider = "local-libvirt"
+name = "rocky-kdive-ready-9"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["kdive-ready-console", "ssh", "drgn"]
+[image.source]
+kind = "s3"
+object_key = "rootfs/local/rocky-kdive-ready-9.qcow2"
+
+[[image]]
+provider = "local-libvirt"
+name = "rocky-kdive-ready-10"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["kdive-ready-console", "ssh", "drgn"]
+[image.source]
+kind = "s3"
+object_key = "rootfs/local/rocky-kdive-ready-10.qcow2"
+
+[[image]]
+provider = "local-libvirt"
+name = "centos-stream-kdive-ready-9"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["kdive-ready-console", "ssh", "drgn"]
+[image.source]
+kind = "s3"
+object_key = "rootfs/local/centos-stream-kdive-ready-9.qcow2"
+
+[[image]]
+provider = "local-libvirt"
+name = "centos-stream-kdive-ready-10"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["kdive-ready-console", "ssh", "drgn"]
+[image.source]
+kind = "s3"
+object_key = "rootfs/local/centos-stream-kdive-ready-10.qcow2"
+
 # A `staged-path` source (local-libvirt only, ADR-0228) registers an operator-staged rootfs
 # FILE — the qcow2 `build-fs` writes to local disk — without any object-store upload. It seeds
 # `registered` (bootable) immediately and is discoverable from the MCP surface
