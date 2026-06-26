@@ -55,3 +55,36 @@ def render_record(record: Mapping[str, object], *, as_json: bool) -> None:
     width = max((len(key) for key in record), default=0)
     for key, value in record.items():
         print(f"{key.ljust(width)}{_GAP}{_cell(value)}".rstrip())
+
+
+def render_report(
+    rows: Sequence[Mapping[str, object]],
+    totals: Mapping[str, object],
+    *,
+    columns: Sequence[str],
+    total_columns: Sequence[str],
+    as_json: bool,
+) -> None:
+    """Render report rows as a table with a totals footer, or as ``{items, totals}`` JSON.
+
+    Both halves are projected onto their declared key sets so the scriptable contract is
+    stable against server-side envelope additions: a ``totals`` key not in ``total_columns``
+    never reaches the output, and a missing one renders blank (table) or ``null`` (JSON),
+    matching :func:`render` / :func:`render_record`.
+
+    Args:
+        rows: The per-row records; each is projected onto ``columns``.
+        totals: The envelope totals; projected onto ``total_columns``.
+        columns: The ordered row column keys.
+        total_columns: The ordered totals keys.
+        as_json: When ``True``, emit one ``{"items": [...], "totals": {...}}`` object.
+    """
+    projected_totals = {c: totals.get(c) for c in total_columns}
+    if as_json:
+        projected_rows = [{c: row.get(c) for c in columns} for row in rows]
+        document = {"items": projected_rows, "totals": projected_totals}
+        print(json.dumps(document, indent=2, default=str))
+        return
+    render(rows, columns=columns, as_json=False)
+    print()
+    render_record(projected_totals, as_json=False)

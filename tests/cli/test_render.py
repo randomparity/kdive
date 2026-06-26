@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from kdive.cli.render import render, render_record
+from kdive.cli.render import render, render_record, render_report
 
 ROWS = [{"id": "r1", "kind": "local-libvirt"}, {"id": "r2", "kind": "remote-libvirt"}]
 
@@ -145,3 +145,42 @@ def test_render_record_json_serializes_non_json_values_via_str(capsys) -> None:
 
     render_record({"path": PurePosixPath("/a/b")}, as_json=True)
     assert json.loads(capsys.readouterr().out) == {"path": "/a/b"}
+
+
+_REPORT_COLS = ["project", "reserved"]
+_REPORT_TCOLS = ["scope", "total_reserved"]
+
+
+def test_render_report_json_emits_items_and_projected_totals(capsys) -> None:
+    rows = [{"project": "p", "reserved": "1.0", "secret": "x"}]
+    totals = {"scope": "all-projects", "total_reserved": "1.0", "extra": "drop-me"}
+    render_report(rows, totals, columns=_REPORT_COLS, total_columns=_REPORT_TCOLS, as_json=True)
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed == {
+        "items": [{"project": "p", "reserved": "1.0"}],
+        "totals": {"scope": "all-projects", "total_reserved": "1.0"},
+    }
+
+
+def test_render_report_table_has_rows_then_totals_footer(capsys) -> None:
+    rows = [{"project": "p", "reserved": "1.0"}]
+    totals = {"scope": "all-projects", "total_reserved": "1.0"}
+    render_report(rows, totals, columns=_REPORT_COLS, total_columns=_REPORT_TCOLS, as_json=False)
+    lines = capsys.readouterr().out.splitlines()
+    assert "project" in lines[0] and any("p" in line for line in lines)  # row table
+    assert "" in lines  # blank separator line
+    assert any("scope" in line and "all-projects" in line for line in lines)  # totals footer
+
+
+def test_render_report_empty_rows_still_prints_header_and_totals(capsys) -> None:
+    render_report(
+        [], {"scope": "all-projects"}, columns=_REPORT_COLS, total_columns=["scope"], as_json=False
+    )
+    out = capsys.readouterr().out
+    assert "project" in out and "scope" in out and "all-projects" in out
+
+
+def test_render_report_json_missing_total_key_renders_null(capsys) -> None:
+    render_report([], {}, columns=_REPORT_COLS, total_columns=_REPORT_TCOLS, as_json=True)
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed == {"items": [], "totals": {"scope": None, "total_reserved": None}}
