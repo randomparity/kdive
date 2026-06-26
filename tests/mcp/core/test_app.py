@@ -426,15 +426,15 @@ _EXPECTED_STEP_MATURITY: dict[str, str] = {
     "systems.define": "implemented",
     "runs.create": "implemented",
     "runs.complete_build": "implemented",
-    "runs.build": "partial",
-    "runs.install": "partial",
-    "runs.boot": "partial",
+    "runs.build": "implemented",
+    "runs.install": "implemented",
+    "runs.boot": "implemented",
     "debug.start_session": "implemented",
     "introspect.run": "implemented",
     "debug.end_session": "implemented",
-    "control.force_crash": "partial",
+    "control.force_crash": "implemented",
     "vmcore.fetch": "implemented",
-    "vmcore.list": "partial",
+    "vmcore.list": "implemented",
     "postmortem.triage": "partial",
     "introspect.from_vmcore": "implemented",
 }
@@ -474,12 +474,12 @@ def test_build_app_registers_lifecycle_prompts() -> None:
 
 
 def test_lifecycle_prompts_disclose_partial_steps() -> None:
-    # runs.build is partial in the live registry; runs.create is implemented.
-    body = _rendered_prompt_body(_built_app(), "build_boot_debug")
-    build_line = next(line for line in body.splitlines() if "runs.build " in line)
-    create_line = next(line for line in body.splitlines() if "runs.create " in line)
-    assert "[partial" in build_line
-    assert "[partial" not in create_line
+    # postmortem.triage is partial in the live registry; vmcore.list is implemented.
+    body = _rendered_prompt_body(_built_app(), "triage_panic")
+    triage_line = next(line for line in body.splitlines() if "postmortem.triage " in line)
+    vmcore_line = next(line for line in body.splitlines() if "vmcore.list " in line)
+    assert "[partial" in triage_line
+    assert "[partial" not in vmcore_line
 
 
 def test_lifecycle_prompts_expected_maturity_matches_registry() -> None:
