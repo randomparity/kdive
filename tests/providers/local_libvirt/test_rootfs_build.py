@@ -20,7 +20,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families._fedora_customize import SSH_NIC_KEYFILE_CONTENT
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.families.rhel import RhelFamily
-from kdive.images.planes._build_common import VersionInspectSeam
+from kdive.images.planes._build_common import MakedumpfileProbeSeam, VersionInspectSeam
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
 from kdive.images.rootfs_catalog import (
     CloudImageSource,
@@ -124,7 +124,15 @@ def _no_versions(_qcow2: Path) -> dict[str, str]:
     return {}
 
 
-def _tools(rec: _Recorder, inspect_versions: VersionInspectSeam = _no_versions) -> RootfsBuildTools:
+def _no_makedumpfile(_qcow2: Path) -> str | None:
+    return None
+
+
+def _tools(
+    rec: _Recorder,
+    inspect_versions: VersionInspectSeam = _no_versions,
+    probe_makedumpfile: MakedumpfileProbeSeam = _no_makedumpfile,
+) -> RootfsBuildTools:
     return RootfsBuildTools(
         resolve_authorized_key=rec.resolve_authorized_key,
         acquire_base=rec.acquire_base,
@@ -132,14 +140,19 @@ def _tools(rec: _Recorder, inspect_versions: VersionInspectSeam = _no_versions) 
         repack_whole_disk_ext4=rec.repack_whole_disk_ext4,
         family_for=rec.family_for,
         inspect_versions=inspect_versions,
+        probe_makedumpfile=probe_makedumpfile,
     )
 
 
 def _plane(
-    tmp_path: Path, rec: _Recorder, inspect_versions: VersionInspectSeam = _no_versions
+    tmp_path: Path,
+    rec: _Recorder,
+    inspect_versions: VersionInspectSeam = _no_versions,
+    probe_makedumpfile: MakedumpfileProbeSeam = _no_makedumpfile,
 ) -> LocalLibvirtRootfsBuildPlane:
     return LocalLibvirtRootfsBuildPlane(
-        workspace=tmp_path / "work", tools=_tools(rec, inspect_versions)
+        workspace=tmp_path / "work",
+        tools=_tools(rec, inspect_versions, probe_makedumpfile),
     )
 
 
@@ -272,6 +285,49 @@ def test_provenance_versions_absent_for_unreported_request(tmp_path: Path) -> No
     assert out.provenance["package_versions"] == {"drgn": "0.0.28"}
     # openssh-server is still requested (in packages), just unversioned (not in the map).
     assert out.provenance["packages"] == ["openssh-server", "drgn"]
+
+
+def test_provenance_records_makedumpfile_version_from_probe(tmp_path: Path) -> None:
+    rec = _Recorder(authorized_key=_key(tmp_path))
+    out = _plane(
+        tmp_path,
+        rec,
+        probe_makedumpfile=lambda _q: "makedumpfile: version 1.7.9 (released 2026-04-20)",
+    ).build(_spec())
+    assert out.provenance["makedumpfile_version"] == "1.7.9"
+
+
+def test_provenance_makedumpfile_falls_back_to_package_versions(tmp_path: Path) -> None:
+    # EL-style: the binary probe finds nothing; the standalone-package version is the fallback.
+    rec = _Recorder(authorized_key=_key(tmp_path))
+    out = _plane(
+        tmp_path,
+        rec,
+        inspect_versions=lambda _q: {"makedumpfile": "1.7.2", "drgn": "0.0.28"},
+        probe_makedumpfile=_no_makedumpfile,
+    ).build(_spec())
+    assert out.provenance["makedumpfile_version"] == "1.7.2"
+
+
+def test_provenance_omits_makedumpfile_version_when_both_empty(tmp_path: Path) -> None:
+    rec = _Recorder(authorized_key=_key(tmp_path))
+    out = _plane(tmp_path, rec).build(_spec())
+    assert "makedumpfile_version" not in out.provenance
+
+
+def test_provenance_omits_makedumpfile_version_on_probe_error(tmp_path: Path) -> None:
+    def _boom(_q: Path) -> str | None:
+        raise CategorizedError("no tool", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    rec = _Recorder(authorized_key=_key(tmp_path))
+    out = _plane(tmp_path, rec, probe_makedumpfile=_boom).build(_spec())
+    assert "makedumpfile_version" not in out.provenance
+
+
+def test_provenance_omits_makedumpfile_version_on_unparseable_probe(tmp_path: Path) -> None:
+    rec = _Recorder(authorized_key=_key(tmp_path))
+    out = _plane(tmp_path, rec, probe_makedumpfile=lambda _q: "garbage output").build(_spec())
+    assert "makedumpfile_version" not in out.provenance
 
 
 def test_build_falls_back_to_virt_builder_for_uncataloged_name(tmp_path: Path) -> None:

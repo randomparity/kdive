@@ -43,8 +43,11 @@ from kdive.images.families._fedora_customize import (
     readiness_unit as _readiness_unit,
 )
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
+from kdive.images.kdump_support import MakedumpfileVersion
 from kdive.images.planes._build_common import (
+    DEFAULT_MAKEDUMPFILE_PROBE,
     DEFAULT_VERSION_INSPECT,
+    MakedumpfileProbeSeam,
     VersionInspectSeam,
     build_workspace,
     digest_file,
@@ -163,6 +166,7 @@ class RootfsBuildTools:
     repack_whole_disk_ext4: RepackWholeDiskExt4 = _real_repack_whole_disk_ext4
     family_for: FamilyResolver = family_for
     inspect_versions: VersionInspectSeam = DEFAULT_VERSION_INSPECT
+    probe_makedumpfile: MakedumpfileProbeSeam = DEFAULT_MAKEDUMPFILE_PROBE
 
 
 def _resolve_entry(spec: RootfsBuildSpec) -> RootfsCatalogEntry:
@@ -258,7 +262,9 @@ class LocalLibvirtRootfsBuildPlane:
             staged = work_dir / f"{spec.name}.qcow2"
             self._tools.repack_whole_disk_ext4(scratch=scratch, qcow2=staged, size=self._size)
             family.normalize(staged)
-            package_versions = self._capture_versions(scratch, spec.packages)
+            installed = self._inspect_installed(scratch)
+            package_versions = {n: installed[n] for n in spec.packages if n in installed}
+            makedumpfile_version = self._capture_makedumpfile(scratch, installed)
             qcow2 = publish_qcow2(self._workspace, image_name=spec.name, scratch=staged)
         digest = digest_file(qcow2)
         return RootfsBuildOutput(
@@ -271,24 +277,50 @@ class LocalLibvirtRootfsBuildPlane:
                 size=self._size,
                 authorized_key=authorized_key,
                 package_versions=package_versions,
+                makedumpfile_version=makedumpfile_version,
             ),
         )
 
-    def _capture_versions(self, scratch: Path, requested: tuple[str, ...]) -> dict[str, str]:
-        """Installed versions for the requested packages; ``{}`` (logged) on inspector failure.
+    def _inspect_installed(self, scratch: Path) -> dict[str, str]:
+        """The full installed ``{name: version}`` map; ``{}`` (logged) on inspector failure.
 
         Inspects the customized scratch image (a normal bootable OS disk, still present in the
-        workspace) and filters to the requested set. Version capture is advisory: a categorized
-        inspector failure degrades to an empty map so the build still publishes (ADR-0252).
+        workspace). Version capture is advisory: a categorized inspector failure degrades to an
+        empty map so the build still publishes (ADR-0252). Callers filter to the requested set for
+        ``package_versions`` and consult the full map for the makedumpfile fallback (ADR-0253).
         """
         try:
-            installed = self._tools.inspect_versions(scratch)
+            return self._tools.inspect_versions(scratch)
         except CategorizedError:
             _log.warning(
                 "package-version capture failed; provenance omits package_versions", exc_info=True
             )
             return {}
-        return {name: installed[name] for name in requested if name in installed}
+
+    def _capture_makedumpfile(self, scratch: Path, installed: dict[str, str]) -> str | None:
+        """The image's makedumpfile version: the binary probe, else the package-version fallback.
+
+        Reads the build-written ``makedumpfile --version`` marker (authoritative across families,
+        EL8/EL9 included); if that yields nothing, falls back to a standalone ``makedumpfile``
+        package version from the full installed map (Fedora/Debian). Either source is parsed to a
+        canonical dotted version. Advisory like package capture: any failure / unparseable / absent
+        source degrades to ``None`` so the build still publishes (ADR-0253).
+        """
+        try:
+            raw = self._tools.probe_makedumpfile(scratch)
+        except CategorizedError:
+            _log.warning(
+                "makedumpfile probe failed; trying package-version fallback", exc_info=True
+            )
+            raw = None
+        for candidate in (raw, installed.get("makedumpfile")):
+            if not candidate:
+                continue
+            try:
+                return str(MakedumpfileVersion.parse(candidate))
+            except ValueError:
+                _log.warning("makedumpfile version %r did not parse; skipping", candidate)
+        return None
 
     def _customize(
         self,
@@ -330,6 +362,7 @@ def _provenance(
     size: str,
     authorized_key: Path,
     package_versions: dict[str, str],
+    makedumpfile_version: str | None,
 ) -> dict[str, object]:
     """Record the pinned inputs and build args that produced the image (falsifiable contract).
 
@@ -341,6 +374,9 @@ def _provenance(
     debian), so the record stays falsifiable across families (#824). ``package_versions`` (the
     installed version of each requested package) is added only when capture succeeded — an empty
     map is omitted so a degraded build's row is byte-identical to a pre-feature one (ADR-0252).
+    ``makedumpfile_version`` (the installed makedumpfile binary's version) is the per-image operand
+    of the computed kdump-capability predicate; added only when captured, omitted otherwise so a
+    degraded build's row stays byte-identical to a pre-feature one (ADR-0253).
     """
     record: dict[str, object] = {
         "plane": "local-libvirt",
@@ -358,4 +394,6 @@ def _provenance(
     }
     if package_versions:
         record["package_versions"] = package_versions
+    if makedumpfile_version:
+        record["makedumpfile_version"] = makedumpfile_version
     return record
