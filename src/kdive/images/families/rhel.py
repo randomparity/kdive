@@ -22,15 +22,12 @@ from kdive.images.families._fedora_customize import (
     KDUMP_SYSCTL_CONTENT,
     KDUMP_SYSCTL_PATH,
     READINESS_MARKER,
+    SEED_MACHINE_ID,
     debug_image_args,
 )
 from kdive.images.families.base import CustomizeContext
 from kdive.images.planes._build_common import run_guestfs_tool
 
-# A valid 32-hex machine-id seeded into cloud-image bases so the first boot does not run
-# ``systemctl preset-all`` (which disables kdump.service on Fedora Cloud). Not a secret — a fixed
-# build-time identity, intentionally constant.
-_SEED_MACHINE_ID = "0a1b2c3d4e5f60718293a4b5c6d7e8f9"  # pragma: allowlist secret
 _CLOUD_INIT_MASK = (
     "systemctl mask cloud-init.service cloud-init-local.service "
     "cloud-config.service cloud-final.service"
@@ -68,6 +65,8 @@ class RhelFamily:
     """The rhel-family (dnf + kdump) :class:`FamilyCustomizer`, EL-major-aware (#823)."""
 
     family = "rhel"
+    kdump_unit = "kdump.service"
+    guest_mac = "selinux-permissive"
 
     def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
         """Return the dnf package set for ``kind`` on ``distro``/``version``.
@@ -111,7 +110,7 @@ class RhelFamily:
                 "--run-command",
                 _CLOUD_INIT_MASK,
                 "--write",
-                f"/etc/machine-id:{_SEED_MACHINE_ID}",  # pragma: allowlist secret
+                f"/etc/machine-id:{SEED_MACHINE_ID}",  # pragma: allowlist secret
             ]
         argv += debug_image_args(ctx.packages, ctx.cleanup)
         argv += [

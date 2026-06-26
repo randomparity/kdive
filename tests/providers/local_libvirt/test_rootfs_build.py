@@ -54,12 +54,17 @@ class _FakeFamily:
 
     rec: _Recorder
     family: str = "rhel"
+    kdump_unit: str = "kdump.service"
+    guest_mac: str = "selinux-permissive"
 
     def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
         return ("marker-pkg",)
 
     def customize_argv(self, ctx: CustomizeContext) -> list[str]:
         self.rec.customize_ctxs.append(ctx)
+        # The plane renders the kdive-ready unit (with this family's kdump_unit) before calling us
+        # and unlinks it afterwards, so capture its content here to guard the point-6 wiring (#824).
+        self.rec.readiness_unit_texts.append(ctx.readiness_unit_path.read_text())
         return ["--install", "marker-pkg", "--run-command", "marker-customize"]
 
     def normalize(self, qcow2: Path) -> None:
@@ -79,6 +84,8 @@ class _Recorder:
     repack_calls: list[tuple[Path, Path]] = field(default_factory=list)
     repack_sizes: list[str] = field(default_factory=list)
     normalize_calls: list[Path] = field(default_factory=list)
+    readiness_unit_texts: list[str] = field(default_factory=list)
+    family_kdump_unit: str = "kdump.service"
     payload: bytes = b"qcow2-bytes"
 
     def resolve_authorized_key(self) -> Path:
@@ -109,7 +116,7 @@ class _Recorder:
         self.repack_sizes.append(size)
 
     def family_for(self, name: str) -> FamilyCustomizer:
-        return _FakeFamily(self)
+        return _FakeFamily(self, kdump_unit=self.family_kdump_unit)
 
 
 def _tools(rec: _Recorder) -> RootfsBuildTools:
@@ -181,6 +188,23 @@ def test_customize_context_threads_key_and_cloud_image_flag(tmp_path: Path) -> N
     assert rec2.customize_ctxs[0].is_cloud_image is False, "a virt-builder row is not a cloud image"
 
 
+def test_readiness_unit_is_rendered_with_the_family_kdump_unit(tmp_path: Path) -> None:
+    # The plane (not the family) renders the kdive-ready unit; it must order After= the family's
+    # kdump_unit so a non-rhel family closes the arm-vs-ready race (ADR-0251 point 6 / #824). This
+    # guards the wiring (plane -> family.kdump_unit), which the readiness_unit() unit test alone
+    # cannot: a revert to a hardcoded unit would still pass that test.
+    rec = _Recorder(authorized_key=_key(tmp_path), family_kdump_unit="kdump-tools.service")
+    _plane(tmp_path, rec).build(_spec())
+    assert len(rec.readiness_unit_texts) == 1
+    after_lines = [
+        line for line in rec.readiness_unit_texts[0].splitlines() if line.startswith("After=")
+    ]
+    assert any("kdump-tools.service" in line for line in after_lines), (
+        "the rendered kdive-ready unit must be ordered After= the family's kdump unit, not a "
+        "hardcoded one"
+    )
+
+
 def test_provenance_source_digest_for_virt_builder_entry(tmp_path: Path) -> None:
     rec = _Recorder(authorized_key=_key(tmp_path))
     out = _plane(tmp_path, rec).build(_spec(name="fedora-kdive-ready-43", releasever="42"))
@@ -198,7 +222,7 @@ def test_provenance_source_digest_for_virt_builder_entry(tmp_path: Path) -> None
         "authorized_key_name": "id.pub",
         "readiness_marker": "kdive-ready",
         "layout": "whole-disk-ext4-qcow2",
-        "guest_selinux": "permissive",
+        "guest_mac": "selinux-permissive",
     }
     assert rec.acquired_sources == [entry.source], "the catalog source is acquired"
 

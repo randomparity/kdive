@@ -153,7 +153,9 @@ agent/kdump/drgn/helpers is rejected, never published), and publishes row-first.
 `fixtures/local-libvirt/rootfs_catalog.toml`. Each row pins its base (a `virt-builder` template or
 a sha256-pinned cloud-image URL) and carries a `kdump_capable` flag. The RHEL-family entries
 (#823) reuse the `rhel` customizer; on EL 8/9 `makedumpfile`/`kdumpctl` come from `kexec-tools`
-(no standalone packages) and EL 8 pulls `drgn` from EPEL.
+(no standalone packages) and EL 8 pulls `drgn` from EPEL. The Debian entries (#824) use the
+`debian` customizer (apt; `kdump-tools.service`; `ssh.service`; `python3-drgn`; AppArmor instead of
+SELinux, needing no relabel; cloud-init disabled via `/etc/cloud/cloud-init.disabled`).
 
 `kdump_capable` is **kernel-relative** to the current default from-source target (a v7.0-class
 x86_64 kernel): it is `true` only when the makedumpfile the build installs from that release's
@@ -171,6 +173,8 @@ build silently becomes capable while the flag lags until re-verified. The runtim
 | `rocky-kdive-ready-10` | Rocky 10.2 | 1.7.8 | no | `kdump_core_incomplete` → `host_dump` |
 | `centos-stream-kdive-ready-9` | CentOS Stream 9 | 1.7.6 (in `kexec-tools`) | no | `kdump_core_incomplete` → `host_dump` |
 | `centos-stream-kdive-ready-10` | CentOS Stream 10 | 1.7.8 | no | `kdump_core_incomplete` → `host_dump` |
+| `debian-kdive-ready-12` | Debian 12 (bookworm) | 1.7.2 | no | `kdump_core_incomplete` → `host_dump` |
+| `debian-kdive-ready-13` | Debian 13 (trixie) | 1.7.6 | no | `kdump_core_incomplete` → `host_dump` |
 
 Versions verified against distro package indexes on 2026-06-26 (the guard test
 `tests/images/test_rootfs_catalog.py` asserts each row's flag matches its documented makedumpfile

@@ -34,19 +34,36 @@ DEFAULT_BUILD_FS_PACKAGES = (
 )
 
 READINESS_MARKER = "kdive-ready"
-# ``After=kdump.service`` closes the arm-vs-ready race (#817): kdump.service and this unit are
-# both ``WantedBy=multi-user.target``, so without an ordering edge the serial ``kdive-ready``
-# signal can fire while kdump.service is still building the capture initramfs + ``kexec -p``-loading
-# it. A ``force_crash`` on a System that reported ``ready`` before kdump armed then captures
-# nothing (an empty ``/var/crash``). Ordering after kdump.service makes ``ready`` mean "kdump
-# finished its arming attempt"; ``After=`` is pure ordering (no ``Wants=``), so a non-kdump build
-# image — where kdump.service is absent — is unaffected (ordering against an absent unit is a
-# no-op), and a kdump that fails to arm still releases readiness (``After=`` releases on the unit's
-# terminal state, success or failure), so the System still reaches ``ready`` and a force_crash
-# surfaces the capture-time readiness failure instead of provisioning hanging.
-READINESS_UNIT = f"""[Unit]
+
+# A valid 32-hex machine-id seeded into cloud-image bases so the first boot does not run
+# ``systemctl preset-all`` (which resets the kdump service to its vendor preset — disabled — on both
+# Fedora Cloud and Debian genericcloud, whose machine-id ships uninitialized/empty). Not a secret:
+# a fixed build-time identity, intentionally constant and shared across families (#824).
+SEED_MACHINE_ID = "0a1b2c3d4e5f60718293a4b5c6d7e8f9"  # pragma: allowlist secret
+
+
+def readiness_unit(kdump_unit: str) -> str:
+    """Render the kdive-ready serial unit ordered ``After=<kdump_unit>`` (#817, #824).
+
+    ``After=<kdump_unit>`` closes the arm-vs-ready race (#817): the family's kdump unit and this
+    unit are both ``WantedBy=multi-user.target``, so without an ordering edge the serial
+    ``kdive-ready`` signal can fire while kdump is still building the capture initramfs + ``kexec
+    -p``-loading it. A ``force_crash`` on a System that reported ``ready`` before kdump armed then
+    captures nothing (an empty ``/var/crash``). Ordering after the kdump unit makes ``ready`` mean
+    "kdump finished its arming attempt"; ``After=`` is pure ordering (no ``Wants=``), so a non-kdump
+    build image — where the kdump unit is absent — is unaffected (ordering against an absent unit is
+    a no-op), and a kdump that fails to arm still releases readiness (``After=`` releases on the
+    unit's terminal state, success or failure), so the System still reaches ``ready`` and a
+    force_crash surfaces the capture-time readiness failure instead of provisioning hanging.
+
+    Args:
+        kdump_unit: The family's kdump systemd unit (``kdump.service`` on ``rhel``,
+            ``kdump-tools.service`` on ``debian``); a wrong/absent name silently reopens the race
+            (#824).
+    """
+    return f"""[Unit]
 Description=Signal kdive serial readiness
-After=dev-ttyS0.device kdump.service
+After=dev-ttyS0.device {kdump_unit}
 Wants=dev-ttyS0.device
 
 [Service]
@@ -57,6 +74,8 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 """
+
+
 FSTAB = "/dev/vda / ext4 defaults 0 1\n"
 
 # Local ``control.force_crash`` injects an NMI; the guest must panic on it for kdump to trigger.
@@ -108,8 +127,56 @@ def drgn_helper_source() -> Path:
     return Path(__file__).parents[4].joinpath(*DRGN_HELPER_REPO_RELPATH)
 
 
+def drgn_helper_args() -> list[str]:
+    """Stage the reviewed ``kdive-drgn`` in-guest helper, read-executable (ADR-0220, #724).
+
+    Returns the virt-customize/virt-builder argv fragment that uploads the helper and makes it
+    ``0755``. Family-neutral: the live ``introspect.run`` path SSH-execs this fixed program on any
+    debug guest carrying a working ``drgn`` (``drgn`` on ``rhel``, ``python3-drgn`` — which ships
+    ``/usr/bin/drgn`` — on ``debian``, #824).
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` if the reviewed ``kdive-drgn`` helper is not a
+            readable file in the source tree — fail loud rather than ship a guest that cannot
+            introspect.
+    """
+    helper = drgn_helper_source()
+    if not helper.is_file():
+        raise CategorizedError(
+            "the kdive-drgn in-guest helper is missing from the source tree; cannot build a "
+            "debug rootfs that can be live-introspected",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"helper": str(helper)},
+        )
+    return [
+        "--upload",
+        f"{helper}:{DRGN_HELPER_GUEST_PATH}",
+        "--run-command",
+        f"chmod 0755 {DRGN_HELPER_GUEST_PATH}",
+    ]
+
+
+def _ssh_nic_keyfile_args(cleanup: list[Path]) -> list[str]:
+    """Stage the NetworkManager SSH-NIC DHCP keyfile (ADR-0218), 0600 so NM loads it (#724).
+
+    Appends the staged tempfile to ``cleanup`` for the caller to unlink. NetworkManager-specific —
+    used by the ``rhel`` family; ``debian`` genericcloud has no NetworkManager and DHCPs the extra
+    NIC via cloud-init's ``cloud-ifupdown-helper`` instead (#824).
+    """
+    with tempfile.NamedTemporaryFile("w", suffix=".nmconnection", delete=False) as keyfile:
+        keyfile.write(SSH_NIC_KEYFILE_CONTENT)
+        keyfile_path = Path(keyfile.name)
+    cleanup.append(keyfile_path)
+    return [
+        "--upload",
+        f"{keyfile_path}:{SSH_NIC_KEYFILE_PATH}",
+        "--run-command",
+        f"chmod 0600 {SSH_NIC_KEYFILE_PATH}",
+    ]
+
+
 def debug_image_args(packages: tuple[str, ...], cleanup: list[Path]) -> list[str]:
-    """Stage the drgn helper + SSH-NIC DHCP keyfile for a debug image (ADR-0220, #724).
+    """Stage the drgn helper + SSH-NIC DHCP keyfile for an ``rhel`` debug image (ADR-0220, #724).
 
     Returns the virt-customize/virt-builder argv fragment and appends any tempfiles to
     ``cleanup`` for the caller to unlink. Non-debug images (no ``drgn`` in ``packages``) get an
@@ -122,25 +189,4 @@ def debug_image_args(packages: tuple[str, ...], cleanup: list[Path]) -> list[str
     """
     if "drgn" not in packages:
         return []
-    helper = drgn_helper_source()
-    if not helper.is_file():
-        raise CategorizedError(
-            "the kdive-drgn in-guest helper is missing from the source tree; cannot build a "
-            "debug rootfs that can be live-introspected",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"helper": str(helper)},
-        )
-    with tempfile.NamedTemporaryFile("w", suffix=".nmconnection", delete=False) as keyfile:
-        keyfile.write(SSH_NIC_KEYFILE_CONTENT)
-        keyfile_path = Path(keyfile.name)
-    cleanup.append(keyfile_path)
-    return [
-        "--upload",
-        f"{helper}:{DRGN_HELPER_GUEST_PATH}",
-        "--run-command",
-        f"chmod 0755 {DRGN_HELPER_GUEST_PATH}",
-        "--upload",
-        f"{keyfile_path}:{SSH_NIC_KEYFILE_PATH}",
-        "--run-command",
-        f"chmod 0600 {SSH_NIC_KEYFILE_PATH}",
-    ]
+    return [*drgn_helper_args(), *_ssh_nic_keyfile_args(cleanup)]

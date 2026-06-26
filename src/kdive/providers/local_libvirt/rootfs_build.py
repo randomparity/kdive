@@ -39,7 +39,7 @@ from kdive.images.families._fedora_customize import (
     READINESS_MARKER as _READINESS_MARKER,
 )
 from kdive.images.families._fedora_customize import (
-    READINESS_UNIT as _READINESS_UNIT,
+    readiness_unit as _readiness_unit,
 )
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.planes._build_common import (
@@ -69,10 +69,6 @@ _DEFAULT_IMAGE_SIZE = "6G"
 _ACQUIRE_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 _CUSTOMIZE_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 _REPACK_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
-
-# The rhel FamilyCustomizer (ADR-0251) sets SELinux permissive + a first-boot relabel; the
-# repacked image is permissive, recorded as the provenance ``guest_selinux``.
-_GUEST_SELINUX = "permissive"
 
 
 def _resolve_managed_public_key() -> Path:
@@ -261,7 +257,9 @@ class LocalLibvirtRootfsBuildPlane:
         return RootfsBuildOutput(
             qcow2_path=qcow2,
             digest=digest,
-            provenance=_provenance(spec, entry, size=self._size, authorized_key=authorized_key),
+            provenance=_provenance(
+                spec, entry, family, size=self._size, authorized_key=authorized_key
+            ),
         )
 
     def _customize(
@@ -276,7 +274,7 @@ class LocalLibvirtRootfsBuildPlane:
         """Render the kdive-ready unit, build the family argv, and run ``virt-customize``."""
         cleanup: list[Path] = []
         with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as unit:
-            unit.write(_READINESS_UNIT)
+            unit.write(_readiness_unit(family.kdump_unit))
             unit_path = Path(unit.name)
         cleanup.append(unit_path)
         try:
@@ -297,14 +295,21 @@ class LocalLibvirtRootfsBuildPlane:
 
 
 def _provenance(
-    spec: RootfsBuildSpec, entry: RootfsCatalogEntry, *, size: str, authorized_key: Path
+    spec: RootfsBuildSpec,
+    entry: RootfsCatalogEntry,
+    family: FamilyCustomizer,
+    *,
+    size: str,
+    authorized_key: Path,
 ) -> dict[str, object]:
     """Record the pinned inputs and build args that produced the image (falsifiable contract).
 
     ``source_image_digest`` names the resolved catalog base source: ``virt-builder:<template>`` or
     ``cloud-image:<url>@sha256:<digest>`` (the latter a verified pin). The image's verifiable
     identity is the output qcow2 content digest
-    (:func:`kdive.images.planes._build_common.digest_file`), per ADR-0092.
+    (:func:`kdive.images.planes._build_common.digest_file`), per ADR-0092. ``guest_mac`` is the
+    family's mandatory-access-control posture (``selinux-permissive`` for rhel, ``apparmor`` for
+    debian), so the record stays falsifiable across families (#824).
     """
     return {
         "plane": "local-libvirt",
@@ -318,5 +323,5 @@ def _provenance(
         "authorized_key_name": authorized_key.name,
         "readiness_marker": _READINESS_MARKER,
         "layout": "whole-disk-ext4-qcow2",
-        "guest_selinux": _GUEST_SELINUX,
+        "guest_mac": family.guest_mac,
     }

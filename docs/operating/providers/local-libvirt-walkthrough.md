@@ -331,13 +331,15 @@ catalog (`fixtures/local-libvirt/rootfs_catalog.toml`) ships these debug-guest e
 | `fedora-kdive-ready-43` | Fedora 43 (1.7.8) | incomplete → use `method="host_dump"` |
 | `rocky-kdive-ready-8` / `-9` / `-10` | Rocky 8/9/10 | incomplete → use `method="host_dump"` |
 | `centos-stream-kdive-ready-9` / `-10` | CentOS Stream 9/10 | incomplete → use `method="host_dump"` |
+| `debian-kdive-ready-12` / `-13` | Debian 12/13 (makedumpfile 1.7.2 / 1.7.6) | incomplete → use `method="host_dump"` |
 
 Only Fedora 44 ships a makedumpfile new enough (≥ 1.7.9) to filter a v7.0 vmcore via the default
 `kdump` method; the others disclose `kdump_core_incomplete` and capture via `host_dump` instead (the
 rest of the lifecycle — provision/build/install/boot — is identical). The full per-release table is
 in the [image-lifecycle runbook](../runbooks/image-lifecycle.md).
 
-`--image` resolves the row's pinned base, EL-version-aware package set, and **destination**
+`--image` resolves the row's pinned base, the family's package set (the EL-version-aware `rhel`
+customizer for Fedora/Rocky/CentOS, the apt-based `debian` customizer for Debian), and **destination**
 (`/var/lib/kdive/rootfs/local/<name>.qcow2` — exactly the `staged-path` your inventory declares), so
 no `--dest` is needed. Point `--workspace` at a **user-writable** path (the default
 `/var/lib/kdive/build/images` is root-owned); the build stages there and publishes the finished
@@ -349,12 +351,16 @@ qcow2 to the catalog destination:
   --workspace ~/.local/share/kdive/build/images
 .venv/bin/python -m kdive build-fs --image rocky-kdive-ready-9 \
   --workspace ~/.local/share/kdive/build/images
+.venv/bin/python -m kdive build-fs --image debian-kdive-ready-12 \
+  --workspace ~/.local/share/kdive/build/images
 ```
 
 The build needs the Step 1 libguestfs tooling and network access — the EL-family images
-`dnf install` their crash toolchain at customize time, and Rocky 8 enables EPEL for `drgn`
-automatically. (On Ubuntu 24.04 the libguestfs `--install` step may be blocked by the
-passt/libguestfs mismatch noted in Step 1; build on a Fedora host or stage a prebuilt qcow2.)
+`dnf install` their crash toolchain at customize time (Rocky 8 enables EPEL for `drgn`
+automatically), and the Debian images `apt install` theirs (`kdump-tools`, `python3-drgn`, `crash`).
+The Debian build is otherwise the same flow and needs no distro-specific workaround. (On Ubuntu
+24.04 the libguestfs `--install` step may be blocked by the passt/libguestfs mismatch noted in
+Step 1; build on a Fedora host or stage a prebuilt qcow2.)
 
 **Label the image for `qemu:///system` — the easy step to miss.** When `--workspace` is under
 `$HOME`, the cross-filesystem publish move can leave the qcow2 with the home SELinux type

@@ -2,18 +2,21 @@
 
 Each :class:`~kdive.images.families.base.FamilyCustomizer` encodes how an OS family customizes a
 base image into a kdive-ready rootfs (package install, kdump/sshd enable, readiness unit, image
-normalization). The MVP ships :class:`~kdive.images.families.rhel.RhelFamily`; ``family_for``
-resolves a catalog row's ``family`` name to its customizer. The registry lives here (not in the
-provider) so the shared ``images`` layer can resolve a family without importing provider details.
+normalization). :class:`~kdive.images.families.rhel.RhelFamily` covers Fedora/Rocky/CentOS Stream
+(#817/#823) and :class:`~kdive.images.families.debian.DebianFamily` covers Debian (#824);
+``family_for`` resolves a catalog row's ``family`` name to its customizer. The registry lives here
+(not in the provider) so the shared ``images`` layer can resolve a family without importing provider
+details.
 """
 
 from __future__ import annotations
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families.base import FamilyCustomizer
+from kdive.images.families.debian import DebianFamily
 from kdive.images.families.rhel import RhelFamily
 
-_FAMILIES: dict[str, FamilyCustomizer] = {"rhel": RhelFamily()}
+_FAMILIES: dict[str, FamilyCustomizer] = {"rhel": RhelFamily(), "debian": DebianFamily()}
 
 
 def family_for(name_or_family: str) -> FamilyCustomizer:
