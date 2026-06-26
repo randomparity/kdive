@@ -39,12 +39,14 @@ Delete an image catalog entry.
 
 Return full detail for one catalog image visible to the caller.
 
-Includes boot layout, digest, capabilities, scope, publish state, and build
-``provenance`` (with captured ``package_versions`` when present).
+Includes boot layout, digest, capabilities, scope, publish state, build ``provenance``
+(with captured ``package_versions``/``makedumpfile_version`` when present), and a computed
+``data.kdump`` block (capability for ``target_kernel``, with the kernel basis disclosed).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `image_id` | string | yes | The catalog image row id (UUID) to describe. |
+| `target_kernel` | string (nullable) | no | Target kernel version (e.g. 7.1) to compute the data.kdump capability against; defaults to the characterized basis when omitted. |
 
 ## `images.extend`
 

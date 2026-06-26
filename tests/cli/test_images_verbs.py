@@ -97,9 +97,32 @@ def test_describe_calls_images_describe_read_tool(monkeypatch: pytest.MonkeyPatc
     assert client.calls == [("images.describe", {"image_id": "img-1"})]
 
 
+def test_describe_threads_target_kernel_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _install(
+        monkeypatch, {"object_id": "img-1", "status": "registered", "data": {"name": "fedora"}}
+    )
+    code = asyncio.run(reads.images_describe(_args(image_id="img-1", target_kernel="7.1")))
+    assert code == 0
+    assert client.calls == [("images.describe", {"image_id": "img-1", "target_kernel": "7.1"})]
+
+
+def test_describe_omits_target_kernel_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _install(
+        monkeypatch, {"object_id": "img-1", "status": "registered", "data": {"name": "fedora"}}
+    )
+    code = asyncio.run(reads.images_describe(_args(image_id="img-1", target_kernel=None)))
+    assert code == 0
+    assert client.calls == [("images.describe", {"image_id": "img-1"})]
+
+
 def test_describe_verb_registered_read_only() -> None:
     by_tool = {verb.tool: verb for verb in REGISTRY if verb.group == "images"}
     assert by_tool["images.describe"].read_only is True
+
+
+def test_describe_verb_declares_target_kernel_option() -> None:
+    by_tool = {verb.tool: verb for verb in REGISTRY if verb.group == "images"}
+    assert "target_kernel" in by_tool["images.describe"].options
 
 
 def test_upload_calls_images_upload_with_payload(monkeypatch: pytest.MonkeyPatch) -> None:

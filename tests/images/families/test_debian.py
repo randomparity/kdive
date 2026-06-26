@@ -13,6 +13,7 @@ from pathlib import Path
 
 from kdive.images.families.base import CustomizeContext
 from kdive.images.families.debian import DebianFamily
+from kdive.images.planes._build_common import MAKEDUMPFILE_MARKER_GUEST_PATH
 
 
 def _ctx(
@@ -34,6 +35,16 @@ def _ctx(
         distro=distro,
         version=version,
     )
+
+
+def test_debug_argv_writes_makedumpfile_version_marker(tmp_path: Path) -> None:
+    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True, kind="debug"))
+    assert MAKEDUMPFILE_MARKER_GUEST_PATH in " ".join(argv)
+
+
+def test_build_argv_omits_makedumpfile_version_marker(tmp_path: Path) -> None:
+    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True, kind="build"))
+    assert MAKEDUMPFILE_MARKER_GUEST_PATH not in " ".join(argv)
 
 
 def test_family_identity_and_kdump_unit() -> None:

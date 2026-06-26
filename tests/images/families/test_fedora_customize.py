@@ -4,7 +4,19 @@ from __future__ import annotations
 
 import pytest
 
-from kdive.images.families._fedora_customize import readiness_unit
+from kdive.images.families._fedora_customize import (
+    makedumpfile_version_marker_args,
+    readiness_unit,
+)
+from kdive.images.planes._build_common import MAKEDUMPFILE_MARKER_GUEST_PATH
+
+
+def test_makedumpfile_marker_args_writes_version_file() -> None:
+    argv = makedumpfile_version_marker_args()
+    joined = " ".join(argv)
+    assert "--run-command" in argv
+    assert MAKEDUMPFILE_MARKER_GUEST_PATH in joined
+    assert "makedumpfile -v" in joined
 
 
 def _after_targets(unit: str) -> list[str]:

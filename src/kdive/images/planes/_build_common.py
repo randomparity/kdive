@@ -16,6 +16,11 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 _DIGEST_CHUNK = 1024 * 1024
 _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
+# The in-guest marker file a debug build writes ``makedumpfile --version`` into, read back into
+# ``provenance["makedumpfile_version"]`` (ADR-0253). Lives here (not in a family module) so the
+# build plane and the family customizers share one definition without a families->build cycle.
+MAKEDUMPFILE_MARKER_GUEST_PATH = "/usr/lib/kdive/makedumpfile-version"
+
 # ADR-0222 (#694): two libguestfs stderr signatures get an actionable CONFIGURATION_ERROR
 # instead of the generic PROVISIONING_FAILURE. The kernel pattern binds the permission/read
 # failure to a vmlinuz path on one match so an unrelated permission error (an unwritable output
@@ -211,3 +216,52 @@ def inspect_package_versions(qcow2_path: Path) -> dict[str, str]:  # pragma: no 
 
 
 DEFAULT_VERSION_INSPECT: VersionInspectSeam = inspect_package_versions
+
+_GUESTFISH_TIMEOUT_S = 5 * 60
+
+type MakedumpfileProbeSeam = Callable[[Path], str | None]
+
+
+def probe_makedumpfile_marker(qcow2_path: Path) -> str | None:  # pragma: no cover - live_vm
+    """Read the build-written ``makedumpfile --version`` marker from ``qcow2_path``, read-only.
+
+    The debug build records the in-guest ``makedumpfile --version`` banner into
+    :data:`MAKEDUMPFILE_MARKER_GUEST_PATH`; this reads it back with a read-only ``guestfish``
+    ``download`` so the version is the binary's own report (authoritative on EL8/EL9, where
+    makedumpfile is bundled in ``kexec-tools`` and invisible to ``virt-inspector``).
+
+    Returns:
+        The marker's stripped text, or ``None`` when the marker is absent/empty (a non-debug or
+        makedumpfile-less image) — never raising for a missing marker.
+
+    Raises:
+        CategorizedError: ``MISSING_DEPENDENCY`` if ``guestfish`` is absent;
+            ``INFRASTRUCTURE_FAILURE`` on timeout.
+    """
+    argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "cat", MAKEDUMPFILE_MARKER_GUEST_PATH]
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; image path is a data arg
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=_GUESTFISH_TIMEOUT_S,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise CategorizedError(
+            "guestfish is not installed; cannot read the makedumpfile-version marker",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+            details={"tool": "guestfish"},
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise CategorizedError(
+            "guestfish exceeded its timeout reading the makedumpfile-version marker",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"timeout_s": _GUESTFISH_TIMEOUT_S},
+        ) from exc
+    if result.returncode != 0:
+        return None  # marker absent (non-debug / makedumpfile-less image) is not an error
+    return result.stdout.strip() or None
+
+
+DEFAULT_MAKEDUMPFILE_PROBE: MakedumpfileProbeSeam = probe_makedumpfile_marker

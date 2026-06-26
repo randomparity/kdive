@@ -93,7 +93,8 @@ async def resources_describe(args: argparse.Namespace) -> int:
 
 
 async def images_describe(args: argparse.Namespace) -> int:
-    return await _record("images.describe", args, {"image_id": args.image_id})
+    payload = {"image_id": args.image_id, **_payload(args, "target_kernel")}
+    return await _record("images.describe", args, payload)
 
 
 async def allocations_list(args: argparse.Namespace) -> int:

@@ -25,6 +25,7 @@ from kdive.images.families._fedora_customize import (
     READINESS_MARKER,
     SEED_MACHINE_ID,
     drgn_helper_args,
+    makedumpfile_version_marker_args,
 )
 from kdive.images.families.base import CustomizeContext
 from kdive.images.planes._build_common import run_guestfs_tool
@@ -137,6 +138,7 @@ class DebianFamily:
         # Debian needs no NetworkManager keyfile (cloud-init's cloud-ifupdown-helper DHCPs the NIC).
         if ctx.kind == "debug":
             argv += drgn_helper_args()
+            argv += makedumpfile_version_marker_args()
         argv += [
             "--ssh-inject",
             f"root:file:{ctx.authorized_key}",

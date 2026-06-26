@@ -9,10 +9,12 @@ and the EL-major-aware package divergence (#823): EL 8/9 take makedumpfile/kdump
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from kdive.images.families.base import CustomizeContext
 from kdive.images.families.rhel import RhelFamily
+from kdive.images.planes._build_common import MAKEDUMPFILE_MARKER_GUEST_PATH
 
 
 def _ctx(
@@ -72,13 +74,25 @@ def test_fedora_debug_argv_enables_kdump_and_sshd(tmp_path: Path) -> None:
     assert "final_action poweroff" in j
 
 
+def test_debug_argv_writes_makedumpfile_version_marker(tmp_path: Path) -> None:
+    argv = RhelFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
+    assert MAKEDUMPFILE_MARKER_GUEST_PATH in " ".join(argv)
+
+
+def test_build_argv_omits_makedumpfile_version_marker(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path, is_cloud_image=True)
+    build_ctx = replace(ctx, kind="build", packages=RhelFamily().packages("build", "fedora", "44"))
+    assert MAKEDUMPFILE_MARKER_GUEST_PATH not in " ".join(RhelFamily().customize_argv(build_ctx))
+
+
 def test_el9_debug_argv_enables_kdump_without_kdump_utils(tmp_path: Path) -> None:
     """EL9 has no kdump-utils pkg; kdump-enable must gate on kexec-tools, not kdump-utils."""
     argv = RhelFamily().customize_argv(
         _ctx(tmp_path, is_cloud_image=True, distro="rocky", version="9")
     )
     j = " ".join(argv)
-    assert "kdump-utils" not in j and "makedumpfile" not in j
+    installed = argv[argv.index("--install") + 1]
+    assert "kdump-utils" not in installed and "makedumpfile" not in installed
     assert "systemctl enable kdump.service" in argv
     assert "final_action poweroff" in j
 

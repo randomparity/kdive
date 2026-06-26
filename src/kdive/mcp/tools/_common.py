@@ -37,6 +37,7 @@ class ConfigErrorReason(StrEnum):
     INVALID_TEXT = "invalid_text"
     INVALID_PCIE_MATCH = "invalid_pcie_match"
     INVALID_CURSOR = "invalid_cursor"
+    INVALID_VERSION = "invalid_version"
 
 
 _MAX_ECHOED_ID = 64
