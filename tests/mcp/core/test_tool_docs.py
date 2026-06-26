@@ -92,6 +92,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "fixtures.validate": ("tests/mcp/catalog/test_fixtures_validate.py",),
     "images.build": ("tests/mcp/ops/test_images_tools.py",),
     "images.delete": ("tests/mcp/ops/test_images_tools.py",),
+    "images.describe": ("tests/mcp/catalog/test_images_describe.py",),
     "images.extend": ("tests/mcp/ops/test_images_tools.py",),
     "images.list": ("tests/mcp/catalog/test_images_list.py",),
     "images.prune_expired": ("tests/mcp/ops/test_images_tools.py",),
