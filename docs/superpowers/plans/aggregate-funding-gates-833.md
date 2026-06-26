@@ -41,12 +41,13 @@ nothing wires them to a denial yet, so the gate's routing stays identical.
      `{"gate": "quota", "current": count, "required": count + 1}` and `"limit": limit` when
      `limit is not None`.
    - budget entry when over budget: read `budget_snapshot`; unmet iff `snapshot is None` or
-     `limit_kcu - spent_kcu < estimate`. Entry:
-     `{"gate": "budget", "required_kcu": str(estimate)}`, plus when a row exists:
-     `"required_limit_kcu": str(spent_kcu + estimate)`, `"limit_kcu"`, `"spent_kcu"`,
-     `"remaining_kcu": str(limit_kcu - spent_kcu)`. When no row: only `required_kcu` (and set
-     `required_limit_kcu = str(estimate)` too, since spent is unknown/0 — keep symmetric and
-     non-misleading; document that absent-row budget reports the estimate as the limit to set).
+     `limit_kcu - spent_kcu < estimate`. **Every** budget entry carries both
+     `"required_kcu": str(estimate)` (the incremental cost) and `"required_limit_kcu"` (the
+     absolute `limit_kcu` to set):
+     - row exists → `"required_limit_kcu": str(spent_kcu + estimate)`, plus `"limit_kcu"`,
+       `"spent_kcu"`, `"remaining_kcu": str(limit_kcu - spent_kcu)`.
+     - no row → `"required_limit_kcu": str(estimate)` (spent is 0/unknown); **omit**
+       `"limit_kcu"` / `"spent_kcu"` / `"remaining_kcu"`.
    - Order: quota first, then budget. Return `[]` when neither is unmet.
 
 **Acceptance:** unit tests over a seeded DB: (a) `quota_status` returns `(None, 0)` with no
@@ -95,9 +96,14 @@ predicate and an `_enrich_funding_denial` step.
    - quota-only (no quota row, generous budget): `unmet == [quota]`.
    - budget-only (generous quota, short budget): `outcome.reason == BUDGET_DENIAL_REASON`,
      `unmet == [budget]` with `required_limit_kcu == spent + estimate`.
-   - host-cap denial: `"unmet" not in outcome.details` (cap=1, second request).
-   - affinity denial: no `unmet` (scoped resource, foreign project) — reuse existing affinity
-     test scaffolding if present, else assert via a host-cap/affinity path that no unmet key.
+   - host-cap denial: `"unmet" not in outcome.details` (cap=1, second request). This covers
+     the non-funding branch (`_is_funding_denial == False`); affinity/PCIe denials take the
+     same branch, so no separate service-layer affinity test is needed (affinity envelope
+     coverage lives in Task 4 if a scoped-resource fixture is available).
+   - **gate stays bare:** call `admission_gate` directly (budget-only seeded short) and assert
+     the returned denial's `details` has no `"unmet"` key — enrichment is observable only
+     through `admit()`, pinning the ADR-0255 routing invariant against a future refactor that
+     moves the read into the gate.
    - all-or-nothing preserved: still `count(allocations)==0`, `count(ledger)==0`, `spent==0`
      on each denial.
 2. `_is_funding_denial(denial)`: `category is QUOTA_EXCEEDED` or
