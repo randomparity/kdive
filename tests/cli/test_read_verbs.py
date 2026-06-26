@@ -371,3 +371,118 @@ def test_payload_omits_missing_optional_filter(monkeypatch: pytest.MonkeyPatch, 
     client = _install_session(monkeypatch, _collection([]))
     asyncio.run(reads.allocations_list(argparse.Namespace(json=False)))
     assert client.calls == [("allocations.list", {})]
+
+
+def _report_collection(items: list[dict], totals: dict) -> dict:
+    return {"object_id": "report", "status": "ok", "data": totals, "items": items}
+
+
+def test_report_all_calls_tool_with_no_optional_args(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    client = _install_session(monkeypatch, _report_collection([], {"scope": "all-projects"}))
+    code = asyncio.run(reads.ledger_report_all(_args(group_by=None, since=None, until=None)))
+    assert code == 0
+    assert client.calls == [("accounting.report_all_projects", {})]
+
+
+def test_report_all_assembles_window_and_group_by(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    client = _install_session(monkeypatch, _report_collection([], {}))
+    asyncio.run(
+        reads.ledger_report_all(
+            _args(group_by="principal", since="2026-01-01T00:00:00+00:00", until=None)
+        )
+    )
+    assert client.calls == [
+        (
+            "accounting.report_all_projects",
+            {"group_by": "principal", "window": ["2026-01-01T00:00:00+00:00", None]},
+        )
+    ]
+
+
+def test_report_all_window_until_only_is_half_open(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    # The symmetric half-open direction: only --until sets the second bound, first is null.
+    client = _install_session(monkeypatch, _report_collection([], {}))
+    asyncio.run(
+        reads.ledger_report_all(_args(group_by=None, since=None, until="2026-12-31T00:00:00+00:00"))
+    )
+    assert client.calls == [
+        ("accounting.report_all_projects", {"window": [None, "2026-12-31T00:00:00+00:00"]})
+    ]
+
+
+def test_report_granted_splits_projects(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    client = _install_session(monkeypatch, _report_collection([], {}))
+    asyncio.run(
+        reads.ledger_report_granted(
+            _args(group_by=None, since=None, until=None, projects="a, b ,c")
+        )
+    )
+    assert client.calls == [("accounting.report_granted_set", {"projects": ["a", "b", "c"]})]
+
+
+def test_report_granted_omits_projects_when_absent(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    client = _install_session(monkeypatch, _report_collection([], {}))
+    asyncio.run(
+        reads.ledger_report_granted(_args(group_by=None, since=None, until=None, projects=None))
+    )
+    assert client.calls == [("accounting.report_granted_set", {})]
+
+
+def test_report_granted_all_empty_projects_is_usage_error(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    client = _install_session(monkeypatch, _report_collection([], {}))
+    code = asyncio.run(
+        reads.ledger_report_granted(_args(group_by=None, since=None, until=None, projects=" , "))
+    )
+    assert code == 2
+    assert client.calls == []  # rejected before any tool call
+    assert "--projects" in capsys.readouterr().err
+
+
+def test_report_renders_rows_and_totals_json(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    items = [
+        _item(
+            "p",
+            "ok",
+            {
+                "project": "p",
+                "principal": "",
+                "reserved": "20",
+                "reconciled": "-19",
+                "variance": "1",
+            },
+        )
+    ]
+    totals = {
+        "scope": "all-projects",
+        "group_by": "",
+        "project_count": "1",
+        "total_project": "*",
+        "total_principal": "",
+        "total_reserved": "20",
+        "total_reconciled": "-19",
+        "total_variance": "1",
+    }
+    _install_session(monkeypatch, _report_collection(items, totals))
+    asyncio.run(
+        reads.ledger_report_all(
+            argparse.Namespace(json=True, group_by=None, since=None, until=None)
+        )
+    )
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["items"] == [
+        {"project": "p", "principal": "", "reserved": "20", "reconciled": "-19", "variance": "1"}
+    ]
+    assert parsed["totals"]["total_reserved"] == "20"
+    assert parsed["totals"]["scope"] == "all-projects"
+
+
+def test_report_all_denial_exits_authorization_denied(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    _install_session(monkeypatch, _denied("report"))
+    code = asyncio.run(reads.ledger_report_all(_args(group_by=None, since=None, until=None)))
+    assert code == 3

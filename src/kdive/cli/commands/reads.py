@@ -12,10 +12,11 @@ verbs flatten the one envelope the same way and call :func:`render_record` (ADR-
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Mapping
 
 from kdive.cli.errors import exit_code_for_envelope
-from kdive.cli.render import render, render_record
+from kdive.cli.render import render, render_record, render_report
 from kdive.cli.transport import Session, tool_envelope
 
 
@@ -159,3 +160,79 @@ async def ledger_show(args: argparse.Namespace) -> int:
 
 async def inventory_show(args: argparse.Namespace) -> int:
     return await _list("inventory.list", args, ["key", "backend", "status"], "project")
+
+
+_REPORT_COLUMNS = ["project", "principal", "reserved", "reconciled", "variance"]
+_REPORT_TOTAL_COLUMNS = [
+    "scope",
+    "group_by",
+    "project_count",
+    "total_project",
+    "total_principal",
+    "total_reserved",
+    "total_reconciled",
+    "total_variance",
+]
+
+
+def _window_payload(args: argparse.Namespace) -> dict[str, object]:
+    """Assemble ``{"window": [since, until]}`` from ``--since``/``--until``, or ``{}``.
+
+    Sends no ``window`` key when both bounds are absent (server reports all time). When only
+    one bound is given the other half of the pair is ``None`` (a half-open window). Values
+    pass through verbatim; the tool's parser owns ISO-8601/timezone validation.
+    """
+    since = getattr(args, "since", None)
+    until = getattr(args, "until", None)
+    if since is None and until is None:
+        return {}
+    return {"window": [since, until]}
+
+
+def _projects_arg(args: argparse.Namespace) -> list[str] | None:
+    """Comma-split ``--projects`` into a name list, or ``None`` when the flag is absent.
+
+    Whitespace is trimmed and empty tokens dropped. A given-but-all-empty value yields an
+    empty list, which the caller rejects as a usage error rather than sending ``projects=[]``.
+    """
+    raw = getattr(args, "projects", None)
+    if raw is None:
+        return None
+    return [name.strip() for name in raw.split(",") if name.strip()]
+
+
+def _totals(envelope: Mapping[str, object]) -> dict[str, object]:
+    data = envelope.get("data")
+    return {str(k): v for k, v in data.items()} if isinstance(data, Mapping) else {}
+
+
+async def _report(name: str, args: argparse.Namespace, payload: Mapping[str, object]) -> int:
+    envelope = await _fetch(name, payload)
+    render_report(
+        _rows(envelope),
+        _totals(envelope),
+        columns=_REPORT_COLUMNS,
+        total_columns=_REPORT_TOTAL_COLUMNS,
+        as_json=args.json,
+    )
+    return exit_code_for_envelope(envelope)
+
+
+async def ledger_report_all(args: argparse.Namespace) -> int:
+    """Platform-wide accounting rollup (``accounting.report_all_projects``; auditor-gated)."""
+    payload = _payload(args, "group_by")
+    payload.update(_window_payload(args))
+    return await _report("accounting.report_all_projects", args, payload)
+
+
+async def ledger_report_granted(args: argparse.Namespace) -> int:
+    """Granted-project accounting rollup (``accounting.report_granted_set``)."""
+    names = _projects_arg(args)
+    if names == []:
+        print("error: --projects was given but listed no project names", file=sys.stderr)
+        return 2
+    payload = _payload(args, "group_by")
+    if names is not None:
+        payload["projects"] = names
+    payload.update(_window_payload(args))
+    return await _report("accounting.report_granted_set", args, payload)
