@@ -91,6 +91,8 @@ kdivectl runs show <run_id>
 kdivectl jobs list
 kdivectl jobs get <job_id>
 kdivectl ledger show --project <project>
+kdivectl ledger report-all [--group-by principal] [--since <ts>] [--until <ts>]
+kdivectl ledger report-granted [--projects a,b] [--group-by principal] [--since <ts>] [--until <ts>]
 kdivectl inventory show [--project <project>]
 ```
 
@@ -105,6 +107,33 @@ not a cross-project listing. `inventory show` is the exception: its `--project` 
 [the matrix below](#read-authorization-platform-axis-vs-project-axis)), omitted for the
 all-projects view. There is no "list across all my projects" verb today; query each project
 in turn.
+
+### Cross-project accounting reports
+
+Two verbs render the multi-project accounting rollups (`reserved` / `reconciled` / `variance`
+per project, plus a totals footer). They map to the report tools and split across the same
+two authorization axes as the rest of the read surface:
+
+```bash
+kdivectl ledger report-all [--group-by principal] [--since <ts>] [--until <ts>]
+kdivectl ledger report-granted [--projects a,b] [--group-by principal] [--since <ts>] [--until <ts>]
+```
+
+- `ledger report-all` (`accounting.report_all_projects`) is the **platform-axis** read: it
+  needs a `platform_auditor` token (satisfied by `platform_admin`) and rolls up every project.
+  A token without that role gets `authorization_denied` (exit `3`) — it is in the
+  platform-axis row of [the matrix below](#read-authorization-platform-axis-vs-project-axis).
+- `ledger report-granted` (`accounting.report_granted_set`) is the **project-axis** read: it
+  rolls up the projects you hold a role on. `--projects a,b` narrows to a named subset (each
+  is `viewer`-checked; a project you are not a member of is denied). Omit `--projects` for all
+  your granted projects; a given-but-empty value (e.g. a stray comma) is a usage error
+  (exit `2`).
+- `--group-by principal` groups rows by principal instead of per-project. `--since` and
+  `--until` are timezone-aware ISO-8601 bounds forming a half-open window; omit both for all
+  time. The bounds are validated server-side — a non-ISO-8601, timezone-naive, or inverted
+  (`start >= end`) window returns `configuration_error` (exit `2`).
+- Both render the per-project rows as a table with a totals footer, or, under `--json`, a
+  single `{"items": [...], "totals": {...}}` object for scripting.
 
 ### Read authorization: platform axis vs. project axis
 
