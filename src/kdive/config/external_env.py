@@ -280,7 +280,22 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "KDIVE_PROJECT",
         "script",
         "demo",
-        "Project the setup-*-libvirt.sh scripts onboard.",
+        "Project the setup-*-libvirt.sh scripts and `scripts/live-stack/onboard.sh` onboard.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_ROLE",
+        "script",
+        "admin",
+        "Role `scripts/live-stack/onboard.sh` writes into the minted token's `roles` claim and "
+        "the printed binding contract; a sub-CONTRIBUTOR value warns (allocations.request needs "
+        "CONTRIBUTOR+).",
+    ),
+    ExternalEnvVar(
+        "KDIVE_TOKEN_TTL",
+        "script",
+        "86400",
+        "Lifetime in seconds of the demo token `scripts/live-stack/onboard.sh` mints "
+        "(default 24h).",
     ),
     ExternalEnvVar(
         "KDIVE_LIMIT_KCU",
