@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.families import family_for
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildPlane, RootfsBuildSpec
 from kdive.images.rootfs_catalog import (
     CloudImageSource,
@@ -18,7 +19,6 @@ from kdive.images.rootfs_catalog import (
     resolve_rootfs_entry,
 )
 from kdive.providers.assembly.composition import build_local_rootfs_build_plane
-from kdive.providers.local_libvirt.rootfs_build import family_for
 
 _log = logging.getLogger(__name__)
 
