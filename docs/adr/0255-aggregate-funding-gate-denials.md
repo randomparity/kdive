@@ -5,9 +5,9 @@
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0245](0245-alloc-denial-remedy-breadcrumbs.md) (the
   remedy breadcrumb that deferred this collapse as needs-design), #838 (budget denial echoes
-  its figures), #841 (role-aware remedies), [ADR-0069](0069-pending-allocation-queue.md) (the
+  its figures), #841 (role-aware remedies), [ADR-0069](0069-reservation-pending-queue-scheduler.md) (the
   queueable-vs-terminate routing the promotion sweep shares),
-  [ADR-0007](0007-budget-quota-invariants.md) (fail-closed funding invariants).
+  [ADR-0007](0007-metering-budgets-admission.md) (fail-closed funding invariants).
 - **Issue:** [#833](https://github.com/randomparity/kdive/issues/833).
 - **Spec:** [`../superpowers/specs/2026-06-26-aggregate-funding-gates-833.md`](../superpowers/specs/2026-06-26-aggregate-funding-gates-833.md).
 
