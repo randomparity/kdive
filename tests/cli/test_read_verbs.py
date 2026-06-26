@@ -215,6 +215,17 @@ def test_every_registry_verb_has_a_handler() -> None:
         assert callable(verb.handler)
 
 
+def test_report_verbs_are_registered_and_read_only() -> None:
+    by_path = {(v.group, v.sub): v for v in REGISTRY}
+    all_v = by_path[("ledger", "report-all")]
+    granted = by_path[("ledger", "report-granted")]
+    assert all_v.tool == "accounting.report_all_projects" and all_v.read_only
+    assert granted.tool == "accounting.report_granted_set" and granted.read_only
+    assert all_v.options == ("group_by", "since", "until")
+    assert granted.options == ("projects", "group_by", "since", "until")
+    assert "platform_auditor" in all_v.help  # help notes the required role
+
+
 _READ_VERBS = [v for v in REGISTRY if v.read_only]
 
 

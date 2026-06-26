@@ -49,6 +49,7 @@ class Verb:
     required_options: tuple[str, ...] = ()
     flags: tuple[str, ...] = ()
     read_only: bool = True
+    help: str = ""
 
 
 REGISTRY: tuple[Verb, ...] = (
@@ -73,6 +74,22 @@ REGISTRY: tuple[Verb, ...] = (
         reads.ledger_show,
         "accounting.usage_project",
         required_options=("project",),
+    ),
+    Verb(
+        "ledger",
+        "report-all",
+        reads.ledger_report_all,
+        "accounting.report_all_projects",
+        options=("group_by", "since", "until"),
+        help="platform-wide accounting rollup (requires a platform_auditor token)",
+    ),
+    Verb(
+        "ledger",
+        "report-granted",
+        reads.ledger_report_granted,
+        "accounting.report_granted_set",
+        options=("projects", "group_by", "since", "until"),
+        help="accounting rollup across your granted projects",
     ),
     Verb("inventory", "show", reads.inventory_show, "inventory.list", options=("project",)),
     Verb("secrets", "list", reads.secrets_list, "secrets.list"),
@@ -182,7 +199,7 @@ def _verb_parser(
     group_parser: argparse._SubParsersAction, verb: Verb, parent: argparse.ArgumentParser
 ) -> None:
     """Add ``verb``'s sub-subparser, declaring its positionals and ``--`` options."""
-    parser = group_parser.add_parser(verb.sub, parents=[parent])
+    parser = group_parser.add_parser(verb.sub, parents=[parent], help=verb.help or None)
     for positional in verb.positionals:
         parser.add_argument(positional)
     for option in verb.options:
