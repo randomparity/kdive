@@ -14,8 +14,10 @@ registered host (ADR-0158). The pure handler is driven directly with hand-built
    not itself use.
 3. **Host compatibility** — every example would survive ``check_source_kind_compatibility``
    for its host's kind.
-4. **Shape** — one item per host, ``object_id == host.name``; the collection chains into
-   ``runs.create``/``runs.build``; an empty host list yields a valid empty collection.
+4. **Shape** — a leading host-independent ``source='external'`` example (the recommended
+   default lane, ADR-0234) followed by one item per host, ``object_id == host.name``; the
+   collection leads with the external upload loop; an empty host list still yields the
+   external example.
 """
 
 from __future__ import annotations
@@ -34,7 +36,12 @@ from kdive.db.build_hosts import BuildHost, BuildHostKind, BuildHostState
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.runs import registrar as runs_registrar
 from kdive.mcp.tools.lifecycle.runs.profile_examples import build_host_profile_examples
-from kdive.profiles.build import BuildProfile, ServerBuildProfile, is_git_source
+from kdive.profiles.build import (
+    BuildProfile,
+    ExternalBuildProfile,
+    ServerBuildProfile,
+    is_git_source,
+)
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
@@ -67,8 +74,16 @@ _ALL_KINDS = [
 ]
 
 
+_EXTERNAL_OBJECT_ID = "external-upload"
+
+
 def _items(resp: ToolResponse) -> dict[str, dict[str, Any]]:
     return {item.object_id: cast(dict[str, Any], item.data) for item in resp.items}
+
+
+def _host_items(resp: ToolResponse) -> dict[str, dict[str, Any]]:
+    """The per-host server examples, excluding the leading external example."""
+    return {k: v for k, v in _items(resp).items() if k != _EXTERNAL_OBJECT_ID}
 
 
 def _profile_of(data: dict[str, Any]) -> dict[str, Any]:
@@ -80,16 +95,46 @@ def _profile_of(data: dict[str, Any]) -> dict[str, Any]:
 def test_one_item_per_host_with_name_object_id() -> None:
     resp = build_host_profile_examples(_ALL_KINDS, declared_instances=["eph-host"])
     assert resp.status == "ok"
-    items = _items(resp)
+    items = _host_items(resp)
     assert set(items) == {"worker-local", "ssh-host", "eph-host"}
     for host in _ALL_KINDS:
         assert items[host.name]["build_host"] == host.name
         assert items[host.name]["host_kind"] == host.kind.value
 
 
-def test_every_example_parses_as_server_build_profile() -> None:
+def test_external_example_is_first_recommended_and_host_independent() -> None:
+    # ADR-0234: the recommended default lane leads the collection as a host-independent
+    # source='external' example with the upload-sequence next actions.
     resp = build_host_profile_examples(_ALL_KINDS, declared_instances=["eph-host"])
-    for data in _items(resp).values():
+    first = resp.items[0]
+    assert first.object_id == _EXTERNAL_OBJECT_ID
+    data = cast(dict[str, Any], first.data)
+    assert data["recommended"] is True
+    assert "build_host" not in data
+    profile = _profile_of(data)
+    assert profile == {"schema_version": 1, "source": "external"}
+    parsed = BuildProfile.parse(profile)
+    assert isinstance(parsed, ExternalBuildProfile)
+    assert first.suggested_next_actions == [
+        "runs.create",
+        "artifacts.expected_uploads",
+        "artifacts.create_run_upload",
+    ]
+
+
+def test_external_note_discloses_recommended_upload_lane() -> None:
+    resp = build_host_profile_examples(_ALL_KINDS, declared_instances=["eph-host"])
+    note = _items(resp)[_EXTERNAL_OBJECT_ID]["note"]
+    assert isinstance(note, str)
+    lowered = note.lower()
+    assert "recommended" in lowered
+    assert "artifacts.expected_uploads" in note
+    assert "runs.complete_build" in note
+
+
+def test_every_host_example_parses_as_server_build_profile() -> None:
+    resp = build_host_profile_examples(_ALL_KINDS, declared_instances=["eph-host"])
+    for data in _host_items(resp).values():
         parsed = BuildProfile.parse(_profile_of(data))
         assert isinstance(parsed, ServerBuildProfile)
         assert parsed.build_host == data["build_host"]
@@ -97,7 +142,7 @@ def test_every_example_parses_as_server_build_profile() -> None:
 
 def test_source_form_matches_advertised_kind() -> None:
     resp = build_host_profile_examples(_ALL_KINDS, declared_instances=["eph-host"])
-    for data in _items(resp).values():
+    for data in _host_items(resp).values():
         parsed = BuildProfile.parse(_profile_of(data))
         assert isinstance(parsed, ServerBuildProfile)
         # The example's source kind must be one the host advertises (a host may accept more
@@ -151,16 +196,25 @@ def test_note_discloses_warm_tree_is_provenance_only() -> None:
     assert "build_provenance" in note
 
 
-def test_collection_chains_into_runs_create_and_build() -> None:
+def test_collection_leads_with_external_upload_loop() -> None:
+    # ADR-0234: the collection-level next actions lead with the external upload loop; the
+    # server-build verb (runs.build) trails as the secondary single-host convenience.
     resp = build_host_profile_examples(_ALL_KINDS, declared_instances=["eph-host"])
-    assert resp.suggested_next_actions == ["runs.create", "runs.build"]
+    assert resp.suggested_next_actions == [
+        "runs.create",
+        "artifacts.expected_uploads",
+        "artifacts.create_run_upload",
+        "runs.build",
+    ]
 
 
-def test_empty_host_list_is_valid_empty_collection() -> None:
+def test_empty_host_list_still_yields_external_example() -> None:
+    # No build hosts still leaves the host-independent external example: a cold agent always
+    # gets the recommended default lane.
     resp = build_host_profile_examples([], declared_instances=[])
     assert resp.status == "ok"
-    assert resp.items == []
-    assert resp.data["count"] == 0
+    assert [item.object_id for item in resp.items] == [_EXTERNAL_OBJECT_ID]
+    assert resp.data["count"] == 1
 
 
 def test_unresolvable_ephemeral_host_is_omitted() -> None:

@@ -5,7 +5,9 @@ auth posture per ADR-0117: a valid token gates the transport as defence-in-depth
 is no platform/project gate and no audit). Unlike ``systems.profile_examples`` — which
 projects the file-based ``systems.toml`` provider inventory — the build-host inventory lives
 in Postgres, so this tool is pool-backed: it reads the registered ``build_hosts`` rows and
-emits one ready-to-edit server-build profile per host.
+emits one ready-to-edit server-build profile per host. The collection leads with a single,
+host-independent ``source='external'`` example — the recommended default upload lane
+(ADR-0234) — followed by the per-host server-build examples (a single-host convenience).
 
 Each example's ``kernel_source_ref`` matches the host's accepted source kind, derived from
 the shared :func:`~kdive.services.runs.build_host_selection.accepted_source_kinds` matrix
@@ -23,6 +25,8 @@ from collections.abc import Collection
 
 from kdive.db.build_hosts import BuildHost
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.catalog.artifacts.expected_uploads import EXPECTED_UPLOADS_TOOL
+from kdive.mcp.tools.catalog.artifacts.uploads import CREATE_RUN_UPLOAD_TOOL
 from kdive.serialization import JsonValue
 from kdive.services.runs.build_host_selection import (
     SourceKind,
@@ -31,10 +35,24 @@ from kdive.services.runs.build_host_selection import (
 )
 
 _OBJECT_ID = "profile-examples"
+_EXTERNAL_OBJECT_ID = "external-upload"
 
-# The build lane a cold agent should follow: edit an example, create the Run, enqueue the
-# build. Each is a registered tool identifier.
-_NEXT_ACTIONS = ["runs.create", "runs.build"]
+# The recommended default lane (ADR-0234): create the Run as source='external', learn the
+# required bytes, upload the prebuilt artifact. Each is a registered tool identifier. The
+# server-build verb (runs.build) trails as the secondary single-host convenience.
+_NEXT_ACTIONS = ["runs.create", EXPECTED_UPLOADS_TOOL, CREATE_RUN_UPLOAD_TOOL, "runs.build"]
+
+# Item-level next actions for the external example: the upload sequence (ADR-0234 §1/§5).
+_EXTERNAL_NEXT_ACTIONS = ["runs.create", EXPECTED_UPLOADS_TOOL, CREATE_RUN_UPLOAD_TOOL]
+
+_EXTERNAL_NOTE = (
+    "Recommended default build lane (ADR-0234): upload a prebuilt kernel artifact instead of "
+    "building on a host. This example is host-independent — it names no build_host and no "
+    "kernel_source_ref. After runs.create with this profile, call artifacts.expected_uploads "
+    "to learn the exact bytes to produce, then artifacts.create_run_upload to upload, then "
+    "runs.complete_build. The per-host server-build examples below are a single-host "
+    "convenience that needs a staged source tree or git-clone access."
+)
 
 # Placeholders the caller must replace before building.
 _PLACEHOLDER_WARM_TREE = "REPLACE_ME-warm-tree-source"
@@ -70,11 +88,14 @@ def build_host_profile_examples(
             used to drop ``ephemeral_libvirt`` hosts with no backing instance.
 
     Returns:
-        A :class:`ToolResponse` collection with one item per *resolving* host; each item's
-        ``data`` carries ``build_host``, ``host_kind``, ``supported_source_kinds``, the
-        ready-to-edit ``profile`` dict, and a ``note``.
+        A :class:`ToolResponse` collection whose FIRST item is the host-independent,
+        recommended external-upload example (ADR-0234) and whose remaining items are one
+        per *resolving* server-build host; each host item's ``data`` carries ``build_host``,
+        ``host_kind``, ``supported_source_kinds``, the ready-to-edit ``profile`` dict, and a
+        ``note``.
     """
-    items = [
+    items = [_external_example_item()]
+    items += [
         _example_item(host)
         for host in hosts
         if build_host_resolves(host.kind, host.name, declared_instances)
@@ -84,6 +105,27 @@ def build_host_profile_examples(
         "ok",
         items,
         suggested_next_actions=list(_NEXT_ACTIONS),
+    )
+
+
+def _external_example_item() -> ToolResponse:
+    """The recommended, host-independent ``source='external'`` example (ADR-0234 §1/§5).
+
+    Unlike the per-host server examples, this one names no build host and no source tree: the
+    agent uploads a prebuilt kernel artifact. Its ``suggested_next_actions`` chain into the
+    upload sequence so the lane is self-describing from discovery alone.
+    """
+    data: dict[str, JsonValue] = {
+        "recommended": True,
+        "lane": "external",
+        "profile": {"schema_version": 1, "source": "external"},
+        "note": _EXTERNAL_NOTE,
+    }
+    return ToolResponse.success(
+        _EXTERNAL_OBJECT_ID,
+        "ok",
+        data=data,
+        suggested_next_actions=list(_EXTERNAL_NEXT_ACTIONS),
     )
 
 
