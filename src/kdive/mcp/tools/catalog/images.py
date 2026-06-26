@@ -19,13 +19,20 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageVisibility
+from kdive.images.kdump_support import (
+    DEFAULT_KERNEL_BASIS,
+    KernelVersion,
+    kdump_capability,
+)
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor
+from kdive.mcp.tools._common import ConfigErrorReason as _ConfigErrorReason
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
+from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import decode_cursor as _decode_cursor
 from kdive.mcp.tools._common import encode_cursor as _encode_cursor
 from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
@@ -34,6 +41,7 @@ from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, projects_with_role
+from kdive.serialization import JsonValue
 
 _LIST_TOOL = "images.list"
 _LIST_TAG = "images.list"
@@ -128,12 +136,36 @@ _DESCRIBE_SQL = """
 """
 
 
-def _describe_envelope(entry: ImageCatalogEntry) -> ToolResponse:
+def _kdump_block(entry: ImageCatalogEntry, basis: KernelVersion) -> dict[str, JsonValue]:
+    """The computed kdump capability for ``entry`` against ``basis`` (ADR-0253).
+
+    Reads the build-recorded ``provenance["makedumpfile_version"]`` (``None`` when absent or not a
+    string) and whether the image carries the ``"kdump"`` tooling tag, then computes the capability,
+    echoing the kernel basis it was computed against. A reader never raises on image data — an
+    unparseable stored version degrades to ``unverified`` inside :func:`kdump_capability`.
+    """
+    raw = entry.provenance.get("makedumpfile_version")
+    cap = kdump_capability(
+        makedumpfile_version=raw if isinstance(raw, str) and raw else None,
+        target_kernel=basis,
+        kdump_tooling="kdump" in entry.capabilities,
+    )
+    return {
+        "makedumpfile_version": raw if isinstance(raw, str) else "",
+        "target_kernel": cap.target_kernel,
+        "capability": cap.status,
+        "min_makedumpfile_required": cap.min_makedumpfile_required,
+        "note": cap.note,
+    }
+
+
+def _describe_envelope(entry: ImageCatalogEntry, basis: KernelVersion) -> ToolResponse:
     """Full per-image detail; withholds the staged ``path`` and the S3 ``object_key``.
 
-    Surfaces ``provenance`` verbatim (build metadata, no secret values) and the boot layout,
-    digest, capabilities, scope, and publish state. ``expires_at`` is an ISO-8601 string when set
-    (a ``datetime`` is not a ``JsonValue``), ``""`` otherwise.
+    Surfaces ``provenance`` verbatim (build metadata, no secret values), the boot layout, digest,
+    capabilities, scope, publish state, and a computed ``kdump`` block (capability for ``basis``).
+    ``expires_at`` is an ISO-8601 string when set (a ``datetime`` is not a ``JsonValue``), ``""``
+    otherwise.
     """
     return ToolResponse.success(
         str(entry.id),
@@ -150,6 +182,7 @@ def _describe_envelope(entry: ImageCatalogEntry) -> ToolResponse:
             "digest": entry.digest or "",
             "capabilities": list(entry.capabilities),
             "provenance": entry.provenance,
+            "kdump": _kdump_block(entry, basis),
             "volume": entry.volume or "",
             "expires_at": entry.expires_at.isoformat() if entry.expires_at else "",
             "managed_by": entry.managed_by.value,
@@ -159,18 +192,33 @@ def _describe_envelope(entry: ImageCatalogEntry) -> ToolResponse:
 
 
 async def describe_image(
-    pool: AsyncConnectionPool, ctx: RequestContext, image_id: str
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    image_id: str,
+    target_kernel: str | None = None,
 ) -> ToolResponse:
-    """Return one catalog image visible to the caller, addressed by row id (ADR-0252).
+    """Return one catalog image visible to the caller, addressed by row id (ADR-0252/0253).
 
     Visibility reuses the ``images.list`` predicate (public, or owned-private with viewer),
     filtered in SQL so an unauthorized private row never leaves the database. A malformed id is a
     ``configuration_error``; a valid id with no visible row is ``not_found`` (byte-identical
-    whether absent or invisible — no existence/membership leak).
+    whether absent or invisible — no existence/membership leak). ``target_kernel`` (optional)
+    selects the kernel the ``data.kdump`` capability is computed against, defaulting to the
+    characterized basis; a malformed value is a ``configuration_error`` (``invalid_version``).
     """
     uid = _as_uuid(image_id)
     if uid is None:
         return _invalid_uuid_error("image_id", image_id)
+    basis = DEFAULT_KERNEL_BASIS
+    if target_kernel is not None:
+        try:
+            basis = KernelVersion.parse(target_kernel)
+        except ValueError:
+            return _config_error_reason(
+                target_kernel,
+                _ConfigErrorReason.INVALID_VERSION,
+                detail=f"target_kernel {target_kernel!r} is not a recognized kernel version",
+            )
     with bind_context(principal=ctx.principal):
         params = {
             "id": str(uid),
@@ -183,7 +231,7 @@ async def describe_image(
             row = await cur.fetchone()
     if row is None:
         return _not_found(image_id)
-    return _describe_envelope(ImageCatalogEntry.model_validate(row))
+    return _describe_envelope(ImageCatalogEntry.model_validate(row), basis)
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -217,10 +265,20 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     )
     async def images_describe(
         image_id: Annotated[str, Field(description="The catalog image row id (UUID) to describe.")],
+        target_kernel: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Target kernel version (e.g. 7.1) to compute the data.kdump capability "
+                    "against; defaults to the characterized basis when omitted."
+                )
+            ),
+        ] = None,
     ) -> ToolResponse:
         """Return full detail for one catalog image visible to the caller.
 
-        Includes boot layout, digest, capabilities, scope, publish state, and build
-        ``provenance`` (with captured ``package_versions`` when present).
+        Includes boot layout, digest, capabilities, scope, publish state, build ``provenance``
+        (with captured ``package_versions``/``makedumpfile_version`` when present), and a computed
+        ``data.kdump`` block (capability for ``target_kernel``, with the kernel basis disclosed).
         """
-        return await describe_image(pool, current_context(), image_id)
+        return await describe_image(pool, current_context(), image_id, target_kernel)
