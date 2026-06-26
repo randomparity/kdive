@@ -11,6 +11,14 @@ from kdive.mcp.tools._common import (
 )
 
 
+def test_config_error_reason_carries_invalid_version() -> None:
+    resp = config_error_reason(
+        "vanilla", ConfigErrorReason.INVALID_VERSION, detail="not a recognized kernel version"
+    )
+    assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+    assert resp.data["reason"] == "invalid_version"
+
+
 def test_config_error_reason_surfaces_reason_and_detail() -> None:
     resp = config_error_reason("not-a-uuid", ConfigErrorReason.INVALID_UUID, detail="bad id")
     assert resp.status == "error"
