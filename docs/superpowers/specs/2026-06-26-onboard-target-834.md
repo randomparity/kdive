@@ -58,12 +58,20 @@ equal *by construction* — the binding cannot drift within a run.
 
 A new token-less `kdive verify-project --project P` subcommand re-opens a fresh connection to
 `KDIVE_DATABASE_URL` and asserts **both** a `budgets` row and a `quotas` row exist for `P`, printing
-the figures. It reuses the *exact* reads admission control uses — `budget_snapshot`
-(`services/allocation/idempotency.py`) and `quota_status`
-(`services/allocation/admission/core.py`) — so "verified" means "the gate admission reads will
-pass," with no second copy of the lookup to drift. Either row absent → non-zero exit with a message
-that names the DB, and the recipe fails. This is what catches a seed that landed in the wrong DB or
-errored partway.
+the figures and the resolved DB. It reuses the *exact* reads admission control uses —
+`budget_snapshot` (`services/allocation/idempotency.py`) and `quota_status`
+(`services/allocation/admission/core.py`) — so "verified" means "the funding reads admission
+performs will return rows," with no second copy of the lookup to drift. Either row absent →
+non-zero exit naming the DB, and the recipe fails.
+
+**What verify does and does not prove.** verify-project resolves `KDIVE_DATABASE_URL` the same way
+`seed-project` did, in the same recipe run, so the two cannot disagree about *which* DB. Its
+guarantee is therefore: the funding rows are **durably present and readable** in the DB this recipe
+targeted — it catches a seed transaction that rolled back, a `migrate` that did not create the
+`budgets`/`quotas` tables (the `SELECT` raises), and a silent seed no-op. It does **not**
+independently prove that targeted DB is the one the *server* reads; that identity comes from both
+processes resolving the same env (see §5), and the recipe makes any skew visible by echoing the
+resolved `KDIVE_DATABASE_URL` it targeted.
 
 ### 3. Token: mint a real 24 h token, best-effort, with a loud expiry warning
 
@@ -77,7 +85,10 @@ printed **unconditionally**, whether or not the mint succeeds.
 
 - **Role:** `admin` (`KDIVE_ROLE` override) + `platform_admin`/`platform_operator`, mirroring
   `examples/local-libvirt/mint-token.sh`, so the demo token reaches every tool including the
-  admin-gated funding tools (`accounting.set_quota`/`set_budget`) and `control.force_crash`.
+  admin-gated funding tools (`accounting.set_quota`/`set_budget`) and `control.force_crash`. The
+  minted role must be **≥ contributor** for the token to pass the `allocations.request` gate; if
+  `KDIVE_ROLE` resolves below contributor (`viewer`), the recipe prints a WARN that the token will
+  be funding-walled (it does not fail — the seed is still valid).
 - **Demo-only:** the bundled mock issuer mints a valid token for any caller; the script repeats the
   existing scripts' "never against a real deployment" warning.
 
@@ -92,10 +103,18 @@ which hard-fails on preflight.)
 ### 5. Order and env
 
 `source live-stack/env.sh` → advisory preflight → `migrate` (idempotent) → `seed-project` →
-`verify-project` → mint + print token + contract. Sourcing `env.sh` is what guarantees
-`KDIVE_DATABASE_URL` is the server's DB (it defaults the value if the caller left it unset, so the
-recipe never seeds an ambient/unset DB). Hard gates: migrate, seed, verify. Advisory (warn,
-non-fatal): preflight, token mint.
+`verify-project` → mint + print token + contract. Sourcing `env.sh` resolves `KDIVE_DATABASE_URL`
+to the live-stack default when the caller left it unset, so the recipe never seeds an ambient/unset
+DB. Hard gates: migrate, seed, verify. Advisory (warn, non-fatal): preflight, token mint.
+
+**Prerequisite (named, not assumed):** the DB onboard targets equals the DB the server reads **only
+when the server is brought up from the same env** — which the live-stack convention satisfies
+(`lib.sh restart_host_processes` sources `env.sh` before starting the host `server`). An operator
+who starts the server with an overriding `KDIVE_DATABASE_URL` not present when `just onboard` runs
+will fund a different DB than the server reads, and the agent stays walled despite a green onboard.
+The recipe therefore echoes the resolved `KDIVE_DATABASE_URL` it targeted so such a skew is visible
+rather than silent; reconciling it is the operator's job, not something the token-less recipe can
+detect.
 
 ## Scope
 
@@ -103,7 +122,8 @@ non-fatal): preflight, token mint.
 
 - `src/kdive/admin/bootstrap.py` — add `verify_project(project) -> ProjectFundingStatus` reusing the
   canonical budget/quota reads; a small frozen result type carrying `(budget_present, quota_present,
-  limit_kcu, max_concurrent_allocations, max_concurrent_systems, database_url_present)`.
+  limit_kcu, max_concurrent_allocations, max_concurrent_systems)`. (No `database_url_present` field:
+  `create_pool` raises when the URL is unset, so verify never reaches the result with it absent.)
 - `src/kdive/__main__.py` — register a `verify-project` command (`--project`, default `demo`) that
   prints the figures and exits non-zero when either row is absent.
 - `scripts/live-stack/onboard.sh` — the recipe body (sources `env.sh` + `lib.sh`; advisory preflight;
@@ -140,8 +160,10 @@ non-fatal): preflight, token mint.
    `export KDIVE_TOKEN=…` line; a subsequent `allocations.request(project="demo")` with that token is
    granted (not quota/budget-walled).
 2. Re-running `just onboard` is a no-op upsert (idempotent) and still verifies + prints.
-3. With `KDIVE_DATABASE_URL` pointing at an empty/wrong DB (no rows after seed), `verify-project`
-   exits non-zero and the recipe **fails loudly** naming the DB.
+3. `verify-project --project P` against a migrated-but-**unseeded** DB exits non-zero naming the DB
+   (the reachable form of "seed did not persist"); a seed step that errors aborts the recipe before
+   it claims success. (Pointing seed *and* verify at the same wrong DB is not this check — both write
+   and read it; see §2 "what verify does and does not prove".)
 4. A provider-preflight FAIL prints a WARN but does **not** abort the seed (recipe still seeds,
    verifies, exits 0).
 5. A token-mint failure (issuer down) prints a WARN, the contract, and the re-mint command, and the

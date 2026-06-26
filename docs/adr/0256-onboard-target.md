@@ -38,9 +38,12 @@ into one idempotent, self-verifying, project-binding-explicit funding step for t
 2. **Verify-readback is the reliability gate.** A new token-less `kdive verify-project --project P`
    re-opens a fresh `KDIVE_DATABASE_URL` connection and asserts both a `budgets` and a `quotas` row
    exist for `P`, printing the figures, reusing the *exact* reads admission control uses
-   (`budget_snapshot`, `quota_status`) so "verified" means "the admission gate will pass" with no
-   second lookup to drift. Either row absent → non-zero exit; the recipe fails loud, naming the DB.
-   This catches a seed that landed in the wrong DB or errored partway.
+   (`budget_snapshot`, `quota_status`) so "verified" means "the admission funding reads return rows"
+   with no second lookup to drift. Either row absent → non-zero exit; the recipe fails loud, naming
+   the DB. verify resolves `KDIVE_DATABASE_URL` the same way the seed did in the same run, so its
+   guarantee is that the rows are durably present and readable in the **targeted** DB (catching a
+   rolled-back seed, a missing schema, or a silent no-op) — not that the targeted DB is the server's.
+   That identity comes from §5; the recipe echoes the resolved URL so a skew is visible.
 
 3. **Token: a real 24 h token, best-effort, loud expiry warning.** The recipe mints a bearer token
    via the existing `mint_local_token` with `ttl_seconds=86400`, role `admin` (`KDIVE_ROLE`
@@ -56,7 +59,12 @@ into one idempotent, self-verifying, project-binding-explicit funding step for t
 
 5. **Order / env / gating.** `source live-stack/env.sh` → advisory preflight → `migrate`
    (idempotent) → `seed-project` → `verify-project` → mint + contract. Hard gates: migrate, seed,
-   verify. Advisory: preflight, mint.
+   verify. Advisory: preflight, mint. The targeted DB equals the server's DB only when the server is
+   brought up from the same env (the live-stack convention: `lib.sh restart_host_processes` sources
+   `env.sh`); a server started with an overriding `KDIVE_DATABASE_URL` absent at onboard time is a
+   skew the token-less recipe cannot detect, so it echoes the resolved URL rather than asserting
+   identity. The minted role must be ≥ contributor to pass the `allocations.request` gate; a
+   sub-contributor `KDIVE_ROLE` (e.g. `viewer`) WARNs (the seed stays valid) rather than failing.
 
 The two existing seed paths are left unchanged: `setup-local-libvirt.sh` is the package-install /
 audited path (different audience, no `just`); `examples/local-libvirt/up.sh` is the heavier guided
@@ -66,8 +74,8 @@ bring-up that also starts the processes. `onboard` is the lightweight, process-a
 ## Consequences
 
 - A fresh stack reaches a granted first allocation in two commands (`just stack-up; just onboard`)
-  with the project binding printed, not inferred. The verify step converts a silent wrong-DB seed
-  into a loud failure.
+  with the project binding printed, not inferred. The verify step converts a seed that did not
+  persist (rollback, missing schema, silent no-op) into a loud failure naming the targeted DB.
 - `verify-project` becomes a reusable, scriptable, token-less funding check for any project, not just
   a recipe internal.
 - `bootstrap.py` gains a deliberate import of two service-layer reads (`budget_snapshot`,
