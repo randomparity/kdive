@@ -177,6 +177,48 @@ provenance metadata for a `cloud-image` row (the URL carries the base) and now a
 family's EL-major package decision; no new `virt-builder` templates are involved. Each row registers
 in the inventory example the way Fedora 44 does.
 
+### Live-proof results (#823, KVM host, 2026-06-26)
+
+`build-fs --image <name>` was run live on the KVM host for all five entries (real
+download + sha256-verify + `virt-customize` + `virt-tar-out`/`virt-make-fs` repack + guestfish
+normalize + publish), and each built rootfs was inspected with guestfish. This exercises the
+**build** lifecycle plane and the novel EL-major-aware `rhel` packaging end-to-end:
+
+| entry | built digest (sha256, abbrev) | makedumpfile **in image** | drgn source | kdump/sshd/kdive-ready |
+|---|---|---|---|---|
+| `rocky-kdive-ready-8` | `5faef213…` | **1.7.2** (in `kexec-tools-2.0.26`) | `drgn-0.0.32-1.el8` from **EPEL** | all `enabled` |
+| `rocky-kdive-ready-9` | `e16538a8…` | **1.7.6** (in `kexec-tools-2.0.29`) | `drgn-0.0.33-2.el9` (AppStream) | all `enabled` |
+| `rocky-kdive-ready-10` | `80a035d9…` | **1.7.8** (`makedumpfile-1.7.8-1.el10` + `kdump-utils`) | `drgn-0.0.33-1.el10` | all `enabled` |
+| `centos-stream-kdive-ready-9` | `9a3667f8…` | **1.7.6** (in `kexec-tools-2.0.29`) | `drgn-0.0.33-2.el9` | all `enabled` |
+| `centos-stream-kdive-ready-10` | `4831fb80…` | **1.7.8** (`makedumpfile-1.7.8-1.el10` + `kdump-utils`) | `drgn-0.0.33-1.el10` | all `enabled` |
+
+Confirms: (1) the EL-8 `epel-release`-before-`drgn` ordering works in `virt-customize` (the `drgn`
+install would otherwise fail — drgn is not in EL 8 base); (2) EL 8/9 take makedumpfile + `kdumpctl`
+from `kexec-tools` while EL 10 installs the standalone `makedumpfile`/`kdump-utils`; (3) the
+**in-image makedumpfile version matches the documented matrix exactly** for every entry (all < 1.7.9
+→ `kdump_capable = false` is correct against the real image); (4) `kdump.service` arms via the
+`kexec-tools` gate (not the Fedora-only `kdump-utils`), and `sshd`/`kdive-ready` enable, the managed
+key injects, and SELinux is permissive on every entry.
+
+**Boot proof (EL9, direct-kernel on the v7.0.0 kernel-under-test).** `rocky-kdive-ready-9` was
+direct-kernel-booted on the from-source **kernel 7.0.0** (`-cpu max,la57=off`, the model the kdive
+libguestfs appliance uses — the default `qemu64` lacks the x86-64-v2 baseline EL9 glibc requires and
+SIGILLs PID1): the kernel mounts `/dev/vda` ext4 with no initramfs (built-in virtio_blk/ext4),
+pivots, `systemd 252-67.el9.rocky.0.1` reaches `Multi-User System`, the **`kdive-ready` serial
+signal fires**, and it reaches the `Rocky Linux 9.8 … Kernel 7.0.0` login prompt. `crashkernel=256M`
+reserved correctly. kdump.service's arming **failed** here because the ad-hoc boot skipped the kdive
+**install** plane that injects `/lib/modules/7.0.0` (dracut needs them to build the capture
+initramfs) — and notably `kdive-ready` **still fired**, confirming on an EL guest that the
+`After=kdump.service` ordering (ADR-0251 point 6) releases readiness on the unit's terminal state
+whether kdump arms or not.
+
+The remaining lifecycle (provision → install the v7.0 kernel + modules → `force_crash` →
+`host_dump`, and the default `kdump` path landing on `kdump_core_incomplete` at the pinned large RAM
+once modules are injected and kdump arms) runs through the operator live-stack harness (the
+env-gated, non-CI path the image-lifecycle runbook describes); the install/boot/kdump-capture
+machinery is distro-agnostic and was proven on Fedora in the #817 MVP — the #823-specific risk was
+the EL package divergence (and its boot), proven above.
+
 ## Architecture
 
 All changes are in the shared `images` layer and the local-libvirt provider.
