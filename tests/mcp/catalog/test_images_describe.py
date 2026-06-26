@@ -287,6 +287,22 @@ def test_describe_malformed_target_kernel_is_configuration_error(migrated_url: s
     asyncio.run(_run())
 
 
+def test_describe_oversized_target_kernel_echo_is_bounded(migrated_url: str) -> None:
+    huge = "x" * 5000
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            iid = await _insert(
+                pool, name="fedora-44", visibility="public", owner=None, capabilities=_DEBUG_CAPS
+            )
+            resp = await catalog_images.describe_image(pool, _ctx(), iid, target_kernel=huge)
+        assert resp.error_category == "configuration_error"
+        # The detail must not reflect the full oversized caller value (echo-bound, ADR-0166/0174).
+        assert huge not in str(resp.detail)
+
+    asyncio.run(_run())
+
+
 def test_describe_withholds_staged_path(migrated_url: str) -> None:
     secret = "/var/lib/kdive/rootfs/secret-local.qcow2"
 

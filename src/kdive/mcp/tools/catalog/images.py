@@ -28,7 +28,7 @@ from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor, _short_id
 from kdive.mcp.tools._common import ConfigErrorReason as _ConfigErrorReason
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
@@ -217,7 +217,8 @@ async def describe_image(
             return _config_error_reason(
                 target_kernel,
                 _ConfigErrorReason.INVALID_VERSION,
-                detail=f"target_kernel {target_kernel!r} is not a recognized kernel version",
+                detail=f"target_kernel {_short_id(target_kernel)!r} is not a recognized "
+                "kernel version",
             )
     with bind_context(principal=ctx.principal):
         params = {
