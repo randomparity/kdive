@@ -18,7 +18,7 @@ from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools.lifecycle.allocations.common import allocation_next_actions
 from kdive.security.authz.context import RequestContext, require_project
-from kdive.security.authz.rbac import Role, require_role
+from kdive.security.authz.rbac import Role, projects_with_role, require_role
 from kdive.services.allocation.admission.core import (
     AFFINITY_DENIAL_REASON,
     BUDGET_DENIAL_REASON,
@@ -118,10 +118,10 @@ async def request_allocation(
         outcome = _outcome_for_metrics(result)
         if outcome is not None:
             (admission_metrics or AdmissionMetrics.disabled()).record_decision(outcome)
-        return _request_response(result)
+        return _request_response(result, ctx)
 
 
-def _request_response(result: RequestAdmissionResult) -> ToolResponse:
+def _request_response(result: RequestAdmissionResult, ctx: RequestContext) -> ToolResponse:
     if result.error is not None:
         return ToolResponse.failure_from_error(result.object_id, result.error)
     if result.resource is None:
@@ -129,7 +129,10 @@ def _request_response(result: RequestAdmissionResult) -> ToolResponse:
     if result.allocation is not None:
         return _grant_or_enqueue_response(result.resource, result.project, result.allocation)
     if result.denial is not None:
-        return _denial_response(result.resource.id, result.project, result.denial)
+        caller_is_admin = result.project in projects_with_role(ctx, Role.ADMIN)
+        return _denial_response(
+            result.resource.id, result.project, result.denial, caller_is_admin=caller_is_admin
+        )
     return ToolResponse.failure(result.object_id, ErrorCategory.INFRASTRUCTURE_FAILURE)
 
 
@@ -168,26 +171,33 @@ def _grant_or_enqueue_response(
     )
 
 
-def _denial_response(resource_id: UUID, project: str, outcome: AdmissionOutcome) -> ToolResponse:
+def _denial_response(
+    resource_id: UUID, project: str, outcome: AdmissionOutcome, *, caller_is_admin: bool
+) -> ToolResponse:
     category = outcome.category or ErrorCategory.ALLOCATION_DENIED
     data = denial_details(outcome)
     _log.info("allocation denied for project %s on resource %s: %s", project, resource_id, category)
     return ToolResponse.failure(
         str(resource_id),
         category,
-        detail=_denial_detail(outcome),
-        suggested_next_actions=_denial_next_actions(outcome),
+        detail=_denial_detail(outcome, caller_is_admin=caller_is_admin),
+        suggested_next_actions=_denial_next_actions(outcome, caller_is_admin=caller_is_admin),
         data=data,
     )
 
 
-def _denial_next_actions(outcome: AdmissionOutcome) -> list[str]:
-    """Lead a funding denial with the admin tool that resolves it (ADR-0245).
+def _denial_next_actions(outcome: AdmissionOutcome, *, caller_is_admin: bool) -> list[str]:
+    """Lead a funding denial with the admin tool that resolves it (ADR-0245, #841).
 
     A quota or budget denial otherwise points only at ``allocations.list``, which on a denied
-    first request returns an empty list. Host-capacity, affinity, and generic denials keep the
-    plain breadcrumb. Branch precedence mirrors :func:`_denial_detail`.
+    first request returns an empty list. The admin remedy tool is led with **only** when the
+    caller holds ``Role.ADMIN`` on the project — the role ``accounting.set_quota`` /
+    ``accounting.set_budget`` require; a non-admin caller (``allocations.request`` needs only
+    ``Role.CONTRIBUTOR``) is not pointed at a tool it cannot invoke. Host-capacity, affinity, and
+    generic denials keep the plain breadcrumb. Branch precedence mirrors :func:`_denial_detail`.
     """
+    if not caller_is_admin:
+        return list(_DENIAL_NEXT_ACTIONS)
     if outcome.reason == BUDGET_DENIAL_REASON:
         return [_BUDGET_REMEDY_TOOL, *_DENIAL_NEXT_ACTIONS]
     if outcome.category is ErrorCategory.QUOTA_EXCEEDED:
@@ -195,13 +205,13 @@ def _denial_next_actions(outcome: AdmissionOutcome) -> list[str]:
     return list(_DENIAL_NEXT_ACTIONS)
 
 
-def _denial_detail(outcome: AdmissionOutcome) -> str:
+def _denial_detail(outcome: AdmissionOutcome, *, caller_is_admin: bool) -> str:
     if outcome.reason == BUDGET_DENIAL_REASON:
-        return _budget_denial_detail(outcome)
+        return _budget_denial_detail(outcome, caller_is_admin=caller_is_admin)
     if outcome.reason == AFFINITY_DENIAL_REASON:
         return "the project is not permitted to place on the selected resource"
     if outcome.category is ErrorCategory.QUOTA_EXCEEDED:
-        return f"project concurrency quota exhausted; raise it with {_QUOTA_REMEDY_TOOL}"
+        return f"project concurrency quota exhausted; {_quota_remedy_clause(caller_is_admin)}"
     if outcome.reason == "at_capacity":
         cap = "?" if outcome.cap is None else str(outcome.cap)
         in_use = "?" if outcome.in_use is None else str(outcome.in_use)
@@ -209,12 +219,14 @@ def _denial_detail(outcome: AdmissionOutcome) -> str:
     return "allocation denied"
 
 
-def _budget_denial_detail(outcome: AdmissionOutcome) -> str:
-    """Name the budget shortfall so the agent can size the increase (#838).
+def _budget_denial_detail(outcome: AdmissionOutcome, *, caller_is_admin: bool) -> str:
+    """Name the budget shortfall so the agent can size the increase (#838, #841).
 
     The estimate and remaining figures ride in ``outcome.details`` (populated by the gate);
     when present the prose names them. A project with no budget row carries only the estimate,
-    so the remaining clause is dropped rather than printing a placeholder.
+    so the remaining clause is dropped rather than printing a placeholder. The closing clause
+    is role-aware (#841): an admin is pointed at ``accounting.set_budget``; a non-admin, who
+    cannot call it, is told to ask a project admin.
     """
     estimate = outcome.details.get("estimate_kcu")
     remaining = outcome.details.get("budget_remaining_kcu")
@@ -226,5 +238,19 @@ def _budget_denial_detail(outcome: AdmissionOutcome) -> str:
         shortfall = ""
     return (
         f"project budget exhausted for the requested window; {shortfall}"
-        f"raise it with {_BUDGET_REMEDY_TOOL}"
+        f"{_budget_remedy_clause(caller_is_admin)}"
     )
+
+
+def _quota_remedy_clause(caller_is_admin: bool) -> str:
+    """The role-aware tail of a quota denial: name the tool only for an admin caller (#841)."""
+    if caller_is_admin:
+        return f"raise it with {_QUOTA_REMEDY_TOOL}"
+    return "ask your project admin to raise the quota"
+
+
+def _budget_remedy_clause(caller_is_admin: bool) -> str:
+    """The role-aware tail of a budget denial: name the tool only for an admin caller (#841)."""
+    if caller_is_admin:
+        return f"raise it with {_BUDGET_REMEDY_TOOL}"
+    return "ask your project admin to raise the budget"
