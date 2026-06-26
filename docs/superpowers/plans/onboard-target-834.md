@@ -94,10 +94,15 @@ Write tests (no implementation yet):
 **Files:** `src/kdive/__main__.py`; tests in `tests/test_main_version.py` (or a sibling
 `tests/test_main_verify_project.py` if cleaner — check where CLI-registration tests live).
 
-1. Red: a test asserting the parser registers `verify-project` with `--project` (default `demo`) —
-   mirror how an existing command's registration is asserted (`_COMMAND_BY_NAME`/`build_parser`). A
-   unit test of `_handle_verify_project` is optional; the DB-touching path is covered by Task 1's
-   `verify_project` tests + Task 4's stubbed shell test, so the handler stays a thin wire.
+1. Red: (a) a test asserting the parser registers `verify-project` with `--project` (default `demo`)
+   — mirror how an existing command's registration is asserted (`_COMMAND_BY_NAME`/`build_parser`);
+   (b) **required** exit-code propagation tests — the whole gate rests on this wire, and Task 1.3
+   (pure `format_verify_result`) and Task 4 (stubbed verify-project) do not exercise the real CLI →
+   process-exit path. Drive the real handler against the testcontainer `migrated_url`:
+   migrated-but-**unseeded** DB → `_handle_verify_project` raises `SystemExit` with a non-zero code
+   (or a `python -m kdive verify-project` subprocess returns non-zero); both rows seeded → exit 0.
+   This closes the `format_verify_result` code → `SystemExit` seam, so a handler that prints but
+   forgets to propagate the code cannot regress onboard into claiming success on an unseeded DB.
 2. Green: add `_add_verify_project_arguments` (`--project`, default `demo`), `_handle_verify_project`
    (runs `asyncio.run(verify_project(project=args.project))`, computes
    `redact_database_url(database_url())`, calls `format_verify_result`, prints the message, and
