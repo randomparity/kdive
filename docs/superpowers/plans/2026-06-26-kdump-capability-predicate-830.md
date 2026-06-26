@@ -225,16 +225,20 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Test: `tests/images/test_families.py` (or the existing family-argv test module — locate with `rg -l "customize_argv" tests/`)
 
 **Interfaces:**
-- Produces: `makedumpfile_version_marker_args() -> list[str]` in `_fedora_customize.py` — a virt-customize fragment that ensures `/usr/lib/kdive/` exists and writes `makedumpfile --version` into `MAKEDUMPFILE_MARKER_GUEST_PATH = "/usr/lib/kdive/makedumpfile-version"`. Consumed by both debug families.
+- Produces:
+  - `MAKEDUMPFILE_MARKER_GUEST_PATH = "/usr/lib/kdive/makedumpfile-version"` defined in
+    **`src/kdive/images/planes/_build_common.py`** (its final home — families already import from
+    `_build_common`, e.g. `debian.py` imports `run_guestfs_tool`, so this direction has no cycle).
+  - `makedumpfile_version_marker_args() -> list[str]` in `_fedora_customize.py` (imports the constant
+    from `_build_common`) — a virt-customize fragment that ensures `/usr/lib/kdive/` exists and writes
+    `makedumpfile --version` into the marker. Consumed by both debug families.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # in the family-argv test module
-from kdive.images.families._fedora_customize import (
-    MAKEDUMPFILE_MARKER_GUEST_PATH,
-    makedumpfile_version_marker_args,
-)
+from kdive.images.families._fedora_customize import makedumpfile_version_marker_args
+from kdive.images.planes._build_common import MAKEDUMPFILE_MARKER_GUEST_PATH
 
 
 def test_makedumpfile_marker_args_writes_version_file() -> None:
@@ -258,22 +262,30 @@ Expected: FAIL (symbol not defined).
 
 - [ ] **Step 3: Implement**
 
-In `_fedora_customize.py`:
+In `_build_common.py` (top-level constant, near the other guest-path constants):
 ```python
 MAKEDUMPFILE_MARKER_GUEST_PATH = "/usr/lib/kdive/makedumpfile-version"
+```
+In `_fedora_customize.py` (import the constant from `_build_common`):
+```python
+from kdive.images.planes._build_common import MAKEDUMPFILE_MARKER_GUEST_PATH
 
 
 def makedumpfile_version_marker_args() -> list[str]:
     """virt-customize fragment recording ``makedumpfile --version`` to a guest marker file.
 
     Read back at build time into ``provenance["makedumpfile_version"]`` (ADR-0253). Best-effort:
-    the command never fails the build (``|| true``); an image without makedumpfile leaves an empty
-    marker, which the probe treats as "absent".
+    the command never fails the build (``|| true``); an image without makedumpfile (or with it off
+    PATH) leaves an empty marker, which the probe treats as "absent". The command tries ``PATH``
+    first, then the canonical ``/usr/sbin`` location, so a run-command shell with a thin PATH still
+    populates the marker.
     """
     return [
         "--run-command",
         "mkdir -p /usr/lib/kdive && "
-        f"makedumpfile --version > {MAKEDUMPFILE_MARKER_GUEST_PATH} 2>/dev/null || true",
+        "{ command -v makedumpfile >/dev/null 2>&1 && makedumpfile --version "
+        "|| /usr/sbin/makedumpfile --version ; } "
+        f"> {MAKEDUMPFILE_MARKER_GUEST_PATH} 2>/dev/null || true",
     ]
 ```
 In `rhel.py` and `debian.py`, inside the `if ctx.kind == "debug":` branch (next to `drgn_helper_args()`), append `makedumpfile_version_marker_args()`. Add the import.
@@ -372,7 +384,7 @@ def _real_makedumpfile_probe(qcow2_path: Path) -> str | None:  # pragma: no cove
 
 DEFAULT_MAKEDUMPFILE_PROBE: MakedumpfileProbeSeam = _real_makedumpfile_probe
 ```
-Import `MAKEDUMPFILE_MARKER_GUEST_PATH` from `_fedora_customize` (or relocate the constant to `_build_common` and re-export to avoid a families→build import cycle — prefer defining it in `_build_common` and importing into `_fedora_customize`).
+`MAKEDUMPFILE_MARKER_GUEST_PATH` already lives in `_build_common` (defined in Task 2), so the real probe reads it directly with no extra import gymnastics.
 
 `rootfs_build.py`: add `probe_makedumpfile: MakedumpfileProbeSeam = DEFAULT_MAKEDUMPFILE_PROBE` to `RootfsBuildTools`; add `_capture_makedumpfile(self, scratch, package_versions) -> str | None`:
 ```python
@@ -498,8 +510,14 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Test: the existing describe test module (locate: `rg -l "describe_image\|images.describe" tests/`)
 
 **Interfaces:**
-- Consumes: `kdump_capability`, `KernelVersion`, `DEFAULT_KERNEL_BASIS` (Task 1); `_invalid_uuid_error`/config-error helpers already imported in `images.py`.
-- Produces: `describe_image(pool, ctx, image_id, target_kernel: str | None = None)`; `data["kdump"]` block.
+- Consumes: `kdump_capability`, `KernelVersion`, `DEFAULT_KERNEL_BASIS` (Task 1); `config_error_reason` + the `ConfigErrorReason` enum from `src/kdive/mcp/tools/_common.py`.
+- Produces: `describe_image(pool, ctx, image_id, target_kernel: str | None = None)`; `data["kdump"]` block; a new `ConfigErrorReason.INVALID_VERSION = "invalid_version"` member.
+
+**Prerequisite step (do first, own commit):** the closed config-error vocabulary
+(`src/kdive/mcp/tools/_common.py` `ConfigErrorReason`, ADR-0174) has no version reason. Add
+`INVALID_VERSION = "invalid_version"` to the enum and update any test that enumerates the vocabulary
+(locate: `rg -n "ConfigErrorReason|invalid_uuid\b" tests/`). The malformed-`target_kernel` path uses
+`config_error_reason(raw, ConfigErrorReason.INVALID_VERSION, detail=f"target_kernel {raw!r} is not a recognized kernel version")`.
 
 - [ ] **Step 1: Write failing tests** (drive `describe_image` directly with a seeded row)
 
@@ -530,6 +548,7 @@ async def test_describe_kdump_not_applicable_for_build_image(...) -> None:
 async def test_describe_malformed_target_kernel_is_config_error(...) -> None:
     resp = await describe_image(pool, ctx, image_id, target_kernel="vanilla")
     assert resp.structured_content["error_category"] == "configuration_error"
+    assert resp.structured_content["data"]["reason"] == "invalid_version"
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -540,7 +559,7 @@ Expected: FAIL.
 - [ ] **Step 3: Implement**
 
 In `images.py`:
-- `describe_image` gains `target_kernel: str | None = None`. Before the DB read, if `target_kernel` is not None, parse it with `KernelVersion.parse`; on `ValueError` return a `configuration_error` naming `target_kernel` (reuse the existing config-error helper shape used for malformed inputs in this package). Otherwise basis = `DEFAULT_KERNEL_BASIS`.
+- `describe_image` gains `target_kernel: str | None = None`. Before the DB read, if `target_kernel` is not None, parse it with `KernelVersion.parse`; on `ValueError` return `config_error_reason(target_kernel, ConfigErrorReason.INVALID_VERSION, detail=f"target_kernel {target_kernel!r} is not a recognized kernel version")` (the prerequisite step adds that enum member). Otherwise basis = `DEFAULT_KERNEL_BASIS`.
 - In `_describe_envelope`, add a `_kdump_block(entry, basis)` helper:
 ```python
 def _kdump_block(entry: ImageCatalogEntry, basis: KernelVersion) -> dict[str, object]:
