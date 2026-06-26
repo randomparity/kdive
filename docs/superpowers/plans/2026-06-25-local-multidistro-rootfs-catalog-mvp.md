@@ -39,11 +39,22 @@ The cloud-image→bare-ext4 path was never exercised in diagnosis. Prove it manu
 - [ ] **Step 4: Repack to bare ext4 + normalize.**
   `virt-tar-out -a <copy> / <tar>` then `virt-make-fs --type=ext4 --format=qcow2 --size=10G <tar> <out>`; then guestfish-normalize: fstab → lone `/dev/vda / ext4`, remove crypttab, SELinux permissive, **and `setfiles`/`restorecon`-relabel** (tar→ext4 drops xattrs). Stage to `/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2`.
 
-- [ ] **Step 5: Boot + kdump-prove (the gate).**
-  Reuse the diagnosis method: build the v7.0 kernel (`make defconfig` + `src/kdive/build_configs/data/kdump.config` merge), inject `/boot/vmlinuz-7.0.0` + `/lib/modules/7.0.0` into an overlay of the F44 image, direct-kernel boot at **≥8 GB RAM** (large enough that 1.7.8 would overrun — use the same size the live-proof will use), SSH in, confirm `kdumpctl status` = operational and `makedumpfile --version` ≥1.7.9, then `virsh inject-nmi` and watch the console.
-  **Pass criteria:** console shows **no** "The kernel version is not supported" line; `/var/crash/<ts>/vmcore` (complete, filtered) exists in the overlay. **If it fails, stop and fix the customize/repack argv before any production code.**
+**Shared live harness (used by Steps 5–7 and Task 9 — the concrete "diagnosis method"):**
+- Managed SSH key: `~/.local/share/kdive/ssh/id_kdive_ed25519` (its pubkey is the guest's `root` `authorized_keys`; verify with `ssh-keygen -y -f <key>`).
+- Build v7.0: `rsync -a --delete --exclude=.git /home/dave/src/linux/ <ws>/`; `make -C <ws> defconfig`; `<ws>/scripts/kconfig/merge_config.sh -m <ws>/.config src/kdive/build_configs/data/kdump.config`; `make -C <ws> olddefconfig`; `make -C <ws> -j$(nproc) bzImage modules`; `make -C <ws> INSTALL_MOD_PATH=<ws>/modroot modules_install`.
+- Inject into an overlay (`qemu-img create -f qcow2 -b <image> -F qcow2 <ov>`): `guestfish --rw -a <ov> -i` → `upload <ws>/arch/x86/boot/bzImage /boot/vmlinuz-7.0.0`; tar `<ws>/modroot/lib/modules/7.0.0` and `tar-in` to `/lib/modules`.
+- Transient domain (qemu:///session): q35, direct-kernel `<kernel><ov vmlinuz>`, `<cmdline>root=/dev/vda rw console=ttyS0,115200 crashkernel=256M`, `<memory>` = the swept size, serial → a log file, `<qemu:commandline>` user-net `hostfwd=tcp:127.0.0.1:<port>-:22`. `virsh -c qemu:///session create <xml>`. (See the #817 diagnosis transcript for the exact XML used.)
+- Crash: `virsh -c qemu:///session inject-nmi <domain>` (guest has `kernel.unknown_nmi_panic=1`). Watch the serial log; harvest `/var/crash/*/` from the overlay with `guestfish --ro`.
+- **Cleanup after each boot:** `virsh -c qemu:///session destroy <domain>`; remove the overlay; remove transient XML. Do not leave staged-image backups in `/var/lib/kdive/rootfs/local/`.
 
-- [ ] **Step 6: Record the working argv.** Save the exact `virt-customize` flag list and any repack/normalize deltas to the scratchpad; Task 4 encodes them in the `rhel` customizer. No commit.
+- [ ] **Step 5: Establish the F43 failure baseline EMPIRICALLY (do not assume a RAM number).**
+  The #817 symptom (`vmcore-incomplete` / "no core in window") was reported on the provider guest but was **not** reproduced in diagnosis — at 4 GB the v7.0 capture on F43 produced a COMPLETE `vmcore` despite the console printing "The kernel version is not supported" (makedumpfile completed-degraded and kdump renamed it). So **find the condition**: using the harness on the existing `fedora-kdive-ready-43` image, sweep guest RAM (4 → 8 → 16 → 32 GB) and observe, per size: (a) does the console print "The kernel version is not supported"? (b) does `/var/crash/<ts>/` end with `vmcore` (complete) or `vmcore-incomplete` (force-off mid-write)? Record the smallest RAM `R*` at which F43 leaves `vmcore-incomplete`. **If no size on this host yields `vmcore-incomplete`** (makedumpfile always completes-degraded), record that and note the consequence: the field failure is the window-overrun path, and the proof signal must be makedumpfile console behavior + dump *correctness*, not file-name state (see Step 6 and Task 9).
+
+- [ ] **Step 6: Prove F44 at `R*` (or at the largest swept size if `R*` was not found).**
+  Inject v7.0 into an overlay of the staged `fedora-kdive-ready-44.qcow2`, boot at `R*`, SSH in, confirm `makedumpfile --version` ≥ 1.7.9 and `kdumpctl status` = operational, `inject-nmi`, watch the console.
+  **Primary pass signal (always checkable):** the console shows **no** "The kernel version is not supported" line (it does on F43 / 1.7.8 at the same RAM). **Secondary:** `/var/crash/<ts>/vmcore` is complete and `crash`/drgn can open it. **If F44 still prints "version not supported", the makedumpfile in the image is < 1.7.9 — stop and fix the package source before any production code.**
+
+- [ ] **Step 7: Record the working argv + `R*`.** Save the exact `virt-customize` flag list, repack/normalize deltas, and the measured `R*` (or "not reproducible on this host") to the scratchpad; Task 4 encodes the argv, Task 9 uses `R*`. Run the cleanup. No commit.
 
 ---
 
@@ -192,7 +203,7 @@ def test_virt_builder_source_invokes_template(tmp_path):
 - Test: `tests/images/families/test_rhel.py`
 
 **Interfaces:**
-- Consumes: the working argv from Task 1 Step 6; the relocated constants from `rootfs_build.py` (`_READINESS_MARKER`, `_READINESS_UNIT`, `_KDUMP_SYSCTL_PATH/_CONTENT`, `_KDUMP_FINAL_ACTION_CMD`, `_FSTAB`, `_SELINUX_CONFIG`, `_debug_image_args`).
+- Consumes: the working argv recorded in Task 1 Step 7; the relocated constants from `rootfs_build.py` (`_READINESS_MARKER`, `_READINESS_UNIT`, `_KDUMP_SYSCTL_PATH/_CONTENT`, `_KDUMP_FINAL_ACTION_CMD`, `_FSTAB`, `_SELINUX_CONFIG`, `_debug_image_args`).
 - Produces:
   - `@dataclass(frozen=True, slots=True) class CustomizeContext: kind: str; packages: tuple[str,...]; authorized_key: Path; readiness_unit_path: Path; is_cloud_image: bool; cleanup: list[Path]`
   - `class FamilyCustomizer(Protocol): family: str; def packages(self, kind: str) -> tuple[str,...]; def customize_argv(self, ctx: CustomizeContext) -> list[str]; def normalize(self, qcow2: Path) -> None`
@@ -248,8 +259,8 @@ def test_rhel_virt_builder_source_skips_cloud_init(tmp_path):
 
 - [ ] **Step 1: Write failing orchestration test** with all seams faked (no libguestfs): assert ordering (acquire → customize → repack → normalize), that the family customizer (not a hardcoded SELinux edit) runs, and provenance content for both a cloud-image and a virt-builder entry.
 - [ ] **Step 2: Run, verify fail.**
-- [ ] **Step 3: Implement.** Add a `family_for(name)` resolver (`{"rhel": RhelFamily()}`); thread the catalog entry's `source` + `family` into the build. Replace the inline virt-builder call with `acquire_base(...)` + a `virt-customize` invocation built from `family.customize_argv(ctx)`. Keep the existing `RootfsBuildSpec`/`RootfsBuildOutput` contract; extend `RootfsBuildSpec` only if needed to carry the resolved `source`/`family` (or resolve them inside the plane from the catalog). Keep `live_vm`-bound real seams `# pragma: no cover - live_vm`.
-- [ ] **Step 4: Run, verify pass.** Run the full `tests/providers/local_libvirt/` + `tests/images/`; `just lint && just type`.
+- [ ] **Step 3: Implement, keeping the plane backward-compatible (green-commit rule).** Add a `family_for(name)` resolver (`{"rhel": RhelFamily()}`); thread the catalog entry's `source` + `family` into the build. Replace the inline virt-builder call with `acquire_base(...)` + a `virt-customize` invocation built from `family.customize_argv(ctx)`. **Do NOT change the `RootfsBuildSpec`/`RootfsBuildOutput` contract or remove `distros.py` in this task** — the existing CLI (`rootfs_command.py`) still builds the old spec and still imports `distros.py`, and must stay green: resolve `source`/`family` *inside the plane* (from the catalog by `spec.name`, falling back to `virt-builder:<distro>-<releasever>` for a spec built the old way). That keeps this commit's `just lint && just type && just test` green before Task 6 moves the CLI. State this constraint in the commit.
+- [ ] **Step 4: Run, verify pass — each commit green.** `uv run python -m pytest tests/providers/local_libvirt tests/images -q`; then `just lint && just type && just test`. All must pass on THIS commit.
 - [ ] **Step 5: Commit.** `feat(local-libvirt): build rootfs from catalog via base-source + family seam (ADR-0250)`
 
 ---
@@ -262,8 +273,8 @@ def test_rhel_virt_builder_source_skips_cloud_init(tmp_path):
 
 - [ ] **Step 1: Write failing test:** `build-fs --image fedora-kdive-ready-44` resolves the catalog entry and the plane is invoked with that entry's source/family/name/version; an unknown `--image` raises `CONFIGURATION_ERROR`. (Inject the plane seam `_build_local_rootfs_plane`.)
 - [ ] **Step 2: Run, verify fail.**
-- [ ] **Step 3: Implement.** Add `--image`; when present, resolve via `resolve_rootfs_entry` and derive `name/distro/version/dest`. Keep `--distro/--releasever/--name/--dest/--kind/--package` as overrides/back-compat for the default. Replace `resolve_base_template`-based `source_image_digest` with the entry's source digest. Delete `images/distros.py` (replaced by the catalog) and update its importers (`rootfs_command.py`, any test) — no shim.
-- [ ] **Step 4: Run, verify pass.** Grep for remaining `distros` / `resolve_base_template` imports and clear them. `just lint && just type`.
+- [ ] **Step 3: Implement.** Add `--image`; when present, resolve via `resolve_rootfs_entry` and derive `name/distro/version/dest`. Keep `--distro/--releasever/--name/--dest/--kind/--package` as overrides/back-compat for the default. Replace `resolve_base_template`-based `source_image_digest` with the entry's source digest. Now that the CLI no longer needs it, delete `images/distros.py` (replaced by the catalog) and update its importers (`rootfs_command.py` and the Task-5 plane fallback, any test) — no shim.
+- [ ] **Step 4: Run, verify pass — commit stays green.** `rg -n "distros|resolve_base_template|SUPPORTED_DISTROS" src/ tests/` returns nothing; then `just lint && just type && just test` all pass on this commit.
 - [ ] **Step 5: Commit.** `feat(images): build-fs --image resolves the rootfs catalog; drop distros.py (ADR-0250)`
 
 ---
@@ -291,12 +302,16 @@ def test_rhel_virt_builder_source_skips_cloud_init(tmp_path):
 
 ## Task 8: Register `fedora-kdive-ready-44` in the inventory
 
-**Files:**
-- Modify: `systems.toml.example`, `src/kdive/admin/default_fixtures.py`, `src/kdive/images/seed_data/` (image_catalog baseline rows) and/or `examples/local-libvirt/*` as the 43 entry is registered.
+**Files:** determined by Step 1's grep — do **not** assume a path. Earlier exploration confirmed
+`fedora-kdive-ready-43` appears in `systems.toml.example`, `src/kdive/admin/default_fixtures.py`,
+`examples/local-libvirt/README.md`, `tests/inventory/test_validate_systems.py`, and
+`tests/admin/test_bootstrap.py`; a `src/kdive/images/seed_data/` directory was **not** found
+(`fd -t d seed_data src/kdive` returned nothing), so do not target it unless Step 1 surfaces a real
+image_catalog seed file.
 - Test: the existing inventory/guard tests (`tests/inventory/test_validate_systems.py`, `tests/admin/test_*`, `tests/guards/test_no_inventory_in_code.py`).
 
-- [ ] **Step 1: Find every place `fedora-kdive-ready-43` is registered.** `rg -n "fedora-kdive-ready-43" src/ systems.toml.example examples/ fixtures/`.
-- [ ] **Step 2: Add the 44 entry** alongside 43 in each inventory surface (systems.toml example image/system rows, `default_fixtures`, image_catalog seed), documenting 44 as the kdump-capable default and 43 as the regression reference (prose notes the makedumpfile-vs-kernel limitation; no `kdump_capable` field — deferred).
+- [ ] **Step 1: Enumerate the registration surface (authoritative).** `rg -n "fedora-kdive-ready-43" src/ systems.toml.example examples/ fixtures/ tests/`. The hit list IS the set of files to touch — there is no separate seed_data to invent. If an image_catalog DB seed exists, it shows up here; if it does not, the local baseline is file/fixture-registered only.
+- [ ] **Step 2: Add the 44 entry** alongside 43 in exactly the files Step 1 surfaced, documenting 44 as the kdump-capable default and 43 as the regression reference (prose notes the makedumpfile-vs-kernel limitation; no `kdump_capable` field — deferred).
 - [ ] **Step 3: Run the guard/inventory tests** (`uv run python -m pytest tests/inventory tests/admin tests/guards -q`); fix until green.
 - [ ] **Step 4: Regenerate any committed config/tool reference** if these surfaces feed a generated doc (`just config-docs`, `just docs`); commit the regen with the change.
 - [ ] **Step 5: Commit.** `feat(inventory): register fedora-kdive-ready-44 alongside 43 (ADR-0250)`
@@ -307,9 +322,13 @@ def test_rhel_virt_builder_source_skips_cloud_init(tmp_path):
 
 **Files:** a `live_vm`-marked test under `tests/providers/local_libvirt/` (or a documented runbook step if a full lifecycle test is impractical); evidence captured to the PR.
 
-- [ ] **Step 1: Reproduce the failure on F43 at pinned RAM (negative-proof).** At **≥8 GB** guest RAM, drive the v7.0 kernel through the lifecycle on `fedora-kdive-ready-43`, `vmcore.fetch` default `kdump`; confirm (a) in-guest console shows "The kernel version is not supported", (b) the fetch returns `kdump_core_incomplete`. If 43 captures cleanly, the RAM is too small — increase it; the proof is invalid otherwise.
-- [ ] **Step 2: Prove the fix on F44.** Build `build-fs --image fedora-kdive-ready-44`; at the **same RAM**, run the lifecycle + default `kdump` `vmcore.fetch`; assert console shows **no** "kernel version is not supported", a complete vmcore is captured, and `postmortem.triage` runs on it.
-- [ ] **Step 3: Capture evidence** (console + transcript) for both into the PR body.
+Use the RAM `R*` measured in Task 1 Step 5 and the **primary signal = makedumpfile console
+behavior** (always checkable), with file-name state as a secondary signal only where Task 1
+established that F43 actually reaches `vmcore-incomplete` on this host.
+
+- [ ] **Step 1: Negative case on F43.** At `R*`, drive the v7.0 kernel through the lifecycle on `fedora-kdive-ready-43`, `vmcore.fetch` default `kdump`; confirm the in-guest console shows "The kernel version is not supported". If Task 1 found an `R*` where F43 leaves `vmcore-incomplete`, additionally confirm the fetch returns `kdump_core_incomplete`; if Task 1 found no such `R*` (makedumpfile always completes-degraded on this host), record that the `kdump_core_incomplete` branch is validated by the Task-7 unit tests only, and that the live negative signal is the console line — do not claim a live `vmcore-incomplete` repro that did not happen.
+- [ ] **Step 2: Positive case on F44.** Build `build-fs --image fedora-kdive-ready-44`; at the **same `R*`**, run the lifecycle + default `kdump` `vmcore.fetch`; assert (a) console shows **no** "kernel version is not supported", (b) a complete `vmcore` is captured, (c) `postmortem.triage` runs on it.
+- [ ] **Step 3: Capture evidence** (console + transcript) for both into the PR body, and state plainly whether the live `vmcore-incomplete` path was reproduced or only unit-validated.
 - [ ] **Step 4: Commit** any `live_vm` test/runbook. `test(live): prove fedora-44 default kdump captures a complete 7.0 vmcore (#817)`
 
 ---
