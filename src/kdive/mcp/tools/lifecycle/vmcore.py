@@ -408,7 +408,11 @@ async def _postmortem_crash(
             run_id,
             "succeeded",
             suggested_next_actions=["postmortem.crash", "artifacts.list"],
-            data={"transcript": redactor.redact_text(output.transcript)},
+            data={
+                "transcript": redactor.redact_text(output.transcript),
+                # Surface the byte-cap so the caller never reads a trimmed transcript as complete.
+                "truncated": output.truncated,
+            },
         )
 
 

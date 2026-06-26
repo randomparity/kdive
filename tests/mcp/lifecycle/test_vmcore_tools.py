@@ -149,6 +149,19 @@ def _vmcore_handlers(crash: CrashPostmortem | None = None) -> vmcore_tools.Vmcor
     )
 
 
+class _TruncatingCrash:
+    """A CrashPostmortem whose output is byte-capped (truncated=True)."""
+
+    def run_crash_postmortem(
+        self, *, vmcore_ref: str, debuginfo_ref: str, expected_build_id: str, commands: list[str]
+    ) -> CrashOutput:
+        return CrashOutput(
+            results={c: {"ran": True} for c in commands},
+            transcript="capped output",
+            truncated=True,
+        )
+
+
 class _RaisingCrash:
     """A CrashPostmortem that raises a planted CategorizedError."""
 
@@ -706,6 +719,34 @@ def test_postmortem_crash_runs_and_redacts(migrated_url: str) -> None:
         assert "hunter2" not in transcript
         assert "[REDACTED]" in transcript
         assert crash.kwargs["expected_build_id"] == "deadbeef"
+
+    asyncio.run(_run())
+
+
+def test_postmortem_crash_surfaces_truncated_flag(migrated_url: str) -> None:
+    # A byte-capped transcript must signal `truncated` so the caller never reads a trimmed
+    # transcript as complete (the cap lives in run_crash_postmortem).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _crashed_with_built_run(pool)
+            resp = await _vmcore_handlers(_TruncatingCrash()).postmortem_crash(
+                pool, _ctx(), run_id=run_id, commands=["log"]
+            )
+        assert resp.status != "error"
+        assert resp.data["truncated"] is True
+
+    asyncio.run(_run())
+
+
+def test_postmortem_crash_not_truncated_when_small(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _crashed_with_built_run(pool)
+            resp = await _vmcore_handlers(_FakeCrash()).postmortem_crash(
+                pool, _ctx(), run_id=run_id, commands=["log"]
+            )
+        assert resp.status != "error"
+        assert resp.data["truncated"] is False
 
     asyncio.run(_run())
 
