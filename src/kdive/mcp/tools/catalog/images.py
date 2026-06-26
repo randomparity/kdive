@@ -24,16 +24,20 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor
+from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import decode_cursor as _decode_cursor
 from kdive.mcp.tools._common import encode_cursor as _encode_cursor
 from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
+from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, projects_with_role
 
 _LIST_TOOL = "images.list"
 _LIST_TAG = "images.list"
+_DESCRIBE_TOOL = "images.describe"
 
 _LIST_SQL = """
     SELECT *
@@ -115,8 +119,74 @@ async def list_images(
     )
 
 
+_DESCRIBE_SQL = """
+    SELECT *
+    FROM image_catalog
+    WHERE id = %(id)s
+      AND (visibility = %(public)s
+           OR (visibility = %(private)s AND owner = ANY(%(projects)s)))
+"""
+
+
+def _describe_envelope(entry: ImageCatalogEntry) -> ToolResponse:
+    """Full per-image detail; withholds the staged ``path`` and the S3 ``object_key``.
+
+    Surfaces ``provenance`` verbatim (build metadata, no secret values) and the boot layout,
+    digest, capabilities, scope, and publish state. ``expires_at`` is an ISO-8601 string when set
+    (a ``datetime`` is not a ``JsonValue``), ``""`` otherwise.
+    """
+    return ToolResponse.success(
+        str(entry.id),
+        entry.state.value,
+        data={
+            "provider": entry.provider,
+            "name": entry.name,
+            "arch": entry.arch,
+            "format": entry.format,
+            "root_device": entry.root_device,
+            "visibility": entry.visibility.value,
+            "owner": entry.owner or "",
+            "state": entry.state.value,
+            "digest": entry.digest or "",
+            "capabilities": list(entry.capabilities),
+            "provenance": entry.provenance,
+            "volume": entry.volume or "",
+            "expires_at": entry.expires_at.isoformat() if entry.expires_at else "",
+            "managed_by": entry.managed_by.value,
+        },
+        suggested_next_actions=[_LIST_TOOL],
+    )
+
+
+async def describe_image(
+    pool: AsyncConnectionPool, ctx: RequestContext, image_id: str
+) -> ToolResponse:
+    """Return one catalog image visible to the caller, addressed by row id (ADR-0252).
+
+    Visibility reuses the ``images.list`` predicate (public, or owned-private with viewer),
+    filtered in SQL so an unauthorized private row never leaves the database. A malformed id is a
+    ``configuration_error``; a valid id with no visible row is ``not_found`` (byte-identical
+    whether absent or invisible — no existence/membership leak).
+    """
+    if _as_uuid(image_id) is None:
+        return _invalid_uuid_error("image_id", image_id)
+    with bind_context(principal=ctx.principal):
+        params = {
+            "id": image_id,
+            "public": ImageVisibility.PUBLIC.value,
+            "private": ImageVisibility.PRIVATE.value,
+            "projects": projects_with_role(ctx, Role.VIEWER),
+        }
+        async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(_DESCRIBE_SQL, params)
+            row = await cur.fetchone()
+    if row is None:
+        return _not_found(image_id)
+    return _describe_envelope(ImageCatalogEntry.model_validate(row))
+
+
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
-    """Register the ``images.list`` read tool on ``app``, bound to ``pool``."""
+    """Register the ``images.list``/``images.describe`` read tools on ``app``, bound to ``pool``."""
 
     @app.tool(
         name=_LIST_TOOL,
@@ -138,3 +208,18 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         ``cursor`` for the next page.
         """
         return await list_images(pool, current_context(), limit=limit, cursor=cursor)
+
+    @app.tool(
+        name=_DESCRIBE_TOOL,
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def images_describe(
+        image_id: Annotated[str, Field(description="The catalog image row id (UUID) to describe.")],
+    ) -> ToolResponse:
+        """Return full detail for one catalog image visible to the caller.
+
+        Includes boot layout, digest, capabilities, scope, publish state, and build
+        ``provenance`` (with captured ``package_versions`` when present).
+        """
+        return await describe_image(pool, current_context(), image_id)

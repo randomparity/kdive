@@ -36,6 +36,7 @@ READ_TOOLS = [
     "secrets.list",
     "fixtures.list",
     "images.list",
+    "images.describe",
 ]
 
 
