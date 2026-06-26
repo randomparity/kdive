@@ -295,6 +295,33 @@ def test_verdict_projects_resource_id(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_verdict_projects_check_data(migrated_url: str) -> None:
+    # A check that discloses structured CheckResult.data (e.g. local_kernel_src's resolved path +
+    # git HEAD, #845) surfaces it under the item's nested ``data`` key; a check with none gets {}.
+    results = [
+        CheckResult(
+            check_id="local_kernel_src",
+            status=CheckStatus.PASS,
+            detail="usable",
+            data={"vantage": "server", "resolved_path": "/abs/linux", "branch": "main"},
+        ),
+        CheckResult(check_id="secret_ref", status=CheckStatus.PASS, detail="all resolve"),
+    ]
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await diagnostics.run_diagnostics(pool, _factory(results), _OPERATOR)
+        by_check = {item.data["check"]: item for item in resp.items}
+        assert by_check["local_kernel_src"].data["data"] == {
+            "vantage": "server",
+            "resolved_path": "/abs/linux",
+            "branch": "main",
+        }
+        assert by_check["secret_ref"].data["data"] == {}
+
+    asyncio.run(_run())
+
+
 def test_verdict_projects_failure_category(migrated_url: str) -> None:
     results = [
         CheckResult(
