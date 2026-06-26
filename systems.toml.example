@@ -40,9 +40,28 @@ schema_version = 2
 # IMAGES — reconciled into image_catalog. `source` is exactly one of s3 | build | staged.
 # ---------------------------------------------------------------------------------------------
 
-# The kdive-ready local baseline rootfs (the former seed_data baseline). Declared `s3`; it
-# reaches `registered` once its object is published and a `digest` is supplied — until then it
-# stays `defined` (the same pre-build state the old YAML seed produced).
+# The kdump-capable local default rootfs (ADR-0250). Its makedumpfile (1.7.9) filters current
+# from-source kernels, so the default `kdump` `vmcore.fetch` captures a complete core. Declared
+# `s3`; it reaches `registered` once its object is published and a `digest` is supplied — until
+# then it stays `defined`.
+[[image]]
+provider = "local-libvirt"
+name = "fedora-kdive-ready-44"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["kdive-ready-console", "ssh", "drgn"]
+[image.source]
+kind = "s3"
+object_key = "rootfs/local/fedora-kdive-ready-44.qcow2"
+# digest = "sha256:…"   # uncomment once published to mark the row `registered`
+
+# The kdive-ready local baseline rootfs (the former seed_data baseline), retained as the #817
+# regression reference (ADR-0250): its makedumpfile (1.7.8) cannot filter the newest kernels, so
+# the default `kdump` method leaves an incomplete core on a from-source kernel — use 44 for that.
+# Declared `s3`; it reaches `registered` once its object is published and a `digest` is supplied —
+# until then it stays `defined` (the same pre-build state the old YAML seed produced).
 [[image]]
 provider = "local-libvirt"
 name = "fedora-kdive-ready-43"

@@ -178,13 +178,32 @@ cost_class = "local"
 
 # RECOMMENDED: register the local-disk rootfs `build-fs` wrote as a catalog image, so an
 # MCP agent can DISCOVER it (`fixtures.list` / `systems.profile_examples`) and provision with
-# `rootfs = {kind = "catalog", provider = "local-libvirt", name = "fedora-kdive-ready-43"}` —
+# `rootfs = {kind = "catalog", provider = "local-libvirt", name = "fedora-kdive-ready-44"}` —
 # no host `ls` and no `KDIVE_GUEST_IMAGE` needed. A `staged-path` source (ADR-0228) points at
 # the host file directly: it seeds `registered` (bootable) immediately, with no object-store
 # upload. The path must live under the provider `allowed_roots` (`/var/lib/kdive/rootfs`) and
 # the image must be `public`. `source` is exactly one of s3 | build | staged | staged-path;
 # use `s3` instead only if you publish the qcow2 to the object store (the row then stays
 # `defined` and unbootable until the object exists).
+#
+# `fedora-kdive-ready-44` is the kdump-capable default (ADR-0250): its makedumpfile (1.7.9)
+# filters current from-source kernels, so the default `kdump` `vmcore.fetch` captures a complete
+# core.
+[[image]]
+provider = "local-libvirt"
+name = "fedora-kdive-ready-44"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["kdive-ready-console", "ssh", "drgn"]
+[image.source]
+kind = "staged-path"
+path = "/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2"
+
+# `fedora-kdive-ready-43` is retained as the #817 regression reference (ADR-0250): its
+# makedumpfile (1.7.8) cannot filter the newest kernels, so the default `kdump` method leaves an
+# incomplete core on a from-source kernel — use 44 for that capture.
 [[image]]
 provider = "local-libvirt"
 name = "fedora-kdive-ready-43"
