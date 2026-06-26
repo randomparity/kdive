@@ -41,7 +41,15 @@ type RootfsSource = VirtBuilderSource | CloudImageSource
 
 @dataclass(frozen=True, slots=True)
 class RootfsCatalogEntry:
-    """One resolved row of the local rootfs catalog."""
+    """One resolved row of the local rootfs catalog.
+
+    Attributes:
+        kdump_capable: Whether the makedumpfile the build installs from this release's repos is
+            new enough (>= 1.7.9) to filter a v7.0-class from-source kernel's vmcore — i.e. whether
+            the default ``kdump`` ``vmcore.fetch`` yields a complete filtered core or hits the
+            ``kdump_core_incomplete`` remediation. Kernel-relative (to the current default target)
+            and a curated build-time snapshot, not live upstream truth (ADR-0251, #823).
+    """
 
     name: str
     distro: str
@@ -50,6 +58,7 @@ class RootfsCatalogEntry:
     arch: str
     kind: str
     source: RootfsSource
+    kdump_capable: bool
 
 
 def _catalog_error(message: str, field: str) -> CategorizedError:
@@ -65,6 +74,13 @@ def _require_str(row: dict[Any, Any], field: str) -> str:
     value = row.get(field)
     if not isinstance(value, str) or not value:
         raise _catalog_error(f"rootfs catalog row is missing {field}", field)
+    return value
+
+
+def _require_bool(row: dict[Any, Any], field: str) -> bool:
+    value = row.get(field)
+    if not isinstance(value, bool):
+        raise _catalog_error(f"rootfs catalog row is missing a boolean {field}", field)
     return value
 
 
@@ -91,6 +107,7 @@ def _parse_entry(row: dict[str, Any]) -> RootfsCatalogEntry:
         arch=_require_str(row, "arch"),
         kind=_require_str(row, "kind"),
         source=_parse_source(row.get("source")),
+        kdump_capable=_require_bool(row, "kdump_capable"),
     )
 
 

@@ -206,6 +206,9 @@ def _resolve_entry(spec: RootfsBuildSpec) -> RootfsCatalogEntry:
         arch=spec.arch,
         kind=_kind_for(spec.capabilities),
         source=VirtBuilderSource(template=f"{spec.distro}-{spec.releasever}"),
+        # A synthesized legacy row makes no kdump-capability claim; default to the safe
+        # disclose-by-default (the runtime incomplete-core remediation is the ground truth).
+        kdump_capable=False,
     )
 
 
@@ -309,6 +312,8 @@ class LocalLibvirtRootfsBuildPlane:
                 readiness_unit_path=unit_path,
                 is_cloud_image=isinstance(entry.source, CloudImageSource),
                 cleanup=cleanup,
+                distro=entry.distro,
+                version=entry.version,
             )
             self._tools.customize(scratch, family.customize_argv(ctx))
         finally:

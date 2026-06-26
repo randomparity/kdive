@@ -9,19 +9,7 @@ import pytest
 from kdive.__main__ import build_parser
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
-from kdive.images.rootfs_command import DEFAULT_DEBUG_FS_PACKAGES, run_build_fs
-
-
-def test_debug_image_ships_kdump_service_package() -> None:
-    """The debug image must include kdump-utils, kexec-tools, and makedumpfile."""
-    assert "kdump-utils" in DEFAULT_DEBUG_FS_PACKAGES
-    assert "kexec-tools" in DEFAULT_DEBUG_FS_PACKAGES
-    assert "makedumpfile" in DEFAULT_DEBUG_FS_PACKAGES
-
-
-def test_debug_image_ships_keyutils_for_kdumpctl() -> None:
-    """The debug image must ship keyutils (`keyctl`), which `kdumpctl` invokes (ADR-0213, #688)."""
-    assert "keyutils" in DEFAULT_DEBUG_FS_PACKAGES
+from kdive.images.rootfs_command import run_build_fs
 
 
 def _patch_plane(
@@ -115,3 +103,30 @@ def test_build_fs_default_path_synthesizes_virt_builder_digest(
     run_build_fs(args)
     spec = seen_specs[0]
     assert spec.source_image_digest == "virt-builder:fedora-43"
+
+
+def test_build_fs_image_resolves_el9_package_set_without_standalone_makedumpfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An EL9 `--image` resolves the EL-aware set: kexec-tools, no standalone makedumpfile."""
+    produced = tmp_path / "plane" / "img.qcow2"
+    produced.parent.mkdir(parents=True)
+    produced.write_bytes(b"image-bytes")
+    seen_specs: list[RootfsBuildSpec] = []
+    _patch_plane(monkeypatch, produced, seen_specs)
+    args = build_parser().parse_args(
+        [
+            "build-fs",
+            "--image",
+            "rocky-kdive-ready-9",
+            "--workspace",
+            str(tmp_path / "ws"),
+            "--dest",
+            str(tmp_path / "out.qcow2"),
+        ]
+    )
+    run_build_fs(args)
+    spec = seen_specs[0]
+    assert spec.distro == "rocky" and spec.releasever == "9"
+    assert "kexec-tools" in spec.packages and "drgn" in spec.packages
+    assert "makedumpfile" not in spec.packages and "kdump-utils" not in spec.packages

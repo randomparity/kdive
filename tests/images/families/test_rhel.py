@@ -1,8 +1,10 @@
-"""Unit tests for the rhel FamilyCustomizer argv contract (ADR-0251).
+"""Unit tests for the rhel FamilyCustomizer argv contract (ADR-0251, #823).
 
 These pin the virt-customize argv the rhel customizer builds without running libguestfs: the
 PROVEN Fedora-44 customization (kdump + sshd enable, NMI-panic sysctl, ssh-inject, kdive-ready
-unit, SELinux permissive) plus the cloud-image-only cloud-init mask and ``/etc/machine-id`` seed.
+unit, SELinux permissive) plus the cloud-image-only cloud-init mask and ``/etc/machine-id`` seed,
+and the EL-major-aware package divergence (#823): EL 8/9 take makedumpfile/kdumpctl from
+``kexec-tools`` and EL 8 enables EPEL for ``drgn``.
 """
 
 from __future__ import annotations
@@ -13,29 +15,54 @@ from kdive.images.families.base import CustomizeContext
 from kdive.images.families.rhel import RhelFamily
 
 
-def _ctx(tmp_path: Path, *, is_cloud_image: bool) -> CustomizeContext:
+def _ctx(
+    tmp_path: Path,
+    *,
+    is_cloud_image: bool,
+    distro: str = "fedora",
+    version: str = "44",
+) -> CustomizeContext:
     fam = RhelFamily()
     return CustomizeContext(
         kind="debug",
-        packages=fam.packages("debug"),
+        packages=fam.packages("debug", distro, version),
         authorized_key=tmp_path / "key.pub",
         readiness_unit_path=tmp_path / "u.service",
         is_cloud_image=is_cloud_image,
         cleanup=[],
+        distro=distro,
+        version=version,
     )
 
 
-def test_rhel_debug_packages_include_kdump_and_openssh() -> None:
-    pkgs = RhelFamily().packages("debug")
-    assert "kdump-utils" in pkgs and "makedumpfile" in pkgs and "openssh-server" in pkgs
+def test_fedora_and_el10_debug_packages_have_separate_makedumpfile() -> None:
+    for distro, version in (("fedora", "44"), ("rocky", "10"), ("centos-stream", "10")):
+        pkgs = RhelFamily().packages("debug", distro, version)
+        assert "makedumpfile" in pkgs, (distro, version)
+        assert "kdump-utils" in pkgs, (distro, version)
+        assert "drgn" in pkgs and "openssh-server" in pkgs and "kexec-tools" in pkgs
+        # keyutils provides keyctl, which kdumpctl invokes building the crash env (ADR-0213, #688).
+        assert "keyutils" in pkgs, (distro, version)
 
 
-def test_rhel_build_packages_are_the_toolchain_set() -> None:
-    pkgs = RhelFamily().packages("build")
-    assert "gcc" in pkgs and "make" in pkgs and "kdump-utils" not in pkgs
+def test_el8_el9_debug_packages_drop_separate_makedumpfile_and_kdump_utils() -> None:
+    for distro, version in (("rocky", "8"), ("rocky", "9"), ("centos-stream", "9")):
+        pkgs = RhelFamily().packages("debug", distro, version)
+        # makedumpfile + kdumpctl are bundled in kexec-tools on EL8/9 — the standalone packages
+        # do not exist, so installing them by name would fail the build.
+        assert "makedumpfile" not in pkgs, (distro, version)
+        assert "kdump-utils" not in pkgs, (distro, version)
+        assert "kexec-tools" in pkgs and "drgn" in pkgs and "openssh-server" in pkgs
 
 
-def test_rhel_debug_argv_enables_kdump_and_sshd(tmp_path: Path) -> None:
+def test_build_packages_are_the_toolchain_set_on_every_release() -> None:
+    for distro, version in (("fedora", "44"), ("rocky", "8"), ("rocky", "10")):
+        pkgs = RhelFamily().packages("build", distro, version)
+        assert "gcc" in pkgs and "make" in pkgs
+        assert "kdump-utils" not in pkgs and "kexec-tools" not in pkgs
+
+
+def test_fedora_debug_argv_enables_kdump_and_sshd(tmp_path: Path) -> None:
     argv = RhelFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
     j = " ".join(argv)
     assert "kdump-utils" in j and "makedumpfile" in j
@@ -43,6 +70,36 @@ def test_rhel_debug_argv_enables_kdump_and_sshd(tmp_path: Path) -> None:
     assert "systemctl enable sshd.service" in argv
     assert "99-kdive-kdump.conf" in j and "unknown_nmi_panic=1" in j
     assert "final_action poweroff" in j
+
+
+def test_el9_debug_argv_enables_kdump_without_kdump_utils(tmp_path: Path) -> None:
+    """EL9 has no kdump-utils pkg; kdump-enable must gate on kexec-tools, not kdump-utils."""
+    argv = RhelFamily().customize_argv(
+        _ctx(tmp_path, is_cloud_image=True, distro="rocky", version="9")
+    )
+    j = " ".join(argv)
+    assert "kdump-utils" not in j and "makedumpfile" not in j
+    assert "systemctl enable kdump.service" in argv
+    assert "final_action poweroff" in j
+
+
+def test_el8_debug_argv_enables_epel_before_installing_drgn(tmp_path: Path) -> None:
+    argv = RhelFamily().customize_argv(
+        _ctx(tmp_path, is_cloud_image=True, distro="rocky", version="8")
+    )
+    assert "dnf -y install epel-release" in argv
+    epel_idx = argv.index("dnf -y install epel-release")
+    install_idx = next(i for i, a in enumerate(argv) if a.startswith("drgn,") or ",drgn" in a)
+    assert epel_idx < install_idx, "EPEL must be enabled before the drgn install transaction"
+    assert "systemctl enable kdump.service" in argv
+
+
+def test_el9_and_el10_do_not_enable_epel(tmp_path: Path) -> None:
+    for distro, version in (("rocky", "9"), ("rocky", "10"), ("centos-stream", "10")):
+        argv = RhelFamily().customize_argv(
+            _ctx(tmp_path, is_cloud_image=True, distro=distro, version=version)
+        )
+        assert "dnf -y install epel-release" not in argv, (distro, version)
 
 
 def test_rhel_debug_argv_injects_key_and_readiness_unit(tmp_path: Path) -> None:
