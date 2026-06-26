@@ -561,27 +561,96 @@ async def _within_alloc_quota(conn: AsyncConnection, project: str) -> bool:
     """Report whether the project is under ``max_concurrent_allocations``.
 
     Fail-closed: a project with **no quota row** is over quota (ADR-0007 §4 — no silent
-    default). Counts the project's **occupying** allocations (GRANTED/ACTIVE/RELEASING) under
-    the held PROJECT lock — a queued ``requested`` row does not count against the grant quota
-    (ADR-0069); the pending cap bounds the backlog separately.
+    default). Derived from :func:`quota_status` so the gate predicate and the aggregated
+    funding report read identical figures and cannot drift.
+    """
+    limit, count = await quota_status(conn, project)
+    return limit is not None and count < limit
+
+
+async def quota_status(conn: AsyncConnection, project: str) -> tuple[int | None, int]:
+    """Return ``(max_concurrent_allocations | None, occupying_count)`` for ``project`` (#833).
+
+    ``None`` limit means **no quota row** (fail-closed, ADR-0007 §4). The occupying count is
+    the project's GRANTED/ACTIVE/RELEASING allocations (the ADR-0069 occupancy predicate —
+    a queued ``requested`` row does not count); it is reported even with no quota row so a
+    funding denial can name the current occupancy. Read under the held PROJECT lock.
     """
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT max_concurrent_allocations FROM quotas WHERE project = %s", (project,)
         )
         row = await cur.fetchone()
-    if row is None:
-        return False
-    cap = int(row[0])
+    limit = int(row[0]) if row is not None else None
+    return limit, await _count_project_occupying(conn, project)
+
+
+async def _count_project_occupying(conn: AsyncConnection, project: str) -> int:
+    """Count the project's allocations occupying a grant-quota slot (GRANTED/ACTIVE/RELEASING)."""
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT count(*) FROM allocations WHERE project = %s AND state = ANY(%s)",
             (project, OCCUPYING_VALUES),
         )
-        count_row = await cur.fetchone()
-    if count_row is None:  # Invariant: count(*) always yields a row.
+        row = await cur.fetchone()
+    if row is None:  # Invariant: count(*) always yields a row.
         raise RuntimeError("count(*) returned no row")
-    return int(count_row[0]) < cap
+    return int(row[0])
+
+
+async def funding_unmet(
+    conn: AsyncConnection, project: str, estimate: Decimal
+) -> list[dict[str, Any]]:
+    """The unmet project-funding gates (quota first, then budget) with their figures (#833).
+
+    A transport-neutral aggregate for the synchronous denial enrichment: each entry carries a
+    ``gate`` discriminator and the current/required figures, but **no** MCP tool name (the
+    transport owns those, ADR-0245). Read under the caller's held PROJECT lock on the cold
+    denial path, so it is consistent with the gate's own check. Empty when neither funding gate
+    is unmet; a denial the gate classified as funding always yields at least its failing gate.
+    """
+    unmet: list[dict[str, Any]] = []
+    limit, count = await quota_status(conn, project)
+    if limit is None or count >= limit:
+        entry: dict[str, Any] = {"gate": "quota", "current": count, "required": count + 1}
+        if limit is not None:
+            entry["limit"] = limit
+        unmet.append(entry)
+    budget = await _budget_unmet_entry(conn, project, estimate)
+    if budget is not None:
+        unmet.append(budget)
+    return unmet
+
+
+async def _budget_unmet_entry(
+    conn: AsyncConnection, project: str, estimate: Decimal
+) -> dict[str, Any] | None:
+    """The budget funding entry, or ``None`` when the project is within budget (#833).
+
+    Reports both the incremental cost (``required_kcu`` = the estimate) and the **absolute**
+    ``required_limit_kcu`` — the smallest ``limit_kcu`` that admits, ``spent_kcu + estimate`` —
+    so an agent on a project with prior spend sizes the budget right the first time. The
+    limit/spent/remaining figures are omitted when there is no budget row (mirrors #838).
+    """
+    snapshot = await budget_snapshot(conn, project)
+    if snapshot is None:
+        return {
+            "gate": "budget",
+            "required_kcu": str(estimate),
+            "required_limit_kcu": str(estimate),
+        }
+    limit_kcu, spent_kcu = snapshot
+    remaining = limit_kcu - spent_kcu
+    if remaining >= estimate:
+        return None
+    return {
+        "gate": "budget",
+        "required_kcu": str(estimate),
+        "required_limit_kcu": str(spent_kcu + estimate),
+        "limit_kcu": str(limit_kcu),
+        "spent_kcu": str(spent_kcu),
+        "remaining_kcu": str(remaining),
+    }
 
 
 async def _enqueue(conn: AsyncConnection, request: AllocationRequest) -> AdmissionOutcome:
