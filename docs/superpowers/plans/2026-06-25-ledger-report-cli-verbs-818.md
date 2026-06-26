@@ -32,11 +32,12 @@
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `tests/cli/test_render.py`:
+Add to `tests/cli/test_render.py`. The file already has
+`from kdive.cli.render import render, render_record` (line 7) — **amend that line** to
+`from kdive.cli.render import render, render_record, render_report` (adding a second
+`from kdive.cli.render import …` line would fail ruff's import sorter, `I`). Then add:
 
 ```python
-from kdive.cli.render import render_report
-
 _COLS = ["project", "reserved"]
 _TCOLS = ["scope", "total_reserved"]
 
@@ -169,6 +170,19 @@ def test_report_all_assembles_window_and_group_by(monkeypatch, capsys) -> None:
             "accounting.report_all_projects",
             {"group_by": "principal", "window": ["2026-01-01T00:00:00+00:00", None]},
         )
+    ]
+
+
+def test_report_all_window_until_only_is_half_open(monkeypatch, capsys) -> None:
+    # The symmetric half-open direction: only --until sets the second bound, first is null.
+    client = _install_session(monkeypatch, _report_collection([], {}))
+    asyncio.run(
+        reads.ledger_report_all(
+            _args(group_by=None, since=None, until="2026-12-31T00:00:00+00:00")
+        )
+    )
+    assert client.calls == [
+        ("accounting.report_all_projects", {"window": [None, "2026-12-31T00:00:00+00:00"]})
     ]
 
 
@@ -475,7 +489,8 @@ verify the new verbs are consistent with it — `report-all` is the `platform_au
 
 ```bash
 just adr-status-check
-/opt/homebrew/bin/bash ./scripts/check-doc-links.sh   # macOS bash-3.2 lacks mapfile; use bash 4+
+just docs-links   # CI's Linux runner. On macOS, run scripts/check-doc-links.sh under a
+                  # bash >= 4 (e.g. Homebrew's) — the stock 3.2 lacks `mapfile`.
 ```
 Expected: links resolve; ADR index in sync.
 
