@@ -33,6 +33,19 @@ Delete an image catalog entry.
 |---|---|---|---|
 | `image_id` | string | yes | The private catalog image to delete. |
 
+## `images.describe`
+
+`implemented` · `read-only`
+
+Return full detail for one catalog image visible to the caller.
+
+Includes boot layout, digest, capabilities, scope, publish state, and build
+``provenance`` (with captured ``package_versions`` when present).
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `image_id` | string | yes | The catalog image row id (UUID) to describe. |
+
 ## `images.extend`
 
 `implemented` · `destructive`
