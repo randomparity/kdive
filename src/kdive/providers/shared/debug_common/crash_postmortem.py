@@ -11,6 +11,8 @@ are injected; the defaults are `live_vm`-only.
 
 from __future__ import annotations
 
+import shutil
+import subprocess  # noqa: S404 - fixed argv only, no shell; the command batch goes via stdin
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -25,9 +27,13 @@ from kdive.store.objectstore import object_store_from_env
 type FetchObject = Callable[[str], bytes]
 type ReadBuildId = Callable[[bytes], str]
 type RunCrash = Callable[[Path, Path, str], CrashResult]
+type CrashPathFinder = Callable[[str], str | None]
 
 # Cap the redacted crash(8) stderr carried in an error envelope; stderr is unbounded.
 _STDERR_CAP = 2048
+# Bound a wedged crash(8) so it never pins a worker thread. A batch of allowlisted read verbs
+# over a multi-GB core can take minutes.
+_CRASH_TIMEOUT_S = 300.0
 
 
 def run_crash_postmortem(
@@ -114,6 +120,67 @@ def default_run_crash(  # pragma: no cover - live_vm
         "the crash subprocess runs only under the live_vm gate",
         category=ErrorCategory.MISSING_DEPENDENCY,
     )
+
+
+def _real_run_crash(
+    vmlinux: Path,
+    vmcore: Path,
+    script: str,
+    *,
+    crash_path_finder: CrashPathFinder = shutil.which,
+) -> CrashResult:
+    """Run the real ``crash(8)`` over the spooled core; the batch goes on stdin only.
+
+    The fixed argv ``crash -s <vmlinux> <vmcore>`` (``-s`` suppresses the banner and the
+    ``crash>`` prompt echo) reaches the binary; the validated, ``quit``-terminated command
+    batch is piped on stdin, never argv. ``crash_path_finder`` is injected so the
+    binary-absent branch is testable off the ``live_vm`` gate.
+
+    Raises:
+        CategorizedError: ``MISSING_DEPENDENCY`` when ``crash`` is not installed on this
+            worker host; ``INFRASTRUCTURE_FAILURE`` for a launch failure or timeout.
+    """
+    crash_path = crash_path_finder("crash")
+    if crash_path is None:
+        raise CategorizedError(
+            "the crash(8) utility is not installed on this worker host",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+        )
+    argv = [crash_path, "-s", str(vmlinux), str(vmcore)]
+    return _exec_crash(argv, script, vmcore.parent)
+
+
+def _exec_crash(  # pragma: no cover - live_vm
+    argv: list[str], script: str, cwd: Path
+) -> CrashResult:
+    """Spawn ``crash`` with the batch on stdin; ``cwd`` is the worker-owned spool dir.
+
+    The ``# pragma: no cover - live_vm`` covers the real subprocess (a host with
+    ``/usr/bin/crash`` and a real core). ``cwd`` points at the spool dir so crash never needs
+    a writable process CWD; ``_CRASH_TIMEOUT_S`` bounds a wedged crash so the worker thread is
+    always released.
+    """
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; the batch goes via stdin only
+            argv,
+            input=script.encode("utf-8"),
+            timeout=_CRASH_TIMEOUT_S,
+            check=False,
+            capture_output=True,
+            cwd=str(cwd),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CategorizedError(
+            "the crash(8) subprocess exceeded the timeout",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"timeout_s": _CRASH_TIMEOUT_S},
+        ) from exc
+    except OSError as exc:
+        raise CategorizedError(
+            "could not launch the crash(8) subprocess",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        ) from exc
+    return CrashResult(exit_status=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
 
 
 __all__ = [

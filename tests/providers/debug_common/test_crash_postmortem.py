@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports import CrashResult
-from kdive.providers.shared.debug_common.crash_postmortem import run_crash_postmortem
+from kdive.providers.shared.debug_common import crash_postmortem
+from kdive.providers.shared.debug_common.crash_postmortem import (
+    _real_run_crash,
+    run_crash_postmortem,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 
@@ -185,3 +191,38 @@ def test_rejected_command_batch_is_configuration_error() -> None:
     # The validator's rejection reason is surfaced under `reason` so the caller learns why.
     assert "reason" in exc.value.details
     assert exc.value.details["reason"]
+
+
+def test_real_run_crash_missing_binary_is_missing_dependency() -> None:
+    # No crash(8) on the worker host: surface a missing_dependency naming the binary, not the
+    # old stub's misleading "runs only under the live_vm gate" message.
+    with pytest.raises(CategorizedError) as exc:
+        _real_run_crash(Path("/v"), Path("/c"), "sys\nquit\n", crash_path_finder=lambda name: None)
+    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert "crash" in str(exc.value)
+
+
+def test_real_run_crash_builds_fixed_argv_and_pipes_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # crash is invoked with a fixed argv (`crash -s <vmlinux> <vmcore>`); the validated batch
+    # is fed on stdin only; cwd is the vmcore's worker-owned spool dir, not the process CWD.
+    captured: dict[str, object] = {}
+
+    def fake_exec(argv: list[str], script: str, cwd: Path) -> CrashResult:
+        captured["argv"] = argv
+        captured["script"] = script
+        captured["cwd"] = cwd
+        return CrashResult(exit_status=0, stdout=b"OK", stderr=b"")
+
+    monkeypatch.setattr(crash_postmortem, "_exec_crash", fake_exec)
+    out = _real_run_crash(
+        Path("/tmp/x.vmlinux"),
+        Path("/tmp/x.vmcore"),
+        "sys\nquit\n",
+        crash_path_finder=lambda name: "/usr/bin/crash",
+    )
+    assert out.stdout == b"OK"
+    assert captured["argv"] == ["/usr/bin/crash", "-s", "/tmp/x.vmlinux", "/tmp/x.vmcore"]
+    assert captured["script"] == "sys\nquit\n"
+    assert captured["cwd"] == Path("/tmp")
