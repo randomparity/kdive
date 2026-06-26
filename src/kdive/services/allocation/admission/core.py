@@ -26,7 +26,7 @@ rule). The ``cost_class`` is resolved admission-side from the chosen Resource (u
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
@@ -298,13 +298,15 @@ async def admission_gate(
     if not await within_budget(conn, request.project, estimate):
         # A budget denial shares ``allocation_denied`` with the host-cap denial but is NOT
         # queueable — waiting will not free budget (ADR-0069). It hard-denies / terminates.
+        # The denial is bare: the synchronous path enriches funding denials with the
+        # aggregated ``unmet`` report (#833); the promotion sweep replays this gate and routes
+        # on the bare category/reason, so the gate must not carry presentation detail.
         return _GateResult(
             denial=AdmissionOutcome(
                 granted=False,
                 allocation=None,
                 category=ErrorCategory.ALLOCATION_DENIED,
                 reason=BUDGET_DENIAL_REASON,
-                details=await _budget_denial_details(conn, request.project, estimate),
             ),
             devices=[],
         )
@@ -315,28 +317,6 @@ async def admission_gate(
     if claim.denial is not None:
         return _GateResult(denial=claim.denial, devices=[])
     return _GateResult(denial=None, devices=claim.devices)
-
-
-async def _budget_denial_details(
-    conn: AsyncConnection, project: str, estimate: Decimal
-) -> dict[str, Any]:
-    """Echo the priced estimate and the project's budget figures into a budget denial (#838).
-
-    Mirrors the host-cap denial's ``cap``/``in_use`` echo so the agent can size a budget
-    increase instead of guessing. Values are stringified to match how ``denial_details``
-    surfaces every detail. The figures are re-read here on the cold denial path rather than
-    widening :func:`within_budget`'s bool contract; the project lock is held, so the read is
-    consistent with the gating check above. A project with no budget row has no figures to
-    report, so only the estimate is echoed (the fail-closed denial still stands).
-    """
-    details: dict[str, Any] = {"estimate_kcu": str(estimate)}
-    snapshot = await budget_snapshot(conn, project)
-    if snapshot is not None:
-        limit_kcu, spent_kcu = snapshot
-        details["limit_kcu"] = str(limit_kcu)
-        details["spent_kcu"] = str(spent_kcu)
-        details["budget_remaining_kcu"] = str(limit_kcu - spent_kcu)
-    return details
 
 
 async def _admit_under_project_lock(
@@ -376,7 +356,7 @@ async def _admit_under_project_lock(
     async with advisory_xact_lock(conn, LockScope.RESOURCE, request.resource.id):
         gate = await admission_gate(conn, request, estimate=estimate)
         if gate.denial is not None:
-            return await _deny_or_enqueue(conn, request, gate.denial)
+            return await _deny_or_enqueue(conn, request, gate.denial, estimate=estimate)
         return await _grant(
             conn,
             request,
@@ -387,18 +367,54 @@ async def _admit_under_project_lock(
 
 
 async def _deny_or_enqueue(
-    conn: AsyncConnection, request: AllocationRequest, denial: AdmissionOutcome
+    conn: AsyncConnection,
+    request: AllocationRequest,
+    denial: AdmissionOutcome,
+    *,
+    estimate: Decimal,
 ) -> AdmissionOutcome:
     """Return the denial, or enqueue a queued row when the caller opted into the queue.
 
     Enqueue only when ``on_capacity="queue"`` AND the denial is ``queueable`` (a capacity
     denial — the grant quota or the host cap). All durable writes run inside the PROJECT-
     locked transaction ``admit`` already opened, so the pending-cap check and the insert are
-    atomic (ADR-0069).
+    atomic (ADR-0069). A denial actually returned to the synchronous caller is enriched with
+    the aggregated funding report (#833); an enqueued request gets a queued allocation, not an
+    onboarding diagnostic.
     """
-    if request.on_capacity != "queue" or not denial.queueable:
+    if request.on_capacity == "queue" and denial.queueable:
+        return await _enqueue(conn, request)
+    return await _enrich_funding_denial(conn, request.project, estimate, denial)
+
+
+def _is_funding_denial(denial: AdmissionOutcome) -> bool:
+    """A project-funding denial: over quota, or over budget (#833).
+
+    The two onboarding gates a fresh project must provision. Excludes the host-cap denial
+    (``ALLOCATION_DENIED`` / ``reason="at_capacity"``), the affinity denial, and PCIe denials —
+    runtime denials that no funding change resolves.
+    """
+    return denial.category is ErrorCategory.QUOTA_EXCEEDED or (
+        denial.category is ErrorCategory.ALLOCATION_DENIED and denial.reason == BUDGET_DENIAL_REASON
+    )
+
+
+async def _enrich_funding_denial(
+    conn: AsyncConnection, project: str, estimate: Decimal, denial: AdmissionOutcome
+) -> AdmissionOutcome:
+    """Attach the aggregated ``details["unmet"]`` to a funding denial (#833).
+
+    Re-reads both funding gates under the PROJECT lock ``admit`` already holds, so the report
+    is consistent with the gate's short-circuit check above; a non-funding denial is returned
+    unchanged. The gate's ``category`` / ``reason`` / ``queueable`` are untouched (the
+    top-level category stays the gate's primary, onboarding order), so only the synchronous
+    caller's view gains the aggregate — the promotion sweep, which never calls this, is
+    unchanged.
+    """
+    if not _is_funding_denial(denial):
         return denial
-    return await _enqueue(conn, request)
+    unmet = await funding_unmet(conn, project, estimate)
+    return replace(denial, details={**denial.details, "unmet": unmet})
 
 
 @dataclass(frozen=True)
