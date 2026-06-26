@@ -226,3 +226,44 @@ def test_real_run_crash_builds_fixed_argv_and_pipes_script(
     assert captured["argv"] == ["/usr/bin/crash", "-s", "/tmp/x.vmlinux", "/tmp/x.vmcore"]
     assert captured["script"] == "sys\nquit\n"
     assert captured["cwd"] == Path("/tmp")
+
+
+# ---------------------------------------------------------------------------
+# live_vm acceptance: the real /usr/bin/crash over a real captured core (ADR-0249)
+# ---------------------------------------------------------------------------
+#
+# CI deselects ``live_vm`` (``just test`` runs ``-m "not live_vm and not live_stack"``), so
+# this is SKIPPED unless the operator runs ``just test-live`` with a real captured core. It is
+# the only test that exercises the real ``_exec_crash`` subprocess seam — everything above
+# injects a fake ``run_crash``.
+
+_LIVE_VMCORE_ENV = "KDIVE_LIVE_VM_VMCORE"
+_LIVE_VMLINUX_ENV = "KDIVE_LIVE_VM_VMLINUX"
+
+
+@pytest.mark.live_vm
+def test_live_vm_real_crash_runs_sys_over_a_real_core() -> None:  # pragma: no cover - live_vm
+    """Run the real ``crash(8)`` ``sys`` verb over a real captured core (ADR-0249).
+
+    Skips unless the operator points ``KDIVE_LIVE_VM_VMCORE`` / ``KDIVE_LIVE_VM_VMLINUX`` at a
+    real captured vmcore and its matching ``vmlinux`` debuginfo and ``crash(8)`` is installed.
+    Proves the production crash invocation (fixed argv, batch on stdin, ``-s`` silent mode)
+    actually drives the binary and returns its output.
+    """
+    import os
+    import shutil as _shutil
+
+    vmcore = os.environ.get(_LIVE_VMCORE_ENV)
+    vmlinux = os.environ.get(_LIVE_VMLINUX_ENV)
+    if not vmcore or not vmlinux:
+        pytest.skip(
+            f"{_LIVE_VMCORE_ENV}/{_LIVE_VMLINUX_ENV} not set; needs a real captured core + vmlinux"
+        )
+    if not _shutil.which("crash"):
+        pytest.skip("crash(8) not installed on this host")
+
+    result = _real_run_crash(Path(vmlinux), Path(vmcore), "sys\nquit\n")
+
+    assert result.exit_status == 0, result.stderr.decode("utf-8", "replace")
+    # crash's `sys` banner always prints these labels over a real core.
+    assert b"KERNEL:" in result.stdout or b"DUMPFILE:" in result.stdout
