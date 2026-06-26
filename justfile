@@ -58,8 +58,16 @@ type:
 
 # Run the test suite, excluding the gated live_vm and live_stack suites.
 # (oidc_issuer-marked tests stay selected; they skip cleanly without the issuer container.)
+#
+# `-n auto` runs the suite across all cores via pytest-xdist; each worker gets its own
+# session-scoped Postgres/MinIO container, so there is no cross-worker DB contention.
+# PYTHONHASHSEED is pinned so every xdist worker collects parametrized tests in the same
+# order — a parametrize source backed by a set is ordered by the hash seed, which differs
+# per worker, and xdist then aborts with "Different tests were collected". It defaults to 0
+# but is overridable: the weekly test-ordering workflow sets PYTHONHASHSEED=random to
+# surface any new ordering-dependent test the pinned seed would otherwise mask.
 test:
-    uv run python -m pytest -m "not live_vm and not live_stack" -q
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "not live_vm and not live_stack" -n auto -q
 
 # Run the live_vm suite (needs a KVM/libvirt host with a kdump-enabled guest).
 test-live:

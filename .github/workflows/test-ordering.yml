@@ -1,0 +1,68 @@
+name: Test ordering
+
+# Weekly run of the test suite with a randomized PYTHONHASHSEED. The PR gate (ci.yml)
+# pins PYTHONHASHSEED=0 so pytest-xdist workers collect parametrized tests in the same
+# order; that pin also masks tests whose collection or assertions depend on set/dict
+# iteration order. This job removes the pin (PYTHONHASHSEED=random) so each xdist worker
+# randomizes independently: a parametrize source backed by an unsorted set makes the
+# workers disagree and xdist aborts with "Different tests were collected", and an
+# order-dependent assertion fails outright. Either way the ordering bug surfaces here
+# instead of becoming a flaky failure when someone runs the suite locally.
+
+on:
+  schedule:
+    # Mondays 07:00 UTC.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-ordering-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-random-seed:
+    name: test (PYTHONHASHSEED=random)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install libvirt build headers
+        # libvirt-python has no wheels; it compiles against the system libvirt
+        # headers, so `uv sync` fails without libvirt-dev present.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libvirt-dev
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.18"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Set up just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+
+      - name: Set up Helm
+        # Mirror the PR gate so the tests/helm render suite actually runs (it skips when
+        # helm is absent), keeping the ordering check over the same test set as ci.yml.
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+        with:
+          version: v3.21.0
+
+      - name: Test (randomized hash seed)
+        # PYTHONHASHSEED=random overrides the recipe default of 0; KDIVE_REQUIRE_DOCKER=1
+        # turns the db suite's skip-when-no-Docker into a hard failure (ADR-0015), matching
+        # the PR gate so the schema tests are part of the ordering surface.
+        env:
+          PYTHONHASHSEED: random
+          KDIVE_REQUIRE_DOCKER: "1"
+        run: just test
