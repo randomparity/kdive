@@ -68,10 +68,26 @@ the kdump harvest disclose an incomplete core honestly.
    transient mid-save name, so on the harvest timeout path it may name a slow (not toolchain-old)
    capture; the remediation names both causes. The genuinely-empty case keeps `_no_core`.
 
+6. **Readiness gates on kdump arming.** The kdive-ready serial unit is ordered
+   `After=kdump.service` so a crash-capture guest does not signal `ready` until kdump has finished
+   arming (built the capture initramfs and `kexec -p`-loaded it). Without the edge, `ready`
+   (`multi-user.target`) races `kdump.service` — also `WantedBy=multi-user.target` — and a
+   `force_crash` on a just-ready System hits an unarmed kdump and captures nothing (an empty
+   `/var/crash`, not even a `vmcore-incomplete`). Live e2e surfaced this: the makedumpfile version
+   is necessary but not sufficient. The local boot window widens to 300s to absorb the first-boot
+   dracut build. `After=` is pure ordering — a build image without `kdump.service` is unaffected
+   (ordering against an absent unit is a no-op), and a kdump that fails to arm still releases
+   readiness (point 5 discloses the capture-time failure), so provisioning never hangs.
+
 ## Consequences
 
 - The default local kdump path captures a complete core for a current from-source kernel on
-  Fedora 44; #817's headline symptom is fixed at the root cause (the toolchain), not masked.
+  Fedora 44; #817's headline symptom is fixed at the root cause (the toolchain plus the
+  arm-vs-ready ordering), not masked. Proven live end-to-end: a `force_crash` immediately on
+  `ready` (no artificial wait) captured a complete filtered vmcore via the default `kdump` method.
+- Crash-capture guests report `ready` later by the kdump arming time (tens of seconds on the first
+  dracut build); the boot window absorbs it and the signal is a timeout, so a fast boot is
+  unaffected.
 - Adding a base OS is a catalog row plus, for a new packaging family, one `FamilyCustomizer` — no
   changes to the build pipeline, repack, or inventory wiring.
 - A distro whose makedumpfile is older than the kernel-under-test still produces an incomplete

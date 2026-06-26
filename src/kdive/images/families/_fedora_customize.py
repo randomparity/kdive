@@ -34,9 +34,19 @@ DEFAULT_BUILD_FS_PACKAGES = (
 )
 
 READINESS_MARKER = "kdive-ready"
+# ``After=kdump.service`` closes the arm-vs-ready race (#817): kdump.service and this unit are
+# both ``WantedBy=multi-user.target``, so without an ordering edge the serial ``kdive-ready``
+# signal can fire while kdump.service is still building the capture initramfs + ``kexec -p``-loading
+# it. A ``force_crash`` on a System that reported ``ready`` before kdump armed then captures
+# nothing (an empty ``/var/crash``). Ordering after kdump.service makes ``ready`` mean "kdump
+# finished its arming attempt"; ``After=`` is pure ordering (no ``Wants=``), so a non-kdump build
+# image — where kdump.service is absent — is unaffected (ordering against an absent unit is a
+# no-op), and a kdump that fails to arm still releases readiness (``After=`` releases on the unit's
+# terminal state, success or failure), so the System still reaches ``ready`` and a force_crash
+# surfaces the capture-time readiness failure instead of provisioning hanging.
 READINESS_UNIT = f"""[Unit]
 Description=Signal kdive serial readiness
-After=dev-ttyS0.device
+After=dev-ttyS0.device kdump.service
 Wants=dev-ttyS0.device
 
 [Service]
