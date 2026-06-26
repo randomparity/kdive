@@ -616,7 +616,46 @@ class WarmTreeSourceOutcome(StrEnum):
     INVALID = "invalid"
 
 
-WarmTreeSourceProbe = Callable[[], Awaitable[WarmTreeSourceOutcome]]
+@dataclass(frozen=True, slots=True)
+class WarmTreeSourceProbeResult:
+    """A warm-tree source probe's verdict plus the structured data to disclose (#845).
+
+    ``outcome`` is the unchanged three-state verdict. The remaining fields are populated only
+    on ``USABLE`` and only when known, so the check can surface ``CheckResult.data`` without
+    touching the filesystem or git itself (it stays unit-testable on an injected result):
+
+    - ``resolved_path`` — the resolved absolute ``KDIVE_KERNEL_SRC`` value (server vantage).
+    - ``head_commit`` — the git HEAD short-commit, when the tree is a git checkout.
+    - ``branch`` — the current branch, when on a named branch (``None`` on a detached HEAD).
+
+    The git fields are best-effort: a non-git tree, an absent ``git``, or a slow read leaves
+    them ``None`` and never changes ``outcome``.
+    """
+
+    outcome: WarmTreeSourceOutcome
+    resolved_path: str | None = None
+    head_commit: str | None = None
+    branch: str | None = None
+
+
+WarmTreeSourceProbe = Callable[[], Awaitable[WarmTreeSourceProbeResult]]
+
+
+def _warm_tree_source_data(result: WarmTreeSourceProbeResult) -> dict[str, str]:
+    """Build the ``CheckResult.data`` for a ``USABLE`` warm-tree source (#845).
+
+    Always carries ``vantage=server`` (the disclosure reflects the server process's env, not the
+    build worker's — ADR-0163) and the ``resolved_path``; the git fields are included only when
+    the probe resolved them (a git checkout on a named branch).
+    """
+    data: dict[str, str] = {"vantage": Vantage.SERVER.value}
+    if result.resolved_path is not None:
+        data["resolved_path"] = result.resolved_path
+    if result.head_commit is not None:
+        data["head_commit"] = result.head_commit
+    if result.branch is not None:
+        data["branch"] = result.branch
+    return data
 
 
 async def _always_enabled() -> bool:
@@ -680,16 +719,17 @@ class LocalKernelSrcCheck(Check):
                 detail="the seeded local build host is disabled; KDIVE_KERNEL_SRC is not required "
                 "(n/a — no local warm-tree lane to validate)",
             )
-        outcome = await self._probe()
-        if outcome is WarmTreeSourceOutcome.USABLE:
+        result = await self._probe()
+        if result.outcome is WarmTreeSourceOutcome.USABLE:
             return CheckResult(
                 check_id=self.id,
                 status=CheckStatus.PASS,
                 detail="the server's KDIVE_KERNEL_SRC points at an existing absolute tree "
                 "(server vantage — not authoritative for a split-deployment build worker, "
                 "whose env may differ; ADR-0163)",
+                data=_warm_tree_source_data(result),
             )
-        if outcome is WarmTreeSourceOutcome.UNSET:
+        if result.outcome is WarmTreeSourceOutcome.UNSET:
             return CheckResult(
                 check_id=self.id,
                 status=CheckStatus.FAIL,
