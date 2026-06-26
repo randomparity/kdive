@@ -28,12 +28,15 @@ contract is the recorded provenance, and the image identity is the output qcow2 
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes._build_common import (
+    DEFAULT_VERSION_INSPECT,
+    VersionInspectSeam,
     build_workspace,
     digest_file,
     publish_qcow2,
@@ -42,6 +45,8 @@ from kdive.images.planes._build_common import (
 )
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
 from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
+
+_log = logging.getLogger(__name__)
 
 # The remote provisioning base image's catalog name is no longer a code literal (ADR-0112): it is
 # a `staged` `[[image]]` entry in `systems.toml`, reconciled into `image_catalog`. The provider
@@ -101,9 +106,10 @@ type VirtBuilder = Callable[..., None]
 
 @dataclass(frozen=True, slots=True)
 class RemoteRootfsBuildTools:
-    """The injectable build seam; defaults to the real libguestfs implementation."""
+    """The injectable build seams; default to the real libguestfs implementations."""
 
     virt_builder: VirtBuilder = _real_virt_builder
+    inspect_versions: VersionInspectSeam = DEFAULT_VERSION_INSPECT
 
 
 class RemoteLibvirtRootfsBuildPlane:
@@ -149,22 +155,48 @@ class RemoteLibvirtRootfsBuildPlane:
                     category=ErrorCategory.PROVISIONING_FAILURE,
                     details={"stage": "virt-builder"},
                 )
+            package_versions = self._capture_versions(scratch, spec.packages)
             qcow2 = publish_qcow2(self._workspace, image_name=spec.name, scratch=scratch)
         digest = digest_file(qcow2)
         return RootfsBuildOutput(
-            qcow2_path=qcow2, digest=digest, provenance=_provenance(spec, size=self._size)
+            qcow2_path=qcow2,
+            digest=digest,
+            provenance=_provenance(spec, size=self._size, package_versions=package_versions),
         )
 
+    def _capture_versions(self, qcow2: Path, requested: tuple[str, ...]) -> dict[str, str]:
+        """Installed versions for the build's package set; ``{}`` (logged) on inspector failure.
 
-def _provenance(spec: RootfsBuildSpec, *, size: str) -> dict[str, object]:
+        Filters to ``_guest_agent_packages(requested)`` — the same set recorded in
+        ``provenance["packages"]`` — so the always-injected guest agent's version is captured too.
+        Version capture is advisory: a categorized inspector failure degrades to an empty map so
+        the build still publishes (ADR-0252).
+        """
+        try:
+            installed = self._tools.inspect_versions(qcow2)
+        except CategorizedError:
+            _log.warning(
+                "package-version capture failed; provenance omits package_versions", exc_info=True
+            )
+            return {}
+        wanted = _guest_agent_packages(requested)
+        return {name: installed[name] for name in wanted if name in installed}
+
+
+def _provenance(
+    spec: RootfsBuildSpec, *, size: str, package_versions: dict[str, str]
+) -> dict[str, object]:
     """Record the pinned inputs and build args that produced the image (falsifiable contract).
 
     ``source_image_digest`` is the caller-declared base/template pin recorded as requested — the
     plane does not re-fetch and checksum the virt-builder template, so it names what was *asked
     for*, not a plane-verified hash. The image's verifiable identity is the output qcow2 content
     digest (:func:`kdive.images.planes._build_common.digest_file`), per ADR-0092.
+    ``package_versions`` (the installed version of each installed package, guest agent included) is
+    added only when capture succeeded — an empty map is omitted so a degraded build's row is
+    byte-identical to a pre-feature one (ADR-0252).
     """
-    return {
+    record: dict[str, object] = {
         "plane": "remote-libvirt",
         "boot_method": "disk-image",
         "releasever": spec.releasever,
@@ -175,6 +207,9 @@ def _provenance(spec: RootfsBuildSpec, *, size: str) -> dict[str, object]:
         "image_size": size,
         "guest_access_seam": "qemu-guest-agent",
     }
+    if package_versions:
+        record["package_versions"] = package_versions
+    return record
 
 
 __all__ = [
