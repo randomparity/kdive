@@ -35,6 +35,12 @@ DEFAULT_BUILD_FS_PACKAGES = (
 
 READINESS_MARKER = "kdive-ready"
 
+# A valid 32-hex machine-id seeded into cloud-image bases so the first boot does not run
+# ``systemctl preset-all`` (which resets the kdump service to its vendor preset — disabled — on both
+# Fedora Cloud and Debian genericcloud, whose machine-id ships uninitialized/empty). Not a secret:
+# a fixed build-time identity, intentionally constant and shared across families (#824).
+SEED_MACHINE_ID = "0a1b2c3d4e5f60718293a4b5c6d7e8f9"  # pragma: allowlist secret
+
 
 def readiness_unit(kdump_unit: str) -> str:
     """Render the kdive-ready serial unit ordered ``After=<kdump_unit>`` (#817, #824).
