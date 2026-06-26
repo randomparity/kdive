@@ -53,22 +53,34 @@ Replace the stored `kdump_capable` bit with a **computed per-kernel predicate** 
 `images.describe` before provisioning. Four parts.
 
 1. **A pure support-matrix + predicate module** (`src/kdive/images/kdump_support.py`).
-   `MakedumpfileVersion` / `KernelVersion` newtypes with parsers and total ordering; an ascending
-   `SUPPORT_MATRIX` of `(KernelVersion, MakedumpfileVersion)` rows (v1: one row `(7.0, 1.7.9)`) with
-   `KNOWN_THROUGH = 7.0` and `DEFAULT_KERNEL_BASIS = KNOWN_THROUGH`; `min_makedumpfile_required(kernel)`
-   (highest row with `kernel_min <= kernel`, floor `0.0.0` for kernels predating every row); and
-   `kdump_capability(*, makedumpfile_version, target_kernel, kdump_tooling) -> KdumpCapability` with
-   `status` ∈ `capable | incapable | unverified | not_applicable`. `not_applicable` when the image
-   has no `"kdump"` tag; `unverified` when the version is unknown or `target_kernel > KNOWN_THROUGH`
-   (note + makedumpfile ChangeLog pointer); otherwise the `>=` comparison. No I/O.
+   `MakedumpfileVersion` / `KernelVersion` newtypes with parsers and total ordering; **kernel
+   comparison on `(major, minor)`** so a 7.0.y stable update or a `-rc`/`+localversion` suffix maps
+   to the same dump-format bucket. An ascending `SUPPORT_MATRIX` of `(KernelVersion,
+   MakedumpfileVersion)` rows (v1: one row `(7.0, 1.7.9)`) with `KNOWN_THROUGH = 7.0`,
+   `DEFAULT_KERNEL_BASIS = KNOWN_THROUGH`, and `MAX_CHARACTERIZED_REQUIREMENT` (the highest row's
+   makedumpfile_min). `required_makedumpfile(kernel)` returns the highest row with `kernel_min <=
+   kernel` or `None` below every row (**no floor**). `kdump_capability(*, makedumpfile_version,
+   target_kernel, kdump_tooling) -> KdumpCapability` with `status` ∈
+   `capable | incapable | unverified | not_applicable`, evaluated in order: no `"kdump"` tag →
+   `not_applicable`; unknown/unparseable version → `unverified`; `target.major_minor > KNOWN_THROUGH`
+   → `unverified`; target in a characterized row → the `>=` comparison; target **older than every
+   row** → `capable` only if `makedumpfile_version >= MAX_CHARACTERIZED_REQUIREMENT` (an image that
+   supports up to `KNOWN_THROUGH` necessarily supports the older target), else `unverified`. The last
+   rule is the safety fix: makedumpfile's kernel support is an *upper* bound, so a low makedumpfile
+   against a mid-range kernel is never assumed capable from a floor. No I/O.
 
 2. **Capture the makedumpfile version at build** into `provenance["makedumpfile_version"]` via a
-   dedicated, family-neutral binary probe (`makedumpfile --version`, read-only) injected into each
-   build plane's tools dataclass as a `MakedumpfileProbeSeam` (mirroring ADR-0252's
-   `VersionInspectSeam` so unit tests inject a fake). A binary probe — not `package_versions` —
-   because only the binary is visible on EL8/EL9. **Degrade, do not fail the build**: probe failure
-   / absent tool logs a WARNING and omits the field (only new builds populate it; older rows omit
-   it). Additive within the schemaless `provenance` jsonb — no schema/migration.
+   family-neutral probe injected into the local build plane's tools dataclass as a
+   `MakedumpfileProbeSeam` (mirroring ADR-0252's `VersionInspectSeam` so unit tests inject a fake).
+   The probe runs `makedumpfile --version` in the build's **existing** guest `--run-command` step,
+   writing a `/usr/lib/kdive/makedumpfile-version` marker (the build already stages `/usr/lib/kdive/`
+   readiness markers), then reads the marker back with the existing read-only read seam — reusing
+   proven mechanisms rather than executing a guest ELF against a read-only mount. **Fallback:** when
+   the marker is empty, use `package_versions["makedumpfile"]` (covers Fedora/Debian standalone
+   packages); the binary probe is what covers the EL8/EL9 bundled case package_versions cannot see.
+   **Degrade, do not fail the build**: any failure logs a WARNING and omits the field (only new
+   builds populate it). Additive within the schemaless `provenance` jsonb — no schema/migration.
+   **Live-proven before merge** on a Fedora and an EL8/EL9 image (this host runs `live_vm`).
 
 3. **The recipe catalog records the version, not a bit.** Remove `RootfsCatalogEntry.kdump_capable`
    and the TOML `kdump_capable` field; add `makedumpfile_version: str` to the row and every
@@ -81,8 +93,10 @@ Replace the stored `kdump_capable` bit with a **computed per-kernel predicate** 
 4. **`images.describe` surfaces the predicate.** Add optional `target_kernel: str | None`; add a
    `data.kdump` block (`makedumpfile_version`, echoed `target_kernel` basis, `capability`,
    `min_makedumpfile_required`, `note`) computed from `provenance["makedumpfile_version"]`,
-   `"kdump" in capabilities`, and the parsed target kernel (or `DEFAULT_KERNEL_BASIS`). A malformed
-   `target_kernel` is a `configuration_error` before the DB read. The `"kdump"` tag is unchanged
+   `"kdump" in capabilities`, and the parsed target kernel (or `DEFAULT_KERNEL_BASIS`). The block
+   echoes the raw stored version; a present-but-unparseable stored version degrades to `unverified`
+   (a reader never raises on image data). Only the caller-supplied malformed `target_kernel` is a
+   `configuration_error`, raised before the DB read. The `"kdump"` tag is unchanged
    (tooling); the block is the kernel-relative answer. CLI gains
    `kdivectl images describe <id> [--target-kernel <ver>]`; `docs/guide/reference/images.md` is
    regenerated.
@@ -110,9 +124,18 @@ Replace the stored `kdump_capable` bit with a **computed per-kernel predicate** 
   case is an agent deciding for *its* from-source kernel; a fixed basis forces the agent to
   re-derive the rule it cannot see. The optional param defaults to the characterized basis, so the
   common path is unchanged while the real question is answerable.
-- **Reuse `package_versions["makedumpfile"]` instead of a binary probe.** Misses EL8/EL9 (bundled in
-  `kexec-tools`), leaving every Rocky/CentOS 8/9 image permanently `unverified` — the binary probe
-  is authoritative across all families.
+- **Reuse `package_versions["makedumpfile"]` as the *only* source.** It misses EL8/EL9 (bundled in
+  `kexec-tools`), leaving every Rocky/CentOS 8/9 image permanently `unverified`. It is kept as the
+  *fallback* when the binary probe yields nothing (it covers the Fedora/Debian standalone case for
+  free), but the binary probe is the authoritative cross-family source.
+- **Execute the makedumpfile ELF directly against a read-only mount.** No mechanism in the codebase
+  runs a guest binary that way (`guestfish exists` and `virt-inspector` only inspect), so it would be
+  unproven and fragile. Instead capture `makedumpfile --version` in the build's existing in-guest
+  `--run-command` step to a marker file and read it back — both proven mechanisms.
+- **A floor (`0.0.0`) min-requirement for kernels below the matrix.** Would report a confident
+  `capable` for any old kernel regardless of the image's makedumpfile, reintroducing the false
+  positive (makedumpfile support is an upper bound). Below the matrix, only an image meeting
+  `MAX_CHARACTERIZED_REQUIREMENT` is provably capable; otherwise `unverified`.
 - **Make version capture a hard build gate.** Regresses build reliability for advisory metadata; a
   transient probe failure would fail an otherwise-good image. Degrade-don't-fail instead
   (consistent with ADR-0252 and ADR-0194).

@@ -77,50 +77,83 @@ before provisioning:
 A new pure, dependency-free module — the single home for the kernel ↔ makedumpfile rule and the
 capability computation. No I/O, fully unit-testable.
 
-- `MakedumpfileVersion(major, minor, patch)` and `KernelVersion(major, minor, ...)` newtypes, each
-  with a `parse(str) -> Self` (e.g. `"1.7.9"`, `"7.0.0"`, `"7.1"`) that raises `ValueError` on
-  malformed input, and a total ordering. makedumpfile reports `makedumpfile: version 1.7.9 (...)`;
-  the parser extracts the dotted triple.
+- `MakedumpfileVersion(major, minor, patch)` and `KernelVersion(major, minor)` newtypes, each with a
+  lenient `parse(str) -> Self` and a total ordering. makedumpfile reports
+  `makedumpfile: version 1.7.9 (...)`; the parser extracts the dotted triple. **Kernel comparison is
+  on `(major, minor)` only** — a from-source kernel is named `7.0`, `7.0.5`, `7.1.0-rc2`,
+  `7.0.0-00123-gdeadbee+`, etc.; the parser reads the leading `major.minor`, treats a missing minor
+  as `0`, and **ignores** any `.patch`/`-rc`/`+localversion`/`-gNNN` suffix, so the same dump-format
+  generation maps to one matrix bucket (a 7.0.y stable update is *not* pushed past a 7.0 threshold).
+  A string with no leading `major[.minor]` integer pair raises `ValueError` (the caller maps that to
+  `configuration_error`); makedumpfile parse failures are handled in §4, not by raising to a reader.
 - `SUPPORT_MATRIX`: an **ascending tuple of `(KernelVersion, MakedumpfileVersion)` rows** — the
-  characterized rule. v1 has one row: `(7.0, 1.7.9)`. `KNOWN_THROUGH: KernelVersion = (7.0)` is the
-  newest kernel whose requirement we have verified; `DEFAULT_KERNEL_BASIS = KNOWN_THROUGH` is the
-  basis used when the caller names no target kernel.
-- `min_makedumpfile_required(kernel) -> MakedumpfileVersion`: the `makedumpfile_min` of the highest
-  matrix row whose `kernel_min <= kernel`, or a floor (`0.0.0`) when the kernel predates every row
-  (monotonic: an older kernel needs an older-or-equal makedumpfile, and every catalog image ships
-  *some* makedumpfile).
+  characterized rule, each row meaning "a kernel in this row's `major.minor` line (up to the next
+  row) needs `>= makedumpfile_min`". v1 has one row: `(7.0, 1.7.9)`. `KNOWN_THROUGH: KernelVersion =
+  7.0` is the newest kernel line whose requirement we have verified; `DEFAULT_KERNEL_BASIS =
+  KNOWN_THROUGH` is the basis used when the caller names no target kernel. The highest row's
+  `makedumpfile_min` is `MAX_CHARACTERIZED_REQUIREMENT` (the requirement at `KNOWN_THROUGH`).
+- `required_makedumpfile(kernel) -> MakedumpfileVersion | None`: the `makedumpfile_min` of the
+  highest row whose `kernel_min <= kernel` (on `major.minor`), or `None` when the kernel is **below
+  every characterized row** (no floor — an un-characterized old kernel has no asserted requirement).
 - `KdumpCapability` result (frozen): `status` ∈ `capable | incapable | unverified | not_applicable`,
   `target_kernel`, `makedumpfile_version | None`, `min_makedumpfile_required | None`, and a `note`
   (the ChangeLog pointer for `unverified`).
-- `kdump_capability(*, makedumpfile_version, target_kernel, kdump_tooling) -> KdumpCapability`:
+- `kdump_capability(*, makedumpfile_version, target_kernel, kdump_tooling) -> KdumpCapability`, in
+  this order:
   - `kdump_tooling is False` (image has no `"kdump"` tag) → `not_applicable`.
-  - `makedumpfile_version is None` (not captured / pre-feature row) → `unverified`, note: rebuild to
-    capture the version.
-  - `target_kernel > KNOWN_THROUGH` → `unverified`, note: "makedumpfile `<v>` shipped; the minimum
-    for kernel `<k>` is unverified — check the makedumpfile ChangeLog", `min_makedumpfile_required`
-    omitted (`None`).
-  - otherwise → `capable`/`incapable` from `makedumpfile_version >= min_makedumpfile_required(target_kernel)`.
+  - `makedumpfile_version` is `None` or unparseable → `unverified`, note: rebuild to capture / odd
+    version string (§4).
+  - `target_kernel.major_minor > KNOWN_THROUGH` → `unverified`, note: "makedumpfile `<v>` shipped;
+    the minimum for kernel `<k>` is unverified — check the makedumpfile ChangeLog",
+    `min_makedumpfile_required` omitted (`None`).
+  - else `req = required_makedumpfile(target_kernel)`:
+    - `req is not None` (target falls in a characterized row) →
+      `capable`/`incapable` from `makedumpfile_version >= req`.
+    - `req is None` (target is **older than every characterized row**) → a confident answer is
+      possible only one way: if `makedumpfile_version >= MAX_CHARACTERIZED_REQUIREMENT` the image
+      supports kernels up to `KNOWN_THROUGH >= target`, so → `capable`. Otherwise the minimum for
+      this un-characterized older kernel is unknown → `unverified` (note: requirement for kernel
+      `<k>` not characterized — check the makedumpfile ChangeLog). This is the safety fix: a low
+      makedumpfile against a mid-range kernel is **never** assumed capable from a floor, because
+      makedumpfile's kernel support is an *upper* bound, not a lower one.
 
 The ChangeLog pointer is a single module constant (the upstream makedumpfile ChangeLog URL).
 
 ### 2. Per-image makedumpfile version captured at build (`provenance["makedumpfile_version"]`)
 
-A dedicated, family-neutral build-time **binary probe** — because `package_versions` cannot see the
-EL8/EL9 bundled case. A `MakedumpfileProbeSeam = Callable[[Path], str | None]` injected into each
-plane's build-tools dataclass (mirroring #829's `VersionInspectSeam`), defaulting to a real
-implementation that runs `makedumpfile --version` against the built image read-only (the validation
-`guestfish`/`virt-inspector` seam pattern, so unit tests inject a fake and need no libguestfs) and
-parses the dotted version.
+A family-neutral build-time **makedumpfile-version probe** — because `package_versions` cannot see
+the EL8/EL9 bundled case (makedumpfile inside `kexec-tools`). The version resolves in two steps,
+authoritative-then-fallback:
 
-- Each plane probes the same image it already inspects for `package_versions` (local: the customized
-  `scratch` before the ext4 repack; remote: the `virt-builder` output) and writes
-  `provenance["makedumpfile_version"] = "<v>"`.
+1. **Run `makedumpfile --version` during the build's existing guest-command step and capture it to a
+   marker file**, then read the marker back with the existing read-only `guestfish`/inspect seam.
+   The local plane already runs `virt-customize` (executes guest commands) and the build already
+   stages readiness markers under `/usr/lib/kdive/` (`drgn-ready`, `allowlisted-helpers`); this adds
+   `makedumpfile --version > /usr/lib/kdive/makedumpfile-version 2>/dev/null || true` to the same
+   `--run-command` set, then reads that file. This reuses **already-proven** mechanisms (guest
+   `--run-command`; read-only file read) rather than executing a guest ELF against a read-only mount
+   — a mechanism nothing in the codebase exercises today. The probe is a
+   `MakedumpfileProbeSeam = Callable[[Path], str | None]` injected into the build-tools dataclass
+   (mirroring #829's `VersionInspectSeam`), so unit tests inject a fake and need no libguestfs.
+2. **Fallback:** when step 1 yields nothing (empty marker / `makedumpfile` not on `PATH`), fall back
+   to `package_versions["makedumpfile"]` if `package_versions` captured it (Fedora/Debian, where
+   makedumpfile is a standalone package). Only when **both** are empty is the field omitted.
+
+- `provenance["makedumpfile_version"] = "<v>"` is the parsed dotted version (the marker's raw
+  `makedumpfile: version X` line is parsed by the shared §1 parser before recording).
 - **Degrade, do not fail the build.** The probe is advisory provenance, exactly like #829's version
-  capture: probe failure / absent tool → log a WARNING, omit the field, publish the image. Only new
-  builds populate it; older rows omit it (`describe` then computes `unverified`). No schema change
-  (additive within the schemaless `provenance` jsonb).
-- The field is the authoritative makedumpfile version for the image (it may duplicate
-  `package_versions["makedumpfile"]` on Fedora/Debian; that is fine and consistent).
+  capture: probe failure / absent tool / unparseable output → log a WARNING, omit the field, publish
+  the image. Only new builds populate it; older rows omit it (`describe` then computes `unverified`).
+  No schema change (additive within the schemaless `provenance` jsonb).
+- **Live proof is required before merge** (this host runs `live_vm`): build at least one Fedora image
+  (standalone makedumpfile) and one EL8/EL9 image (bundled makedumpfile) and confirm
+  `provenance["makedumpfile_version"]` is populated and correct in both — the marker path on Fedora,
+  exercising the bundled-`kexec-tools` case on EL. Without that proof the feature could silently
+  degrade every image to `unverified` while looking healthy.
+- Scope: the probe is wired into the **local-libvirt** plane (where the kdump-capture path and the
+  `kdump_core_incomplete` failure live, the issue's `provider:local-libvirt`). The remote plane
+  already records `package_versions`; it inherits the field via the §1 fallback where makedumpfile is
+  a standalone package and otherwise omits it (no remote kdump-capture path depends on this).
 
 ### 3. The recipe catalog records the version, not a bit
 
@@ -157,6 +190,11 @@ The recipe-catalog `makedumpfile_version` is the curated *expectation*; `provena
 ```
 
 - `makedumpfile_version` is read from `entry.provenance["makedumpfile_version"]` (`""` when absent).
+  `data.kdump.makedumpfile_version` echoes the **raw stored string** for transparency. If the stored
+  string is present but does not parse (an odd makedumpfile build / future format), the capability
+  degrades to `unverified` (note: stored makedumpfile version `<raw>` is unrecognized) — a reader
+  never raises on image data; only the caller-supplied `target_kernel` can be a
+  `configuration_error`.
 - `kdump_tooling` is `"kdump" in entry.capabilities`.
 - `target_kernel` is the parsed parameter, or `DEFAULT_KERNEL_BASIS` when omitted; the echoed value
   is always the basis the answer was computed against (criterion: never a bare kernel-independent
