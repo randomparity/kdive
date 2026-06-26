@@ -238,3 +238,150 @@ def test_install_fixtures_refuses_overwrite_without_force(tmp_path: Path) -> Non
         install_fixtures(fixture_dest)
 
     install_fixtures(fixture_dest, force=True)
+
+
+def _seed_rows(url: str, *, budget: bool, quota: bool, project: str = "demo") -> None:
+    """Apply the budget and/or quota seed upserts to ``url`` for ``project``."""
+    statements = seed_project_statements(
+        project=project,
+        limit_kcu=Decimal("1000000"),
+        max_concurrent_allocations=4,
+        max_concurrent_systems=4,
+    )
+    budget_sql, quota_sql = statements[0], statements[1]
+    chosen = ([budget_sql] if budget else []) + ([quota_sql] if quota else [])
+    with psycopg.connect(url, autocommit=True) as conn:
+        for sql, params in chosen:
+            conn.execute(sql.encode(), params)
+
+
+def test_redact_database_url_masks_url_password() -> None:
+    from kdive.admin.bootstrap import redact_database_url
+
+    secret = "p4ss-w0rd"  # noqa: S105 # pragma: allowlist secret - test literal
+    redacted = redact_database_url(f"postgresql://kdive:{secret}@db.example:5432/kdive")
+
+    assert secret not in redacted
+    assert "***" in redacted
+    assert "db.example" in redacted
+    assert "5432" in redacted
+    assert "/kdive" in redacted
+
+
+def test_redact_database_url_leaves_passwordless_url_unchanged() -> None:
+    from kdive.admin.bootstrap import redact_database_url
+
+    url = "postgresql://kdive@db.example:5432/kdive"
+    assert redact_database_url(url) == url
+    assert "***" not in redact_database_url(url)
+
+
+def test_redact_database_url_masks_conninfo_password_token() -> None:
+    from kdive.admin.bootstrap import redact_database_url
+
+    secret = "s3cr3t"  # noqa: S105 # pragma: allowlist secret - test literal
+    redacted = redact_database_url(f"host=db.example dbname=kdive password={secret}")
+
+    assert secret not in redacted
+    assert "db.example" in redacted
+
+
+def test_verify_project_both_rows_present(
+    monkeypatch: pytest.MonkeyPatch, migrated_url: str
+) -> None:
+    from kdive.admin.bootstrap import verify_project
+
+    _seed_rows(migrated_url, budget=True, quota=True)
+    monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)
+
+    status = asyncio.run(verify_project(project="demo"))
+
+    assert status.budget_present is True
+    assert status.quota_present is True
+    assert status.funded is True
+    assert status.limit_kcu == Decimal("1000000")
+    assert status.spent_kcu == Decimal("0")
+    assert status.max_concurrent_allocations == 4
+    assert status.occupancy == 0
+
+
+def test_verify_project_missing_budget(monkeypatch: pytest.MonkeyPatch, migrated_url: str) -> None:
+    from kdive.admin.bootstrap import verify_project
+
+    _seed_rows(migrated_url, budget=False, quota=True)
+    monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)
+
+    status = asyncio.run(verify_project(project="demo"))
+
+    assert status.budget_present is False
+    assert status.quota_present is True
+    assert status.funded is False
+    assert status.limit_kcu is None
+
+
+def test_verify_project_missing_quota(monkeypatch: pytest.MonkeyPatch, migrated_url: str) -> None:
+    from kdive.admin.bootstrap import verify_project
+
+    _seed_rows(migrated_url, budget=True, quota=False)
+    monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)
+
+    status = asyncio.run(verify_project(project="demo"))
+
+    assert status.budget_present is True
+    assert status.quota_present is False
+    assert status.funded is False
+    assert status.max_concurrent_allocations is None
+
+
+def test_verify_project_neither_row(monkeypatch: pytest.MonkeyPatch, migrated_url: str) -> None:
+    from kdive.admin.bootstrap import verify_project
+
+    monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)
+
+    status = asyncio.run(verify_project(project="demo"))
+
+    assert status.budget_present is False
+    assert status.quota_present is False
+    assert status.funded is False
+
+
+def test_format_verify_result_funded_returns_zero() -> None:
+    from kdive.admin.bootstrap import ProjectFundingStatus, format_verify_result
+
+    status = ProjectFundingStatus(
+        budget_present=True,
+        quota_present=True,
+        limit_kcu=Decimal("1000000"),
+        spent_kcu=Decimal("0"),
+        max_concurrent_allocations=4,
+        occupancy=0,
+    )
+    message, code = format_verify_result(
+        status, project="demo", redacted_url="postgresql://kdive:***@db/kdive"
+    )
+
+    assert code == 0
+    assert "demo" in message
+    assert "postgresql://kdive:***@db/kdive" in message
+    assert "1000000" in message
+
+
+def test_format_verify_result_missing_row_returns_nonzero() -> None:
+    from kdive.admin.bootstrap import ProjectFundingStatus, format_verify_result
+
+    status = ProjectFundingStatus(
+        budget_present=False,
+        quota_present=True,
+        limit_kcu=None,
+        spent_kcu=None,
+        max_concurrent_allocations=4,
+        occupancy=0,
+    )
+    message, code = format_verify_result(
+        status, project="demo", redacted_url="postgresql://kdive:***@db/kdive"
+    )
+
+    assert code != 0
+    assert "demo" in message
+    assert "budget" in message.lower()
+    assert "postgresql://kdive:***@db/kdive" in message
