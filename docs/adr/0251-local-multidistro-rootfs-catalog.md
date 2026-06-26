@@ -46,7 +46,11 @@ the kdump harvest disclose an incomplete core honestly.
 3. **Family customizer seam.** `images/families/` defines a `FamilyCustomizer` protocol
    (`packages`, `customize_argv`, `normalize`). The MVP ships `rhel` (Fedora, Rocky, CentOS
    Stream); the existing inline Fedora customization moves into it. `debian` and `suse` are added
-   by follow-up issues — the protocol exists now so those PRs are additive. A structured
+   by follow-up issues — the protocol exists now so those PRs are additive. (Realized in #824: the
+   `debian` family lands as `debian-kdive-ready-{12,13}` from sha256-pinned genericcloud qcow2s.
+   "Additive" held for the family/catalog/inventory, but Debian's init divergences required two
+   small generalizations of the shared seam — the kdump-unit ordering in point 6 and the `guest_mac`
+   provenance below.) A structured
    `kdump_capable` capability flag is deferred (YAGNI) to the first follow-up that renders it; the
    makedumpfile-vs-kernel limitation is conveyed at runtime by the incomplete-core remediation.
    (Realized in #823: the RHEL-family follow-up adds a required `kdump_capable: bool` to
@@ -83,6 +87,11 @@ the kdump harvest disclose an incomplete core honestly.
    (ordering against an absent unit is a no-op), and a kdump that fails to arm still releases
    readiness (point 5 discloses the capture-time failure), so provisioning never hangs.
 
+   The kdump unit name is **family-parameterized** (`FamilyCustomizer.kdump_unit`): `rhel` orders
+   after `kdump.service`, `debian` after `kdump-tools.service` (#824). Without this, the `After=`
+   edge on a Debian guest would name a non-existent unit — a no-op that silently reopens the race
+   point 6 closes, because "ordering against an absent unit is a no-op" cuts both ways.
+
 ## Consequences
 
 - The default local kdump path captures a complete core for a current from-source kernel on
@@ -99,7 +108,15 @@ the kdump harvest disclose an incomplete core honestly.
   separate pkgs), EL 8 enables EPEL for `drgn`, and the kdump-enable gate keys on `kexec-tools`, not
   the Fedora-only `kdump-utils`. None ship makedumpfile ≥ 1.7.9 yet, so all five disclose the
   incomplete-core remediation on the default `kdump` path; Fedora 44 stays the only kdump-capable
-  default.
+  default. Realized further in #824: Debian 12/13 land as two `debian` `cloud-image` rows. Debian's
+  divergences (apt; `kdump-tools.service`; `ssh.service`; `python3-drgn`; initramfs-tools not dracut;
+  AppArmor instead of SELinux, needing no relabel; `/etc/cloud/cloud-init.disabled` to disable
+  cloud-init version-proof across the Debian 13 unit rename) live in a distinct `debian`
+  `FamilyCustomizer`. Two shared seams generalized: the readiness unit's kdump ordering
+  (`FamilyCustomizer.kdump_unit`, point 6) and the build-pipeline `guest_selinux` provenance field,
+  now `guest_mac` (`selinux-permissive` for `rhel`, `apparmor` for `debian`). Both Debian entries ship
+  makedumpfile < 1.7.9 (1.7.2 / 1.7.6), so both disclose the incomplete-core remediation like the #823
+  rows.
 - A distro whose makedumpfile is older than the kernel-under-test still produces an incomplete
   core; the worker now returns a clear, actionable failure naming `host_dump`/newer-image rather
   than the opaque window-timeout message.

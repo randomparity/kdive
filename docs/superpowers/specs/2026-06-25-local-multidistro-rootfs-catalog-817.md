@@ -219,6 +219,101 @@ env-gated, non-CI path the image-lifecycle runbook describes); the install/boot/
 machinery is distro-agnostic and was proven on Fedora in the #817 MVP — the #823-specific risk was
 the EL package divergence (and its boot), proven above.
 
+## Follow-up realization: #824 — `debian` customizer + Debian 12/13 entries
+
+The second follow-up adds a `debian` `FamilyCustomizer` and two catalog rows
+(`debian-kdive-ready-12`, `debian-kdive-ready-13`) sourced from their **genericcloud qcow2s**
+(sha256-pinned `cloud-image` source, the same lane proven for Fedora 44 and the #823 EL entries).
+Unlike #823 (which reused `rhel`), Debian's packaging and init divergences need a distinct family;
+the divergences below are verified against the Debian package database and manpages (2026-06-26).
+
+### The load-bearing divergence: the kdump unit name (a generalization of point 6)
+
+Debian's kdump arms through **`kdump-tools.service`**, not RHEL's `kdump.service`. Point 6 closes the
+arm-vs-ready race by ordering the `kdive-ready` serial unit `After=kdump.service`. On Debian that edge
+would name a unit that does not exist — and "ordering against an absent unit is a no-op", so the race
+point 6 fixed would silently reopen: a `force_crash` on a just-`ready` Debian System could hit an
+unarmed kdump and capture nothing.
+
+The fix makes the readiness unit's kdump ordering **family-parameterized**. The `FamilyCustomizer`
+gains a `kdump_unit: str` attribute (`rhel` → `kdump.service`, `debian` → `kdump-tools.service`); the
+shared readiness unit is rendered with the family's unit so the `After=` edge always names the real
+kdump unit. `After=` stays pure ordering, so a build image without that unit is still unaffected.
+
+### `debian` packaging and customization (verified 2026-06-26)
+
+| concern | `rhel` | `debian` |
+|---|---|---|
+| install | dnf (`--install`) | apt (`--install`, same virt-customize verb) |
+| debug crash pkgs | `drgn kexec-tools makedumpfile kdump-utils keyutils openssh-server` | `makedumpfile kdump-tools crash python3-drgn openssh-server` |
+| kdump enable | `systemctl enable kdump.service` | `systemctl enable kdump-tools.service` + `USE_KDUMP=1` in `/etc/default/kdump-tools` |
+| capture initramfs | dracut (`kdumpctl`) | initramfs-tools (`update-initramfs`) |
+| NMI-panic sysctl | `kernel.unknown_nmi_panic=1` (generic) | `kernel.unknown_nmi_panic=1` (identical, shared constant) |
+| sshd unit | `sshd.service` | `ssh.service` |
+| drgn package | `drgn` (CLI) | `python3-drgn` (ships `/usr/bin/drgn`, so the `kdive-drgn` helper's `drgn -k` works) |
+| MAC | SELinux permissive + first-boot relabel | AppArmor — **no relabel** |
+
+Notes on the non-obvious choices:
+
+- **AppArmor handling in `normalize` is "no relabel".** AppArmor is profile-based (loaded from
+  `/etc/apparmor.d/` by `apparmor.service` at boot), not xattr-labeled like SELinux, so the
+  `virt-tar-out`/`virt-make-fs` repack does not strip it and no `/.autorelabel` is needed. The default
+  Debian policy leaves **sshd unconfined**, so a host-injected `/root/.ssh/authorized_keys` is not
+  blocked. Debian genericcloud ships **no `/etc/selinux/config`**, so the `debian` `normalize` does
+  the fstab/crypttab rewrite only and deliberately touches neither SELinux nor AppArmor. The provenance
+  records this: the build-pipeline `guest_selinux` field is generalized to **`guest_mac`** (`rhel` →
+  `selinux-permissive`, `debian` → `apparmor`), exposed by the family.
+
+- **cloud-init disable is version-proof.** Debian 13's newer cloud-init renamed
+  `cloud-init.service` → `cloud-init-network.service`, so masking a fixed unit-name list would silently
+  miss a stage on trixie. The `debian` lane instead drops **`/etc/cloud/cloud-init.disabled`** (cloud-init
+  checks for this file and no-ops regardless of unit names) — one write, correct on both releases.
+
+- **machine-id seed (cloud-image only).** Debian genericcloud ships an empty `/etc/machine-id`, which
+  systemd treats as first boot and runs `preset-all`, which can reset `kdump-tools.service` to its
+  vendor preset — the same hazard that disabled kdump on Fedora Cloud. The lane seeds the same fixed
+  machine-id the `rhel` lane uses, so kdump stays armed on first boot.
+
+- **No NetworkManager keyfile.** Debian genericcloud uses ifupdown + cloud-init's
+  `cloud-ifupdown-helper`, which DHCPs each NIC automatically; it does not ship NetworkManager, so the
+  `rhel` SSH-NIC NM keyfile (ADR-0218) would be inert. The `debian` debug image stages the reviewed
+  `kdive-drgn` helper (the introspection contract) but **not** the NM keyfile — the extra SSH NIC the
+  drgn-live transport renders is DHCP'd by the cloud helper.
+
+### `kdump_capable` — both Debian entries are `false`
+
+| catalog name | base | makedumpfile (build-time) | source | `kdump_capable` (v7.0) |
+|---|---|---|---|---|
+| `debian-kdive-ready-12` | Debian 12 (bookworm) | 1.7.2 | bookworm `makedumpfile 1:1.7.2` | false |
+| `debian-kdive-ready-13` | Debian 13 (trixie) | 1.7.6 | trixie `makedumpfile 1:1.7.6` | false |
+
+Neither ships makedumpfile ≥ 1.7.9, so both disclose the cause-neutral `kdump_core_incomplete`
+remediation on the default `kdump` path for the v7.0-class kernel-under-test — the same posture as every
+#823 entry. Their lifecycle proof covers provision/build/install/boot/`host_dump`; Fedora 44 remains the
+only kdump-capable default. The per-row makedumpfile snapshot is added to the
+`tests/images/test_rootfs_catalog.py` guard so a flag flipped without bumping the documented version fails.
+
+**Post-dump action.** Debian's kdump-tools has no `final_action poweroff` analog (RHEL pins it so the
+guest self-shuts-off, the host harvest's reliable completion signal); Debian governs capture-kernel
+reboot/halt via the generic `kernel.panic` sysctl. For a `kdump_capable = false` entry the default
+`kdump` path lands on the incomplete-core remediation regardless, and `host_dump` (host-side QEMU
+`dump-guest-memory`) is the proven capture and does not depend on in-guest kdump timing — so the
+`debian` customizer enables kdump-tools and sets `USE_KDUMP=1`/the NMI sysctl (enough for kdump to arm
+and leave a `vmcore-incomplete`) without pinning a poweroff action. A Debian poweroff-on-dump pin is left
+to the follow-up that first ships a kdump-capable Debian (makedumpfile ≥ 1.7.9).
+
+### Naming, registration, and live-proof
+
+Rows follow the convention: `debian-kdive-ready-{12,13}` (`distro = "debian"`, `version = "12"`/`"13"`,
+`family = "debian"`), sourced from the **versioned** genericcloud serial qcow2 (not the rotating
+`latest/` path, whose content changes on each point release and would break the sha256 pin), pinned by
+sha256 computed from the downloaded image and cross-checked against Debian's published `SHA512SUMS`. Each
+registers in the inventory example the way the #823 entries do. The build lifecycle is live-proven on the
+KVM host (`build-fs --image <name>`: real download + sha256-verify + `virt-customize` + repack +
+guestfish normalize + publish, then guestfish inspection of the built rootfs), and an EL-style direct-kernel
+boot on the v7.0.0 kernel-under-test confirms the `kdive-ready` serial signal fires and kdump-tools arms;
+the remaining capture lifecycle runs through the operator live-stack harness as for #823.
+
 ## Architecture
 
 All changes are in the shared `images` layer and the local-libvirt provider.
