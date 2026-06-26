@@ -1,11 +1,11 @@
-"""Unit tests for the in-process local-libvirt rootfs build plane (M2.4/2, ADR-0092).
+"""Unit tests for the in-process local-libvirt rootfs build plane (M2.4/2, ADR-0092, ADR-0250).
 
-These cover the plane's orchestration and provenance contract without libguestfs or qemu: the
-slow tools (`virt-builder`, `virt-tar-out`, `virt-make-fs`, `guestfish`) are injected seams the
-tests stub. The real libguestfs path is exercised on the operator-run live-stack path. The
-acceptance that the produced qcow2 passes `virt-inspector` for the expected layout (whole-disk
-ext4, normalized fstab, no crypttab, guest SELinux off) is asserted by recording the guest-side
-operations the plane drives — the live path proves the layout, the unit path proves the wiring.
+These cover the plane's orchestration and provenance contract without libguestfs, qemu, or the
+network: every slow/external seam (``acquire_base``, the ``virt-customize`` runner, the repack, and
+the family's ``normalize``) is an injected stub the tests record. The real libguestfs path is
+exercised on the operator-run live-stack path. The plane now resolves the catalog row for
+``spec.name`` (falling back to a virt-builder template for an uncataloged old-style spec) and
+drives ``acquire base → virt-customize(family argv) → repack ext4 → family.normalize → output``.
 """
 
 from __future__ import annotations
@@ -17,13 +17,20 @@ from pathlib import Path
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.families import _fedora_customize
+from kdive.images.families._fedora_customize import SSH_NIC_KEYFILE_CONTENT
+from kdive.images.families.base import CustomizeContext, FamilyCustomizer
+from kdive.images.families.rhel import RhelFamily
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
-from kdive.providers.local_libvirt import rootfs_build
+from kdive.images.rootfs_catalog import (
+    CloudImageSource,
+    RootfsSource,
+    VirtBuilderSource,
+    resolve_rootfs_entry,
+)
 from kdive.providers.local_libvirt.rootfs_build import (
     LocalLibvirtRootfsBuildPlane,
     RootfsBuildTools,
-    _real_virt_builder,
+    family_for,
 )
 
 
@@ -34,7 +41,7 @@ def _spec(**overrides: object) -> RootfsBuildSpec:
         "arch": "x86_64",
         "releasever": "43",
         "packages": ("openssh-server", "drgn"),
-        "source_image_digest": "sha256:fedora-43-template",
+        "source_image_digest": "ignored:caller-declared",
         "capabilities": ("agent", "kdump", "drgn"),
     }
     base.update(overrides)
@@ -42,60 +49,87 @@ def _spec(**overrides: object) -> RootfsBuildSpec:
 
 
 @dataclass
-class _RecordingTools:
-    """Stub seams that record the guest-side operations the plane drives."""
+class _FakeFamily:
+    """A FamilyCustomizer stub recording its calls into the shared recorder."""
+
+    rec: _Recorder
+    family: str = "rhel"
+
+    def packages(self, kind: str) -> tuple[str, ...]:
+        return ("marker-pkg",)
+
+    def customize_argv(self, ctx: CustomizeContext) -> list[str]:
+        self.rec.customize_ctxs.append(ctx)
+        return ["--install", "marker-pkg", "--run-command", "marker-customize"]
+
+    def normalize(self, qcow2: Path) -> None:
+        self.rec.order.append("normalize")
+        self.rec.normalize_calls.append(qcow2)
+
+
+@dataclass
+class _Recorder:
+    """Stub seams that record the staged build operations in call order."""
 
     authorized_key: Path
-    builder_calls: list[dict[str, object]] = field(default_factory=list)
+    order: list[str] = field(default_factory=list)
+    acquired_sources: list[RootfsSource] = field(default_factory=list)
+    customize_argvs: list[list[str]] = field(default_factory=list)
+    customize_ctxs: list[CustomizeContext] = field(default_factory=list)
     repack_calls: list[tuple[Path, Path]] = field(default_factory=list)
+    repack_sizes: list[str] = field(default_factory=list)
     normalize_calls: list[Path] = field(default_factory=list)
     payload: bytes = b"qcow2-bytes"
 
     def resolve_authorized_key(self) -> Path:
         return self.authorized_key
 
-    def virt_builder(
+    def acquire_base(
         self,
-        *,
-        distro: str,
-        releasever: str,
-        packages: tuple[str, ...],
-        authorized_key: Path,
+        source: RootfsSource,
         scratch: Path,
-        size: str,
+        *,
+        releasever: str,
+        arch: str,
+        virt_builder: object,
+        downloader: object,
     ) -> None:
         scratch.write_bytes(b"scratch")
-        self.builder_calls.append(
-            {
-                "distro": distro,
-                "releasever": releasever,
-                "packages": packages,
-                "authorized_key": authorized_key,
-                "size": size,
-            }
-        )
+        self.order.append("acquire")
+        self.acquired_sources.append(source)
 
-    repack_sizes: list[str] = field(default_factory=list)
+    def customize(self, qcow2: Path, argv: list[str]) -> None:
+        self.order.append("customize")
+        self.customize_argvs.append(argv)
 
     def repack_whole_disk_ext4(self, *, scratch: Path, qcow2: Path, size: str) -> None:
         qcow2.write_bytes(self.payload)
+        self.order.append("repack")
         self.repack_calls.append((scratch, qcow2))
         self.repack_sizes.append(size)
 
-    def normalize_guest(self, qcow2: Path) -> None:
-        self.normalize_calls.append(qcow2)
+    def family_for(self, name: str) -> FamilyCustomizer:
+        return _FakeFamily(self)
 
 
-def _plane(tmp_path: Path, tools: _RecordingTools) -> LocalLibvirtRootfsBuildPlane:
-    return LocalLibvirtRootfsBuildPlane(
-        workspace=tmp_path / "work",
-        tools=RootfsBuildTools(
-            resolve_authorized_key=tools.resolve_authorized_key,
-            virt_builder=tools.virt_builder,
-            repack_whole_disk_ext4=tools.repack_whole_disk_ext4,
-            normalize_guest=tools.normalize_guest,
-        ),
+def _tools(rec: _Recorder) -> RootfsBuildTools:
+    return RootfsBuildTools(
+        resolve_authorized_key=rec.resolve_authorized_key,
+        acquire_base=rec.acquire_base,
+        customize=rec.customize,
+        repack_whole_disk_ext4=rec.repack_whole_disk_ext4,
+        family_for=rec.family_for,
     )
+
+
+def _plane(tmp_path: Path, rec: _Recorder) -> LocalLibvirtRootfsBuildPlane:
+    return LocalLibvirtRootfsBuildPlane(workspace=tmp_path / "work", tools=_tools(rec))
+
+
+def _key(tmp_path: Path) -> Path:
+    key = tmp_path / "id.pub"
+    key.write_text("ssh-ed25519 AAAA kdive\n")
+    return key
 
 
 def test_default_workspace_is_the_managed_build_path() -> None:
@@ -106,10 +140,8 @@ def test_default_workspace_is_the_managed_build_path() -> None:
 
 
 def test_build_produces_qcow2_with_content_digest(tmp_path: Path) -> None:
-    key = tmp_path / "id.pub"
-    key.write_text("ssh-ed25519 AAAA kdive\n")
-    tools = _RecordingTools(authorized_key=key, payload=b"the-image-bytes")
-    out = _plane(tmp_path, tools).build(_spec())
+    rec = _Recorder(authorized_key=_key(tmp_path), payload=b"the-image-bytes")
+    out = _plane(tmp_path, rec).build(_spec())
 
     assert isinstance(out, RootfsBuildOutput)
     assert out.qcow2_path.exists()
@@ -118,137 +150,124 @@ def test_build_produces_qcow2_with_content_digest(tmp_path: Path) -> None:
     assert out.digest == expected, "image identity is the qcow2 content digest"
 
 
-def test_build_records_pinned_provenance(tmp_path: Path) -> None:
-    key = tmp_path / "id.pub"
-    key.write_text("ssh-ed25519 AAAA kdive\n")
-    tools = _RecordingTools(authorized_key=key)
-    out = _plane(tmp_path, tools).build(_spec(releasever="42", packages=("openssh-server",)))
+def test_build_drives_acquire_customize_repack_normalize_in_order(tmp_path: Path) -> None:
+    rec = _Recorder(authorized_key=_key(tmp_path))
+    out = _plane(tmp_path, rec).build(_spec())
 
-    # The provenance record is the plane's falsifiable contract (ADR-0092): pin every
-    # key and value so a dropped/renamed field or a swapped-in default is caught.
+    assert rec.order == ["acquire", "customize", "repack", "normalize"], (
+        "pipeline is acquire base → virt-customize → repack ext4 → family.normalize"
+    )
+    # The family customizer (not a hardcoded SELinux edit) builds the virt-customize argv.
+    assert rec.customize_argvs == [["--install", "marker-pkg", "--run-command", "marker-customize"]]
+    assert len(rec.repack_calls) == 1
+    scratch_path, staged_qcow2 = rec.repack_calls[0]
+    assert scratch_path.name == "scratch.qcow2", "the acquired scratch image is customized in place"
+    assert rec.repack_sizes == ["6G"], "the configured size flows to the repack stage"
+    assert rec.normalize_calls == [staged_qcow2], "the repacked image is normalized before publish"
+    assert out.qcow2_path.name == staged_qcow2.name
+
+
+def test_customize_context_threads_key_and_cloud_image_flag(tmp_path: Path) -> None:
+    rec = _Recorder(authorized_key=_key(tmp_path))
+    # fedora-kdive-ready-44 is a cloud-image catalog row; the flag must reach the customizer.
+    _plane(tmp_path, rec).build(_spec(name="fedora-kdive-ready-44"))
+    ctx = rec.customize_ctxs[0]
+    assert ctx.is_cloud_image is True
+    assert ctx.authorized_key == rec.authorized_key
+    assert ctx.readiness_unit_path.suffix == ".service"
+
+    rec2 = _Recorder(authorized_key=_key(tmp_path))
+    _plane(tmp_path, rec2).build(_spec(name="fedora-kdive-ready-43"))
+    assert rec2.customize_ctxs[0].is_cloud_image is False, "a virt-builder row is not a cloud image"
+
+
+def test_provenance_source_digest_for_virt_builder_entry(tmp_path: Path) -> None:
+    rec = _Recorder(authorized_key=_key(tmp_path))
+    out = _plane(tmp_path, rec).build(_spec(name="fedora-kdive-ready-43", releasever="42"))
+    entry = resolve_rootfs_entry("fedora-kdive-ready-43")
+    assert isinstance(entry.source, VirtBuilderSource)
     assert out.provenance == {
         "plane": "local-libvirt",
         "distro": "fedora",
         "releasever": "42",
-        "packages": ["openssh-server"],
-        "source_image_digest": "sha256:fedora-43-template",
+        "packages": ["openssh-server", "drgn"],
+        "source_image_digest": f"virt-builder:{entry.source.template}",
         "capabilities": ["agent", "kdump", "drgn"],
         "arch": "x86_64",
         "image_size": "6G",
         "authorized_key_name": "id.pub",
         "readiness_marker": "kdive-ready",
         "layout": "whole-disk-ext4-qcow2",
-        "guest_selinux": "disabled",
+        "guest_selinux": "permissive",
     }
+    assert rec.acquired_sources == [entry.source], "the catalog source is acquired"
 
 
-def test_build_drives_the_layout_stages_in_order(tmp_path: Path) -> None:
-    key = tmp_path / "id.pub"
-    key.write_text("ssh-ed25519 AAAA kdive\n")
-    tools = _RecordingTools(authorized_key=key)
-    out = _plane(tmp_path, tools).build(_spec())
+def test_provenance_source_digest_for_cloud_image_entry(tmp_path: Path) -> None:
+    rec = _Recorder(authorized_key=_key(tmp_path))
+    out = _plane(tmp_path, rec).build(_spec(name="fedora-kdive-ready-44", releasever="44"))
+    entry = resolve_rootfs_entry("fedora-kdive-ready-44")
+    assert isinstance(entry.source, CloudImageSource)
+    expected = f"cloud-image:{entry.source.url}@sha256:{entry.source.sha256}"
+    assert out.provenance["source_image_digest"] == expected
+    assert rec.acquired_sources == [entry.source]
 
-    assert len(tools.builder_calls) == 1, "virt-builder customizes the scratch image once"
-    assert tools.builder_calls[0]["distro"] == "fedora"
-    assert tools.builder_calls[0]["releasever"] == "43"
-    assert tools.builder_calls[0]["packages"] == ("openssh-server", "drgn")
-    assert tools.builder_calls[0]["authorized_key"] == key
-    assert tools.builder_calls[0]["size"] == "6G", "configured size flows to virt-builder"
-    assert len(tools.repack_calls) == 1, "repacked to a whole-disk ext4 qcow2 once"
-    scratch_path, staged_qcow2 = tools.repack_calls[0]
-    assert scratch_path.name == "scratch.qcow2", "the customized scratch image is repacked"
-    assert tools.repack_sizes == ["6G"], "the configured size flows to the repack stage"
-    assert tools.normalize_calls == [staged_qcow2], (
-        "fstab/crypttab/SELinux normalized before publish"
-    )
-    assert out.qcow2_path.name == staged_qcow2.name
+
+def test_build_falls_back_to_virt_builder_for_uncataloged_name(tmp_path: Path) -> None:
+    # An old-style spec whose name is absent from the catalog still builds: the plane synthesizes
+    # a virt-builder:<distro>-<releasever> source so the legacy CLI stays green (Task 6 moves it).
+    rec = _Recorder(authorized_key=_key(tmp_path))
+    spec = _spec(name="legacy-image-99", distro="fedora", releasever="41")
+    out = _plane(tmp_path, rec).build(spec)
+    assert rec.acquired_sources == [VirtBuilderSource(template="fedora-41")]
+    assert out.provenance["source_image_digest"] == "virt-builder:fedora-41"
 
 
 def test_build_fails_fast_when_authorized_key_unresolved(tmp_path: Path) -> None:
     key = tmp_path / "missing.pub"  # never created
-    tools = _RecordingTools(authorized_key=key)
+    rec = _Recorder(authorized_key=key)
     with pytest.raises(CategorizedError) as exc:
-        _plane(tmp_path, tools).build(_spec())
+        _plane(tmp_path, rec).build(_spec())
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert str(exc.value) == (
         "resolved SSH public key is not a readable file; cannot build the rootfs image"
     )
     assert exc.value.details == {"authorized_key": str(key)}
-    assert not tools.builder_calls, "no libguestfs stage runs without a resolvable key"
+    assert rec.order == [], "no build stage runs without a resolvable key"
 
 
 @pytest.mark.parametrize("bad_name", ["../escape", "a/b", ".hidden", "-leading", "with space"])
 def test_build_rejects_a_name_that_would_escape_the_workspace(
     tmp_path: Path, bad_name: str
 ) -> None:
-    key = tmp_path / "id.pub"
-    key.write_text("ssh-ed25519 AAAA kdive\n")
-    tools = _RecordingTools(authorized_key=key)
+    rec = _Recorder(authorized_key=_key(tmp_path))
     with pytest.raises(CategorizedError) as exc:
-        _plane(tmp_path, tools).build(_spec(name=bad_name))
+        _plane(tmp_path, rec).build(_spec(name=bad_name))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert not tools.builder_calls, "an unsafe name is rejected before any libguestfs stage runs"
+    assert rec.order == [], "an unsafe name is rejected before any build stage runs"
 
 
-def _capture_virt_builder_argv(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, packages: tuple[str, ...]
+def test_family_for_resolves_rhel_and_rejects_unknown() -> None:
+    assert isinstance(family_for("rhel"), RhelFamily)
+    with pytest.raises(CategorizedError) as exc:
+        family_for("plan9")
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["family"] == "plan9"
+
+
+def _rhel_argv(
+    tmp_path: Path, *, packages: tuple[str, ...], is_cloud_image: bool = False
 ) -> list[str]:
-    """Drive the real virt-builder seam with a stubbed runner and return the argv it built."""
-    captured: list[list[str]] = []
-
-    def _fake_run_guestfs_tool(argv: list[str], **_: object) -> None:
-        captured.append(argv)
-
-    monkeypatch.setattr(rootfs_build, "run_guestfs_tool", _fake_run_guestfs_tool)
-    key = tmp_path / "id.pub"
-    key.write_text("ssh-ed25519 AAAA kdive\n")
-    _real_virt_builder(
-        distro="fedora",
-        releasever="43",
+    """Build the rhel customizer argv the plane feeds virt-customize, without running libguestfs."""
+    ctx = CustomizeContext(
+        kind="debug",
         packages=packages,
-        authorized_key=key,
-        scratch=tmp_path / "scratch.qcow2",
-        size="6G",
+        authorized_key=tmp_path / "id.pub",
+        readiness_unit_path=tmp_path / "kdive-ready.service",
+        is_cloud_image=is_cloud_image,
+        cleanup=[],
     )
-    assert len(captured) == 1, "virt-builder runs once"
-    return captured[0]
-
-
-def test_virt_builder_stages_nmi_panic_sysctl_for_a_kdump_image(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A kdump image must panic on the NMI `control.force_crash` injects; without this sysctl the
-    # guest ignores it and kdump never triggers (ADR-0213, #688, mirrors remote ADR-0084).
-    argv = _capture_virt_builder_argv(monkeypatch, tmp_path, packages=("kdump-utils",))
-    assert "--write" in argv
-    write_value = argv[argv.index("--write") + 1]
-    assert write_value == "/etc/sysctl.d/99-kdive-kdump.conf:kernel.unknown_nmi_panic=1\n"
-
-
-def test_virt_builder_pins_kdump_final_action_to_poweroff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The host-side harvest waits for the guest to self-shut-off after dumping (ADR-0217); pinning
-    # kdump `final_action poweroff` makes VIR_DOMAIN_SHUTOFF the reliable completion signal instead
-    # of Fedora's default `reboot`, which never self-shuts-off. kdump.conf accepts only
-    # reboot/halt/poweroff — `shutdown` is rejected (`[FAILED]`, kdump never arms; #705 regression).
-    argv = _capture_virt_builder_argv(monkeypatch, tmp_path, packages=("kdump-utils",))
-    joined = " ".join(argv)
-    assert "final_action poweroff" in joined
-    assert "final_action shutdown" not in joined
-    assert "/etc/kdump.conf" in joined
-
-
-def test_virt_builder_omits_nmi_panic_sysctl_for_a_non_kdump_image(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A non-kdump (e.g. build-host) image never runs force_crash; a stray NMI must not panic it,
-    # so the sysctl is gated on the same kdump-utils condition that enables kdump.service.
-    argv = _capture_virt_builder_argv(monkeypatch, tmp_path, packages=("gcc", "make"))
-    joined = " ".join(argv)
-    assert "unknown_nmi_panic" not in joined
-    assert "99-kdive-kdump.conf" not in joined
-    assert "final_action" not in joined
+    return RhelFamily().customize_argv(ctx)
 
 
 def _upload_target(argv: list[str], guest_path: str) -> str:
@@ -259,74 +278,53 @@ def _upload_target(argv: list[str], guest_path: str) -> str:
     raise AssertionError(f"no --upload arg targets {guest_path}: {argv}")
 
 
-def test_virt_builder_stages_kdive_drgn_helper_for_a_debug_image(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_family_argv_omits_nmi_panic_sysctl_for_a_non_kdump_image(tmp_path: Path) -> None:
+    # A non-kdump (e.g. build-host) image never runs force_crash; a stray NMI must not panic it,
+    # so the sysctl is gated on the same kdump-utils condition that enables kdump.service.
+    joined = " ".join(_rhel_argv(tmp_path, packages=("gcc", "make")))
+    assert "unknown_nmi_panic" not in joined
+    assert "99-kdive-kdump.conf" not in joined
+    assert "final_action" not in joined
+
+
+def test_family_argv_stages_kdive_drgn_helper_for_a_debug_image(tmp_path: Path) -> None:
     # The live `introspect.run` path SSH-execs `/usr/local/sbin/kdive-drgn <helper>` in the guest
-    # (ADR-0219/0220, #724). The debug image (drgn in packages) must stage the repo's reviewed
-    # reference helper read-executable so a live attach can run it; absent → DEBUG_ATTACH_FAILURE.
-    argv = _capture_virt_builder_argv(monkeypatch, tmp_path, packages=("drgn",))
+    # (ADR-0219/0220, #724). The debug image (drgn in packages) stages the repo's reviewed reference
+    # helper read-executable so a live attach can run it; absent → DEBUG_ATTACH_FAILURE.
+    argv = _rhel_argv(tmp_path, packages=("drgn",))
     helper_src = _upload_target(argv, "/usr/local/sbin/kdive-drgn")
-    assert helper_src.endswith("deploy/remote-libvirt-guest-helpers/kdive-drgn"), (
-        "the uploaded helper is the repo's reviewed reference implementation"
-    )
+    assert helper_src.endswith("deploy/remote-libvirt-guest-helpers/kdive-drgn")
     assert "chmod 0755 /usr/local/sbin/kdive-drgn" in argv, "helper is made read-executable"
 
 
-def test_virt_builder_stages_ssh_nic_dhcp_keyfile_for_a_debug_image(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The drgn-live SSH transport (ADR-0218) renders a SLIRP NIC the guest must DHCP to be
-    # reachable on root@127.0.0.1:<port>; without guest networking → TRANSPORT_FAILURE. The debug
-    # image stages an interface-name-independent NM keyfile, uploaded then chmod 0600 (NM ignores
-    # world-readable keyfiles) (ADR-0220, #724).
+def test_family_argv_stages_ssh_nic_dhcp_keyfile_for_a_debug_image(tmp_path: Path) -> None:
+    # The drgn-live SSH transport (ADR-0218) renders a SLIRP NIC the guest must DHCP to reach; the
+    # debug image stages an interface-name-independent NM keyfile, uploaded then chmod 0600.
     keyfile = "/etc/NetworkManager/system-connections/kdive-ssh-nic.nmconnection"
-    argv = _capture_virt_builder_argv(monkeypatch, tmp_path, packages=("drgn",))
-    # An --upload arg targets the keyfile (the host source is a tempfile cleaned up post-run, so
-    # assert on the staged content constant — what the upload writes — not the transient path).
+    argv = _rhel_argv(tmp_path, packages=("drgn",))
     _upload_target(argv, keyfile)
-    assert "method=auto" in _fedora_customize.SSH_NIC_KEYFILE_CONTENT, "the keyfile DHCPs the NIC"
-    assert "interface-name" not in _fedora_customize.SSH_NIC_KEYFILE_CONTENT, (
-        "no interface-name → applies to any ethernet NIC under direct-kernel boot"
-    )
+    assert "method=auto" in SSH_NIC_KEYFILE_CONTENT, "the keyfile DHCPs the NIC"
+    assert "interface-name" not in SSH_NIC_KEYFILE_CONTENT
     assert f"chmod 0600 {keyfile}" in argv, "keyfile is mode 0600 so NM loads it"
 
 
-def test_virt_builder_omits_drgn_helper_and_keyfile_for_a_non_debug_image(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A non-debug (e.g. build-host) image carries no drgn and no introspection contract, so it
-    # gets neither the kdive-drgn helper nor the SSH-NIC keyfile — gated on `drgn in packages`.
-    argv = _capture_virt_builder_argv(monkeypatch, tmp_path, packages=("gcc", "make"))
-    joined = " ".join(argv)
+def test_family_argv_omits_drgn_helper_and_keyfile_for_a_non_debug_image(tmp_path: Path) -> None:
+    # A non-debug (e.g. build-host) image carries no drgn and no introspection contract, so it gets
+    # neither the kdive-drgn helper nor the SSH-NIC keyfile — gated on `drgn in packages`.
+    joined = " ".join(_rhel_argv(tmp_path, packages=("gcc", "make")))
     assert "kdive-drgn" not in joined
     assert "kdive-ssh-nic" not in joined
     assert "NetworkManager" not in joined
 
 
-def test_virt_builder_fails_loud_when_drgn_helper_source_is_absent(
+def test_family_argv_fails_loud_when_drgn_helper_source_is_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The helper is resolved from the source tree; an absent helper file must fail loud with a
-    # CONFIGURATION_ERROR before virt-builder runs, never silently ship a guest that cannot
-    # introspect (ADR-0220 D2, #724).
-    captured: list[list[str]] = []
+    # CONFIGURATION_ERROR rather than ship a guest that cannot introspect (ADR-0220 D2, #724).
+    import kdive.images.families._fedora_customize as fedora_customize
 
-    def _fake_run_guestfs_tool(argv: list[str], **_: object) -> None:
-        captured.append(argv)
-
-    monkeypatch.setattr(rootfs_build, "run_guestfs_tool", _fake_run_guestfs_tool)
-    monkeypatch.setattr(_fedora_customize, "drgn_helper_source", lambda: tmp_path / "missing")
-    key = tmp_path / "id.pub"
-    key.write_text("ssh-ed25519 AAAA kdive\n")
+    monkeypatch.setattr(fedora_customize, "drgn_helper_source", lambda: tmp_path / "missing")
     with pytest.raises(CategorizedError) as exc:
-        _real_virt_builder(
-            distro="fedora",
-            releasever="43",
-            packages=("drgn",),
-            authorized_key=key,
-            scratch=tmp_path / "scratch.qcow2",
-            size="6G",
-        )
+        _rhel_argv(tmp_path, packages=("drgn",))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert not captured, "virt-builder never runs when the reviewed helper is missing"
