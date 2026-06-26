@@ -1,0 +1,21 @@
+# Local-libvirt rootfs image catalog (ADR-0250). File-authoritative: build-fs --image <name>
+# resolves a row here. source.kind = "virt-builder" carries a template; "cloud-image" carries a
+# sha256-pinned url. family selects the FamilyCustomizer (rhel|debian|suse).
+
+[[image]]
+name = "fedora-kdive-ready-43"
+distro = "fedora"
+version = "43"
+family = "rhel"
+arch = "x86_64"
+kind = "debug"
+source = { kind = "virt-builder", template = "fedora-43" }
+
+[[image]]
+name = "fedora-kdive-ready-44"
+distro = "fedora"
+version = "44"
+family = "rhel"
+arch = "x86_64"
+kind = "debug"
+source = { kind = "cloud-image", url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2", sha256 = "28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f" }  # pragma: allowlist secret
