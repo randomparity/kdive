@@ -77,3 +77,27 @@ arch = "x86_64"
 kind = "debug"
 kdump_capable = false  # makedumpfile 1.7.8 (separate pkg, el10) < 1.7.9
 source = { kind = "cloud-image", url = "https://cloud.centos.org/centos/10-stream/x86_64/images/CentOS-Stream-GenericCloud-10-20260622.0.x86_64.qcow2", sha256 = "508a48761d1a28c98046256e8f77b0ea34d751791a5629bb216743ef98526d0b" }  # pragma: allowlist secret
+
+# Debian-family entries (Debian 12 bookworm + 13 trixie, ADR-0251 / #824), built via
+# `build-fs --image <name>` from their sha256-pinned genericcloud bases (versioned serial paths, not
+# the rotating `latest/`). Both ship makedumpfile < 1.7.9, so both hit the kdump_core_incomplete
+# remediation for a v7.0-class kernel — use `method="host_dump"` (or fedora-kdive-ready-44) there.
+[[image]]
+name = "debian-kdive-ready-12"
+distro = "debian"
+version = "12"
+family = "debian"
+arch = "x86_64"
+kind = "debug"
+kdump_capable = false  # makedumpfile 1.7.2 (bookworm) < 1.7.9
+source = { kind = "cloud-image", url = "https://cloud.debian.org/images/cloud/bookworm/20260615-2510/debian-12-genericcloud-amd64-20260615-2510.qcow2", sha256 = "59f936c9f8f9b467585c126661370c14ccfffe824928a066da282788cc3d330c" }  # pragma: allowlist secret
+
+[[image]]
+name = "debian-kdive-ready-13"
+distro = "debian"
+version = "13"
+family = "debian"
+arch = "x86_64"
+kind = "debug"
+kdump_capable = false  # makedumpfile 1.7.6 (trixie) < 1.7.9
+source = { kind = "cloud-image", url = "https://cloud.debian.org/images/cloud/trixie/20260623-2518/debian-13-genericcloud-amd64-20260623-2518.qcow2", sha256 = "e32d03ec8f05b0b3a4c16e8cc0a5424efa78514141a60a2656623cf422cc6416" }  # pragma: allowlist secret

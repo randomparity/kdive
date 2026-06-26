@@ -29,6 +29,8 @@ _MAKEDUMPFILE_BY_NAME: dict[str, tuple[int, int, int]] = {
     "rocky-kdive-ready-8": (1, 7, 2),
     "centos-stream-kdive-ready-10": (1, 7, 8),
     "centos-stream-kdive-ready-9": (1, 7, 6),
+    "debian-kdive-ready-12": (1, 7, 2),
+    "debian-kdive-ready-13": (1, 7, 6),
 }
 _V7_THRESHOLD = (1, 7, 9)
 
@@ -55,7 +57,14 @@ def test_loads_all_rhel_family_entries() -> None:
     } <= set(cat)
 
 
-def test_rhel_entries_are_sha256_pinned_cloud_images() -> None:
+def test_loads_debian_entries() -> None:
+    cat = load_rootfs_catalog()
+    assert {"debian-kdive-ready-12", "debian-kdive-ready-13"} <= set(cat)
+    for name in ("debian-kdive-ready-12", "debian-kdive-ready-13"):
+        assert cat[name].family == "debian", name
+
+
+def test_cloud_image_entries_are_sha256_pinned() -> None:
     cat = load_rootfs_catalog()
     for name in _MAKEDUMPFILE_BY_NAME:
         if name.startswith("fedora-kdive-ready-43"):
