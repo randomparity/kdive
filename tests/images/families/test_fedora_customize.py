@@ -16,7 +16,7 @@ def test_makedumpfile_marker_args_writes_version_file() -> None:
     joined = " ".join(argv)
     assert "--run-command" in argv
     assert MAKEDUMPFILE_MARKER_GUEST_PATH in joined
-    assert "makedumpfile --version" in joined
+    assert "makedumpfile -v" in joined
 
 
 def _after_targets(unit: str) -> list[str]:
