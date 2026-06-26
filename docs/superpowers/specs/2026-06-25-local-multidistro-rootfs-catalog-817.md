@@ -247,7 +247,7 @@ kdump unit. `After=` stays pure ordering, so a build image without that unit is 
 | install | dnf (`--install`) | apt (`--install`, same virt-customize verb) |
 | debug crash pkgs | `drgn kexec-tools makedumpfile kdump-utils keyutils openssh-server` | `makedumpfile kdump-tools crash python3-drgn openssh-server` |
 | kdump enable | `systemctl enable kdump.service` | `systemctl enable kdump-tools.service` + `USE_KDUMP=1` in `/etc/default/kdump-tools` |
-| capture initramfs | dracut (`kdumpctl`) | initramfs-tools (`update-initramfs`) |
+| capture initramfs | dracut (`kdumpctl`, in-guest at boot) | initramfs-tools (`update-initramfs`, in-guest at boot) |
 | NMI-panic sysctl | `kernel.unknown_nmi_panic=1` (generic) | `kernel.unknown_nmi_panic=1` (identical, shared constant) |
 | sshd unit | `sshd.service` | `ssh.service` |
 | drgn package | `drgn` (CLI) | `python3-drgn` (ships `/usr/bin/drgn`, so the `kdive-drgn` helper's `drgn -k` works) |
@@ -280,6 +280,18 @@ Notes on the non-obvious choices:
   `kdive-drgn` helper (the introspection contract) but **not** the NM keyfile — the extra SSH NIC the
   drgn-live transport renders is DHCP'd by the cloud helper.
 
+- **`update-initramfs` is a runtime mechanism, not a customize-time step.** Like the `rhel` lane
+  (which never runs dracut at customize time), the `debian` customizer does **not** invoke
+  `update-initramfs` during the build: at build time there is no target `/lib/modules/<v7.0>` (the
+  install plane injects those), so a customize-time rebuild would produce a useless capture initramfs.
+  `kdump-tools` builds the capture initrd in-guest at boot via initramfs-tools, the analog of
+  `kdumpctl`/dracut on `rhel`.
+
+- **The `guest_selinux` to `guest_mac` provenance rename has no contract blast radius.** Provenance is
+  a falsifiable build record, not a typed API; the only in-tree reader of `guest_selinux` is the
+  build-plane provenance unit test (verified by grep). New rows carry `guest_mac`; the rename does not
+  affect any persisted contract or downstream consumer.
+
 ### `kdump_capable` — both Debian entries are `false`
 
 | catalog name | base | makedumpfile (build-time) | source | `kdump_capable` (v7.0) |
@@ -310,9 +322,15 @@ Rows follow the convention: `debian-kdive-ready-{12,13}` (`distro = "debian"`, `
 sha256 computed from the downloaded image and cross-checked against Debian's published `SHA512SUMS`. Each
 registers in the inventory example the way the #823 entries do. The build lifecycle is live-proven on the
 KVM host (`build-fs --image <name>`: real download + sha256-verify + `virt-customize` + repack +
-guestfish normalize + publish, then guestfish inspection of the built rootfs), and an EL-style direct-kernel
-boot on the v7.0.0 kernel-under-test confirms the `kdive-ready` serial signal fires and kdump-tools arms;
-the remaining capture lifecycle runs through the operator live-stack harness as for #823.
+guestfish normalize + publish, then guestfish inspection of the built rootfs confirms the apt package set,
+`ssh.service`/`kdump-tools.service`/`kdive-ready.service` enablement, the injected key, the absence of
+`/etc/selinux/config`, and `/etc/cloud/cloud-init.disabled`). A direct-kernel boot on the v7.0.0
+kernel-under-test proves the **`kdive-ready` serial signal fires** and that `After=kdump-tools.service`
+releases readiness on the unit's terminal state — exactly as the #823 EL9 boot proved for
+`After=kdump.service`. Per that same precedent, kdump-tools does **not** arm in the ad-hoc boot (it skips
+the install plane that injects `/lib/modules/<v7.0>` that initramfs-tools needs to build the capture
+initramfs); kdump-tools arming and the `vmcore-incomplete` capture are proven only through the operator
+live-stack harness (with the install plane), as for #823.
 
 ## Architecture
 
