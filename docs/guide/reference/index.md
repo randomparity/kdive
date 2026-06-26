@@ -86,8 +86,8 @@
 | [`ops.reconcile_systems`](ops.md#opsreconcile_systems) | `implemented` |
 | [`ops.set_cost_class_coeff`](ops.md#opsset_cost_class_coeff) | `implemented` |
 | [`ops.set_host_capacity`](ops.md#opsset_host_capacity) | `implemented` |
-| [`postmortem.crash`](postmortem.md#postmortemcrash) | `partial` |
-| [`postmortem.triage`](postmortem.md#postmortemtriage) | `partial` |
+| [`postmortem.crash`](postmortem.md#postmortemcrash) | `implemented` |
+| [`postmortem.triage`](postmortem.md#postmortemtriage) | `implemented` |
 | [`projects.list`](projects.md#projectslist) | `implemented` |
 | [`reports.generate_all_projects`](reports.md#reportsgenerate_all_projects) | `implemented` |
 | [`reports.generate_granted_set`](reports.md#reportsgenerate_granted_set) | `implemented` |

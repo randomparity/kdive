@@ -405,3 +405,12 @@ def test_capture_host_dump_verifies_stored_checksum(tmp_path: Path) -> None:
         )
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert not core.exists()
+
+
+def test_local_retrieve_from_env_wires_real_crash_runner() -> None:
+    # Production assembly must wire the real crash(8) runner, not the removed stub, so
+    # postmortem.crash/triage actually run over a captured core on the deployed worker.
+    from kdive.providers.shared.debug_common.crash_postmortem import _real_run_crash
+
+    retriever = LocalLibvirtRetrieve.from_env(secret_registry=SecretRegistry())
+    assert retriever._run_crash is _real_run_crash

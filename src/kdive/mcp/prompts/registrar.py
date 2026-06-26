@@ -7,10 +7,11 @@ lifecycle prompts (`start_investigation`, `build_boot_debug`, `triage_panic`) as
 pointers* into the real tools: each is an ordered list of registered tool names with a
 one-line purpose per step.
 
-Maturity (ADR-0175) is respected by *disclosure*, not omission. Nearly the whole live
-lifecycle is `partial` today, so dropping `partial` steps would empty the two lifecycle
-journeys; instead each `partial` step is tagged with its maturity `reason` so an agent is
-never silently steered into a not-yet-proven tool. A referenced tool that is unknown to
+Maturity (ADR-0175) is respected by *disclosure*, not omission: rather than dropping a
+`partial` step (which could empty a journey), each `partial` step is tagged with its
+maturity `reason` so an agent is never silently steered into a not-yet-proven tool. Every
+lifecycle step is `implemented` today, but the disclosure survives for any future `partial`
+step. A referenced tool that is unknown to
 the live registry or marked `planned` (advertised but unavailable) raises at registration
 — a fail-fast that also catches an accidental registrar reordering. `register` takes the
 maturity map explicitly, so it is pure with respect to FastMCP internals and unit-testable

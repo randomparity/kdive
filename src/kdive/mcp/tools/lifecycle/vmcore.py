@@ -408,7 +408,11 @@ async def _postmortem_crash(
             run_id,
             "succeeded",
             suggested_next_actions=["postmortem.crash", "artifacts.list"],
-            data={"transcript": redactor.redact_text(output.transcript)},
+            data={
+                "transcript": redactor.redact_text(output.transcript),
+                # Surface the byte-cap so the caller never reads a trimmed transcript as complete.
+                "truncated": output.truncated,
+            },
         )
 
 
@@ -497,18 +501,7 @@ def register(
     @app.tool(
         name="postmortem.crash",
         annotations=_docmeta.read_only(),
-        meta=_docmeta.maturity_meta(
-            "partial",
-            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
-            detail=(
-                "Runs allowlisted crash(8) verbs over a Run's captured core; requires a real "
-                "captured vmcore, produced only under the gated live markers."
-            ),
-            promotion=(
-                "A non-gated test or recorded live_stack run runs crash commands over a real "
-                "captured core."
-            ),
-        ),
+        meta=_docmeta.maturity_meta("implemented"),
     )
     async def postmortem_crash_tool(
         run_id: Annotated[str, Field(description="The Run whose captured core to analyze.")],
@@ -525,15 +518,7 @@ def register(
     @app.tool(
         name="postmortem.triage",
         annotations=_docmeta.read_only(),
-        meta=_docmeta.maturity_meta(
-            "partial",
-            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
-            detail=(
-                "Runs the default crash triage batch over a Run's captured core; requires a "
-                "real captured vmcore, produced only under the gated live markers."
-            ),
-            promotion=("A non-gated test or recorded live_stack run triages a real captured core."),
-        ),
+        meta=_docmeta.maturity_meta("implemented"),
     )
     async def postmortem_triage_tool(
         run_id: Annotated[str, Field(description="The Run whose captured core to triage.")],

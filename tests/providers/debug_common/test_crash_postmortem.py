@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports import CrashResult
-from kdive.providers.shared.debug_common.crash_postmortem import run_crash_postmortem
+from kdive.providers.shared.debug_common import crash_postmortem
+from kdive.providers.shared.debug_common.crash_postmortem import (
+    _real_run_crash,
+    run_crash_postmortem,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 
@@ -105,6 +111,69 @@ def test_build_id_mismatch_is_configuration_error() -> None:
     assert exc.value.details == {"vmcore_ref": "core-ref"}
 
 
+def test_nonzero_exit_with_empty_stdout_is_infrastructure_failure() -> None:
+    # crash(8) that cannot initialize over the core/namelist exits non-zero with no usable
+    # output; that must surface as a typed failure, not a success-reporting empty transcript.
+    with pytest.raises(CategorizedError) as exc:
+        run_crash_postmortem(
+            vmcore_ref="core-ref",
+            debuginfo_ref="debug-ref",
+            expected_build_id="deadbeef",
+            commands=["sys"],
+            fetch_object=lambda ref: b"CORE",
+            read_build_id=lambda data: "deadbeef",
+            run_crash=lambda v, c, s: CrashResult(
+                exit_status=1, stdout=b"  \n", stderr=b"cannot open core"
+            ),
+            secret_registry=SecretRegistry(),
+        )
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details["exit_status"] == 1
+    assert exc.value.details["stderr"] == "cannot open core"
+
+
+def test_nonzero_exit_with_transcript_is_returned_not_discarded() -> None:
+    # crash continues a batch past a per-command error and may still exit non-zero; the
+    # already-produced transcript must be returned, not thrown away.
+    out = run_crash_postmortem(
+        vmcore_ref="core-ref",
+        debuginfo_ref="debug-ref",
+        expected_build_id="deadbeef",
+        commands=["sys", "struct nope"],
+        fetch_object=lambda ref: b"CORE",
+        read_build_id=lambda data: "deadbeef",
+        run_crash=lambda v, c, s: CrashResult(
+            exit_status=1, stdout=b"SYSTEM MAP: ...\n", stderr=b"struct: invalid"
+        ),
+        secret_registry=SecretRegistry(),
+    )
+    assert out.transcript == "SYSTEM MAP: ...\n"
+
+
+def test_nonzero_exit_stderr_is_redacted_and_capped() -> None:
+    # stderr can echo secrets/paths; it is redacted against the supplied registry and capped
+    # before it enters the error envelope.
+    registry = SecretRegistry()
+    registry.register("hunter2-secret", scope=None)
+    with pytest.raises(CategorizedError) as exc:
+        run_crash_postmortem(
+            vmcore_ref="core-ref",
+            debuginfo_ref="debug-ref",
+            expected_build_id="deadbeef",
+            commands=["sys"],
+            fetch_object=lambda ref: b"CORE",
+            read_build_id=lambda data: "deadbeef",
+            run_crash=lambda v, c, s: CrashResult(
+                exit_status=2, stdout=b"", stderr=b"key=hunter2-secret " + b"x" * 4000
+            ),
+            secret_registry=registry,
+        )
+    stderr = exc.value.details["stderr"]
+    assert isinstance(stderr, str)
+    assert "hunter2-secret" not in stderr
+    assert len(stderr) <= 2048
+
+
 def test_rejected_command_batch_is_configuration_error() -> None:
     with pytest.raises(CategorizedError) as exc:
         run_crash_postmortem(
@@ -122,3 +191,112 @@ def test_rejected_command_batch_is_configuration_error() -> None:
     # The validator's rejection reason is surfaced under `reason` so the caller learns why.
     assert "reason" in exc.value.details
     assert exc.value.details["reason"]
+
+
+def test_large_transcript_is_byte_capped_and_marked_truncated() -> None:
+    # A verbose verb (log/foreach bt) over a big core can emit megabytes; the inline transcript
+    # is byte-capped (redact-then-cap) and flagged truncated so it never overflows the response.
+    big = b"A" * (2 * 1024 * 1024)  # 2 MiB > the 1 MiB cap
+    out = run_crash_postmortem(
+        vmcore_ref="core-ref",
+        debuginfo_ref="debug-ref",
+        expected_build_id="deadbeef",
+        commands=["log"],
+        fetch_object=lambda ref: b"CORE",
+        read_build_id=lambda data: "deadbeef",
+        run_crash=lambda v, c, s: CrashResult(exit_status=0, stdout=big, stderr=b""),
+        secret_registry=SecretRegistry(),
+    )
+    assert out.truncated is True
+    assert len(out.transcript.encode("utf-8")) <= 1 << 20
+
+
+def test_small_transcript_is_not_truncated() -> None:
+    out = run_crash_postmortem(
+        vmcore_ref="core-ref",
+        debuginfo_ref="debug-ref",
+        expected_build_id="deadbeef",
+        commands=["sys"],
+        fetch_object=lambda ref: b"CORE",
+        read_build_id=lambda data: "deadbeef",
+        run_crash=lambda v, c, s: CrashResult(exit_status=0, stdout=b"short", stderr=b""),
+        secret_registry=SecretRegistry(),
+    )
+    assert out.truncated is False
+    assert out.transcript == "short"
+
+
+def test_real_run_crash_missing_binary_is_missing_dependency() -> None:
+    # No crash(8) on the worker host: surface a missing_dependency naming the binary, not the
+    # old stub's misleading "runs only under the live_vm gate" message.
+    with pytest.raises(CategorizedError) as exc:
+        _real_run_crash(Path("/v"), Path("/c"), "sys\nquit\n", crash_path_finder=lambda name: None)
+    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert "crash" in str(exc.value)
+
+
+def test_real_run_crash_builds_fixed_argv_and_pipes_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # crash is invoked with a fixed argv (`crash -s <vmlinux> <vmcore>`); the validated batch
+    # is fed on stdin only; cwd is the vmcore's worker-owned spool dir, not the process CWD.
+    captured: dict[str, object] = {}
+
+    def fake_exec(argv: list[str], script: str, cwd: Path) -> CrashResult:
+        captured["argv"] = argv
+        captured["script"] = script
+        captured["cwd"] = cwd
+        return CrashResult(exit_status=0, stdout=b"OK", stderr=b"")
+
+    monkeypatch.setattr(crash_postmortem, "_exec_crash", fake_exec)
+    out = _real_run_crash(
+        Path("/tmp/x.vmlinux"),
+        Path("/tmp/x.vmcore"),
+        "sys\nquit\n",
+        crash_path_finder=lambda name: "/usr/bin/crash",
+    )
+    assert out.stdout == b"OK"
+    assert captured["argv"] == ["/usr/bin/crash", "-s", "/tmp/x.vmlinux", "/tmp/x.vmcore"]
+    assert captured["script"] == "sys\nquit\n"
+    assert captured["cwd"] == Path("/tmp")
+
+
+# ---------------------------------------------------------------------------
+# live_vm acceptance: the real /usr/bin/crash over a real captured core (ADR-0249)
+# ---------------------------------------------------------------------------
+#
+# CI deselects ``live_vm`` (``just test`` runs ``-m "not live_vm and not live_stack"``), so
+# this is SKIPPED unless the operator runs ``just test-live`` with a real captured core. It is
+# the only test that exercises the real ``_exec_crash`` subprocess seam — everything above
+# injects a fake ``run_crash``.
+
+_LIVE_VMCORE_ENV = "KDIVE_LIVE_VM_VMCORE"
+_LIVE_VMLINUX_ENV = "KDIVE_LIVE_VM_VMLINUX"
+
+
+@pytest.mark.live_vm
+def test_live_vm_real_crash_runs_sys_over_a_real_core() -> None:  # pragma: no cover - live_vm
+    """Run the real ``crash(8)`` ``sys`` verb over a real captured core (ADR-0249).
+
+    Skips unless the operator points ``KDIVE_LIVE_VM_VMCORE`` / ``KDIVE_LIVE_VM_VMLINUX`` at a
+    real captured vmcore and its matching ``vmlinux`` debuginfo and ``crash(8)`` is installed.
+    Proves the production crash invocation (fixed argv, batch on stdin, ``-s`` silent mode)
+    actually drives the binary and returns its output.
+    """
+    import os
+    import shutil as _shutil
+
+    vmcore = os.environ.get(_LIVE_VMCORE_ENV)
+    vmlinux = os.environ.get(_LIVE_VMLINUX_ENV)
+    if not vmcore or not vmlinux:
+        pytest.skip(
+            f"{_LIVE_VMCORE_ENV}/{_LIVE_VMLINUX_ENV} not set; needs a real captured core + vmlinux"
+        )
+    if not _shutil.which("crash"):
+        pytest.skip("crash(8) not installed on this host")
+
+    result = _real_run_crash(Path(vmlinux), Path(vmcore), "sys\nquit\n")
+
+    assert result.exit_status == 0, result.stderr.decode("utf-8", "replace")
+    # crash's `sys` banner always prints these labels over a real core.
+    assert b"KERNEL:" in result.stdout or b"DUMPFILE:" in result.stdout

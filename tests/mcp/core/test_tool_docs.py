@@ -589,6 +589,22 @@ def test_vmcore_fetch_implemented_both_methods_proven_live() -> None:
     )
 
 
+def test_postmortem_crash_triage_promoted_to_implemented() -> None:
+    # #816 (ADR-0249): the real crash(8) runner is wired into production (replacing the no-op
+    # stub) and live-proven end-to-end — `_real_run_crash` drove the real crash(8) over a real
+    # captured core and `run_crash_postmortem` returned a `sys`+`log` transcript. So both tools
+    # are now `implemented` and, per ADR-0175, carry no maturity_detail. (crash(8) must support
+    # the kernel under test — a host prerequisite documented alongside drgn/libguestfs.)
+    offenders = []
+    for name in ("postmortem.crash", "postmortem.triage"):
+        meta = next(t for t in TOOLS if t.name == name).meta or {}
+        if meta.get("maturity") != "implemented":
+            offenders.append(f"{name}: maturity is not implemented ({meta.get('maturity')!r})")
+        if "maturity_detail" in meta:
+            offenders.append(f"{name}: implemented tool still carries maturity_detail")
+    assert not offenders, f"postmortem tools not promoted to implemented: {offenders}"
+
+
 def test_maturity_meta_rejects_partial_without_reason() -> None:
     with pytest.raises(ValueError, match="requires reason"):
         _docmeta.maturity_meta("partial")

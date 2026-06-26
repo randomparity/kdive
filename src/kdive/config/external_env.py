@@ -75,6 +75,20 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "local-libvirt preserve-crash live-attach test (#747); unset → that test skips.",
     ),
     ExternalEnvVar(
+        "KDIVE_LIVE_VM_VMCORE",
+        "test",
+        None,
+        "Path to a real captured vmcore for the live_vm crash(8) postmortem test (#816); "
+        "paired with KDIVE_LIVE_VM_VMLINUX. Unset → that test skips.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIVE_VM_VMLINUX",
+        "test",
+        None,
+        "Path to the vmlinux debuginfo matching KDIVE_LIVE_VM_VMCORE for the live_vm crash(8) "
+        "postmortem test (#816). Unset → that test skips.",
+    ),
+    ExternalEnvVar(
         "KDIVE_REQUIRE_DOCKER",
         "test",
         "0",

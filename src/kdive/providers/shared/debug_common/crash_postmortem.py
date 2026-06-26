@@ -6,11 +6,14 @@ run a validated `crash` command batch over an injected subprocess, and return th
 redacted transcript. Lifted out of `local_libvirt/retrieve.py` so `remote_libvirt`
 reuses it without a private copy (the ADR-0083 `debug_common` home for shared
 worker-side postmortem code). Slow seams (`fetch_object`, `run_crash`, `read_build_id`)
-are injected; the defaults are `live_vm`-only.
+are injected: `run_crash` defaults to the real `crash(8)` runner (only its subprocess exec
+is `live_vm`-gated), while `fetch_object` and `read_build_id` stay `live_vm`-only.
 """
 
 from __future__ import annotations
 
+import shutil
+import subprocess  # noqa: S404 - fixed argv only, no shell; the command batch goes via stdin
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -25,6 +28,17 @@ from kdive.store.objectstore import object_store_from_env
 type FetchObject = Callable[[str], bytes]
 type ReadBuildId = Callable[[bytes], str]
 type RunCrash = Callable[[Path, Path, str], CrashResult]
+type CrashPathFinder = Callable[[str], str | None]
+
+# Cap the redacted crash(8) stderr carried in an error envelope; stderr is unbounded.
+_STDERR_CAP = 2048
+# Byte-cap the redacted transcript returned inline (a verbose verb over a big core can emit
+# megabytes). Mirrors the introspect report cap (ADR-0033); redact-then-cap so the cap bounds
+# the *returned* payload and `truncated` signals the trim.
+_TRANSCRIPT_BYTE_CAP = 1 << 20  # 1 MiB
+# Bound a wedged crash(8) so it never pins a worker thread. A batch of allowlisted read verbs
+# over a multi-GB core can take minutes.
+_CRASH_TIMEOUT_S = 300.0
 
 
 def run_crash_postmortem(
@@ -73,11 +87,35 @@ def run_crash_postmortem(
         crash = run_crash(Path(vmlinux_file.name), Path(core_file.name), script)
     redactor = Redactor(registry=secret_registry)
     transcript = redactor.redact_text(crash.stdout.decode("utf-8", "replace"))
+    if crash.exit_status != 0 and not transcript.strip():
+        # crash continues a batch past a per-command error, so a non-zero exit *with* output is
+        # kept (the transcript is still useful). A non-zero exit with no output is the
+        # init-failure shape (e.g. an incompatible core it could not open) — surface it instead
+        # of reporting a success with an empty transcript.
+        stderr = redactor.redact_text(crash.stderr.decode("utf-8", "replace"))
+        raise CategorizedError(
+            "the crash(8) subprocess exited non-zero with no output; the core was not analyzed",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"exit_status": crash.exit_status, "stderr": stderr[:_STDERR_CAP]},
+        )
+    transcript, truncated = _byte_cap_text(transcript, _TRANSCRIPT_BYTE_CAP)
     return CrashOutput(
         results={cmd: {"ran": True} for cmd in commands},
         transcript=transcript,
-        truncated=False,
+        truncated=truncated,
     )
+
+
+def _byte_cap_text(text: str, byte_cap: int) -> tuple[str, bool]:
+    """Trim ``text`` to at most ``byte_cap`` UTF-8 bytes; return it and whether it was trimmed.
+
+    Caps the already-redacted transcript so the cap bounds the returned payload exactly. The
+    slice can split a multibyte char, so the decode drops the partial tail (``errors="ignore"``).
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= byte_cap:
+        return text, False
+    return encoded[:byte_cap].decode("utf-8", "ignore"), True
 
 
 def default_fetch_object(ref: str) -> bytes:  # pragma: no cover - live_vm
@@ -93,13 +131,65 @@ def default_read_vmcore_build_id(data: bytes) -> str:  # pragma: no cover - live
     )
 
 
-def default_run_crash(  # pragma: no cover - live_vm
-    vmlinux: Path, vmcore: Path, script: str
+def _real_run_crash(
+    vmlinux: Path,
+    vmcore: Path,
+    script: str,
+    *,
+    crash_path_finder: CrashPathFinder = shutil.which,
 ) -> CrashResult:
-    raise CategorizedError(
-        "the crash subprocess runs only under the live_vm gate",
-        category=ErrorCategory.MISSING_DEPENDENCY,
-    )
+    """Run the real ``crash(8)`` over the spooled core; the batch goes on stdin only.
+
+    The fixed argv ``crash -s <vmlinux> <vmcore>`` (``-s`` suppresses the banner and the
+    ``crash>`` prompt echo) reaches the binary; the validated, ``quit``-terminated command
+    batch is piped on stdin, never argv. ``crash_path_finder`` is injected so the
+    binary-absent branch is testable off the ``live_vm`` gate.
+
+    Raises:
+        CategorizedError: ``MISSING_DEPENDENCY`` when ``crash`` is not installed on this
+            worker host; ``INFRASTRUCTURE_FAILURE`` for a launch failure or timeout.
+    """
+    crash_path = crash_path_finder("crash")
+    if crash_path is None:
+        raise CategorizedError(
+            "the crash(8) utility is not installed on this worker host",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+        )
+    argv = [crash_path, "-s", str(vmlinux), str(vmcore)]
+    return _exec_crash(argv, script, vmcore.parent)
+
+
+def _exec_crash(  # pragma: no cover - live_vm
+    argv: list[str], script: str, cwd: Path
+) -> CrashResult:
+    """Spawn ``crash`` with the batch on stdin; ``cwd`` is the worker-owned spool dir.
+
+    The ``# pragma: no cover - live_vm`` covers the real subprocess (a host with
+    ``/usr/bin/crash`` and a real core). ``cwd`` points at the spool dir so crash never needs
+    a writable process CWD; ``_CRASH_TIMEOUT_S`` bounds a wedged crash so the worker thread is
+    always released.
+    """
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; the batch goes via stdin only
+            argv,
+            input=script.encode("utf-8"),
+            timeout=_CRASH_TIMEOUT_S,
+            check=False,
+            capture_output=True,
+            cwd=str(cwd),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CategorizedError(
+            "the crash(8) subprocess exceeded the timeout",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"timeout_s": _CRASH_TIMEOUT_S},
+        ) from exc
+    except OSError as exc:
+        raise CategorizedError(
+            "could not launch the crash(8) subprocess",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        ) from exc
+    return CrashResult(exit_status=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
 
 
 __all__ = [
@@ -108,6 +198,5 @@ __all__ = [
     "RunCrash",
     "default_fetch_object",
     "default_read_vmcore_build_id",
-    "default_run_crash",
     "run_crash_postmortem",
 ]

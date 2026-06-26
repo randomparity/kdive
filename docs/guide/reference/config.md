@@ -198,6 +198,8 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_LIVE_SSH_TARGET` | — | SSH target gating the criterion-5 live_stack tier; unset → the live_stack suite skips. |
 | `KDIVE_LIVE_VM_BZIMAGE` | — | Path to a kernel image that panics early in boot (no usable rootfs) for the gated local-libvirt preserve-crash live-attach test (#747); unset → that test skips. |
 | `KDIVE_LIVE_VM_SYSTEM_ID` | — | System id of a pre-provisioned live VM for the gated local-libvirt install test. |
+| `KDIVE_LIVE_VM_VMCORE` | — | Path to a real captured vmcore for the live_vm crash(8) postmortem test (#816); paired with KDIVE_LIVE_VM_VMLINUX. Unset → that test skips. |
+| `KDIVE_LIVE_VM_VMLINUX` | — | Path to the vmlinux debuginfo matching KDIVE_LIVE_VM_VMCORE for the live_vm crash(8) postmortem test (#816). Unset → that test skips. |
 | `KDIVE_OIDC_CLIENT_ID` | `kdive-test` | OIDC client id the live_stack harness presents to the mock issuer. |
 | `KDIVE_REMOTE_BASE_IMAGE_VOLUME` | — | Name of the prebuilt remote-libvirt base-image storage volume for the remote live_stack test; unset → that test skips. |
 | `KDIVE_REQUIRE_DOCKER` | `0` | Set to 1 to fail (not skip) the disposable-Postgres/MinIO fixtures when Docker is absent. |
