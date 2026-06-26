@@ -96,6 +96,23 @@ def test_failure_category_defaults_to_none() -> None:
     assert result.failure_category is None
 
 
+def test_data_defaults_to_none() -> None:
+    result = CheckResult(check_id="x", status=CheckStatus.PASS, detail="ok")
+    assert result.data is None
+
+
+def test_data_carries_structured_fields_on_any_status() -> None:
+    # The structured machine-readable companion to ``detail``; legal on any status,
+    # like ``resource_id``.
+    result = CheckResult(
+        check_id="x",
+        status=CheckStatus.PASS,
+        detail="ok",
+        data={"resolved_path": "/abs/tree", "vantage": "server"},
+    )
+    assert result.data == {"resolved_path": "/abs/tree", "vantage": "server"}
+
+
 def test_run_check_returns_the_checks_result() -> None:
     expected = CheckResult(check_id="x", status=CheckStatus.PASS, detail="ok")
     result = asyncio.run(run_check(_Static(expected), timeout=1.0))

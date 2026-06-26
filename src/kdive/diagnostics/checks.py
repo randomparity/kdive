@@ -19,7 +19,7 @@ import asyncio
 import contextlib
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -115,6 +115,12 @@ class CheckResult:
             (``secret_ref``, ``local_kernel_src``, ``ephemeral_libvirt_buildhost_agent``), like
             ``provider`` is ``None`` for a provider-independent check. Legal on any status — an
             operator most needs the host name on a failing/erroring host (ADR-0194).
+        data: Structured, machine-readable fields a check chooses to surface alongside the
+            prose ``detail`` — string-valued, non-secret, and read programmatically by a
+            caller (e.g. ``local_kernel_src`` discloses the resolved ``KDIVE_KERNEL_SRC`` path
+            and git HEAD, #845). ``None`` when the check emits none. Legal on any status, like
+            ``resource_id``; unlike ``detail`` it is the fielded path, not the
+            credential-careful prose, so a caller need not parse strings.
     """
 
     check_id: str
@@ -124,6 +130,7 @@ class CheckResult:
     provider: str | None = None
     failure_category: str | None = None
     resource_id: str | None = None
+    data: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         if self.status is CheckStatus.FAIL and not self.fix:
