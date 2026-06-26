@@ -168,11 +168,12 @@ async def describe_image(
     ``configuration_error``; a valid id with no visible row is ``not_found`` (byte-identical
     whether absent or invisible — no existence/membership leak).
     """
-    if _as_uuid(image_id) is None:
+    uid = _as_uuid(image_id)
+    if uid is None:
         return _invalid_uuid_error("image_id", image_id)
     with bind_context(principal=ctx.principal):
         params = {
-            "id": image_id,
+            "id": str(uid),
             "public": ImageVisibility.PUBLIC.value,
             "private": ImageVisibility.PRIVATE.value,
             "projects": projects_with_role(ctx, Role.VIEWER),

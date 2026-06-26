@@ -153,6 +153,23 @@ def test_describe_malformed_id_is_configuration_error(migrated_url: str) -> None
     asyncio.run(_run())
 
 
+def test_describe_normalizes_noncanonical_uuid_forms(migrated_url: str) -> None:
+    # UUID() accepts urn:/brace/unhyphenated forms PostgreSQL's uuid input rejects; the handler
+    # must normalize to the canonical form before the query, not raise an uncaught DataError.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            iid = await _insert(pool, name="fedora", visibility="public", owner=None)
+            bare = iid.replace("-", "")
+            by_urn = await catalog_images.describe_image(pool, _ctx(), f"urn:uuid:{iid}")
+            by_braces = await catalog_images.describe_image(pool, _ctx(), f"{{{iid}}}")
+            by_bare = await catalog_images.describe_image(pool, _ctx(), bare)
+        for resp in (by_urn, by_braces, by_bare):
+            assert resp.status != "error", "a non-canonical but valid UUID resolves the same row"
+            assert resp.data["name"] == "fedora"
+
+    asyncio.run(_run())
+
+
 def test_describe_withholds_staged_path(migrated_url: str) -> None:
     secret = "/var/lib/kdive/rootfs/secret-local.qcow2"
 
