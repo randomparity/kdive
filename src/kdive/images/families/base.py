@@ -38,6 +38,14 @@ class FamilyCustomizer(Protocol):
     """How an OS family turns a base image into a kdive-ready rootfs."""
 
     family: str
+    #: The family's kdump systemd unit. The shared kdive-ready unit is ordered ``After=`` this so
+    #: the serial readiness signal cannot precede kdump arming (ADR-0251 point 6); a wrong/absent
+    #: name silently reopens that race. ``kdump.service`` (rhel) / ``kdump-tools.service`` (debian).
+    kdump_unit: str
+    #: The mandatory-access-control posture the build pipeline records as provenance ``guest_mac``:
+    #: ``selinux-permissive`` (rhel — repack drops xattrs, so a first-boot relabel + permissive) or
+    #: ``apparmor`` (debian — profile-based, needs no relabel).
+    guest_mac: str
 
     def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
         """Return the package set this family installs for ``kind`` on ``distro``/``version``."""

@@ -68,6 +68,8 @@ class RhelFamily:
     """The rhel-family (dnf + kdump) :class:`FamilyCustomizer`, EL-major-aware (#823)."""
 
     family = "rhel"
+    kdump_unit = "kdump.service"
+    guest_mac = "selinux-permissive"
 
     def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
         """Return the dnf package set for ``kind`` on ``distro``/``version``.

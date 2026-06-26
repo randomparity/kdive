@@ -54,6 +54,8 @@ class _FakeFamily:
 
     rec: _Recorder
     family: str = "rhel"
+    kdump_unit: str = "kdump.service"
+    guest_mac: str = "selinux-permissive"
 
     def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
         return ("marker-pkg",)
@@ -198,7 +200,7 @@ def test_provenance_source_digest_for_virt_builder_entry(tmp_path: Path) -> None
         "authorized_key_name": "id.pub",
         "readiness_marker": "kdive-ready",
         "layout": "whole-disk-ext4-qcow2",
-        "guest_selinux": "permissive",
+        "guest_mac": "selinux-permissive",
     }
     assert rec.acquired_sources == [entry.source], "the catalog source is acquired"
 
