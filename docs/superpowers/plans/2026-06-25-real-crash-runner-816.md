@@ -120,10 +120,14 @@ git commit -m "fix(retrieve): fail crash postmortem on non-zero exit with no out
 
 ---
 
-### Task 2: `_real_run_crash` runner + delete the stub
+### Task 2: `_real_run_crash` runner (stub still in place)
+
+> **Ordering:** This task ADDS the runner but leaves `default_run_crash` in the module, so
+> the tree stays importable. Task 3 deletes the stub in the same commit that repoints its two
+> importers — never delete it here, or the Task 2 commit breaks `just type` (whole-tree).
 
 **Files:**
-- Modify: `src/kdive/providers/shared/debug_common/crash_postmortem.py` (remove `default_run_crash`; add `_real_run_crash`, `_exec_crash`, `_CRASH_TIMEOUT_S`)
+- Modify: `src/kdive/providers/shared/debug_common/crash_postmortem.py` (add `_real_run_crash`, `_exec_crash`, `_CRASH_TIMEOUT_S`; keep `default_run_crash` for now)
 - Test: `tests/providers/debug_common/test_crash_postmortem.py`
 
 **Interfaces:**
@@ -168,7 +172,7 @@ def test_real_run_crash_builds_fixed_argv_and_pipes_script(monkeypatch) -> None:
 Run: `uv run python -m pytest tests/providers/debug_common/test_crash_postmortem.py -k real_run_crash -q`
 Expected: FAIL (`_real_run_crash` undefined).
 
-- [ ] **Step 3: Implement** (delete `default_run_crash`; add the runner)
+- [ ] **Step 3: Implement** (add the runner; leave `default_run_crash` untouched — Task 3 deletes it)
 
 ```python
 import shutil
@@ -232,53 +236,69 @@ def _exec_crash(  # pragma: no cover - live_vm
     return CrashResult(exit_status=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
 ```
 
-Update `__all__`: remove `"default_run_crash"`, add `"_real_run_crash"` is NOT exported
-(leading underscore); instead export nothing new — callers import `_real_run_crash`
-directly by name. Keep `default_fetch_object`, `default_read_vmcore_build_id` in `__all__`.
+Leave `__all__` unchanged in this task (`default_run_crash` is still present and exported).
+`_real_run_crash` has a leading underscore and is imported by name, so it needs no `__all__`
+entry.
 
 - [ ] **Step 4: Run to verify pass + full module**
 
 Run: `uv run python -m pytest tests/providers/debug_common/test_crash_postmortem.py -q && just lint && just type`
-Expected: PASS, zero warnings.
+Expected: PASS, zero warnings (tree still imports cleanly — the stub is still present).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/kdive/providers/shared/debug_common/crash_postmortem.py tests/providers/debug_common/test_crash_postmortem.py
-git commit -m "feat(retrieve): add real crash(8) runner, replacing the no-op stub"
+git commit -m "feat(retrieve): add real crash(8) runner alongside the stub"
 ```
 
 ---
 
-### Task 3: Wire `_real_run_crash` into both providers
+### Task 3: Wire `_real_run_crash` into both providers and delete the stub
+
+> **Single commit:** the stub deletion and BOTH importer edits land together, so the tree is
+> never left importing a deleted name. `just type` is whole-tree — a half-done wiring fails it.
 
 **Files:**
+- Modify: `src/kdive/providers/shared/debug_common/crash_postmortem.py` (delete `default_run_crash`; drop it from `__all__`)
 - Modify: `src/kdive/providers/local_libvirt/retrieve.py` (import + `from_env`, lines 58-61, 134-135)
 - Modify: `src/kdive/providers/remote_libvirt/retrieve/facade.py` (import + default param, lines 40-47, 67)
-- Test: `tests/providers/test_composition.py` (assert the wired runner is the real one, not the stub)
+- Test: `tests/providers/local_libvirt/test_retrieve.py` (local), `tests/providers/remote_libvirt/retrieve/test_facade_postmortem.py` (remote)
 
 **Interfaces:**
 - Consumes: `_real_run_crash` from Task 2.
 
-- [ ] **Step 1: Write failing test**
+- [ ] **Step 1: Write failing tests (local + remote)**
 
 ```python
-# tests/providers/test_composition.py — assert production assembly wires the real runner
+# tests/providers/local_libvirt/test_retrieve.py
 def test_local_retrieve_wires_real_crash_runner() -> None:
-    from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
     from kdive.providers.shared.debug_common.crash_postmortem import _real_run_crash
     r = LocalLibvirtRetrieve.from_env(secret_registry=SecretRegistry())
     assert r._run_crash is _real_run_crash
 ```
 
-(If `test_composition.py` lacks a natural home, add to `tests/providers/local_libvirt/test_retrieve.py` instead — match the existing import style there.)
+```python
+# tests/providers/remote_libvirt/retrieve/test_facade_postmortem.py
+# The remote facade wraps run_crash inside CrashPostmortemAdapter (no `_run_crash` on the
+# facade), so assert the constructor DEFAULT is the real runner — that is the wiring site.
+import inspect
+from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
+from kdive.providers.shared.debug_common.crash_postmortem import _real_run_crash
+
+def test_remote_facade_defaults_to_real_crash_runner() -> None:
+    default = inspect.signature(RemoteLibvirtRetrieve.__init__).parameters["run_crash"].default
+    assert default is _real_run_crash
+```
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/providers/local_libvirt/test_retrieve.py -k real_crash -q`
-Expected: FAIL (still wired to the removed `default_run_crash` → ImportError, or wired to the stub).
+Run: `uv run python -m pytest tests/providers/local_libvirt/test_retrieve.py tests/providers/remote_libvirt/retrieve/test_facade_postmortem.py -k crash_runner -q`
+Expected: FAIL (both still wired to `default_run_crash`).
 
-- [ ] **Step 3: Implement wiring**
+- [ ] **Step 3: Implement (delete stub + repoint both importers, one commit)**
+
+`crash_postmortem.py`: delete `default_run_crash` and remove `"default_run_crash"` from `__all__`.
 
 `local_libvirt/retrieve.py`: change the import
 `from ...crash_postmortem import (default_fetch_object, default_run_crash)` →
@@ -289,19 +309,20 @@ Expected: FAIL (still wired to the removed `default_run_crash` → ImportError, 
 `_real_run_crash`) and the default `run_crash: RunCrash = default_run_crash` →
 `run_crash: RunCrash = _real_run_crash`.
 
-- [ ] **Step 4: Run to verify pass + grep the stub is gone**
+- [ ] **Step 4: Run to verify pass + grep the stub is gone + whole-tree type**
 
 Run:
 ```bash
 uv run python -m pytest tests/providers/local_libvirt/test_retrieve.py tests/providers/remote_libvirt -q
+just type
 rg -n "default_run_crash" src/ tests/ || echo "stub fully removed"
 ```
-Expected: PASS; the grep prints "stub fully removed".
+Expected: PASS; `just type` clean (no dangling import); the grep prints "stub fully removed".
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/kdive/providers/local_libvirt/retrieve.py src/kdive/providers/remote_libvirt/retrieve/facade.py tests/
+git add src/kdive/providers/shared/debug_common/crash_postmortem.py src/kdive/providers/local_libvirt/retrieve.py src/kdive/providers/remote_libvirt/retrieve/facade.py tests/
 git commit -m "feat(retrieve): wire the real crash runner into both providers"
 ```
 
