@@ -223,26 +223,36 @@ async def _upsert_console_artifact_row(
         return _ConsoleArtifact(existing.id, stored.key, redacted)
 
 
-def _expected_crash_matches(run: Run, redacted_console: bytes) -> bool:
+def _expected_crash_matched_line(run: Run, redacted_console: bytes) -> str | None:
+    """The first console line matching this Run's ``console_crash`` expectation, else ``None``.
+
+    Returns ``SearchResult.matches[0]["text"]`` so the caller can record *which* line matched (not
+    just that one did), letting an agent confirm the boot reproduced the intended crash rather than
+    an unrelated earlier line that shares the pattern substring (#840). The searched bytes are the
+    Run's already-redacted boot-window console (``_read_redacted_console`` runs the ``Redactor``
+    before any match) and ``search_text`` clips the line to ``MAX_LINE_CHARS``, so the returned line
+    is redacted-and-bounded at its source. Fails closed to ``None`` for a non-``console_crash``
+    expectation, a non-string pattern, or a malformed pattern (ADR-0260).
+    """
     expected = run.expected_boot_failure
     if expected is None or expected.get("kind") != "console_crash":
-        return False
+        return None
     pattern = expected.get("pattern")
     if not isinstance(pattern, str):
-        return False
+        return None
     try:
-        return (
-            search_text(
-                redacted_console,
-                pattern=pattern,
-                before_lines=0,
-                after_lines=0,
-                max_matches=1,
-            ).match_count
-            > 0
+        result = search_text(
+            redacted_console,
+            pattern=pattern,
+            before_lines=0,
+            after_lines=0,
+            max_matches=1,
         )
     except ArtifactSearchInputError:
-        return False
+        return None
+    if not result.matches:
+        return None
+    return result.matches[0]["text"]
 
 
 # A generic, provider-neutral kernel-panic signature for an undeclared early-boot crash. The
@@ -384,6 +394,7 @@ async def _record_expected_crash(
     system_id: UUID,
     profile_policy: ProfilePolicy,
     artifact: _ConsoleArtifact,
+    matched_line: str,
 ) -> dict[str, Any]:
     """Record ``expected_crash_observed``, disclosing the reachable + inert capture surface.
 
@@ -392,6 +403,10 @@ async def _record_expected_crash(
     unreachable methods (ADR-0239). The inert disclosure is best-effort: a missing or
     unparseable System profile degrades to an empty inert set rather than failing a
     correctly-observed expected crash.
+
+    ``matched_line`` is the console line that matched the Run's expectation (#840, ADR-0260),
+    recorded so ``runs.get`` can surface which line matched. It is read from the already-redacted
+    boot-window console and clipped by ``search_text``, so it is redacted-and-bounded at source.
     """
     inert = await _expected_crash_inert_capture(conn, system_id, profile_policy)
     await _record_boot_audit(conn, job_ctx, run)
@@ -403,6 +418,7 @@ async def _record_expected_crash(
         "evidence_artifact_id": str(artifact.id),
         "available_capture": [CaptureMethod.CONSOLE.value],
         "inert_capture": inert,
+        "matched_line": matched_line,
     }
 
 
@@ -449,9 +465,14 @@ async def _run_boot_and_capture_outcome(
             artifact = await _capture_run_console(
                 conn, system_id, run.id, secret_registry, artifact_store, snapshotter, mark
             )
-        if artifact is not None and artifact.data and _expected_crash_matches(run, artifact.data):
+        matched_line = (
+            _expected_crash_matched_line(run, artifact.data)
+            if artifact is not None and artifact.data
+            else None
+        )
+        if artifact is not None and matched_line is not None:
             return await _record_expected_crash(
-                conn, job_ctx, run, system_id, profile_policy, artifact
+                conn, job_ctx, run, system_id, profile_policy, artifact, matched_line
             )
         if exc.category is ErrorCategory.READINESS_FAILURE:
             crash = await _record_crash_halted_live(

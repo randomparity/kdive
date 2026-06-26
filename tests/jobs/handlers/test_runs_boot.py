@@ -50,54 +50,65 @@ class _FakeRun:
 _CONSOLE = b"line1\nkernel BUG at mm/slub.c:1\nline3\n"
 
 
-def test_expected_crash_matches_when_pattern_is_found_in_console() -> None:
+def test_expected_crash_returns_matched_line_when_pattern_is_found() -> None:
+    # The matched line (not just a bool) is returned so runs.get can surface *which* line
+    # matched — the whole point of #840. The pattern is a substring of one line; the full
+    # matched line text comes back.
     run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": "BUG at"}))
-    assert runs_boot._expected_crash_matches(run, _CONSOLE) is True
+    assert runs_boot._expected_crash_matched_line(run, _CONSOLE) == "kernel BUG at mm/slub.c:1"
 
 
-def test_expected_crash_no_match_when_pattern_absent() -> None:
+def test_expected_crash_none_when_pattern_absent() -> None:
     run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": "no-such-marker"}))
-    assert runs_boot._expected_crash_matches(run, _CONSOLE) is False
+    assert runs_boot._expected_crash_matched_line(run, _CONSOLE) is None
 
 
-def test_expected_crash_false_when_no_expected_failure_declared() -> None:
+def test_expected_crash_none_when_no_expected_failure_declared() -> None:
     run = cast(Run, _FakeRun(None))
-    assert runs_boot._expected_crash_matches(run, _CONSOLE) is False
+    assert runs_boot._expected_crash_matched_line(run, _CONSOLE) is None
 
 
-def test_expected_crash_false_for_non_console_crash_kind() -> None:
+def test_expected_crash_none_for_non_console_crash_kind() -> None:
     run = cast(Run, _FakeRun({"kind": "exit_code", "pattern": "BUG at"}))
-    assert runs_boot._expected_crash_matches(run, _CONSOLE) is False
+    assert runs_boot._expected_crash_matched_line(run, _CONSOLE) is None
 
 
-def test_expected_crash_false_when_pattern_is_not_a_string() -> None:
+def test_expected_crash_none_when_pattern_is_not_a_string() -> None:
     run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": 123}))
-    assert runs_boot._expected_crash_matches(run, _CONSOLE) is False
+    assert runs_boot._expected_crash_matched_line(run, _CONSOLE) is None
 
 
-def test_expected_crash_false_on_invalid_search_pattern() -> None:
+def test_expected_crash_none_on_invalid_search_pattern() -> None:
     # A trailing '|' yields an empty term, so parse_literal_terms raises
     # ArtifactSearchInputError inside search_text. The handler must catch it and
-    # fail closed (no crash match) rather than let it propagate out.
+    # fail closed (no matched line) rather than let it propagate out.
     run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": "BUG at|"}))
     # Guard: the pattern truly drives search_text into the raising path.
     with pytest.raises(ArtifactSearchInputError):
         search_text(_CONSOLE, pattern="BUG at|", max_matches=1)
-    assert runs_boot._expected_crash_matches(run, _CONSOLE) is False
+    assert runs_boot._expected_crash_matched_line(run, _CONSOLE) is None
 
 
 def test_expected_crash_fails_closed_when_search_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Even if search_text raises for some other reason, the except branch must
-    # swallow it and return False — a mutant deleting the try/except or flipping
-    # its `return False` to `return True` is killed here.
+    # swallow it and return None — a mutant deleting the try/except is killed here.
     def _boom(*_args: object, **_kwargs: object) -> object:
         raise ArtifactSearchInputError("forced")
 
     monkeypatch.setattr(runs_boot, "search_text", _boom)
     run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": "BUG at"}))
-    assert runs_boot._expected_crash_matches(run, _CONSOLE) is False
+    assert runs_boot._expected_crash_matched_line(run, _CONSOLE) is None
+
+
+def test_expected_crash_matched_line_is_redacted_at_source() -> None:
+    # Redaction is by sourcing: the searched bytes are the already-redacted console, so a
+    # secret the Redactor replaced upstream is the placeholder by the time the line is returned.
+    redacted_console = b"line1\nkernel BUG at token=[REDACTED]\nline3\n"
+    run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": "BUG at"}))
+    matched = runs_boot._expected_crash_matched_line(run, redacted_console)
+    assert matched == "kernel BUG at token=[REDACTED]"
 
 
 def _ports() -> runs.RunHandlerPorts:
@@ -392,6 +403,7 @@ def _record_expected(
             uuid4(),
             cast(ProfilePolicy, _Pol(gdbstub=gdbstub, host_dump=host_dump, kdump=kdump)),
             artifact,
+            "Kernel panic - not syncing: matched line",
         )
 
     return asyncio.run(_run()), audits
@@ -408,6 +420,7 @@ def test_record_expected_crash_discloses_console_and_inert(
     assert result["expectation_matched"] is True
     assert result["available_capture"] == ["console"]
     assert result["inert_capture"] == ["gdbstub", "host_dump"]
+    assert result["matched_line"] == "Kernel panic - not syncing: matched line"
     assert len(audits) == 1
 
 

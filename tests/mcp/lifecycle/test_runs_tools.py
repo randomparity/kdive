@@ -616,6 +616,36 @@ def test_envelope_for_run_expected_boot_failure_detail_is_structured() -> None:
     assert resp.data["required_cmdline"] == "panic_on_oops=1"
     assert resp.data["expected_boot_failure"] == "console_crash"
     assert resp.data["expected_boot_failure_detail"] == expected
+    assert "expected_boot_failure_matched_line" not in resp.data
+
+
+def test_envelope_for_run_surfaces_expected_boot_failure_matched_line() -> None:
+    # The actual console line that matched, alongside the configured detail (#840, ADR-0260).
+    expected = {"pattern": "__d_lookup", "kind": "console_crash"}
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED, expected_boot_failure=expected),
+        step_progress=StepProgress(
+            install="succeeded",
+            boot="succeeded",
+            boot_outcome="expected_crash_observed",
+            matched_line="RIP: 0010:__d_lookup+0x1a/0x120",
+        ),
+    )
+
+    assert resp.data["expected_boot_failure_detail"] == expected
+    assert resp.data["expected_boot_failure_matched_line"] == "RIP: 0010:__d_lookup+0x1a/0x120"
+
+
+def test_envelope_for_run_matched_line_absent_when_progress_has_none() -> None:
+    expected = {"pattern": "__d_lookup", "kind": "console_crash"}
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED, expected_boot_failure=expected),
+        step_progress=StepProgress(
+            install="succeeded", boot="succeeded", boot_outcome="ready", matched_line=None
+        ),
+    )
+
+    assert "expected_boot_failure_matched_line" not in resp.data
 
 
 def _ready_progress(boot_outcome: str | None) -> StepProgress:
@@ -852,6 +882,28 @@ def test_step_progress_capture_disclosure_absent_is_none(migrated_url: str) -> N
                 progress = await step_progress(conn, UUID(run_id))
         assert progress.available_capture is None
         assert progress.inert_capture is None
+        assert progress.matched_line is None
+
+
+def test_step_progress_reads_matched_line(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(
+                pool,
+                run_id,
+                "boot",
+                "succeeded",
+                {
+                    "boot_outcome": "expected_crash_observed",
+                    "matched_line": "RIP: 0010:__d_lookup+0x1a/0x120",
+                },
+            )
+            async with pool.connection() as conn:
+                progress = await step_progress(conn, UUID(run_id))
+        assert progress.matched_line == "RIP: 0010:__d_lookup+0x1a/0x120"
+
+    asyncio.run(_run())
 
     asyncio.run(_run())
 
@@ -1400,6 +1452,33 @@ def test_get_run_exposes_expected_boot_failure(migrated_url: str) -> None:
             resp = await get_run(pool, _ctx(), run_id)
         assert resp.data["expected_boot_failure"] == "console_crash"
         assert resp.data["expected_boot_failure_detail"] == expected
+
+    asyncio.run(_run())
+
+
+def test_get_run_surfaces_expected_boot_failure_matched_line(migrated_url: str) -> None:
+    expected = {"kind": "console_crash", "pattern": "__d_lookup"}
+    matched = "RIP: 0010:__d_lookup+0x1a/0x120"
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE runs SET expected_boot_failure = %s WHERE id = %s",
+                    (Jsonb(expected), run_id),
+                )
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _insert_step(
+                pool,
+                run_id,
+                "boot",
+                "succeeded",
+                {"boot_outcome": "expected_crash_observed", "matched_line": matched},
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["expected_boot_failure_detail"] == expected
+        assert resp.data["expected_boot_failure_matched_line"] == matched
 
     asyncio.run(_run())
 
