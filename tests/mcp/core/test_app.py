@@ -435,7 +435,7 @@ _EXPECTED_STEP_MATURITY: dict[str, str] = {
     "control.force_crash": "implemented",
     "vmcore.fetch": "implemented",
     "vmcore.list": "implemented",
-    "postmortem.triage": "partial",
+    "postmortem.triage": "implemented",
     "introspect.from_vmcore": "implemented",
 }
 
@@ -473,13 +473,18 @@ def test_build_app_registers_lifecycle_prompts() -> None:
             assert step.tool in body, f"{spec.name} body omits {step.tool}"
 
 
-def test_lifecycle_prompts_disclose_partial_steps() -> None:
-    # postmortem.triage is partial in the live registry; vmcore.list is implemented.
+def test_lifecycle_prompts_disclose_no_partial_steps_when_all_implemented() -> None:
+    # #816: with postmortem.crash/triage promoted, every tool the triage_panic journey
+    # references is `implemented`, so the rendered body tags no step `[partial`. The
+    # disclosure *rendering* (a partial step gets a `[partial: reason]` tag) is unit-tested
+    # against a fabricated maturity map in tests/mcp/prompts/test_lifecycle_prompts.py; this
+    # integration check pins the live registry's current all-implemented state.
     body = _rendered_prompt_body(_built_app(), "triage_panic")
     triage_line = next(line for line in body.splitlines() if "postmortem.triage " in line)
-    vmcore_line = next(line for line in body.splitlines() if "vmcore.list " in line)
-    assert "[partial" in triage_line
-    assert "[partial" not in vmcore_line
+    assert "[partial" not in triage_line
+    # No numbered step line carries a [partial tag (the _NOTES footer mentions it literally).
+    step_lines = [ln for ln in body.splitlines() if " — " in ln]
+    assert step_lines and all("[partial" not in ln for ln in step_lines)
 
 
 def test_lifecycle_prompts_expected_maturity_matches_registry() -> None:
