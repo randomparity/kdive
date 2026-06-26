@@ -215,6 +215,9 @@ def _item(result: CheckResult) -> ToolResponse:
             "provider": result.provider,
             "failure_category": result.failure_category,
             "resource_id": result.resource_id,
+            # The check's structured fields (e.g. local_kernel_src's resolved path + git HEAD,
+            # #845); ``{}`` when the check discloses none, so the key is always present.
+            "data": dict(result.data) if result.data else {},
         },
     )
 
