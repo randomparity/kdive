@@ -77,7 +77,7 @@ Create a run, bound to a system or unbound against a target_kind.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `build_profile` | object(source=server) \| object(source=external) | yes | Build profile for the Run's kernel. source='server' builds from a kernel tree (kernel_source_ref required); source='external' ingests a prebuilt artifact. For a local build host a warm-tree kernel_source_ref is a provenance label only — it does not select the tree; the operator stages the actual source via KDIVE_KERNEL_SRC on the worker, and runs.get echoes the label and resolved commit in data.build_provenance. The optional 'config' is a catalog ComponentRef (e.g. {'kind':'catalog','provider':'system','name':'kdump'}); OMIT it to get the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named fragment. Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: append them via runs.build.cmdline (bound on the first build). See resource://kdive/docs/operating/build-source-staging.md for staging the source, or resource://kdive/docs/operating/external-build-upload.md for shaping a source='external' upload. |
+| `build_profile` | object(source=external) \| object(source=server) | yes | Build profile for the Run's kernel. The recommended default is source='external': ingest a prebuilt artifact (ADR-0234). After runs.create with source='external', call artifacts.expected_uploads to learn the exact bytes to produce, artifacts.create_run_upload to upload, then runs.complete_build. source='server' builds from a kernel tree (kernel_source_ref required) and is a single-host convenience: for a local build host a warm-tree kernel_source_ref is a provenance label only — it does not select the tree; the operator stages the actual source via KDIVE_KERNEL_SRC on the worker, and runs.get echoes the label and resolved commit in data.build_provenance. The optional 'config' is a catalog ComponentRef (e.g. {'kind':'catalog','provider':'system','name':'kdump'}); OMIT it to get the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named fragment. Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: append them via runs.build.cmdline (bound on the first server build). See resource://kdive/docs/operating/external-build-upload.md for shaping a source='external' upload, or resource://kdive/docs/operating/build-source-staging.md for staging a server-build source. |
 | `expected_boot_failure` | object(free-form) (nullable) | no | Optional declared boot crash, e.g. {'kind':'console_crash','pattern':'Unable to handle kernel'}. The pattern is matched as a case-sensitive literal substring (NOT a regex), tested line-by-line against the redacted console log; a single line containing the substring is a match. Use '\|' to OR alternatives (e.g. 'Oops\|Unable to handle kernel') — up to 16 terms, 256 characters total, each term non-empty. A match makes the expected crash the Run's success outcome. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `investigation_id` | string | yes | Investigation to attach the Run to. |
@@ -87,6 +87,12 @@ Create a run, bound to a system or unbound against a target_kind.
 
 `build_profile` fields:
 
+- _variant object(source=external):_
+  - `schema_version` (``=1``, required)
+  - `source` (``=external``, required)
+  - `profile_requirements` (`object (nullable)`, optional)
+    - `provider` (`string`, required)
+    - `name` (`string`, required)
 - _variant object(source=server):_
   - `schema_version` (``=1``, required)
   - `source` (``=server``, optional)
@@ -116,12 +122,6 @@ Create a run, bound to a system or unbound against a target_kind.
     - `name` (`string`, required)
   - `patch_ref` (`string (nullable)`, optional)
   - `build_host` (`string (nullable)`, optional)
-- _variant object(source=external):_
-  - `schema_version` (``=1``, required)
-  - `source` (``=external``, required)
-  - `profile_requirements` (`object (nullable)`, optional)
-    - `provider` (`string`, required)
-    - `name` (`string`, required)
 
 `reuse_requirement` fields:
 
@@ -132,7 +132,16 @@ Create a run, bound to a system or unbound against a target_kind.
 
 `build_profile` examples:
 
-_server lane, warm-tree source:_
+_external lane, recommended default (ingest a prebuilt artifact):_
+
+```json
+{
+  "schema_version": 1,
+  "source": "external"
+}
+```
+
+_server lane, warm-tree source (single-host convenience):_
 
 ```json
 {
@@ -154,15 +163,6 @@ _server lane, git source:_
       "ref": "v6.9"
     }
   }
-}
-```
-
-_external lane (ingest a prebuilt artifact):_
-
-```json
-{
-  "schema_version": 1,
-  "source": "external"
 }
 ```
 

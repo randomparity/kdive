@@ -299,7 +299,11 @@ def _badges(d: ToolDoc) -> str:
 # `BuildProfile.parse`, so a schema change that invalidates a documented example fails loud.
 _BUILD_PROFILE_EXAMPLES: tuple[tuple[str, dict[str, Any]], ...] = (
     (
-        "server lane, warm-tree source",
+        "external lane, recommended default (ingest a prebuilt artifact)",
+        {"schema_version": 1, "source": "external"},
+    ),
+    (
+        "server lane, warm-tree source (single-host convenience)",
         {"schema_version": 1, "source": "server", "kernel_source_ref": "v6.9"},
     ),
     (
@@ -311,10 +315,6 @@ _BUILD_PROFILE_EXAMPLES: tuple[tuple[str, dict[str, Any]], ...] = (
                 "git": {"remote": "https://git.kernel.org/.../linux.git", "ref": "v6.9"}
             },
         },
-    ),
-    (
-        "external lane (ingest a prebuilt artifact)",
-        {"schema_version": 1, "source": "external"},
     ),
 )
 
