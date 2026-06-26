@@ -276,14 +276,27 @@ def test_redact_database_url_leaves_passwordless_url_unchanged() -> None:
     assert "***" not in redact_database_url(url)
 
 
-def test_redact_database_url_masks_conninfo_password_token() -> None:
+def test_redact_database_url_blanket_redacts_conninfo_with_password() -> None:
     from kdive.admin.bootstrap import redact_database_url
 
     secret = "s3cr3t"  # noqa: S105 # pragma: allowlist secret - test literal
-    redacted = redact_database_url(f"host=db.example dbname=kdive password={secret}")
+    # A keyword/value conninfo is redacted wholesale: a token regex would only partially mask a
+    # spaced or quoted value, leaking the tail. Cover the plain, spaced, and quoted forms.
+    for conninfo in (
+        f"host=db.example dbname=kdive password={secret}",
+        f"host=db.example password = {secret} dbname=kdive",
+        f"host=db.example password='{secret} more' dbname=kdive",
+    ):
+        redacted = redact_database_url(conninfo)
+        assert secret not in redacted
+        assert "redacted" in redacted.lower()
 
-    assert secret not in redacted
-    assert "db.example" in redacted
+
+def test_redact_database_url_passwordless_conninfo_unchanged() -> None:
+    from kdive.admin.bootstrap import redact_database_url
+
+    conninfo = "host=db.example dbname=kdive user=kdive"
+    assert redact_database_url(conninfo) == conninfo
 
 
 def test_verify_project_both_rows_present(

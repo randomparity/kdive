@@ -268,15 +268,17 @@ def redact_database_url(url: str) -> str:
     """Mask the password in a Postgres conninfo so it is safe to print (ADR-0256).
 
     Handles the ``postgresql://`` URL form carrying a userinfo password (password → ``***``,
-    host/port/db intact) and a keyword/value conninfo (the ``password=…`` token masked). Returns
-    the input unchanged when it carries no password — the diagnostic value is the host/db, not
-    the secret.
+    host/port/db intact). Returns the input unchanged when it carries no password — the
+    diagnostic value is the host/db, not the secret. Any *other* string that mentions
+    ``password`` (a libpq keyword/value conninfo, where the value may be quoted or spaced and a
+    token regex would only partially mask it) is replaced wholesale with ``<redacted>``: a
+    partial mask could leak the tail of a real secret, so it is never attempted.
 
     Args:
         url: A psycopg URL or keyword/value conninfo string.
 
     Returns:
-        The same conninfo with any password component masked.
+        A display-safe rendering with any password component masked.
     """
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme and parsed.password is not None:
@@ -287,7 +289,9 @@ def redact_database_url(url: str) -> str:
         return urllib.parse.urlunsplit(
             (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
         )
-    return re.sub(r"password=\S+", "password=***", url)
+    if re.search(r"password", url, re.IGNORECASE):
+        return "<redacted: conninfo with password>"
+    return url
 
 
 def format_verify_result(
