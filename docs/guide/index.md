@@ -42,6 +42,7 @@ given tool.
 
 | Page | What it covers |
 |---|---|
+| [Core reproduce/verify path](core-path.md) | The ~12-tool path from acquiring capacity to triaging a crash, and the curated MCP prompts |
 | [Concepts](concepts.md) | The six durable objects and their lifecycle ordering |
 | [Response envelope](response-envelope.md) | `ToolResponse` fields; the references-not-dumps rule |
 | [Async jobs](async-jobs.md) | The long-op pattern and the `jobs.*` polling tools |
