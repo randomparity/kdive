@@ -6,9 +6,10 @@ import hashlib
 import re
 import subprocess  # noqa: S404 - libguestfs tools invoked with fixed argv, no shell
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from xml.etree.ElementTree import fromstring as _xml_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
@@ -146,3 +147,67 @@ def digest_file(path: Path) -> str:
             details={"path": str(path), "error": type(exc).__name__},
         ) from exc
     return f"sha256:{hasher.hexdigest()}"
+
+
+_VIRT_INSPECTOR_TIMEOUT_S = 5 * 60
+
+type VersionInspectSeam = Callable[[Path], dict[str, str]]
+
+
+def parse_virt_inspector_versions(xml: str) -> dict[str, str]:
+    """Map each ``<application>`` with a ``<name>`` and ``<version>`` to ``{name: version}``.
+
+    Applications missing a name or version are skipped. A DOCTYPE is rejected up front so a
+    crafted package name cannot trigger entity expansion (stdlib ElementTree expands internal
+    entities only when a DTD is present).
+    """
+    if "<!DOCTYPE" in xml:
+        raise ValueError("DOCTYPE is not allowed in virt-inspector output")
+    root = _xml_fromstring(xml)  # noqa: S314 - trusted virt-inspector output; DOCTYPE rejected above
+    versions: dict[str, str] = {}
+    for app in root.iter("application"):
+        name = app.findtext("name")
+        version = app.findtext("version")
+        if name and version:
+            versions[name] = version
+    return versions
+
+
+def inspect_package_versions(qcow2_path: Path) -> dict[str, str]:  # pragma: no cover - live_vm
+    """Return the full installed ``{name: version}`` map for ``qcow2_path`` via ``virt-inspector``.
+
+    Raises:
+        CategorizedError: ``MISSING_DEPENDENCY`` if ``virt-inspector`` is absent;
+            ``INFRASTRUCTURE_FAILURE`` on timeout or a non-zero exit.
+    """
+    argv = ["virt-inspector", "--no-icon", "-a", str(qcow2_path)]
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed argv; image path is a data arg
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=_VIRT_INSPECTOR_TIMEOUT_S,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise CategorizedError(
+            "virt-inspector is not installed; cannot capture package versions",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+            details={"tool": "virt-inspector"},
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise CategorizedError(
+            "virt-inspector exceeded its timeout",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"timeout_s": _VIRT_INSPECTOR_TIMEOUT_S},
+        ) from exc
+    if result.returncode != 0:
+        raise CategorizedError(
+            "virt-inspector failed",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"stderr": result.stderr[-2000:]},
+        )
+    return parse_virt_inspector_versions(result.stdout)
+
+
+DEFAULT_VERSION_INSPECT: VersionInspectSeam = inspect_package_versions
