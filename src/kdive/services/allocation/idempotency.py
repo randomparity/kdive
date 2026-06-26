@@ -25,6 +25,22 @@ async def within_budget(conn: AsyncConnection, project: str, estimate: Decimal) 
     return remaining >= estimate
 
 
+async def budget_snapshot(conn: AsyncConnection, project: str) -> tuple[Decimal, Decimal] | None:
+    """Return ``(limit_kcu, spent_kcu)`` for ``project``, or ``None`` if it has no budget row.
+
+    The figures the budget gate's denial echoes back so a caller can size a budget increase
+    instead of guessing (#838). Kept separate from :func:`within_budget` so the gating
+    predicate that renewal and the adversarial race suite rely on keeps its plain bool
+    contract; the snapshot is read only on the cold denial path.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT limit_kcu, spent_kcu FROM budgets WHERE project = %s", (project,))
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    return Decimal(row[0]), Decimal(row[1])
+
+
 async def resolve_replay(
     conn: AsyncConnection,
     *,
