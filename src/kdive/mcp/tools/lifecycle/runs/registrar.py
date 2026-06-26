@@ -146,24 +146,28 @@ def _register_runs_create(
     async def runs_create(
         investigation_id: Annotated[str, Field(description="Investigation to attach the Run to.")],
         build_profile: Annotated[
-            ServerBuildProfile | ExternalBuildProfile,
+            ExternalBuildProfile | ServerBuildProfile,
             Field(
                 description=(
-                    "Build profile for the Run's kernel. source='server' builds from a kernel "
-                    "tree (kernel_source_ref required); source='external' ingests a prebuilt "
-                    "artifact. For a local build host a warm-tree kernel_source_ref is a "
-                    "provenance label only — it does not select the tree; the operator stages "
-                    "the actual source via KDIVE_KERNEL_SRC on the worker, and runs.get echoes "
-                    "the label and resolved commit in data.build_provenance. The optional "
-                    "'config' is a catalog ComponentRef "
+                    "Build profile for the Run's kernel. The recommended default is "
+                    "source='external': ingest a prebuilt artifact (ADR-0234). After "
+                    "runs.create with source='external', call artifacts.expected_uploads to "
+                    "learn the exact bytes to produce, artifacts.create_run_upload to upload, "
+                    "then runs.complete_build. source='server' builds from a kernel tree "
+                    "(kernel_source_ref required) and is a single-host convenience: for a "
+                    "local build host a warm-tree kernel_source_ref is a provenance label "
+                    "only — it does not select the tree; the operator stages the actual source "
+                    "via KDIVE_KERNEL_SRC on the worker, and runs.get echoes the label and "
+                    "resolved commit in data.build_provenance. The optional 'config' is a "
+                    "catalog ComponentRef "
                     "(e.g. {'kind':'catalog','provider':'system','name':'kdump'}); OMIT it to get "
                     "the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) "
                     "for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named "
                     "fragment. Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set "
-                    "here: append them via runs.build.cmdline (bound on the first build). "
-                    "See resource://kdive/docs/operating/build-source-staging.md for "
-                    "staging the source, or resource://kdive/docs/operating/"
-                    "external-build-upload.md for shaping a source='external' upload."
+                    "here: append them via runs.build.cmdline (bound on the first server build). "
+                    "See resource://kdive/docs/operating/external-build-upload.md for shaping a "
+                    "source='external' upload, or resource://kdive/docs/operating/"
+                    "build-source-staging.md for staging a server-build source."
                 )
             ),
         ],
