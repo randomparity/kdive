@@ -36,10 +36,15 @@ We will add two `read_only` registry verbs under the `ledger` group —
 - **`--since` / `--until` window flags**, assembled by the verb handler into the
   `[start, end]` pair (omitted when both absent; `null` for an absent half). Values pass
   through verbatim; the server owns validation.
-- **`--projects a,b`** (granted only), comma-split into the `projects` list.
+- **`--projects a,b`** (granted only), comma-split into the `projects` list. A given-but-
+  all-empty value (e.g. a stray comma) is a CLI usage error (exit `2`) rather than an empty
+  list, so a typo fails loudly instead of returning a clean-but-misleading empty rollup.
 - **`--group-by principal`**, a pass-through string the server validates.
 - **A new `render_report` path** that tables the rows and prints the envelope totals as a
-  footer; under `--json` it emits one `{"items": [...], "totals": {...}}` object.
+  footer; under `--json` it emits one `{"items": [...], "totals": {...}}` object. Both halves
+  are projected onto a declared key set (rows like the existing list verbs, totals onto the
+  envelope's documented `data` keys), so a server-side `data` addition cannot silently change
+  the scriptable contract.
 - **Server-side authorization only.** The verbs add no role logic; `report-all`'s help text
   notes the `platform_auditor` requirement, and a non-auditor token surfaces the server's
   `authorization_denied` envelope (exit `3`).
