@@ -26,9 +26,30 @@ _SHA256_CHUNK_BYTES = 1024 * 1024
 
 
 class VmcoreEntry(NamedTuple):
+    """A ``/var/crash/<ts>`` core the reader saw.
+
+    ``incomplete`` marks a ``vmcore-incomplete`` — kdump's name for a core it has not finished
+    writing (its transient mid-save name, also left behind when ``makedumpfile`` aborts). Such a
+    core is unreliable for crash/drgn and is never promoted to the harvested core.
+    """
+
     path: str
     mtime: float
     size_bytes: int
+    incomplete: bool = False
+
+
+class HarvestOutcome(NamedTuple):
+    """The result of a ``/var/crash`` harvest.
+
+    ``core`` is the spooled complete ``vmcore`` (``dest``) when one was harvested, else ``None``.
+    ``incomplete_found`` is ``True`` when the overlay held a ``vmcore-incomplete`` but no complete
+    ``vmcore`` could be returned — the cause-neutral disclosure signal the caller maps to a
+    ``READINESS_FAILURE``.
+    """
+
+    core: Path | None
+    incomplete_found: bool
 
 
 @runtime_checkable
@@ -46,20 +67,24 @@ def select_newest(entries: list[VmcoreEntry]) -> VmcoreEntry | None:
 
 def harvest_vmcore(
     reader: GuestCoreReader, overlay: str, *, dest: Path, max_bytes: int
-) -> Path | None:
-    """Stream the newest ``/var/crash/*/vmcore`` from ``overlay`` into ``dest``.
+) -> HarvestOutcome:
+    """Stream the newest complete ``/var/crash/*/vmcore`` from ``overlay`` into ``dest``.
 
-    Returns ``dest`` (now holding the core) or ``None`` when no core is present. ``dest`` is
-    owned by the caller (see ``retrieve.py``); this function only writes into it, and never
-    when the size cap rejects the core or no core exists.
+    Prefers a complete ``vmcore``; a ``vmcore-incomplete`` is never downloaded or returned (a
+    truncated/unfiltered core is unreliable for crash/drgn). When no complete core exists the
+    outcome carries ``incomplete_found`` so the caller can disclose an incomplete-core readiness
+    failure separately from a genuinely empty ``/var/crash``. ``dest`` is owned by the caller
+    (see ``retrieve.py``); this function writes into it only when a complete core is harvested.
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` when the core exceeds ``max_bytes`` (checked
             from the ``statns`` size before any bytes are downloaded).
     """
-    chosen = select_newest(reader.list_vmcores(overlay))
+    entries = reader.list_vmcores(overlay)
+    incomplete_found = any(entry.incomplete for entry in entries)
+    chosen = select_newest([entry for entry in entries if not entry.incomplete])
     if chosen is None:
-        return None
+        return HarvestOutcome(core=None, incomplete_found=incomplete_found)
     if chosen.size_bytes > max_bytes:
         raise CategorizedError(
             "kdump core exceeds the single-object ceiling",
@@ -67,7 +92,7 @@ def harvest_vmcore(
             details={"size_bytes": chosen.size_bytes, "max_bytes": max_bytes},
         )
     reader.download_vmcore(overlay, chosen.path, dest)
-    return dest
+    return HarvestOutcome(core=dest, incomplete_found=incomplete_found)
 
 
 def file_sha256_b64(path: Path) -> str:

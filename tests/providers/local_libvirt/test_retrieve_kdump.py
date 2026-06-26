@@ -27,9 +27,15 @@ from uuid import UUID
 
 import pytest
 
+from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.retrieve import (
+    KDUMP_CORE_INCOMPLETE_REMEDIATION,
+    LocalLibvirtRetrieve,
+)
 from kdive.providers.local_libvirt.retrieve_kdump import (
     GuestCoreReader,
+    HarvestOutcome,
     VmcoreEntry,
     extract_dmesg_or_sentinel,
     file_sha256_b64,
@@ -38,10 +44,12 @@ from kdive.providers.local_libvirt.retrieve_kdump import (
     redact_dmesg,
     select_newest,
 )
-from kdive.providers.shared.debug_common.core_file import DMESG_UNAVAILABLE
+from kdive.providers.shared.debug_common.core_file import DMESG_UNAVAILABLE, MAX_CORE_BYTES
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _OVERLAY = "/var/lib/kdive/rootfs/sys-overlay.qcow2"
+_SYS = UUID("33333333-3333-3333-3333-333333333333")
+_RUN = UUID("44444444-4444-4444-4444-444444444444")
 
 
 @dataclass
@@ -81,7 +89,7 @@ def test_harvest_downloads_newest_core_to_dest(tmp_path: Path) -> None:
     )
     dest = tmp_path / "core.vmcore"
     out = harvest_vmcore(reader, _OVERLAY, dest=dest, max_bytes=1024)
-    assert out == dest
+    assert out == HarvestOutcome(core=dest, incomplete_found=False)
     assert dest.read_bytes() == b"NEWER"
     assert reader.downloads == ["/var/crash/new/vmcore"]
 
@@ -89,7 +97,9 @@ def test_harvest_downloads_newest_core_to_dest(tmp_path: Path) -> None:
 def test_harvest_absent_core_returns_none(tmp_path: Path) -> None:
     reader = _FakeReader(entries=[])
     dest = tmp_path / "core.vmcore"
-    assert harvest_vmcore(reader, _OVERLAY, dest=dest, max_bytes=1024) is None
+    assert harvest_vmcore(reader, _OVERLAY, dest=dest, max_bytes=1024) == HarvestOutcome(
+        core=None, incomplete_found=False
+    )
     assert not dest.exists()
 
 
@@ -104,6 +114,81 @@ def test_harvest_oversize_core_is_configuration_error(tmp_path: Path) -> None:
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert reader.downloads == []  # rejected before downloading the bytes
     assert not dest.exists()
+
+
+def test_harvest_only_incomplete_core_is_not_promoted(tmp_path: Path) -> None:
+    """A lone vmcore-incomplete is never downloaded/returned; it only flags the disclosure."""
+    reader = _FakeReader(
+        entries=[VmcoreEntry("/var/crash/x/vmcore-incomplete", 100.0, 5, incomplete=True)],
+        blobs={"/var/crash/x/vmcore-incomplete": b"PARTIAL"},
+    )
+    dest = tmp_path / "core.vmcore"
+    out = harvest_vmcore(reader, _OVERLAY, dest=dest, max_bytes=1024)
+    assert out == HarvestOutcome(core=None, incomplete_found=True)
+    assert reader.downloads == []
+    assert not dest.exists()
+
+
+def test_harvest_prefers_complete_core_over_incomplete(tmp_path: Path) -> None:
+    """With both present (even when the incomplete one is newer) the complete vmcore wins."""
+    reader = _FakeReader(
+        entries=[
+            VmcoreEntry("/var/crash/done/vmcore", 100.0, 5),
+            VmcoreEntry("/var/crash/aborted/vmcore-incomplete", 300.0, 7, incomplete=True),
+        ],
+        blobs={"/var/crash/done/vmcore": b"COMPLETE"},
+    )
+    dest = tmp_path / "core.vmcore"
+    out = harvest_vmcore(reader, _OVERLAY, dest=dest, max_bytes=1024)
+    assert out == HarvestOutcome(core=dest, incomplete_found=True)
+    assert dest.read_bytes() == b"COMPLETE"
+    assert reader.downloads == ["/var/crash/done/vmcore"]
+
+
+def _kdump_capture_via_reader(reader: _FakeReader, spool: Path) -> None:
+    """Drive ``capture(KDUMP)`` with ``reader`` behind the wait seam (no live host, no store).
+
+    The success path is exercised in ``test_retrieve.py``; here the store/build-id seams must
+    never run because every scenario raises before any core is streamed.
+    """
+
+    def wait(_system_id: UUID) -> HarvestOutcome:
+        spool.mkdir(parents=True, exist_ok=True)
+        return harvest_vmcore(reader, _OVERLAY, dest=spool / "vmcore", max_bytes=MAX_CORE_BYTES)
+
+    retriever = LocalLibvirtRetrieve(
+        tenant="local",
+        store_factory=lambda: pytest.fail("store used on a no-core path"),
+        wait_for_vmcore=wait,
+        read_vmcore_build_id=lambda _d: pytest.fail("build-id seam used on a no-core path"),
+        read_vmcore_build_id_from_file=lambda _p: pytest.fail("build-id seam used"),
+        extract_redacted_from_file=lambda _p: pytest.fail("redaction seam used"),
+        host_dump_capture=lambda _s: pytest.fail("host_dump seam used on the kdump path"),
+        secret_registry=SecretRegistry(),
+    )
+    retriever.capture(_SYS, _RUN, CaptureMethod.KDUMP)
+
+
+def test_capture_incomplete_core_is_readiness_failure_with_remediation(tmp_path: Path) -> None:
+    reader = _FakeReader(
+        entries=[VmcoreEntry("/var/crash/x/vmcore-incomplete", 100.0, 5, incomplete=True)],
+        blobs={},
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _kdump_capture_via_reader(reader, tmp_path / "spool")
+    assert exc.value.category is ErrorCategory.READINESS_FAILURE
+    assert exc.value.details["reason"] == "kdump_core_incomplete"
+    assert exc.value.details["remediation"] == KDUMP_CORE_INCOMPLETE_REMEDIATION
+    assert exc.value.details["system_id"] == str(_SYS)
+
+
+def test_capture_empty_crashdir_keeps_no_core_path(tmp_path: Path) -> None:
+    """A genuinely empty /var/crash stays the existing _no_core readiness failure (no reason)."""
+    reader = _FakeReader(entries=[], blobs={})
+    with pytest.raises(CategorizedError) as exc:
+        _kdump_capture_via_reader(reader, tmp_path / "spool")
+    assert exc.value.category is ErrorCategory.READINESS_FAILURE
+    assert exc.value.details.get("reason") != "kdump_core_incomplete"
 
 
 def test_guest_core_reader_protocol_is_runtime_checkable() -> None:
