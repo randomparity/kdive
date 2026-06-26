@@ -78,29 +78,72 @@ documented per release (and the first follow-up that renders it adds the structu
 
 ## Follow-up realization: #823 — RHEL family entries (Rocky 8/9/10 + CentOS Stream 9/10)
 
-The first follow-up adds five catalog rows reusing the shipped `rhel` `FamilyCustomizer`, sourced
-from their **GenericCloud qcow2s** (sha256-pinned `cloud-image` source, the same lane proven for
-Fedora 44), and **renders the structured capability flag** the MVP deferred.
+The first follow-up adds five catalog rows reusing the `rhel` `FamilyCustomizer`, sourced from their
+**GenericCloud qcow2s** (sha256-pinned `cloud-image` source, the same lane proven for Fedora 44),
+makes the `rhel` family **EL-version-aware** (the MVP's package set was Fedora-shaped), and
+**renders the structured capability flag** the MVP deferred.
+
+### EL-version-aware `rhel` packaging (the load-bearing change)
+
+"Reuse `rhel`" holds at the dnf level but the MVP's package set was Fedora-specific. Verified
+against the distro package indexes (2026-06-26):
+
+| EL major | makedumpfile + `kdumpctl` | `drgn` | kdump-enable unit |
+|---|---|---|---|
+| 8 (Rocky 8) | bundled in `kexec-tools` (no separate pkg) | EPEL only (`epel-release` is in the default-enabled `extras` repo) | `kdump.service` (kexec-tools) |
+| 9 (Rocky/CentOS Stream 9) | bundled in `kexec-tools` (no separate pkg) | BaseOS/AppStream | `kdump.service` (kexec-tools) |
+| 10 (Rocky/CentOS Stream 10) | **separate** `makedumpfile` pkg + `kdump-utils` (like Fedora) | BaseOS/AppStream | `kdump.service` (kdump-utils) |
+
+`RhelFamily.packages(kind, distro, version)` therefore returns an EL-major-aware debug set:
+
+- **Fedora and EL ≥ 10:** `drgn kexec-tools makedumpfile kdump-utils keyutils openssh-server`
+  (unchanged from the MVP — separate `makedumpfile`/`kdump-utils` exist).
+- **EL 8 / EL 9:** `drgn kexec-tools keyutils openssh-server` — `makedumpfile` and `kdumpctl` come
+  from `kexec-tools`; the standalone `makedumpfile`/`kdump-utils` packages do not exist, so
+  installing them by name would fail the build. **EL 8** additionally runs `dnf -y install
+  epel-release` (a separate transaction, before the `drgn` install, so the EPEL repo metadata is
+  present) because `drgn` is not in EL 8 BaseOS/AppStream.
+
+Two MVP gates that keyed on Fedora package names are corrected: the kdump-enable block now gates on
+`"kexec-tools" in packages` (present in every debug set, absent from the build set) rather than
+`"kdump-utils" in packages`; the install list (and provenance `packages`) is the actually-installed
+set, so provenance stays falsifiable. `CustomizeContext` gains `distro`/`version` so the family can
+emit the EL-8 EPEL step. The `build` kind set is generic toolchain packages available on every EL,
+unchanged.
 
 ### `kdump_capable` flag (the rendered capability)
 
 `RootfsCatalogEntry` gains a required `kdump_capable: bool` field, parsed and validated by the
-loader. It is a **coarse, kernel-relative** fact: `true` iff the entry's base image ships a
-makedumpfile new enough (**≥ 1.7.9**, the first release supporting v7.0 x86_64 — the kernel-class
-under test) to filter the from-source kernel's vmcore. It is **not** an absolute kdump-works flag —
-it answers "does the default `kdump` `vmcore.fetch` produce a *complete* core for the current
-from-source kernel-under-test on this image, or does it hit the incomplete-core remediation?"
+loader. It describes the **makedumpfile the build installs from the release's repos at build time**
+(the bundled `kexec-tools` makedumpfile on EL 8/9, the separate `makedumpfile` pkg on EL ≥ 10 /
+Fedora) — **not** the frozen sha256-pinned base, which the build updates from. `true` iff that
+makedumpfile is **≥ 1.7.9**, the first release supporting an x86_64 **v7.0-class kernel**.
+
+Two explicit preconditions of the boolean, named so it is not over-read:
+
+- **Kernel-relative.** It is `true`/`false` *for the current default from-source kernel target*
+  (v7.0-class). It is not an absolute "kdump works" flag: the same makedumpfile 1.7.8 image that is
+  `false` here would produce a complete filtered core for an older (e.g. v6.x) kernel it does
+  support. The flag answers "does the default `kdump` `vmcore.fetch` produce a *complete filtered*
+  core for the v7.0-class kernel-under-test, or does it hit the incomplete-core remediation?"
+- **Snapshot, not live truth.** The documented makedumpfile version is a point-in-time snapshot of a
+  mutable upstream repo that the build re-pulls on every run. When a release ships makedumpfile
+  ≥ 1.7.9, a fresh build silently becomes capable while the curated flag still reads `false` until
+  re-verified. The flag is a curated default that can **lag** a distro's makedumpfile bump; the
+  runtime `kdump_core_incomplete` remediation (which fires on the actual harvest) is the ground
+  truth, not the flag.
 
 The flag is **rendered** in the operator image table in
 [`../../operating/runbooks/image-lifecycle.md`](../../operating/runbooks/image-lifecycle.md) and
 **guarded** by `tests/images/test_rootfs_catalog.py`, which carries the authoritative per-entry
-makedumpfile version (verified against distro package indexes, 2026-06-26) and asserts each row's
-`kdump_capable == (makedumpfile_version ≥ 1.7.9)`. A flag flipped without a matching version bump
-fails the guard.
+makedumpfile version (a documented snapshot, verified against distro package indexes 2026-06-26) and
+asserts each row's `kdump_capable == (makedumpfile_version ≥ 1.7.9)`. The guard catches an
+*internally inconsistent* edit (a flag flipped without bumping the documented version); it does not
+and cannot detect upstream drift — re-verification is a manual, dated step.
 
 ### Verified makedumpfile matrix (2026-06-26)
 
-| catalog name | base | makedumpfile | source | `kdump_capable` |
+| catalog name | base | makedumpfile (build-time) | source | `kdump_capable` (v7.0) |
 |---|---|---|---|---|
 | `fedora-kdive-ready-44` | Fedora 44 | 1.7.9 | `mdapi.fedoraproject.org/f44` | **true** |
 | `fedora-kdive-ready-43` | Fedora 43 | 1.7.8 | `mdapi.fedoraproject.org/f43` | false |
@@ -114,16 +157,25 @@ None of the EL releases ship makedumpfile ≥ 1.7.9 yet (1.7.9 published 2026-04
 so **every #823 entry is `kdump_capable = false`** for the v7.0-class kernel-under-test. That is the
 expected, disclosed outcome: their lifecycle proof covers provision/build/install/boot/`host_dump`,
 and the default `kdump` path lands on the cause-neutral `kdump_core_incomplete` remediation (which
-names `host_dump` and a newer image). Fedora 44 remains the only kdump-capable default. As EL
-distros ship makedumpfile ≥ 1.7.9, flipping the flag is a one-line catalog edit plus the guard's
-version bump.
+names `host_dump` and a newer image). Fedora 44 remains the only kdump-capable default.
+
+### Live-proof preconditions (carry the MVP's negative-proof rigor)
+
+A `kdump_capable = false` entry does **not** universally fail the default `kdump` path: per the
+MVP live-proof gate, makedumpfile 1.7.8 on a *small* (4 GB) guest can still write a complete
+**unfiltered** core that fits the window — the window-overrun only manifests at large RAM. So the
+false-entry proof reuses the MVP's pinned **large** guest RAM, and the disclosure assertion is "the
+default `kdump` path lands on `kdump_core_incomplete`" *at that RAM*; the pass signal is the
+remediation (and the in-guest "kernel version is not supported" console line), not file existence.
+The lifecycle planes (provision/build/install/boot/`host_dump`) are proven independently of RAM.
 
 ### Naming and registration
 
 Rows follow the `fedora-kdive-ready-NN` convention: `rocky-kdive-ready-{8,9,10}` and
 `centos-stream-kdive-ready-{9,10}` (`distro = "rocky"` / `"centos-stream"`). `distro`/`version` are
-provenance metadata for a `cloud-image` row (the URL carries the base), so no new `virt-builder`
-templates are involved. Each row registers in the inventory example the way Fedora 44 does.
+provenance metadata for a `cloud-image` row (the URL carries the base) and now also drive the
+family's EL-major package decision; no new `virt-builder` templates are involved. Each row registers
+in the inventory example the way Fedora 44 does.
 
 ## Architecture
 

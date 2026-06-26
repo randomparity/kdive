@@ -94,9 +94,12 @@ the kdump harvest disclose an incomplete core honestly.
   unaffected.
 - Adding a base OS is a catalog row plus, for a new packaging family, one `FamilyCustomizer` — no
   changes to the build pipeline, repack, or inventory wiring. Realized in #823: Rocky 8/9/10 and
-  CentOS Stream 9/10 land as five `cloud-image` rows reusing `rhel`, no code beyond the
-  `kdump_capable` flag. None ship makedumpfile ≥ 1.7.9 yet, so all five disclose the incomplete-core
-  remediation on the default `kdump` path; Fedora 44 stays the only kdump-capable default.
+  CentOS Stream 9/10 land as five `cloud-image` rows reusing `rhel`. "Reuse `rhel`" required making
+  the family **EL-major-aware**: EL 8/9 take `makedumpfile`/`kdumpctl` from `kexec-tools` (no
+  separate pkgs), EL 8 enables EPEL for `drgn`, and the kdump-enable gate keys on `kexec-tools`, not
+  the Fedora-only `kdump-utils`. None ship makedumpfile ≥ 1.7.9 yet, so all five disclose the
+  incomplete-core remediation on the default `kdump` path; Fedora 44 stays the only kdump-capable
+  default.
 - A distro whose makedumpfile is older than the kernel-under-test still produces an incomplete
   core; the worker now returns a clear, actionable failure naming `host_dump`/newer-image rather
   than the opaque window-timeout message.
