@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -31,9 +31,9 @@ from kdive.mcp.tools.lifecycle.allocations.lifecycle import (
     release_allocation,
 )
 from kdive.mcp.tools.lifecycle.allocations.request import (
-    _budget_denial_detail,
     _denial_detail,
     _denial_next_actions,
+    _funding_denial_detail,
     request_allocation,
 )
 from kdive.mcp.tools.lifecycle.allocations.view import (
@@ -57,6 +57,29 @@ def _ctx(
 ) -> RequestContext:
     roles = {"proj": role} if role is not None else {}
     return RequestContext(principal="user-1", agent_session="s", projects=projects, roles=roles)
+
+
+def _gate_entry(resp: ToolResponse, gate: str) -> Mapping[str, object]:
+    """Return the named gate's entry from a denial's data["unmet"] (#833)."""
+    unmet = resp.data["unmet"]
+    assert isinstance(unmet, list)
+    for entry in unmet:
+        if isinstance(entry, dict) and entry.get("gate") == gate:
+            return entry
+    raise AssertionError(f"no {gate!r} entry in unmet: {unmet!r}")
+
+
+def _unmet_gates(resp: ToolResponse) -> list[str]:
+    """The ordered gate discriminators from a denial's data["unmet"] (#833)."""
+    unmet = resp.data["unmet"]
+    assert isinstance(unmet, list)
+    gates: list[str] = []
+    for entry in unmet:
+        assert isinstance(entry, dict)
+        gate = entry["gate"]
+        assert isinstance(gate, str)
+        gates.append(gate)
+    return gates
 
 
 @asynccontextmanager
@@ -449,8 +472,8 @@ def test_budget_denial_names_set_budget_remedy_for_admin(migrated_url: str) -> N
 
 def test_budget_denial_omits_admin_tool_for_non_admin(migrated_url: str) -> None:
     # #841: a budget denial to a non-admin caller must drop accounting.set_budget and tell the
-    # caller to ask a project admin — while STILL naming the #838 shortfall figures so the admin
-    # can be asked for a sized increase.
+    # caller to ask a project admin — while STILL naming the shortfall figure so the admin
+    # can be asked for a sized increase (#833 surfaces it in data["unmet"]).
     async def _run() -> ToolResponse:
         async with _pool(migrated_url) as pool:
             await _register(pool, cap=2, limit="0")
@@ -460,86 +483,135 @@ def test_budget_denial_omits_admin_tool_for_non_admin(migrated_url: str) -> None
     assert resp.data["reason"] == "budget_exceeded"
     assert resp.suggested_next_actions == ["allocations.list"]
     assert "accounting.set_budget" not in resp.suggested_next_actions
-    estimate_kcu = str(resp.data["estimate_kcu"])
+    budget = _gate_entry(resp, "budget")
+    required_kcu = str(budget["required_kcu"])
     assert resp.detail is not None
     assert "accounting." not in resp.detail
     assert "ask your project admin" in resp.detail
-    assert estimate_kcu in resp.detail  # #838 shortfall still named for the non-admin
+    assert required_kcu in resp.detail  # the shortfall is still named for the non-admin
 
 
 def test_budget_denial_reports_cost_and_remaining(migrated_url: str) -> None:
-    # #838: a budget denial echoes the priced estimate and the budget figures into `data`, and
-    # names the shortfall in the prose, so the agent can size accounting.set_budget rather than
-    # over-setting the budget blind.
+    # #833/#838: a budget denial surfaces the budget gate's figures in data["unmet"], names the
+    # shortfall in the prose, and carries the absolute required_limit_kcu, so the agent sizes
+    # accounting.set_budget rather than over-setting blind.
     async def _run() -> ToolResponse:
         async with _pool(migrated_url) as pool:
             await _register(pool, cap=2, limit="0")  # generous quota, zero budget
             return await _request(pool, _ctx(Role.ADMIN))
 
     resp = asyncio.run(_run())
-    estimate_kcu = str(resp.data["estimate_kcu"])
     assert resp.data["reason"] == "budget_exceeded"
-    assert Decimal(estimate_kcu) > 0
-    assert Decimal(str(resp.data["limit_kcu"])) == Decimal("0")
-    assert Decimal(str(resp.data["spent_kcu"])) == Decimal("0")
-    assert Decimal(str(resp.data["budget_remaining_kcu"])) == Decimal("0")
+    budget = _gate_entry(resp, "budget")
+    required_kcu = str(budget["required_kcu"])
+    assert Decimal(required_kcu) > 0
+    assert Decimal(str(budget["required_limit_kcu"])) == Decimal(required_kcu)  # spent 0
+    assert Decimal(str(budget["limit_kcu"])) == Decimal("0")
+    assert Decimal(str(budget["spent_kcu"])) == Decimal("0")
+    assert Decimal(str(budget["remaining_kcu"])) == Decimal("0")
+    assert budget["remedy"] == "accounting.set_budget"
     assert resp.detail is not None
-    assert estimate_kcu in resp.detail  # the prose names the shortfall
+    assert required_kcu in resp.detail  # the prose names the shortfall
     assert "accounting.set_budget" in resp.detail
 
 
-def test_budget_denial_detail_without_figures_drops_shortfall_clause() -> None:
-    # Defensive: a budget denial whose details lack the figures still yields valid prose (no
-    # KeyError, no placeholder), naming only the remedy tool for an admin caller.
-    outcome = AdmissionOutcome(
-        granted=False,
-        allocation=None,
-        category=ErrorCategory.ALLOCATION_DENIED,
-        reason=BUDGET_DENIAL_REASON,
-    )
-    detail = _budget_denial_detail(outcome, caller_is_admin=True)
+def test_both_funding_gates_unmet_aggregate_admin(migrated_url: str) -> None:
+    # #833: a fresh project trips quota AND budget; one denial enumerates both gates with their
+    # remedies so an admin provisions both at once. Top-level category stays the gate's primary.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2, quota=0, limit="0")  # both rows present, both exhausted
+            return await _request(pool, _ctx(Role.ADMIN))
+
+    resp = asyncio.run(_run())
+    assert resp.error_category == "quota_exceeded"
+    gates = _unmet_gates(resp)
+    assert gates == ["quota", "budget"]
+    assert _gate_entry(resp, "quota")["remedy"] == "accounting.set_quota"
+    assert _gate_entry(resp, "budget")["remedy"] == "accounting.set_budget"
+    assert resp.suggested_next_actions == [
+        "accounting.set_quota",
+        "accounting.set_budget",
+        "allocations.list",
+    ]
+    assert resp.detail is not None
+    assert "accounting.set_quota" in resp.detail
+    assert "accounting.set_budget" in resp.detail
+
+
+def test_both_funding_gates_unmet_non_admin(migrated_url: str) -> None:
+    # #833/#841: a non-admin sees both unmet gates named in data and prose, but no admin tool in
+    # the breadcrumb and a "ask your project admin" remedy.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2, quota=0, limit="0")
+            return await _request(pool, _ctx(Role.CONTRIBUTOR))
+
+    resp = asyncio.run(_run())
+    assert _unmet_gates(resp) == ["quota", "budget"]
+    assert resp.suggested_next_actions == ["allocations.list"]
+    assert resp.detail is not None
+    assert "accounting." not in resp.detail
+    assert "ask your project admin" in resp.detail
+
+
+def test_funding_denial_detail_enumerates_both_gates() -> None:
+    # #833: the prose names every unmet gate + its remedy for an admin caller.
+    unmet: list[dict[str, object]] = [
+        {"gate": "quota", "current": 0, "required": 1},
+        {"gate": "budget", "required_kcu": "6.0000", "required_limit_kcu": "6.0000"},
+    ]
+    detail = _funding_denial_detail(unmet, caller_is_admin=True)
+    assert "accounting.set_quota" in detail
     assert "accounting.set_budget" in detail
-    assert "remaining" not in detail
-
-
-def test_budget_denial_detail_with_estimate_only_names_estimate() -> None:
-    outcome = AdmissionOutcome(
-        granted=False,
-        allocation=None,
-        category=ErrorCategory.ALLOCATION_DENIED,
-        reason=BUDGET_DENIAL_REASON,
-        details={"estimate_kcu": "6.0000"},
-    )
-    detail = _budget_denial_detail(outcome, caller_is_admin=True)
     assert "requested 6.0000 kcu" in detail
-    assert "remaining" not in detail
 
 
-def test_budget_denial_detail_non_admin_keeps_shortfall_drops_tool() -> None:
-    # #841: the non-admin budget detail names the shortfall figures (#838) but routes to a
-    # project admin instead of the uncallable accounting.set_budget tool.
-    outcome = AdmissionOutcome(
-        granted=False,
-        allocation=None,
-        category=ErrorCategory.ALLOCATION_DENIED,
-        reason=BUDGET_DENIAL_REASON,
-        details={"estimate_kcu": "6.0000", "budget_remaining_kcu": "0"},
-    )
-    detail = _budget_denial_detail(outcome, caller_is_admin=False)
+def test_funding_denial_detail_non_admin_drops_tools() -> None:
+    # #841: a non-admin gets shortfall prose but no tool names — routed to a project admin.
+    unmet: list[dict[str, object]] = [
+        {
+            "gate": "budget",
+            "required_kcu": "6.0000",
+            "required_limit_kcu": "6.0000",
+            "remaining_kcu": "0",
+            "limit_kcu": "0",
+            "spent_kcu": "0",
+        },
+    ]
+    detail = _funding_denial_detail(unmet, caller_is_admin=False)
     assert "requested 6.0000 kcu, 0 kcu remaining" in detail
     assert "accounting.set_budget" not in detail
     assert "ask your project admin" in detail
 
 
 def test_denial_next_actions_role_awareness() -> None:
-    # #841: the next-action breadcrumb leads with the admin remedy tool only for an admin caller.
+    # #833/#841: the breadcrumb leads with every unmet remedy (quota then budget) for an admin
+    # caller; a non-admin keeps the plain breadcrumb.
+    both = AdmissionOutcome(
+        granted=False,
+        allocation=None,
+        category=ErrorCategory.QUOTA_EXCEEDED,
+        details={"unmet": [{"gate": "quota"}, {"gate": "budget"}]},
+    )
     budget = AdmissionOutcome(
         granted=False,
         allocation=None,
         category=ErrorCategory.ALLOCATION_DENIED,
         reason=BUDGET_DENIAL_REASON,
+        details={"unmet": [{"gate": "budget"}]},
     )
-    quota = AdmissionOutcome(granted=False, allocation=None, category=ErrorCategory.QUOTA_EXCEEDED)
+    quota = AdmissionOutcome(
+        granted=False,
+        allocation=None,
+        category=ErrorCategory.QUOTA_EXCEEDED,
+        details={"unmet": [{"gate": "quota"}]},
+    )
+    assert _denial_next_actions(both, caller_is_admin=True) == [
+        "accounting.set_quota",
+        "accounting.set_budget",
+        "allocations.list",
+    ]
     assert _denial_next_actions(budget, caller_is_admin=True)[0] == "accounting.set_budget"
     assert _denial_next_actions(budget, caller_is_admin=False) == ["allocations.list"]
     assert _denial_next_actions(quota, caller_is_admin=True)[0] == "accounting.set_quota"
@@ -548,7 +620,12 @@ def test_denial_next_actions_role_awareness() -> None:
 
 def test_quota_denial_detail_role_awareness() -> None:
     # #841: the quota denial prose names accounting.set_quota only for an admin caller.
-    quota = AdmissionOutcome(granted=False, allocation=None, category=ErrorCategory.QUOTA_EXCEEDED)
+    quota = AdmissionOutcome(
+        granted=False,
+        allocation=None,
+        category=ErrorCategory.QUOTA_EXCEEDED,
+        details={"unmet": [{"gate": "quota", "current": 0, "required": 1}]},
+    )
     admin_detail = _denial_detail(quota, caller_is_admin=True)
     non_admin_detail = _denial_detail(quota, caller_is_admin=False)
     assert "accounting.set_quota" in admin_detail

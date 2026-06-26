@@ -38,6 +38,9 @@ _DENIAL_NEXT_ACTIONS = ["allocations.list"]
 # Admin tools that resolve a funding denial (ADR-0245). Both are registered in mcp/exposure.py.
 _QUOTA_REMEDY_TOOL = "accounting.set_quota"
 _BUDGET_REMEDY_TOOL = "accounting.set_budget"
+# The MCP layer owns the gate→remedy-tool mapping (ADR-0255): the service emits a transport-
+# neutral ``gate`` discriminator in ``data["unmet"]`` and the transport names the tool.
+_GATE_REMEDY_TOOL = {"quota": _QUOTA_REMEDY_TOOL, "budget": _BUDGET_REMEDY_TOOL}
 
 
 def _outcome_for_metrics(result: RequestAdmissionResult) -> AdmissionOutcome | None:
@@ -176,6 +179,8 @@ def _denial_response(
 ) -> ToolResponse:
     category = outcome.category or ErrorCategory.ALLOCATION_DENIED
     data = denial_details(outcome)
+    if isinstance(data.get("unmet"), list):
+        data["unmet"] = _unmet_with_remedies(data["unmet"])
     _log.info("allocation denied for project %s on resource %s: %s", project, resource_id, category)
     return ToolResponse.failure(
         str(resource_id),
@@ -186,30 +191,70 @@ def _denial_response(
     )
 
 
-def _denial_next_actions(outcome: AdmissionOutcome, *, caller_is_admin: bool) -> list[str]:
-    """Lead a funding denial with the admin tool that resolves it (ADR-0245, #841).
+def _unmet_with_remedies(unmet: list[object]) -> list[object]:
+    """Name each unmet funding gate's remedy tool in the surfaced ``data["unmet"]`` (ADR-0255).
 
-    A quota or budget denial otherwise points only at ``allocations.list``, which on a denied
-    first request returns an empty list. The admin remedy tool is led with **only** when the
-    caller holds ``Role.ADMIN`` on the project — the role ``accounting.set_quota`` /
-    ``accounting.set_budget`` require; a non-admin caller (``allocations.request`` needs only
-    ``Role.CONTRIBUTOR``) is not pointed at a tool it cannot invoke. Host-capacity, affinity, and
-    generic denials keep the plain breadcrumb. Branch precedence mirrors :func:`_denial_detail`.
+    The service emits a transport-neutral ``gate`` per entry; the MCP layer, which owns the tool
+    names, augments each with its ``remedy``. Returns new entries (no mutation of the outcome).
+    """
+    augmented: list[object] = []
+    for entry in unmet:
+        if isinstance(entry, dict):
+            tool = _GATE_REMEDY_TOOL.get(entry.get("gate"))
+            augmented.append({**entry, "remedy": tool} if tool is not None else dict(entry))
+        else:
+            augmented.append(entry)
+    return augmented
+
+
+def _unmet_entries(outcome: AdmissionOutcome) -> list[dict[str, object]]:
+    """The funding-gate entries from a denial, or ``[]`` when it is not a funding denial."""
+    unmet = outcome.details.get("unmet")
+    if not isinstance(unmet, list):
+        return []
+    return [entry for entry in unmet if isinstance(entry, dict)]
+
+
+def _denial_next_actions(outcome: AdmissionOutcome, *, caller_is_admin: bool) -> list[str]:
+    """Lead a funding denial with every admin tool that resolves it (ADR-0245/0255, #841).
+
+    A funding denial otherwise points only at ``allocations.list``, which on a denied first
+    request returns an empty list. Each unmet gate's remedy tool is led with (quota then budget,
+    the ``unmet`` order) **only** when the caller holds ``Role.ADMIN`` on the project — the role
+    ``accounting.set_quota`` / ``accounting.set_budget`` require; a non-admin caller
+    (``allocations.request`` needs only ``Role.CONTRIBUTOR``) is not pointed at a tool it cannot
+    invoke. Host-capacity, affinity, and generic denials carry no ``unmet`` and keep the plain
+    breadcrumb.
     """
     if not caller_is_admin:
         return list(_DENIAL_NEXT_ACTIONS)
-    if outcome.reason == BUDGET_DENIAL_REASON:
-        return [_BUDGET_REMEDY_TOOL, *_DENIAL_NEXT_ACTIONS]
-    if outcome.category is ErrorCategory.QUOTA_EXCEEDED:
-        return [_QUOTA_REMEDY_TOOL, *_DENIAL_NEXT_ACTIONS]
+    remedies = [
+        tool
+        for entry in _unmet_entries(outcome)
+        if (tool := _GATE_REMEDY_TOOL.get(entry.get("gate"))) is not None
+    ]
+    if remedies:
+        return [*remedies, *_DENIAL_NEXT_ACTIONS]
     return list(_DENIAL_NEXT_ACTIONS)
 
 
 def _denial_detail(outcome: AdmissionOutcome, *, caller_is_admin: bool) -> str:
-    if outcome.reason == BUDGET_DENIAL_REASON:
-        return _budget_denial_detail(outcome, caller_is_admin=caller_is_admin)
+    """Compose the human-readable denial detail (ADR-0255).
+
+    A funding denial (carrying ``unmet``) enumerates every unmet gate + its remedy; the other
+    denials keep their category-specific prose. The category branches also serve as the
+    defensive fallback if a funding denial reached the transport without its ``unmet`` list.
+    """
+    unmet = _unmet_entries(outcome)
+    if unmet:
+        return _funding_denial_detail(unmet, caller_is_admin=caller_is_admin)
     if outcome.reason == AFFINITY_DENIAL_REASON:
         return "the project is not permitted to place on the selected resource"
+    if outcome.reason == BUDGET_DENIAL_REASON:
+        return (
+            "project budget exhausted for the requested window; "
+            f"{_budget_remedy_clause(caller_is_admin)}"
+        )
     if outcome.category is ErrorCategory.QUOTA_EXCEEDED:
         return f"project concurrency quota exhausted; {_quota_remedy_clause(caller_is_admin)}"
     if outcome.reason == "at_capacity":
@@ -219,27 +264,41 @@ def _denial_detail(outcome: AdmissionOutcome, *, caller_is_admin: bool) -> str:
     return "allocation denied"
 
 
-def _budget_denial_detail(outcome: AdmissionOutcome, *, caller_is_admin: bool) -> str:
-    """Name the budget shortfall so the agent can size the increase (#838, #841).
+def _funding_denial_detail(unmet: list[dict[str, object]], *, caller_is_admin: bool) -> str:
+    """Name every unmet funding gate and its remedy so the caller provisions both (#833).
 
-    The estimate and remaining figures ride in ``outcome.details`` (populated by the gate);
-    when present the prose names them. A project with no budget row carries only the estimate,
-    so the remaining clause is dropped rather than printing a placeholder. The closing clause
-    is role-aware (#841): an admin is pointed at ``accounting.set_budget``; a non-admin, who
-    cannot call it, is told to ask a project admin.
+    Each gate's clause carries its current/required figures and a role-aware remedy: an admin is
+    pointed at the resolving tool; a non-admin, who cannot call it, is told to ask a project
+    admin. Clauses are joined in ``unmet`` order (quota then budget).
     """
-    estimate = outcome.details.get("estimate_kcu")
-    remaining = outcome.details.get("budget_remaining_kcu")
-    if estimate is not None and remaining is not None:
-        shortfall = f"requested {estimate} kcu, {remaining} kcu remaining; "
-    elif estimate is not None:
-        shortfall = f"requested {estimate} kcu; "
-    else:
-        shortfall = ""
-    return (
-        f"project budget exhausted for the requested window; {shortfall}"
-        f"{_budget_remedy_clause(caller_is_admin)}"
-    )
+    clauses = [_gate_clause(entry, caller_is_admin=caller_is_admin) for entry in unmet]
+    clauses = [clause for clause in clauses if clause]
+    body = "; ".join(clauses) if clauses else "funding not provisioned"
+    return f"project not provisioned for the requested allocation: {body}"
+
+
+def _gate_clause(entry: dict[str, object], *, caller_is_admin: bool) -> str:
+    """One funding gate's shortfall + remedy clause, or ``""`` for an unknown gate."""
+    gate = entry.get("gate")
+    if gate == "quota":
+        limit = entry.get("limit")
+        usage = (
+            f"concurrency quota exhausted (in use {entry.get('current')} of {limit})"
+            if limit is not None
+            else "concurrency quota not provisioned"
+        )
+        return f"{usage}, {_quota_remedy_clause(caller_is_admin)}"
+    if gate == "budget":
+        required = entry.get("required_kcu")
+        remaining = entry.get("remaining_kcu")
+        if required is not None and remaining is not None:
+            shortfall = f"budget exhausted (requested {required} kcu, {remaining} kcu remaining)"
+        elif required is not None:
+            shortfall = f"budget not provisioned (requested {required} kcu)"
+        else:
+            shortfall = "budget not provisioned"
+        return f"{shortfall}, {_budget_remedy_clause(caller_is_admin)}"
+    return ""
 
 
 def _quota_remedy_clause(caller_is_admin: bool) -> str:
