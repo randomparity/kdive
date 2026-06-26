@@ -332,6 +332,32 @@ the install plane that injects `/lib/modules/<v7.0>` that initramfs-tools needs 
 initramfs); kdump-tools arming and the `vmcore-incomplete` capture are proven only through the operator
 live-stack harness (with the install plane), as for #823.
 
+### Live-proof results (#824, KVM host, 2026-06-26)
+
+`build-fs --image <name>` ran live on the KVM host for both entries (real download + sha256-verify +
+`virt-customize` apt install + `virt-tar-out`/`virt-make-fs` repack + guestfish normalize + publish),
+and each built rootfs was guestfish-inspected. This exercises the **build** lifecycle plane and the novel
+`debian` customizer end-to-end:
+
+| entry | built digest (sha256, abbrev) | makedumpfile **in image** | kdump-tools / python3-drgn | ssh.service / kdump-tools.service / kdive-ready |
+|---|---|---|---|---|
+| `debian-kdive-ready-12` | `a676aa80…` | **1.7.2-1** | 1.8.1 / 0.0.22 | all `enabled` |
+| `debian-kdive-ready-13` | `938fe0b9…` | **1.7.6-1** | 1.10.7 / 0.0.31 | all `enabled` |
+
+Confirms: (1) the apt package set installs (`kdump-tools`, `python3-drgn`, `crash`, `makedumpfile`,
+`openssh-server`) and the offline `virt-customize` run-commands all succeed on a real Debian guest;
+(2) `systemctl enable` arms `ssh.service` and `kdump-tools.service` (the latter `WantedBy=basic.target`,
+so its wants symlink lands in `basic.target.wants/` — `systemctl is-enabled` reports `enabled`), and
+`kdive-ready.service` enables; (3) the rendered `kdive-ready` unit is ordered
+`After=dev-ttyS0.device kdump-tools.service` (the point-6 generalization, proven live on Debian);
+(4) `USE_KDUMP=1` is set, the machine-id is seeded, `/etc/cloud/cloud-init.disabled` exists, and there
+is **no** `/etc/selinux/config` (AppArmor, no relabel); (5) `python3-drgn` ships `/usr/bin/drgn` and the
+`kdive-drgn` helper is staged read-executable; (6) the **in-image makedumpfile version matches the
+documented matrix exactly** for both entries (1.7.2 / 1.7.6, both < 1.7.9 → `kdump_capable = false` is
+correct against the real image). The remaining capture lifecycle (install plane → `force_crash` →
+`host_dump`, and the default `kdump` path landing on `kdump_core_incomplete`) runs through the operator
+live-stack harness as for #823.
+
 ## Architecture
 
 All changes are in the shared `images` layer and the local-libvirt provider.
