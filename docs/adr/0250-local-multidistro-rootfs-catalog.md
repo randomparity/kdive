@@ -44,10 +44,17 @@ the kdump harvest disclose an incomplete core honestly.
    repack rebuilds the bare ext4 whole-disk rootfs regardless of the source partition layout.
 
 3. **Family customizer seam.** `images/families/` defines a `FamilyCustomizer` protocol
-   (`packages`, `customize_argv`, `normalize`, `kdump_capable`). The MVP ships `rhel` (Fedora,
-   Rocky, CentOS Stream); the existing inline Fedora customization moves into it. `debian` and
-   `suse` are added by follow-up issues — the protocol exists now so those PRs are additive.
-   `kdump_capable(version)` is disclosure metadata, not a runtime gate.
+   (`packages`, `customize_argv`, `normalize`). The MVP ships `rhel` (Fedora, Rocky, CentOS
+   Stream); the existing inline Fedora customization moves into it. `debian` and `suse` are added
+   by follow-up issues — the protocol exists now so those PRs are additive. A structured
+   `kdump_capable` capability flag is deferred (YAGNI) to the first follow-up that renders it; the
+   makedumpfile-vs-kernel limitation is conveyed at runtime by the incomplete-core remediation.
+
+   The cloud-image lane is **not** assumed equivalent to the virt-builder scratch: a Fedora Cloud
+   base is btrfs-with-subvolumes + separate `/boot`/ESP + cloud-init, so the lane disables
+   cloud-init, collapses the source to one bare ext4 via the existing `virt-tar-out`/`virt-make-fs`
+   repack, and SELinux-relabels the result. This path is proven by a manual spike before the
+   abstraction is generalized (it was never exercised in diagnosis).
 
 4. **Fedora 44 default.** Add `fedora-kdive-ready-44` (cloud-image source), retain
    `fedora-kdive-ready-43` (regression reference), and register the new image in the inventory the
@@ -56,8 +63,10 @@ the kdump harvest disclose an incomplete core honestly.
 5. **Incomplete-core handling.** `_LibguestfsCoreReader.list_vmcores` also globs
    `/var/crash/*/vmcore-incomplete`. A complete `vmcore` is still preferred and an incomplete core
    is never promoted; when only an incomplete core exists, `capture` raises `READINESS_FAILURE`
-   with `reason="kdump_core_incomplete"` and a drift-proof remediation constant pointing at
-   `host_dump` or a newer image. The genuinely-empty case keeps its existing `_no_core` message.
+   with `reason="kdump_core_incomplete"` and a drift-proof, **cause-neutral** remediation constant
+   pointing at `host_dump` or a newer image. Cause-neutral because `vmcore-incomplete` is also the
+   transient mid-save name, so on the harvest timeout path it may name a slow (not toolchain-old)
+   capture; the remediation names both causes. The genuinely-empty case keeps `_no_core`.
 
 ## Consequences
 
@@ -68,8 +77,8 @@ the kdump harvest disclose an incomplete core honestly.
 - A distro whose makedumpfile is older than the kernel-under-test still produces an incomplete
   core; the worker now returns a clear, actionable failure naming `host_dump`/newer-image rather
   than the opaque window-timeout message.
-- `kdump_capable` is advisory metadata: an operator can still request kdump on an old-toolchain
-  image and gets the disclosed incomplete-core remediation, preserving the deny-nothing contract.
+- The contract stays deny-nothing: an operator can still request kdump on an old-toolchain image
+  and gets the disclosed incomplete-core remediation rather than a silent failure or a hard gate.
 - Bit-reproducible rootfs rebuilds remain a non-goal (ADR-0092); the falsifiable provenance now
   records the pinned cloud-image `url@sha256` or `virt-builder` template per image.
 
