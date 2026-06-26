@@ -95,20 +95,42 @@ new error category is introduced.
 
 ### `unmet` entry shape
 
+Both gates report an **absolute** remedy target — the value to pass to the remedy tool — so an
+agent applies one rule and never needs a second detour, even on a project with prior spend.
+
 - quota: `{"gate": "quota", "current": <int>, "required": <int>, "limit": <int>?, "remedy":
-  "accounting.set_quota"}` — `current` = occupying allocations; `required` = `current + 1`;
-  `limit` present only when a quota row exists.
-- budget: `{"gate": "budget", "required_kcu": <str>, "limit_kcu": <str>?, "spent_kcu":
-  <str>?, "remaining_kcu": <str>?, "remedy": "accounting.set_budget"}` — `required_kcu` = the
-  priced estimate; the limit/spent/remaining figures present only when a budget row exists
+  "accounting.set_quota"}` — `current` = occupying allocations; `required` = the minimum
+  `max_concurrent_allocations` value that would admit this request = `current + 1` (an
+  absolute limit to set, **not** a free-slot count); `limit` present only when a quota row
+  exists.
+- budget: `{"gate": "budget", "required_limit_kcu": <str>, "required_kcu": <str>,
+  "limit_kcu": <str>?, "spent_kcu": <str>?, "remaining_kcu": <str>?, "remedy":
+  "accounting.set_budget"}` — `required_limit_kcu` = the minimum `limit_kcu` that would admit
+  = `spent_kcu + estimate` (the absolute value to pass to `accounting.set_budget`, symmetric
+  with quota's `required`); `required_kcu` = the priced estimate (the incremental cost, kept
+  for context); the limit/spent/remaining figures present only when a budget row exists
   (mirrors #838's omit-on-absent-row rule).
+
+The admission invariant the figures serve: quota admits iff `current < limit`; budget admits
+iff `limit_kcu - spent_kcu >= estimate`. `required` / `required_limit_kcu` are precisely the
+smallest limit that satisfies each.
 
 kcu figures are stringified `Decimal` (no float precision loss, matching `accounting.estimate`
 and #838); allocation counts are JSON integers. `gate` is transport-neutral; `remedy` is
 injected by the MCP layer that owns the tool names (ADR-0245).
 
-A fresh project (no rows) → `[{gate:quota, current:0, required:1, remedy:…}, {gate:budget,
-required_kcu:"…", remedy:…}]` — exactly the issue's example.
+A fresh project (no rows, `spent_kcu = 0`) → `[{gate:quota, current:0, required:1, remedy:…},
+{gate:budget, required_limit_kcu:"…", required_kcu:"…", remedy:…}]` (with `required_limit_kcu
+== required_kcu` since spend is zero) — exactly the issue's example.
+
+### Invariant: `unmet` is non-empty for a funding denial
+
+`funding_unmet` is read under the **same** `PROJECT` lock the gate's check held (the synchronous
+transaction is still open at enrichment time), so a denial the gate classified as a funding
+denial always re-reads at least the gate that failed as still unmet — `unmet` is never empty.
+The transport treats an absent/empty `unmet` as "not a funding denial" and falls back to the
+category-based prose, so a future refactor that moved the read outside the lock could not emit a
+misleading empty array.
 
 ## Success criteria (falsifiable)
 
