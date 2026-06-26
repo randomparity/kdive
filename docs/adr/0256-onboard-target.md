@@ -59,8 +59,15 @@ into one idempotent, self-verifying, project-binding-explicit funding step for t
    deliberate divergence from `setup-local-libvirt.sh` (which hard-fails preflight).
 
 5. **Order / env / gating.** `source live-stack/env.sh` → advisory preflight → `migrate`
-   (idempotent) → `seed-project` → `verify-project` → mint + contract. Hard gates: migrate, seed,
-   verify. Advisory: preflight, mint. The targeted DB equals the server's DB only when the server is
+   (idempotent) → `seed-project` → `verify-project` → mint + contract. **Hard gates: `migrate` and
+   `verify-project`** (the funding rows are present); **advisory: preflight, the seed's
+   resource-discovery side effect, and the mint.** `seed_project` commits the budget/quota upserts
+   before it registers discovered resources, and `register_all_discovery` re-raises an unreachable
+   composed provider's failure — so the recipe runs the seed capturing its exit and lets verify
+   decide: rows present → a non-zero seed is a WARN (discovery failed, funding committed), rows
+   absent → fail. verify, not the seed exit code, is the funding source of truth, so a
+   libvirt-unreachable host still funds its project. The targeted DB equals the server's DB only
+   when the server is
    brought up from the same env (the live-stack convention: `lib.sh restart_host_processes` sources
    `env.sh`); a server started with an overriding `KDIVE_DATABASE_URL` absent at onboard time is a
    skew the token-less recipe cannot detect, so it echoes the credential-redacted resolved URL

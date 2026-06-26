@@ -107,7 +107,15 @@ which hard-fails on preflight.)
 `source live-stack/env.sh` → advisory preflight → `migrate` (idempotent) → `seed-project` →
 `verify-project` → mint + print token + contract. Sourcing `env.sh` resolves `KDIVE_DATABASE_URL`
 to the live-stack default when the caller left it unset, so the recipe never seeds an ambient/unset
-DB. Hard gates: migrate, seed, verify. Advisory (warn, non-fatal): preflight, token mint.
+DB. **Hard gates: `migrate` and `verify-project`** — verify (the funding rows are present) is the
+funding source of truth, not the seed's exit code. **Advisory (warn, non-fatal): preflight, the
+seed's resource-discovery side effect, and the token mint.** `seed_project` commits the budget/quota
+upserts in a transaction *before* it registers discovered resources, and
+`register_all_discovery` re-raises a composed-but-unreachable provider's failure; so the recipe runs
+`seed-project` capturing its exit and lets `verify-project` decide: rows present → a non-zero seed is
+a WARN (its discovery leg failed; the funding committed), rows absent → fail. A libvirt-unreachable
+host therefore still funds its project (consistent with the advisory preflight) instead of
+hard-failing inside the seed's discovery leg.
 
 **Prerequisite (named, not assumed):** the DB onboard targets equals the DB the server reads **only
 when the server is brought up from the same env** — which the live-stack convention satisfies
@@ -136,7 +144,7 @@ detect.
   result with it absent.)
 - `src/kdive/__main__.py` — register a `verify-project` command (`--project`, default `demo`) that
   prints the figures and exits non-zero when either row is absent.
-- `scripts/live-stack/onboard.sh` — the recipe body (sources `env.sh` + `lib.sh`; advisory preflight;
+- `scripts/live-stack/onboard.sh` — the recipe body (sources `env.sh`; advisory preflight;
   `migrate`; `seed-project`; `verify-project`; mint + contract).
 - `justfile` — `just onboard` calling the script.
 - `scripts/live-stack/up.sh` — its status output suggests `just onboard` (up.sh still does not seed;
@@ -171,9 +179,9 @@ detect.
    granted (not quota/budget-walled).
 2. Re-running `just onboard` is a no-op upsert (idempotent) and still verifies + prints.
 3. `verify-project --project P` against a migrated-but-**unseeded** DB exits non-zero naming the DB
-   (the reachable form of "seed did not persist"); a seed step that errors aborts the recipe before
-   it claims success. (Pointing seed *and* verify at the same wrong DB is not this check — both write
-   and read it; see §2 "what verify does and does not prove".)
+   (the reachable form of "funding rows did not persist"); verify — not the seed's exit code — is the
+   gate that aborts the recipe before it claims success. (Pointing seed *and* verify at the same wrong
+   DB is not this check — both write and read it; see §2 "what verify does and does not prove".)
 4. A provider-preflight FAIL prints a WARN but does **not** abort the seed (recipe still seeds,
    verifies, exits 0).
 5. A token-mint failure (issuer down) prints a WARN, the contract, and the re-mint command, and the
@@ -181,6 +189,9 @@ detect.
 6. The printed token carries a 24 h TTL and a loud expiry warning.
 7. `verify_project` returns `budget_present=False` when only the quota row exists, and vice versa
    (covered by the testcontainer unit tests).
+8. When `seed-project` exits non-zero but `verify-project` confirms both rows (a post-commit
+   discovery failure), the recipe prints a WARN about the seed/discovery failure and still exits 0 —
+   the committed funding is not blocked by an unreachable provider.
 
 ## Failure modes / edges
 
@@ -191,6 +202,9 @@ detect.
 - Quota row present but `limit_kcu == 0` (a mis-seed) → verify reports presence and prints the
   figure `0`, so the zero is visible rather than masked; presence (not value) is the pass condition,
   matching the issue.
-- `seed-project` registers discovered resources inside `seed_project`; if discovery surfaces no
-  schedulable resource, the advisory preflight WARN is the signal — keeping the funding seed and the
-  provider readiness concerns separately legible.
+- `seed-project` registers discovered resources inside `seed_project` (after committing the funding
+  upserts). If discovery surfaces no schedulable resource, the advisory preflight WARN is the signal.
+  If discovery *raises* (a composed provider is unreachable — `register_all_discovery` re-raises),
+  the funding rows are already committed, so `verify-project` passes and onboard downgrades the seed
+  failure to a WARN rather than blocking funding — keeping the funding seed and provider-readiness
+  concerns separately legible.

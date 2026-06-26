@@ -75,7 +75,10 @@ Write tests (no implementation yet):
    `quota_status(conn, project)` (→ `(max_alloc | None, occupancy)`); map `None` → `*_present=False`.
    Import `budget_snapshot` from `kdive.services.allocation.idempotency` and `quota_status` from
    `kdive.services.allocation.admission.core` (the deliberate single-source-of-truth coupling the
-   ADR records). Close the pool in `finally`, mirroring `seed_project`.
+   ADR records). Close the pool in `finally`, mirroring `seed_project`. Add a one-line docstring/
+   comment noting these are reused here as **advisory point-reads outside the PROJECT lock**
+   (`quota_status` is documented "read under the held PROJECT lock") — acceptable because verify
+   reports state, it does not make an admission decision.
 3. `def redact_database_url(url: str) -> str`: `urllib.parse.urlsplit`; if `parsed.password`,
    rebuild netloc with the password replaced by `***`; for a non-URL conninfo, regex-mask a
    `password=<...>` token, else return `<redacted>`. Stdlib only.
@@ -122,7 +125,10 @@ Write tests (no implementation yet):
    - preflight FAIL (stub makes `check-local-libvirt.sh` exit 1) → WARN printed, **seed still runs**,
      exit 0 (the advisory-vs-hard-fail divergence from `setup-local-libvirt.sh`).
    - `verify-project` exit 1 (stub routes that subcommand to exit 1) → recipe exits non-zero, mint
-     does **not** run.
+     does **not** run. (verify is the hard funding gate.)
+   - `seed-project` exit 1 but `verify-project` exit 0 (stub routes seed→1, verify→0; models a
+     post-commit discovery failure — see below) → WARN about the seed/discovery failure, recipe
+     **continues** to mint, exit 0.
    - mint failure (stub routes the mint call to exit 1) → WARN printed, contract + re-mint command
      printed, exit 0.
    - `KDIVE_ROLE=viewer` → a sub-contributor WARN is printed; exit 0.
@@ -133,9 +139,21 @@ Write tests (no implementation yet):
      `seed-project`.
    - advisory preflight: `if ! "${repo_root}/scripts/check-local-libvirt.sh"; then echo "WARN …" >&2;
      fi` (never aborts).
-   - hard steps: `uv run python -m kdive migrate`; `uv run python -m kdive seed-project --project
-     "$PROJECT" …`; `uv run python -m kdive verify-project --project "$PROJECT"` (its output is the
-     redacted-DB echo + figures; a non-zero exit aborts via `set -e`).
+   - `migrate` (hard): `uv run python -m kdive migrate` (no schema → no rows; a failure aborts).
+   - `seed-project` (its **funding rows** are the hard part, its **discovery** is advisory):
+     `seed_project` commits the budget/quota upserts in a `conn.transaction()` block *before*
+     `register_discovered_resources` runs (`src/kdive/admin/bootstrap.py`), and
+     `register_all_discovery` re-raises a composed-but-unreachable provider's registration failure
+     (`providers/core/resolver.py`). So run seed capturing its exit
+     (`if ! uv run python -m kdive seed-project --project "$PROJECT" …; then seed_rc=1; fi`) rather
+     than letting `set -e` abort — the committed rows survive a discovery raise.
+   - `verify-project` (the **hard funding gate**): `uv run python -m kdive verify-project --project
+     "$PROJECT"` (its output is the redacted-DB echo + figures; a non-zero exit — rows absent —
+     aborts via `set -e`). If `seed_rc=1` but verify passed, print a WARN that seed's
+     resource-discovery step failed (provider likely unreachable; preflight has the detail) while
+     the funding rows are committed, and continue. This makes verify, not seed's exit code, the
+     funding source of truth — the spec's "verify is the reliability gate" thesis — and keeps a
+     libvirt-unreachable host from blocking funding (consistent with the advisory preflight).
    - role floor: `case "$ROLE" in viewer) echo "WARN: role '$ROLE' is below contributor; the token
      will be funding-walled" >&2 ;; esac`.
    - best-effort mint: `if token=$(uv run python - "$PROJECT" "$TTL" "$ROLE" <<'PY' … mint_local_token
@@ -173,7 +191,9 @@ Write tests (no implementation yet):
   no migration, no change to `setup-local-libvirt.sh` / `examples/local-libvirt/*`. Reverting the
   branch removes the recipe with no residue.
 - `verify-project` and `onboard.sh` are idempotent and read-only except for the seed they delegate
-  to (itself an idempotent upsert), so a re-run or a half-finished run leaves no inconsistent state.
+  to. The seed is an idempotent budget/quota upsert (committed before its resource-discovery side
+  effect, which is itself an idempotent re-registration), so a re-run or a half-finished run — even
+  one where discovery raised — leaves the funding rows consistent and re-runnable.
 
 ## Verification (live, where the host allows)
 
