@@ -32,7 +32,11 @@ from kdive.services.allocation import idempotency as allocation_idempotency
 from kdive.services.allocation.admission.core import (
     BUDGET_DENIAL_REASON,
     AllocationRequest,
+    admission_gate,
     admit,
+    funding_unmet,
+    price_window_and_estimate,
+    quota_status,
 )
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -97,6 +101,11 @@ async def _spent(conn: psycopg.AsyncConnection) -> Decimal:
     budget = await BUDGETS.get(conn, "proj")
     assert budget is not None
     return budget.spent_kcu
+
+
+async def _spent_or_none(conn: psycopg.AsyncConnection) -> Decimal | None:
+    budget = await BUDGETS.get(conn, "proj")
+    return budget.spent_kcu if budget is not None else None
 
 
 async def _count(conn: psycopg.AsyncConnection, table: str) -> int:
@@ -198,9 +207,9 @@ def test_exactly_at_budget_grants(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_budget_denial_details_carry_estimate_and_remaining(migrated_url: str) -> None:
-    # #838: an over-budget denial echoes the priced estimate and the budget figures so the
-    # caller can size accounting.set_budget instead of guessing.
+def test_budget_only_unmet_carries_figures(migrated_url: str) -> None:
+    # #833/#838: a budget-only denial enumerates the budget gate in data["unmet"] with absolute
+    # figures so the caller can size accounting.set_budget instead of guessing.
     async def _run() -> None:
         async with _conn(migrated_url) as conn:
             res = await _seed_resource(conn)
@@ -209,17 +218,21 @@ def test_budget_denial_details_carry_estimate_and_remaining(migrated_url: str) -
             outcome = await _admit(conn, resource=res)
             assert outcome.granted is False
             assert outcome.reason == BUDGET_DENIAL_REASON
-            assert Decimal(outcome.details["estimate_kcu"]) == Decimal("6")
-            assert Decimal(outcome.details["limit_kcu"]) == Decimal("5")
-            assert Decimal(outcome.details["spent_kcu"]) == Decimal("0")
-            assert Decimal(outcome.details["budget_remaining_kcu"]) == Decimal("5")
+            unmet = outcome.details["unmet"]
+            assert [e["gate"] for e in unmet] == ["budget"]
+            budget = unmet[0]
+            assert Decimal(budget["required_kcu"]) == Decimal("6")
+            assert Decimal(budget["required_limit_kcu"]) == Decimal("6")
+            assert Decimal(budget["limit_kcu"]) == Decimal("5")
+            assert Decimal(budget["spent_kcu"]) == Decimal("0")
+            assert Decimal(budget["remaining_kcu"]) == Decimal("5")
 
     asyncio.run(_run())
 
 
-def test_budget_denial_details_omit_figures_without_budget_row(migrated_url: str) -> None:
-    # #838: a project with no budget row is fail-closed; only the estimate is known, so the
-    # absent budget figures are omitted rather than reported as zero.
+def test_budget_only_unmet_omits_figures_without_budget_row(migrated_url: str) -> None:
+    # #833/#838: a project with no budget row is fail-closed; the limit/spent/remaining figures
+    # are omitted rather than reported as zero, but both required figures are still named.
     async def _run() -> None:
         async with _conn(migrated_url) as conn:
             res = await _seed_resource(conn)
@@ -227,10 +240,84 @@ def test_budget_denial_details_omit_figures_without_budget_row(migrated_url: str
             outcome = await _admit(conn, resource=res)
             assert outcome.granted is False
             assert outcome.reason == BUDGET_DENIAL_REASON
-            assert Decimal(outcome.details["estimate_kcu"]) == Decimal("6")
-            assert "limit_kcu" not in outcome.details
-            assert "spent_kcu" not in outcome.details
-            assert "budget_remaining_kcu" not in outcome.details
+            unmet = outcome.details["unmet"]
+            assert [e["gate"] for e in unmet] == ["budget"]
+            budget = unmet[0]
+            assert Decimal(budget["required_kcu"]) == Decimal("6")
+            assert Decimal(budget["required_limit_kcu"]) == Decimal("6")
+            assert "limit_kcu" not in budget
+            assert "spent_kcu" not in budget
+            assert "remaining_kcu" not in budget
+
+    asyncio.run(_run())
+
+
+def test_both_funding_gates_unmet_aggregate(migrated_url: str) -> None:
+    # #833: a fresh project trips quota AND budget; the synchronous denial enumerates both in
+    # one envelope (top-level category stays the gate's primary, quota), no durable write.
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            res = await _seed_resource(conn)  # neither quota nor budget seeded
+            outcome = await _admit(conn, resource=res)
+            assert outcome.granted is False
+            assert outcome.category is ErrorCategory.QUOTA_EXCEEDED
+            assert [e["gate"] for e in outcome.details["unmet"]] == ["quota", "budget"]
+            assert await _count(conn, "allocations") == 0
+            assert await _count(conn, "ledger") == 0
+            assert await _spent_or_none(conn) is None
+
+    asyncio.run(_run())
+
+
+def test_quota_only_unmet_lists_quota(migrated_url: str) -> None:
+    # #833: quota absent, budget generous → only the quota gate is enumerated.
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            res = await _seed_resource(conn)
+            await _seed_budget(conn, limit="100")  # budget fine, quota absent
+            outcome = await _admit(conn, resource=res)
+            assert outcome.granted is False
+            assert outcome.category is ErrorCategory.QUOTA_EXCEEDED
+            unmet = outcome.details["unmet"]
+            assert [e["gate"] for e in unmet] == ["quota"]
+            assert unmet[0] == {"gate": "quota", "current": 0, "required": 1}
+
+    asyncio.run(_run())
+
+
+def test_host_cap_denial_has_no_unmet(migrated_url: str) -> None:
+    # #833: a host-capacity denial is a runtime (queueable) denial, not a funding gate, so it
+    # carries no aggregated unmet list and keeps the existing cap/in_use envelope.
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            res = await _seed_resource(conn, cap=1)
+            await _seed_budget(conn, limit="100")
+            await _seed_quota(conn, allocs=10)
+            first = await _admit(conn, resource=res)
+            assert first.granted is True
+            second = await _admit(conn, resource=res)
+            assert second.granted is False
+            assert second.reason == "at_capacity"
+            assert "unmet" not in second.details
+
+    asyncio.run(_run())
+
+
+def test_admission_gate_denial_stays_bare_no_unmet(migrated_url: str) -> None:
+    # #833/ADR-0255: enrichment lives only in the synchronous admit() path. The shared gate the
+    # promotion sweep replays returns a bare denial, pinning its routing contract against a
+    # refactor that moved the aggregate read into the gate.
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            res = await _seed_resource(conn)
+            await _seed_quota(conn, allocs=10)
+            await _seed_budget(conn, limit="5")  # budget short → budget denial
+            req = AllocationRequest(ctx=CTX, resource=res, project="proj", selector=SEL, window=2)
+            _, estimate = await price_window_and_estimate(conn, req)
+            gate = await admission_gate(conn, req, estimate=estimate)
+            assert gate.denial is not None
+            assert gate.denial.reason == BUDGET_DENIAL_REASON
+            assert "unmet" not in gate.denial.details
 
     asyncio.run(_run())
 
@@ -250,6 +337,103 @@ def test_budget_snapshot_is_none_without_budget_row(migrated_url: str) -> None:
     async def _run() -> None:
         async with _conn(migrated_url) as conn:
             assert await allocation_idempotency.budget_snapshot(conn, "proj") is None
+
+    asyncio.run(_run())
+
+
+def test_quota_status_none_limit_without_row(migrated_url: str) -> None:
+    # #833: no quota row → limit None (fail-closed), count 0; the count is still reported so a
+    # funding denial can name the current occupancy even with no row.
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            assert await quota_status(conn, "proj") == (None, 0)
+
+    asyncio.run(_run())
+
+
+def test_quota_status_reports_limit_and_occupying(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            res = await _seed_resource(conn)
+            await _seed_budget(conn, limit="100")
+            await _seed_quota(conn, allocs=5)
+            granted = await _admit(conn, resource=res)
+            assert granted.granted is True
+            assert await quota_status(conn, "proj") == (5, 1)
+
+    asyncio.run(_run())
+
+
+def test_funding_unmet_lists_both_for_fresh_project(migrated_url: str) -> None:
+    # #833: a project with neither row trips both funding gates; the aggregate enumerates both
+    # so the caller provisions quota and budget at once. Neither carries limit figures.
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            unmet = await funding_unmet(conn, "proj", Decimal("6"))
+            assert [e["gate"] for e in unmet] == ["quota", "budget"]
+            quota, budget = unmet
+            assert quota == {"gate": "quota", "current": 0, "required": 1}
+            assert budget == {
+                "gate": "budget",
+                "required_kcu": "6",
+                "required_limit_kcu": "6",
+            }
+
+    asyncio.run(_run())
+
+
+def test_funding_unmet_quota_only(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            await _seed_budget(conn, limit="100")  # budget fine, quota absent
+            unmet = await funding_unmet(conn, "proj", Decimal("6"))
+            assert [e["gate"] for e in unmet] == ["quota"]
+            assert unmet[0] == {"gate": "quota", "current": 0, "required": 1}
+
+    asyncio.run(_run())
+
+
+def test_funding_unmet_budget_only_with_row_figures(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            await _seed_quota(conn, allocs=10)  # quota fine
+            await _seed_budget(conn, limit="5")  # remaining 5 < estimate 6
+            unmet = await funding_unmet(conn, "proj", Decimal("6"))
+            assert [e["gate"] for e in unmet] == ["budget"]
+            assert unmet[0] == {
+                "gate": "budget",
+                "required_kcu": "6",
+                "required_limit_kcu": "6",
+                "limit_kcu": "5",
+                "spent_kcu": "0",
+                "remaining_kcu": "5",
+            }
+
+    asyncio.run(_run())
+
+
+def test_funding_unmet_budget_required_limit_includes_prior_spend(migrated_url: str) -> None:
+    # #833: the absolute figure to set is spent + estimate, not the estimate alone — so a
+    # project with prior spend does not get denied a second time after sizing the budget.
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            await _seed_quota(conn, allocs=10)
+            await _seed_budget(conn, limit="100")
+            await conn.execute("UPDATE budgets SET spent_kcu = %s WHERE project = %s", (98, "proj"))
+            unmet = await funding_unmet(conn, "proj", Decimal("6"))  # remaining 2 < 6
+            assert [e["gate"] for e in unmet] == ["budget"]
+            assert unmet[0]["required_limit_kcu"] == "104"  # 98 + 6
+            assert unmet[0]["remaining_kcu"] == "2"
+
+    asyncio.run(_run())
+
+
+def test_funding_unmet_empty_when_both_satisfied(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            await _seed_quota(conn, allocs=10)
+            await _seed_budget(conn, limit="100")
+            assert await funding_unmet(conn, "proj", Decimal("6")) == []
 
     asyncio.run(_run())
 
