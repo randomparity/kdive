@@ -128,6 +128,13 @@ validated against: its root filesystem is **btrfs with subvolumes**, it has a se
 (and EFI ESP), and **cloud-init is enabled**. The cloud-image lane therefore must:
 1. **disable/remove cloud-init** during customize (it otherwise waits on a datasource at boot —
    like the zram stall seen in diagnosis — and can reset network/ssh, clobbering the injected key);
+1b. **seed `/etc/machine-id`** with a valid id (PROVEN in the Task-1 spike): Fedora Cloud ships
+   `machine-id="uninitialized"`, which makes systemd treat first boot specially and run
+   `systemctl preset-all`, resetting `kdump.service` to its vendor preset (**disabled**) so kdump
+   never arms — the `kexec_crash_loaded=0` / "Kdump is not operational" failure. The virt-builder
+   F43 scratch already carries a populated machine-id, which is why it was never reset. Seeding it
+   makes kdump auto-arm at boot. (A `system-preset` file enabling kdump is the alternative; seeding
+   machine-id is simpler and matches F43.)
 2. let the existing `virt-tar-out` (root tree → tar) / `virt-make-fs` (tar → bare ext4) collapse
    the btrfs+multi-partition source into the one whole-disk ext4 the provider direct-kernel-boots,
    then **SELinux-relabel** the result (tar→ext4 drops the source's security xattrs);

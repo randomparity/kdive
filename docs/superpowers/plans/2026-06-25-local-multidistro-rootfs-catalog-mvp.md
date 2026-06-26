@@ -225,12 +225,22 @@ def test_rhel_debug_argv_enables_kdump_and_sshd(tmp_path):
     assert "systemctl enable sshd.service" in argv
     assert "99-kdive-kdump.conf" in j and "unknown_nmi_panic=1" in j
 
-def test_rhel_cloud_image_disables_cloud_init(tmp_path):
+def test_rhel_cloud_image_disables_cloud_init_and_seeds_machine_id(tmp_path):
     fam = RhelFamily()
     ctx = CustomizeContext(kind="debug", packages=fam.packages("debug"),
                            authorized_key=tmp_path/"k", readiness_unit_path=tmp_path/"u",
                            is_cloud_image=True, cleanup=[])
-    assert any("cloud-init" in a for a in fam.customize_argv(ctx))
+    argv = fam.customize_argv(ctx)
+    assert any("cloud-init" in a for a in argv)
+    # machine-id seed (else first-boot preset-all disables kdump on Fedora Cloud)
+    assert any("/etc/machine-id" in a for a in argv)
+
+def test_rhel_virt_builder_source_skips_machine_id_seed(tmp_path):
+    fam = RhelFamily()
+    ctx = CustomizeContext(kind="debug", packages=fam.packages("debug"),
+                           authorized_key=tmp_path/"k", readiness_unit_path=tmp_path/"u",
+                           is_cloud_image=False, cleanup=[])
+    assert not any("/etc/machine-id" in a for a in fam.customize_argv(ctx))
 
 def test_rhel_virt_builder_source_skips_cloud_init(tmp_path):
     fam = RhelFamily()
@@ -241,7 +251,7 @@ def test_rhel_virt_builder_source_skips_cloud_init(tmp_path):
 ```
 
 - [ ] **Step 2: Run, verify fail.**
-- [ ] **Step 3: Implement.** Move the inline Fedora argv-building from `rootfs_build.py::_real_virt_builder` into `RhelFamily.customize_argv` (dnf `--install`, sshd enable, kdump enable + sysctl + final_action, `_debug_image_args`, ssh-inject, kdive-ready upload+enable, SELinux permissive). Add the cloud-init mask when `ctx.is_cloud_image`. `RhelFamily.normalize` moves `_real_normalize_guest` (fstab/crypttab/SELinux) here and adds a SELinux relabel. Relocate the shared constants into a module both `rhel.py` and `rootfs_build.py` import (or into `families/rhel.py` and import back). Keep `RootfsBuildSpec.distro`/family mapping intact.
+- [ ] **Step 3: Implement** the argv PROVEN in the Task-1 spike (see `scratchpad/SPIKE-RESULTS.md`). Move the inline Fedora argv-building from `rootfs_build.py::_real_virt_builder` into `RhelFamily.customize_argv` (dnf `--install drgn,kexec-tools,makedumpfile,kdump-utils,keyutils,openssh-server`, sshd enable, kdump enable + sysctl `kernel.unknown_nmi_panic=1` + `final_action poweroff`, `_debug_image_args`, ssh-inject, kdive-ready upload+enable, SELinux permissive). When `ctx.is_cloud_image`: **(a)** mask `cloud-init*.service`, and **(b) seed `/etc/machine-id`** with a valid 32-hex id (`--write /etc/machine-id:<id>`) — without it, Fedora Cloud's `machine-id="uninitialized"` triggers a first-boot `preset-all` that DISABLES kdump (proven: `kexec_crash_loaded=0`). `RhelFamily.normalize` moves `_real_normalize_guest` (fstab/crypttab/SELinux) here and adds a SELinux relabel. Relocate the shared constants into a module both `rhel.py` and `rootfs_build.py` import. Keep `RootfsBuildSpec.distro`/family mapping intact.
 - [ ] **Step 4: Run, verify pass.** `just lint && just type`.
 - [ ] **Step 5: Commit.** `feat(images): add rhel FamilyCustomizer; relocate Fedora customization (ADR-0250)`
 
