@@ -6,6 +6,7 @@ from typing import cast
 from uuid import UUID
 
 from kdive.domain.capacity.state import RunState
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory, suppressed_detail
 from kdive.domain.lifecycle import Run
 from kdive.domain.operations.jobs import Job
@@ -14,7 +15,12 @@ from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools.lifecycle._recovery import build_profile_summary
 from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
 from kdive.services.runs import states as run_states
-from kdive.services.runs.steps import BootAttempt, StepProgress
+from kdive.services.runs.steps import (
+    READY_BOOT_OUTCOME,
+    BootAttempt,
+    StepProgress,
+    ready_boot_outcome,
+)
 
 ALLOC_HOSTABLE = run_states.ALLOC_HOSTABLE
 INVESTIGATION_OPEN_FOR_RUN = run_states.INVESTIGATION_OPEN_FOR_RUN
@@ -172,6 +178,19 @@ def envelope_for_run(
         # `pending`; surface the surviving failed boot job as evidence (#750, ADR-0230). Only the
         # SUCCEEDED read path passes a non-None value, so this stays scoped to `runs.get`.
         data["boot_readiness"] = cast(JsonValue, boot_readiness.as_data())
+    if (
+        step_progress is not None
+        and step_progress.boot_outcome == READY_BOOT_OUTCOME
+        and run.target_kind is ResourceKind.LOCAL_LIBVIRT
+    ):
+        # The success-path symmetry to the failure side: name what defined boot success (the
+        # kdive-ready console marker reached with no pre-marker crash) so the agent need not scrape
+        # the console to trust the verdict (#837, ADR-0254). The descriptor is single-sourced in
+        # `services.runs.steps` so the wording cannot drift; it carries only build-time constants,
+        # so it is redaction-safe. Gated on local-libvirt: remote-libvirt also records
+        # `boot_outcome: "ready"` but confirms readiness by a boot-id change (ADR-0082), not the
+        # console marker, so this console-marker descriptor would misreport a remote boot.
+        data["boot_outcome"] = cast(JsonValue, ready_boot_outcome())
     if required_cmdline is not None:
         # The platform-owned boot args (#748). Extra kernel debug args are not set here: they
         # are appended via runs.build.cmdline (or runs.complete_build.cmdline for external

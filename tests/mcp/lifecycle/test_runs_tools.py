@@ -57,7 +57,7 @@ from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.runs import steps as run_steps
 from kdive.services.runs.admission import RunCreateResult
-from kdive.services.runs.steps import StepProgress, step_progress
+from kdive.services.runs.steps import StepProgress, ready_boot_outcome, step_progress
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.mcp.systems_support import provider_resolver
 
@@ -99,6 +99,7 @@ def _run_model(
     *,
     failure: ErrorCategory | None = None,
     expected_boot_failure: dict[str, str] | None = None,
+    target_kind: ResourceKind = ResourceKind.LOCAL_LIBVIRT,
 ) -> Run:
     return Run(
         id=uuid4(),
@@ -108,7 +109,7 @@ def _run_model(
         project="proj",
         investigation_id=uuid4(),
         system_id=uuid4(),
-        target_kind=ResourceKind.LOCAL_LIBVIRT,
+        target_kind=target_kind,
         state=state,
         build_profile=_profile(),
         expected_boot_failure=expected_boot_failure,
@@ -617,6 +618,47 @@ def test_envelope_for_run_expected_boot_failure_detail_is_structured() -> None:
     assert resp.data["expected_boot_failure_detail"] == expected
 
 
+def _ready_progress(boot_outcome: str | None) -> StepProgress:
+    return StepProgress(install="succeeded", boot="succeeded", boot_outcome=boot_outcome)
+
+
+def test_envelope_for_run_surfaces_ready_boot_outcome() -> None:
+    # Success-path symmetry to the failure side: the structured "ready" descriptor (#837).
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED), step_progress=_ready_progress("ready")
+    )
+
+    assert resp.data["boot_outcome"] == ready_boot_outcome()
+
+
+def test_envelope_for_run_ready_boot_outcome_absent_for_expected_crash() -> None:
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=_ready_progress("expected_crash_observed"),
+    )
+
+    assert "boot_outcome" not in resp.data
+
+
+def test_envelope_for_run_ready_boot_outcome_absent_without_outcome() -> None:
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED), step_progress=_ready_progress(None)
+    )
+
+    assert "boot_outcome" not in resp.data
+
+
+def test_envelope_for_run_ready_boot_outcome_omitted_for_remote_libvirt() -> None:
+    # Remote-libvirt confirms readiness by a boot-id change (ADR-0082), not the console marker, so
+    # the console-marker descriptor would misreport a remote boot — it is omitted (ADR-0254, #837).
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED, target_kind=ResourceKind.REMOTE_LIBVIRT),
+        step_progress=_ready_progress("ready"),
+    )
+
+    assert "boot_outcome" not in resp.data
+
+
 @pytest.mark.parametrize(
     ("state", "actions"),
     [
@@ -938,6 +980,18 @@ def test_get_boot_without_disclosure_omits_capture_keys(migrated_url: str) -> No
             resp = await get_run(pool, _ctx(), run_id)
         assert "available_capture" not in resp.data
         assert "inert_capture" not in resp.data
+
+    asyncio.run(_run())
+
+
+def test_get_ready_boot_surfaces_boot_outcome(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _insert_step(pool, run_id, "boot", "succeeded", {"boot_outcome": "ready"})
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["boot_outcome"] == ready_boot_outcome()
 
     asyncio.run(_run())
 

@@ -14,6 +14,7 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle import Run, System
+from kdive.images.families._fedora_customize import READINESS_MARKER
 from kdive.jobs import queue
 from kdive.profiles.provider_policy import capture_method
 from kdive.profiles.provisioning import ProvisioningProfile
@@ -135,6 +136,32 @@ class StepProgress:
     def steps_map(self) -> dict[str, str]:
         """The fixed-key `runs.get` `data.steps` map; `build` is `succeeded` by construction."""
         return {"build": "succeeded", "install": self.install, "boot": self.boot}
+
+
+# The persisted `boot` step `boot_outcome` value for a clean boot (recorded by the boot handler).
+READY_BOOT_OUTCOME = "ready"
+_READY_BOOT_SIGNAL = "console_marker"
+_READY_BOOT_RULE = "marker line reached with no pre-marker crash signature"
+
+
+def ready_boot_outcome() -> dict[str, str]:
+    """The structured ``ready`` boot-outcome descriptor for the ``runs.get`` success path (#837).
+
+    Mirrors the failure side's disclosure: names *what* defined a clean boot's success so an agent
+    need not scrape the console to trust the verdict. The ``marker``/``unit`` derive from the
+    image's single-source-of-truth ``READINESS_MARKER`` and the ``rule`` describes the
+    console-verdict logic (``classify_console``, ADR-0055), so the surfaced wording cannot drift —
+    the same single-sourcing the failure-side ``inert_capture_reason`` uses (ADR-0239). It
+    interpolates no guest output (only build-time constants), so surfacing it is redaction-safe.
+    Returns a fresh dict each call, so a caller nesting it into a response cannot mutate the source.
+    """
+    return {
+        "outcome": READY_BOOT_OUTCOME,
+        "signal": _READY_BOOT_SIGNAL,
+        "marker": READINESS_MARKER,
+        "unit": f"{READINESS_MARKER}.service",
+        "rule": _READY_BOOT_RULE,
+    }
 
 
 async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:

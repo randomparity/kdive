@@ -1,4 +1,30 @@
-from kdive.services.runs.steps import BuildStepResult, _optional_str_list
+from kdive.images.families._fedora_customize import READINESS_MARKER
+from kdive.services.runs.steps import BuildStepResult, _optional_str_list, ready_boot_outcome
+
+
+def test_ready_boot_outcome_descriptor_shape() -> None:
+    # The success-path symmetry to the failure side: names what defined a clean boot's success.
+    assert ready_boot_outcome() == {
+        "outcome": "ready",
+        "signal": "console_marker",
+        "marker": "kdive-ready",
+        "unit": "kdive-ready.service",
+        "rule": "marker line reached with no pre-marker crash signature",
+    }
+
+
+def test_ready_boot_outcome_marker_sourced_from_readiness_constant() -> None:
+    # Single-sourced from the image's readiness marker so marker/unit cannot drift.
+    descriptor = ready_boot_outcome()
+    assert descriptor["marker"] == READINESS_MARKER
+    assert descriptor["unit"] == f"{READINESS_MARKER}.service"
+
+
+def test_ready_boot_outcome_returns_a_fresh_mapping() -> None:
+    # A fresh dict each call — a caller nesting it into a response cannot mutate the source.
+    first = ready_boot_outcome()
+    first["outcome"] = "tampered"
+    assert ready_boot_outcome()["outcome"] == "ready"
 
 
 def test_optional_str_list_passes_through_string_list() -> None:
