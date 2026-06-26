@@ -60,6 +60,29 @@ _USE_KDUMP_CMD = (
 # Version-proof cloud-init disable: cloud-init no-ops if this file exists, regardless of the
 # per-stage unit names (which Debian 13 renamed) — one write, correct on both 12 and 13.
 _CLOUD_INIT_DISABLED_PATH = "/etc/cloud/cloud-init.disabled"
+
+# Debian genericcloud ships openssh-server with NO host keys: cloud-init generates them
+# per-instance on first boot. Disabling cloud-init (above) therefore leaves sshd keyless, so
+# ``ssh.service`` fails its ``sshd -t`` preflight and rate-limits — SSH (the drgn-live transport)
+# never comes up (#824, found by live boot). Debian has no Fedora/RHEL ``sshd-keygen@.service``, so
+# stage a oneshot that runs ``ssh-keygen -A`` (creates any missing host-key types) ordered
+# ``Before=ssh.service``. The ``ConditionPathExists=!`` gate keeps keys per-instance: it generates
+# on a fresh boot but skips a guest that already has keys, so it never overwrites an existing
+# identity.
+_SSHD_KEYGEN_UNIT_PATH = "/etc/systemd/system/kdive-sshd-keygen.service"
+_SSHD_KEYGEN_UNIT = """[Unit]
+Description=Generate sshd host keys (kdive)
+Before=ssh.service
+ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ssh-keygen -A
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+"""
 _GUESTFISH_TIMEOUT_S = 5 * 60
 
 type RunGuestfs = Callable[..., None]
@@ -86,6 +109,11 @@ class DebianFamily:
             ",".join(ctx.packages),
             "--run-command",
             "systemctl enable ssh.service",
+            # Generate the sshd host keys cloud-init would have made (see _SSHD_KEYGEN_UNIT).
+            "--write",
+            f"{_SSHD_KEYGEN_UNIT_PATH}:{_SSHD_KEYGEN_UNIT}",
+            "--run-command",
+            "systemctl enable kdive-sshd-keygen.service",
         ]
         # Gate kdump enable + the NMI-panic sysctl on the kdump package (in every debug set, absent
         # from the build set) so a build-host image never panics on a stray NMI.

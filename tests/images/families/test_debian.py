@@ -80,6 +80,18 @@ def test_debug_argv_injects_key_and_readiness_unit(tmp_path: Path) -> None:
     assert "systemctl enable kdive-ready.service" in argv
 
 
+def test_debug_argv_stages_sshd_host_key_generation(tmp_path: Path) -> None:
+    # Debian genericcloud ships openssh-server with NO host keys (cloud-init makes them per-instance
+    # at first boot); disabling cloud-init removes that, and Debian has no Fedora/RHEL sshd-keygen
+    # unit, so ssh.service fails its `sshd -t` preflight. Stage a oneshot that runs `ssh-keygen -A`
+    # before ssh.service so SSH (the drgn-live transport) comes up (#824, live-found).
+    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
+    j = " ".join(argv)
+    assert "ssh-keygen -A" in j, "must generate missing sshd host keys"
+    assert "Before=ssh.service" in j, "keygen must be ordered before ssh.service"
+    assert "systemctl enable kdive-sshd-keygen.service" in argv
+
+
 def test_debug_argv_touches_no_selinux_and_stages_no_nm_keyfile(tmp_path: Path) -> None:
     # Debian has no /etc/selinux/config and no NetworkManager — neither must be touched (#824).
     argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
