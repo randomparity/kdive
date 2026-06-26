@@ -114,11 +114,7 @@ Return the accepted upload-artifact names per owner-kind. Requires a token.
 
 ## `artifacts.fetch_raw`
 
-`partial` · `read-only`
-
-**Maturity:** live_dependency — Presigns a Run's raw vmcore/vmlinux; those objects only exist after a live build/capture path runs, exercised under the gated live markers.
-
-**Promotion:** A non-gated test presigns an asset a real run produced, or a recorded live_stack run does.
+`implemented` · `read-only`
 
 Mint a presigned download URL for a Run's raw vmcore or vmlinux. Requires contributor.
 
@@ -133,11 +129,7 @@ project membership + contributor on the asset's owning project, not by redaction
 
 ## `artifacts.get`
 
-`partial` · `read-only`
-
-**Maturity:** live_dependency — Fetches a redacted artifact's bytes; the artifact only exists after a live build/boot/capture path runs, exercised under the gated live markers.
-
-**Promotion:** A non-gated test fetches inline + presigned content for an artifact a real run produced, or a recorded live_stack run does.
+`implemented` · `read-only`
 
 Fetch a byte window of one redacted artifact's content by id.
 
@@ -156,11 +148,7 @@ capped at KDIVE_ARTIFACT_INLINE_MAX_BYTES). `data.content_truncated` and
 
 ## `artifacts.list`
 
-`partial` · `read-only`
-
-**Maturity:** live_dependency — Lists redacted artifacts a System produced; those rows only exist after a live build/boot/capture path runs, exercised under the gated live markers.
-
-**Promotion:** A non-gated test asserts the listing against artifacts a real run produced, or a recorded live_stack run does.
+`implemented` · `read-only`
 
 List the redacted artifacts for a System. Requires viewer.
 
@@ -170,11 +158,7 @@ List the redacted artifacts for a System. Requires viewer.
 
 ## `artifacts.search_text`
 
-`partial` · `read-only`
-
-**Maturity:** live_dependency — Searches a redacted artifact's text; the artifact only exists after a live build/boot/capture path runs, exercised under the gated live markers.
-
-**Promotion:** A non-gated test searches an artifact a real run produced, or a recorded live_stack run does.
+`implemented` · `read-only`
 
 Search a redacted System artifact with bounded literal line context.
 

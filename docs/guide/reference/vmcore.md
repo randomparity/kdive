@@ -16,11 +16,7 @@ Capture and persist a vmcore.
 
 ## `vmcore.list`
 
-`partial` · `read-only`
-
-**Maturity:** live_dependency — Lists a Run's redacted vmcore artifacts; those rows only exist after a live capture path runs, exercised under the gated live markers.
-
-**Promotion:** A non-gated test or recorded live_stack run lists vmcore artifacts a real capture produced.
+`implemented` · `read-only`
 
 List vmcore artifacts for one run.
 

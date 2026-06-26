@@ -23,13 +23,7 @@ Attach a ready system to an unbound run before install.
 
 ## `runs.boot`
 
-`partial`
-
-**Maturity:** live_dependency — Boots an installed kernel via the provider and waits for readiness; the boot path is exercised only under the gated live markers.
-
-**Promotion:** A non-gated test or recorded live_stack run boots a real kernel and asserts the booted kernel identity.
-
-**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.
+`implemented`
 
 Boot an installed run.
 
@@ -43,13 +37,7 @@ The kernel cmdline is fixed at build time; append extra debug args (e.g.
 
 ## `runs.build`
 
-`partial`
-
-**Maturity:** live_dependency — Enqueues a kernel build the worker runs against the provider's build host; the toolchain build path is exercised only under the gated live markers.
-
-**Promotion:** A non-gated test or recorded live_stack run produces a real kernel artifact the build ledger records.
-
-**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.
+`implemented`
 
 Enqueue a kernel build for a run.
 
@@ -193,13 +181,7 @@ args (e.g. `dhash_entries=1`) via `runs.build.cmdline` (bound on the Run's first
 
 ## `runs.install`
 
-`partial`
-
-**Maturity:** live_dependency — Installs a built kernel onto its System via the provider; the install path is exercised only under the gated live markers.
-
-**Promotion:** A non-gated test or recorded live_stack run installs a real kernel and the subsequent boot observes it.
-
-**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.
+`implemented`
 
 Install a built run onto its system.
 
