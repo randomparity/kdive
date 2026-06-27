@@ -49,7 +49,7 @@ from kdive.mcp.tools.ops.build_hosts import registrar as ops_build_hosts_tools
 from kdive.mcp.tools.ops.images import registrar as ops_images_tools
 from kdive.mcp.tools.ops.resources import host_ops as ops_resource_host_tools
 from kdive.mcp.tools.ops.resources import registrar as ops_resource_mutation_tools
-from kdive.mcp.tools.reports import register as register_report_tools
+from kdive.mcp.tools.reports import generate as reports_generate
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
@@ -206,7 +206,7 @@ def _register_ops_secrets_tools(
 
 
 def _register_report_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:
-    register_report_tools(app, pool, secret_registry=assembly.secret_registry)
+    reports_generate.register(app, pool, secret_registry=assembly.secret_registry)
 
 
 def _register_doc_resources(
