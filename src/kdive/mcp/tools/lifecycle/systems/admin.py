@@ -34,10 +34,9 @@ from kdive.mcp.tools._idempotency import (
     resolve_envelope_replay,
     validate_idempotency_key,
 )
-from kdive.profiles.provider_policy import reject_rootfs_upload_without_window
+from kdive.profiles.provider_policy import ProfilePolicy, reject_rootfs_upload_without_window
 from kdive.profiles.provisioning import ProvisioningProfile, dump_profile, profile_digest
 from kdive.profiles.types import ProvisioningProfileInput
-from kdive.providers.core.runtime import ProfilePolicy
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed

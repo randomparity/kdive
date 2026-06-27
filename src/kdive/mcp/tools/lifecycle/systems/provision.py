@@ -36,8 +36,8 @@ from kdive.mcp.tools._idempotency import (
     validate_idempotency_key,
 )
 from kdive.mcp.tools.lifecycle.systems.view import defined_system_envelope
+from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.types import ProvisioningProfileInput
-from kdive.providers.core.runtime import ProfilePolicy
 from kdive.security.authz.context import RequestContext
 from kdive.services.systems.admission import (
     AdmissionFailure,

@@ -12,8 +12,8 @@ from kdive.components.validation import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import DESTRUCTIVE_JOB_KINDS
+from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource, _UploadRootfs
-from kdive.providers.core.runtime import ProfilePolicy
 
 type RootfsValidator = Callable[[RootfsSource], None]
 

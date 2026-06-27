@@ -46,9 +46,9 @@ from kdive.mcp.tools.debug.ops import DebugEngineRuntime, DebugRuntimeResolver
 from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
 from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
+from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.runtime import ProfilePolicy
 from kdive.providers.ports import (
     DEBUG_TRANSPORT_KINDS,
     Connector,

@@ -24,9 +24,9 @@ from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.runs.common import abandon_run_step_best_effort
 from kdive.jobs.payloads import RunPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
+from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.runtime import ProfilePolicy
 from kdive.providers.ports import Booter, Connector, ConsoleSnapshotter, SystemHandle
 from kdive.providers.shared.runtime_paths import (
     console_log_path,

@@ -9,16 +9,15 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Protocol
 
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.references import ComponentRef
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.operations.jobs import JobKind
 from kdive.images.planes.base import RootfsBuildPlane
-from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
+from kdive.profiles.provider_policy import ProfilePolicy
+from kdive.profiles.provisioning import RootfsSource
 from kdive.providers.ports import (
     AttachSeam,
     Booter,
@@ -57,34 +56,6 @@ class DebugCapabilities:
 
     attach_seam: AttachSeam
     engine: GdbMiEngine
-
-
-class ProfilePolicy(Protocol):
-    """Provider-owned behavior derived from a parsed provisioning profile."""
-
-    def rootfs_source(self, profile: ProvisioningProfile) -> RootfsSource | None:
-        """Return the rootfs source used by this provider, if any."""
-
-    def ssh_credential_ref(self, profile: ProvisioningProfile) -> str | None:
-        """Return the live-SSH credential reference used by this provider, if any."""
-
-    def drgn_live_requires_credential(self, profile: ProvisioningProfile) -> bool:
-        """Return whether drgn-live needs a profile credential."""
-
-    def validate_profile(self, profile: ProvisioningProfile) -> None:
-        """Run provider-specific static profile validation."""
-
-    def destructive_opt_in(self, profile: ProvisioningProfile, op: JobKind) -> bool:
-        """Return whether the profile opts into a destructive operation."""
-
-    def capture_method(self, profile: ProvisioningProfile) -> CaptureMethod:
-        """Resolve the crash-capture method enabled by the profile."""
-
-    def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
-        """Return whether the System has a gdbstub endpoint (independent of capture_method)."""
-
-    def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
-        """Return whether a host-side memory dump is available on a preserved crash."""
 
 
 @dataclass(frozen=True, slots=True)

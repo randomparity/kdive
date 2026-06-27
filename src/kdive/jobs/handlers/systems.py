@@ -24,10 +24,9 @@ from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReprovisionPayload, SystemPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
-from kdive.profiles.provider_policy import rootfs_upload_window_allowed
+from kdive.profiles.provider_policy import ProfilePolicy, rootfs_upload_window_allowed
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.runtime import ProfilePolicy
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.store.objectstore import ObjectStore, artifact_key

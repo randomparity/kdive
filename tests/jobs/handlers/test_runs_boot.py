@@ -22,9 +22,9 @@ from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.handlers.runs import registrar as runs_registrar
 from kdive.jobs.handlers.runs.build import BuildHostTransportFactories
 from kdive.jobs.models import HandlerRegistry
+from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.runtime import ProfilePolicy
 from kdive.providers.ports import Connector
 from kdive.security.artifacts.artifact_search import (
     ArtifactSearchInputError,
