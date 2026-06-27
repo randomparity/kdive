@@ -106,8 +106,3 @@ def envelope_for_allocation(
         ),
         data=data,
     )
-
-
-_allocation_next_actions = allocation_next_actions
-_queue_position = queue_position
-_envelope_for_allocation = envelope_for_allocation

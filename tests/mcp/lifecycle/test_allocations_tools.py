@@ -22,7 +22,7 @@ from kdive.domain.lifecycle import Allocation
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload
-from kdive.mcp.tools.lifecycle.allocations.common import _envelope_for_allocation
+from kdive.mcp.tools.lifecycle.allocations.common import envelope_for_allocation
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import (
     ReleaseOutcome,
     RenewOutcome,
@@ -935,10 +935,10 @@ def test_envelope_role_filters_success_next_actions() -> None:
     # ADR-0261: a GRANTED envelope's breadcrumb is filtered by the caller's role on the
     # allocation's project, so a non-operator is never pointed at operator-only systems.provision.
     alloc = _granted_alloc()
-    operator = _envelope_for_allocation(alloc, _ctx(role=Role.OPERATOR))
-    contributor = _envelope_for_allocation(alloc, _ctx(role=Role.CONTRIBUTOR))
-    viewer = _envelope_for_allocation(alloc, _ctx(role=Role.VIEWER))
-    role_less = _envelope_for_allocation(alloc, _ctx(role=None))
+    operator = envelope_for_allocation(alloc, _ctx(role=Role.OPERATOR))
+    contributor = envelope_for_allocation(alloc, _ctx(role=Role.CONTRIBUTOR))
+    viewer = envelope_for_allocation(alloc, _ctx(role=Role.VIEWER))
+    role_less = envelope_for_allocation(alloc, _ctx(role=None))
 
     assert operator.suggested_next_actions == [
         "allocations.get",
@@ -960,7 +960,7 @@ def test_envelope_filter_is_per_project_not_connection_union() -> None:
         projects=("proj", "other"),
         roles={"proj": Role.CONTRIBUTOR, "other": Role.OPERATOR},
     )
-    resp = _envelope_for_allocation(alloc, ctx)
+    resp = envelope_for_allocation(alloc, ctx)
     assert "systems.provision" not in resp.suggested_next_actions
     assert resp.suggested_next_actions == ["allocations.get", "allocations.release"]
 
@@ -1310,15 +1310,15 @@ def test_failed_envelope_reports_failure_category_else_infrastructure() -> None:
         )
 
     # NULL cause -> the unchanged infrastructure_failure fallback.
-    null_cause = _envelope_for_allocation(_make(), _ctx())
+    null_cause = envelope_for_allocation(_make(), _ctx())
     assert null_cause.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE.value
     assert null_cause.retryable is True
     # A budget terminate -> allocation_denied, terminal.
-    budget = _envelope_for_allocation(_make(ErrorCategory.ALLOCATION_DENIED), _ctx())
+    budget = envelope_for_allocation(_make(ErrorCategory.ALLOCATION_DENIED), _ctx())
     assert budget.error_category == ErrorCategory.ALLOCATION_DENIED.value
     assert budget.retryable is False
     # A queue timeout -> queue_timeout, retryable.
-    timed_out = _envelope_for_allocation(_make(ErrorCategory.QUEUE_TIMEOUT), _ctx())
+    timed_out = envelope_for_allocation(_make(ErrorCategory.QUEUE_TIMEOUT), _ctx())
     assert timed_out.error_category == ErrorCategory.QUEUE_TIMEOUT.value
     assert timed_out.retryable is True
 
@@ -1472,7 +1472,7 @@ def test_envelope_surfaces_recovery_context_on_granted() -> None:
         requested_disk_gb=40,
         shape="small",
     )
-    data = _envelope_for_allocation(alloc, _ctx()).data
+    data = envelope_for_allocation(alloc, _ctx()).data
     assert data["resource_id"] == str(res)
     assert data["requested_kind"] == ResourceKind.LOCAL_LIBVIRT.value
     assert data["requested_vcpus"] == 4
@@ -1495,7 +1495,7 @@ def test_envelope_surfaces_requested_pool() -> None:
         state=AllocationState.REQUESTED,
         requested_pool="big-remote",
     )
-    data = _envelope_for_allocation(alloc, _ctx()).data
+    data = envelope_for_allocation(alloc, _ctx()).data
     assert data["requested_pool"] == "big-remote"
     assert data["requested_kind"] is None
 
@@ -1512,7 +1512,7 @@ def test_envelope_surfaces_selector_on_failed() -> None:
         requested_kind=ResourceKind.LOCAL_LIBVIRT,
         failure_category=ErrorCategory.ALLOCATION_DENIED,
     )
-    resp = _envelope_for_allocation(alloc, _ctx())
+    resp = envelope_for_allocation(alloc, _ctx())
     assert resp.status == "error"
     assert resp.data["requested_kind"] == ResourceKind.LOCAL_LIBVIRT.value
     assert resp.data["resource_id"] is None
