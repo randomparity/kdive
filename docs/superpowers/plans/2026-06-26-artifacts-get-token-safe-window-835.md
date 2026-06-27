@@ -15,6 +15,15 @@ Guardrail commands (run individually before each commit, mirroring CI):
 - `uv run python -m pytest tests/mcp/catalog/test_artifacts_tools.py -q` — focused
 - `just test` — full suite, before first push (step 7)
 
+## Task ordering note (TDD micro-sequence)
+
+The new tests import `ARTIFACT_GET_WINDOW_MAX_BYTES`. If the constant does not exist
+when the test runs, the "red" is an `ImportError`, not the behavioral assertion the
+test is meant to prove. So define the constant first (Task 2 step 1 — it is inert
+until the `min` term is added), then write the failing test (Task 1, fails on
+`next_offset`), then add the `min` term (Task 2 step 2) to go green. Concretely:
+Task 2-define → Task 1-write+confirm-red → Task 2-min-term → green.
+
 ## Task 1 — Failing tests for the token-safe ceiling
 
 Where it fits: proves the #835 residual is closed and that no ADR-0247 behavior
@@ -51,13 +60,16 @@ Where it fits: the core fix.
 
 File: `src/kdive/mcp/tools/catalog/artifacts/reads.py`
 
-- Add module constant near `ARTIFACT_GET_WINDOW_DEFAULT_BYTES` (line ~55):
+- **Step 1 (before Task 1's test):** add module constant near
+  `ARTIFACT_GET_WINDOW_DEFAULT_BYTES` (line ~55):
   ```python
   ARTIFACT_GET_WINDOW_MAX_BYTES = 24 * 1024
   ```
   with a comment citing ADR-0257 and the token↔byte rationale (non-configurable
-  token-safety ceiling; inline_cap can only lower further).
-- In `_artifact_content`, change `effective_max` (line 281) to:
+  token-safety ceiling; inline_cap can only lower further). This constant is inert
+  until step 2, so Task 1's test imports it and fails on behavior, not import.
+- **Step 2 (after Task 1's test is red):** in `_artifact_content`, change
+  `effective_max` (line 281) to:
   ```python
   effective_max = min(max(max_bytes, 1), inline_cap, ARTIFACT_GET_WINDOW_MAX_BYTES)
   ```
