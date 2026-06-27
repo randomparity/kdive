@@ -3712,7 +3712,11 @@ def test_register_handlers_binds_build() -> None:
 
 from kdive.domain.capture import CaptureMethod  # noqa: E402
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy  # noqa: E402
-from kdive.providers.ports import Booter, Installer, InstallRequest  # noqa: E402
+from kdive.providers.ports.lifecycle import (  # noqa: E402
+    Booter,
+    Installer,
+    InstallRequest,
+)
 
 _LOCAL_POLICY = LocalLibvirtProfilePolicy()
 _SUCCEEDED_BUILD: dict[str, Any] = {

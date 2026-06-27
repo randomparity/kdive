@@ -42,9 +42,11 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
-from kdive.providers.ports import (
+from kdive.providers.ports.handles import (
     SystemHandle,
     TransportHandle,
+)
+from kdive.providers.ports.lifecycle import (
     TransportHandleData,
     TransportHandleKind,
 )

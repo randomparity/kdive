@@ -44,12 +44,12 @@ from kdive.mcp.tools.debug.session_context import (
 )
 from kdive.mcp.tools.debug.session_registry import GdbMiSessionRegistry
 from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
-from kdive.providers.ports import (
+from kdive.providers.ports.debug import (
     AttachSeam,
     GdbMiAttachment,
     GdbMiEngine,
-    TransportHandleData,
 )
+from kdive.providers.ports.lifecycle import TransportHandleData
 from kdive.security.authz.context import RequestContext
 
 _EngineOp = Callable[[GdbMiEngine, GdbMiAttachment], ToolResponse]

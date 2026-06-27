@@ -11,7 +11,11 @@ from kdive.artifacts.storage import StoredArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import CaptureOutput, CrashOutput, CrashResult
+from kdive.providers.ports.retrieve import (
+    CaptureOutput,
+    CrashOutput,
+    CrashResult,
+)
 from kdive.providers.remote_libvirt.retrieve import postmortem
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.retrieve.host_dump_capture import HostDumpCapturer

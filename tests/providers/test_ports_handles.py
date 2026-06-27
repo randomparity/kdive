@@ -5,7 +5,10 @@ from __future__ import annotations
 from kdive.domain.capacity.state import ResourceStatus
 from kdive.domain.catalog.discovery import ResourceRecord
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.providers.ports import SystemHandle, TransportHandle
+from kdive.providers.ports.handles import (
+    SystemHandle,
+    TransportHandle,
+)
 
 
 def test_shared_provider_handles_are_distinct_types() -> None:

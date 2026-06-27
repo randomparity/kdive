@@ -25,7 +25,7 @@ import kdive.config as config
 from kdive.config.core_settings import DATABASE_URL
 from kdive.db.artifact_queries import debuginfo_ref_for_run_sync
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import GdbMiAttachment
+from kdive.providers.ports.debug import GdbMiAttachment
 from kdive.providers.shared.debug_common.crash_postmortem import default_fetch_object
 
 type _ReadDebuginfoRef = Callable[[str], str | None]

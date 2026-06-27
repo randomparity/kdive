@@ -49,12 +49,14 @@ from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.ports import (
+from kdive.providers.ports.handles import (
+    SystemHandle,
+    TransportHandle,
+)
+from kdive.providers.ports.lifecycle import (
     DEBUG_TRANSPORT_KINDS,
     Connector,
     DebugTransportKind,
-    SystemHandle,
-    TransportHandle,
 )
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext

@@ -16,7 +16,11 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.tools.debug.session_registry import GdbMiSessionRegistry
-from kdive.providers.ports import GdbFrame, GdbMiAttachment, GdbStopRecord
+from kdive.providers.ports.debug import (
+    GdbFrame,
+    GdbMiAttachment,
+    GdbStopRecord,
+)
 from kdive.providers.shared.debug_common import gdbmi
 from kdive.providers.shared.debug_common.debuginfo import DebuginfoResolver
 from kdive.providers.shared.debug_common.execution import ExecutionControl

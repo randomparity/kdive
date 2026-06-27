@@ -22,7 +22,7 @@ from typing import Protocol
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import TransportHandleData
+from kdive.providers.ports.lifecycle import TransportHandleData
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, all_remote_configs
 from kdive.providers.remote_libvirt.connection.transport import (
     open_libvirt_protocol,

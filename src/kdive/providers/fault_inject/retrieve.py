@@ -10,7 +10,10 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.fault_inject._common import SYNTHETIC_BUILD_ID, TENANT, StorePort
-from kdive.providers.ports import CaptureOutput, CrashOutput
+from kdive.providers.ports.retrieve import (
+    CaptureOutput,
+    CrashOutput,
+)
 from kdive.security.artifacts.crash_commands import validate_crash_commands
 
 _RETENTION_CLASS = "vmcore"

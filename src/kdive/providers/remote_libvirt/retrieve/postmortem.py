@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kdive.providers.ports import CrashOutput
+from kdive.providers.ports.retrieve import CrashOutput
 from kdive.providers.shared.debug_common.crash_postmortem import (
     FetchObject,
     ReadBuildId,

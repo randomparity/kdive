@@ -23,7 +23,7 @@ from uuid import UUID
 from kdive.providers.infra.reaping import OwnedDomain
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
-from kdive.providers.ports import OwnedInfra
+from kdive.providers.ports.handles import OwnedInfra
 
 
 @dataclass(frozen=True, slots=True)

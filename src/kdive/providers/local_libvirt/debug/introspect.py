@@ -29,13 +29,13 @@ from typing import cast
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.prereqs.managed_ssh_key import managed_private_key_path
-from kdive.providers.ports import (
+from kdive.providers.ports.lifecycle import TransportHandleData
+from kdive.providers.ports.retrieve import (
     IntrospectOutput,
     LiveIntrospector,
     LiveScriptOutput,
     VmcoreIntrospector,
 )
-from kdive.providers.ports.lifecycle import TransportHandleData
 from kdive.providers.shared.debug_common.drgn_program import (
     open_vmcore_program,
     read_vmcoreinfo_build_id,

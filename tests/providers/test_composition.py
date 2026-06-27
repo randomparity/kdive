@@ -33,14 +33,16 @@ from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.infra.reaping import OwnedDomain
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
-from kdive.providers.ports import (
-    CaptureOutput,
-    CrashOutput,
-    InstallRequest,
-    IntrospectOutput,
-    LiveScriptOutput,
+from kdive.providers.ports.handles import (
     SystemHandle,
     TransportHandle,
+)
+from kdive.providers.ports.lifecycle import InstallRequest
+from kdive.providers.ports.retrieve import (
+    CaptureOutput,
+    CrashOutput,
+    IntrospectOutput,
+    LiveScriptOutput,
 )
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
 from kdive.providers.remote_libvirt.lifecycle.control import RemoteLibvirtControl

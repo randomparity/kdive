@@ -56,7 +56,7 @@ from kdive.providers.local_libvirt.lifecycle.readiness import (
 from kdive.providers.local_libvirt.lifecycle.staged_write import write_staged_bytes
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
-from kdive.providers.ports import InstallRequest
+from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.libvirt_xml import register_kdive_namespace, register_qemu_namespace
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.store.objectstore import object_store_from_env

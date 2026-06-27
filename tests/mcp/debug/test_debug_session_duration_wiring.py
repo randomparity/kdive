@@ -36,9 +36,11 @@ from kdive.mcp.tools.debug import sessions_lifecycle as _sessions_lifecycle_mod
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
-from kdive.providers.ports import (
+from kdive.providers.ports.handles import (
     SystemHandle,
     TransportHandle,
+)
+from kdive.providers.ports.lifecycle import (
     TransportHandleData,
     TransportHandleKind,
 )

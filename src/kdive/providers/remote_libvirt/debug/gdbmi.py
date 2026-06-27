@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kdive.providers.ports import GdbMiAttachment
+from kdive.providers.ports.debug import GdbMiAttachment
 from kdive.providers.shared.debug_common.debuginfo import stage_and_attach
 from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine as _GdbMiEngine
 from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote

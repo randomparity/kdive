@@ -18,7 +18,7 @@ from kdive.jobs.handlers.runs.common import abandon_run_step_best_effort
 from kdive.jobs.payloads import RunPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.ports import InstallRequest
+from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.security import audit
 from kdive.services.runs.steps import (
     cmdline_for,

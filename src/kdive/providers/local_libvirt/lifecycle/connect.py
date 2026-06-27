@@ -36,10 +36,12 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
-from kdive.providers.ports import (
-    DebugTransportKind,
+from kdive.providers.ports.handles import (
     SystemHandle,
     TransportHandle,
+)
+from kdive.providers.ports.lifecycle import (
+    DebugTransportKind,
     TransportHandleData,
 )
 from kdive.providers.shared.debug_common.rsp import rsp_reachable

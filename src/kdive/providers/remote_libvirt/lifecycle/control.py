@@ -24,7 +24,7 @@ import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import PowerAction
-from kdive.providers.ports import Controller as Controller
+from kdive.providers.ports.lifecycle import Controller as Controller
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
 from kdive.providers.remote_libvirt.connection.transport import (
     open_libvirt_protocol,

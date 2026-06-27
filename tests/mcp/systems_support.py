@@ -32,7 +32,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
-from kdive.providers.ports import (
+from kdive.providers.ports.lifecycle import (
     DEBUG_TRANSPORT_KINDS,
     INTROSPECTION_MODES,
     DebugTransportKind,

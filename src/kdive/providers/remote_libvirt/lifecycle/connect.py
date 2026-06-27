@@ -14,10 +14,12 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import (
-    DebugTransportKind,
+from kdive.providers.ports.handles import (
     SystemHandle,
     TransportHandle,
+)
+from kdive.providers.ports.lifecycle import (
+    DebugTransportKind,
     TransportHandleData,
 )
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config

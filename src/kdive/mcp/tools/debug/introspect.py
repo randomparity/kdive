@@ -39,9 +39,11 @@ from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_ta
 from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
-from kdive.providers.ports import (
+from kdive.providers.ports.lifecycle import (
     DebugTransportKind,
     IntrospectionMode,
+)
+from kdive.providers.ports.retrieve import (
     LiveIntrospector,
     LiveScriptOutput,
     VmcoreIntrospector,

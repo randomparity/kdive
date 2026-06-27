@@ -11,7 +11,10 @@ from __future__ import annotations
 import json
 from typing import Protocol
 
-from kdive.providers.ports import IntrospectOutput, LiveScriptOutput
+from kdive.providers.ports.retrieve import (
+    IntrospectOutput,
+    LiveScriptOutput,
+)
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 

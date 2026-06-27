@@ -28,7 +28,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.install import LocalLibvirtInstall, ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.provisioning import render_domain_xml
-from kdive.providers.ports import InstallRequest
+from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.libvirt_xml import parse_capabilities_arch, parse_metadata_system_id
 from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
 

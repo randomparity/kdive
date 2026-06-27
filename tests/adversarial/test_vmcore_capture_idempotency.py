@@ -27,7 +27,7 @@ from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers import vmcore as vmcore_plane
 from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
-from kdive.providers.ports import CaptureOutput
+from kdive.providers.ports.retrieve import CaptureOutput
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.systems_support import provider_resolver
 

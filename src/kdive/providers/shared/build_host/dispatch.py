@@ -16,7 +16,10 @@ from kdive.domain.build_phase import BuildPhase
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.observability.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import GitKernelSource, GitSourceRef, ServerBuildProfile, is_git_source
-from kdive.providers.ports import Builder, TransportCapableBuilder
+from kdive.providers.ports.build import (
+    Builder,
+    TransportCapableBuilder,
+)
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.shared.build_host.transports.ssh_transport import SshBuildTransport
 from kdive.security.secrets.secret_registry import SecretRegistry

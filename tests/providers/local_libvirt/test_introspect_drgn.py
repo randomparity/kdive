@@ -20,7 +20,7 @@ from kdive.providers.local_libvirt.debug.introspect import (
     LocalLibvirtVmcoreIntrospect,
     VmcoreIntrospector,
 )
-from kdive.providers.ports import LiveScriptOutput
+from kdive.providers.ports.retrieve import LiveScriptOutput
 from kdive.providers.shared.debug_common.introspect import (
     _Module,
     _Program,

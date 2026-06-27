@@ -18,20 +18,24 @@ from kdive.domain.capture import CaptureMethod
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import RootfsSource
-from kdive.providers.ports import (
+from kdive.providers.ports.build import Builder
+from kdive.providers.ports.console import ConsoleSnapshotter
+from kdive.providers.ports.debug import (
     AttachSeam,
-    Booter,
-    Builder,
-    Connector,
-    ConsoleSnapshotter,
-    Controller,
-    CrashPostmortem,
-    DebugTransportKind,
     GdbMiEngine,
+)
+from kdive.providers.ports.lifecycle import (
+    Booter,
+    Connector,
+    Controller,
+    DebugTransportKind,
     Installer,
     IntrospectionMode,
-    LiveIntrospector,
     Provisioner,
+)
+from kdive.providers.ports.retrieve import (
+    CrashPostmortem,
+    LiveIntrospector,
     Retriever,
     VmcoreIntrospector,
 )

@@ -13,7 +13,7 @@ from typing import cast
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import GdbMiAttachment
+from kdive.providers.ports.debug import GdbMiAttachment
 from kdive.providers.shared.debug_common import debuginfo
 
 

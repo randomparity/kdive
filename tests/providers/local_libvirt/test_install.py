@@ -40,7 +40,7 @@ from kdive.providers.local_libvirt.lifecycle.readiness import (
     _verdict_to_result,
     classify_console,
 )
-from kdive.providers.ports import InstallRequest
+from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.runtime_paths import read_console_log
 from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
 

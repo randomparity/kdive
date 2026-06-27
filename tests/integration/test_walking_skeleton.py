@@ -37,7 +37,10 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.catalog.artifacts.reads import artifacts_get, artifacts_list
 from kdive.mcp.tools.lifecycle import control as control_tools
 from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
-from kdive.providers.ports import CaptureOutput, CrashOutput
+from kdive.providers.ports.retrieve import (
+    CaptureOutput,
+    CrashOutput,
+)
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.integration._seed import (

@@ -36,7 +36,7 @@ from kdive.mcp.tools.lifecycle.vmcore_view import (
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
-from kdive.providers.ports import CrashPostmortem
+from kdive.providers.ports.retrieve import CrashPostmortem
 from kdive.security.artifacts.crash_commands import validate_crash_commands
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role

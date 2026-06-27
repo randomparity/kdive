@@ -9,7 +9,11 @@ from __future__ import annotations
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import SystemHandle, TransportHandle, TransportHandleData
+from kdive.providers.ports.handles import (
+    SystemHandle,
+    TransportHandle,
+)
+from kdive.providers.ports.lifecycle import TransportHandleData
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.lifecycle.connect import RemoteLibvirtConnect
 

@@ -11,7 +11,10 @@ import libvirt
 
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import CaptureOutput, CrashOutput
+from kdive.providers.ports.retrieve import (
+    CaptureOutput,
+    CrashOutput,
+)
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
 from kdive.providers.remote_libvirt.guest.agent import (
     qemu_agent_command,

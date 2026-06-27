@@ -44,7 +44,11 @@ from kdive.domain.lifecycle.records import DebugSession, Investigation, Run, Sys
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.debug import sessions as debug_tools
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
-from kdive.providers.ports import SystemHandle, TransportHandle, TransportHandleData
+from kdive.providers.ports.handles import (
+    SystemHandle,
+    TransportHandle,
+)
+from kdive.providers.ports.lifecycle import TransportHandleData
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.adversarial.conftest import seed_allocation, seed_resource

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from kdive.providers.ports import IntrospectOutput, LiveScriptOutput
+from kdive.providers.ports.retrieve import (
+    IntrospectOutput,
+    LiveScriptOutput,
+)
 
 
 class FaultInjectIntrospect:

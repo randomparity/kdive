@@ -38,7 +38,7 @@ from kdive.providers.local_libvirt.retrieve_kdump import (
     redact_dmesg,
 )
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
-from kdive.providers.ports import (
+from kdive.providers.ports.retrieve import (
     CaptureOutput,
     CrashOutput,
     CrashResult,

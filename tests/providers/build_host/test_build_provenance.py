@@ -17,7 +17,10 @@ from kdive.build_artifacts.results import BuildOutput
 from kdive.db.build_hosts import BuildHost, BuildHostKind, BuildHostState
 from kdive.observability.build_telemetry import BuildPhaseRecorder
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
-from kdive.providers.ports import Builder, TransportCapableBuilder
+from kdive.providers.ports.build import (
+    Builder,
+    TransportCapableBuilder,
+)
 from kdive.providers.ports.build_transport import BuildTransport, CommandResult
 from kdive.providers.shared.build_host.dispatch import (
     BuildHostDispatchRequest,

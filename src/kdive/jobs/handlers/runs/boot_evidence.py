@@ -19,7 +19,9 @@ from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import Run
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.ports import Connector, ConsoleSnapshotter, SystemHandle
+from kdive.providers.ports.console import ConsoleSnapshotter
+from kdive.providers.ports.handles import SystemHandle
+from kdive.providers.ports.lifecycle import Connector
 from kdive.providers.shared.runtime_paths import (
     console_log_path,
     domain_name_for,

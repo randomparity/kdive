@@ -33,7 +33,10 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.debug import sessions_read
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.mcp.tools.lifecycle.systems.view import get_system as _get_system
-from kdive.providers.ports import TransportHandleData, TransportHandleKind
+from kdive.providers.ports.lifecycle import (
+    TransportHandleData,
+    TransportHandleKind,
+)
 from kdive.security.authz.rbac import Role
 from tests.mcp.systems_support import provider_resolver
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn

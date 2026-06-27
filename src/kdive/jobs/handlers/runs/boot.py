@@ -21,7 +21,11 @@ from kdive.jobs.payloads import RunPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.ports import Booter, Connector, ConsoleSnapshotter
+from kdive.providers.ports.console import ConsoleSnapshotter
+from kdive.providers.ports.lifecycle import (
+    Booter,
+    Connector,
+)
 from kdive.security.authz.context import RequestContext
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore

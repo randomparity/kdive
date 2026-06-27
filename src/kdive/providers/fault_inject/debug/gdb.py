@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from threading import Lock
 
-from kdive.providers.ports import (
+from kdive.providers.ports.debug import (
     GdbBreakpointRef,
     GdbMiAttachment,
     GdbStopRecord,

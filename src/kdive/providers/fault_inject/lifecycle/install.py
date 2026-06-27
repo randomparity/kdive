@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from kdive.providers.ports import InstallRequest
+from kdive.providers.ports.lifecycle import InstallRequest
 
 
 class FaultInjectInstall:
