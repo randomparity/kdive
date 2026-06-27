@@ -175,14 +175,14 @@ class VmcoreHandlers:
         pool: AsyncConnectionPool,
         ctx: RequestContext,
         run_id: str,
-        run: Callable[[CrashPostmortem, SecretRegistry], Awaitable[ToolResponse]],
+        invoke_postmortem: Callable[[CrashPostmortem, SecretRegistry], Awaitable[ToolResponse]],
     ) -> ToolResponse:
         return await with_runtime_for_run(
             pool,
             self.resolver,
             ctx,
             run_id,
-            lambda runtime: run(runtime.crash_postmortem, self.secret_registry),
+            lambda runtime: invoke_postmortem(runtime.crash_postmortem, self.secret_registry),
             required_role=Role.CONTRIBUTOR,
         )
 
