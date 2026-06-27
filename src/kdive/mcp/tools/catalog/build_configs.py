@@ -150,27 +150,9 @@ async def set_build_config(
     content: str,
     description: str,
 ) -> ToolResponse:
-    """Publish/replace a build-config fragment (``platform_admin``; ADR-0119).
+    """Publish or replace an operator build-config fragment.
 
-    Serialized per fragment ``name`` on :attr:`LockScope.BUILD_CONFIG` (the same lock the seed
-    takes); the object PUT, the catalog upsert (``source='operator'``), and the
-    ``platform_audit_log`` row commit together. A non-``platform_admin`` caller is denied and,
-    when it holds some platform role, the denial is audited. The object store is resolved
-    (``store_factory``) **after** the authorization gate, so a denied caller never triggers — or
-    learns about — object-store configuration state and is always audited.
-
-    Args:
-        pool: The async connection pool.
-        store_factory: Resolves the object store; called only after the authz gate passes, so a
-            store-resolution failure is reachable only by an authorized caller.
-        ctx: The caller's request context.
-        name: The fragment name (lowercase ``a-z0-9_-``; folds into the object key).
-        content: The full kernel-config fragment text (UTF-8).
-        description: An optional human label; empty preserves the prior description.
-
-    Returns:
-        A :class:`ToolResponse`: ``published`` with ``{name, sha256, bytes, source}`` on success,
-        or a failure envelope (``AUTHORIZATION_DENIED`` / ``CONFIGURATION_ERROR``).
+    The object store is resolved only after platform-admin authorization and input validation.
     """
     try:
         require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)

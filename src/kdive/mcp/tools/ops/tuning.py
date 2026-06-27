@@ -145,21 +145,10 @@ async def export_systems_toml(
     document: str | None = None,
     resolve_target: Callable[[], WritebackTarget | None] = resolve_writeback_target,
 ) -> ToolResponse:
-    """Serialize the live inventory to a ``systems.toml`` document, optionally persisting it.
+    """Serialize live inventory to ``systems.toml``, optionally persisting it.
 
-    Read by default (``PLATFORM_OPERATOR``; audited). Generalizes :func:`export_cost_classes` to
-    the whole file: images, build_hosts, cost_classes, and the identity/economic/sizing fields of
-    resources, honoring the override ledger (a ``removed`` identity is omitted; a ``detached`` one
-    is emitted with its live runtime values). The connection/debug fields the remote-libvirt
-    provider reads from the file (``gdb_addr``, ``gdbstub_range``, the three TLS refs,
-    ``base_image``, ``shapes``) are not persisted, so a ``[[remote_libvirt]]`` block is a skeleton
-    of ``REPLACE_ME_*`` placeholders an operator completes before a fresh start.
-
-    With ``persist=True`` the document is also written to the configured writeback target
-    (``KDIVE_INVENTORY_WRITEBACK``; off by default → ``configuration_error``). A skeleton (any
-    ``REPLACE_ME_*``) is refused before any write. ``document`` persists an operator-completed
-    text verbatim instead of the live serialization — the path for a fleet with ``remote_libvirt``
-    hosts, whose live export is always a skeleton (ADR-0199 §D). Always returns ``data["toml"]``.
+    ``persist=True`` requires configured writeback and refuses unresolved placeholders before any
+    write.
     """
     with bind_context(principal=ctx.principal):
         try:
