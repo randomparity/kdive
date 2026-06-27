@@ -8,7 +8,7 @@ from uuid import UUID
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.build_artifacts.results import BuildOutput
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
+from kdive.observability.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.fault_inject._common import SYNTHETIC_BUILD_ID, TENANT, StorePort
 

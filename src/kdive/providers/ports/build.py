@@ -6,7 +6,7 @@ from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from kdive.build_artifacts.results import BuildOutput
-from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
+from kdive.observability.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.security.secrets.secret_registry import SecretRegistry

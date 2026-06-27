@@ -48,7 +48,7 @@ def _register_run_handlers(
     registry: HandlerRegistry,
     assembly: WorkerHandlerAssembly,
 ) -> None:
-    from kdive.jobs.build_telemetry import BuildPhaseRecorder
+    from kdive.observability.build_telemetry import BuildPhaseRecorder
 
     runs.register_handlers(
         registry,

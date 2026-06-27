@@ -13,7 +13,7 @@ from kdive.components.references import ComponentRef
 from kdive.components.requirements import validate_config_requirements
 from kdive.domain.build_phase import BuildPhase
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
+from kdive.observability.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.shared.build_host.common import _dropped_fragment_symbols
 from kdive.providers.shared.build_host.configuration.config import (

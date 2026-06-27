@@ -19,7 +19,7 @@ from kdive.db.build_host_policy import KERNEL_SRC_UNSET_DETAIL
 from kdive.db.build_hosts import BuildHost, BuildHostKind, BuildHostState
 from kdive.domain.build_phase import BuildPhase
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.jobs.build_telemetry import BuildPhaseRecorder
+from kdive.observability.build_telemetry import BuildPhaseRecorder
 from kdive.profiles.build import BuildProfile, GitSourceRef, ServerBuildProfile
 from kdive.providers.ports import Builder, TransportCapableBuilder
 from kdive.providers.ports.build_transport import BuildTransport

@@ -45,7 +45,7 @@ from kdive.build_configs.defaults import (
 from kdive.components.references import ComponentRef
 from kdive.config.core_settings import BUILD_WORKSPACE, KERNEL_SRC
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
+from kdive.observability.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.shared.build_host import execution as _build_exec

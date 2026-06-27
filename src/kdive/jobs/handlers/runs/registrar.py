@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from kdive.domain.operations.jobs import JobKind
-from kdive.jobs.build_telemetry import BuildPhaseRecorder
 from kdive.jobs.handlers.runs.boot import boot_handler
 from kdive.jobs.handlers.runs.build import (
     BuildHostTransportFactories,
@@ -16,6 +15,7 @@ from kdive.jobs.handlers.runs.build import (
 )
 from kdive.jobs.handlers.runs.install import install_handler
 from kdive.jobs.models import HandlerRegistry
+from kdive.observability.build_telemetry import BuildPhaseRecorder
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore

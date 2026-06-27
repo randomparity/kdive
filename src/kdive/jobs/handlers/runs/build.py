@@ -22,11 +22,11 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import Job
-from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.runs.shared import finalize_build
 from kdive.jobs.payloads import BuildPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
+from kdive.observability.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.shared.build_host.dispatch import (

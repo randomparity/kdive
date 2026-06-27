@@ -11,7 +11,7 @@ from kdive.artifacts.storage import StoredArtifact
 from kdive.build_artifacts.results import BuildOutput
 from kdive.domain.build_phase import BuildPhase
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.jobs.build_telemetry import BuildPhaseRecorder
+from kdive.observability.build_telemetry import BuildPhaseRecorder
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.shared.build_host import execution as _build_exec
 from kdive.providers.shared.build_host.orchestration import BuildHostOrchestrator

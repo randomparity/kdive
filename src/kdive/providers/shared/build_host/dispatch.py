@@ -14,7 +14,7 @@ from kdive.db.build_host_policy import check_warm_tree_source_admission
 from kdive.db.build_hosts import BuildHost, BuildHostKind
 from kdive.domain.build_phase import BuildPhase
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
+from kdive.observability.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import GitKernelSource, GitSourceRef, ServerBuildProfile, is_git_source
 from kdive.providers.ports import Builder, TransportCapableBuilder
 from kdive.providers.ports.build_transport import BuildTransport

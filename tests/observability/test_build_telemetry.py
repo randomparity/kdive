@@ -10,7 +10,7 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from kdive.domain.build_phase import BuildPhase
-from kdive.jobs.build_telemetry import BuildPhaseRecorder
+from kdive.observability.build_telemetry import BuildPhaseRecorder
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.shared.build_host.execution import CapturedStep
 from kdive.providers.shared.build_host.orchestration import BuildHostOrchestrator
