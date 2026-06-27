@@ -336,13 +336,13 @@ def _register_runs_complete_build(
     async def runs_complete_build(
         run_id: Annotated[str, Field(description="The external-build Run to finalize.")],
         cmdline: Annotated[
-            str,
+            str | None,
             Field(
                 description="Kernel debug args appended to the platform-required boot args "
                 "(e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot "
                 "via runs.install/runs.boot (ADR-0061)."
             ),
-        ],
+        ] = None,
         build_id: Annotated[
             str | None,
             Field(

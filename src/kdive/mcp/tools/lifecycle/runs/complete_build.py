@@ -90,12 +90,13 @@ class CompleteBuildHandlers:
         run_id: str,
         *,
         build_id: str | None,
-        cmdline: str,
+        cmdline: str | None = None,
     ) -> ToolResponse:
         """Validate an external Run's uploads and finalize it ``created -> succeeded``."""
         uid = _as_uuid(run_id)
         if uid is None:
             return _config_error(run_id)
+        cmdline = _normalize_cmdline(cmdline)
         owned = platform_owned_cmdline_token(cmdline)
         if owned is not None:
             return _config_error(
@@ -126,7 +127,7 @@ class CompleteBuildHandlers:
         prepared: _ExternalBuildCompletion,
         *,
         build_id: str | None,
-        cmdline: str,
+        cmdline: str | None,
     ) -> _ExternalBuildFinalization | ToolResponse:
         """Reassemble chunked uploads and validate the external-build artifact set."""
         if prepared.store is not None:
@@ -246,7 +247,7 @@ class _ExternalBuildFinalization:
 
     run: Run
     output: BuildOutput
-    cmdline: str
+    cmdline: str | None
     keys: dict[str, str]
     heads: dict[str, HeadResult]
     store: ExternalBuildStore | None
@@ -326,6 +327,13 @@ def _complete_envelope(run_id: UUID, result: BuildStepResult) -> ToolResponse:
     return ToolResponse.success(
         str(run_id), "succeeded", suggested_next_actions=["runs.get"], refs=result.refs()
     )
+
+
+def _normalize_cmdline(cmdline: str | None) -> str | None:
+    if cmdline is None:
+        return None
+    cmdline = cmdline.strip()
+    return cmdline or None
 
 
 async def _finalize_external_build(

@@ -163,6 +163,17 @@ async def _artifact_keys(pool, run_id) -> set[str]:
         return {row["object_key"] for row in await cur.fetchall()}
 
 
+async def _build_step_result(pool, run_id) -> dict[str, object]:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT result FROM run_steps WHERE run_id = %s AND step = 'build'",
+            (run_id,),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return row["result"]
+
+
 def test_complete_build_finalizes_external_run(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -180,6 +191,43 @@ def test_complete_build_finalizes_external_run(migrated_url: str) -> None:
                 run = await RUNS.get(conn, run_id)
         assert run is not None and run.state is RunState.SUCCEEDED
         assert run.kernel_ref is not None and run.kernel_ref.endswith("/kernel")
+
+    asyncio.run(_run())
+
+
+def test_complete_build_without_cmdline_records_none(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            resp = await _build_handlers(validator).complete_build(
+                pool,
+                _ctx(),
+                str(run_id),
+                build_id=None,
+            )
+            assert resp.status == "succeeded"
+            result = await _build_step_result(pool, run_id)
+        assert "cmdline" not in result
+
+    asyncio.run(_run())
+
+
+def test_complete_build_blank_cmdline_records_none(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            resp = await _build_handlers(validator).complete_build(
+                pool,
+                _ctx(),
+                str(run_id),
+                build_id=None,
+                cmdline="   ",
+            )
+            assert resp.status == "succeeded"
+            result = await _build_step_result(pool, run_id)
+        assert "cmdline" not in result
 
     asyncio.run(_run())
 
