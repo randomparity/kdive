@@ -15,7 +15,8 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import InvestigationState
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.catalog import investigations as inv_tools
+from kdive.mcp.tools.catalog import investigations_handlers as inv_tools
+from kdive.mcp.tools.catalog import investigations_view as inv_view
 from kdive.security.authz.rbac import AuthorizationError, Role
 from tests.db_waits import wait_until_any_backend_waiting
 
@@ -901,7 +902,7 @@ def test_list_requires_viewer_role(migrated_url: str) -> None:
 def test_investigation_row_error_envelope() -> None:
     from uuid import uuid4 as _u  # local import; module-level imports include only UUID
 
-    resp = inv_tools._investigation_row_error(_u())
+    resp = inv_view.investigation_row_error(_u())
     assert resp.status == "error"
     assert resp.error_category == "configuration_error"
 
@@ -914,7 +915,7 @@ def test_list_degrades_one_invalid_row(migrated_url: str, monkeypatch: pytest.Mo
             await _open(pool, _ctx(), project="proj", title="good-a")
             await _open(pool, _ctx(), project="proj", title="good-b")
             calls = {"n": 0}
-            real = inv_tools.Investigation.model_validate
+            real = inv_view.Investigation.model_validate
 
             def flaky(row: object) -> object:
                 calls["n"] += 1
@@ -922,7 +923,7 @@ def test_list_degrades_one_invalid_row(migrated_url: str, monkeypatch: pytest.Mo
                     raise ValueError("synthetic invalid row")
                 return real(row)
 
-            monkeypatch.setattr(inv_tools.Investigation, "model_validate", staticmethod(flaky))
+            monkeypatch.setattr(inv_view.Investigation, "model_validate", staticmethod(flaky))
             resp = await inv_tools.list_investigations(pool, _ctx())
             assert resp.data["count"] == 2
             assert sorted(i.status for i in resp.items) == ["error", "open"]
