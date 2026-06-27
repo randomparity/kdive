@@ -21,7 +21,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
 import libvirt
@@ -353,6 +353,19 @@ type _DomainSettled = Callable[[], bool]
 type _Sleep = Callable[[float], None]
 
 
+class _GuestfsHandle(Protocol):  # pragma: no cover - live_vm (libguestfs binding surface)
+    """The subset of the unstubbed guestfs handle this reader drives."""
+
+    def add_drive_opts(self, filename: str, *, readonly: bool) -> None: ...
+    def launch(self) -> None: ...
+    def inspect_os(self) -> list[str]: ...
+    def mount_ro(self, root: str, mountpoint: str) -> None: ...
+    def glob_expand(self, pattern: str) -> list[str]: ...
+    def statns(self, path: str) -> dict[str, int]: ...
+    def download(self, path: str, dest: str) -> None: ...
+    def close(self) -> None: ...
+
+
 def _libvirt_uri() -> str:
     """The provider's configured libvirt URI (``KDIVE_LIBVIRT_URI``, default ``qemu:///system``)."""
     return config.require(LIBVIRT_URI)
@@ -412,7 +425,7 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
         )
 
     @staticmethod
-    def _mount(overlay: str):  # type: ignore[no-untyped-def]
+    def _mount(overlay: str) -> _GuestfsHandle:
         try:
             import guestfs  # noqa: PLC0415  # ty: ignore[unresolved-import]  # operator-provided
         except ImportError as exc:
@@ -420,7 +433,7 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
                 "libguestfs (the guestfs Python binding) is required for local kdump capture",
                 category=ErrorCategory.MISSING_DEPENDENCY,
             ) from exc
-        guest = guestfs.GuestFS(python_return_dict=True)
+        guest = cast("_GuestfsHandle", guestfs.GuestFS(python_return_dict=True))
         try:
             guest.add_drive_opts(overlay, readonly=True)
             guest.launch()
