@@ -10,8 +10,9 @@ from psycopg import AsyncConnection
 
 from kdive.domain.errors import CategorizedError
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.handlers import control, image_build, runs, systems, vmcore
+from kdive.jobs.handlers import control, image_build, systems, vmcore
 from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
+from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.models import HandlerRegistry, JobHandler
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactories

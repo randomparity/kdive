@@ -17,8 +17,8 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.handlers import runs
 from kdive.jobs.handlers.runs import boot as runs_boot
+from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.handlers.runs import registrar as runs_registrar
 from kdive.jobs.handlers.runs.build import BuildHostTransportFactories
 from kdive.jobs.models import HandlerRegistry

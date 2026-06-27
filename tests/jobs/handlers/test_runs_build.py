@@ -12,8 +12,8 @@ from kdive.db.build_hosts import get_by_name
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers import runs
 from kdive.jobs.handlers.runs import build as runs_build
+from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.payloads import BuildPayload
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.integration._seed import seed_granted_allocation, seed_running_run, seed_system

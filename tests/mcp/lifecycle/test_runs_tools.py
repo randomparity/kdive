@@ -34,9 +34,9 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.domain.pcie import PCIeClaim
-from kdive.jobs.handlers import runs as runs_handlers
 from kdive.jobs.handlers.runs import boot as runs_boot
 from kdive.jobs.handlers.runs import common as run_handler_common
+from kdive.jobs.handlers.runs import registrar as runs_handlers
 from kdive.jobs.handlers.runs import shared as runs_shared
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse

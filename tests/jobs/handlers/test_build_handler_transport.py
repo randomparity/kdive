@@ -37,7 +37,7 @@ from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers import runs as runs_handlers
+from kdive.jobs.handlers.runs import registrar as runs_handlers
 from kdive.jobs.payloads import BuildPayload
 from kdive.profiles.build import BuildProfile, GitSourceRef, ServerBuildProfile
 from kdive.providers.local_libvirt.build import LocalLibvirtBuild
