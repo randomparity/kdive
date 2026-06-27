@@ -67,6 +67,12 @@ Mechanical, must compile together:
   replace the str-only `_optional_str_map` use for provenance with a coercion that admits
   `str | bool` values (add `_optional_str_bool_map`, or generalize), keep the `None`-on-malformed
   posture; `dump()` return type widens to include `dict[str, str | bool]`.
+  **bool-is-int trap:** `bool` subclasses `int` in Python (`isinstance(True, int) is True`), so
+  the admit check must be `isinstance(k, str) and isinstance(v, str | bool)` — **never** `int`,
+  or malformed numeric values (e.g. `123`) would leak in. The existing
+  `test_load_ignores_build_provenance_with_non_string_values` (`{"resolved_commit": 123}` → `None`)
+  must stay green, and a new test must assert a `bool` value is **accepted** (round-trips, not
+  dropped).
 - `mcp/tools/lifecycle/runs/common.py` — `_build_provenance_data` / `envelope_for_run`
   `build_provenance` param type widens; it already `cast(JsonValue, ...)`, so no logic change.
 - `mcp/tools/lifecycle/runs/view.py` — pass-through type only if annotated.
@@ -91,7 +97,14 @@ No new stringified flag is introduced (`dirty` is a real `bool`).
 
 ## Rollback / cleanup
 
-Pure additive provenance keys + a type widening; no migration, no state change. Reverting the
-branch restores `{label, resolved_commit?}`. Persisted rows with the new keys degrade cleanly
-on an older reader (extra keys ignored; `_optional_str_map` would have dropped a bool row to
-`None` — acceptable, provenance is best-effort).
+Pure additive provenance keys + a type widening; no migration, no kdive-side persisted-state
+change. Reverting the branch restores `{label, resolved_commit?}`. Persisted rows with the new
+keys degrade cleanly on an older reader (extra keys ignored; `_optional_str_map` would have
+dropped a bool row to `None` — acceptable, provenance is best-effort).
+
+The probes do touch the **operator's** `$KDIVE_KERNEL_SRC/.git` (not the rsync workspace copy):
+`git stash create` writes GC-reclaimed loose objects and `git status` may refresh the index's
+stat cache (ADR-0265 documents this). They run as the worker (root) against an operator-owned
+repo, so a permission or git "dubious ownership" (`safe.directory`) failure must degrade to
+`None` and omit the key — never raise. This is the same best-effort posture `rev_parse_head`
+already has; the new probes inherit it. No kdive state, no caller-visible failure.
