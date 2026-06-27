@@ -30,6 +30,7 @@ from kdive.jobs.provider_context import set_provider_kind
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.shared.build_host.dispatch import (
+    BuildHostDispatchRequest,
     BuildHostTransportFactories,
     run_build_on_host,
 )
@@ -117,15 +118,17 @@ async def _run_build(
     run_id = run.id
     builder = resolver.resolve(run.target_kind).builder
     return await run_build_on_host(
-        builder,
-        host,
-        run_id,
-        parsed,
-        secret_registry=secret_registry,
-        kernel_src=kernel_src,
+        BuildHostDispatchRequest(
+            builder=builder,
+            host=host,
+            run_id=run_id,
+            parsed=parsed,
+            secret_registry=secret_registry,
+            kernel_src=kernel_src,
+            provider=provider,
+        ),
         transport_factories=transport_factories,
         recorder=recorder,
-        provider=provider,
     )
 
 

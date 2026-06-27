@@ -17,9 +17,10 @@ from kdive.build_artifacts.results import BuildOutput
 from kdive.db.build_hosts import BuildHost, BuildHostKind, BuildHostState
 from kdive.jobs.build_telemetry import BuildPhaseRecorder
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
-from kdive.providers.ports import TransportCapableBuilder
+from kdive.providers.ports import Builder, TransportCapableBuilder
 from kdive.providers.ports.build_transport import BuildTransport, CommandResult
 from kdive.providers.shared.build_host.dispatch import (
+    BuildHostDispatchRequest,
     BuildHostTransportFactory,
     _build_over_transport_session,
     run_build_on_host,
@@ -53,6 +54,23 @@ def _warm_parsed() -> ServerBuildProfile:
     parsed = BuildProfile.parse(_WARM_PROFILE)
     assert isinstance(parsed, ServerBuildProfile)
     return parsed
+
+
+def _request(
+    builder: object,
+    host: BuildHost,
+    parsed: ServerBuildProfile,
+    *,
+    kernel_src: str = "",
+) -> BuildHostDispatchRequest:
+    return BuildHostDispatchRequest(
+        builder=cast(Builder, builder),
+        host=host,
+        run_id=_RUN_ID,
+        parsed=parsed,
+        secret_registry=SecretRegistry(),
+        kernel_src=kernel_src,
+    )
 
 
 def _local_host() -> BuildHost:
@@ -253,12 +271,7 @@ def test_local_git_build_records_full_stripped_provenance() -> None:
     host = _local_host()
     out = asyncio.run(
         run_build_on_host(
-            cast(TransportCapableBuilder, builder),
-            host,
-            _RUN_ID,
-            _git_parsed(),
-            secret_registry=SecretRegistry(),
-            kernel_src="",
+            _request(cast(TransportCapableBuilder, builder), host, _git_parsed()),
         )
     )
     # The dispatch LOCAL git branch appends build_host to the clone-filled provenance, and the
@@ -277,12 +290,7 @@ def test_local_git_build_no_provenance_when_clone_records_nothing() -> None:
     builder = _LocalGitBuilder(sink, fill=False)
     out = asyncio.run(
         run_build_on_host(
-            cast(TransportCapableBuilder, builder),
-            _local_host(),
-            _RUN_ID,
-            _git_parsed(),
-            secret_registry=SecretRegistry(),
-            kernel_src="",
+            _request(cast(TransportCapableBuilder, builder), _local_host(), _git_parsed()),
         )
     )
     assert out.build_provenance is None
@@ -328,12 +336,12 @@ def test_warm_tree_records_label_and_resolved_commit(tmp_path: Path) -> None:
     builder = _WarmBuilder()
     out = asyncio.run(
         run_build_on_host(
-            cast(TransportCapableBuilder, builder),
-            _local_host(),
-            _RUN_ID,
-            _warm_parsed(),
-            secret_registry=SecretRegistry(),
-            kernel_src=str(tmp_path),
+            _request(
+                cast(TransportCapableBuilder, builder),
+                _local_host(),
+                _warm_parsed(),
+                kernel_src=str(tmp_path),
+            ),
         )
     )
     assert builder.called is True
@@ -345,12 +353,12 @@ def test_warm_tree_non_git_source_degrades_to_label_only(tmp_path: Path) -> None
     builder = _WarmBuilder()
     out = asyncio.run(
         run_build_on_host(
-            cast(TransportCapableBuilder, builder),
-            _local_host(),
-            _RUN_ID,
-            _warm_parsed(),
-            secret_registry=SecretRegistry(),
-            kernel_src=str(tmp_path),
+            _request(
+                cast(TransportCapableBuilder, builder),
+                _local_host(),
+                _warm_parsed(),
+                kernel_src=str(tmp_path),
+            ),
         )
     )
     assert builder.called is True

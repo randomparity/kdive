@@ -6,6 +6,7 @@ import asyncio
 import subprocess  # noqa: S404 - fixed argv, no shell, best-effort provenance read
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from uuid import UUID
 
 from kdive.build_artifacts.results import BuildOutput
@@ -32,6 +33,19 @@ type BuildHostTransportFactory = Callable[
 type BuildHostTransportFactories = Mapping[BuildHostKind, BuildHostTransportFactory]
 
 
+@dataclass(frozen=True, slots=True)
+class BuildHostDispatchRequest:
+    """Stable inputs for running one build on one admitted build host."""
+
+    builder: Builder
+    host: BuildHost
+    run_id: UUID
+    parsed: ServerBuildProfile
+    secret_registry: SecretRegistry
+    kernel_src: str
+    provider: str = ""
+
+
 def ssh_build_transport_factory(
     host: BuildHost,
     secret_registry: SecretRegistry,
@@ -47,16 +61,10 @@ def default_build_host_transport_factories() -> dict[BuildHostKind, BuildHostTra
 
 
 async def run_build_on_host(
-    builder: Builder,
-    host: BuildHost,
-    run_id: UUID,
-    parsed: ServerBuildProfile,
+    request: BuildHostDispatchRequest,
     *,
-    secret_registry: SecretRegistry,
-    kernel_src: str,
     transport_factories: BuildHostTransportFactories | None = None,
     recorder: BuildPhaseRecorder = DISABLED_RECORDER,
-    provider: str = "",
 ) -> BuildOutput:
     """Run ``builder`` on the selected build host.
 
@@ -68,29 +76,36 @@ async def run_build_on_host(
     mirroring the warm tree, so it does not read ``KDIVE_KERNEL_SRC`` and skips the warm-tree
     admission. ``kernel_src`` is ignored for non-``LOCAL`` (git/remote) hosts.
     """
-    if host.kind is BuildHostKind.LOCAL:
-        warm_tree = not is_git_source(parsed)
+    if request.host.kind is BuildHostKind.LOCAL:
+        warm_tree = not is_git_source(request.parsed)
         if warm_tree:
             await asyncio.to_thread(
-                check_warm_tree_source_admission, kernel_src, host_kind=host.kind
+                check_warm_tree_source_admission,
+                request.kernel_src,
+                host_kind=request.host.kind,
             )
         result = await asyncio.to_thread(
-            lambda: builder.build(run_id, parsed, recorder=recorder, provider=provider)
+            lambda: request.builder.build(
+                request.run_id,
+                request.parsed,
+                recorder=recorder,
+                provider=request.provider,
+            )
         )
         if warm_tree:
-            return _with_warm_tree_provenance(result, parsed, kernel_src)
-        return _with_local_git_build_host(result, host)
-    capable = _require_transport_capable(builder, host, run_id)
+            return _with_warm_tree_provenance(result, request.parsed, request.kernel_src)
+        return _with_local_git_build_host(result, request.host)
+    capable = _require_transport_capable(request.builder, request.host, request.run_id)
     factories = _transport_factories(transport_factories)
-    factory = factories.get(host.kind)
+    factory = factories.get(request.host.kind)
     if factory is None:
         raise CategorizedError(
             "unsupported build host kind",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={
-                "run_id": str(run_id),
-                "build_host": host.name,
-                "build_host_kind": str(host.kind),
+                "run_id": str(request.run_id),
+                "build_host": request.host.name,
+                "build_host_kind": str(request.host.kind),
             },
         )
     # The transport session — factory __enter__ (VM provision + minutes-long synchronous
@@ -103,13 +118,13 @@ async def run_build_on_host(
         _build_over_transport_session,
         capable,
         factory,
-        host=host,
-        run_id=run_id,
-        parsed=parsed,
-        source=_git_source(parsed),
-        secret_registry=secret_registry,
+        host=request.host,
+        run_id=request.run_id,
+        parsed=request.parsed,
+        source=_git_source(request.parsed),
+        secret_registry=request.secret_registry,
         recorder=recorder,
-        provider=provider,
+        provider=request.provider,
     )
 
 
