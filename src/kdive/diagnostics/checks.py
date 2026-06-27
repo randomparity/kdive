@@ -102,7 +102,7 @@ class CheckResult:
             ``error``/``pass`` carrying a fix is a producer bug).
         provider: The provider this result pertains to, or ``None`` for a
             provider-independent check (``secret_ref``).
-        failure_category: The :class:`ErrorCategory`-style label for *why* the contract was
+        failure_category: The :class:`ErrorCategory` for *why* the contract was
             violated (``fail``) or the check could not run (``error``) — e.g.
             ``transport_failure`` vs ``configuration_error`` for a reachability probe. ``None``
             on ``pass`` (a clean read has no failure to categorize); a ``pass`` carrying one is a
@@ -135,7 +135,10 @@ class CheckResult:
         if self.failure_category is not None and not isinstance(
             self.failure_category, ErrorCategory
         ):
-            object.__setattr__(self, "failure_category", ErrorCategory(self.failure_category))
+            raise TypeError(
+                f"{self.check_id}: failure_category must be an ErrorCategory "
+                f"(got {type(self.failure_category).__name__})"
+            )
         if self.status is CheckStatus.FAIL and not self.fix:
             raise ValueError(f"{self.check_id}: a fail result must name a fix")
         if self.status is not CheckStatus.FAIL and self.fix is not None:

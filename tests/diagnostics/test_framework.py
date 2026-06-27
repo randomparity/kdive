@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any, cast
 
 import pytest
 
@@ -79,7 +80,7 @@ def test_fail_result_may_carry_a_failure_category() -> None:
         fix="bring it up",
         failure_category=ErrorCategory.TRANSPORT_FAILURE,
     )
-    assert result.failure_category == "transport_failure"
+    assert result.failure_category is ErrorCategory.TRANSPORT_FAILURE
 
 
 def test_error_result_may_carry_a_failure_category() -> None:
@@ -89,7 +90,17 @@ def test_error_result_may_carry_a_failure_category() -> None:
         detail="bad config",
         failure_category=ErrorCategory.CONFIGURATION_ERROR,
     )
-    assert result.failure_category == "configuration_error"
+    assert result.failure_category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_failure_category_rejects_raw_string() -> None:
+    with pytest.raises(TypeError, match="ErrorCategory"):
+        CheckResult(
+            check_id="x",
+            status=CheckStatus.ERROR,
+            detail="bad config",
+            failure_category=cast(Any, "configuration_error"),
+        )
 
 
 def test_failure_category_defaults_to_none() -> None:

@@ -33,7 +33,12 @@ def test_roundtrip_preserves_three_state_and_fields() -> None:
     out = deserialize_results(serialize_results(src))
     assert [(r.check_id, r.status, r.fix, r.failure_category) for r in out] == [
         (PROVIDER_TLS_ID, CheckStatus.PASS, None, None),
-        (GDBSTUB_ACL_ID, CheckStatus.FAIL, "open the ACL", "configuration_error"),
+        (
+            GDBSTUB_ACL_ID,
+            CheckStatus.FAIL,
+            "open the ACL",
+            ErrorCategory.CONFIGURATION_ERROR,
+        ),
     ]
 
 

@@ -105,7 +105,7 @@ def test_failed_maps_to_error_with_category() -> None:
     results = asyncio.run(_dispatcher(queue, clock_ticks=[0.0, 0.1]).run_worker_checks())
     assert all(r.status is CheckStatus.ERROR for r in results)
     assert {r.check_id for r in results} == {PROVIDER_TLS_ID, GDBSTUB_ACL_ID}
-    assert all(r.failure_category == "configuration_error" for r in results)
+    assert all(r.failure_category is ErrorCategory.CONFIGURATION_ERROR for r in results)
 
 
 def test_malformed_result_maps_to_error() -> None:

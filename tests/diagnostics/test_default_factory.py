@@ -378,7 +378,7 @@ def test_run_substitutes_tls_acl_and_runs_reachability_and_secret_ref(
         assert by_id[worker_id].provider == "remote-libvirt"
         assert FEATURE_NOT_ENABLED_DETAIL in by_id[worker_id].detail
         assert WORKER_UNAVAILABLE_DETAIL not in by_id[worker_id].detail
-        assert by_id[worker_id].failure_category == "not_implemented"
+        assert by_id[worker_id].failure_category is ErrorCategory.NOT_IMPLEMENTED
 
     # Server-vantage checks still run when worker-vantage checks are substituted.
     assert by_id[REACHABILITY_ID].status is CheckStatus.PASS
@@ -397,7 +397,7 @@ def test_run_reports_configuration_error_when_config_unresolvable_at_run_time(
     report = asyncio.run(_factory(None).run())
     by_id = {r.check_id: r for r in report.results}
     assert by_id[REACHABILITY_ID].status is CheckStatus.ERROR
-    assert by_id[REACHABILITY_ID].failure_category == "configuration_error"
+    assert by_id[REACHABILITY_ID].failure_category is ErrorCategory.CONFIGURATION_ERROR
     assert by_id[REACHABILITY_ID].fix is None
 
 
@@ -424,7 +424,7 @@ def test_base_image_staging_fails_when_volume_absent(monkeypatch, tmp_path: Path
     assert by_id[REACHABILITY_ID].status is CheckStatus.PASS
     assert by_id[BASE_IMAGE_STAGING_ID].status is CheckStatus.FAIL
     assert by_id[BASE_IMAGE_STAGING_ID].fix == BASE_VOLUME_NOT_STAGED_FIX
-    assert by_id[BASE_IMAGE_STAGING_ID].failure_category == "configuration_error"
+    assert by_id[BASE_IMAGE_STAGING_ID].failure_category is ErrorCategory.CONFIGURATION_ERROR
     assert report.has_failure is True
 
 
@@ -467,7 +467,7 @@ def test_local_kernel_src_fails_when_unset(monkeypatch, tmp_path: Path) -> None:
     report = asyncio.run(_factory(None).run())
     by_id = {r.check_id: r for r in report.results}
     assert by_id[LOCAL_KERNEL_SRC_ID].status is CheckStatus.FAIL
-    assert by_id[LOCAL_KERNEL_SRC_ID].failure_category == "configuration_error"
+    assert by_id[LOCAL_KERNEL_SRC_ID].failure_category is ErrorCategory.CONFIGURATION_ERROR
     assert by_id[LOCAL_KERNEL_SRC_ID].fix is not None
     assert by_id[LOCAL_KERNEL_SRC_ID].provider is None
     assert report.has_failure is True

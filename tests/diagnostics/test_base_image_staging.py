@@ -76,7 +76,7 @@ def test_not_staged_is_fail_configuration_error_with_staging_fix() -> None:
     )
     result = asyncio.run(check.run())
     assert result.status is CheckStatus.FAIL
-    assert result.failure_category == "configuration_error"
+    assert result.failure_category is ErrorCategory.CONFIGURATION_ERROR
     assert result.fix == BASE_VOLUME_NOT_STAGED_FIX
     assert result.provider == _PROVIDER
 
@@ -87,7 +87,7 @@ def test_unreachable_is_error_transport_failure_no_fix() -> None:
     )
     result = asyncio.run(check.run())
     assert result.status is CheckStatus.ERROR
-    assert result.failure_category == "transport_failure"
+    assert result.failure_category is ErrorCategory.TRANSPORT_FAILURE
     assert result.fix is None
     assert result.provider == _PROVIDER
 
@@ -98,7 +98,7 @@ def test_indeterminate_is_error_configuration_error_no_fix() -> None:
     )
     result = asyncio.run(check.run())
     assert result.status is CheckStatus.ERROR
-    assert result.failure_category == "configuration_error"
+    assert result.failure_category is ErrorCategory.CONFIGURATION_ERROR
     assert result.fix is None
     assert result.provider == _PROVIDER
 

@@ -21,6 +21,7 @@ from kdive.diagnostics.checks import (
     EphemeralLibvirtBuildHostAgentCheck,
     Vantage,
 )
+from kdive.domain.errors import ErrorCategory
 
 
 def _probe(results: list[BuildHostProbeResult]) -> BuildHostAgentProbe:
@@ -57,7 +58,7 @@ def test_any_agent_unreachable_is_fail_with_fix_and_names_host() -> None:
     )
     assert result.status is CheckStatus.FAIL
     assert result.fix == BUILDHOST_AGENT_FIX
-    assert result.failure_category == "configuration_error"
+    assert result.failure_category is ErrorCategory.CONFIGURATION_ERROR
     assert "broken" in result.detail
 
 
@@ -67,7 +68,7 @@ def test_only_host_unreachable_transport_is_error_transport_failure() -> None:
     )
     assert result.status is CheckStatus.ERROR
     assert result.fix is None
-    assert result.failure_category == "transport_failure"
+    assert result.failure_category is ErrorCategory.TRANSPORT_FAILURE
 
 
 def test_only_host_unreachable_config_is_error_configuration_error() -> None:
@@ -75,7 +76,7 @@ def test_only_host_unreachable_config_is_error_configuration_error() -> None:
         [BuildHostProbeResult("x", BuildHostAgentOutcome.HOST_UNREACHABLE, transport_error=False)]
     )
     assert result.status is CheckStatus.ERROR
-    assert result.failure_category == "configuration_error"
+    assert result.failure_category is ErrorCategory.CONFIGURATION_ERROR
 
 
 def test_mixed_unreachable_causes_is_configuration_error() -> None:
@@ -88,13 +89,13 @@ def test_mixed_unreachable_causes_is_configuration_error() -> None:
         ]
     )
     assert result.status is CheckStatus.ERROR
-    assert result.failure_category == "configuration_error"
+    assert result.failure_category is ErrorCategory.CONFIGURATION_ERROR
 
 
 def test_no_hosts_is_error_configuration_error() -> None:
     result = _run([])
     assert result.status is CheckStatus.ERROR
-    assert result.failure_category == "configuration_error"
+    assert result.failure_category is ErrorCategory.CONFIGURATION_ERROR
     assert "no ephemeral_libvirt build host" in result.detail
 
 
