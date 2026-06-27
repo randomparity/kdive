@@ -471,7 +471,7 @@ def test_report_renders_rows_and_totals_json(monkeypatch: pytest.MonkeyPatch, ca
     totals = {
         "scope": "all-projects",
         "group_by": "",
-        "project_count": "1",
+        "project_count": 1,
         "total_project": "*",
         "total_principal": "",
         "total_reserved": "20",

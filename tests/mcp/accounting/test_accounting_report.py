@@ -319,7 +319,7 @@ def test_granted_set_zero_spend_project_is_named(migrated_url: str) -> None:
             ctx = _project_ctx(roles={"proj-a": Role.VIEWER}, projects=("proj-a",))
             resp = await report_granted_set(pool, ctx)
         assert resp.status == "ok"
-        assert data_str(resp, "project_count") == "1"
+        assert resp.data["project_count"] == 1
         rows = _rows(resp)
         assert len(rows) == 1
         assert rows[0]["project"] == "proj-a"
