@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Annotated
 
 from fastmcp import FastMCP
@@ -57,6 +58,44 @@ _MERGE_RECIPE = (
     "make defconfig && scripts/kconfig/merge_config.sh -m .config kdump.config "
     "&& make olddefconfig  # then verify every CONFIG_* in kdump.config is present in .config"
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedBuildConfigInput:
+    data: bytes
+    sha256: str
+    cap: int
+
+
+def _validate_set_build_config_input(
+    name: str, content: str, description: str
+) -> _ValidatedBuildConfigInput | ToolResponse:
+    try:
+        validate_build_config_name(name)
+    except ValueError:
+        return ToolResponse.failure(
+            name,
+            ErrorCategory.CONFIGURATION_ERROR,
+            suggested_next_actions=[_SET_TOOL],
+            data={"field": "name"},
+        )
+    data = content.encode("utf-8")
+    cap = int(config.require(MAX_BUILD_CONFIG_BYTES))
+    if not data or exceeds_build_config_cap(data, cap):
+        return ToolResponse.failure(
+            name,
+            ErrorCategory.CONFIGURATION_ERROR,
+            suggested_next_actions=[_SET_TOOL],
+            data={"field": "content", "limit": cap, "actual": len(data)},
+        )
+    if len(description.encode("utf-8")) > _MAX_DESCRIPTION_BYTES:
+        return ToolResponse.failure(
+            name,
+            ErrorCategory.CONFIGURATION_ERROR,
+            suggested_next_actions=[_SET_TOOL],
+            data={"field": "description"},
+        )
+    return _ValidatedBuildConfigInput(data=data, sha256=hashlib.sha256(data).hexdigest(), cap=cap)
 
 
 async def read_build_config(
@@ -143,32 +182,9 @@ async def set_build_config(
             name, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[_SET_TOOL]
         )
     with bind_context(principal=ctx.principal):
-        try:
-            validate_build_config_name(name)
-        except ValueError:
-            return ToolResponse.failure(
-                name,
-                ErrorCategory.CONFIGURATION_ERROR,
-                suggested_next_actions=[_SET_TOOL],
-                data={"field": "name"},
-            )
-        data = content.encode("utf-8")
-        cap = int(config.require(MAX_BUILD_CONFIG_BYTES))
-        if not data or exceeds_build_config_cap(data, cap):
-            return ToolResponse.failure(
-                name,
-                ErrorCategory.CONFIGURATION_ERROR,
-                suggested_next_actions=[_SET_TOOL],
-                data={"field": "content", "limit": cap, "actual": len(data)},
-            )
-        if len(description.encode("utf-8")) > _MAX_DESCRIPTION_BYTES:
-            return ToolResponse.failure(
-                name,
-                ErrorCategory.CONFIGURATION_ERROR,
-                suggested_next_actions=[_SET_TOOL],
-                data={"field": "description"},
-            )
-        sha256 = hashlib.sha256(data).hexdigest()
+        validated = _validate_set_build_config_input(name, content, description)
+        if isinstance(validated, ToolResponse):
+            return validated
         store = store_factory()  # resolved only after the authz gate + validation
         async with (
             pool.connection() as conn,
@@ -182,12 +198,14 @@ async def set_build_config(
                     owner_kind="build-configs",
                     owner_id=name,
                     name=f"{name}.config",
-                    data=data,
+                    data=validated.data,
                     sensitivity=Sensitivity.REDACTED,
                     retention_class="build-config",
                 ),
             )
-            await upsert_operator_build_config(conn, name, written.key, sha256, description)
+            await upsert_operator_build_config(
+                conn, name, written.key, validated.sha256, description
+            )
             await audit.record_platform(
                 conn,
                 principal=ctx.principal,
@@ -195,7 +213,7 @@ async def set_build_config(
                 event=audit.PlatformAuditEvent(
                     tool=_SET_TOOL,
                     scope=name,
-                    args={"name": name, "sha256": sha256, "bytes": len(data)},
+                    args={"name": name, "sha256": validated.sha256, "bytes": len(validated.data)},
                     platform_role=held_platform_roles(ctx),
                     actor=actor_for(ctx),
                 ),
@@ -204,7 +222,12 @@ async def set_build_config(
             name,
             "published",
             suggested_next_actions=[_TOOL],
-            data={"name": name, "sha256": sha256, "bytes": len(data), "source": "operator"},
+            data={
+                "name": name,
+                "sha256": validated.sha256,
+                "bytes": len(validated.data),
+                "source": "operator",
+            },
         )
 
 
