@@ -118,10 +118,10 @@ def test_list_returns_host_with_flat_capability_projection(migrated_url: str) ->
         assert resp.status == "available"
         assert resp.data["kind"] == "local-libvirt"
         assert resp.data["arch"] == "x86_64"
-        assert resp.data["vcpus"] == "8"
-        assert resp.data["memory_mb"] == "16384"
+        assert resp.data["vcpus"] == 8
+        assert resp.data["memory_mb"] == 16384
         assert resp.data["transports"] == "gdbstub"
-        assert resp.data["concurrent_allocation_cap"] == "2"
+        assert resp.data["concurrent_allocation_cap"] == 2
 
     asyncio.run(_run())
 
