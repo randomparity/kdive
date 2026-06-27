@@ -57,20 +57,25 @@ def test_null_reaper_lists_nothing_and_destroy_is_noop() -> None:
 
 
 def test_reconcile_report_holds_counts_and_failures() -> None:
-    report = ReconcileReport(
-        expired_allocations=5,
-        orphaned_systems=1,
-        abandoned_jobs=2,
-        dead_sessions=3,
-        leaked_domains=4,
-        idempotency_keys_gc_count=6,
-        failures=("abandoned_jobs",),
+    report = ReconcileReport.from_counts(
+        {
+            "expired_allocations": 5,
+            "orphaned_systems": 1,
+            "abandoned_jobs": 2,
+            "dead_sessions": 3,
+            "leaked_domains": 4,
+            "idempotency_keys_gc_count": 6,
+            "reconcile_inventory": 7,
+        },
+        ["abandoned_jobs"],
     )
     assert report.expired_allocations == 5
     assert report.orphaned_systems == 1
     assert report.idempotency_keys_gc_count == 6
-    assert report.reconciled_inventory == 0
+    assert report.reconciled_inventory == 7
     assert report.failures == ("abandoned_jobs",)
+    assert tuple(report.repair_counts) == loop.ALL_REPAIR_KINDS
+    assert report.repair_counts["abandoned_uploads"] == 0
 
 
 def test_orphaned_system_enqueues_gc_teardown(migrated_url: str) -> None:
@@ -647,6 +652,9 @@ def test_reconcile_once_counts_a_mixed_pass(migrated_url: str) -> None:
             idempotency_keys_gc_count=0,
             failures=(),
         )
+        assert tuple(report.repair_counts) == loop.ALL_REPAIR_KINDS
+        assert report.repair_counts["orphaned_systems"] == 1
+        assert report.repair_counts["abandoned_uploads"] == 0
         assert reaper.destroyed == ["vm-leak"]
 
     asyncio.run(_run())
@@ -1051,7 +1059,7 @@ def test_all_repair_kinds_matches_a_fully_populated_plan() -> None:
     plan = loop._repair_plan(
         reaper=NullReaper(), config=config, image_publish_grace=timedelta(seconds=1)
     )
-    assert {spec.name for spec in plan} == set(loop.ALL_REPAIR_KINDS)
+    assert tuple(spec.name for spec in plan) == loop.ALL_REPAIR_KINDS
 
 
 def test_build_artifact_repairs_are_in_all_repair_kinds() -> None:
