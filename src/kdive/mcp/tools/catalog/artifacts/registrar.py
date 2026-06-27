@@ -87,7 +87,7 @@ def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
                 description=(
                     "Start byte of the inline window (0-based; a negative value reads from "
                     "the start). Page through a large artifact with the returned "
-                    'data.next_offset until data.content_truncated is "false".'
+                    "data.next_offset until data.content_truncated is false."
                 )
             ),
         ] = 0,

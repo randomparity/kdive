@@ -37,7 +37,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.integration._seed import seed_unbound_running_run
 from tests.mcp._seed import seed_crashed_system
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
-from tests.mcp.json_data import data_str
+from tests.mcp.json_data import data_bool, data_int, data_str
 
 _CONTEXT_BOUNDS = {
     "before_lines": BEFORE_LINES_RANGE,
@@ -253,7 +253,7 @@ def test_artifacts_search_text_returns_bounded_matches(migrated_url: str) -> Non
                 request=_lookup_search_with_context(red_id),
             )
         assert resp.status == "searched"
-        assert resp.data["match_count"] == "1"
+        assert resp.data["match_count"] == 1
         matches = json.loads(data_str(resp, "matches_json"))
         assert matches[0]["line"] == 2
         assert matches[0]["before"] == ["before"]
@@ -459,9 +459,9 @@ def test_artifacts_get_inlines_small_redacted_content(migrated_url: str) -> None
             )
         assert resp.status == "available"
         assert data_str(resp, "content") == "panic: redacted log\n"
-        assert data_str(resp, "content_truncated") == "false"
+        assert data_bool(resp, "content_truncated") is False
         assert "next_offset" not in resp.data  # whole object fits the window
-        assert data_str(resp, "size_bytes") == str(len(b"panic: redacted log\n"))
+        assert data_int(resp, "size_bytes") == len(b"panic: redacted log\n")
         assert resp.refs["download_uri"].endswith("?token=stub")
         # default TTL reaches presign_get with no env set
         assert store.presigned_expires_in == 900
@@ -482,9 +482,9 @@ def test_artifacts_get_default_window_caps_large_console(migrated_url: str) -> N
             )
         assert resp.status == "available"
         assert len(data_str(resp, "content")) == ARTIFACT_GET_WINDOW_DEFAULT_BYTES
-        assert data_str(resp, "content_truncated") == "true"
-        assert data_str(resp, "next_offset") == str(ARTIFACT_GET_WINDOW_DEFAULT_BYTES)
-        assert data_str(resp, "size_bytes") == "20000"
+        assert data_bool(resp, "content_truncated") is True
+        assert data_int(resp, "next_offset") == ARTIFACT_GET_WINDOW_DEFAULT_BYTES
+        assert data_int(resp, "size_bytes") == 20000
         assert resp.refs["download_uri"].endswith("?token=stub")
 
     asyncio.run(_run())
@@ -512,11 +512,11 @@ def test_artifacts_get_pages_to_completion(migrated_url: str) -> None:
                     max_bytes=2_000,
                 )
                 collected += data_str(resp, "content").encode("utf-8")
-                if data_str(resp, "content_truncated") == "false":
+                if data_bool(resp, "content_truncated") is False:
                     assert "next_offset" not in resp.data
                     seen_final = True
                     break
-                offset = int(data_str(resp, "next_offset"))
+                offset = data_int(resp, "next_offset")
         assert seen_final
         assert collected == body
 
@@ -541,9 +541,9 @@ def test_artifacts_get_caps_window_at_token_safe_ceiling(migrated_url: str) -> N
             )
         assert resp.status == "available"
         assert len(data_str(resp, "content")) == ARTIFACT_GET_WINDOW_MAX_BYTES
-        assert data_str(resp, "content_truncated") == "true"
-        assert data_str(resp, "next_offset") == str(ARTIFACT_GET_WINDOW_MAX_BYTES)
-        assert data_str(resp, "size_bytes") == "40000"
+        assert data_bool(resp, "content_truncated") is True
+        assert data_int(resp, "next_offset") == ARTIFACT_GET_WINDOW_MAX_BYTES
+        assert data_int(resp, "size_bytes") == 40000
 
     asyncio.run(_run())
 
@@ -571,11 +571,11 @@ def test_artifacts_get_pages_past_ceiling_to_completion(migrated_url: str) -> No
                 window = data_str(resp, "content").encode("utf-8")
                 assert len(window) <= ARTIFACT_GET_WINDOW_MAX_BYTES  # ceiling honored each page
                 collected += window
-                if data_str(resp, "content_truncated") == "false":
+                if data_bool(resp, "content_truncated") is False:
                     assert "next_offset" not in resp.data
                     seen_final = True
                     break
-                offset = int(data_str(resp, "next_offset"))
+                offset = data_int(resp, "next_offset")
         assert seen_final
         assert collected == body
 
@@ -597,8 +597,8 @@ def test_artifacts_get_explicit_max_below_ceiling_is_exact(migrated_url: str) ->
                 max_bytes=8_000,
             )
         assert len(data_str(resp, "content")) == 8_000
-        assert data_str(resp, "content_truncated") == "true"
-        assert data_str(resp, "next_offset") == "8000"
+        assert data_bool(resp, "content_truncated") is True
+        assert data_int(resp, "next_offset") == 8000
 
     asyncio.run(_run())
 
@@ -619,7 +619,7 @@ def test_artifacts_get_offset_past_end_is_empty(migrated_url: str) -> None:
                 )
                 assert resp.status == "available"
                 assert data_str(resp, "content") == ""
-                assert data_str(resp, "content_truncated") == "false"
+                assert data_bool(resp, "content_truncated") is False
                 assert "next_offset" not in resp.data
 
     asyncio.run(_run())
@@ -643,8 +643,8 @@ def test_artifacts_get_multibyte_split_decodes_with_replacement(migrated_url: st
         content = data_str(resp, "content")
         assert content.startswith("é" * 7)
         assert content.endswith("�")  # the split byte
-        assert data_str(resp, "content_truncated") == "true"
-        assert data_str(resp, "next_offset") == "15"
+        assert data_bool(resp, "content_truncated") is True
+        assert data_int(resp, "next_offset") == 15
 
     asyncio.run(_run())
 
@@ -664,10 +664,10 @@ def test_artifacts_get_clamps_out_of_range_window(migrated_url: str) -> None:
                 pool, _ctx(), artifact_id=red_id, store_factory=lambda: store2, max_bytes=0
             )
         assert data_str(neg, "content") == "abcdef"  # negative offset → from start
-        assert data_str(neg, "content_truncated") == "false"
+        assert data_bool(neg, "content_truncated") is False
         assert data_str(zero, "content") == "a"  # max_bytes<=0 → 1-byte window
-        assert data_str(zero, "content_truncated") == "true"
-        assert data_str(zero, "next_offset") == "1"
+        assert data_bool(zero, "content_truncated") is True
+        assert data_int(zero, "next_offset") == 1
 
     asyncio.run(_run())
 
@@ -690,8 +690,8 @@ def test_artifacts_get_clamps_window_to_lowered_inline_cap(
                 max_bytes=64 * 1024,
             )
         assert len(data_str(resp, "content")) == 8192  # clamped to the configured cap
-        assert data_str(resp, "content_truncated") == "true"
-        assert data_str(resp, "next_offset") == "8192"
+        assert data_bool(resp, "content_truncated") is True
+        assert data_int(resp, "next_offset") == 8192
 
     asyncio.run(_run())
 
@@ -712,7 +712,7 @@ def test_artifacts_get_degenerate_zero_cap_does_not_loop(
             )
         assert resp.status == "available"
         assert data_str(resp, "content") == ""
-        assert data_str(resp, "content_truncated") == "false"
+        assert data_bool(resp, "content_truncated") is False
         assert "next_offset" not in resp.data
 
     asyncio.run(_run())

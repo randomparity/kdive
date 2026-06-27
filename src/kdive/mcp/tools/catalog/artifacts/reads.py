@@ -35,6 +35,7 @@ from kdive.security.artifacts.artifact_search import (
 )
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.serialization import JsonValue
 from kdive.services.artifacts.listing import RedactedArtifact, list_redacted_system_artifacts
 from kdive.store.objectstore import (
     object_store_from_env,
@@ -239,7 +240,7 @@ async def artifacts_get(
     (`refs["download_uri"]`). The window is ``data[byte_offset : byte_offset +
     effective_max]`` where ``effective_max = min(max_bytes,
     KDIVE_ARTIFACT_INLINE_MAX_BYTES, ARTIFACT_GET_WINDOW_MAX_BYTES)`` (the last a hard
-    24 KiB token-safe ceiling, ADR-0257); ``data["content_truncated"]`` is ``"true"`` and
+    24 KiB token-safe ceiling, ADR-0257); ``data["content_truncated"]`` is ``true`` and
     ``data["next_offset"]`` carries the byte offset to resume paging when bytes remain
     after the window. A negative ``byte_offset`` reads from the start and a
     ``max_bytes <= 0`` floors to a 1-byte window (clamped, never rejected). Objects
@@ -276,7 +277,7 @@ async def _artifact_content(
     *,
     byte_offset: int,
     max_bytes: int,
-) -> dict[str, str] | None:
+) -> dict[str, JsonValue] | None:
     """Enrich ``refs`` with a download URI and return the inline byte-window data fields.
 
     Best-effort: any store failure yields a ``content_unavailable`` reason and leaves
@@ -304,7 +305,7 @@ async def _artifact_content(
             return None
         refs["download_uri"] = await asyncio.to_thread(store.presign_get, key, expires_in=ttl)
         if head.size_bytes > _MAX_WINDOWED_FETCH_BYTES:
-            return {"size_bytes": str(head.size_bytes), "content_omitted": "artifact_too_large"}
+            return {"size_bytes": head.size_bytes, "content_omitted": "artifact_too_large"}
         fetched = await asyncio.to_thread(store.get_artifact, key, head.etag)
     except CategorizedError:
         refs.pop("download_uri", None)
@@ -317,13 +318,13 @@ async def _artifact_content(
     # degenerate inline cap <= 0) advertises no `next_offset`, so a paging caller never
     # loops on a non-advancing cursor.
     truncated = len(window) > 0 and next_offset < head.size_bytes
-    data = {
-        "size_bytes": str(head.size_bytes),
+    data: dict[str, JsonValue] = {
+        "size_bytes": head.size_bytes,
         "content": window.decode("utf-8", errors="replace"),
-        "content_truncated": str(truncated).lower(),
+        "content_truncated": truncated,
     }
     if truncated:
-        data["next_offset"] = str(next_offset)
+        data["next_offset"] = next_offset
     return data
 
 
@@ -353,7 +354,7 @@ async def _artifacts_search_text(
     if head.size_bytes > _MAX_SEARCHABLE_ARTIFACT_BYTES:
         return _config_error(
             artifact_id,
-            data={"reason": "artifact_too_large", "size_bytes": str(head.size_bytes)},
+            data={"reason": "artifact_too_large", "size_bytes": head.size_bytes},
         )
     try:
         fetched = await asyncio.to_thread(store.get_artifact, key, head.etag)
@@ -376,8 +377,8 @@ async def _artifacts_search_text(
         suggested_next_actions=["artifacts.search_text", "runs.get"],
         refs={"artifact": key},
         data={
-            "match_count": str(result.match_count),
-            "truncated": str(result.truncated).lower(),
+            "match_count": result.match_count,
+            "truncated": result.truncated,
             "matches_json": result.matches_json(),
         },
     )
