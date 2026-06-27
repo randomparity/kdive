@@ -127,6 +127,19 @@ class WorkerVantageDispatchMode:
     dispatcher: WorkerCheckDispatcher
 
 
+@dataclass(frozen=True, slots=True)
+class _CompositeWorkerCheckDispatcher:
+    """Run several provider dispatchers as one worker-vantage dispatcher."""
+
+    dispatchers: Sequence[WorkerCheckDispatcher]
+
+    async def run_worker_checks(self) -> list[CheckResult]:
+        results: list[CheckResult] = []
+        for dispatcher in self.dispatchers:
+            results.extend(await dispatcher.run_worker_checks())
+        return results
+
+
 type WorkerVantageMode = WorkerVantageSubstitutionMode | WorkerVantageDispatchMode
 
 
@@ -421,27 +434,43 @@ def default_service_factory(
         checks.append(_buildhost_agent_check(provider_contributions, pool))
         per_check_timeout = _BUILDHOST_AGENT_PER_CHECK_TIMEOUT
         overall_timeout = None
-    unavailable_worker_checks: list[WorkerVantageCheck] = []
+    worker_dispatch_inputs: list[
+        tuple[DiagnosticProviderContribution, tuple[WorkerVantageDescriptor, ...]]
+    ] = []
     worker_mode: WorkerVantageMode | None = None
     for contribution in provider_contributions:
         if not contribution.enabled():
             continue
         checks.extend(contribution.checks())
-        unavailable = contribution.unavailable_worker_checks()
+        worker_dispatch_inputs.append(
+            (contribution, tuple(contribution.unavailable_worker_checks()))
+        )
+    if worker_dispatch_inputs:
         if pool is not None:
             # Function-local import: worker_dispatch imports WORKER_UNAVAILABLE_DETAIL from this
             # module, so a top-level import here would be a cycle (ADR-0164).
             from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
 
-            worker_mode = WorkerVantageDispatchMode(
+            dispatchers = [
                 JobWorkerCheckDispatcher(
                     pool,
                     provider=contribution.provider,
                     worker_check_ids=tuple(descriptor.id for descriptor in unavailable),
                 )
+                for contribution, unavailable in worker_dispatch_inputs
+            ]
+            dispatcher = (
+                dispatchers[0]
+                if len(dispatchers) == 1
+                else _CompositeWorkerCheckDispatcher(dispatchers)
             )
+            worker_mode = WorkerVantageDispatchMode(dispatcher)
         else:
-            unavailable_worker_checks.extend(_worker_vantage_checks(unavailable))
+            unavailable_worker_checks = [
+                check
+                for _, unavailable in worker_dispatch_inputs
+                for check in _worker_vantage_checks(unavailable)
+            ]
             worker_mode = WorkerVantageSubstitutionMode(
                 WorkerVantageSubstitution.FEATURE_NOT_ENABLED,
                 unavailable_worker_checks,
