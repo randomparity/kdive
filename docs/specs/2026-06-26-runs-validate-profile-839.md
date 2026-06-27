@@ -50,9 +50,14 @@ capacity, requiring an Investigation/System/Allocation, or writing an audit reco
   resolved later at `runs.build`/`runs.complete_build`.
 - No host *availability* check (enabled/reachable/at-capacity). `runs.create`'s create-time
   compat check (`_compat_block_response`) does not check those either — they are re-validated
-  at `runs.build` (`resolve_and_admit`). `validate_profile` matches the create-time verdict
-  exactly, so it never rejects a pairing `runs.create` would accept, nor accepts one it would
-  reject.
+  at `runs.build` (`resolve_and_admit`). `validate_profile` matches the create-time **compat**
+  verdict exactly (same `check_source_kind_compatibility` primitive, pinned by the parity
+  test), so it never rejects a pairing `runs.create` would accept, nor accepts one it would
+  reject. The *structural* accept/reject set also agrees with `runs.create` — both validate the
+  same `ServerBuildProfile`/`ExternalBuildProfile` classes (`BuildProfile.parse` dispatches on
+  `source`; the `runs.create` boundary validates the `ExternalBuildProfile | ServerBuildProfile`
+  union over those same classes), so only the error *shape* differs, never the verdict (this is
+  the gap the tool closes). That structural agreement is pinned, not assumed (see Parity).
 - No CLI verb. The read-only sibling `runs.profile_examples` has no curated `kdivectl` verb;
   `validate_profile` follows it (still reachable through the generic read-only passthrough).
 
@@ -143,12 +148,23 @@ The handler's non-`Mapping` defensive branch in `BuildProfile.parse` is unreacha
 transport (the `Mapping[str, object]` boundary type rejects a non-object JSON `build_profile`
 first); the parse path is still driven directly in a unit test.
 
-## Parity invariant (test)
+## Parity invariants (tests)
 
-`validate_profile`'s compatibility verdict must equal `runs.create`'s create-time verdict for
-the same `(build_profile, build_hosts)`. A test pins this by asserting that, for a matrix of
-profiles, `validate_profile`'s pass/fail agrees with `_compat_block_response` (both consume the
-shared `check_source_kind_compatibility`), so the two surfaces cannot drift.
+Two distinct parities, each pinned so neither surface can silently drift from `runs.create`:
+
+1. **Compat parity.** `validate_profile`'s compatibility verdict must equal `runs.create`'s
+   create-time verdict for the same `(build_profile, build_hosts)`. A test asserts that, for a
+   matrix of server profiles, `validate_profile`'s pass/fail agrees with `_compat_block_response`
+   (both consume the shared `check_source_kind_compatibility`).
+2. **Structural parity.** `validate_profile`'s accept/reject verdict on a document's *shape*
+   must equal `runs.create`'s boundary verdict. The two use different parse machinery
+   (`BuildProfile.parse`'s `source`-dispatch vs. the `ExternalBuildProfile | ServerBuildProfile`
+   union the `runs.create` signature validates) — equivalent only because both bottom out in the
+   same two model classes. A test feeds the same matrix of valid and malformed documents through
+   `BuildProfile.parse` and through a `TypeAdapter(ExternalBuildProfile | ServerBuildProfile)`
+   and asserts the accept/reject sets are identical, so a future union reordering, an added
+   variant, or a model change that diverges the two is caught here rather than as a "validate
+   said valid, create rejected it" surprise in production.
 
 ## Guardrail impact
 
