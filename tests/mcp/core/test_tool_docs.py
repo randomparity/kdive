@@ -154,6 +154,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "runs.install": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.list": ("tests/mcp/lifecycle/test_runs_list.py",),
     "runs.profile_examples": ("tests/mcp/lifecycle/test_runs_profile_examples.py",),
+    "runs.validate_profile": ("tests/mcp/lifecycle/test_runs_validate_profile.py",),
     "secrets.list": ("tests/mcp/ops/test_secrets_list.py",),
     "shapes.delete": ("tests/mcp/catalog/test_shapes_tools.py",),
     "shapes.list": ("tests/mcp/catalog/test_shapes_tools.py",),
