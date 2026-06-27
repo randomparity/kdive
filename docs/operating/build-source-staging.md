@@ -80,6 +80,28 @@ A bare `kernel_source_ref` in the Run's profile is provenance metadata only — 
 build, it does **not** override `KDIVE_KERNEL_SRC`. The worker always builds from the staged
 tree.
 
+#### Provenance: the warm-tree lane builds working-tree state, not `HEAD`
+
+`rsync -a --delete` mirrors the staged tree **as-is**, including uncommitted edits. So
+`runs.get` reports `data.build_provenance` for a warm-tree **git** tree as
+`{label, resolved_commit, dirty, tree_sha?}`:
+
+- `resolved_commit` — `git rev-parse HEAD`: the commit the working tree is **based on**. It is
+  **decorative when `dirty` is true** — it does not describe what was compiled.
+- `dirty` — `true` iff `git status --porcelain` is non-empty (tracked edits or untracked files);
+  a native JSON boolean. `false` means "no **tracked** changes," not "byte-identical to a clean
+  `resolved_commit` checkout."
+- `tree_sha` — present only when `dirty` is true with tracked changes: a content-deterministic
+  git tree-object SHA (`git stash create` resolved to `^{tree}`) of the tracked working-tree
+  state, so two builds of identical tracked content share a `tree_sha`. It captures
+  **git-tracked** content only — gitignored paths (e.g. `.config`, build objects) and untracked
+  files are **not** in the digest; `dirty` still flags untracked files.
+
+A non-git staged tree degrades to `{label}` (no HEAD to report). All probes are best-effort: a
+git/permission failure omits the affected key and never fails the build. They read the live
+staged tree at build-completion, so the provenance is accurate when the tree is not mutated
+during the build.
+
 For the full local provider prerequisites (toolchain, disk space, fixtures) see
 [Local libvirt](providers/local-libvirt.md).
 
