@@ -165,7 +165,7 @@ async def _audit_inventory_write(
                 scope=_WRITEBACK_SYSTEMS_SCOPE,
                 args={
                     "tool": _EXPORT_SYSTEMS_TOOL,
-                    "persist": "true",
+                    "persist": True,
                     "target": target,
                     "outcome": outcome,
                 },
