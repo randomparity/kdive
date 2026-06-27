@@ -14,7 +14,7 @@ from pathlib import Path
 
 from kdive.providers.ports import GdbMiAttachment
 from kdive.providers.shared.debug_common.debuginfo import stage_and_attach
-from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
+from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine as _GdbMiEngine
 from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote
 
 
@@ -33,7 +33,7 @@ def remote_attach_seam(
     """
 
     def attach(vmlinux_path: Path) -> GdbMiAttachment:
-        return GdbMiEngine(host_policy=allow_acl_remote).attach(
+        return _GdbMiEngine(host_policy=allow_acl_remote).attach(
             host=host, port=port, vmlinux_path=vmlinux_path, transcript_path=transcript_path
         )
 
