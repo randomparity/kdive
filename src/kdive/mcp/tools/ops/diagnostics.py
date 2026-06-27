@@ -231,8 +231,8 @@ def _verdict(results: list[CheckResult], has_failure: bool, has_error: bool) -> 
         [_item(r) for r in results],
         suggested_next_actions=[_TOOL],
         data={
-            "has_failure": "true" if has_failure else "false",
-            "has_error": "true" if has_error else "false",
+            "has_failure": has_failure,
+            "has_error": has_error,
         },
     )
 

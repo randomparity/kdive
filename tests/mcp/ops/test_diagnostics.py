@@ -268,7 +268,7 @@ def test_verdict_carries_each_check_status_detail_fix_provider(migrated_url: str
         assert item.data["status"] == "fail"
         assert item.data["fix"] == "open the host firewall / ACL for it"
         assert item.data["provider"] == "remote-libvirt"
-        assert resp.data["has_failure"] == "true"
+        assert resp.data["has_failure"] is True
 
     asyncio.run(_run())
 
@@ -367,8 +367,8 @@ def test_down_dependency_is_error_not_failure(migrated_url: str) -> None:
         assert item.data["fix"] is None
         assert "unreachable" in data_str(item, "detail")
         # An error is reported distinctly and never inflated into a contract failure.
-        assert resp.data["has_error"] == "true"
-        assert resp.data["has_failure"] == "false"
+        assert resp.data["has_error"] is True
+        assert resp.data["has_failure"] is False
 
     asyncio.run(_run())
 
@@ -412,8 +412,8 @@ def test_factory_build_failure_is_error_verdict_and_audited(
         assert item.data["status"] == "error"
         assert item.data["fix"] is None
         assert "malformed KDIVE" not in data_str(item, "detail")
-        assert resp.data["has_error"] == "true"
-        assert resp.data["has_failure"] == "false"
+        assert resp.data["has_error"] is True
+        assert resp.data["has_failure"] is False
         # The served attempt is still audited.
         rows = await _platform_audit_rows(migrated_url)
         assert len(rows) == 1
