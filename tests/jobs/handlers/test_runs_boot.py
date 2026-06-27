@@ -17,8 +17,10 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.handlers import runs, runs_boot
-from kdive.jobs.handlers.runs_build import BuildHostTransportFactories
+from kdive.jobs.handlers import runs
+from kdive.jobs.handlers.runs import boot as runs_boot
+from kdive.jobs.handlers.runs import registrar as runs_registrar
+from kdive.jobs.handlers.runs.build import BuildHostTransportFactories
 from kdive.jobs.models import HandlerRegistry
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
@@ -133,13 +135,19 @@ def test_register_handlers_binds_each_run_kind_to_its_handler(
         return label
 
     monkeypatch.setattr(
-        runs, "build_handler", lambda conn, job, **kw: _fake("build", conn, job, **kw)
+        runs_registrar,
+        "build_handler",
+        lambda conn, job, **kw: _fake("build", conn, job, **kw),
     )
     monkeypatch.setattr(
-        runs, "install_handler", lambda conn, job, **kw: _fake("install", conn, job, **kw)
+        runs_registrar,
+        "install_handler",
+        lambda conn, job, **kw: _fake("install", conn, job, **kw),
     )
     monkeypatch.setattr(
-        runs, "boot_handler", lambda conn, job, **kw: _fake("boot", conn, job, **kw)
+        runs_registrar,
+        "boot_handler",
+        lambda conn, job, **kw: _fake("boot", conn, job, **kw),
     )
 
     registry = HandlerRegistry()

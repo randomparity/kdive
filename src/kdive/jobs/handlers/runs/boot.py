@@ -20,7 +20,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.context import context_from_job as job_context_from_job
-from kdive.jobs.handlers.runs_common import abandon_run_step_best_effort
+from kdive.jobs.handlers.runs.common import abandon_run_step_best_effort
 from kdive.jobs.payloads import RunPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.profiles.provisioning import ProvisioningProfile

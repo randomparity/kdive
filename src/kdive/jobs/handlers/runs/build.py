@@ -24,7 +24,7 @@ from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.jobs.context import context_from_job as job_context_from_job
-from kdive.jobs.handlers.runs_shared import finalize_build
+from kdive.jobs.handlers.runs.shared import finalize_build
 from kdive.jobs.payloads import BuildPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
