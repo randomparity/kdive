@@ -70,6 +70,7 @@ NAMESPACE_TOC: dict[str, str] = {
     "session": "identity and orientation (whoami)",
     "shapes": "list resource shapes",
     "systems": "define, provision, and bind Systems",
+    "tools": "search the full tool surface by capability (the gateway)",
     "vmcore": "manage vmcore introspection targets",
 }
 
