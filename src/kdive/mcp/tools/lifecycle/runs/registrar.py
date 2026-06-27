@@ -16,6 +16,7 @@ from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run_target_kind
+from kdive.mcp.tools.lifecycle.runs import build_install_boot
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest as _RunBindRequest
 from kdive.mcp.tools.lifecycle.runs.bind import bind_run as _bind_run
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run as _cancel_run
@@ -184,6 +185,7 @@ def register(
     _register_runs_complete_build(app, pool, resolver)
     _register_runs_install(app, pool)
     _register_runs_boot(app, pool)
+    build_install_boot.register(app, pool, resolver=resolver)
     _register_runs_profile_examples(app, pool)
     _register_runs_validate_profile(app, pool)
 

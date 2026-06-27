@@ -148,6 +148,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "runs.bind": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.boot": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.build": ("tests/mcp/lifecycle/test_runs_tools.py",),
+    "runs.build_install_boot": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.cancel": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.complete_build": ("tests/mcp/lifecycle/test_complete_build_tool.py",),
     "runs.create": ("tests/mcp/lifecycle/test_runs_tools.py",),

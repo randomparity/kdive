@@ -197,6 +197,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "runs.complete_build": _CONTRIBUTOR,
     "runs.install": _CONTRIBUTOR,
     "runs.boot": _CONTRIBUTOR,
+    "runs.build_install_boot": _CONTRIBUTOR,
     # secrets (platform operator)
     "secrets.list": _PLAT_OP,
     # shapes
