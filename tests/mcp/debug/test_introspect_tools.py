@@ -456,6 +456,23 @@ class _CountingResolver(ProviderResolver):
         return self._runtime
 
 
+def _live_resolver(
+    port: _FakeLiveIntrospector,
+    *,
+    supported_introspection: frozenset[str] = frozenset({"live", "live-script"}),
+) -> _CountingResolver:
+    runtime = cast(
+        ProviderRuntime,
+        SimpleNamespace(
+            vmcore_introspector=_FakeIntrospector(),
+            live_introspector=port,
+            supported_introspection=supported_introspection,
+            component_sources=SimpleNamespace(provider="local-libvirt"),
+        ),
+    )
+    return _CountingResolver(runtime)
+
+
 async def _seed_live_drgn_session(
     pool: AsyncConnectionPool,
     *,
@@ -495,7 +512,11 @@ def test_run_live_routes_bare_domain_handle_to_introspector(migrated_url: str) -
             session_id = await _seed_live_drgn_session(pool, transport_handle="kdive-remote-1")
             port = _FakeLiveIntrospector()
             resp = await introspect_tools.introspect_run(
-                pool, _live_ctx(), session_id=session_id, helper="tasks", introspector=port
+                pool,
+                _live_ctx(),
+                session_id=session_id,
+                helper="tasks",
+                resolver=_live_resolver(port),
             )
         assert resp.status != "error"
         assert port.kwargs == {"transport_handle": "kdive-remote-1", "helper": "tasks"}
@@ -509,7 +530,11 @@ def test_run_live_happy_path_returns_redacted_report(migrated_url: str) -> None:
             session_id = await _seed_live_drgn_session(pool)
             port = _FakeLiveIntrospector()
             resp = await introspect_tools.introspect_run(
-                pool, _live_ctx(), session_id=session_id, helper="tasks", introspector=port
+                pool,
+                _live_ctx(),
+                session_id=session_id,
+                helper="tasks",
+                resolver=_live_resolver(port),
             )
         assert resp.status != "error"
         report = data_mapping(resp, "report")
@@ -576,7 +601,11 @@ def test_run_live_masks_planted_secret_in_response(migrated_url: str) -> None:
             # The port is the single redaction boundary; it returns the already-masked shape.
             port = _FakeLiveIntrospector(output=_output(comm="[REDACTED]"))
             resp = await introspect_tools.introspect_run(
-                pool, _live_ctx(), session_id=session_id, helper="tasks", introspector=port
+                pool,
+                _live_ctx(),
+                session_id=session_id,
+                helper="tasks",
+                resolver=_live_resolver(port),
             )
         report = data_mapping(resp, "report")
         tasks = json_mapping(report["tasks"])
@@ -595,7 +624,7 @@ def test_run_live_marks_transcript_sensitive(migrated_url: str) -> None:
                 _live_ctx(),
                 session_id=session_id,
                 helper="tasks",
-                introspector=_FakeLiveIntrospector(),
+                resolver=_live_resolver(_FakeLiveIntrospector()),
             )
         # The raw drgn-over-ssh transcript is sensitive; the response advertises that so a
         # consumer never treats the report as a substitute for the redacted-only contract.
@@ -613,7 +642,7 @@ def test_run_live_unknown_helper_is_config_error(migrated_url: str) -> None:
                 _live_ctx(),
                 session_id=session_id,
                 helper="exec_arbitrary",
-                introspector=_FakeLiveIntrospector(),
+                resolver=_live_resolver(_FakeLiveIntrospector()),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
 
@@ -629,7 +658,7 @@ def test_run_live_non_live_session_is_config_error(migrated_url: str) -> None:
                 _live_ctx(),
                 session_id=session_id,
                 helper="tasks",
-                introspector=_FakeLiveIntrospector(),
+                resolver=_live_resolver(_FakeLiveIntrospector()),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
 
@@ -646,7 +675,7 @@ def test_run_live_non_drgn_live_session_is_config_error(migrated_url: str) -> No
                 _live_ctx(),
                 session_id=session_id,
                 helper="tasks",
-                introspector=_FakeLiveIntrospector(),
+                resolver=_live_resolver(_FakeLiveIntrospector()),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
 
@@ -662,7 +691,7 @@ def test_run_live_cross_project_is_config_error(migrated_url: str) -> None:
                 _live_ctx(projects=("other",)),
                 session_id=session_id,
                 helper="tasks",
-                introspector=_FakeLiveIntrospector(),
+                resolver=_live_resolver(_FakeLiveIntrospector()),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
 
@@ -679,7 +708,7 @@ def test_run_live_without_operator_raises(migrated_url: str) -> None:
                     _live_ctx(Role.VIEWER),
                     session_id=session_id,
                     helper="tasks",
-                    introspector=_FakeLiveIntrospector(),
+                    resolver=_live_resolver(_FakeLiveIntrospector()),
                 )
 
     asyncio.run(_run())
@@ -695,7 +724,7 @@ def test_run_live_port_attach_failure_is_typed(migrated_url: str) -> None:
                 _live_ctx(),
                 session_id=session_id,
                 helper="tasks",
-                introspector=_FakeLiveIntrospector(raises=err),
+                resolver=_live_resolver(_FakeLiveIntrospector(raises=err)),
             )
         assert resp.status == "error" and resp.error_category == "transport_failure"
 
@@ -710,7 +739,7 @@ def test_run_live_malformed_session_id_is_config_error(migrated_url: str) -> Non
                 _live_ctx(),
                 session_id="nope",
                 helper="tasks",
-                introspector=_FakeLiveIntrospector(),
+                resolver=_live_resolver(_FakeLiveIntrospector()),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
 
@@ -732,7 +761,7 @@ def test_script_clamps_timeout_to_floor(migrated_url: str) -> None:
                 session_id=session_id,
                 script="print(1)",
                 timeout_sec=0.0,
-                introspector=port,
+                resolver=_live_resolver(port),
             )
         assert resp.status != "error"
         assert port.kwargs["timeout_sec"] == 1.0
@@ -760,7 +789,7 @@ def test_script_clamps_timeout_to_ceiling(
                 session_id=session_id,
                 script="print(1)",
                 timeout_sec=99999.0,
-                introspector=port,
+                resolver=_live_resolver(port),
             )
         assert port.kwargs["timeout_sec"] == 600.0
 
@@ -778,7 +807,7 @@ def test_script_threads_script_into_the_introspector(migrated_url: str) -> None:
                 session_id=session_id,
                 script="print(prog['x'])",
                 timeout_sec=12.0,
-                introspector=port,
+                resolver=_live_resolver(port),
             )
         assert resp.status != "error"
         assert port.kwargs["transport_handle"] == "kdive-remote-1"
@@ -800,7 +829,7 @@ def test_script_seam_error_surfaces_typed(migrated_url: str) -> None:
                 session_id=session_id,
                 script="boom",
                 timeout_sec=5.0,
-                introspector=port,
+                resolver=_live_resolver(port),
             )
         assert resp.status == "error"
         assert resp.error_category == ErrorCategory.DEBUG_ATTACH_FAILURE
@@ -835,7 +864,7 @@ def test_script_over_size_cap_is_configuration_error(migrated_url: str) -> None:
                 session_id=session_id,
                 script=huge,
                 timeout_sec=5.0,
-                introspector=port,
+                resolver=_live_resolver(port),
             )
         assert resp.status == "error"
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR

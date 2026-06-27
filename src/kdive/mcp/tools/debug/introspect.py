@@ -212,7 +212,7 @@ async def introspect_run(
     *,
     session_id: str,
     helper: str,
-    introspector: LiveIntrospector,
+    resolver: ProviderResolver,
 ) -> ToolResponse:
     """Run live drgn introspection over a `live` drgn-live DebugSession; return a redacted report.
 
@@ -223,19 +223,23 @@ async def introspect_run(
     Off a prepared live host, the provider seam reports ``missing_dependency`` instead of
     importing drgn.
     """
-    if helper not in _LIVE_HELPERS:
-        return _config_error(session_id)
     with bind_context(principal=ctx.principal):
-        async with pool.connection() as conn:
-            try:
-                resolved = await resolve_live_drgn_session(conn, ctx, session_id)
-            except CategorizedError as exc:
-                return ToolResponse.failure_from_error(session_id, exc)
-        return await _introspect_live_session(
-            session_id,
-            resolved=resolved,
-            helper=helper,
-            introspector=introspector,
+
+        async def _run(resolved: LiveDrgnSession, runtime: ProviderRuntime) -> ToolResponse:
+            return await _introspect_live_session(
+                session_id,
+                resolved=resolved,
+                helper=helper,
+                introspector=runtime.live_introspector,
+            )
+
+        return await _with_live_introspection(
+            pool=pool,
+            resolver=resolver,
+            ctx=ctx,
+            session_id=session_id,
+            mode=_LIVE_INTROSPECTION,
+            action=_run,
         )
 
 
@@ -280,7 +284,7 @@ async def introspect_script(
     session_id: str,
     script: str,
     timeout_sec: float,
-    introspector: LiveIntrospector,
+    resolver: ProviderResolver,
 ) -> ToolResponse:
     """Run a caller drgn script over a `live` drgn-live DebugSession; return capped stdout.
 
@@ -291,17 +295,23 @@ async def introspect_script(
     host, the provider seam reports ``missing_dependency`` instead of importing drgn (ADR-0240).
     """
     with bind_context(principal=ctx.principal):
-        async with pool.connection() as conn:
-            try:
-                resolved = await resolve_live_drgn_session(conn, ctx, session_id)
-            except CategorizedError as exc:
-                return ToolResponse.failure_from_error(session_id, exc)
-        return await _run_live_script(
-            session_id,
-            resolved=resolved,
-            script=script,
-            timeout_sec=timeout_sec,
-            introspector=introspector,
+
+        async def _run(resolved: LiveDrgnSession, runtime: ProviderRuntime) -> ToolResponse:
+            return await _run_live_script(
+                session_id,
+                resolved=resolved,
+                script=script,
+                timeout_sec=timeout_sec,
+                introspector=runtime.live_introspector,
+            )
+
+        return await _with_live_introspection(
+            pool=pool,
+            resolver=resolver,
+            ctx=ctx,
+            session_id=session_id,
+            mode=_LIVE_SCRIPT,
+            action=_run,
         )
 
 
@@ -400,22 +410,12 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
         ],
     ) -> ToolResponse:
         """Run live drgn introspection over a live drgn-live DebugSession. Requires contributor."""
-
-        async def _run(resolved: LiveDrgnSession, runtime: ProviderRuntime) -> ToolResponse:
-            return await _introspect_live_session(
-                session_id,
-                resolved=resolved,
-                helper=helper,
-                introspector=runtime.live_introspector,
-            )
-
-        return await _with_live_introspection(
-            pool=pool,
-            resolver=resolver,
-            ctx=current_context(),
+        return await introspect_run(
+            pool,
+            current_context(),
             session_id=session_id,
-            mode=_LIVE_INTROSPECTION,
-            action=_run,
+            helper=helper,
+            resolver=resolver,
         )
 
     @app.tool(
@@ -446,22 +446,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
         ] = _DEFAULT_SCRIPT_TIMEOUT,
     ) -> ToolResponse:
         """Run a caller drgn script over a live drgn-live DebugSession. Requires contributor."""
-        ctx = current_context()
-
-        async def _run(resolved: LiveDrgnSession, runtime: ProviderRuntime) -> ToolResponse:
-            return await _run_live_script(
-                session_id,
-                resolved=resolved,
-                script=script,
-                timeout_sec=timeout_sec,
-                introspector=runtime.live_introspector,
-            )
-
-        return await _with_live_introspection(
-            pool=pool,
-            resolver=resolver,
-            ctx=ctx,
+        return await introspect_script(
+            pool,
+            current_context(),
             session_id=session_id,
-            mode=_LIVE_SCRIPT,
-            action=_run,
+            script=script,
+            timeout_sec=timeout_sec,
+            resolver=resolver,
         )
