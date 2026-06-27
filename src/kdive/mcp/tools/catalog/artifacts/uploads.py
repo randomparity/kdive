@@ -206,13 +206,13 @@ def _bad_declaration(
 
 
 def _validate_one_declaration(
-    object_id: str, art: ArtifactDeclaration, allowed: frozenset[str]
+    object_id: str, declaration: ArtifactDeclaration, allowed: frozenset[str]
 ) -> tuple[str, str, int] | ToolResponse:
     """Validate one declaration's required fields, naming the specific failure (ADR-0166)."""
     for key in _REQUIRED_DECLARATION_FIELDS:
-        if key not in art:
+        if key not in declaration:
             return _bad_declaration(object_id, allowed, field=key)
-    name, sha256, size = art["name"], art["sha256"], art["size_bytes"]
+    name, sha256, size = declaration["name"], declaration["sha256"], declaration["size_bytes"]
     if not isinstance(name, str) or name not in allowed:
         return _bad_declaration(object_id, allowed, field="name", value=name)
     if not isinstance(sha256, str):
@@ -226,13 +226,13 @@ def _validate_artifact_declarations(
     object_id: str, artifacts: Sequence[ArtifactDeclaration], allowed: frozenset[str], cap: int
 ) -> list[ManifestEntry] | ToolResponse:
     entries: list[ManifestEntry] = []
-    for art in artifacts:
-        validated_decl = _validate_one_declaration(object_id, art, allowed)
-        if isinstance(validated_decl, ToolResponse):
-            return validated_decl
-        name, sha256, size = validated_decl
+    for declaration in artifacts:
+        validated_declaration = _validate_one_declaration(object_id, declaration, allowed)
+        if isinstance(validated_declaration, ToolResponse):
+            return validated_declaration
+        name, sha256, size = validated_declaration
         artifact_cap = EFFECTIVE_CONFIG_MAX_BYTES if name == "effective_config" else cap
-        raw_chunks = art.get("chunks")
+        raw_chunks = declaration.get("chunks")
         if raw_chunks is None:
             if size <= 0 or size > min(SINGLE_PUT_MAX_BYTES, artifact_cap):
                 return _config_error(object_id, data={"reason": "size_out_of_range"})
