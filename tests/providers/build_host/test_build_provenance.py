@@ -334,8 +334,7 @@ def _git_init_commit(tree: Path) -> str:
     ).stdout.strip()
 
 
-def test_warm_tree_records_label_and_resolved_commit(tmp_path: Path) -> None:
-    sha = _git_init_commit(tmp_path)
+def _run_warm(tmp_path: Path) -> BuildOutput:
     builder = _WarmBuilder()
     out = asyncio.run(
         run_build_on_host(
@@ -348,7 +347,37 @@ def test_warm_tree_records_label_and_resolved_commit(tmp_path: Path) -> None:
         )
     )
     assert builder.called is True
-    assert out.build_provenance == {"label": "linux-6.9", "resolved_commit": sha}
+    return out
+
+
+def test_warm_tree_clean_records_label_commit_and_dirty_false(tmp_path: Path) -> None:
+    sha = _git_init_commit(tmp_path)
+    out = _run_warm(tmp_path)
+    assert out.build_provenance == {"label": "linux-6.9", "resolved_commit": sha, "dirty": False}
+
+
+def test_warm_tree_dirty_tracked_edit_records_tree_sha(tmp_path: Path) -> None:
+    sha = _git_init_commit(tmp_path)
+    (tmp_path / "f").write_text("edited")
+    out = _run_warm(tmp_path)
+    prov = out.build_provenance
+    assert prov is not None
+    assert prov["label"] == "linux-6.9"
+    assert prov["resolved_commit"] == sha
+    assert prov["dirty"] is True
+    tree_sha = prov["tree_sha"]
+    assert isinstance(tree_sha, str) and tree_sha
+
+
+def test_warm_tree_dirty_untracked_only_has_no_tree_sha(tmp_path: Path) -> None:
+    sha = _git_init_commit(tmp_path)
+    (tmp_path / "untracked").write_text("z")
+    out = _run_warm(tmp_path)
+    assert out.build_provenance == {
+        "label": "linux-6.9",
+        "resolved_commit": sha,
+        "dirty": True,
+    }
 
 
 def test_warm_tree_non_git_source_degrades_to_label_only(tmp_path: Path) -> None:

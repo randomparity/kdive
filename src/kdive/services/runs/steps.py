@@ -41,18 +41,21 @@ def _optional_str_list(value: object) -> list[str] | None:
     return [item for item in value if isinstance(item, str)]
 
 
-def _optional_str_map(value: object) -> dict[str, str] | None:
-    """Coerce a persisted JSON value to a ``dict[str, str]``; ``None`` on any other shape (#778).
+def _optional_provenance_map(value: object) -> dict[str, str | bool] | None:
+    """Coerce a persisted JSON value to ``dict[str, str | bool]``; ``None`` otherwise (#778, #861).
 
-    Accepts only a mapping whose every key and value is a string, so a malformed persisted
-    ``build_provenance`` degrades to ``None`` rather than carrying mistyped fields forward.
+    Accepts only a mapping whose every key is a string and every value is a ``str`` or ``bool`` —
+    ``bool`` for the warm-tree ``dirty`` flag (ADR-0265), ``str`` for every other provenance field.
+    A malformed persisted ``build_provenance`` degrades to ``None`` rather than carrying mistyped
+    fields forward. ``bool`` subclasses ``int`` in Python, so the value check is ``str | bool``
+    explicitly (never ``int``) to keep a stray numeric value (e.g. ``123``) rejected.
     """
     if not isinstance(value, Mapping):
         return None
     items = cast("Mapping[object, object]", value).items()
-    if not all(isinstance(k, str) and isinstance(v, str) for k, v in items):
+    if not all(isinstance(k, str) and isinstance(v, str | bool) for k, v in items):
         return None
-    return {k: v for k, v in items if isinstance(k, str) and isinstance(v, str)}
+    return {k: v for k, v in items if isinstance(k, str) and isinstance(v, str | bool)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +67,7 @@ class BuildStepResult:
     build_id: str | None
     initrd_ref: str | None = None
     cmdline: str | None = None
-    build_provenance: dict[str, str] | None = None
+    build_provenance: dict[str, str | bool] | None = None
 
     @classmethod
     def load(cls, value: object) -> BuildStepResult | None:
@@ -77,11 +80,11 @@ class BuildStepResult:
             build_id=_optional_str(result.get("build_id")),
             initrd_ref=_optional_str(result.get("initrd_ref")),
             cmdline=_optional_str(result.get("cmdline")),
-            build_provenance=_optional_str_map(result.get("build_provenance")),
+            build_provenance=_optional_provenance_map(result.get("build_provenance")),
         )
 
-    def dump(self) -> dict[str, str | dict[str, str]]:
-        result: dict[str, str | dict[str, str]] = {}
+    def dump(self) -> dict[str, str | dict[str, str | bool]]:
+        result: dict[str, str | dict[str, str | bool]] = {}
         if self.kernel_ref is not None:
             result["kernel_ref"] = self.kernel_ref
         if self.debuginfo_ref is not None:

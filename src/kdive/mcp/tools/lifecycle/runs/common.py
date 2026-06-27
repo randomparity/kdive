@@ -214,7 +214,7 @@ def _capture_data(step_progress: StepProgress | None) -> dict[str, JsonValue]:
     return data
 
 
-def _build_provenance_data(build_provenance: dict[str, str] | None) -> dict[str, JsonValue]:
+def _build_provenance_data(build_provenance: dict[str, str | bool] | None) -> dict[str, JsonValue]:
     if build_provenance is None:
         return {}
     # The build-step provenance recorded at write time (#778). Passed through verbatim:
@@ -236,7 +236,7 @@ def envelope_for_run(
     active_debug_session_ids: list[str] | None = None,
     step_progress: StepProgress | None = None,
     boot_readiness: BootAttempt | None = None,
-    build_provenance: dict[str, str] | None = None,
+    build_provenance: dict[str, str | bool] | None = None,
 ) -> ToolResponse:
     """Render a Run; `failed` becomes a failure envelope carrying its `failure_category`.
 

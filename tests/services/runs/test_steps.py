@@ -53,7 +53,7 @@ def test_initrd_ref_round_trips_through_dump_and_load() -> None:
 
 
 def test_build_provenance_round_trips_through_dump_and_load() -> None:
-    provenance = {
+    provenance: dict[str, str | bool] = {
         "remote": "https://git.kernel.org/pub/scm/linux.git",
         "ref": "v6.9",
         "resolved_commit": "a1b2c3d4",
@@ -80,7 +80,9 @@ def test_load_ignores_non_mapping_build_provenance() -> None:
     assert loaded.build_provenance is None
 
 
-def test_load_ignores_build_provenance_with_non_string_values() -> None:
+def test_load_ignores_build_provenance_with_non_string_non_bool_values() -> None:
+    # An int (123) is neither str nor bool, so the whole map degrades to None. bool subclasses
+    # int in Python, so this also guards against the coercion accidentally admitting ints.
     loaded = BuildStepResult.load(
         {
             "kernel_ref": "k",
@@ -89,6 +91,25 @@ def test_load_ignores_build_provenance_with_non_string_values() -> None:
     )
     assert loaded is not None
     assert loaded.build_provenance is None
+
+
+def test_build_provenance_round_trips_bool_dirty_flag() -> None:
+    # The warm-tree lane carries dirty as a native bool (#861, ADR-0265); it must survive the
+    # dump/load round-trip, not be dropped by a str-only coercion.
+    provenance: dict[str, str | bool] = {
+        "label": "linux-6.9",
+        "resolved_commit": "a1b2c3d4",
+        "dirty": True,
+        "tree_sha": "deadbeef",
+    }
+    result = BuildStepResult(
+        kernel_ref="k", debuginfo_ref="d", build_id="b", build_provenance=provenance
+    )
+    dumped = result.dump()
+    assert dumped["build_provenance"] == provenance
+    loaded = BuildStepResult.load(dumped)
+    assert loaded is not None
+    assert loaded.build_provenance == provenance
 
 
 def test_refs_carry_no_modules_key_under_the_unified_format() -> None:
