@@ -13,6 +13,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.domain.capacity.state import AllocationState, DebugSessionState, RunState, SystemState
+from kdive.health.heartbeat import Heartbeat
 from kdive.providers.infra.reaping import DumpVolume, InfraReaper, NullReaper
 from kdive.reconciler import loop
 from kdive.reconciler.cleanup.gc import (
@@ -725,6 +726,51 @@ def test_reconciler_run_wakes_promptly_when_stopped_during_interval(
         stop.set()
 
         await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(_run())
+
+
+def test_reconciler_heartbeat_ticks_during_long_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _run() -> None:
+        stop = asyncio.Event()
+        pass_can_finish = asyncio.Event()
+        now = 0.0
+        waits: list[float] = []
+
+        heartbeat = Heartbeat(stale_after=1.5, now=lambda: now)
+
+        async def _run_once(self: Reconciler) -> ReconcileReport:
+            await pass_can_finish.wait()
+            stop.set()
+            return ReconcileReport(0, 0, 0, 0, 0, 0, ())
+
+        async def _sleep_until_stop(stop: asyncio.Event, timeout: float) -> None:
+            nonlocal now
+            waits.append(timeout)
+            now += timeout
+            if len(waits) == 3:
+                pass_can_finish.set()
+                await stop.wait()
+                return
+            await asyncio.sleep(0)
+
+        monkeypatch.setattr(Reconciler, "run_once", _run_once)
+        pool = cast(AsyncConnectionPool, object())
+        reconciler = Reconciler(
+            pool,
+            NullReaper(),
+            config=ReconcileConfig(
+                interval=timedelta(seconds=30),
+                heartbeat=heartbeat,
+                heartbeat_tick=timedelta(seconds=1),
+                heartbeat_sleep_until_stop=_sleep_until_stop,
+            ),
+        )
+
+        await asyncio.wait_for(reconciler.run(stop), timeout=1.0)
+
+        assert waits == [1.0, 1.0, 1.0]
+        assert heartbeat.is_live() is True
 
     asyncio.run(_run())
 

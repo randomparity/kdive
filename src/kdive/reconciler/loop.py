@@ -174,6 +174,11 @@ class _RepairSpec:
     repair: _RepairFn
 
 
+async def _sleep_until_stop(stop: asyncio.Event, timeout: float) -> None:
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(stop.wait(), timeout=timeout)
+
+
 @dataclass(frozen=True, slots=True)
 class ReconcileReport:
     """Per-category counts of one pass, plus the names of repairs that raised."""
@@ -232,6 +237,9 @@ class ReconcileConfig:
     dump_volume_grace: timedelta = DEFAULT_DUMP_VOLUME_GRACE
     heartbeat: Heartbeat | None = None
     heartbeat_tick: timedelta = timedelta(seconds=1)
+    heartbeat_sleep_until_stop: Callable[[asyncio.Event, float], Awaitable[None]] = (
+        _sleep_until_stop
+    )
     telemetry: ReconcilerTelemetry | None = None
     fleet_telemetry: FleetTelemetry | None = None
     build_host_telemetry: BuildHostTelemetry | None = None
@@ -571,7 +579,12 @@ class Reconciler:
         if self._config.heartbeat is None:
             return None
         return asyncio.create_task(
-            _tick_until_stop(self._config.heartbeat, stop, self._heartbeat_tick)
+            _tick_until_stop(
+                self._config.heartbeat,
+                stop,
+                self._heartbeat_tick,
+                self._config.heartbeat_sleep_until_stop,
+            )
         )
 
     async def _pass_loop(self, stop: asyncio.Event) -> None:
@@ -593,7 +606,12 @@ class Reconciler:
                 await asyncio.wait_for(stop.wait(), timeout=interval)
 
 
-async def _tick_until_stop(heartbeat: Heartbeat, stop: asyncio.Event, interval: float) -> None:
+async def _tick_until_stop(
+    heartbeat: Heartbeat,
+    stop: asyncio.Event,
+    interval: float,
+    sleep_until_stop: Callable[[asyncio.Event, float], Awaitable[None]] = _sleep_until_stop,
+) -> None:
     """Bump ``heartbeat`` every ``interval`` seconds until ``stop`` is set or cancelled.
 
     Runs concurrently with the pass loop so a long-running pass never starves the
@@ -602,8 +620,7 @@ async def _tick_until_stop(heartbeat: Heartbeat, stop: asyncio.Event, interval: 
     """
     heartbeat.tick()
     while not stop.is_set():
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(stop.wait(), timeout=interval)
+        await sleep_until_stop(stop, interval)
         if stop.is_set():
             break
         heartbeat.tick()
