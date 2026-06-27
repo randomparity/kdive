@@ -191,10 +191,7 @@ def test_build_calls_images_build(monkeypatch: pytest.MonkeyPatch) -> None:
             _args(
                 provider="local-libvirt",
                 name="fedora-40",
-                arch="x86_64",
-                releasever="40",
-                source_image_digest="sha256:base",
-                capabilities="agent,kdump",
+                packages=["crash", "drgn"],
             )
         )
     )
@@ -205,27 +202,21 @@ def test_build_calls_images_build(monkeypatch: pytest.MonkeyPatch) -> None:
                 "request": {
                     "provider": "local-libvirt",
                     "name": "fedora-40",
-                    "arch": "x86_64",
-                    "releasever": "40",
-                    "source_image_digest": "sha256:base",
-                    "capabilities": ["agent", "kdump"],
+                    "packages": ["crash", "drgn"],
                 },
             },
         )
     ]
 
 
-def test_build_trims_blank_capability_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_trims_blank_package_entries(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _install(monkeypatch)
     asyncio.run(
         images.images_build(
             _args(
                 provider="local-libvirt",
                 name="fedora-40",
-                arch="x86_64",
-                releasever="40",
-                source_image_digest="sha256:base",
-                capabilities=" agent, ,kdump, ",
+                packages=[" crash ", " ", "drgn"],
             )
         )
     )
@@ -235,10 +226,7 @@ def test_build_trims_blank_capability_entries(monkeypatch: pytest.MonkeyPatch) -
             "request": {
                 "provider": "local-libvirt",
                 "name": "fedora-40",
-                "arch": "x86_64",
-                "releasever": "40",
-                "source_image_digest": "sha256:base",
-                "capabilities": ["agent", "kdump"],
+                "packages": ["crash", "drgn"],
             },
         },
     )
@@ -251,10 +239,7 @@ def test_publish_calls_images_publish(monkeypatch: pytest.MonkeyPatch) -> None:
             _args(
                 provider="local-libvirt",
                 name="fedora-40",
-                arch="x86_64",
-                releasever="40",
-                source_image_digest="sha256:base",
-                capabilities="agent",
+                packages=["crash"],
             )
         )
     )
@@ -355,7 +340,7 @@ def test_list_json_projects_onto_declared_columns(monkeypatch: pytest.MonkeyPatc
     assert list(payload[0].keys()) == ["id", "name", "arch", "visibility", "owner", "state"]
 
 
-def test_list_missing_capabilities_attr_not_required(
+def test_list_missing_optional_attrs_not_required(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = _install(monkeypatch, _collection([]))
@@ -423,10 +408,7 @@ def test_build_json_flag_threads_through_to_render(monkeypatch: pytest.MonkeyPat
             _json_args(
                 provider="local-libvirt",
                 name="fedora-40",
-                arch="x86_64",
-                releasever="40",
-                source_image_digest="sha256:base",
-                capabilities="agent",
+                packages=["crash"],
             )
         )
     )
@@ -434,18 +416,15 @@ def test_build_json_flag_threads_through_to_render(monkeypatch: pytest.MonkeyPat
     assert payload["id"] == "b1"
 
 
-def test_build_tolerates_missing_capabilities_attr(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_tolerates_missing_packages_attr(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _install(monkeypatch)
     bare = argparse.Namespace(
         json=False,
         provider="local-libvirt",
         name="fedora-40",
-        arch="x86_64",
-        releasever="40",
-        source_image_digest="sha256:base",
     )
     asyncio.run(images.images_build(bare))
-    assert client.calls[0][1]["request"]["capabilities"] == []
+    assert client.calls[0][1]["request"]["packages"] == []
 
 
 def test_publish_sends_request_envelope_and_threads_json(
@@ -457,17 +436,18 @@ def test_publish_sends_request_envelope_and_threads_json(
             _json_args(
                 provider="local-libvirt",
                 name="fedora-40",
-                arch="x86_64",
-                releasever="40",
-                source_image_digest="sha256:base",
-                capabilities="agent",
+                packages=["crash"],
             )
         )
     )
     name, arguments = client.calls[0]
     assert name == "images.publish"
     assert list(arguments.keys()) == ["request"]
-    assert arguments["request"]["provider"] == "local-libvirt"
+    assert arguments["request"] == {
+        "provider": "local-libvirt",
+        "name": "fedora-40",
+        "packages": ["crash"],
+    }
     payload = json.loads(capsys.readouterr().out)
     assert payload["id"] == "p1"
 
