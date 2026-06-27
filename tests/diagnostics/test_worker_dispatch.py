@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable
 
+import pytest
+
 from kdive.diagnostics.checks import (
     GDBSTUB_ACL_ID,
     PROVIDER_TLS_ID,
@@ -57,17 +59,25 @@ async def _noop_sleep(_seconds: float) -> None:
     return None
 
 
-def _dispatcher(queue: _FakeQueue, *, clock_ticks: list[float]) -> JobWorkerCheckDispatcher:
+def _dispatcher(
+    queue: _FakeQueue,
+    *,
+    clock_ticks: list[float],
+    budget: float = 15.0,
+    poll_interval: float = 0.25,
+    sleep_fn=_noop_sleep,  # noqa: ANN001
+) -> JobWorkerCheckDispatcher:
     ticks = iter(clock_ticks)  # increasing values -> the bounded wait terminates deterministically
     return JobWorkerCheckDispatcher(
         pool=None,
         provider="remote-libvirt",
         worker_check_ids=(PROVIDER_TLS_ID, GDBSTUB_ACL_ID),
-        budget=15.0,
+        budget=budget,
+        poll_interval=poll_interval,
         enqueue_fn=queue.enqueue,  # ty: ignore[invalid-argument-type]
         get_fn=queue.get_by_dedup_key,  # ty: ignore[invalid-argument-type]
         clock=lambda: next(ticks),
-        sleep_fn=_noop_sleep,
+        sleep_fn=sleep_fn,
         dedup_suffix="fixed",
     )
 
@@ -113,3 +123,24 @@ def test_pending_then_budget_exhausted_returns_worker_unavailable() -> None:
     # The synthetic unavailable results carry the dispatcher's provider so the operator
     # view attributes the failure to the right provider, not a null one.
     assert all(r.provider == "remote-libvirt" for r in results)
+
+
+def test_pending_sleep_is_clamped_to_remaining_budget() -> None:
+    queue = _FakeQueue([_FakeJob(JobState.QUEUED), _FakeJob(JobState.QUEUED)])
+    sleeps: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    results = asyncio.run(
+        _dispatcher(
+            queue,
+            clock_ticks=[0.0, 14.9, 15.0],
+            budget=15.0,
+            poll_interval=0.25,
+            sleep_fn=_record_sleep,
+        ).run_worker_checks()
+    )
+
+    assert sleeps == [pytest.approx(0.1)]
+    assert all(r.status is CheckStatus.ERROR for r in results)

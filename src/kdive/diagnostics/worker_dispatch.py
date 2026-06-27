@@ -135,7 +135,8 @@ class JobWorkerCheckDispatcher:
             current = await self._get(dedup_key)
             if current is not None and current.state in _TERMINAL:
                 return self._from_terminal(current)
-            if self._clock() - start >= self._budget:
+            remaining = self._budget - (self._clock() - start)
+            if remaining <= 0:
                 _log.warning("diagnostics job %s not picked up within %ss", dedup_key, self._budget)
                 return _unavailable(
                     WORKER_UNAVAILABLE_DETAIL,
@@ -143,7 +144,7 @@ class JobWorkerCheckDispatcher:
                     provider=self._provider,
                     check_ids=self._worker_check_ids,
                 )
-            await self._sleep(self._poll_interval)
+            await self._sleep(min(self._poll_interval, remaining))
 
     def _from_terminal(self, job: Job) -> list[CheckResult]:
         if job.state is JobState.SUCCEEDED:
