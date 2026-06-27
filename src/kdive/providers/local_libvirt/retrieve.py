@@ -1,14 +1,6 @@
-"""Local-libvirt Retrieve plane: capture a kdump vmcore and run crash postmortem (ADR-0031).
+"""Local-libvirt Retrieve plane: vmcore capture and crash postmortem (ADR-0031).
 
-`LocalLibvirtRetrieve` realizes two seam-injected ports, mirroring `LocalLibvirtBuild`:
-`Retriever.capture(system_id, run_id, method)` dispatches to the appropriate seam, stores the raw
-`sensitive` core and a `redacted` dmesg derivative under the crashing Run (ADR-0244), and returns
-both refs plus the core's build-id;
-`CrashPostmortem.run_crash_postmortem(...)` symbolizes the core against the Run's
-`debuginfo_ref` over an injected `crash` subprocess. The slow, host-bound operations are
-`live_vm`-gated seams, so the orchestration and the full error contract are unit-tested with
-fakes. The crash-command
-validator is the load-bearing security control at the port boundary: every caller command is
+The crash-command validator is the port-boundary security control: caller commands are
 sanitized and allowlist-checked before any `crash` invocation.
 """
 
@@ -150,21 +142,7 @@ class LocalLibvirtRetrieve:
         )
 
     def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
-        """Capture a core via ``method``; store raw + redacted; return refs + build-id.
-
-        ``system_id`` locates the live domain/overlay; ``run_id`` owns the stored core
-        (``owner_kind='runs'``, ADR-0244). Both ``KDUMP`` (the ADR-0203 overlay harvest) and
-        ``HOST_DUMP`` (the ADR-0211 libvirt domain core dump) stream the captured core from a worker
-        temp file straight to the object store, never holding the whole core in one in-memory buffer
-        (#657); they differ only in the seam that produces that file.
-
-        Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` for capture/build-id provenance or
-                input failures propagated by injected seams; ``MISSING_DEPENDENCY`` when a
-                capture, build-id, or redaction seam is unavailable; ``READINESS_FAILURE``
-                if no complete core appears in the window; or ``INFRASTRUCTURE_FAILURE``
-                propagated from a failed artifact store.
-        """
+        """Capture a Run-owned core plus redacted dmesg, returning refs and build-id."""
         if method is CaptureMethod.HOST_DUMP:
             return self._capture_via_file(
                 system_id, run_id, method, self._host_dump_capture(system_id)
@@ -177,11 +155,7 @@ class LocalLibvirtRetrieve:
     def _capture_via_file(
         self, system_id: UUID, run_id: UUID, method: CaptureMethod, core: Path | None
     ) -> CaptureOutput:
-        """Stream ``core`` (a worker temp file) to the store as raw + redacted; own its cleanup.
-
-        ``core`` is the spooled file a capture seam produced (``None`` when no core exists). The
-        spool dir is removed in ``finally`` on every path once a core is present (#657).
-        """
+        """Store a captured core without whole-core buffering, then remove its spool dir."""
         if core is None:
             raise self._no_core(system_id)
         try:
