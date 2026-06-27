@@ -221,7 +221,7 @@ async def _authorize_registration(
     return None
 
 
-def _common_registration(
+def _validate_registration_and_resolve_owner(
     ctx: RequestContext,
     request: RuntimeResourceRegistration,
 ) -> tuple[ToolResponse | None, str | None]:
@@ -271,7 +271,7 @@ async def _register_with_plan(
     failure = await _authorize_registration(pool, ctx, tool=tool, name=request.name)
     if failure is not None:
         return failure
-    failure, owner_project = _common_registration(ctx, request)
+    failure, owner_project = _validate_registration_and_resolve_owner(ctx, request)
     if failure is not None:
         return failure
     if reachability_host_uri is None:
