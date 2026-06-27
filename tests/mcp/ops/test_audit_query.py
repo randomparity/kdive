@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid4
@@ -34,22 +35,15 @@ from kdive.mcp.tools.ops import audit as audit_tools
 from kdive.security.authz.rbac import PlatformRole, Role, RoleDenied
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
+_BASE_CTX = RequestContext(principal="user-1", agent_session="sess-1", projects=())
 
 
-def _ctx(
-    *,
-    roles: dict[str, Role] | None = None,
-    projects: tuple[str, ...] = (),
-    platform_roles: frozenset[PlatformRole] = frozenset(),
-    principal: str = "user-1",
-) -> RequestContext:
-    return RequestContext(
-        principal=principal,
-        agent_session="sess-1",
-        projects=projects,
-        roles=roles or {},
-        platform_roles=platform_roles,
-    )
+def _platform_ctx(role: PlatformRole) -> RequestContext:
+    return replace(_BASE_CTX, platform_roles=frozenset({role}))
+
+
+def _project_ctx(*, roles: dict[str, Role], projects: tuple[str, ...]) -> RequestContext:
+    return replace(_BASE_CTX, projects=projects, roles=roles)
 
 
 @asynccontextmanager
@@ -214,7 +208,7 @@ def test_project_form_admin_reads_only_that_project(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
-            ctx = _ctx(roles={"proj-a": Role.ADMIN}, projects=("proj-a",))
+            ctx = _project_ctx(roles={"proj-a": Role.ADMIN}, projects=("proj-a",))
             resp = await audit_tools.query_project(pool, ctx, request=_project_query("proj-a"))
         assert resp.status == "ok"
         assert resp.error_category is None
@@ -240,7 +234,7 @@ def test_project_form_member_below_admin_propagates_roledenied(migrated_url: str
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
             for role in (Role.VIEWER, Role.OPERATOR):
-                ctx = _ctx(roles={"proj-a": role}, projects=("proj-a",))
+                ctx = _project_ctx(roles={"proj-a": role}, projects=("proj-a",))
                 with pytest.raises(RoleDenied) as exc:
                     await audit_tools.query_project(pool, ctx, request=_project_query("proj-a"))
                 assert exc.value.project == "proj-a"
@@ -255,7 +249,7 @@ def test_project_form_non_member_denied(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
             # admin on proj-a but querying proj-b (not a member) → denied.
-            ctx = _ctx(roles={"proj-a": Role.ADMIN}, projects=("proj-a",))
+            ctx = _project_ctx(roles={"proj-a": Role.ADMIN}, projects=("proj-a",))
             resp = await audit_tools.query_project(pool, ctx, request=_project_query("proj-b"))
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
@@ -269,7 +263,7 @@ def test_project_form_platform_auditor_without_project_role_denied(migrated_url:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
-            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            ctx = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
             resp = await audit_tools.query_project(pool, ctx, request=_project_query("proj-a"))
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
@@ -284,7 +278,7 @@ def test_cross_project_auditor_reads_all_and_audits(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
-            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            ctx = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
             resp = await audit_tools.query_all_projects(pool, ctx, request=_all_projects_query())
         assert resp.status == "ok"
         assert {r["project"] for r in _rows(resp)} == {"proj-a", "proj-b"}
@@ -304,7 +298,7 @@ def test_cross_project_admin_satisfies_auditor_gate(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
-            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}))
+            ctx = _platform_ctx(PlatformRole.PLATFORM_ADMIN)
             resp = await audit_tools.query_all_projects(pool, ctx, request=_all_projects_query())
         assert resp.status == "ok"
         rows = await _platform_audit_rows(migrated_url)
@@ -320,7 +314,7 @@ def test_cross_project_project_only_token_denied_unaudited(migrated_url: str) ->
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
-            ctx = _ctx(roles={"proj-a": Role.ADMIN}, projects=("proj-a",))
+            ctx = _project_ctx(roles={"proj-a": Role.ADMIN}, projects=("proj-a",))
             resp = await audit_tools.query_all_projects(pool, ctx, request=_all_projects_query())
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
@@ -336,7 +330,7 @@ def test_cross_project_operator_denied_but_audited(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
-            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_OPERATOR}))
+            ctx = _platform_ctx(PlatformRole.PLATFORM_OPERATOR)
             resp = await audit_tools.query_all_projects(pool, ctx, request=_all_projects_query())
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
@@ -367,7 +361,7 @@ def test_filter_by_principal_cross_project(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
-            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            ctx = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
             resp = await audit_tools.query_all_projects(
                 pool, ctx, request=_all_projects_principal_query("alice")
             )
@@ -382,7 +376,7 @@ def test_filter_by_object_project_form(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             ids = await _seed_two_projects(pool)
-            ctx = _ctx(roles={"proj-a": Role.ADMIN}, projects=("proj-a",))
+            ctx = _project_ctx(roles={"proj-a": Role.ADMIN}, projects=("proj-a",))
             resp = await audit_tools.query_project(
                 pool,
                 ctx,
@@ -401,7 +395,7 @@ def test_filter_by_transition_cross_project(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
-            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            ctx = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
             resp = await audit_tools.query_all_projects(
                 pool, ctx, request=_all_projects_transition_query("defined")
             )
@@ -417,7 +411,7 @@ def test_filter_by_window_cross_project(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
-            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            ctx = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
             window: list[str | None] = [
                 (_DT + timedelta(minutes=30)).isoformat(),
                 (_DT + timedelta(minutes=90)).isoformat(),
@@ -437,7 +431,7 @@ def test_malformed_object_id_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
-            ctx = _ctx(roles={"proj-a": Role.ADMIN}, projects=("proj-a",))
+            ctx = _project_ctx(roles={"proj-a": Role.ADMIN}, projects=("proj-a",))
             resp = await audit_tools.query_project(
                 pool,
                 ctx,
@@ -453,7 +447,7 @@ def test_malformed_object_id_is_config_error(migrated_url: str) -> None:
 def test_malformed_window_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            ctx = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
             resp = await audit_tools.query_all_projects(
                 pool, ctx, request=_all_projects_window_query(["not-a-date", None])
             )
@@ -466,7 +460,7 @@ def test_malformed_window_is_config_error(migrated_url: str) -> None:
 def test_naive_window_bound_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            ctx = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
             resp = await audit_tools.query_all_projects(
                 pool,
                 ctx,
@@ -481,7 +475,7 @@ def test_naive_window_bound_is_config_error(migrated_url: str) -> None:
 def test_inverted_window_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            ctx = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
             resp = await audit_tools.query_all_projects(
                 pool,
                 ctx,
@@ -517,7 +511,7 @@ def test_cross_project_paginates_with_cursor(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_n_rows(pool, 5)
-            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            ctx = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
             seen: list[str] = []
             cursor: str | None = None
             for _ in range(10):
@@ -538,7 +532,7 @@ def test_cross_project_no_truncation_at_exactly_limit(migrated_url: str) -> None
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_n_rows(pool, 2)
-            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            ctx = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
             resp = await audit_tools.query_all_projects(
                 pool, ctx, request=_all_projects_query(), limit=2
             )
@@ -552,7 +546,7 @@ def test_cross_project_malformed_cursor_is_config_error(migrated_url: str) -> No
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_n_rows(pool, 1)
-            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            ctx = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
             resp = await audit_tools.query_all_projects(
                 pool, ctx, request=_all_projects_query(), cursor="!!!"
             )
