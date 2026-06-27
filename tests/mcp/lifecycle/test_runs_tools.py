@@ -3671,10 +3671,10 @@ class _FakeInstaller:
 class _FakeBooter:
     """Records boot() calls; optionally writes the console during boot, then returns or raises.
 
-    ``on_boot`` models libvirt writing the serial console *during* the boot (after the boot
-    handler has recorded its boot-window mark, ADR-0241), so a test's console bytes land inside
-    this boot's window. It runs before any canned error, matching a crash whose oops reaches the
-    console before readiness fails.
+    ``on_boot`` models libvirt writing the serial console *during* the boot. For local-libvirt
+    the serial ``<log>`` is ``append='off'`` and truncated per power-cycle (ADR-0258), so the
+    whole file is this boot's window (the boot handler takes no local slice). It runs before any
+    canned error, matching a crash whose oops reaches the console before readiness fails.
     """
 
     def __init__(
@@ -3701,6 +3701,19 @@ def _append_console(tmp_path: Path, data: bytes) -> Callable[[UUID], None]:
     def _write(system_id: UUID) -> None:
         with (tmp_path / f"{system_id}.log").open("ab") as fh:
             fh.write(data)
+
+    return _write
+
+
+def _truncating_console(tmp_path: Path, data: bytes) -> Callable[[UUID], None]:
+    """An ``on_boot`` hook modeling libvirt's ``append='off'`` serial log (ADR-0258).
+
+    Each power-cycle opens the log truncating (``wb``), so the file holds only this boot's
+    ``data`` — the prior boot's bytes are gone from disk, not merely sliced off by an offset.
+    """
+
+    def _write(system_id: UUID) -> None:
+        (tmp_path / f"{system_id}.log").write_bytes(data)
 
     return _write
 
@@ -4706,7 +4719,7 @@ def test_boot_handler_preserves_console_read_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 
-    def fail_read_console_log(_path: Path, _offset: int = 0) -> bytes:
+    def fail_read_console_log(_path: Path) -> bytes:
         raise CategorizedError(
             "failed to read console log",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -4819,7 +4832,7 @@ def test_boot_handler_reboot_preserves_prior_run_console(
             sid = await _system_id_of(pool, run1)
             job1 = await _enqueue_job(pool, JobKind.BOOT, run1, "boot")
             first_boot = _FakeBooter(
-                on_boot=_append_console(tmp_path, b"FIRST-BOOT-MARKER ready\n")
+                on_boot=_truncating_console(tmp_path, b"FIRST-BOOT-MARKER ready\n")
             )
             async with pool.connection() as conn:
                 await runs_handlers.boot_handler(
@@ -4830,14 +4843,14 @@ def test_boot_handler_reboot_preserves_prior_run_console(
                     artifact_store=minio_store,
                 )
 
-            # Second boot of the SAME System (new Run): libvirt appends to the same serial log
-            # (never truncated per-boot); the per-Run boot-window mark slices run2's capture to its
-            # own appended bytes, written under run2's own per-Run object key.
+            # Second boot of the SAME System (new Run): libvirt's append='off' serial log is
+            # truncated on power-cycle (ADR-0258), so run2's log holds only its own bytes, captured
+            # whole and written under run2's own per-Run object key — run1's row is untouched.
             run2 = await _seed_succeeded_run_on_system(pool, sid)
             await _record_install_step(pool, run2)
             job2 = await _enqueue_job(pool, JobKind.BOOT, run2, "boot")
             second_boot = _FakeBooter(
-                on_boot=_append_console(tmp_path, b"SECOND-BOOT-MARKER oops\n")
+                on_boot=_truncating_console(tmp_path, b"SECOND-BOOT-MARKER oops\n")
             )
             async with pool.connection() as conn:
                 await runs_handlers.boot_handler(

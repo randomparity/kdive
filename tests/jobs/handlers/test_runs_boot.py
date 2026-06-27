@@ -487,21 +487,14 @@ def test_local_console_artifact_is_per_run_immutable(migrated_url: str) -> None:
     assert b1.object_key.endswith(f"console-{run_b}")
 
 
-def test_mark_boot_window_local_is_file_size(tmp_path, monkeypatch) -> None:
-    # Local (no snapshotter): the mark is the current console-log byte size.
+def test_mark_boot_window_local_is_zero_regardless_of_log_size(tmp_path, monkeypatch) -> None:
+    # Local (no snapshotter): no slice is taken. libvirt renders the serial <log> append='off',
+    # truncating it per power-cycle (ADR-0258), so the whole current file is this boot — the mark
+    # is always 0 even when a prior boot left bytes on disk.
     system_id = uuid4()
     log = tmp_path / f"{system_id}.log"
     log.write_bytes(b"prior boot bytes\n")
     monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: log)
-
-    mark = asyncio.run(runs_boot._mark_boot_window(system_id, None))
-
-    assert mark == len(b"prior boot bytes\n")
-
-
-def test_mark_boot_window_local_zero_when_log_absent(tmp_path, monkeypatch) -> None:
-    system_id = uuid4()
-    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / "missing.log")
 
     assert asyncio.run(runs_boot._mark_boot_window(system_id, None)) == 0
 
@@ -529,33 +522,31 @@ def test_mark_boot_window_degrades_to_zero_on_failure() -> None:
     assert asyncio.run(runs_boot._mark_boot_window(uuid4(), _Boom())) == 0
 
 
-def test_read_redacted_console_honors_offset(tmp_path, monkeypatch) -> None:
+def test_read_redacted_console_reads_whole_log(tmp_path, monkeypatch) -> None:
     system_id = uuid4()
     log = tmp_path / f"{system_id}.log"
-    log.write_bytes(b"prior\nthis boot panic\n")
+    log.write_bytes(b"line one\nthis boot panic\n")
     monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: log)
 
-    redacted = asyncio.run(
-        runs_boot._read_redacted_console(system_id, SecretRegistry(), len(b"prior\n"))
-    )
+    redacted = asyncio.run(runs_boot._read_redacted_console(system_id, SecretRegistry()))
 
-    assert redacted == b"this boot panic\n"
+    assert redacted == b"line one\nthis boot panic\n"
 
 
-def test_local_slice_excludes_prior_boot_panic(tmp_path, monkeypatch) -> None:
+def test_local_capture_excludes_prior_boot_panic_via_truncation(tmp_path, monkeypatch) -> None:
     system_id = uuid4()
     log = tmp_path / f"{system_id}.log"
     monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: log)
 
-    # Run A boots and panics; bytes are appended to the System's serial log.
-    log.write_bytes(b"[run A] Kernel panic - not syncing: A\n")
+    # Run B power-cycles the domain; libvirt's append='off' serial <log> truncates on start
+    # (ADR-0258), so by capture time the per-System log holds ONLY this boot's bytes — Run A's
+    # prior panic is gone from disk, not merely sliced off by an offset.
+    log.write_bytes(b"[run B] booted clean READY\n")
 
-    # Run B's boot-window mark is taken before its boot appends a clean log.
     mark_b = asyncio.run(runs_boot._mark_boot_window(system_id, None))
-    with log.open("ab") as fh:
-        fh.write(b"[run B] booted clean READY\n")
+    assert mark_b == 0  # local takes no slice
 
-    redacted_b = asyncio.run(runs_boot._read_redacted_console(system_id, SecretRegistry(), mark_b))
+    redacted_b = asyncio.run(runs_boot._read_redacted_console(system_id, SecretRegistry()))
 
     assert redacted_b == b"[run B] booted clean READY\n"
-    assert not runs_boot._generic_panic_matches(redacted_b)  # prior panic is out of B's window
+    assert not runs_boot._generic_panic_matches(redacted_b)  # no prior panic in the truncated log

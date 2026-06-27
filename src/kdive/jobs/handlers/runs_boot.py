@@ -78,12 +78,11 @@ async def _capture_console_artifact(
     run_id: UUID,
     secret_registry: SecretRegistry,
     artifact_store: ObjectStore | None,
-    offset: int = 0,
 ) -> _ConsoleArtifact | None:
     try:
         if artifact_store is None:
             return None
-        redacted = await _read_redacted_console(system_id, secret_registry, offset)
+        redacted = await _read_redacted_console(system_id, secret_registry)
         if redacted is None:
             return None
         stored = await _store_console_artifact(artifact_store, system_id, run_id, redacted)
@@ -115,12 +114,13 @@ async def _capture_run_console(
     snapshotter: ConsoleSnapshotter | None,
     mark: int,
 ) -> _ConsoleArtifact | None:
-    """Persist this Run's boot-window console (ADR-0235/0241), dispatching to the provider shape.
+    """Persist this Run's boot-window console (ADR-0235/0241/0258), dispatching to the provider.
 
-    ``mark`` (read before ``booter.boot``) scopes the capture to this boot: a part index for the
-    out-of-band ``snapshotter`` (remote-libvirt), or a console-log byte offset for the worker-local
-    read (local-libvirt). Both write an immutable per-Run artifact and return its id + bytes; both
-    are best-effort and never raise.
+    ``mark`` (read before ``booter.boot``) scopes the remote capture to this boot: the next part
+    index for the out-of-band ``snapshotter`` (remote-libvirt). The local-libvirt path takes no
+    slice — its serial ``<log>`` is ``append="off"`` and truncated per power-cycle (ADR-0258), so
+    the whole current file is this boot. Both write an immutable per-Run artifact and return its
+    id + bytes; both are best-effort and never raise.
     """
     if snapshotter is not None:
         try:
@@ -134,21 +134,21 @@ async def _capture_run_console(
             )
             return None
         return None if snap is None else _ConsoleArtifact(snap.id, snap.object_key, snap.data)
-    return await _capture_console_artifact(
-        conn, system_id, run_id, secret_registry, artifact_store, mark
-    )
+    return await _capture_console_artifact(conn, system_id, run_id, secret_registry, artifact_store)
 
 
 async def _mark_boot_window(system_id: UUID, snapshotter: ConsoleSnapshotter | None) -> int:
-    """The boot-window start mark, read before ``booter.boot`` (ADR-0241).
+    """The boot-window start mark, read before ``booter.boot``.
 
-    Remote: the snapshotter's next part index. Local: the current console-log byte size. Best-effort
-    — any failure degrades to ``0`` (cumulative, the pre-slicing behavior) and never fails the boot.
+    Remote (ADR-0241): the snapshotter's next part index; a failure degrades best-effort to ``0``
+    (cumulative) and never fails the boot. Local: always ``0`` — the serial ``<log>`` is
+    ``append="off"`` and truncated per power-cycle (ADR-0258), so the whole current file is this
+    boot and no slice is taken.
     """
+    if snapshotter is None:
+        return 0
     try:
-        if snapshotter is not None:
-            return await snapshotter.mark_boot_window(system_id)
-        return await asyncio.to_thread(_console_log_size, system_id)
+        return await snapshotter.mark_boot_window(system_id)
     except Exception:
         _log.warning(
             "reading the console boot-window mark for system %s failed; "
@@ -159,17 +159,8 @@ async def _mark_boot_window(system_id: UUID, snapshotter: ConsoleSnapshotter | N
         return 0
 
 
-def _console_log_size(system_id: UUID) -> int:
-    try:
-        return console_log_path(system_id).stat().st_size
-    except FileNotFoundError:
-        return 0
-
-
-async def _read_redacted_console(
-    system_id: UUID, secret_registry: SecretRegistry, offset: int = 0
-) -> bytes | None:
-    raw = await asyncio.to_thread(read_console_log, console_log_path(system_id), offset)
+async def _read_redacted_console(system_id: UUID, secret_registry: SecretRegistry) -> bytes | None:
+    raw = await asyncio.to_thread(read_console_log, console_log_path(system_id))
     if not raw:
         _log.warning(
             "console log for system %s is empty or unreadable; registering no console artifact",
