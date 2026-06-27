@@ -113,9 +113,7 @@ class RemoteLibvirtBuild:
         allowed_component_roots: list[Path] | None = None,
         staging_cleanup: _StagingCleanup = _local_staging_cleanup,
         workspace_cleanup: WorkspaceCleanup | None = None,
-        build_provenance_sink: dict[str, str] | None = None,
     ) -> None:
-        self._build_provenance_sink = build_provenance_sink
         self._workspace_root = workspace_root
         self._allowed_component_roots = allowed_component_roots or [
             Path(_build_config.DEFAULT_BUILD_COMPONENT_ROOT)
@@ -154,15 +152,10 @@ class RemoteLibvirtBuild:
         workspace_root = Path(config.require(BUILD_WORKSPACE))
         kernel_src = config.require(KERNEL_SRC)
         allowed_component_roots = _build_config.build_component_roots_from_env()
-        # The worker-local git lane (ADR-0162) records {remote, ref, resolved_commit} here; the
-        # build handler reads it back off BuildOutput and dispatch adds build_host (#778).
-        build_provenance_sink: dict[str, str] = {}
         return cls(
             workspace_root=workspace_root,
             store_factory=object_store_from_env,
-            checkout=_build_workspace.make_checkout(
-                kernel_src, secret_registry, provenance_sink=build_provenance_sink
-            ),
+            checkout=_build_workspace.make_checkout(kernel_src, secret_registry),
             run_olddefconfig=_build_exec.real_run_olddefconfig,
             read_config=_build_exec.real_read_config,
             run_make=_build_exec.real_run_make,
@@ -173,7 +166,6 @@ class RemoteLibvirtBuild:
             staging_factory=_real_staging_factory,
             catalog_fetch=build_config_fetch_from_env(),
             allowed_component_roots=allowed_component_roots,
-            build_provenance_sink=build_provenance_sink,
         )
 
     def over_transport(
@@ -184,7 +176,6 @@ class RemoteLibvirtBuild:
         git_remote: str,
         git_ref: str,
         secret_registry: SecretRegistry,
-        provenance_sink: dict[str, str] | None = None,
     ) -> RemoteLibvirtBuild:
         """Return a sibling builder whose build runs ON ``transport``'s host (ADR-0099).
 
@@ -212,9 +203,7 @@ class RemoteLibvirtBuild:
         return RemoteLibvirtBuild(
             workspace_root=host_root,
             store_factory=self._store_factory,
-            checkout=transport_git_checkout(
-                transport, git_remote, git_ref, secret_registry, provenance_sink=provenance_sink
-            ),
+            checkout=transport_git_checkout(transport, git_remote, git_ref, secret_registry),
             run_olddefconfig=transport_run_olddefconfig(transport),
             read_config=transport_read_config(transport),
             run_make=transport_run_make(transport),
@@ -245,15 +234,9 @@ class RemoteLibvirtBuild:
                 non-zero ``make``/``olddefconfig``/``modules_install`` exit or a missing
                 build-id; ``INFRASTRUCTURE_FAILURE`` propagated from a failed artifact store.
         """
-        # `from_env` runs once per worker process, so this builder (and its checkout closure's
-        # provenance_sink) is reused across every build the worker handles. Clear the sink up
-        # front — BEFORE the checkout fills it — so a build only ever attaches provenance its own
-        # clone recorded; a clone that records nothing must not inherit the prior build's (#778).
-        if self._build_provenance_sink is not None:
-            self._build_provenance_sink.clear()
         workspace = self._orchestrator.workspace_path(run_id)
         try:
-            build_workspace_capturing_log(
+            workspace_result = build_workspace_capturing_log(
                 lambda: self._orchestrator.build_workspace(
                     run_id, profile, recorder=recorder, provider=provider
                 ),
@@ -278,7 +261,7 @@ class RemoteLibvirtBuild:
                 self._staging_cleanup(mod_root)
             return _build_workspace.attach_clone_provenance(
                 BuildOutput(kernel_ref=kernel.key, debuginfo_ref=vmlinux.key, build_id=build_id),
-                self._build_provenance_sink,
+                workspace_result.clone_provenance,
             )
         finally:
             self._orchestrator.cleanup_workspace(workspace)

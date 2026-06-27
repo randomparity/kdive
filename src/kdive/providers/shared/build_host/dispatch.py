@@ -183,20 +183,14 @@ def bind_over_transport(
     git_remote: str,
     git_ref: str,
     secret_registry: SecretRegistry,
-    provenance_sink: dict[str, str] | None = None,
 ) -> Builder:
-    """Rebind ``builder`` onto ``transport`` with the host workspace and git coordinates.
-
-    ``provenance_sink``, when given, is forwarded to the builder's git-checkout seam, which fills
-    it with the clone's resolved-commit provenance (#778).
-    """
+    """Rebind ``builder`` onto ``transport`` with the host workspace and git coordinates."""
     return builder.over_transport(
         transport,
         host_workspace_root=host_workspace_root,
         git_remote=git_remote,
         git_ref=git_ref,
         secret_registry=secret_registry,
-        provenance_sink=provenance_sink,
     )
 
 
@@ -223,7 +217,6 @@ def _build_over_transport_session(
     transport_ctx = factory(host, secret_registry, run_id, source)
     with recorder.phase(BuildPhase.PROVISION, provider):
         transport = transport_ctx.__enter__()
-    provenance_sink: dict[str, str] = {}
     try:
         git_remote, git_ref = _git_coords(parsed, run_id)
         bound = bind_over_transport(
@@ -233,7 +226,6 @@ def _build_over_transport_session(
             git_remote=git_remote,
             git_ref=git_ref,
             secret_registry=secret_registry,
-            provenance_sink=provenance_sink,
         )
         result = bound.build(run_id, parsed, recorder=recorder, provider=provider)
     except BaseException as exc:
@@ -245,21 +237,19 @@ def _build_over_transport_session(
         raise
     else:
         transport_ctx.__exit__(None, None, None)
-    return _with_git_provenance(result, provenance_sink, host)
+    return _with_git_provenance(result, host)
 
 
-def _with_git_provenance(
-    result: BuildOutput, provenance_sink: dict[str, str], host: BuildHost
-) -> BuildOutput:
+def _with_git_provenance(result: BuildOutput, host: BuildHost) -> BuildOutput:
     """Attach ``{**clone-provenance, build_host}`` to ``result`` when the clone recorded any.
 
-    The checkout seam fills ``provenance_sink`` with ``{remote, ref, resolved_commit}`` (remote
-    userinfo-stripped); the build host is known here, not in the seam, so it is added last. An
-    empty sink (the checkout recorded nothing) leaves ``build_provenance`` ``None`` (#778).
+    The bound builder attaches ``{remote, ref, resolved_commit}`` (remote userinfo-stripped); the
+    build host is known here, not in the checkout seam, so it is added last. ``None`` provenance
+    is left untouched (#778).
     """
-    if not provenance_sink:
+    if result.build_provenance is None:
         return result
-    return result._replace(build_provenance={**provenance_sink, "build_host": host.name})
+    return result._replace(build_provenance={**result.build_provenance, "build_host": host.name})
 
 
 def _git_coords(parsed: ServerBuildProfile, run_id: UUID) -> tuple[str, str]:

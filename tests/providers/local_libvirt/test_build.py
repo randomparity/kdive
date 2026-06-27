@@ -41,6 +41,7 @@ from kdive.providers.shared.build_host.publishing.artifact_publish import (
 )
 from kdive.providers.shared.build_host.publishing.kernel_bundle import local_kernel_bundle
 from kdive.providers.shared.build_host.workspaces import workspace as build_host_workspace
+from kdive.providers.shared.build_host.workspaces.workspace import CloneProvenance
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _RUN = UUID("22222222-2222-2222-2222-222222222222")
@@ -352,19 +353,13 @@ def test_build_rejects_config_missing_prereq_before_make(tmp_path: Path, config_
 # --- provenance sink reset across sequential builds (#778) ----------------------------
 
 
-def _builder_with_sink(
+def _builder_for_checkout_provenance(
     store: _FakeStore,
     seams: _Seams,
     tmp_path: Path,
-    sink: dict[str, str],
     checkout: Any,
 ) -> LocalLibvirtBuild:
-    """A real builder whose checkout closure shares ``sink`` with the instance (provider shape).
-
-    Mirrors ``from_env``: the same ``sink`` dict is both baked into the checkout closure (where
-    ``clone_tree`` would fill it) and stored on the instance for ``attach_clone_provenance`` to
-    read back. Reusing one such builder across two builds reproduces the worker's serial reuse.
-    """
+    """A real builder whose checkout closure returns explicit clone provenance."""
     return LocalLibvirtBuild(
         tenant=_TENANT,
         workspace_root=tmp_path,
@@ -382,26 +377,27 @@ def _builder_with_sink(
         secret_registry=SecretRegistry(),
         catalog_fetch=lambda _name: _FRAGMENT_BYTES,
         workspace_cleanup=seams.workspace_cleanups.append,
-        build_provenance_sink=sink,
     )
 
 
 def test_build_does_not_inherit_prior_builds_provenance(tmp_path: Path) -> None:
-    # One builder instance (its provenance sink reused across builds, like the worker's process)
-    # runs two sequential builds: build 1's clone records git provenance, build 2's clone records
-    # nothing. Build 2 must NOT inherit build 1's {remote, ref, resolved_commit} (#778).
+    # One builder instance runs two sequential builds: build 1's clone returns git provenance,
+    # build 2's clone returns nothing. Build 2 must not inherit build 1's provenance (#778).
     store, seams = _FakeStore(), _Seams()
-    sink: dict[str, str] = {}
     resolved = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"  # pragma: allowlist secret
 
-    def _checkout(_run: UUID, _profile: ServerBuildProfile, _ws: Path, _fragment: bytes) -> None:
-        # clone_tree fills the sink only when this build's clone records something.
+    def _checkout(
+        _run: UUID, _profile: ServerBuildProfile, _ws: Path, _fragment: bytes
+    ) -> CloneProvenance | None:
         if _run == _RUN:
-            sink["remote"] = "https://git.example/linux.git"
-            sink["ref"] = "v6.9"
-            sink["resolved_commit"] = resolved
+            return CloneProvenance(
+                remote="https://git.example/linux.git",
+                ref="v6.9",
+                resolved_commit=resolved,
+            )
+        return None
 
-    builder = _builder_with_sink(store, seams, tmp_path, sink, _checkout)
+    builder = _builder_for_checkout_provenance(store, seams, tmp_path, _checkout)
 
     first = builder.build(_RUN, _profile())
     assert first.build_provenance == {
@@ -1810,9 +1806,8 @@ def test_from_env_threads_remote_allowlist(monkeypatch: pytest.MonkeyPatch) -> N
         *,
         allowlist: Sequence[str],
         sandbox_provider: object = None,
-        provenance_sink: object = None,
     ) -> object:
-        del kernel_src, secret_registry, sandbox_provider, provenance_sink
+        del kernel_src, secret_registry, sandbox_provider
         captured["allow"] = tuple(allowlist)
         return lambda *_a, **_k: None
 
@@ -1864,9 +1859,8 @@ def test_real_checkout_git_source_invokes_clone_tree(
         run_id: UUID,
         secret_registry: SecretRegistry,
         sandbox: object = None,
-        provenance_sink: object = None,
     ) -> None:
-        del ws, run_id, secret_registry, sandbox, provenance_sink
+        del ws, run_id, secret_registry, sandbox
         seen["remote"] = source.remote
         seen["allow"] = tuple(allow)
 

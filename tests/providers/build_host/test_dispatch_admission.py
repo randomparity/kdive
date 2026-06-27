@@ -429,24 +429,7 @@ def test_bind_over_transport_forwards_every_coordinate() -> None:
         "git_remote": "https://git.example/linux.git",
         "git_ref": "v6.9",
         "secret_registry": registry,
-        "provenance_sink": None,
     }
-
-
-def test_bind_over_transport_forwards_provenance_sink() -> None:
-    # The provenance sink the dispatch session creates must reach the builder's checkout seam.
-    builder = _BindRecordingBuilder()
-    sink: dict[str, str] = {}
-    bind_over_transport(
-        cast(TransportCapableBuilder, builder),
-        cast(BuildTransport, _FakeTransport()),
-        host_workspace_root="/build",
-        git_remote="https://git.example/linux.git",
-        git_ref="v6.9",
-        secret_registry=SecretRegistry(),
-        provenance_sink=sink,
-    )
-    assert builder.kwargs["provenance_sink"] is sink
 
 
 def test_require_transport_capable_rejects_plain_builder_with_host_and_run_id() -> None:
@@ -540,9 +523,6 @@ def test_transport_session_forwards_factory_args_and_build_args() -> None:
     assert builder.build_kwargs == {"recorder": recorder, "provider": "remotevirt"}
     # The transport (the ctx's __enter__ return) + workspace + git coords reach over_transport.
     assert builder.over_transport_args == (ctx.transport,)
-    # The session creates the provenance sink and forwards it (a fresh dict, not an identity pin).
-    sink = builder.over_transport_kwargs.pop("provenance_sink")
-    assert isinstance(sink, dict)
     assert builder.over_transport_kwargs == {
         "host_workspace_root": host.workspace_root,
         "git_remote": "https://git.example/linux.git",

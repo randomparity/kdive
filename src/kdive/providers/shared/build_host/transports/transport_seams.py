@@ -34,6 +34,7 @@ from kdive.providers.shared.build_host.execution import (
 from kdive.providers.shared.build_host.workspaces.workspace import (
     GIT_APPLY_TIMEOUT_S,
     Checkout,
+    CloneProvenance,
     redacted_tail,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -142,8 +143,6 @@ def transport_git_checkout(
     git_remote: str,
     git_ref: str,
     secret_registry: SecretRegistry,
-    *,
-    provenance_sink: dict[str, str] | None = None,
 ) -> Checkout:
     """Return a ``Checkout`` that clones via ``git`` and merges config over the transport.
 
@@ -151,11 +150,9 @@ def transport_git_checkout(
     config, optional patch — but every filesystem and subprocess operation goes through
     *t* instead of the local environment.
 
-    When ``provenance_sink`` is supplied, the resolved-commit provenance of the clone —
-    ``{remote, ref, resolved_commit}`` with ``remote`` userinfo-stripped (a credentialed clone
-    URL must never reach provenance, logs, or error details) — is written into it (#778). The
-    caller (the dispatch layer) reads the sink back and attaches ``build_host``. Capture is
-    best-effort: it never gates the build.
+    The resolved-commit provenance of the clone is returned as ``{remote, ref, resolved_commit}``
+    with ``remote`` userinfo-stripped (a credentialed clone URL must never reach provenance,
+    logs, or error details).
     """
 
     def _checkout(
@@ -163,15 +160,16 @@ def transport_git_checkout(
         profile: ServerBuildProfile,
         workspace: Path,
         fragment_bytes: bytes,
-    ) -> None:
+    ) -> CloneProvenance | None:
         resolved_commit = t.clone(git_remote, git_ref, str(workspace))
-        if provenance_sink is not None:
-            provenance_sink["remote"] = strip_userinfo(git_remote)
-            provenance_sink["ref"] = git_ref
-            provenance_sink["resolved_commit"] = resolved_commit
         _transport_merge_config(t, fragment_bytes, workspace, run_id)
         if profile.patch_ref is not None:
             _transport_apply_patch(t, profile.patch_ref, workspace, secret_registry)
+        return CloneProvenance(
+            remote=strip_userinfo(git_remote),
+            ref=git_ref,
+            resolved_commit=resolved_commit,
+        )
 
     return _checkout
 

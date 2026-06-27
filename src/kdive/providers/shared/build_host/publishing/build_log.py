@@ -65,13 +65,13 @@ def persist_build_log(
     )
 
 
-def build_workspace_capturing_log(
-    build_workspace: Callable[[], object],
+def build_workspace_capturing_log[T](
+    build_workspace: Callable[[], T],
     store: StorePort,
     run_id: UUID,
     *,
     tenant: str,
-) -> None:
+) -> T:
     """Run ``build_workspace``; on a build failure carrying captured output, persist the log.
 
     Wraps the orchestrator's ``build_workspace`` call so a ``BUILD_FAILURE`` whose
@@ -82,7 +82,7 @@ def build_workspace_capturing_log(
     mask or reshape the build error. Failures carrying no captured output propagate unchanged.
     """
     try:
-        build_workspace()
+        return build_workspace()
     except CategorizedError as exc:
         output = exc.details.get(BUILD_LOG_DETAIL)
         if exc.category is not ErrorCategory.BUILD_FAILURE or not isinstance(output, str):
