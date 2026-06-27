@@ -65,6 +65,13 @@ log, so the gate input is this boot only, byte-exact, with no offset arithmetic.
 - The capture's correctness now depends on the `<log>` being truncated per boot. We pin that
   with `append="off"` in the XML we own, so the dependency is explicit rather than implicit in
   a libvirt default.
+- **Accepted residual — evidence capture on `INSTALL_FAILURE` before `create()`.** The boot
+  handler captures the console best-effort on its error path; if `boot()` raised before the
+  domain started (`create()` failed after `destroy()`, so libvirt never truncated the log) the
+  whole-file read persists the prior boot's bytes as this run's evidence (the old offset gave
+  an empty slice there). This is evidence only — the panic gates run solely on the
+  `READINESS_FAILURE` path, reached only after a successful `create()`/truncate, so it cannot
+  cause a cross-boot mislabel. Accepted rather than adding pre-`create` capture suppression.
 - **Accepted residual — virtlogd rotation.** A boot whose console exceeds virtlogd's
   `max_size` (default ~2 MiB) rotates the head into `<sys>.log.1`, which `read_console_log`
   does not read. A normal kernel boot is well under 2 MiB; this pre-existing limitation is

@@ -75,10 +75,12 @@ no-cross-boot-bleed guarantee is preserved by truncation instead of a fragile of
 - For the local provider (`console_snapshotter` unset) the boot-window mark is `0` and the
   captured console is the whole current per-System log — a long clean boot's head
   (`t=0.000000`, `Command line:`) is retained.
-- ADR-0241's guarantee holds: a readiness-failing Run does not match a prior boot's
-  `Kernel panic`, because libvirt truncated the prior boot's bytes from the log. A unit test
-  models the truncated-per-boot log (only this boot's bytes present) and asserts the prior
-  panic is absent from the gate input.
+- ADR-0241's gate guarantee holds: a readiness-failing Run does not match a prior boot's
+  `Kernel panic`. The panic gates (`_generic_panic_matches` / `_expected_crash_matched_line`)
+  run only on the `READINESS_FAILURE` path, which is reached only after `booter.boot` started
+  the domain (`create()` succeeded) and libvirt truncated the prior boot's bytes from the log,
+  so the gate input is this boot only. A unit test models the truncated-per-boot log (only
+  this boot's bytes present) and asserts the prior panic is absent from the gate input.
 - Remote part-index slicing and its tests are unchanged.
 - Error contract unchanged: a `PermissionError` reading the log is still a
   `CONFIGURATION_ERROR` with the worker-readability remediation; other `OSError` is an
@@ -86,6 +88,15 @@ no-cross-boot-bleed guarantee is preserved by truncation instead of a fragile of
 
 ## Out of scope / accepted residuals
 
+- **Best-effort evidence capture on an `INSTALL_FAILURE` before `create()`.** The boot
+  handler's error path (`runs_boot.py` `except CategorizedError`) captures the console
+  best-effort even when `boot()` raised before the domain started — e.g. `create()` failed
+  after `destroy()`, so libvirt never re-opened (truncated) the log. The whole-file read then
+  persists the prior boot's bytes as this run's evidence artifact, where the old offset would
+  have yielded an empty slice. This is **evidence only** — the panic-matching gates run solely
+  on the `READINESS_FAILURE` path (reached only after a successful `create()`/truncate), so it
+  cannot cause a cross-boot mislabel; the run is already FAILED. Accepted as a low-impact
+  residual rather than adding pre-`create` capture-suppression logic.
 - **virtlogd rotation of a multi-MiB boot.** virtlogd rotates the live file at its
   configured `max_size` (default ~2 MiB); a boot whose console exceeds that rotates the head
   into `<sys>.log.1`, which `read_console_log` does not read. A normal kernel boot console is
