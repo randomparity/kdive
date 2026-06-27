@@ -167,18 +167,42 @@ def _project_query(
     )
 
 
-def _all_projects_query(
-    *,
-    principal: str | None = None,
-    object_id: str | None = None,
-    transition: str | None = None,
-    window: list[str | None] | None = None,
-) -> audit_tools.AllProjectsAuditQuery:
+def _all_projects_query() -> audit_tools.AllProjectsAuditQuery:
+    return audit_tools.AllProjectsAuditQuery(
+        scope="all-projects",
+        principal=None,
+        object_id=None,
+        transition=None,
+        window=None,
+    )
+
+
+def _all_projects_principal_query(principal: str) -> audit_tools.AllProjectsAuditQuery:
     return audit_tools.AllProjectsAuditQuery(
         scope="all-projects",
         principal=principal,
-        object_id=object_id,
+        object_id=None,
+        transition=None,
+        window=None,
+    )
+
+
+def _all_projects_transition_query(transition: str) -> audit_tools.AllProjectsAuditQuery:
+    return audit_tools.AllProjectsAuditQuery(
+        scope="all-projects",
+        principal=None,
+        object_id=None,
         transition=transition,
+        window=None,
+    )
+
+
+def _all_projects_window_query(window: list[str | None]) -> audit_tools.AllProjectsAuditQuery:
+    return audit_tools.AllProjectsAuditQuery(
+        scope="all-projects",
+        principal=None,
+        object_id=None,
+        transition=None,
         window=window,
     )
 
@@ -345,7 +369,7 @@ def test_filter_by_principal_cross_project(migrated_url: str) -> None:
             await _seed_two_projects(pool)
             ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
             resp = await audit_tools.query_all_projects(
-                pool, ctx, request=_all_projects_query(principal="alice")
+                pool, ctx, request=_all_projects_principal_query("alice")
             )
         assert resp.status == "ok"
         assert {r["principal"] for r in _rows(resp)} == {"alice"}
@@ -379,7 +403,7 @@ def test_filter_by_transition_cross_project(migrated_url: str) -> None:
             await _seed_two_projects(pool)
             ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
             resp = await audit_tools.query_all_projects(
-                pool, ctx, request=_all_projects_query(transition="defined")
+                pool, ctx, request=_all_projects_transition_query("defined")
             )
         assert resp.status == "ok"
         assert {r["transition"] for r in _rows(resp)} == {"defined"}
@@ -399,7 +423,7 @@ def test_filter_by_window_cross_project(migrated_url: str) -> None:
                 (_DT + timedelta(minutes=90)).isoformat(),
             ]
             resp = await audit_tools.query_all_projects(
-                pool, ctx, request=_all_projects_query(window=window)
+                pool, ctx, request=_all_projects_window_query(window)
             )
         assert resp.status == "ok"
         rows = _rows(resp)
@@ -431,7 +455,7 @@ def test_malformed_window_is_config_error(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
             resp = await audit_tools.query_all_projects(
-                pool, ctx, request=_all_projects_query(window=["not-a-date", None])
+                pool, ctx, request=_all_projects_window_query(["not-a-date", None])
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -446,7 +470,7 @@ def test_naive_window_bound_is_config_error(migrated_url: str) -> None:
             resp = await audit_tools.query_all_projects(
                 pool,
                 ctx,
-                request=_all_projects_query(window=["2026-01-01T00:00:00", None]),
+                request=_all_projects_window_query(["2026-01-01T00:00:00", None]),
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -461,8 +485,8 @@ def test_inverted_window_is_config_error(migrated_url: str) -> None:
             resp = await audit_tools.query_all_projects(
                 pool,
                 ctx,
-                request=_all_projects_query(
-                    window=[
+                request=_all_projects_window_query(
+                    [
                         "2026-01-02T00:00:00+00:00",
                         "2026-01-01T00:00:00+00:00",
                     ]
