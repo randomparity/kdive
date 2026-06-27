@@ -68,6 +68,10 @@ from kdive.providers.shared.build_host.publishing.kernel_bundle import (
     local_kernel_bundle,
     transport_kernel_bundle,
 )
+from kdive.providers.shared.build_host.sandbox import (
+    SandboxProvider,
+    resolve_build_sandbox_provider,
+)
 from kdive.providers.shared.build_host.transports.transport_seams import (
     transport_git_checkout,
     transport_read_build_id,
@@ -114,7 +118,9 @@ class RemoteLibvirtBuild:
         allowed_component_roots: list[Path] | None = None,
         staging_cleanup: StagingCleanup = _local_staging_cleanup,
         workspace_cleanup: WorkspaceCleanup | None = None,
+        sandbox_provider: SandboxProvider | None = None,
     ) -> None:
+        self._sandbox_provider = sandbox_provider
         self._allowed_component_roots = allowed_component_roots or [
             Path(_build_config.DEFAULT_BUILD_COMPONENT_ROOT)
         ]
@@ -140,6 +146,7 @@ class RemoteLibvirtBuild:
             staging_cleanup=staging_cleanup,
             sensitivity=_SENSITIVITY,
             retention_class=_RETENTION_CLASS,
+            staging_owner=self._own_staging_for_sandbox,
         )
         self._store_factory = store_factory
         self._catalog_fetch = catalog_fetch
@@ -158,20 +165,28 @@ class RemoteLibvirtBuild:
         workspace_root = Path(config.require(BUILD_WORKSPACE))
         kernel_src = config.require(KERNEL_SRC)
         allowed_component_roots = _build_config.build_component_roots_from_env()
+        sandbox_provider = resolve_build_sandbox_provider()
         return cls(
             workspace_root=workspace_root,
             store_factory=object_store_from_env,
-            checkout=_build_workspace.make_checkout(kernel_src, secret_registry),
-            run_olddefconfig=_build_exec.real_run_olddefconfig,
+            checkout=_build_workspace.make_checkout(
+                kernel_src, secret_registry, sandbox_provider=sandbox_provider
+            ),
+            run_olddefconfig=lambda ws: _build_exec.real_run_olddefconfig(
+                ws, sandbox=sandbox_provider.get()
+            ),
             read_config=_build_exec.real_read_config,
-            run_make=_build_exec.real_run_make,
-            run_modules_install=_build_exec.real_run_modules_install,
+            run_make=lambda ws: _build_exec.real_run_make(ws, sandbox=sandbox_provider.get()),
+            run_modules_install=lambda ws, mr: _build_exec.real_run_modules_install(
+                ws, mr, sandbox=sandbox_provider.get()
+            ),
             make_bundle=local_kernel_bundle,
             read_vmlinux_source=_local_vmlinux_source,
             read_build_id=_build_exec.real_read_build_id,
             staging_factory=_real_staging_factory,
             catalog_fetch=build_config_fetch_from_env(),
             allowed_component_roots=allowed_component_roots,
+            sandbox_provider=sandbox_provider,
         )
 
     def over_transport(
@@ -239,6 +254,11 @@ class RemoteLibvirtBuild:
 
     def publish(self, run_id: UUID, name: str, source: ArtifactSource) -> StoredArtifact:
         return self._pipeline.publish(run_id, name, source)
+
+    def _own_staging_for_sandbox(self, mod_root: Path) -> None:
+        sandbox = self._sandbox_provider.get() if self._sandbox_provider is not None else None
+        if sandbox is not None:
+            sandbox.own(mod_root)
 
 
 def _local_vmlinux_source(workspace: Path) -> ArtifactSource:  # pragma: no cover - live_vm

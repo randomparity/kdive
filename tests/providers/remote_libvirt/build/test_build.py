@@ -409,6 +409,77 @@ def test_from_env_does_not_spawn_make_or_connect_s3(monkeypatch: pytest.MonkeyPa
     assert isinstance(builder, RemoteLibvirtBuild)
 
 
+def test_from_env_threads_worker_sandbox_into_local_build_seams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KDIVE_BUILD_WORKSPACE", str(tmp_path / "ws"))
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", "/srv/linux")
+    store = _FakeStore()
+    staging = tmp_path / "mods"
+    captured: dict[str, object] = {}
+    sandbox_owns: list[Path] = []
+    sandbox_tokens: list[object] = []
+
+    class _Sandbox:
+        def own(self, path: Path) -> None:
+            sandbox_owns.append(path)
+
+    sandbox = _Sandbox()
+
+    class _SandboxProvider:
+        def get(self) -> object:
+            sandbox_tokens.append(sandbox)
+            return sandbox
+
+    provider = _SandboxProvider()
+
+    def _checkout_factory(
+        kernel_src: str,
+        secret_registry: SecretRegistry,
+        *,
+        sandbox_provider: object = None,
+    ) -> object:
+        captured["checkout"] = (kernel_src, secret_registry, sandbox_provider)
+        return lambda _run_id, _profile, _workspace, _fragment: None
+
+    monkeypatch.setattr(build_module, "object_store_from_env", lambda: store)
+    monkeypatch.setattr(build_module, "build_config_fetch_from_env", lambda: lambda _name: b"frag")
+    monkeypatch.setattr(build_module, "resolve_build_sandbox_provider", lambda: provider)
+    monkeypatch.setattr(build_module._build_workspace, "make_checkout", _checkout_factory)
+    monkeypatch.setattr(build_module._build_exec, "real_read_config", lambda _ws: _GOOD_CONFIG)
+    monkeypatch.setattr(build_module._build_exec, "real_read_build_id", lambda _ws: "build-id")
+    monkeypatch.setattr(build_module, "_real_staging_factory", lambda: staging)
+    monkeypatch.setattr(build_module, "_local_vmlinux_source", lambda _ws: ArtifactBytes(b"v"))
+    monkeypatch.setattr(build_module, "local_kernel_bundle", lambda _ws, _mr: ArtifactBytes(b"k"))
+
+    def _run_olddefconfig(_workspace: Path, *, sandbox: object = None) -> CapturedStep:
+        captured["olddefconfig_sandbox"] = sandbox
+        return CapturedStep(0, "")
+
+    def _run_make(_workspace: Path, *, sandbox: object = None) -> CapturedStep:
+        captured["make_sandbox"] = sandbox
+        return CapturedStep(0, "")
+
+    def _run_modules_install(_workspace: Path, _mod_root: Path, *, sandbox: object = None) -> int:
+        captured["modules_sandbox"] = sandbox
+        return 0
+
+    monkeypatch.setattr(build_module._build_exec, "real_run_olddefconfig", _run_olddefconfig)
+    monkeypatch.setattr(build_module._build_exec, "real_run_make", _run_make)
+    monkeypatch.setattr(build_module._build_exec, "real_run_modules_install", _run_modules_install)
+
+    registry = SecretRegistry()
+    builder = RemoteLibvirtBuild.from_env(secret_registry=registry)
+    builder.build(_RUN, _profile())
+
+    assert captured["checkout"] == ("/srv/linux", registry, provider)
+    assert captured["olddefconfig_sandbox"] is sandbox
+    assert captured["make_sandbox"] is sandbox
+    assert captured["modules_sandbox"] is sandbox
+    assert sandbox_owns == [staging]
+    assert sandbox_tokens == [sandbox, sandbox, sandbox, sandbox]
+
+
 def test_validate_config_ref_rejects_file_outside_roots(tmp_path: Path) -> None:
     allowed = tmp_path / "allowed"
     allowed.mkdir()
