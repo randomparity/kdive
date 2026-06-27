@@ -98,13 +98,21 @@ returns the handler's envelope; `current_context()` is consulted (auth-only).
 
 **Files:** create `tests/mcp/lifecycle/test_runs_validate_profile.py`.
 
-Drive `validate_build_profile` directly. The pool is only touched on the server lane; use the
-`migrated_url` fixture + the `_pool` async-context helper from
-`test_runs_profile_examples.py` for server-lane cases (the seeded `worker-local` LOCAL row is
-always present; insert an `ssh` row via raw SQL, as `_insert_ssh_host` does, for the
-remote-incompat case). External-lane and parse-failure cases need no DB — pass a closed/never-
-opened pool or skip the connection by asserting they return before `get_by_name` (prefer the
-real pool fixture for uniformity).
+Drive `validate_build_profile` directly. The pool is only touched on the server lane.
+
+- **DB-free tests (no Docker):** every parse-failure, external-lane, and structural-parity
+  case has no DB dependency (the spec: a parse failure / the external lane never opens a
+  connection). Drive these with **no** `migrated_url` — call `BuildProfile.parse` directly, or
+  pass a never-opened `AsyncConnectionPool(url, open=False)` whose connection is never reached.
+  These are the tool's core behavior and **must run without a Docker daemon**; do not route
+  them through the testcontainers fixture (it skips when Docker is absent, silently dropping
+  the core coverage).
+- **DB-backed tests (server lane only):** use the `migrated_url` fixture (re-exported in
+  `tests/mcp/conftest.py`) + the `_pool` async-context helper from
+  `test_runs_profile_examples.py`. The seeded `worker-local` LOCAL row is always present;
+  insert an `ssh` row via raw SQL, as `_insert_ssh_host` does, for the remote-incompat and
+  unregistered-host cases. Scope `migrated_url` strictly to cases that actually call
+  `get_by_name`.
 
 Cover every **Edge & error cases** table row (one test each):
 - valid external → `status="valid"`, `data.source=="external"`, no `build_host` key.
