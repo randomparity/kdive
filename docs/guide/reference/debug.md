@@ -81,6 +81,7 @@ List the caller's debug sessions, filterable by run/system/project/state. Viewer
 - `project` (`string (nullable)`, optional) — Only sessions in this project (within your membership).
 - `state` (``attach`, `live`, `detached` (nullable)`, optional) — Only sessions in this lifecycle state.
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
+- `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
 
 ## `debug.read_memory`
 
