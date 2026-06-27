@@ -990,7 +990,10 @@ def test_artifacts_get_schema_advertises_window_params() -> None:
     assert "next_offset" in str(props["byte_offset"]["description"])
     assert props["max_bytes"]["type"] == "integer"
     assert props["max_bytes"]["default"] == ARTIFACT_GET_WINDOW_DEFAULT_BYTES
-    assert "KDIVE_ARTIFACT_INLINE_MAX_BYTES" in str(props["max_bytes"]["description"])
+    max_bytes_desc = str(props["max_bytes"]["description"])
+    assert "KDIVE_ARTIFACT_INLINE_MAX_BYTES" in max_bytes_desc
+    # #835: the hard token-safe ceiling is discoverable in the schema text.
+    assert str(ARTIFACT_GET_WINDOW_MAX_BYTES) in max_bytes_desc
 
 
 def test_search_text_model_bounds_equal_runtime_bounds() -> None:
