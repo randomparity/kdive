@@ -11,7 +11,7 @@ import pytest
 from fastmcp import Client, FastMCP
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.mcp.app import ENVELOPE_OUTPUT_SCHEMA, _advertise_envelope_output_schema
+from kdive.mcp.envelope_schema import ENVELOPE_OUTPUT_SCHEMA, advertise_envelope_output_schema
 from kdive.mcp.responses import ToolResponse
 
 
@@ -85,7 +85,7 @@ def test_schema_is_ref_free() -> None:
 
 def test_sweep_advertises_fielded_schema() -> None:
     app = _probe_app()
-    swept = _advertise_envelope_output_schema(app)
+    swept = advertise_envelope_output_schema(app)
     assert swept == 2
 
     async def _run() -> list[dict[str, Any] | None]:
@@ -108,7 +108,7 @@ def test_failure_detail_round_trips_through_client() -> None:
         )
         return ToolResponse.failure_from_error("obj-1", exc)
 
-    _advertise_envelope_output_schema(app)
+    advertise_envelope_output_schema(app)
     data, errors, structured = _call_and_capture(app, "fail.one")
     assert data is not None
     assert structured is not None
@@ -118,7 +118,7 @@ def test_failure_detail_round_trips_through_client() -> None:
 
 def test_sweep_restores_data_and_logs_no_parse_error() -> None:
     app = _probe_app()
-    _advertise_envelope_output_schema(app)
+    advertise_envelope_output_schema(app)
     data, errors, structured = _call_and_capture(app, "scalar.one")
     assert data is not None  # parse succeeded (model instance), not nulled
     assert structured is not None
@@ -129,7 +129,7 @@ def test_sweep_restores_data_and_logs_no_parse_error() -> None:
 def test_collection_round_trips_through_client() -> None:
     # AC#2: a non-empty `items` envelope parses; structured_content keeps the nested list.
     app = _probe_app()
-    _advertise_envelope_output_schema(app)
+    advertise_envelope_output_schema(app)
     data, errors, structured = _call_and_capture(app, "list.coll")
     assert data is not None
     assert structured is not None
@@ -154,4 +154,4 @@ def test_sweep_raises_on_empty_tool_surface() -> None:
     """A zero count means the registry accessor broke — fail loud, don't ship recursive schemas."""
     empty: FastMCP = FastMCP(name="empty")
     with pytest.raises(RuntimeError):
-        _advertise_envelope_output_schema(empty)
+        advertise_envelope_output_schema(empty)
