@@ -41,8 +41,12 @@ match only `profile`/`build_profile` binding errors
 (`middleware/binding_errors.py:150-171`); a hard `max_length` on a `label` `Field`
 would raise a `ValidationError` no conversion matches, which the middleware re-raises
 raw rather than as the uniform envelope (the ADR-0247 / ADR-0259 hazard). Rules: strip
-ASCII whitespace; then require `1..=200` chars and no C0 control chars or DEL; the
-error names the bound/rule only, never the rejected value (ADR-0123).
+Unicode whitespace (`str.strip()`); then require `1..=200` code points and
+`str.isprintable()` (one rule that rejects control, format/zero-width/bidi, surrogate,
+and non-`U+0020` separator characters, so a label cannot render identically to a
+different handle); the error names the bound/rule only, never the rejected value
+(ADR-0123). `validate_label` runs as the first step of each handler so an invalid label
+inserts no row, takes no lock, and writes no audit record.
 
 **Set at mint only.** The label is set where the row is first created. It is threaded
 into both Run insert sites (`admission._insert_run`, the bound path, and the unbound

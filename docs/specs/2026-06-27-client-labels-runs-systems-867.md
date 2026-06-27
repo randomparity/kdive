@@ -72,16 +72,39 @@ length-check precedent (`investigations_handlers.py:65-78`).
 Rules for a supplied `label` (a single shared `validate_label` helper):
 
 - `None` → accepted (no label).
-- Leading/trailing ASCII whitespace is stripped first.
-- After stripping, length must be `1..=200` characters; `0` or `>200` →
-  `configuration_error`, `data.reason = "invalid_label"`.
-- No C0 control characters or DEL (`ord < 0x20` or `ord == 0x7f`) — labels are
-  single-line handles, so an embedded newline/NUL/tab is rejected →
-  `configuration_error`, `data.reason = "invalid_label"`.
+- Leading/trailing whitespace is stripped first with `str.strip()` (Unicode
+  whitespace).
+- After stripping, length must be `1..=200` Unicode code points (`len(label)`); `0`
+  (empty after strip) or `>200` → `configuration_error`,
+  `data.reason = "invalid_label"`.
+- The stripped value must be printable — `label.isprintable()` must be `True`. This is
+  the single character rule and it subsumes the control-character check: `isprintable`
+  is `False` for any character in a control (`Cc`, incl. NUL/newline/tab and the C1
+  range), format (`Cf`, incl. zero-width and bidi-override characters), surrogate
+  (`Cs`), or non-`Cn` separator (`Zl`/`Zp`/`Zs`) category, while allowing the ASCII
+  space (`U+0020`) so an interior space is fine. A non-printable character →
+  `configuration_error`, `data.reason = "invalid_label"`. Rejecting format/separator
+  characters keeps a label from rendering identically to a different label, which is the
+  whole point of the handle (a confusable handle would defeat the disambiguation goal).
 - The error `detail` names the bound and the rule only; it never echoes the rejected
   value (ADR-0123).
 
 The stored value is the stripped string.
+
+**Ordering.** `validate_label` runs as the **first step** of each tool's
+handler/service path — before target/allocation resolution, advisory-lock acquisition,
+capacity or reuse re-assertion, the row `INSERT`, and any audit-log write. This is what
+makes the "inserts nothing / consumes no capacity / writes no audit row on an invalid
+label" guarantee structural rather than incidental: in `admission.create_run` the
+audit event is written inside `_insert_run` *after* `RUNS.insert`, and the bound path
+acquires locks in `_create_locked`, so a label rejected anywhere later than the top of
+`create_run` would already have taken a lock or written a row.
+
+**Idempotency interaction.** Under a replayed `idempotency_key`, the stored success
+envelope wins (`_idempotency.py`), so a repeated call with the same key but a *changed*
+`label` returns the first call's stored `label` and ignores the new one. This is the
+existing replay contract — the label is request input that the key dedups — not a new
+behavior; it is called out here so the precedence is not a surprise.
 
 ## Surfacing contract
 
@@ -98,12 +121,14 @@ The stored value is the stripped string.
   omitting it is unchanged behavior and stores `NULL`.
 - A supplied valid `label` round-trips: it is persisted and appears as `data.label` in
   the create envelope and in the corresponding `get` / `list` envelopes.
-- An over-length, empty-after-strip, or control-character `label` returns a
-  `configuration_error` with `data.reason = "invalid_label"` and inserts nothing /
-  consumes no capacity.
-- A whitespace-padded label is stored stripped.
+- An over-length, empty-after-strip, or non-printable (control / zero-width / bidi /
+  non-ASCII-space) `label` returns a `configuration_error` with
+  `data.reason = "invalid_label"` and inserts no Run/System row, writes no audit-log
+  row, and consumes no capacity.
+- A whitespace-padded label is stored stripped; an interior ASCII space is preserved.
 - The redaction, authorization, idempotency, and state-machine behavior of all three
-  tools is otherwise unchanged.
+  tools is otherwise unchanged. Under a replayed `idempotency_key`, the stored
+  envelope's `label` wins (a changed label on a replay is ignored by design).
 - Migration `0050` is additive and forward-only; pre-existing Runs/Systems read
   `label = null`.
 
