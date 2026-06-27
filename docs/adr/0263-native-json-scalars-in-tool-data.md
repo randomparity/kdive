@@ -56,7 +56,12 @@ Emit native JSON scalars for every count and flag an agent reads out of `ToolRes
 
 Helper return types that carried these fields change from `dict[str, str]` to
 `dict[str, JsonValue]` (`resource_capability_data`, `shapes._shape_args`,
-`debug.ops._stop_data`, `accounting.admin` quota `values`). Where a dict is shared with an
+`debug.ops._stop_data`, `accounting.admin` quota `values`). `resource_capability_data` reads
+`ResourceCapabilities.scalar()`, which is `Any` over JSONB, so the numeric caps are coerced
+with `int(value)` (a non-coercible/absent value is dropped, as the current `is not None`
+guard already does) rather than passed through — dropping `str()` alone would forward a
+string-stored value untyped. `shapes._shape_args` reads a typed `SystemShape`, so it needs no
+coercion. Where a dict is shared with an
 audit call, the same native dict feeds both; the audit digest input changes (a one-way
 hash with no stored plaintext to compare against) but audit behavior does not.
 

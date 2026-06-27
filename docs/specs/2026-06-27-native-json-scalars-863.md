@@ -20,14 +20,16 @@ stringification is deliberate flattening, correctable without any schema change.
 
 Every count and flag an agent reads out of `ToolResponse.data` (success or error) is a
 native JSON `int`/`bool`. The `dict[str, str]` flattening convention is retired for those
-fields. A regression guard prevents reintroducing stringified booleans.
+fields. A regression guard catches the two boolean-stringification idioms present in the
+tree today (`str(...).lower()` and a bare `"true"`/`"false"` literal) so they cannot return.
 
 ## Scope
 
 ### In scope — convert to native (see ADR-0263 for the full field list)
 
 - **Counts → `int`** in: `_resource_envelopes` (`vcpus`, `memory_mb`,
-  `concurrent_allocation_cap`); `ops/build_hosts/lifecycle` (`max_concurrent`);
+  `concurrent_allocation_cap` — see "Capability coercion" below);
+  `ops/build_hosts/lifecycle` (`max_concurrent`);
   `catalog/shapes` (`vcpus`, `memory_mb`, `disk_gb`); `catalog/artifacts/reads`
   (`match_count`, `size_bytes`, `next_offset`); `catalog/artifacts/raw_fetch` (`size_bytes`,
   `ttl`); `catalog/artifacts/uploads` (`expires_in`, `part_number`); `ops/reconcile` and
@@ -49,6 +51,20 @@ fields. A regression guard prevents reintroducing stringified booleans.
 - UUIDs, enum values, `resources.list` `transports` (list→comma string).
 - `str(...)` confined to audit `args=` / error `details=` that never reaches response `data`.
 
+### Capability coercion (`_resource_envelopes`)
+
+`resource_capability_data` reads each value via `ResourceCapabilities.scalar(key)`, which
+returns `Any` over the JSONB `capabilities` mapping. Today every writer stores the numeric
+caps as ints (`register.py` pydantic `int`, `overrides.py` `inst.vcpus`), but dropping
+`str()` only yields a native `int` *if* the stored value is already numeric — a non-numeric
+stored value would silently pass through as a string and violate the contract. The numeric
+caps are therefore coerced explicitly: `int(value)` for `vcpus`/`memory_mb`/
+`concurrent_allocation_cap`, and a value that is `None` or not coercible to `int` is dropped
+from `data` exactly as the current `is not None` guard already drops a missing key (no new
+error path). A test feeds a string-stored capability value and asserts the envelope emits an
+`int`. `catalog/shapes._shape_args` reads a typed `SystemShape` (`shape.vcpus` is already
+`int`), so it needs no coercion — drop `str()` directly there.
+
 ## Behavior contract
 
 | Field class | Before | After |
@@ -59,8 +75,12 @@ fields. A regression guard prevents reintroducing stringified booleans.
 | UUID / enum | string | string (unchanged) |
 
 `artifacts.get` paging sentinel: callers page until `content_truncated` is `false` (boolean),
-not the string `"false"`. Tool-description/reference prose is updated accordingly and the
-generated reference regenerated with `just docs`.
+not the string `"false"`. The prose that pins the old string type is updated at its source
+sites — `catalog/artifacts/registrar.py:90` and `:102` (the `byte_offset` tool-description
+text) and `lifecycle/runs/common.py:84` (the console-paging comment) — and
+`docs/guide/reference/artifacts.md` is regenerated from the registrar description with
+`just docs` (it is generated, not hand-edited). Accepted ADR-0262 keeps its point-in-time
+`"false"` wording and is not edited.
 
 Shared dicts that feed both a response and an audit call (`accounting.admin` quota `values`,
 `catalog/shapes._shape_args`) become native and serve both; audit args accept
@@ -81,8 +101,10 @@ stringification is statically indistinguishable from `str(uuid)`; per-tool
   (`isinstance(data["match_count"], int)`, `data["truncated"] is True`, etc.) rather than the
   old string equality.
 - Add the AST guard test (fails before the sweep on the existing idioms; passes after).
-- Regenerate the generated reference docs; confirm no other reference prose pins the old
-  string types.
+- Add a coercion test for `_resource_envelopes`: a resource whose JSONB stores `vcpus` as a
+  string still yields an `int` in the envelope (or the key is dropped if non-coercible).
+- Regenerate the generated reference docs; grep the tree for residual `is "false"` / `is
+  "true"` paging prose and confirm none survives outside accepted ADRs.
 
 ## Acceptance criteria
 
