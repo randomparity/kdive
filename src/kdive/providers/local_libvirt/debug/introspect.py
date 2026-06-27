@@ -359,22 +359,10 @@ def _validate_ssh_target(transport_handle: str) -> int:
     return decoded.port
 
 
-def _real_run_live_helper(
-    transport_handle: str, helper: str, *, secret_registry: SecretRegistry
-) -> dict[str, object]:
-    """SSH-exec ``kdive-drgn <helper>`` in the guest and return its section dict (ADR-0219).
-
-    Decodes + re-validates the handle (loopback ssh, before IO), resolves the kdive-managed
-    private key as the ``root`` identity, and runs ``ssh … kdive-drgn <helper>`` with fixed argv.
-    The helper name is validated by the caller against the fixed set, so no caller-controlled
-    string reaches the remote command.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` for a non-ssh/non-loopback handle or an absent
-            managed key (both before IO); ``TRANSPORT_FAILURE`` for an SSH launch/connect fault or
-            timeout; ``DEBUG_ATTACH_FAILURE`` for a non-zero helper exit (drgn could not attach
-            in-guest); ``INFRASTRUCTURE_FAILURE`` for undecodable / non-object helper stdout.
-    """
+def _live_ssh_argv(
+    transport_handle: str, secret_registry: SecretRegistry, drgn_args: list[str]
+) -> list[str]:
+    """Build the fixed loopback SSH argv for an in-guest ``kdive-drgn`` invocation."""
     port = _validate_ssh_target(transport_handle)
     key_path = managed_private_key_path()
     if not key_path.is_file():
@@ -384,7 +372,7 @@ def _real_run_live_helper(
             details={"key_path": str(key_path)},
         )
     secret_registry.register(key_path.read_text(encoding="utf-8"), scope=None)
-    argv = [
+    return [
         "ssh",
         "-i",
         str(key_path),
@@ -401,8 +389,27 @@ def _real_run_live_helper(
         f"{_SSH_USER}@{_LOOPBACK_HOST}",
         "--",
         _DRGN_HELPER,
-        helper,
+        *drgn_args,
     ]
+
+
+def _real_run_live_helper(
+    transport_handle: str, helper: str, *, secret_registry: SecretRegistry
+) -> dict[str, object]:
+    """SSH-exec ``kdive-drgn <helper>`` in the guest and return its section dict (ADR-0219).
+
+    Decodes + re-validates the handle (loopback ssh, before IO), resolves the kdive-managed
+    private key as the ``root`` identity, and runs ``ssh … kdive-drgn <helper>`` with fixed argv.
+    The helper name is validated by the caller against the fixed set, so no caller-controlled
+    string reaches the remote command.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` for a non-ssh/non-loopback handle or an absent
+            managed key (both before IO); ``TRANSPORT_FAILURE`` for an SSH launch/connect fault or
+            timeout; ``DEBUG_ATTACH_FAILURE`` for a non-zero helper exit (drgn could not attach
+            in-guest); ``INFRASTRUCTURE_FAILURE`` for undecodable / non-object helper stdout.
+    """
+    argv = _live_ssh_argv(transport_handle, secret_registry, [helper])
     return _exec_live_helper(argv)
 
 
@@ -467,37 +474,11 @@ def _real_run_live_script(
             timeout; ``DEBUG_ATTACH_FAILURE`` for a non-zero in-guest exit (script error or drgn
             could not attach).
     """
-    port = _validate_ssh_target(transport_handle)
-    key_path = managed_private_key_path()
-    if not key_path.is_file():
-        raise CategorizedError(
-            "the kdive-managed SSH private key is not present on this worker host",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"key_path": str(key_path)},
-        )
-    secret_registry.register(key_path.read_text(encoding="utf-8"), scope=None)
-    argv = [
-        "ssh",
-        "-i",
-        str(key_path),
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        f"ConnectTimeout={_SSH_CONNECT_TIMEOUT_S}",
-        "-p",
-        str(port),
-        f"{_SSH_USER}@{_LOOPBACK_HOST}",
-        "--",
-        _DRGN_HELPER,
-        "run-script",
-        # Re-assert the in-guest timeout floor at the argv boundary (defense in depth): coreutils
-        # `timeout 0` disables the bound, so the in-guest value is always >= 1 regardless of caller.
-        str(max(1, int(timeout_sec))),
-    ]
+    # Re-assert the in-guest timeout floor at the argv boundary (defense in depth): coreutils
+    # `timeout 0` disables the bound, so the in-guest value is always >= 1 regardless of caller.
+    argv = _live_ssh_argv(
+        transport_handle, secret_registry, ["run-script", str(max(1, int(timeout_sec)))]
+    )
     return _exec_live_script(argv, script, timeout_sec + _LIVE_SCRIPT_SSH_SLACK_S)
 
 
