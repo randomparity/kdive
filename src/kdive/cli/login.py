@@ -31,6 +31,7 @@ _DEFAULT_AUDIENCE = "kdive"
 _DEFAULT_CLIENT_ID = "kdive-test"
 _REDIRECT_URI = "http://localhost:1234/callback"
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_FETCH_SCHEMES = frozenset({"http", "https"})
 
 
 def _cache_path() -> Path:
@@ -63,6 +64,17 @@ def read_cached_token() -> str | None:
         return _cache_path().read_text().strip() or None
     except FileNotFoundError:
         return None
+
+
+def _validate_fetch_url(url: str, *, label: str) -> None:
+    scheme = urllib.parse.urlparse(url).scheme.lower()
+    if scheme not in _FETCH_SCHEMES:
+        got = scheme or "<missing>"
+        raise ValueError(f"{label} must use http or https, got {got}")
+
+
+def _validate_issuer_fetches(issuer: OidcIssuer) -> None:
+    _validate_fetch_url(issuer.base_url, label="OIDC issuer URL")
 
 
 @dataclass(frozen=True)
@@ -204,7 +216,7 @@ def _exchange_code(issuer: OidcIssuer, code: str) -> str:
         }
     ).encode()
     request = urllib.request.Request(issuer.token_endpoint, data=body, method="POST")
-    with urllib.request.urlopen(request) as response:
+    with urllib.request.urlopen(request) as response:  # nosec B310 - issuer URL is http(s)-only.
         payload = json.loads(response.read())
     access_token = payload.get("access_token")
     if not isinstance(access_token, str) or not access_token:
@@ -248,6 +260,7 @@ def mint_local_token(
         ValueError: ``ttl_seconds`` is set but not positive.
     """
     issuer = OidcIssuer.from_config()
+    _validate_issuer_fetches(issuer)
     claims = _build_claims(
         subject=subject,
         audience=issuer.audience,
@@ -280,6 +293,7 @@ def login(platform_role: str | None) -> str:
         The minted access token.
     """
     issuer = OidcIssuer.from_config()
+    _validate_issuer_fetches(issuer)
     platform_roles = [platform_role] if platform_role is not None else None
     claims = _build_claims(
         subject="operator-cli",

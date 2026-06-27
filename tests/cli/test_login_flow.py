@@ -105,6 +105,37 @@ def test_mint_local_token_rejects_nonpositive_ttl(monkeypatch: pytest.MonkeyPatc
         login.mint_local_token(project="local", ttl_seconds=0)
 
 
+def test_mint_local_token_rejects_non_http_issuer_before_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issuer = OidcIssuer(base_url="file:///tmp/issuer", audience="kdive")
+    monkeypatch.setattr(login.OidcIssuer, "from_config", classmethod(lambda cls: issuer))
+
+    def _unused_code(_issuer: OidcIssuer, _claims: Mapping[str, object]) -> str:
+        raise AssertionError("authorization endpoint should not be called")
+
+    def _unused_exchange(_issuer: OidcIssuer, _code: str) -> str:
+        raise AssertionError("token endpoint should not be called")
+
+    monkeypatch.setattr(login, "_authorization_code", _unused_code)
+    monkeypatch.setattr(login, "_exchange_code", _unused_exchange)
+
+    with pytest.raises(ValueError, match="http or https"):
+        login.mint_local_token(project="local")
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_mint_local_token_accepts_http_and_https_issuer_schemes(
+    monkeypatch: pytest.MonkeyPatch, scheme: str
+) -> None:
+    issuer = OidcIssuer(base_url=f"{scheme}://issuer.example/default", audience="kdive")
+    monkeypatch.setattr(login.OidcIssuer, "from_config", classmethod(lambda cls: issuer))
+    monkeypatch.setattr(login, "_authorization_code", lambda got_issuer, claims: "code")
+    monkeypatch.setattr(login, "_exchange_code", lambda got_issuer, code: f"token-for-{code}")
+
+    assert login.mint_local_token(project="local") == "token-for-code"
+
+
 @pytest.mark.oidc_issuer
 def test_mint_local_token_ttl_is_honored_by_the_live_issuer() -> None:
     """The injected ``exp`` overrides the issuer default end-to-end (the real round trip).

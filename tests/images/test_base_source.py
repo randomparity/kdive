@@ -33,6 +33,46 @@ def test_cloud_image_sha256_match(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_cloud_image_accepts_http_and_https_urls(tmp_path: Path, scheme: str) -> None:
+    data = b"qcow2-bytes"
+    src = CloudImageSource(url=f"{scheme}://x/y.qcow2", sha256=hashlib.sha256(data).hexdigest())
+
+    def dl(url: str, dest: Path) -> None:
+        assert url == src.url
+        dest.write_bytes(data)
+
+    acquire_base(
+        src,
+        tmp_path / "scratch",
+        releasever="44",
+        arch="x86_64",
+        virt_builder=_unused,
+        downloader=dl,
+    )
+
+
+def test_cloud_image_rejects_non_http_url_before_downloader(tmp_path: Path) -> None:
+    src = CloudImageSource(
+        url="file:///tmp/base.qcow2",
+        sha256="0" * 64,  # pragma: allowlist secret
+    )
+
+    with pytest.raises(CategorizedError) as e:
+        acquire_base(
+            src,
+            tmp_path / "scratch",
+            releasever="44",
+            arch="x86_64",
+            virt_builder=_unused,
+            downloader=_unused,
+        )
+
+    assert e.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert e.value.details["reason"] == "unsupported_url_scheme"
+    assert e.value.details["scheme"] == "file"
+
+
 def test_cloud_image_sha256_mismatch_fails_closed(tmp_path: Path) -> None:
     src = CloudImageSource(url="https://x/y.qcow2", sha256="0" * 64)  # pragma: allowlist secret
 
