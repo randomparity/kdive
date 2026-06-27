@@ -241,13 +241,7 @@ def _build(pool: AsyncConnectionPool, ctx: RequestContext):
         ctx,
         payload=ImageBuildPayload(
             provider="local-libvirt",
-            name="fedora-40",
-            arch="x86_64",
-            releasever="40",
-            source_image_digest="sha256:base",
-            capabilities=("agent", "kdump"),
-            format="qcow2",
-            root_device="/dev/vda",
+            name="fedora-kdive-ready-44",
         ),
     )
 
@@ -258,13 +252,7 @@ def _publish(pool: AsyncConnectionPool, ctx: RequestContext):
         ctx,
         payload=ImageBuildPayload(
             provider="local-libvirt",
-            name="fedora-40",
-            arch="x86_64",
-            releasever="40",
-            source_image_digest="sha256:base",
-            capabilities=("agent", "kdump"),
-            format="qcow2",
-            root_device="/dev/vda",
+            name="fedora-kdive-ready-44",
         ),
     )
 
@@ -301,11 +289,7 @@ def test_images_registrar_exposes_annotations_and_invokes_wrappers(
 
             request = images_registrar.ImageBuildRequest(
                 provider="local-libvirt",
-                name="fedora-40",
-                arch="x86_64",
-                releasever="40",
-                source_image_digest="sha256:base",
-                capabilities=("agent", "kdump"),
+                name="fedora-kdive-ready-44",
             )
             build_resp = await _call_registered_tool(tools[BUILD_TOOL], request)
             ctx["value"] = _admin_ctx()
@@ -330,7 +314,12 @@ def test_build_operator_enqueues_image_build_and_audits(migrated_url: str) -> No
         assert [kind for kind, _ in jobs] == ["image_build"]
         audit = await _platform_audit_rows(migrated_url)
         assert audit == [
-            ("ops-operator", "platform_operator", "images.build", "local-libvirt:fedora-40")
+            (
+                "ops-operator",
+                "platform_operator",
+                "images.build",
+                "local-libvirt:fedora-kdive-ready-44",
+            )
         ]
 
     asyncio.run(_run())
@@ -344,7 +333,9 @@ def test_build_admin_without_operator_is_denied_and_audited(migrated_url: str) -
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
         assert await _job_rows(migrated_url) == []
         audit = await _platform_audit_rows(migrated_url)
-        assert audit == [("ops-admin", "platform_admin", "images.build", "denied:fedora-40")]
+        assert audit == [
+            ("ops-admin", "platform_admin", "images.build", "denied:fedora-kdive-ready-44")
+        ]
 
     asyncio.run(_run())
 

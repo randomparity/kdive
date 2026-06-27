@@ -107,14 +107,7 @@ def _resolver_with_plane(plane: _FakePlane | None) -> ProviderResolver:
 def _payload(**kw: object) -> ImageBuildPayload:
     base: dict[str, object] = {
         "provider": "local-libvirt",
-        "name": "base",
-        "arch": "x86_64",
-        "releasever": "43",
-        "packages": ("kexec-tools",),
-        "source_image_digest": "sha256:" + "0" * 64,
-        "capabilities": ("agent", "kdump", "drgn"),
-        "format": "qcow2",
-        "root_device": "/dev/vda",
+        "name": "fedora-kdive-ready-43",
         "visibility": "public",
     }
     base.update(kw)
@@ -152,9 +145,10 @@ def test_handler_builds_validates_publishes_registered(migrated_url: str, tmp_pa
             # The blocking build ran off the event-loop thread.
             assert plane.build_thread is not None
             assert plane.build_thread != main_thread
-            # The build spec carried the payload's pinned inputs.
+            # The build spec carried catalog-derived pinned inputs.
             assert plane.spec is not None
             assert plane.spec.releasever == "43"
+            assert plane.spec.source_image_digest == "virt-builder:fedora-43"
 
     asyncio.run(_run())
 
@@ -175,7 +169,7 @@ def test_handler_resolves_build_plane_from_provider_runtime(
                 conn, job, resolver=resolver, store=store, inspect=_all_present
             )
 
-            assert ref == "images/local-libvirt/base/x86_64.qcow2"
+            assert ref == "images/local-libvirt/fedora-kdive-ready-43/x86_64.qcow2"
             assert plane.spec is not None
             assert plane.spec.provider == ResourceKind.LOCAL_LIBVIRT.value
 

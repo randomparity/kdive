@@ -18,7 +18,8 @@ from psycopg import AsyncConnection
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.images.planes.base import RootfsBuildPlane, RootfsBuildSpec
+from kdive.images.planes.base import RootfsBuildPlane
+from kdive.images.rootfs_specs import CatalogRootfsBuild, catalog_rootfs_build
 from kdive.images.validation import DEFAULT_INSPECT, InspectSeam, validate_guest_contract
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ImageBuildPayload, load_payload
@@ -28,18 +29,6 @@ from kdive.services.images.publish import (
     PublishRequest,
     publish_image,
 )
-
-
-def _spec(payload: ImageBuildPayload) -> RootfsBuildSpec:
-    return RootfsBuildSpec(
-        provider=payload.provider,
-        name=payload.name,
-        arch=payload.arch,
-        releasever=payload.releasever,
-        packages=payload.packages,
-        source_image_digest=payload.source_image_digest,
-        capabilities=payload.capabilities,
-    )
 
 
 async def image_build_handler(
@@ -67,22 +56,23 @@ async def image_build_handler(
             the missing element), or publish fails — the worker dead-letters with the category.
     """
     payload = load_payload(job, ImageBuildPayload)
+    catalog_build = _resolve_catalog_build(payload)
     build_plane = _resolve_build_plane(resolver, payload.provider)
-    output = await asyncio.to_thread(build_plane.build, _spec(payload))
+    output = await asyncio.to_thread(build_plane.build, catalog_build.spec)
     await asyncio.to_thread(
         validate_guest_contract,
         output.qcow2_path,
-        required=list(payload.capabilities),
+        required=list(catalog_build.spec.capabilities),
         inspect=inspect,
     )
     request = PublishRequest(
         provider=payload.provider,
         name=payload.name,
-        arch=payload.arch,
-        format=payload.format,
-        root_device=payload.root_device,
+        arch=catalog_build.spec.arch,
+        format=catalog_build.format,
+        root_device=catalog_build.root_device,
         digest=output.digest,
-        capabilities=payload.capabilities,
+        capabilities=catalog_build.spec.capabilities,
         provenance=output.provenance,
         visibility=payload.visibility,
         owner=payload.owner,
@@ -92,6 +82,17 @@ async def image_build_handler(
     if entry.object_key is None:  # Invariant: a registered row always carries its object key.
         raise RuntimeError(f"published image {entry.id} has no object_key")
     return entry.object_key
+
+
+def _resolve_catalog_build(payload: ImageBuildPayload) -> CatalogRootfsBuild:
+    """Resolve catalog-owned image identity for the provider-specific build plane."""
+    if payload.provider == ResourceKind.LOCAL_LIBVIRT.value:
+        return catalog_rootfs_build(payload.provider, payload.name, packages=payload.packages)
+    raise CategorizedError(
+        "provider-specific image build request is not implemented",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"provider": payload.provider},
+    )
 
 
 def _resolve_build_plane(resolver: ProviderResolver, provider: str) -> RootfsBuildPlane:

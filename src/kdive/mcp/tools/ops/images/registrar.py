@@ -16,7 +16,6 @@ from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, ConfigDict, Field
 
-from kdive.domain.catalog.image_format import ImageFormat
 from kdive.jobs.payloads import ImageBuildPayload
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
@@ -44,26 +43,17 @@ class ImageBuildRequest(BaseModel):
 
     provider: str = Field(description="The provider whose plane builds or built the image.")
     name: str = Field(description="The catalog image name.")
-    arch: str = Field(description="The target architecture.")
-    releasever: str = Field(description="The distro release version.")
-    source_image_digest: str = Field(description="The base image content digest.")
-    capabilities: tuple[str, ...] = Field(
-        default=(), description="The guest-contract tags the image must satisfy."
+    packages: tuple[str, ...] = Field(
+        default=(),
+        description="Optional package override; omitted uses the provider catalog default.",
     )
-    format: ImageFormat = Field(default="qcow2", description="The image format.")
-    root_device: str = Field(default="/dev/vda", description="The guest root device path.")
 
     def to_payload(self) -> ImageBuildPayload:
         """Convert the MCP request into the durable IMAGE_BUILD job payload."""
         return ImageBuildPayload(
             provider=self.provider,
             name=self.name,
-            arch=self.arch,
-            releasever=self.releasever,
-            source_image_digest=self.source_image_digest,
-            capabilities=self.capabilities,
-            format=self.format,
-            root_device=self.root_device,
+            packages=self.packages,
         )
 
 

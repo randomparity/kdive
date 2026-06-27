@@ -40,7 +40,7 @@ async def _enqueue_image_build(
     rather than enqueuing a duplicate. The ``platform_audit_log`` accountability row is written
     in the same transaction as the enqueue (both commit or neither does).
     """
-    dedup_key = f"image_build:{payload.provider}:{payload.name}:{payload.arch}"
+    dedup_key = f"image_build:{payload.provider}:{payload.name}"
     async with pool.connection() as conn, conn.transaction():
         await audit.record_platform(
             conn,
@@ -49,7 +49,7 @@ async def _enqueue_image_build(
             event=audit.PlatformAuditEvent(
                 tool=tool,
                 scope=f"{payload.provider}:{payload.name}",
-                args={"provider": payload.provider, "name": payload.name, "arch": payload.arch},
+                args={"provider": payload.provider, "name": payload.name},
                 platform_role=held_platform_roles(ctx),
                 actor=actor_for(ctx),
             ),
