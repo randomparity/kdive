@@ -11,6 +11,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from kdive.build_artifacts.provenance import (
     rev_parse_head,
     staged_tree_sha,
@@ -71,6 +73,19 @@ def test_dirty_none_on_non_git_tree(tmp_path: Path) -> None:
 
 def test_dirty_none_on_empty_path() -> None:
     assert working_tree_dirty("") is None
+
+
+def test_dirty_none_when_git_status_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A failed `git status` (non-zero exit: index.lock contention, corrupt index, ...) on a real
+    # work tree must degrade to None, NOT a spurious False that would call a dirty build clean.
+    _init_commit(tmp_path)
+    (tmp_path / "f").write_text("edited")  # genuinely dirty
+
+    def _failing_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="locked")
+
+    monkeypatch.setattr("kdive.build_artifacts.provenance.subprocess.run", _failing_run)
+    assert working_tree_dirty(str(tmp_path)) is None
 
 
 # ---------------------------------------------------------------------------

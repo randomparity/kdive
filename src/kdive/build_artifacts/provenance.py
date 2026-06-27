@@ -42,21 +42,28 @@ def working_tree_dirty(tree: str, *, timeout: float = DEFAULT_GIT_READ_TIMEOUT) 
 
     ``True`` iff ``git -C <tree> status --porcelain`` is non-empty — counting both tracked
     modifications and untracked files (``??``), the same content the warm-tree rsync mirrors.
-    Returns ``None`` (unknowable) when ``tree`` is not a git work tree or any git/OS error
-    occurs, so the caller omits ``dirty`` rather than guessing. Gitignored paths are not
+    ``False`` on a clean tree (git exits 0 with no output). Returns ``None`` (unknowable) when
+    ``tree`` is empty, not a git work tree, or any git/OS error occurs, so the caller omits
+    ``dirty`` rather than guessing — critically, a *failed* ``git status`` is ``None``, never a
+    spurious ``False`` that would falsely report a dirty build as clean. Gitignored paths are not
     reported by ``git status`` (see ADR-0265): ``False`` means "no tracked changes", not
     "byte-identical to a clean ``HEAD`` checkout".
     """
-    out = _git_read(tree, "status", "--porcelain", timeout=timeout)
-    if out is None:
-        # Distinguish "git said nothing" (clean) from "git failed". A clean tree exits 0 with
-        # empty stdout, which ``_git_read`` collapses to ``None``; re-probe membership cheaply.
-        return False if _is_git_work_tree(tree, timeout=timeout) else None
-    return bool(out)
-
-
-def _is_git_work_tree(tree: str, *, timeout: float) -> bool:
-    return _git_read(tree, "rev-parse", "--is-inside-work-tree", timeout=timeout) == "true"
+    if not tree:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", tree, "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as _exc:
+        return None
+    if proc.returncode != 0:
+        return None
+    return bool(proc.stdout.strip())
 
 
 def staged_tree_sha(tree: str, *, timeout: float = DEFAULT_GIT_READ_TIMEOUT) -> str | None:
