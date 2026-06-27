@@ -13,7 +13,7 @@ retry, so they were transient resets of a held stream, but the client had no sig
 were transient: a raw socket close carries no `retryable` flag.
 
 The held stream is `jobs.wait`. It keeps one streamable-HTTP POST open while it polls, up to
-`MAX_WAIT_S = 300.0` s (`src/kdive/mcp/tools/catalog/jobs.py`). FastMCP's uvicorn server applies
+`MAX_WAIT_S = 300.0` s (`src/kdive/mcp/tools/jobs.py`). FastMCP's uvicorn server applies
 no per-request duration cap to an in-flight streaming POST, so the only thing that severs a long
 hold is an intermediary (reverse proxy / load balancer) idle timeout. Once severed, the response
 bytes never arrive — kdive cannot wrap that drop in an envelope, because the connection that would
@@ -64,7 +64,7 @@ pure helper, `_server_uvicorn_config() -> dict[str, object]`, that the unit test
 asserts equals `{"timeout_keep_alive": 65.0}` — testing the real value, not a stub. `_run_server`
 calls the helper, keeping its body trivial.
 
-### 2. `jobs.wait` prompt non-terminal return (`src/kdive/mcp/tools/catalog/jobs.py`)
+### 2. `jobs.wait` prompt non-terminal return (`src/kdive/mcp/tools/jobs.py`)
 
 No behavior change — `wait_job` already returns the current `running`/`queued` envelope (with
 `jobs.wait` in `suggested_next_actions`) the moment the clamped deadline passes without the job

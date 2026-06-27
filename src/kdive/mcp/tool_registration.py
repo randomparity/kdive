@@ -13,6 +13,7 @@ from kdive.diagnostics.service import DiagnosticsService, default_service_factor
 from kdive.mcp.envelope_schema import registered_tools
 from kdive.mcp.prompts import registrar as lifecycle_prompts
 from kdive.mcp.resources import registrar as doc_resources
+from kdive.mcp.tools import jobs
 from kdive.mcp.tools.accounting.admin import register as register_accounting_admin
 from kdive.mcp.tools.accounting.estimate import register as register_accounting_estimate
 from kdive.mcp.tools.accounting.reports import register as register_accounting_reports
@@ -22,16 +23,14 @@ from kdive.mcp.tools.catalog import (
     build_configs,
     fixtures,
     investigations,
-    jobs,
-    projects,
     resources,
-    session,
     shapes,
 )
 from kdive.mcp.tools.catalog import images as catalog_images
 from kdive.mcp.tools.catalog.artifacts import registrar as artifacts_tools
 from kdive.mcp.tools.debug import introspect
 from kdive.mcp.tools.debug import sessions as debug_tools
+from kdive.mcp.tools.identity import projects, session
 from kdive.mcp.tools.lifecycle import control as control_tools
 from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
 from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_tools

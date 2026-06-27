@@ -139,5 +139,5 @@ typed signature — the handler never receives an invalid enum).
 CI also gates `just docs-check` and `just adr-status-check` **individually** (not via
 `just ci`), so after editing the `jobs.list`/`allocations.list` tool docstrings or
 parameters run `just docs` and commit the regenerated `docs/guide/reference/*.md`. Tests
-live beside the existing list-tool tests (`tests/mcp/catalog/test_jobs_tools.py`,
+live beside the existing list-tool tests (`tests/mcp/jobs/test_jobs_tools.py`,
 `tests/mcp/lifecycle/test_allocations_tools.py`, `tests/jobs/test_queue.py`).

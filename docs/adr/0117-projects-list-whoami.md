@@ -37,7 +37,7 @@ response is the caller's own token claims, with no cross-tenant data.
   membership — invisible in the granted-set usage report by design (ADR-0116) —
   becomes visible here.
 - A new public tool on the MCP surface: a new module
-  `src/kdive/mcp/tools/catalog/projects.py`, a registrar entry in `_PLANE_REGISTRARS`,
+  `src/kdive/mcp/tools/identity/projects.py`, a registrar entry in `_PLANE_REGISTRARS`,
   a regenerated agent-facing reference (`docs/guide/reference/projects.md` + index),
   and a `test_tool_docs._BEHAVIOR_TESTS_BY_TOOL` mapping. No schema, migration,
   dependency, or auth-model change; the advertised `outputSchema` stays the flat

@@ -20,7 +20,7 @@ from kdive.jobs import queue
 from kdive.jobs.payloads import Authorizing, BuildPayload, SystemPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.middleware import DenialAuditMiddleware
-from kdive.mcp.tools.catalog import jobs as jobs_tools
+from kdive.mcp.tools import jobs as jobs_tools
 from kdive.security.authz.rbac import Role, RoleDenied
 
 CTX = RequestContext(principal="user-1", agent_session="s", projects=("proj",))

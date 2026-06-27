@@ -13,7 +13,7 @@ from typing import cast
 
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.catalog.projects import whoami
+from kdive.mcp.tools.identity.projects import whoami
 from kdive.security.authz.rbac import PlatformRole, Role
 from tests.mcp.json_data import data_sequence, data_str
 

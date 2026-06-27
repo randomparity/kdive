@@ -19,7 +19,7 @@ source, not assumed):
 | Issue's design thought | Already in kdive |
 |---|---|
 | Split start from wait (async handle) | Long ops are durable jobs; the tool returns `{job_id, status: running}` and the agent polls (`mcp/tools/lifecycle/runs/build.py`, `domain/models.py` `JobKind`) |
-| Bounded `wait_for(id, timeout)` long-poll | `jobs.wait(job_id, timeout_s)` polls server-side up to `MAX_WAIT_S=300` (`mcp/tools/catalog/jobs.py:125`) |
+| Bounded `wait_for(id, timeout)` long-poll | `jobs.wait(job_id, timeout_s)` polls server-side up to `MAX_WAIT_S=300` (`mcp/tools/jobs.py:125`) |
 | Server is source of truth; in-flight work discoverable | `jobs.list`, `allocations.list` |
 | Idempotency (no double-book) | `idempotency_key` on `allocations.request` / `allocations.renew` |
 | Leases with TTL + renewal + server-side expiry | `lease_expiry`, `allocations.renew` (`services/allocation/renew.py`), reconciler expiry sweep + `queue_timeout` reaper (`services/allocation/promotion.py`) |
@@ -62,7 +62,7 @@ waiting agent (see Gap 1) — a forward-only migration with no backfill.
 ### Gap 1 — `allocations.wait(allocation_id, timeout_s=30.0)`
 
 A read-only tool that is a direct structural mirror of `wait_job`
-(`mcp/tools/catalog/jobs.py:125`). It polls `ALLOCATIONS.get` every `POLL_INTERVAL_S`,
+(`mcp/tools/jobs.py:125`). It polls `ALLOCATIONS.get` every `POLL_INTERVAL_S`,
 holding no pool connection while it sleeps, and returns when the allocation **leaves the
 `requested` state** or the (clamped, `≤ MAX_WAIT_S`) deadline elapses.
 

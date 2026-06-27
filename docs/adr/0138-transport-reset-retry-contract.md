@@ -15,7 +15,7 @@ envelope was built to advertise (ADR-0118).
 
 The drops correlate with the long-poll tools. `jobs.wait` holds a single streamable-HTTP
 POST open for up to `MAX_WAIT_S = 300.0` seconds while it polls
-(`src/kdive/mcp/tools/catalog/jobs.py`). A 300 s held stream is a plausible reset window:
+(`src/kdive/mcp/tools/jobs.py`). A 300 s held stream is a plausible reset window:
 idle reverse proxies and load balancers apply their own read/idle timeout, and FastMCP's
 uvicorn server imposes **no** per-request duration cap on an in-flight streaming POST
 (`timeout_keep_alive` governs idle time *between* requests, not the life of an in-flight

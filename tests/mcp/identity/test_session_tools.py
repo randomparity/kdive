@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kdive.mcp.tools.catalog.session import whoami
+from kdive.mcp.tools.identity.session import whoami
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
 

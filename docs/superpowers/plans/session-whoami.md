@@ -13,7 +13,7 @@ registrations a new tool requires). It is implemented directly in this session
 
 - `just lint` — `ruff check` + `ruff format --check`
 - `just type` — `ty check` (whole tree, src + tests)
-- focused tests: `uv run python -m pytest tests/mcp/catalog/test_session_tools.py tests/mcp/core/test_app.py tests/mcp/core/test_exposure.py tests/mcp/core/test_tool_docs.py -q`
+- focused tests: `uv run python -m pytest tests/mcp/identity/test_session_tools.py tests/mcp/core/test_app.py tests/mcp/core/test_exposure.py tests/mcp/core/test_tool_docs.py -q`
 - `just docs-check` after `just docs` (the tool reference is generated + CI-gated)
 - full suite once before first push: `just test`
 
@@ -31,10 +31,10 @@ registrations a new tool requires). It is implemented directly in this session
 
 **Where it fits:** AC#1, #2, #4 of the spec — the pure `whoami(ctx)` projection.
 
-**Files:** new `tests/mcp/catalog/test_session_tools.py`.
+**Files:** new `tests/mcp/identity/test_session_tools.py`.
 
 Write tests (no implementation yet) against a `whoami(ctx)` function in
-`kdive.mcp.tools.catalog.session`:
+`kdive.mcp.tools.identity.session`:
 
 1. Full context (principal, client_id, two projects with roles, one role-less project,
    two platform roles) → success envelope; `object_id == principal`, `status == "ok"`;
@@ -51,15 +51,15 @@ Build `RequestContext` directly (frozen dataclass) with `Role`/`PlatformRole` en
 
 **Acceptance:** tests run and fail with ImportError/AttributeError (no handler yet).
 
-**Run:** `uv run python -m pytest tests/mcp/catalog/test_session_tools.py -q` → red.
+**Run:** `uv run python -m pytest tests/mcp/identity/test_session_tools.py -q` → red.
 
 ## Task 2 — Implement the handler + registrar (TDD green)
 
 **Where it fits:** the tool module itself.
 
-**Files:** new `src/kdive/mcp/tools/catalog/session.py`.
+**Files:** new `src/kdive/mcp/tools/identity/session.py`.
 
-Mirror `catalog/projects.py`:
+Mirror `identity/projects.py`:
 
 - `whoami(ctx: RequestContext) -> ToolResponse` — pure projection. Build
   `projects = sorted(set(ctx.projects))`; `roles = {p: r.value for p, r in
@@ -103,7 +103,7 @@ context.
 `docs/guide/reference/session.md` + `docs/guide/reference/index.md`, and an exposure
 admission test (in `test_session_tools.py` or `test_exposure.py`).
 
-- Add `"session.whoami": ("tests/mcp/catalog/test_session_tools.py",)` to
+- Add `"session.whoami": ("tests/mcp/identity/test_session_tools.py",)` to
   `_BEHAVIOR_TESTS_BY_TOOL` so `test_active_tools_have_a_covering_test` passes.
 - Add a test asserting `required_scopes("session.whoami") == frozenset()` (public) and
   that a viewer-only connection sees the tool via the exposure filter — AC#3.

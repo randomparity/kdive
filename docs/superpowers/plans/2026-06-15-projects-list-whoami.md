@@ -10,7 +10,7 @@
 
 - `just lint` (ruff check + format check)
 - `just type` (ty)
-- `uv run pytest -q tests/mcp/catalog/test_projects_tools.py tests/mcp/core/test_tool_docs.py`
+- `uv run pytest -q tests/mcp/identity/test_projects_tools.py tests/mcp/core/test_tool_docs.py`
 - `just docs` (regenerate the tool reference) then `just docs-check` (CI gate) + `just docs-links`
 - Full local gate before push: `just ci`
 
@@ -21,14 +21,14 @@
   authenticated read with no platform gate, no audit; registrar `register(app, pool)`).
 - Drive the handler with an injected `RequestContext` (the repo unit contract).
 - 100-char lines, Google-style docstrings, absolute imports, no relative paths.
-- Tool name `projects.list`; module `src/kdive/mcp/tools/catalog/projects.py`.
+- Tool name `projects.list`; module `src/kdive/mcp/tools/identity/projects.py`.
 
 ## Task 1 — The `projects.list` tool module
 
 **Where it fits:** the discovery primitive — a pure projection of `current_context()`.
 
-**Files:** `src/kdive/mcp/tools/catalog/projects.py` (new) +
-`tests/mcp/catalog/test_projects_tools.py` (new).
+**Files:** `src/kdive/mcp/tools/identity/projects.py` (new) +
+`tests/mcp/identity/test_projects_tools.py` (new).
 
 **Steps (TDD):**
 1. **Failing tests first** (mirror the spec acceptance criteria), driving a handler
@@ -86,7 +86,7 @@ to a behavior test; the agent-facing reference is generated from the live regist
 generated), `docs/guide/reference/index.md` (generated).
 
 **Steps:**
-1. Add `"projects.list": ("tests/mcp/catalog/test_projects_tools.py",)` to
+1. Add `"projects.list": ("tests/mcp/identity/test_projects_tools.py",)` to
    `_BEHAVIOR_TESTS_BY_TOOL`.
 2. **Description source (decided):** the generated reference takes the tool's
    description from the `@app.tool` docstring unless `_TOOL_DESCRIPTION_OVERRIDES`
