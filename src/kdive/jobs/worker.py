@@ -46,6 +46,11 @@ _RUN_COMPENSATION_STATES = (RunState.CREATED, RunState.RUNNING)
 _RUN_COMPENSATION_STATE_VALUES = tuple(state.value for state in _RUN_COMPENSATION_STATES)
 
 
+async def _sleep_until_stop(stop: asyncio.Event, timeout: float) -> None:
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(stop.wait(), timeout=timeout)
+
+
 @dataclass(frozen=True)
 class WorkerConfig:
     """Timing, health, and telemetry collaborators for :class:`Worker`."""
@@ -55,6 +60,9 @@ class WorkerConfig:
     poll_interval: timedelta = timedelta(seconds=1)
     heartbeat: Heartbeat | None = None
     heartbeat_tick: timedelta = timedelta(seconds=1)
+    heartbeat_sleep_until_stop: Callable[[asyncio.Event, float], Awaitable[None]] = (
+        _sleep_until_stop
+    )
     readiness: Callable[[], Awaitable[bool]] | None = None
     telemetry: WorkerTelemetry | None = None
 
@@ -108,6 +116,7 @@ class Worker:
         self._secret_registry = secret_registry
         self._heartbeat = config.heartbeat
         self._heartbeat_tick = config.heartbeat_tick.total_seconds()
+        self._heartbeat_sleep_until_stop = config.heartbeat_sleep_until_stop
         self._readiness = config.readiness
         self._telemetry = config.telemetry or WorkerTelemetry.disabled()
 
@@ -184,7 +193,14 @@ class Worker:
     def _start_heartbeat_ticker(self, stop: asyncio.Event) -> asyncio.Task[None] | None:
         if self._heartbeat is None:
             return None
-        return asyncio.create_task(_tick_until_stop(self._heartbeat, stop, self._heartbeat_tick))
+        return asyncio.create_task(
+            _tick_until_stop(
+                self._heartbeat,
+                stop,
+                self._heartbeat_tick,
+                self._heartbeat_sleep_until_stop,
+            )
+        )
 
     async def _claim_loop(self, stop: asyncio.Event) -> None:
         poll = self._poll_interval.total_seconds()
@@ -335,11 +351,6 @@ def _context_key(key: str) -> str:
 
 def _redacted(redactor: Redactor, value: str) -> str:
     return redactor.redact_text(value)[:_CONTEXT_VALUE_MAX]
-
-
-async def _sleep_until_stop(stop: asyncio.Event, timeout: float) -> None:
-    with contextlib.suppress(TimeoutError):
-        await asyncio.wait_for(stop.wait(), timeout=timeout)
 
 
 async def _tick_until_stop(
