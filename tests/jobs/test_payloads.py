@@ -220,44 +220,40 @@ def test_power_payload_dumps_json_and_loads_enum() -> None:
     assert decoded.action is PowerAction.RESET
 
 
-def test_image_build_payload_narrows_format_visibility_and_scope() -> None:
+def test_image_build_payload_serializes_private_scope() -> None:
     expires_at = datetime(2026, 1, 1, tzinfo=UTC)
     payload = dump_payload(
         JobKind.IMAGE_BUILD,
         {
             "provider": "local-libvirt",
-            "name": "base",
-            "arch": "x86_64",
-            "releasever": "43",
-            "source_image_digest": "sha256:" + "0" * 64,
-            "format": "qcow2",
-            "root_device": "/dev/vda",
+            "name": "fedora-kdive-ready-43",
             "visibility": ImageVisibility.PRIVATE,
             "owner": "proj",
             "expires_at": expires_at,
         },
     )
 
-    assert payload["format"] == "qcow2"
     assert payload["visibility"] == "private"
     assert payload["owner"] == "proj"
     assert payload["expires_at"] == "2026-01-01T00:00:00Z"
 
 
-def test_image_build_payload_rejects_invalid_format_and_scope() -> None:
-    base = {
-        "provider": "local-libvirt",
-        "name": "base",
-        "arch": "x86_64",
-        "releasever": "43",
-        "source_image_digest": "sha256:" + "0" * 64,
-        "format": "raw",
-        "root_device": "/dev/vda",
-    }
+def test_image_build_payload_rejects_catalog_derived_fields() -> None:
+    """Identity fields now live on the catalog row, so the payload forbids them as extra inputs."""
     with pytest.raises(PayloadValidationError, match="invalid image_build payload"):
-        dump_payload(JobKind.IMAGE_BUILD, base)
+        dump_payload(
+            JobKind.IMAGE_BUILD,
+            {"provider": "local-libvirt", "name": "base", "format": "qcow2"},
+        )
 
-    bad_scope = base | {"format": "qcow2", "visibility": "private", "owner": "proj"}
+
+def test_image_build_payload_rejects_private_without_expiry() -> None:
+    bad_scope = {
+        "provider": "local-libvirt",
+        "name": "fedora-kdive-ready-43",
+        "visibility": "private",
+        "owner": "proj",
+    }
     with pytest.raises(PayloadValidationError, match="expires_at must be set iff"):
         dump_payload(JobKind.IMAGE_BUILD, bad_scope)
 
