@@ -437,20 +437,3 @@ def test_build_host_resolves_ephemeral_only_when_declared() -> None:
     assert build_host_selection.build_host_resolves(eph, "ub24", ["ub24"]) is True
     assert build_host_selection.build_host_resolves(eph, "ub24", []) is False
     assert build_host_selection.build_host_resolves(eph, "ub24", ["other"]) is False
-
-
-def test_declared_remote_instance_names_degrades_on_config_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _boom() -> list[str]:
-        raise CategorizedError("bad toml", category=ErrorCategory.CONFIGURATION_ERROR)
-
-    monkeypatch.setattr(build_host_selection, "remote_instance_names", _boom)
-    assert build_host_selection.declared_remote_instance_names() == []
-
-
-def test_declared_remote_instance_names_passes_through(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(build_host_selection, "remote_instance_names", lambda: ["a", "b"])
-    assert build_host_selection.declared_remote_instance_names() == ["a", "b"]

@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 from uuid import UUID
 
-from kdive.build_artifacts.validation import parse_gnu_build_id, patch_target_paths
+from kdive.build_artifacts.validation import parse_gnu_build_id
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.ports.build_transport import BuildTransport
@@ -31,9 +31,11 @@ from kdive.providers.shared.build_host.execution import (
     RunStep,
     build_failure,
 )
+from kdive.providers.shared.build_host.patches import patch_target_paths
 from kdive.providers.shared.build_host.workspaces.workspace import (
     GIT_APPLY_TIMEOUT_S,
     Checkout,
+    CloneProvenance,
     redacted_tail,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -46,38 +48,30 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 def transport_run_step(
     t: BuildTransport,
     args: list[str],
+    secret_registry: SecretRegistry,
     timeout_s: int = MAKE_TIMEOUT_S,
 ) -> RunStep:
-    """Return a ``RunStep`` that runs ``make -C <ws> <args...>`` over the transport.
-
-    The transport already captures stdout+stderr in its ``CommandResult``; the returned step
-    surfaces both as a redacted, tail-capped ``CapturedStep`` so a failed build's output can be
-    persisted as a build-log artifact (#770).
-    """
-
     def _step(ws: Path) -> CapturedStep:
+        # Preserve stdout+stderr so failed builds can persist a build-log artifact (#770); redact
+        # against the app registry so a resolved secret never survives into the artifact (#838).
         result = t.run(["make", "-C", str(ws), *args], cwd=str(ws), timeout_s=timeout_s)
-        return CapturedStep.from_streams(result.returncode, result.stdout, result.stderr)
+        return CapturedStep.from_streams(
+            result.returncode, result.stdout, result.stderr, registry=secret_registry
+        )
 
     return _step
 
 
-def transport_run_make(t: BuildTransport) -> RunStep:
-    """Return a ``RunStep`` for the parallel kernel build, using ``os.cpu_count()`` jobs.
-
-    Mirrors ``real_run_make``'s ``-j{os.cpu_count() or 1}`` parallelism exactly.
-    """
-    return transport_run_step(t, [f"-j{os.cpu_count() or 1}"])
+def transport_run_make(t: BuildTransport, secret_registry: SecretRegistry) -> RunStep:
+    # Keep transport builds at parity with real_run_make's worker-local parallelism.
+    return transport_run_step(t, [f"-j{os.cpu_count() or 1}"], secret_registry)
 
 
-def transport_run_olddefconfig(t: BuildTransport) -> RunStep:
-    """Return a ``RunStep`` for ``make olddefconfig`` over the transport."""
-    return transport_run_step(t, ["olddefconfig"])
+def transport_run_olddefconfig(t: BuildTransport, secret_registry: SecretRegistry) -> RunStep:
+    return transport_run_step(t, ["olddefconfig"], secret_registry)
 
 
 def transport_read_config(t: BuildTransport) -> ReadConfig:
-    """Return a ``ReadConfig`` that reads ``<workspace>/.config`` via the transport."""
-
     def _read(ws: Path) -> str:
         return t.read_text(str(ws / ".config"))
 
@@ -90,14 +84,8 @@ def transport_read_config(t: BuildTransport) -> ReadConfig:
 
 
 def transport_run_modules_install(t: BuildTransport) -> RunModulesInstall:
-    """Return a ``RunModulesInstall`` running ``make modules_install`` over the transport.
-
-    Mirrors ``real_run_modules_install``'s argv exactly — ``make -C <ws>
-    INSTALL_MOD_PATH=<mod_root> modules_install`` — staging the module tree at *mod_root* on
-    the transport's host.
-    """
-
     def _step(ws: Path, mod_root: Path) -> int:
+        # Keep argv parity with real_run_modules_install while staging modules on the host.
         argv = ["make", "-C", str(ws), f"INSTALL_MOD_PATH={mod_root}", "modules_install"]
         return t.run(argv, cwd=str(ws), timeout_s=MAKE_TIMEOUT_S).returncode
 
@@ -105,19 +93,8 @@ def transport_run_modules_install(t: BuildTransport) -> RunModulesInstall:
 
 
 def transport_read_build_id(t: BuildTransport) -> ReadBuildId:
-    """Return a ``ReadBuildId`` extracting ``vmlinux``'s GNU build-id over the transport.
-
-    Mirrors ``real_read_build_id``: ``objcopy`` writes the ``.notes`` section to a sibling
-    file on the host, the (small) note blob is read back to the worker via ``read_bytes``, and
-    :func:`parse_gnu_build_id` parses it on the worker. Only the note — never ``vmlinux`` —
-    crosses the transport.
-
-    Raises:
-        CategorizedError: ``BUILD_FAILURE`` if ``objcopy`` exits non-zero or the note carries
-            no GNU build-id (from :func:`parse_gnu_build_id`).
-    """
-
     def _read(ws: Path) -> str:
+        # Extract host-side and read back only the small notes blob, never vmlinux.
         note_path = str(ws / "vmlinux.note")
         argv = ["objcopy", "-O", "binary", "--only-section=.notes", str(ws / "vmlinux"), note_path]
         result = t.run(argv, cwd=str(ws), timeout_s=OBJCOPY_TIMEOUT_S)
@@ -142,8 +119,6 @@ def transport_git_checkout(
     git_remote: str,
     git_ref: str,
     secret_registry: SecretRegistry,
-    *,
-    provenance_sink: dict[str, str] | None = None,
 ) -> Checkout:
     """Return a ``Checkout`` that clones via ``git`` and merges config over the transport.
 
@@ -151,11 +126,9 @@ def transport_git_checkout(
     config, optional patch — but every filesystem and subprocess operation goes through
     *t* instead of the local environment.
 
-    When ``provenance_sink`` is supplied, the resolved-commit provenance of the clone —
-    ``{remote, ref, resolved_commit}`` with ``remote`` userinfo-stripped (a credentialed clone
-    URL must never reach provenance, logs, or error details) — is written into it (#778). The
-    caller (the dispatch layer) reads the sink back and attaches ``build_host``. Capture is
-    best-effort: it never gates the build.
+    The resolved-commit provenance of the clone is returned as ``{remote, ref, resolved_commit}``
+    with ``remote`` userinfo-stripped (a credentialed clone URL must never reach provenance,
+    logs, or error details).
     """
 
     def _checkout(
@@ -163,15 +136,16 @@ def transport_git_checkout(
         profile: ServerBuildProfile,
         workspace: Path,
         fragment_bytes: bytes,
-    ) -> None:
+    ) -> CloneProvenance | None:
         resolved_commit = t.clone(git_remote, git_ref, str(workspace))
-        if provenance_sink is not None:
-            provenance_sink["remote"] = strip_userinfo(git_remote)
-            provenance_sink["ref"] = git_ref
-            provenance_sink["resolved_commit"] = resolved_commit
         _transport_merge_config(t, fragment_bytes, workspace, run_id)
         if profile.patch_ref is not None:
             _transport_apply_patch(t, profile.patch_ref, workspace, secret_registry)
+        return CloneProvenance(
+            remote=strip_userinfo(git_remote),
+            ref=git_ref,
+            resolved_commit=resolved_commit,
+        )
 
     return _checkout
 

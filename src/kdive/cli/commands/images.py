@@ -19,22 +19,19 @@ from kdive.cli.commands.reads import fetch_read_envelope, flatten_collection_row
 from kdive.cli.render import render
 
 
-def _capabilities(args: argparse.Namespace) -> list[str]:
-    """Split the comma-separated ``--capabilities`` value into a tag list."""
-    raw = getattr(args, "capabilities", None)
+def _packages(args: argparse.Namespace) -> list[str]:
+    """Return repeatable ``--packages`` values, omitting blanks."""
+    raw = getattr(args, "packages", None)
     if not raw:
         return []
-    return [tag.strip() for tag in str(raw).split(",") if tag.strip()]
+    return [str(package).strip() for package in raw if str(package).strip()]
 
 
-def _public_image_request(args: argparse.Namespace) -> dict[str, object]:
+def _image_build_request(args: argparse.Namespace) -> dict[str, object]:
     return {
         "provider": args.provider,
         "name": args.name,
-        "arch": args.arch,
-        "releasever": args.releasever,
-        "source_image_digest": args.source_image_digest,
-        "capabilities": _capabilities(args),
+        "packages": _packages(args),
     }
 
 
@@ -69,7 +66,7 @@ async def images_delete(args: argparse.Namespace) -> int:
 async def images_build(args: argparse.Namespace) -> int:
     return await run_mutating_tool(
         "images.build",
-        {"request": _public_image_request(args)},
+        {"request": _image_build_request(args)},
         as_json=args.json,
     )
 
@@ -77,7 +74,7 @@ async def images_build(args: argparse.Namespace) -> int:
 async def images_publish(args: argparse.Namespace) -> int:
     return await run_mutating_tool(
         "images.publish",
-        {"request": _public_image_request(args)},
+        {"request": _image_build_request(args)},
         as_json=args.json,
     )
 

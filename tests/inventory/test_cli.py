@@ -17,7 +17,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.inventory.reconcile_cli import reconcile_systems
+from kdive.inventory.cli import reconcile_systems
 
 # `migrated_url` is provided by tests/inventory/conftest.py (re-exported from tests.db.conftest),
 # resolved by pytest at call time — no import here (avoids the F811 fixture-shadow).

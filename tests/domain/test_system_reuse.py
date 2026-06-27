@@ -9,7 +9,7 @@ import pytest
 
 from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Allocation, System
+from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.lifecycle.sizing import AllocationSizing
 from kdive.domain.lifecycle.system_reuse import (
     ReuseRequirement,

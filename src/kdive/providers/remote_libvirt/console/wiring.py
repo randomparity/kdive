@@ -27,8 +27,8 @@ from kdive.artifacts.storage import (
 )
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
+from kdive.providers.remote_libvirt.connection.transport import remote_connection
 from kdive.providers.remote_libvirt.console.collector import ConsoleStream
-from kdive.providers.remote_libvirt.transport import remote_connection
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secrets import SecretBackend
 

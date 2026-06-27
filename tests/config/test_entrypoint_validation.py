@@ -44,7 +44,7 @@ def test_log_level_flag_overrides_env(monkeypatch) -> None:
         captured["level"] = level
 
     monkeypatch.setattr("kdive.observability.facade.bootstrap_stdout_floor", _capture)
-    monkeypatch.setattr("kdive.admin.bootstrap.install_fixtures", lambda *a, **k: None)
+    monkeypatch.setattr("kdive.admin.fixtures.install_fixtures", lambda *a, **k: None)
     main(["--log-level", "DEBUG", "install-fixtures"])
     assert captured["level"] == "DEBUG"
 
@@ -57,6 +57,6 @@ def test_log_level_falls_back_to_registry(monkeypatch) -> None:
         captured["level"] = level
 
     monkeypatch.setattr("kdive.observability.facade.bootstrap_stdout_floor", _capture)
-    monkeypatch.setattr("kdive.admin.bootstrap.install_fixtures", lambda *a, **k: None)
+    monkeypatch.setattr("kdive.admin.fixtures.install_fixtures", lambda *a, **k: None)
     main(["install-fixtures"])
     assert captured["level"] == "WARNING"

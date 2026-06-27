@@ -22,8 +22,11 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
+from kdive.providers.remote_libvirt.connection.transport import (
+    open_libvirt_protocol,
+    remote_connection,
+)
 from kdive.providers.remote_libvirt.guest.agent import AgentExecResult, GuestDomain
-from kdive.providers.remote_libvirt.transport import open_libvirt_protocol, remote_connection
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend

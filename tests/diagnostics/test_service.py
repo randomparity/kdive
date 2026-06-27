@@ -24,6 +24,7 @@ from kdive.diagnostics.service import (
     WorkerVantageSubstitutionMode,
     worker_unavailable_results,
 )
+from kdive.domain.errors import ErrorCategory
 
 
 class _Fixed(Check):
@@ -144,7 +145,7 @@ def test_worker_unavailable_yields_error_pointing_at_health() -> None:
     assert [r.status for r in results] == [CheckStatus.ERROR, CheckStatus.ERROR]
     assert all(r.fix is None for r in results)
     assert all(WORKER_UNAVAILABLE_DETAIL in r.detail for r in results)
-    assert all(r.failure_category == "transport_failure" for r in results)
+    assert all(r.failure_category is ErrorCategory.TRANSPORT_FAILURE for r in results)
 
 
 def test_worker_unavailable_results_default_reason_is_worker_down() -> None:
@@ -164,7 +165,7 @@ def test_feature_not_enabled_substitution_does_not_point_at_health() -> None:
     assert FEATURE_NOT_ENABLED_DETAIL in results[0].detail
     assert "/livez" not in results[0].detail
     assert "/readyz" not in results[0].detail
-    assert results[0].failure_category == "not_implemented"
+    assert results[0].failure_category is ErrorCategory.NOT_IMPLEMENTED
 
 
 def test_feature_not_enabled_and_worker_down_are_category_distinguishable() -> None:
@@ -194,7 +195,7 @@ def test_unavailable_worker_metadata_yields_error_without_runnable_check() -> No
     assert result.provider == "remote-libvirt"
     assert result.status is CheckStatus.ERROR
     assert FEATURE_NOT_ENABLED_DETAIL in result.detail
-    assert result.failure_category == "not_implemented"
+    assert result.failure_category is ErrorCategory.NOT_IMPLEMENTED
 
 
 def test_service_substitutes_worker_results_when_worker_down() -> None:
@@ -218,7 +219,7 @@ def test_service_substitution_reason_threads_into_results() -> None:
     report = asyncio.run(service.run())
     assert report.results[0].status is CheckStatus.ERROR
     assert FEATURE_NOT_ENABLED_DETAIL in report.results[0].detail
-    assert report.results[0].failure_category == "not_implemented"
+    assert report.results[0].failure_category is ErrorCategory.NOT_IMPLEMENTED
 
 
 class _FakeDispatcher:
@@ -271,7 +272,7 @@ def test_server_and_real_worker_results_compose_into_one_verdict() -> None:
                 "blocked",
                 fix="open the ACL",
                 provider="remote-libvirt",
-                failure_category="configuration_error",
+                failure_category=ErrorCategory.CONFIGURATION_ERROR,
             ),
         ]
     )

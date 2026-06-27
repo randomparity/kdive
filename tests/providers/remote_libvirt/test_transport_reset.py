@@ -10,7 +10,7 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
-from kdive.providers.remote_libvirt.transport_reset import RemoteLibvirtTransportResetter
+from kdive.providers.remote_libvirt.connection.transport_reset import RemoteLibvirtTransportResetter
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend
 from tests.providers.remote_libvirt.fakes import FakeControlConn, FakeDomain

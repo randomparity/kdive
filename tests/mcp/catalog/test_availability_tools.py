@@ -20,7 +20,7 @@ from kdive.db.repositories import ALLOCATIONS, SYSTEM_SHAPES
 from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import AllocationState
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.lifecycle import Allocation, SystemShape
+from kdive.domain.lifecycle.records import Allocation, SystemShape
 from kdive.domain.pcie import PCIeClaim
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse

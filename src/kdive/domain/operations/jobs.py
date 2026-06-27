@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal, TypedDict
+from typing import Any, TypedDict
 
 from pydantic import Field
 
@@ -29,17 +29,10 @@ class JobKind(StrEnum):
     DIAGNOSTICS_WORKER_CHECK = "diagnostics_worker_check"
 
 
-type DestructiveJobKind = Literal[
-    JobKind.REPROVISION,
-    JobKind.TEARDOWN,
-    JobKind.FORCE_CRASH,
-    JobKind.POWER,
-]
-
 DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
     {JobKind.REPROVISION, JobKind.TEARDOWN, JobKind.FORCE_CRASH, JobKind.POWER}
 )
-"""Runtime set mirroring the ``DestructiveJobKind`` Literal (ADR-0130 token validation)."""
+"""Job kinds that require destructive-operation admission checks (ADR-0130)."""
 
 
 class PowerAction(StrEnum):
@@ -77,7 +70,6 @@ class Job(DomainModel):
 
 __all__ = [
     "DESTRUCTIVE_JOB_KINDS",
-    "DestructiveJobKind",
     "Job",
     "JobAuthorizing",
     "JobKind",

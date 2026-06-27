@@ -22,7 +22,11 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
 from kdive.providers.local_libvirt.retrieve_kdump import HarvestOutcome
-from kdive.providers.ports import CaptureOutput, CrashOutput, CrashResult
+from kdive.providers.ports.retrieve import (
+    CaptureOutput,
+    CrashOutput,
+    CrashResult,
+)
 from kdive.providers.shared.runtime_paths import WORKER_READABILITY_REMEDIATION
 from kdive.security.artifacts.crash_commands import crash_command_rejection_reason
 from kdive.security.secrets.secret_registry import SecretRegistry

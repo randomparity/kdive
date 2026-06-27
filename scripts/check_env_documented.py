@@ -66,6 +66,7 @@ _EXCLUDE_FILES: frozenset[Path] = frozenset(
     _ROOT / rel
     for rel in (
         "tests/config/test_registry.py",
+        "tests/config/test_validation.py",
         "tests/scripts/test_config_env_guard.py",
         "tests/scripts/test_gen_config_reference.py",
         "tests/scripts/test_check_env_documented.py",

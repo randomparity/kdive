@@ -3,7 +3,7 @@
 The libvirt boundary for :class:`RemoteLibvirtReachabilityCheck`: it resolves the single declared
 ``[[remote_libvirt]]`` instance, opens the mutual-TLS ``qemu+tls://`` connection, and calls
 ``getInfo()`` — the same connect path the discovery/provisioning planes use
-(``remote_libvirt.transport``). The blocking libvirt work is offloaded with
+(``remote_libvirt.connection.transport``). The blocking libvirt work is offloaded with
 :func:`asyncio.to_thread` (mirroring :class:`SshBuildHostProber`) so the probe never stalls the
 diagnostics event loop, and the per-check timeout in :func:`run_check` bounds a black-holing host.
 
@@ -32,13 +32,13 @@ from pathlib import Path
 
 import libvirt
 
-from kdive.diagnostics.checks import ReachabilityOutcome, ReachabilityProbe
+from kdive.diagnostics.provider_checks import ReachabilityOutcome, ReachabilityProbe
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
     unbound_remote_config,
 )
-from kdive.providers.remote_libvirt.transport import open_libvirt, remote_connection
+from kdive.providers.remote_libvirt.connection.transport import open_libvirt, remote_connection
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 

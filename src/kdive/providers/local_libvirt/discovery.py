@@ -24,7 +24,7 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeDescriptor
 from kdive.providers.local_libvirt.settings import LIBVIRT_ALLOCATION_CAP, LIBVIRT_URI
-from kdive.providers.ports import OwnedInfra
+from kdive.providers.ports.handles import OwnedInfra
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
     parse_capabilities_arch,
@@ -81,7 +81,7 @@ def _parse_pci_descriptor(device_xml: str) -> PCIeDescriptor | None:
         vendor_id = _hex_id(_required_attr(cap, "vendor", "id"))
         device_id = _hex_id(_required_attr(cap, "product", "id"))
         class_code = (cap.findtext("class") or "").removeprefix("0x").lower()
-    except KeyError, TypeError, ValueError:
+    except (KeyError, TypeError, ValueError) as _exc:
         return None
     if not class_code:
         return None

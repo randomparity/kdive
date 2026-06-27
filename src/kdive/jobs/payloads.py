@@ -14,7 +14,6 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
 
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.catalog.image_format import ImageFormat
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.operations.jobs import Job, JobAuthorizing, JobKind, PowerAction
 
@@ -95,23 +94,17 @@ class CaptureVmcorePayload(RunPayload):
 
 
 class ImageBuildPayload(_PayloadBase):
-    """The inputs an ``IMAGE_BUILD`` job carries: build spec + the publish row's scope.
+    """The inputs an ``IMAGE_BUILD`` job carries: provider catalog identity + row scope.
 
-    The spec fields drive ``RootfsBuildPlane.build`` and the row fields drive
-    ``publish_image``. ``visibility`` is ``public`` for an operator base image; a private
-    image carries ``owner`` and ``expires_at`` (the handler validates the pairing through the
-    publish service and the DB CHECK constraints).
+    Cataloged providers derive arch, release, source, capabilities, format, and root device from
+    their catalog row at job execution. ``visibility`` is ``public`` for an operator base image;
+    a private image carries ``owner`` and ``expires_at`` (the handler validates the pairing
+    through the publish service and the DB CHECK constraints).
     """
 
     provider: str
     name: str
-    arch: str
-    releasever: str
     packages: tuple[str, ...] = ()
-    source_image_digest: str
-    capabilities: tuple[str, ...] = ()
-    format: ImageFormat
-    root_device: str
     visibility: ImageVisibility = ImageVisibility.PUBLIC
     owner: str | None = None
     expires_at: datetime | None = None

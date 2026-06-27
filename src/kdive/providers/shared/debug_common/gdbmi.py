@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import (
+from kdive.providers.ports.debug import (
     GdbBreakpointRef,
     GdbController,
     GdbFrame,

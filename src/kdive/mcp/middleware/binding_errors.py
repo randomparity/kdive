@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +36,27 @@ def _loc_under(param: str) -> Callable[[ValidationError], bool]:
         return bool(errors) and all(
             bool(err.get("loc")) and err["loc"][0] == param for err in errors
         )
+
+    return _predicate
+
+
+def _loc_under_path(path: Sequence[str]) -> Callable[[ValidationError], bool]:
+    """Predicate for binding failures under a nested typed parameter path."""
+
+    def _predicate(exc: ValidationError) -> bool:
+        errors = exc.errors()
+        return bool(errors) and all(
+            bool(err.get("loc")) and tuple(err["loc"][: len(path)]) == tuple(path) for err in errors
+        )
+
+    return _predicate
+
+
+def _any_match(*predicates: Callable[[ValidationError], bool]) -> Callable[[ValidationError], bool]:
+    """Predicate that accepts any one binding-error shape."""
+
+    def _predicate(exc: ValidationError) -> bool:
+        return any(predicate(exc) for predicate in predicates)
 
     return _predicate
 
@@ -121,25 +142,31 @@ def _search_context_cap_envelope(object_id: str, exc: ValidationError) -> ToolRe
 class _BindingConversion:
     """How to convert one tool's binding ``ValidationError`` into an envelope."""
 
-    id_arg: str
+    id_paths: tuple[tuple[str, ...], ...]
     matches: Callable[[ValidationError], bool]
     build: Callable[[str, ValidationError], ToolResponse]
 
 
 _BINDING_CONVERSIONS: dict[str, _BindingConversion] = {
-    "systems.define": _BindingConversion("allocation_id", _loc_under("profile"), _profile_envelope),
+    "systems.define": _BindingConversion(
+        (("allocation_id",),), _loc_under("profile"), _profile_envelope
+    ),
     "systems.provision": _BindingConversion(
-        "allocation_id", _loc_under("profile"), _profile_envelope
+        (("allocation_id",),), _loc_under("profile"), _profile_envelope
     ),
     "systems.reprovision": _BindingConversion(
-        "system_id", _loc_under("profile"), _profile_envelope
+        (("system_id",),), _loc_under("profile"), _profile_envelope
     ),
     "runs.create": _BindingConversion(
-        "system_id", _loc_under("build_profile"), _build_profile_envelope
+        (("request", "system_id"), ("system_id",)),
+        _any_match(_loc_under_path(("request", "build_profile")), _loc_under("build_profile")),
+        _build_profile_envelope,
     ),
-    "allocations.request": _BindingConversion("project", _is_shape_xor_error, _shape_xor_envelope),
+    "allocations.request": _BindingConversion(
+        (("project",),), _is_shape_xor_error, _shape_xor_envelope
+    ),
     "artifacts.search_text": _BindingConversion(
-        "artifact_id", _is_search_context_cap_error, _search_context_cap_envelope
+        (("artifact_id",),), _is_search_context_cap_error, _search_context_cap_envelope
     ),
 }
 
@@ -161,16 +188,21 @@ class BindingErrorMiddleware(Middleware):
         except ValidationError as exc:
             if not conversion.matches(exc):
                 raise
-            object_id = _binding_object_id(context, conversion.id_arg)
+            object_id = _binding_object_id(context, conversion.id_paths)
             envelope = conversion.build(object_id, exc)
             return ToolResult(structured_content=envelope.model_dump(mode="json"))
 
 
-def _binding_object_id(context: Any, id_arg: str) -> str:
-    """The call's object id from ``id_arg``, falling back to the tool name."""
+def _binding_object_id(context: Any, id_paths: tuple[tuple[str, ...], ...]) -> str:
+    """The call's object id from the first present path, falling back to the tool name."""
     arguments = getattr(context.message, "arguments", None)
-    if isinstance(arguments, dict):
-        value = arguments.get(id_arg)
+    for path in id_paths:
+        value = arguments
+        for key in path:
+            if not isinstance(value, dict):
+                value = None
+                break
+            value = value.get(key)
         if isinstance(value, str):
             return value
     return str(context.message.name)

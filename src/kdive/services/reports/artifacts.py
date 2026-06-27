@@ -16,12 +16,12 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
+from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.db.repositories import ARTIFACTS
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.services.reports import Report
+from kdive.services.reports.core import Report
 from kdive.services.reports.render import render_csv, render_xlsx
-from kdive.store.objectstore import register_artifact_row
 
 _TENANT = "local"
 _RETENTION_CLASS = "report"

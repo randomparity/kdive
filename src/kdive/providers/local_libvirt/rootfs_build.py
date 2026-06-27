@@ -6,9 +6,7 @@ provenance** into the :class:`RootfsBuildOutput`. The pipeline is:
 
 1. resolve the kdive-managed SSH public key (ADR-0052 — the single source of truth shared with
    the connect-time ``ssh -i`` identity);
-2. resolve the catalog row for ``spec.name`` (its base ``source`` + ``family``); an uncataloged
-   old-style spec falls back to a ``virt-builder:<distro>-<releasever>`` template + the rhel family
-   so the legacy ``build-fs`` CLI keeps working until it moves to ``--image`` (Task 6, ADR-0251);
+2. resolve the catalog row for ``spec.name`` (its base ``source`` + ``family``);
 3. :func:`kdive.images.base_source.acquire_base` materializes the base into a scratch qcow2 — a
    ``virt-builder`` template or a sha256-pinned cloud image;
 4. ``virt-customize`` applies the family's argv (``family.customize_argv``): install the package
@@ -60,8 +58,7 @@ from kdive.images.rootfs_catalog import (
     CloudImageSource,
     RootfsCatalogEntry,
     RootfsSource,
-    VirtBuilderSource,
-    load_rootfs_catalog,
+    resolve_rootfs_entry,
 )
 from kdive.prereqs.managed_ssh_key import (
     ManagedKeyError,
@@ -92,7 +89,7 @@ def _resolve_managed_public_key() -> Path:
         ) from exc
 
 
-def _run(argv: list[str], *, stage: str, timeout_s: int) -> None:
+def _run_libguestfs_tool(argv: list[str], *, stage: str, timeout_s: int) -> None:
     """Run a fixed-argv libguestfs tool, mapping failure onto a categorized error."""
     run_guestfs_tool(
         argv,
@@ -104,7 +101,7 @@ def _run(argv: list[str], *, stage: str, timeout_s: int) -> None:
 
 def _real_virt_builder(*, template: str, output: Path) -> None:  # pragma: no cover - live_vm
     """Acquire a base scratch image from a ``virt-builder`` template (the acquire_base seam)."""
-    _run(
+    _run_libguestfs_tool(
         ["virt-builder", template, "--format", "qcow2", "--output", str(output)],
         stage="virt-builder",
         timeout_s=_ACQUIRE_TIMEOUT_S,
@@ -113,7 +110,7 @@ def _real_virt_builder(*, template: str, output: Path) -> None:  # pragma: no co
 
 def _real_virt_customize(qcow2: Path, argv: list[str]) -> None:  # pragma: no cover - live_vm
     """Apply the family's customization argv to the acquired scratch via ``virt-customize``."""
-    _run(
+    _run_libguestfs_tool(
         ["virt-customize", "-a", str(qcow2), *argv],
         stage="virt-customize",
         timeout_s=_CUSTOMIZE_TIMEOUT_S,
@@ -125,12 +122,12 @@ def _real_repack_whole_disk_ext4(*, scratch: Path, qcow2: Path, size: str) -> No
     with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as handle:
         tar_path = Path(handle.name)
     try:
-        _run(
+        _run_libguestfs_tool(
             ["virt-tar-out", "-a", str(scratch), "/", str(tar_path)],
             stage="virt-tar-out",
             timeout_s=_REPACK_TIMEOUT_S,
         )
-        _run(
+        _run_libguestfs_tool(
             [
                 "virt-make-fs",
                 "--type=ext4",
@@ -170,32 +167,8 @@ class RootfsBuildTools:
 
 
 def _resolve_entry(spec: RootfsBuildSpec) -> RootfsCatalogEntry:
-    """Resolve the catalog row for ``spec.name``, synthesizing a virt-builder fallback if absent.
-
-    A spec built the old way (``build-fs`` without ``--image``, until Task 6) carries a name that
-    may not be a catalog row; it falls back to a ``virt-builder:<distro>-<releasever>`` template +
-    the rhel family so the legacy CLI keeps building. A malformed catalog still raises.
-    """
-    entry = load_rootfs_catalog().get(spec.name)
-    if entry is not None:
-        return entry
-    return RootfsCatalogEntry(
-        name=spec.name,
-        distro=spec.distro,
-        version=spec.releasever,
-        family="rhel",
-        arch=spec.arch,
-        kind=_kind_for(spec.capabilities),
-        source=VirtBuilderSource(template=f"{spec.distro}-{spec.releasever}"),
-        # A synthesized legacy row makes no makedumpfile-version claim; an empty value makes the
-        # computed predicate yield ``unverified`` (the build-time probe records the real version).
-        makedumpfile_version="",
-    )
-
-
-def _kind_for(capabilities: tuple[str, ...]) -> str:
-    """Derive the image ``kind`` for a synthesized fallback row from its capability tags."""
-    return "build" if "build" in capabilities else "debug"
+    """Resolve the catalog row for ``spec.name``; uncataloged builds are rejected."""
+    return resolve_rootfs_entry(spec.name)
 
 
 def _source_digest(source: RootfsSource) -> str:

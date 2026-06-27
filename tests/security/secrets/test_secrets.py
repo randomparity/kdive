@@ -64,7 +64,7 @@ def test_resolved_value_is_masked_by_redactor(tmp_path: Path) -> None:
     _write(tmp_path, "key", "s3cr3t-value\n")
     backend = FileRefBackend(tmp_path, registry)
     value = backend.resolve(str(tmp_path / "key"))
-    redactor = Redactor(list(registry.snapshot()))
+    redactor = Redactor(registry=registry)
     assert redactor.redact_text(f"output {value} here") == f"output {REDACTION} here"
 
 
@@ -74,7 +74,7 @@ def test_register_before_return_post_condition(tmp_path: Path) -> None:
     backend = FileRefBackend(tmp_path, registry)
     value = backend.resolve(str(tmp_path / "key"))
     assert value in registry.snapshot()
-    redactor = Redactor(list(registry.snapshot()))
+    redactor = Redactor(registry=registry)
     assert REDACTION in redactor.redact_text(f"saw {value}")
 
 

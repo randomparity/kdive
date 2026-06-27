@@ -15,11 +15,15 @@ from uuid import UUID
 
 from kdive.build_artifacts.results import BuildOutput
 from kdive.db.build_hosts import BuildHost, BuildHostKind, BuildHostState
-from kdive.jobs.build_telemetry import BuildPhaseRecorder
+from kdive.observability.build_telemetry import BuildPhaseRecorder
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
-from kdive.providers.ports import TransportCapableBuilder
+from kdive.providers.ports.build import (
+    Builder,
+    TransportCapableBuilder,
+)
 from kdive.providers.ports.build_transport import BuildTransport, CommandResult
 from kdive.providers.shared.build_host.dispatch import (
+    BuildHostDispatchRequest,
     BuildHostTransportFactory,
     _build_over_transport_session,
     run_build_on_host,
@@ -55,6 +59,23 @@ def _warm_parsed() -> ServerBuildProfile:
     return parsed
 
 
+def _request(
+    builder: object,
+    host: BuildHost,
+    parsed: ServerBuildProfile,
+    *,
+    kernel_src: str = "",
+) -> BuildHostDispatchRequest:
+    return BuildHostDispatchRequest(
+        builder=cast(Builder, builder),
+        host=host,
+        run_id=_RUN_ID,
+        parsed=parsed,
+        secret_registry=SecretRegistry(),
+        kernel_src=kernel_src,
+    )
+
+
 def _local_host() -> BuildHost:
     return BuildHost(
         id=UUID("00000000-0000-0000-0000-0000000000d2"),
@@ -88,7 +109,7 @@ def _ephemeral_host() -> BuildHost:
 
 
 # ---------------------------------------------------------------------------
-# transport_git_checkout writes provenance into a caller-provided sink
+# transport_git_checkout returns explicit provenance
 # ---------------------------------------------------------------------------
 
 
@@ -109,23 +130,20 @@ class _CloneTransport:
         return None
 
 
-def test_transport_git_checkout_records_stripped_provenance_into_sink() -> None:
-    sink: dict[str, str] = {}
+def test_transport_git_checkout_returns_stripped_provenance() -> None:
     checkout = transport_git_checkout(
         cast(BuildTransport, _CloneTransport()),
         _CREDENTIALED_REMOTE,
         "v6.9",
         SecretRegistry(),
-        provenance_sink=sink,
     )
-    checkout(_RUN_ID, _git_parsed(), Path("/ws"), b"FRAG=y\n")
+    provenance = checkout(_RUN_ID, _git_parsed(), Path("/ws"), b"FRAG=y\n")
 
     # The credentialed remote is userinfo-stripped before entering provenance.
-    assert sink == {
-        "remote": "https://git.example/linux.git",
-        "ref": "v6.9",
-        "resolved_commit": _SHA,
-    }
+    assert provenance is not None
+    assert provenance.remote == "https://git.example/linux.git"
+    assert provenance.ref == "v6.9"
+    assert provenance.resolved_commit == _SHA
 
 
 def test_transport_git_checkout_without_sink_does_not_raise() -> None:
@@ -149,23 +167,25 @@ class _FakeTransport:
 
 
 class _SinkRecordingBuilder:
-    """A transport-capable builder that writes a canned SHA into the provenance sink it gets."""
+    """A transport-capable builder whose bound build returns explicit clone provenance."""
 
     def __init__(self, *, write_sink: bool = True) -> None:
         self.write_sink = write_sink
 
-    def over_transport(
-        self, transport: object, *, provenance_sink: dict[str, str] | None = None, **_kw: object
-    ) -> _SinkRecordingBuilder:
-        self._sink = provenance_sink
+    def over_transport(self, transport: object, **_kw: object) -> _SinkRecordingBuilder:
         return self
 
     def build(self, run_id: UUID, profile: object, **_: object) -> BuildOutput:
-        if self.write_sink and self._sink is not None:
-            self._sink["remote"] = "https://git.example/linux.git"
-            self._sink["ref"] = "v6.9"
-            self._sink["resolved_commit"] = _SHA
-        return BuildOutput(kernel_ref="k", debuginfo_ref="d", build_id="b")
+        output = BuildOutput(kernel_ref="k", debuginfo_ref="d", build_id="b")
+        if not self.write_sink:
+            return output
+        return output._replace(
+            build_provenance={
+                "remote": "https://git.example/linux.git",
+                "ref": "v6.9",
+                "resolved_commit": _SHA,
+            }
+        )
 
 
 def _factory_for(ctx_transport: _FakeTransport) -> BuildHostTransportFactory:
@@ -254,12 +274,7 @@ def test_local_git_build_records_full_stripped_provenance() -> None:
     host = _local_host()
     out = asyncio.run(
         run_build_on_host(
-            cast(TransportCapableBuilder, builder),
-            host,
-            _RUN_ID,
-            _git_parsed(),
-            secret_registry=SecretRegistry(),
-            kernel_src="",
+            _request(cast(TransportCapableBuilder, builder), host, _git_parsed()),
         )
     )
     # The dispatch LOCAL git branch appends build_host to the clone-filled provenance, and the
@@ -278,12 +293,7 @@ def test_local_git_build_no_provenance_when_clone_records_nothing() -> None:
     builder = _LocalGitBuilder(sink, fill=False)
     out = asyncio.run(
         run_build_on_host(
-            cast(TransportCapableBuilder, builder),
-            _local_host(),
-            _RUN_ID,
-            _git_parsed(),
-            secret_registry=SecretRegistry(),
-            kernel_src="",
+            _request(cast(TransportCapableBuilder, builder), _local_host(), _git_parsed()),
         )
     )
     assert out.build_provenance is None
@@ -329,12 +339,12 @@ def test_warm_tree_records_label_and_resolved_commit(tmp_path: Path) -> None:
     builder = _WarmBuilder()
     out = asyncio.run(
         run_build_on_host(
-            cast(TransportCapableBuilder, builder),
-            _local_host(),
-            _RUN_ID,
-            _warm_parsed(),
-            secret_registry=SecretRegistry(),
-            kernel_src=str(tmp_path),
+            _request(
+                cast(TransportCapableBuilder, builder),
+                _local_host(),
+                _warm_parsed(),
+                kernel_src=str(tmp_path),
+            ),
         )
     )
     assert builder.called is True
@@ -346,12 +356,12 @@ def test_warm_tree_non_git_source_degrades_to_label_only(tmp_path: Path) -> None
     builder = _WarmBuilder()
     out = asyncio.run(
         run_build_on_host(
-            cast(TransportCapableBuilder, builder),
-            _local_host(),
-            _RUN_ID,
-            _warm_parsed(),
-            secret_registry=SecretRegistry(),
-            kernel_src=str(tmp_path),
+            _request(
+                cast(TransportCapableBuilder, builder),
+                _local_host(),
+                _warm_parsed(),
+                kernel_src=str(tmp_path),
+            ),
         )
     )
     assert builder.called is True

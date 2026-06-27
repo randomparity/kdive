@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Annotated
 
 from fastmcp import FastMCP
@@ -59,27 +60,51 @@ _MERGE_RECIPE = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _ValidatedBuildConfigInput:
+    data: bytes
+    sha256: str
+    cap: int
+
+
+def _validate_set_build_config_input(
+    name: str, content: str, description: str
+) -> _ValidatedBuildConfigInput | ToolResponse:
+    try:
+        validate_build_config_name(name)
+    except ValueError:
+        return ToolResponse.failure(
+            name,
+            ErrorCategory.CONFIGURATION_ERROR,
+            suggested_next_actions=[_SET_TOOL],
+            data={"field": "name"},
+        )
+    data = content.encode("utf-8")
+    cap = int(config.require(MAX_BUILD_CONFIG_BYTES))
+    if not data or exceeds_build_config_cap(data, cap):
+        return ToolResponse.failure(
+            name,
+            ErrorCategory.CONFIGURATION_ERROR,
+            suggested_next_actions=[_SET_TOOL],
+            data={"field": "content", "limit": cap, "actual": len(data)},
+        )
+    if len(description.encode("utf-8")) > _MAX_DESCRIPTION_BYTES:
+        return ToolResponse.failure(
+            name,
+            ErrorCategory.CONFIGURATION_ERROR,
+            suggested_next_actions=[_SET_TOOL],
+            data={"field": "description"},
+        )
+    return _ValidatedBuildConfigInput(data=data, sha256=hashlib.sha256(data).hexdigest(), cap=cap)
+
+
 async def read_build_config(
     conn: AsyncConnection,
     store: ObjectStore,
     *,
     name: str,
 ) -> ToolResponse:
-    """Fetch the seeded build-config fragment by name, returning bytes, sha256, and merge recipe.
-
-    Args:
-        conn: An open async psycopg connection.
-        store: The object store that holds the fragment bytes.
-        name: The fragment name to retrieve (e.g. ``"kdump"``).
-
-    Returns:
-        A :class:`ToolResponse` carrying ``content`` (the raw fragment text),
-        ``sha256`` (the catalog digest), and ``merge_recipe`` (the ``merge_config.sh``
-        invocation to apply the fragment onto a defconfig).
-
-    Raises:
-        CategorizedError: CONFIGURATION_ERROR when ``name`` is unknown.
-    """
+    """Return one fragment's bytes plus digest and merge recipe."""
     entry = await get_build_config(conn, name)
     if entry is None:
         raise CategorizedError(
@@ -111,27 +136,9 @@ async def set_build_config(
     content: str,
     description: str,
 ) -> ToolResponse:
-    """Publish/replace a build-config fragment (``platform_admin``; ADR-0119).
+    """Publish or replace an operator build-config fragment.
 
-    Serialized per fragment ``name`` on :attr:`LockScope.BUILD_CONFIG` (the same lock the seed
-    takes); the object PUT, the catalog upsert (``source='operator'``), and the
-    ``platform_audit_log`` row commit together. A non-``platform_admin`` caller is denied and,
-    when it holds some platform role, the denial is audited. The object store is resolved
-    (``store_factory``) **after** the authorization gate, so a denied caller never triggers — or
-    learns about — object-store configuration state and is always audited.
-
-    Args:
-        pool: The async connection pool.
-        store_factory: Resolves the object store; called only after the authz gate passes, so a
-            store-resolution failure is reachable only by an authorized caller.
-        ctx: The caller's request context.
-        name: The fragment name (lowercase ``a-z0-9_-``; folds into the object key).
-        content: The full kernel-config fragment text (UTF-8).
-        description: An optional human label; empty preserves the prior description.
-
-    Returns:
-        A :class:`ToolResponse`: ``published`` with ``{name, sha256, bytes, source}`` on success,
-        or a failure envelope (``AUTHORIZATION_DENIED`` / ``CONFIGURATION_ERROR``).
+    The object store is resolved only after platform-admin authorization and input validation.
     """
     try:
         require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)
@@ -143,32 +150,9 @@ async def set_build_config(
             name, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[_SET_TOOL]
         )
     with bind_context(principal=ctx.principal):
-        try:
-            validate_build_config_name(name)
-        except ValueError:
-            return ToolResponse.failure(
-                name,
-                ErrorCategory.CONFIGURATION_ERROR,
-                suggested_next_actions=[_SET_TOOL],
-                data={"field": "name"},
-            )
-        data = content.encode("utf-8")
-        cap = int(config.require(MAX_BUILD_CONFIG_BYTES))
-        if not data or exceeds_build_config_cap(data, cap):
-            return ToolResponse.failure(
-                name,
-                ErrorCategory.CONFIGURATION_ERROR,
-                suggested_next_actions=[_SET_TOOL],
-                data={"field": "content", "limit": cap, "actual": len(data)},
-            )
-        if len(description.encode("utf-8")) > _MAX_DESCRIPTION_BYTES:
-            return ToolResponse.failure(
-                name,
-                ErrorCategory.CONFIGURATION_ERROR,
-                suggested_next_actions=[_SET_TOOL],
-                data={"field": "description"},
-            )
-        sha256 = hashlib.sha256(data).hexdigest()
+        validated = _validate_set_build_config_input(name, content, description)
+        if isinstance(validated, ToolResponse):
+            return validated
         store = store_factory()  # resolved only after the authz gate + validation
         async with (
             pool.connection() as conn,
@@ -182,12 +166,14 @@ async def set_build_config(
                     owner_kind="build-configs",
                     owner_id=name,
                     name=f"{name}.config",
-                    data=data,
+                    data=validated.data,
                     sensitivity=Sensitivity.REDACTED,
                     retention_class="build-config",
                 ),
             )
-            await upsert_operator_build_config(conn, name, written.key, sha256, description)
+            await upsert_operator_build_config(
+                conn, name, written.key, validated.sha256, description
+            )
             await audit.record_platform(
                 conn,
                 principal=ctx.principal,
@@ -195,7 +181,7 @@ async def set_build_config(
                 event=audit.PlatformAuditEvent(
                     tool=_SET_TOOL,
                     scope=name,
-                    args={"name": name, "sha256": sha256, "bytes": len(data)},
+                    args={"name": name, "sha256": validated.sha256, "bytes": len(validated.data)},
                     platform_role=held_platform_roles(ctx),
                     actor=actor_for(ctx),
                 ),
@@ -204,7 +190,12 @@ async def set_build_config(
             name,
             "published",
             suggested_next_actions=[_TOOL],
-            data={"name": name, "sha256": sha256, "bytes": len(data), "source": "operator"},
+            data={
+                "name": name,
+                "sha256": validated.sha256,
+                "bytes": len(validated.data),
+                "source": "operator",
+            },
         )
 
 
@@ -223,20 +214,7 @@ def _entry_envelope(entry: BuildConfigEntry) -> ToolResponse:
 
 
 async def list_build_config_entries(pool: AsyncConnectionPool, ctx: RequestContext) -> ToolResponse:
-    """List every build-config fragment as a sorted catalog index (authenticated; no RBAC).
-
-    Returns identity + provenance (``name``, ``sha256``, ``source``, ``description``) per row,
-    never the fragment bytes — ``buildconfig.get`` serves those by name. An empty catalog is an
-    empty ``ok`` collection. The catalog is shared, non-sensitive infra, so any authenticated
-    caller may read it (the ``buildconfig.get`` / ``images.list`` / ``shapes.list`` precedent).
-
-    Args:
-        pool: The async connection pool.
-        ctx: The caller's request context (authenticated; no project scope needed).
-
-    Returns:
-        A collection :class:`ToolResponse` of per-row sub-envelopes, sorted by ``name``.
-    """
+    """List shared build-config metadata for authenticated callers; no fragment bytes."""
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             entries = await list_build_configs(conn)
@@ -254,24 +232,8 @@ async def delete_build_config(
 ) -> ToolResponse:
     """Delete an operator-published fragment (``platform_admin``; audited).
 
-    Mirrors :func:`set_build_config`'s gate exactly: a non-``platform_admin`` caller is denied
-    and, when it holds some platform role, the denial is audited. Serialized per ``name`` on
-    :attr:`LockScope.BUILD_CONFIG` (the same lock ``set``/seed take), so the source-scoped
-    delete and its provenance-for-reason read cannot interleave with a concurrent ``set``.
-    Removes only a ``source='operator'`` row; a ``seed``/``config`` row is refused with
-    ``CONFIGURATION_ERROR`` + ``data.reason='not_operator_source'`` (a ``config`` row is
-    re-asserted by the reconcile pass; a ``seed`` is the packaged baseline), and a missing name
-    is ``CONFIGURATION_ERROR`` + ``data.reason='not_found'``. Only a successful removal writes a
-    success audit row. The fragment's object-store bytes are left in place (ADR-0231).
-
-    Args:
-        pool: The async connection pool.
-        ctx: The caller's request context.
-        name: The fragment name to remove.
-
-    Returns:
-        A ``deleted`` :class:`ToolResponse` on success, or a failure envelope
-        (``AUTHORIZATION_DENIED`` / ``CONFIGURATION_ERROR``).
+    Only ``source='operator'`` rows are removable; seeded/configured rows are refused, and
+    object-store bytes are intentionally retained (ADR-0231).
     """
     try:
         require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)

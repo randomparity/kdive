@@ -20,10 +20,10 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, RESOURCES
-from kdive.domain.accounting import Budget
+from kdive.domain.accounting.records import Budget
 from kdive.domain.capacity.state import AllocationState, ResourceStatus
 from kdive.domain.catalog.resources import Resource, ResourceKind
-from kdive.domain.lifecycle import Allocation
+from kdive.domain.lifecycle.records import Allocation
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import renew_allocation
 from kdive.security.authz.rbac import AuthorizationError, Role

@@ -23,12 +23,12 @@ from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory_optional
 from kdive.inventory.model import ImageEntry, InventoryDoc, RemoteLibvirtInstance, StagedSource
 from kdive.inventory.path import systems_toml_path
+from kdive.providers.remote_libvirt.connection.uri_validation import validate_remote_uri
 from kdive.providers.remote_libvirt.settings import (
     REMOTE_LIBVIRT_MACHINE,
     REMOTE_LIBVIRT_NETWORK,
     REMOTE_LIBVIRT_STORAGE_POOL,
 )
-from kdive.providers.remote_libvirt.uri_validation import validate_remote_uri
 
 _DEFAULT_STORAGE_POOL = "default"
 _DEFAULT_NETWORK = "default"

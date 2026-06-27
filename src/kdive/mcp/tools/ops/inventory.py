@@ -36,7 +36,7 @@ from kdive.inventory.overrides import (
     OverrideIdentity,
 )
 from kdive.inventory.overrides import clear_override as clear_override_entry
-from kdive.inventory.reconcile import resource_identity_lock
+from kdive.inventory.reconcile.locks import resource_identity_lock
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse

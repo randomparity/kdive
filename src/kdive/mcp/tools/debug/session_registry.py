@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import GdbMiAttachment
+from kdive.providers.ports.debug import GdbMiAttachment
 
 
 class GdbMiSessionRegistry:

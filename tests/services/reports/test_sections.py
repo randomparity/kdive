@@ -26,7 +26,7 @@ from kdive.db.repositories import (
     RUNS,
     SYSTEMS,
 )
-from kdive.domain.accounting import Budget
+from kdive.domain.accounting.records import Budget
 from kdive.domain.capacity.state import (
     AllocationState,
     InvestigationState,
@@ -36,9 +36,9 @@ from kdive.domain.capacity.state import (
 )
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.catalog.resources import Resource, ResourceKind
-from kdive.domain.lifecycle import Allocation, Investigation, Run, System
+from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.services.accounting import ledger as accounting
-from kdive.services.reports import ReportScope
+from kdive.services.reports.core import ReportScope
 from kdive.services.reports.sections import (
     ActivitySection,
     CostsSection,

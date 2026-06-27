@@ -1,6 +1,7 @@
 """The production local warm-tree source probe adapter (ADR-0163, #533/#532).
 
-The build-host boundary for :class:`~kdive.diagnostics.checks.LocalKernelSrcCheck`: it resolves
+The build-host boundary for
+:class:`~kdive.diagnostics.local_kernel_src_check.LocalKernelSrcCheck`: it resolves
 ``KDIVE_KERNEL_SRC`` from the config snapshot and classifies it over the single shared
 ``warm_tree_source_error`` predicate (``db/build_host_policy.py``) — the same rule
 the build-time ``sync_tree`` and the admission-time ``check_warm_tree_source_admission`` enforce
@@ -26,13 +27,14 @@ from collections.abc import Awaitable, Callable
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
+from kdive.build_artifacts.provenance import rev_parse_head
 from kdive.config.core_settings import KERNEL_SRC
 from kdive.db.build_host_policy import (
     KERNEL_SRC_UNSET_DETAIL,
     warm_tree_source_error,
 )
 from kdive.db.build_hosts import WORKER_LOCAL_ID, get_by_id
-from kdive.diagnostics.checks import (
+from kdive.diagnostics.local_kernel_src_check import (
     WarmTreeSourceOutcome,
     WarmTreeSourceProbe,
     WarmTreeSourceProbeResult,
@@ -41,7 +43,7 @@ from kdive.diagnostics.checks import (
 _log = logging.getLogger(__name__)
 
 # The git HEAD short-commit length disclosed in CheckResult.data (the 12-char prefix of the full
-# SHA `_rev_parse_head` returns) — long enough to be unambiguous, short enough to read (#845).
+# SHA `rev_parse_head` returns) — long enough to be unambiguous, short enough to read (#845).
 _SHORT_COMMIT_LEN = 12
 # The bound on the whole best-effort git read (commit + branch), kept well under the diagnostics
 # per-check budget (10s, `checks.py` `run_check`) so a slow/hung tree leaves the git fields unset
@@ -61,7 +63,7 @@ def _kernel_src_from_config() -> str:
 def _rev_parse_branch(tree: str) -> str | None:
     """Return the current branch (``git -C <tree> rev-parse --abbrev-ref HEAD``), or ``None``.
 
-    Best-effort, mirroring ``dispatch._rev_parse_head``: any failure (not a git tree, ``git``
+    Best-effort, mirroring ``rev_parse_head``: any failure (not a git tree, ``git``
     absent) or a detached HEAD (``--abbrev-ref`` prints ``HEAD``) yields ``None`` — there is no
     named branch to disclose.
     """
@@ -75,7 +77,7 @@ def _rev_parse_branch(tree: str) -> str | None:
             timeout=_GIT_READ_TIMEOUT,
             check=False,
         )
-    except OSError, subprocess.SubprocessError:
+    except (OSError, subprocess.SubprocessError) as _exc:
         return None
     if proc.returncode != 0:
         return None
@@ -88,17 +90,11 @@ def _rev_parse_branch(tree: str) -> str | None:
 def _git_head(tree: str) -> tuple[str | None, str | None]:
     """Return ``(short_commit, branch)`` for a git checkout, best-effort (``(None, None)`` else).
 
-    Reuses ``dispatch._rev_parse_head`` (the same best-effort ``git rev-parse HEAD`` the
-    post-build provenance path uses) via a function-local import — ``diagnostics → providers`` is
-    the only legal import direction, and the local import keeps this module's top-level import
-    graph narrow. The branch is read only when a commit was found, so a non-git tree costs one
-    failed ``rev-parse`` rather than two. Blocking; callers offload it with ``asyncio.to_thread``.
+    Reuses the neutral provenance helper shared with post-build provenance. The branch is read
+    only when a commit was found, so a non-git tree costs one failed ``rev-parse`` rather than two.
+    Blocking; callers offload it with ``asyncio.to_thread``.
     """
-    # Function-local import: dispatch pulls a wide provider graph; importing it here keeps the
-    # diagnostics adapter's top-level imports narrow (the service.py buildhost_agent pattern).
-    from kdive.providers.shared.build_host.dispatch import _rev_parse_head
-
-    commit = _rev_parse_head(tree)
+    commit = rev_parse_head(tree, timeout=_GIT_READ_TIMEOUT)
     if commit is None:
         return None, None
     return commit[:_SHORT_COMMIT_LEN], _rev_parse_branch(tree)

@@ -46,6 +46,14 @@ def test_loads_both_fedora_entries() -> None:
     assert {"fedora-kdive-ready-43", "fedora-kdive-ready-44"} <= set(cat)
 
 
+def test_loads_fedora_build_host_entry() -> None:
+    cat = load_rootfs_catalog()
+    entry = cat["fedora-kdive-build-44"]
+    assert entry.kind == "build"
+    assert entry.distro == "fedora"
+    assert entry.version == "44"
+
+
 def test_loads_all_rhel_family_entries() -> None:
     cat = load_rootfs_catalog()
     assert {

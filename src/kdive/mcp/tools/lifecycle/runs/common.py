@@ -8,7 +8,7 @@ from uuid import UUID
 from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory, suppressed_detail
-from kdive.domain.lifecycle import Run
+from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import Job
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import job_envelope
@@ -139,6 +139,89 @@ def _succeeded_next_step(run: Run, progress: StepProgress | None) -> list[str]:
     return ["debug.start_session"]
 
 
+def _run_step_data(
+    run: Run, step_progress: StepProgress | None, boot_readiness: BootAttempt | None
+) -> dict[str, JsonValue]:
+    data: dict[str, JsonValue] = {}
+    if step_progress is not None:
+        data["steps"] = cast(JsonValue, step_progress.steps_map())
+    if boot_readiness is not None:
+        # The boot step row was deleted on terminal failure (ADR-0185), so `steps.boot` reads
+        # `pending`; surface the surviving failed boot job as evidence (#750, ADR-0230). Only the
+        # SUCCEEDED read path passes a non-None value, so this stays scoped to `runs.get`.
+        data["boot_readiness"] = cast(JsonValue, boot_readiness.as_data())
+    if (
+        step_progress is not None
+        and step_progress.boot_outcome == READY_BOOT_OUTCOME
+        and run.target_kind is ResourceKind.LOCAL_LIBVIRT
+    ):
+        # The success-path symmetry to the failure side: name what defined boot success (the
+        # kdive-ready console marker reached with no pre-marker crash) so the agent need not scrape
+        # the console to trust the verdict (#837, ADR-0254). Gated on local-libvirt: remote-libvirt
+        # confirms readiness by boot-id change (ADR-0082), not the console marker.
+        data["boot_outcome"] = cast(JsonValue, ready_boot_outcome())
+    return data
+
+
+def _required_cmdline_data(required_cmdline: str | None) -> dict[str, JsonValue]:
+    if required_cmdline is None:
+        return {}
+    # The platform-owned boot args (#748). Extra kernel debug args are appended via
+    # runs.build.cmdline, or runs.complete_build.cmdline for external builds.
+    return {"required_cmdline": required_cmdline}
+
+
+def _expected_boot_failure_data(
+    run: Run, step_progress: StepProgress | None
+) -> dict[str, JsonValue]:
+    if run.expected_boot_failure is None:
+        return {}
+
+    data: dict[str, JsonValue] = {
+        "expected_boot_failure_detail": cast(JsonValue, run.expected_boot_failure)
+    }
+    kind = run.expected_boot_failure.get("kind")
+    if isinstance(kind, str):
+        data["expected_boot_failure"] = kind
+    if step_progress is not None and step_progress.matched_line is not None:
+        # The actual console line that matched the configured pattern (#840, ADR-0260), surfaced
+        # alongside `expected_boot_failure_detail` so an agent can confirm the intended crash.
+        data["expected_boot_failure_matched_line"] = step_progress.matched_line
+    return data
+
+
+def _capture_data(step_progress: StepProgress | None) -> dict[str, JsonValue]:
+    if step_progress is None:
+        return {}
+
+    data: dict[str, JsonValue] = {}
+    if step_progress.available_capture is not None:
+        # The crash outcome's reachable-now capture methods, and the provisioned-but-inert ones,
+        # so an agent learns which capture flags will not fire on this boot (#760, ADR-0239).
+        data["available_capture"] = cast(JsonValue, step_progress.available_capture)
+    if step_progress.inert_capture is not None:
+        data["inert_capture"] = cast(JsonValue, step_progress.inert_capture)
+        if step_progress.boot_outcome == "expected_crash_observed":
+            # Console-crash panic precedes kexec, so live attach/vmcore are impossible by design
+            # (#802). Reuse the same wording as debug.start_session/vmcore.fetch.
+            data["inert_capture_reason"] = CONSOLE_CRASH_GUIDANCE
+    return data
+
+
+def _build_provenance_data(build_provenance: dict[str, str] | None) -> dict[str, JsonValue]:
+    if build_provenance is None:
+        return {}
+    # The build-step provenance recorded at write time (#778). Passed through verbatim:
+    # userinfo-stripped at write time, and absent entirely when no provenance was recorded.
+    return {"build_provenance": cast(JsonValue, build_provenance)}
+
+
+def _console_access_data(console_ref: str | None) -> dict[str, JsonValue]:
+    if console_ref is None:
+        return {}
+    return {"console_access": cast(JsonValue, dict(_CONSOLE_ACCESS_HINT))}
+
+
 def envelope_for_run(
     run: Run,
     *,
@@ -171,84 +254,30 @@ def envelope_for_run(
     if run.state is RunState.FAILED:
         category = run.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE
         return _failed_envelope(run, category, failing_job)
-    steps: dict[str, str] | None = None
+
     if run.state in (RunState.CREATED, RunState.RUNNING):
         actions = ["runs.get", "runs.build"]
     elif run.state is RunState.SUCCEEDED:
         # Build-succeeded; install/boot live in run_steps (ADR-0179). Walk the progression
         # and surface the per-step map so a caller need not infer it from Run.state.
         actions = ["runs.get", *_succeeded_next_step(run, step_progress)]
-        if step_progress is not None:
-            steps = step_progress.steps_map()
     else:  # CANCELED — terminal, nothing to advance.
         actions = ["runs.get"]
+
+    console_ref = step_progress.console_evidence_artifact_id if step_progress is not None else None
     data: dict[str, JsonValue] = {
         "project": run.project,
         "target_kind": run.target_kind.value,
         "system_id": str(run.system_id) if run.system_id is not None else None,
         "active_debug_session_ids": list(active_debug_session_ids or []),
+        **_run_step_data(run, step_progress, boot_readiness),
+        **_required_cmdline_data(required_cmdline),
+        **_expected_boot_failure_data(run, step_progress),
+        **_capture_data(step_progress),
+        **_build_provenance_data(build_provenance),
+        **_run_recovery(run),
+        **_console_access_data(console_ref),
     }
-    if steps is not None:
-        data["steps"] = cast(JsonValue, steps)
-    if boot_readiness is not None:
-        # The boot step row was deleted on terminal failure (ADR-0185), so `steps.boot` reads
-        # `pending`; surface the surviving failed boot job as evidence (#750, ADR-0230). Only the
-        # SUCCEEDED read path passes a non-None value, so this stays scoped to `runs.get`.
-        data["boot_readiness"] = cast(JsonValue, boot_readiness.as_data())
-    if (
-        step_progress is not None
-        and step_progress.boot_outcome == READY_BOOT_OUTCOME
-        and run.target_kind is ResourceKind.LOCAL_LIBVIRT
-    ):
-        # The success-path symmetry to the failure side: name what defined boot success (the
-        # kdive-ready console marker reached with no pre-marker crash) so the agent need not scrape
-        # the console to trust the verdict (#837, ADR-0254). The descriptor is single-sourced in
-        # `services.runs.steps` so the wording cannot drift; it carries only build-time constants,
-        # so it is redaction-safe. Gated on local-libvirt: remote-libvirt also records
-        # `boot_outcome: "ready"` but confirms readiness by a boot-id change (ADR-0082), not the
-        # console marker, so this console-marker descriptor would misreport a remote boot.
-        data["boot_outcome"] = cast(JsonValue, ready_boot_outcome())
-    if required_cmdline is not None:
-        # The platform-owned boot args (#748). Extra kernel debug args are not set here: they
-        # are appended via runs.build.cmdline (or runs.complete_build.cmdline for external
-        # builds), bound on the Run's first build.
-        data["required_cmdline"] = required_cmdline
-    if run.expected_boot_failure is not None:
-        kind = run.expected_boot_failure.get("kind")
-        if isinstance(kind, str):
-            data["expected_boot_failure"] = kind
-        data["expected_boot_failure_detail"] = cast(JsonValue, run.expected_boot_failure)
-        if step_progress is not None and step_progress.matched_line is not None:
-            # The actual console line that matched the configured pattern (#840, ADR-0260),
-            # surfaced alongside the configured `expected_boot_failure_detail` so an agent can
-            # confirm the boot reproduced the intended crash, not an unrelated pattern hit. The
-            # boot handler read it from the already-redacted console and `search_text` clipped it,
-            # so it is redaction-safe and length-bounded; present only when a crash actually
-            # matched.
-            data["expected_boot_failure_matched_line"] = step_progress.matched_line
-    if step_progress is not None and step_progress.available_capture is not None:
-        # The crash outcome's reachable-now capture methods, and the provisioned-but-inert ones,
-        # so an agent learns which capture flags will not fire on this boot (#760, ADR-0239).
-        data["available_capture"] = cast(JsonValue, step_progress.available_capture)
-    if step_progress is not None and step_progress.inert_capture is not None:
-        data["inert_capture"] = cast(JsonValue, step_progress.inert_capture)
-        if step_progress.boot_outcome == "expected_crash_observed":
-            # The reason the inert methods cannot fire on a console_crash boot: the panic
-            # precedes kexec, so live attach/vmcore are impossible by design (#802). Reuse the
-            # one shared constant that debug.start_session/vmcore.fetch surface as their failure
-            # detail so the wordings cannot drift; it interpolates no guest output, so surfacing
-            # it on the success path is redaction-safe. Gated on the outcome so the
-            # console_crash-specific wording stays accurate.
-            data["inert_capture_reason"] = CONSOLE_CRASH_GUIDANCE
-    if build_provenance is not None:
-        # The build-step provenance recorded at write time (Task 5, #778): remote, ref,
-        # resolved_commit, build_host. Passed through verbatim — userinfo-stripped at write time.
-        # Key is absent entirely when no provenance was recorded (not present-as-null).
-        data["build_provenance"] = cast(JsonValue, build_provenance)
-    data.update(_run_recovery(run))
-    console_ref = step_progress.console_evidence_artifact_id if step_progress is not None else None
-    if console_ref is not None:
-        data["console_access"] = cast(JsonValue, dict(_CONSOLE_ACCESS_HINT))
     return ToolResponse.success(
         str(run.id),
         run.state.value,

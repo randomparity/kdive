@@ -30,14 +30,17 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers import runs as runs_handlers
 from kdive.jobs.handlers import vmcore as vmcore_plane
+from kdive.jobs.handlers.runs import registrar as runs_handlers
 from kdive.jobs.payloads import Authorizing, BuildPayload, CaptureVmcorePayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.catalog.artifacts.reads import artifacts_get, artifacts_list
 from kdive.mcp.tools.lifecycle import control as control_tools
 from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
-from kdive.providers.ports import CaptureOutput, CrashOutput
+from kdive.providers.ports.retrieve import (
+    CaptureOutput,
+    CrashOutput,
+)
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.integration._seed import (

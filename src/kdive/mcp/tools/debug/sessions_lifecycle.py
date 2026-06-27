@@ -33,7 +33,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import DEBUG_SESSIONS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import DebugSessionState, RunState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import DebugSession, Run, System
+from kdive.domain.lifecycle.records import DebugSession, Run, System
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import ConfigErrorReason
@@ -42,19 +42,21 @@ from kdive.mcp.tools._common import capability_unsupported as _capability_unsupp
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
-from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
 from kdive.mcp.tools.debug.ops import DebugEngineRuntime, DebugRuntimeResolver
 from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
 from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
+from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
+from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.runtime import ProfilePolicy
-from kdive.providers.ports import (
+from kdive.providers.ports.handles import (
+    SystemHandle,
+    TransportHandle,
+)
+from kdive.providers.ports.lifecycle import (
     DEBUG_TRANSPORT_KINDS,
     Connector,
     DebugTransportKind,
-    SystemHandle,
-    TransportHandle,
 )
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext

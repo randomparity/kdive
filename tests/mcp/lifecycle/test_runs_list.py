@@ -29,7 +29,7 @@ from kdive.domain.capacity.state import (
 )
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.lifecycle import Allocation, Investigation, Run, System
+from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.runs.list import RunsListRequest, list_runs

@@ -19,6 +19,7 @@ from kdive.diagnostics.checks import (
     CheckResult,
     CheckStatus,
 )
+from kdive.domain.errors import ErrorCategory
 
 _ALLOWED_IDS = frozenset({PROVIDER_TLS_ID, GDBSTUB_ACL_ID})
 
@@ -38,7 +39,9 @@ def serialize_results(results: list[CheckResult]) -> str:
                     "detail": r.detail,
                     "fix": r.fix,
                     "provider": r.provider,
-                    "failure_category": r.failure_category,
+                    "failure_category": (
+                        r.failure_category.value if r.failure_category is not None else None
+                    ),
                     "resource_id": r.resource_id,
                 }
                 for r in results
@@ -75,7 +78,11 @@ def _reconstruct(item: Any) -> CheckResult:
             detail=item["detail"],
             fix=item.get("fix"),
             provider=item.get("provider"),
-            failure_category=item.get("failure_category"),
+            failure_category=(
+                ErrorCategory(item["failure_category"])
+                if item.get("failure_category") is not None
+                else None
+            ),
             resource_id=item.get("resource_id"),
         )
     except (KeyError, ValueError) as exc:  # missing field, bad enum, or invariant violation

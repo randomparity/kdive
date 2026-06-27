@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.operations.jobs import DestructiveJobKind
+from kdive.domain.operations.jobs import JobKind
 from kdive.profiles.provisioning import (
     SUPPORTED_DOMAIN_XML_PARAMS,
     ProvisioningProfile,
@@ -36,7 +36,7 @@ class LocalLibvirtProfilePolicy:
             )
         validate_rootfs_reference(section.rootfs)
 
-    def destructive_opt_in(self, profile: ProvisioningProfile, op: DestructiveJobKind) -> bool:
+    def destructive_opt_in(self, profile: ProvisioningProfile, op: JobKind) -> bool:
         return op.value in profile.provider.local_libvirt.destructive_ops
 
     def capture_method(self, profile: ProvisioningProfile) -> CaptureMethod:

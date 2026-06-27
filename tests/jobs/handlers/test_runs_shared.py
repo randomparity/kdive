@@ -15,7 +15,7 @@ from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState, SystemState
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers.runs_shared import finalize_build
+from kdive.jobs.handlers.runs.shared import finalize_build
 from kdive.jobs.payloads import BuildPayload
 from kdive.services.runs.steps import BuildStepResult
 from tests.integration._seed import (

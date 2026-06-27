@@ -23,10 +23,14 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
-| `limit` | integer | no | Maximum rows returned (capped at 200). |
-| `project` | string | yes | Project whose allocations to list. |
-| `state` | `requested`, `granted`, `active`, `releasing`, `released`, `expired`, `failed` (nullable) | no | Only allocations in this lifecycle state. |
+| `request` | object | yes | Allocations list filters and pagination request. |
+
+`request` fields:
+
+- `project` (`string`, required) — Project whose allocations to list.
+- `state` (``requested`, `granted`, `active`, `releasing`, `released`, `expired`, `failed` (nullable)`, optional) — Only allocations in this lifecycle state.
+- `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
+- `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
 
 ## `allocations.release`
 

@@ -19,14 +19,14 @@ from kdive.domain.build_phase import BuildPhase
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import ErrorCategory
 from kdive.health.metrics_text import render_prometheus
-from kdive.jobs.build_telemetry import BuildPhaseRecorder
 from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.jobs.worker_telemetry import WorkerTelemetry
-from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
+from kdive.observability.build_telemetry import BuildPhaseRecorder
+from kdive.observability.console_telemetry import ConsoleTelemetry
+from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.observability.labels import ALLOWED_LABEL_KEYS
 from kdive.reconciler.build_host_fleet import BuildHostSnapshot, BuildHostTelemetry
-from kdive.reconciler.console_telemetry import ConsoleTelemetry
 from kdive.reconciler.fleet import FleetSnapshot, FleetTelemetry
 from kdive.reconciler.loop import ALL_REPAIR_KINDS
 from kdive.reconciler.loop_telemetry import ReconcilerTelemetry

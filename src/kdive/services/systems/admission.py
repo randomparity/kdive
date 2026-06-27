@@ -30,13 +30,13 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, IllegalTransition, JobState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Allocation, System
+from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.lifecycle.sizing import MB_PER_GB, AllocationSizing
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.context import authorizing as job_authorizing
 from kdive.jobs.payloads import SystemPayload
-from kdive.profiles.provider_policy import reject_rootfs_upload_without_window
+from kdive.profiles.provider_policy import ProfilePolicy, reject_rootfs_upload_without_window
 from kdive.profiles.provisioning import (
     ProvisioningProfile,
     dump_profile,
@@ -44,7 +44,6 @@ from kdive.profiles.provisioning import (
     require_concrete_sizing,
 )
 from kdive.profiles.types import ProvisioningProfileInput
-from kdive.providers.core.runtime import ProfilePolicy
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role

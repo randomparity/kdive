@@ -118,14 +118,15 @@ Every `*.list` tool is opt-in keyset-paginated
 | `total` | `int` | Present only where it is cheap to compute (the bounded single-System `artifacts.list`). |
 | `count` | `int` | The per-page item count (always present on a collection). |
 
-Each list tool also takes an optional `cursor` request parameter (and a `limit`,
-default 50, capped at 200). To read a full result set, call the tool, then keep
-re-calling it with `cursor = data.next_cursor` until `data.truncated` is `false`:
+Paginated list tools take optional `cursor` and `limit` fields in their request
+payload; `limit` defaults to 50 and is capped at 200. To read a full result set,
+call the tool, then keep re-calling it with `cursor = data.next_cursor` until
+`data.truncated` is `false`:
 
 ```text
-page = jobs.list(limit=50)
+page = jobs.list(request={"limit": 50})
 while page.data.truncated:
-    page = jobs.list(limit=50, cursor=page.data.next_cursor)
+    page = jobs.list(request={"limit": 50, "cursor": page.data.next_cursor})
 ```
 
 Rules:

@@ -12,7 +12,7 @@ from pydantic import Field
 from kdive.domain.capacity.state import AllocationState
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import AllocationRequestPayload
+from kdive.mcp.tool_payloads import AllocationRequestPayload, ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import (
@@ -26,6 +26,21 @@ from kdive.mcp.tools.lifecycle.allocations.view import get_allocation as _get_al
 from kdive.mcp.tools.lifecycle.allocations.view import list_allocations as _list_allocations
 from kdive.mcp.tools.lifecycle.allocations.view import wait_allocation as _wait_allocation
 from kdive.services.allocation.admission.metrics import AdmissionMetrics
+
+
+class _AllocationsListPayload(ToolPayload):
+    """Public payload for ``allocations.list`` filters and pagination."""
+
+    project: str = Field(description="Project whose allocations to list.")
+    state: AllocationState | None = Field(
+        default=None, description="Only allocations in this lifecycle state."
+    )
+    limit: int = Field(
+        default=DEFAULT_LIST_LIMIT, description="Maximum rows returned (capped at 200)."
+    )
+    cursor: str | None = Field(
+        default=None, description="Opaque continuation cursor from a prior page's next_cursor."
+    )
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -131,17 +146,10 @@ def _register_allocations_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def allocations_list(
-        project: Annotated[str, Field(description="Project whose allocations to list.")],
-        state: Annotated[
-            AllocationState | None, Field(description="Only allocations in this lifecycle state.")
-        ] = None,
-        limit: Annotated[
-            int, Field(description="Maximum rows returned (capped at 200).")
-        ] = DEFAULT_LIST_LIMIT,
-        cursor: Annotated[
-            str | None,
-            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
-        ] = None,
+        request: Annotated[
+            _AllocationsListPayload,
+            Field(description="Allocations list filters and pagination request."),
+        ],
     ) -> ToolResponse:
         """List allocations visible in a project, newest first, filterable by state.
 
@@ -149,7 +157,12 @@ def _register_allocations_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         ``cursor`` for the next page. The ``state`` filter composes with the cursor.
         """
         return await _list_allocations(
-            pool, current_context(), project=project, limit=limit, cursor=cursor, state=state
+            pool,
+            current_context(),
+            project=request.project,
+            limit=request.limit,
+            cursor=request.cursor,
+            state=request.state,
         )
 
 

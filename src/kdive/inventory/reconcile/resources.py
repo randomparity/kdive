@@ -1,0 +1,654 @@
+"""The resource merge-reconcile (M2.6 #393, ADR-0112) — fixes #385.
+
+:func:`reconcile_resources` applies the ``systems.toml`` provider-instance declarations onto
+the ``resources`` table. ``managed_by`` governs **existence**; a **config overlay** applies
+declared attributes regardless of who created the row:
+
+* ``cost_class`` → the top-level ``resources.cost_class`` **column** (NOT NULL, read by
+  cost-coefficient resolution). It is **never** written into the ``capabilities`` jsonb — that
+  would leave the NOT NULL column stale and break pricing.
+* ``vcpus`` / ``memory_mb`` / ``concurrent_allocation_cap`` → the ``capabilities`` jsonb. The
+  fault-inject ``vcpus`` / ``memory_mb`` here are exactly what #385 lacked: without them a
+  kind-targeted ``allocations.request`` is denied ``configuration_error`` before reaching the
+  lifecycle.
+
+One creator per kind (avoids a Phase-2 double-create):
+
+* ``local-libvirt`` — **discovery** creates the row (it enumerates real hardware); this
+  reconcile **binds** to that row by ``host_uri``, gives it the config instance ``name``, and
+  overlays cost/cap **without** touching the discovery-owned ``vcpus`` / ``memory_mb`` / PCIe.
+* ``fault-inject`` / ``remote-libvirt`` — this reconcile is the **sole creator**
+  (``managed_by='config'``). Their provider discovery is bind-only/non-creating in Phase 2, so
+  the legacy env-based discovery and this reconcile never both insert a row for the same host.
+
+Identity is ``(kind, name)`` (the migration's partial-unique index); the ``id`` UUID stays the
+PK/FK target. A discovered ``local-libvirt`` host with no config instance keeps its row and is
+given a deterministic ``name`` derived from its ``host_uri`` (never pruned — it is
+discovery-owned). Prune touches only ``managed_by='config'`` rows; a config resource with a
+live allocation is **cordoned**, not deleted (the reaper-style refuse-if-live contract).
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, cast
+from uuid import UUID
+
+from psycopg import AsyncConnection
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+
+from kdive.domain.catalog.resource_capabilities import (
+    CONCURRENT_ALLOCATION_CAP_KEY,
+    MEMORY_MB_KEY,
+    VCPUS_KEY,
+)
+from kdive.domain.catalog.resources import ResourceKind
+from kdive.inventory._row_typing import RowTyper
+from kdive.inventory.errors import InventoryError
+from kdive.inventory.model import (
+    FaultInjectInstance,
+    InventoryDoc,
+    LocalLibvirtInstance,
+    RemoteLibvirtInstance,
+)
+from kdive.inventory.overrides import (
+    InventoryOverrideDisposition,
+    InventorySourceKind,
+    lookup_many,
+)
+from kdive.inventory.reconcile.locks import inventory_pass_lock, resource_identity_lock
+from kdive.inventory.reconcile.prune import (
+    prune_or_cordon_removed_resource,
+    prune_or_cordon_resource,
+)
+from kdive.inventory.reconcile.records import (
+    CONFIG_MANAGED_BY,
+    DISCOVERY_MANAGED_BY,
+    ReconcileDiff,
+    ReconcileRecord,
+)
+
+_log = logging.getLogger(__name__)
+
+# fault-inject has no real host, so every fault-inject instance shares this synthetic host_uri
+# and is distinguished by its (kind, name) identity (the Phase-3 multi-instance goal).
+_FAULT_INJECT_HOST_URI = "fault-inject://local"
+_RESOURCE_UPSERT_SELECT_BY_NAME = (
+    "SELECT id, name, host_uri, cost_class, capabilities, pool, managed_by, "
+    "lease_expires_at, owner_project, affinity_allowlist "
+    "FROM resources WHERE kind = %s AND name = %s FOR UPDATE"
+)
+_RESOURCE_UPSERT_SELECT_UNNAMED_BY_HOST = (
+    "SELECT id, name, host_uri, cost_class, capabilities, pool, managed_by, "
+    "lease_expires_at, owner_project, affinity_allowlist "
+    "FROM resources WHERE kind = %s AND host_uri = %s AND name IS NULL FOR UPDATE"
+)
+
+
+type ResourceCapValue = str | int | float | bool | None | list[ResourceCapValue] | ResourceCaps
+type ResourceCaps = dict[str, ResourceCapValue]
+
+
+@dataclass(frozen=True)
+class _UpsertResourceRow:
+    id: UUID
+    name: str | None
+    host_uri: str
+    cost_class: str
+    capabilities: ResourceCaps
+    pool: str
+    managed_by: str
+    lease_expires_at: datetime | None
+    owner_project: str | None
+    affinity_allowlist: list[str]
+
+
+@dataclass(frozen=True)
+class _LocalResourceRow:
+    id: UUID
+    name: str | None
+    cost_class: str
+    capabilities: ResourceCaps
+    pool: str
+
+
+@dataclass(frozen=True)
+class _DiscoveredResourceRow:
+    id: UUID
+    host_uri: str
+
+
+@dataclass(frozen=True)
+class _PruneResourceRow:
+    id: UUID
+    kind: str
+    name: str
+
+
+@dataclass(frozen=True)
+class _DeclaredResource:
+    kind: ResourceKind
+    name: str
+    host_uri: str
+    cost_class: str
+    caps: ResourceCaps
+    pool: str
+
+
+@dataclass(frozen=True)
+class _ConfigResourceUpsert:
+    declared: _DeclaredResource
+    adopt_by_host: bool
+    discovery_owned_keys: tuple[str, ...] = ()
+    detached: bool = False
+
+
+async def reconcile_resources(conn: AsyncConnection, doc: InventoryDoc) -> ReconcileDiff:
+    """Apply ``doc``'s provider instances onto ``resources`` and prune departed config rows.
+
+    Held under the same session-scoped inventory lock as :func:`reconcile_images`, so the two
+    passes never race the ``(kind, name)`` identity constraint.
+
+    Args:
+        conn: The reconcile pass connection (a fresh transaction is opened per phase).
+        doc: The parsed inventory document.
+
+    Returns:
+        The :class:`ReconcileDiff` for the resource pass.
+    """
+    diff = ReconcileDiff()
+    async with inventory_pass_lock(conn):
+        overrides = await lookup_many(conn, InventorySourceKind.RESOURCE)
+        await _create_config_resources(conn, doc, diff, overrides)
+        await _overlay_local_libvirt(conn, doc, diff)
+        await _name_unconfigured_discovered(conn, doc, diff)
+        await _prune_departed(conn, doc, diff, overrides)
+    return diff
+
+
+def _disposition(
+    overrides: Mapping[tuple[str, str], Any], kind: ResourceKind, name: str
+) -> InventoryOverrideDisposition | None:
+    """The override disposition for ``(kind, name)``, or ``None`` for an un-overridden identity."""
+    entry = overrides.get((kind.value, name))
+    return entry.disposition if entry is not None else None
+
+
+async def _create_config_resources(
+    conn: AsyncConnection,
+    doc: InventoryDoc,
+    diff: ReconcileDiff,
+    overrides: Mapping[tuple[str, str], Any],
+) -> None:
+    """Upsert the config-owned kinds: fault-inject (no host) and remote-libvirt.
+
+    Both are keyed by their true identity ``(kind, name)`` — the migration's partial-unique
+    index. A row whose ``name`` already matches is updated in place (so a changed ``host_uri``
+    propagates without a duplicate insert). Only when no name match exists does remote-libvirt
+    fall back to **adopting** a discovery row for the same ``host_uri`` whose ``name`` is still
+    NULL (the legacy env-based discovery created it), so config and discovery never produce two
+    rows for one host.
+    """
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        for request in _config_resource_upserts(doc, overrides):
+            declared = request.declared
+            async with resource_identity_lock(conn, declared.kind, declared.name):
+                await _upsert_config_resource(
+                    cur,
+                    diff,
+                    declared=declared,
+                    adopt_by_host=request.adopt_by_host,
+                    discovery_owned_keys=request.discovery_owned_keys,
+                    detached=request.detached,
+                )
+
+
+def _config_resource_upserts(
+    doc: InventoryDoc,
+    overrides: Mapping[tuple[str, str], Any],
+) -> Iterator[_ConfigResourceUpsert]:
+    """Yield config-owned provider resources with their provider-specific upsert options."""
+    for inst in doc.fault_inject:
+        request = _fault_inject_upsert(inst, overrides)
+        if request is not None:
+            yield request
+    for inst in doc.remote_libvirt:
+        request = _remote_libvirt_upsert(inst, overrides)
+        if request is not None:
+            yield request
+
+
+def _fault_inject_upsert(
+    inst: FaultInjectInstance,
+    overrides: Mapping[tuple[str, str], Any],
+) -> _ConfigResourceUpsert | None:
+    disposition = _disposition(overrides, ResourceKind.FAULT_INJECT, inst.name)
+    if disposition is InventoryOverrideDisposition.REMOVED:
+        return None
+    return _ConfigResourceUpsert(
+        declared=_DeclaredResource(
+            kind=ResourceKind.FAULT_INJECT,
+            name=inst.name,
+            host_uri=_FAULT_INJECT_HOST_URI,
+            cost_class=inst.cost_class,
+            caps=_declared_caps(inst),
+            pool=inst.pool,
+        ),
+        adopt_by_host=False,
+        detached=disposition is InventoryOverrideDisposition.DETACHED,
+    )
+
+
+def _remote_libvirt_upsert(
+    inst: RemoteLibvirtInstance,
+    overrides: Mapping[tuple[str, str], Any],
+) -> _ConfigResourceUpsert | None:
+    disposition = _disposition(overrides, ResourceKind.REMOTE_LIBVIRT, inst.name)
+    if disposition is InventoryOverrideDisposition.REMOVED:
+        return None
+    return _ConfigResourceUpsert(
+        declared=_DeclaredResource(
+            kind=ResourceKind.REMOTE_LIBVIRT,
+            name=inst.name,
+            host_uri=inst.uri,
+            cost_class=inst.cost_class,
+            caps=_declared_caps(inst),
+            pool=inst.pool,
+        ),
+        adopt_by_host=True,
+        discovery_owned_keys=(VCPUS_KEY, MEMORY_MB_KEY),
+        detached=disposition is InventoryOverrideDisposition.DETACHED,
+    )
+
+
+def _declared_caps(inst: FaultInjectInstance | RemoteLibvirtInstance) -> ResourceCaps:
+    return {
+        VCPUS_KEY: inst.vcpus,
+        MEMORY_MB_KEY: inst.memory_mb,
+        CONCURRENT_ALLOCATION_CAP_KEY: inst.concurrent_allocation_cap,
+    }
+
+
+async def _upsert_config_resource(
+    cur: Any,
+    diff: ReconcileDiff,
+    *,
+    declared: _DeclaredResource,
+    adopt_by_host: bool,
+    discovery_owned_keys: tuple[str, ...] = (),
+    detached: bool = False,
+) -> None:
+    """Create or change-detectingly update one config-owned resource row keyed by (kind, name).
+
+    The lookup is always by the true identity ``(kind, name)`` so a row never collides with
+    itself on a ``host_uri`` change (the change is written through). ``adopt_by_host`` additionally
+    lets remote-libvirt adopt a legacy-discovery row (same ``host_uri``, ``name IS NULL``) when no
+    name match exists, instead of inserting a duplicate. On create supplies the NOT NULL columns
+    ``systems.toml`` lacks (``status='available'``, ``pool='default'``). The overlay **merges**
+    ``caps`` into the existing capabilities jsonb so a discovery-contributed hardware fact is never
+    clobbered. ``cost_class`` lands in the COLUMN, never jsonb. Adoption/update flips ``managed_by``
+    to ``config`` and writes the ``name`` + ``host_uri``.
+
+    ``discovery_owned_keys`` are capability keys a discovery row owns as ground truth (e.g.
+    ``vcpus`` / ``memory_mb`` hardware facts): a present existing value wins over the
+    config-supplied one, so the config value is only a fallback for a pure-config host with no
+    discovered size.
+
+    ``detached`` (ADR-0199) marks an identity whose live row's runtime values the operator owns:
+    the field-overwrite branch (:func:`_update_config_resource`) is **skipped** so the file does
+    not clobber the runtime value, while the existence/adoption branch still runs so a
+    ``managed_by`` flip is repaired. A **hand-deleted** ``detached`` row is **not** re-inserted
+    (that would resurrect
+    stale file values under a still-active override) — it is left absent for the GC step to clear,
+    after which the next no-entry pass re-asserts the file.
+    """
+    row = await _find_existing(
+        cur,
+        kind=declared.kind,
+        name=declared.name,
+        host_uri=declared.host_uri,
+        adopt_by_host=adopt_by_host,
+    )
+    if row is None:
+        if detached:
+            return  # GC clears the entry; the next no-entry pass re-asserts the file
+        await _insert_config_resource(
+            cur,
+            diff,
+            declared=declared,
+        )
+        return
+    existing = row.capabilities
+    merged = {**existing, **declared.caps}
+    for key in discovery_owned_keys:
+        if key in existing:
+            merged[key] = existing[key]
+    if _needs_config_adoption(row):
+        await _adopt_config_resource(
+            cur,
+            diff,
+            row=row,
+            declared=declared,
+            caps=merged,
+        )
+        return
+    if detached:
+        return  # runtime owns the live row's values; do not overwrite them from the file
+    await _update_config_resource(
+        cur,
+        diff,
+        row=row,
+        declared=declared,
+        caps=merged,
+    )
+
+
+async def _insert_config_resource(
+    cur: Any,
+    diff: ReconcileDiff,
+    *,
+    declared: _DeclaredResource,
+) -> None:
+    await cur.execute(
+        "INSERT INTO resources (kind, name, capabilities, pool, cost_class, status, "
+        " host_uri, managed_by) "
+        "VALUES (%s, %s, %s, %s, %s, 'available', %s, %s)",
+        (
+            declared.kind.value,
+            declared.name,
+            Jsonb(declared.caps),
+            declared.pool,
+            declared.cost_class,
+            declared.host_uri,
+            CONFIG_MANAGED_BY,
+        ),
+    )
+    diff.created.append(_record(declared.kind, declared.name))
+
+
+async def _adopt_config_resource(
+    cur: Any,
+    diff: ReconcileDiff,
+    *,
+    row: _UpsertResourceRow,
+    declared: _DeclaredResource,
+    caps: ResourceCaps,
+) -> None:
+    """Convert a non-config or scoped resource row into the declared config identity."""
+    await cur.execute(
+        "UPDATE resources SET name = %s, host_uri = %s, cost_class = %s, capabilities = %s, "
+        "pool = %s, managed_by = %s, lease_expires_at = NULL, owner_project = NULL, "
+        "affinity_allowlist = '{}' WHERE id = %s",
+        (
+            declared.name,
+            declared.host_uri,
+            declared.cost_class,
+            Jsonb(caps),
+            declared.pool,
+            CONFIG_MANAGED_BY,
+            row.id,
+        ),
+    )
+    diff.updated.append(_record(declared.kind, declared.name))
+
+
+async def _update_config_resource(
+    cur: Any,
+    diff: ReconcileDiff,
+    *,
+    row: _UpsertResourceRow,
+    declared: _DeclaredResource,
+    caps: ResourceCaps,
+) -> None:
+    """Apply ordinary config field changes to an already config-managed row."""
+    if (
+        row.host_uri == declared.host_uri
+        and row.cost_class == declared.cost_class
+        and row.capabilities == caps
+        and row.pool == declared.pool
+    ):
+        return
+    await cur.execute(
+        "UPDATE resources SET host_uri = %s, cost_class = %s, capabilities = %s, pool = %s "
+        "WHERE id = %s",
+        (declared.host_uri, declared.cost_class, Jsonb(caps), declared.pool, row.id),
+    )
+    diff.updated.append(_record(declared.kind, declared.name))
+
+
+def _needs_config_adoption(row: _UpsertResourceRow) -> bool:
+    return (
+        row.managed_by != CONFIG_MANAGED_BY
+        or row.name is None
+        or row.lease_expires_at is not None
+        or row.owner_project is not None
+        or row.affinity_allowlist != []
+    )
+
+
+async def _find_existing(
+    cur: Any, *, kind: ResourceKind, name: str, host_uri: str, adopt_by_host: bool
+) -> _UpsertResourceRow | None:
+    """Resolve the existing row to upsert: by (kind, name) first, then host-adopt for remote."""
+    await cur.execute(
+        _RESOURCE_UPSERT_SELECT_BY_NAME,
+        (kind.value, name),
+    )
+    row = await cur.fetchone()
+    if row is not None or not adopt_by_host:
+        return _upsert_row(row) if row is not None else None
+    await cur.execute(
+        _RESOURCE_UPSERT_SELECT_UNNAMED_BY_HOST,
+        (kind.value, host_uri),
+    )
+    row = await cur.fetchone()
+    return _upsert_row(row) if row is not None else None
+
+
+async def _overlay_local_libvirt(
+    conn: AsyncConnection, doc: InventoryDoc, diff: ReconcileDiff
+) -> None:
+    """Overlay cost/cap onto discovery-created local-libvirt rows; never create or overwrite HW.
+
+    Binds by ``host_uri`` to the discovery row, gives it the config ``name``, sets the
+    ``cost_class`` column, and merges only ``concurrent_allocation_cap`` into the capabilities
+    jsonb — the discovery-owned ``vcpus`` / ``memory_mb`` / PCIe keys are left untouched.
+    """
+    if not doc.local_libvirt:
+        return
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        for inst in doc.local_libvirt:
+            await _overlay_one_local(cur, inst, diff)
+
+
+async def _overlay_one_local(cur: Any, inst: LocalLibvirtInstance, diff: ReconcileDiff) -> None:
+    await cur.execute(
+        "SELECT id, name, cost_class, capabilities, pool FROM resources "
+        "WHERE kind = %s AND host_uri = %s FOR UPDATE",
+        (ResourceKind.LOCAL_LIBVIRT.value, inst.host_uri),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        diff.warned.append(
+            _record(
+                ResourceKind.LOCAL_LIBVIRT,
+                inst.name,
+                f"no discovered local-libvirt host at {inst.host_uri}; overlay deferred",
+            )
+        )
+        return
+    row = _local_row(row)
+    merged = {
+        **row.capabilities,
+        CONCURRENT_ALLOCATION_CAP_KEY: inst.concurrent_allocation_cap,
+    }
+    changed = (
+        row.name != inst.name
+        or row.cost_class != inst.cost_class
+        or row.capabilities != merged
+        or row.pool != inst.pool
+    )
+    if changed:
+        await cur.execute(
+            "UPDATE resources SET name = %s, cost_class = %s, capabilities = %s, pool = %s "
+            "WHERE id = %s",
+            (inst.name, inst.cost_class, Jsonb(merged), inst.pool, row.id),
+        )
+        diff.updated.append(_record(ResourceKind.LOCAL_LIBVIRT, inst.name))
+
+
+async def _name_unconfigured_discovered(
+    conn: AsyncConnection, doc: InventoryDoc, diff: ReconcileDiff
+) -> None:
+    """Give every discovery row without a config instance a deterministic name from host_uri."""
+    configured = {inst.host_uri for inst in doc.local_libvirt}
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT id, host_uri FROM resources WHERE managed_by = %s AND name IS NULL FOR UPDATE",
+            (DISCOVERY_MANAGED_BY,),
+        )
+        rows = await cur.fetchall()
+        for raw_row in rows:
+            row = _discovered_row(raw_row)
+            if row.host_uri in configured:
+                continue  # the local-libvirt overlay names this one
+            name = _deterministic_name(row.host_uri)
+            await cur.execute("UPDATE resources SET name = %s WHERE id = %s", (name, row.id))
+
+
+async def _prune_departed(
+    conn: AsyncConnection,
+    doc: InventoryDoc,
+    diff: ReconcileDiff,
+    overrides: Mapping[tuple[str, str], Any],
+) -> None:
+    """Prune (or cordon) each config resource whose (kind, name) left the file or is ``removed``.
+
+    A ``removed`` ledger entry (ADR-0199) suppresses a still-declared identity, so its row must be
+    cordoned-if-live / deleted-once-idle even though the file still declares it — without this it
+    would be skipped by the ``identity in declared`` guard and never reach the prune contract. A
+    ``detached`` identity's row is runtime-owned and is never pruned here.
+    """
+    declared = _declared_config_identities(doc)
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT id, kind, name FROM resources WHERE managed_by = %s", (CONFIG_MANAGED_BY,)
+        )
+        rows = await cur.fetchall()
+    for raw in rows:
+        row = _prune_row(raw)
+        identity = (row.kind, row.name)
+        disposition = overrides.get(identity)
+        is_removed = (
+            disposition is not None
+            and disposition.disposition is InventoryOverrideDisposition.REMOVED
+        )
+        if identity in declared and not is_removed:
+            continue
+        if disposition is not None and not is_removed:
+            continue  # a `detached` row is runtime-owned; never prune it
+        name = row.name
+        kind = ResourceKind(row.kind)
+        # A `removed` identity uses the FK-safe ledger-removal contract (cordon if any allocation
+        # row exists, delete only a never-allocated row); a file-departed identity keeps the
+        # established file-departure contract (cordon if a live allocation exists).
+        outcome = (
+            await prune_or_cordon_removed_resource(conn, row.id, name, kind=kind)
+            if is_removed
+            else await prune_or_cordon_resource(conn, row.id, name, kind=kind)
+        )
+        record = ReconcileRecord(name=name, entry=f"resource[{identity[0]}/{name}]")
+        if outcome.cordoned:
+            diff.cordoned.append(record)
+            _log.info("inventory: config resource %s still in use; cordoned (not pruned)", name)
+        elif outcome.pruned:
+            diff.pruned.append(record)
+            _log.info("inventory: config resource %s absent from config; row pruned", name)
+
+
+def _declared_config_identities(doc: InventoryDoc) -> set[tuple[str, str]]:
+    """The (kind, name) identities the file declares for the config-owned (sole-creator) kinds.
+
+    Only ``fault_inject`` / ``remote_libvirt`` are config-owned; ``local_libvirt`` rows are
+    discovery-owned and are never pruned by this reconcile.
+    """
+    identities: set[tuple[str, str]] = set()
+    for inst in doc.fault_inject:
+        identities.add((ResourceKind.FAULT_INJECT.value, inst.name))
+    for inst in doc.remote_libvirt:
+        identities.add((ResourceKind.REMOTE_LIBVIRT.value, inst.name))
+    return identities
+
+
+def _deterministic_name(host_uri: str) -> str:
+    """A stable, readable name for an unconfigured discovered host derived from its host_uri."""
+    cleaned = "".join(ch if ch.isalnum() else "-" for ch in host_uri).strip("-")
+    return f"discovered-{cleaned}" if cleaned else "discovered-host"
+
+
+_ROWS = RowTyper("resources")
+
+
+def _resource_caps(value: object) -> ResourceCaps:
+    if not isinstance(value, dict):
+        raise InventoryError("resources", "capabilities", "database row is not a JSON object")
+    return cast("ResourceCaps", value)
+
+
+def _upsert_row(row: Mapping[str, object]) -> _UpsertResourceRow:
+    row_id = _ROWS.uuid(row, "id")
+    name = _ROWS.optional_string(row, "name")
+    host_uri = _ROWS.string(row, "host_uri")
+    cost_class = _ROWS.string(row, "cost_class")
+    managed_by = _ROWS.string(row, "managed_by")
+    lease_expires_at = _ROWS.optional_datetime(row, "lease_expires_at")
+    owner_project = _ROWS.optional_string(row, "owner_project")
+    affinity_allowlist = _ROWS.string_list(row, "affinity_allowlist")
+    return _UpsertResourceRow(
+        id=row_id,
+        name=name,
+        host_uri=host_uri,
+        cost_class=cost_class,
+        capabilities=_resource_caps(row["capabilities"]),
+        pool=_ROWS.string(row, "pool"),
+        managed_by=managed_by,
+        lease_expires_at=lease_expires_at,
+        owner_project=owner_project,
+        affinity_allowlist=affinity_allowlist,
+    )
+
+
+def _local_row(row: Mapping[str, object]) -> _LocalResourceRow:
+    return _LocalResourceRow(
+        id=_ROWS.uuid(row, "id"),
+        name=_ROWS.optional_string(row, "name"),
+        cost_class=_ROWS.string(row, "cost_class"),
+        capabilities=_resource_caps(row["capabilities"]),
+        pool=_ROWS.string(row, "pool"),
+    )
+
+
+def _discovered_row(row: Mapping[str, object]) -> _DiscoveredResourceRow:
+    return _DiscoveredResourceRow(
+        id=_ROWS.uuid(row, "id"),
+        host_uri=_ROWS.string(row, "host_uri"),
+    )
+
+
+def _prune_row(row: Mapping[str, object]) -> _PruneResourceRow:
+    return _PruneResourceRow(
+        id=_ROWS.uuid(row, "id"),
+        kind=_ROWS.string(row, "kind"),
+        name=_ROWS.string(row, "name"),
+    )
+
+
+def _record(kind: ResourceKind, name: str, detail: str = "") -> ReconcileRecord:
+    return ReconcileRecord(name=name, entry=f"resource[{kind.value}/{name}]", detail=detail)
+
+
+__all__ = ["reconcile_resources"]

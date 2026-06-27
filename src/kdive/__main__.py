@@ -157,7 +157,7 @@ def _handle_migrate(
     args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
 ) -> None:
     del args, secret_registry, telemetry
-    from kdive.admin.bootstrap import migrate
+    from kdive.admin.migrations import migrate
 
     migrate()
 
@@ -166,7 +166,7 @@ def _handle_seed_build_configs(
     args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
 ) -> None:
     del args, secret_registry, telemetry
-    from kdive.admin.bootstrap import seed_build_configs_step
+    from kdive.admin.build_configs import seed_build_configs_step
 
     seed_build_configs_step()
 
@@ -177,7 +177,7 @@ def _handle_install_fixtures(
     del secret_registry, telemetry
     from pathlib import Path
 
-    from kdive.admin.bootstrap import install_fixtures
+    from kdive.admin.fixtures import install_fixtures
 
     install_fixtures(Path(args.dest), force=args.force)
 
@@ -188,7 +188,7 @@ def _handle_seed_project(
     del secret_registry, telemetry
     from decimal import Decimal
 
-    from kdive.admin.bootstrap import seed_project
+    from kdive.admin.projects import seed_project
 
     asyncio.run(
         seed_project(
@@ -208,7 +208,7 @@ def _handle_verify_project(
     args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
 ) -> None:
     del secret_registry, telemetry
-    from kdive.admin.bootstrap import format_verify_result, redact_database_url, verify_project
+    from kdive.admin.projects import format_verify_result, redact_database_url, verify_project
     from kdive.db.pool import database_url
 
     status = asyncio.run(verify_project(project=args.project))
@@ -248,7 +248,7 @@ def _handle_reconcile_systems(
     args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
 ) -> None:
     del secret_registry, telemetry
-    from kdive.inventory.reconcile_cli import reconcile_systems, validate_systems
+    from kdive.inventory.cli import reconcile_systems, validate_systems
 
     if args.check:
         raise SystemExit(validate_systems(args.path))
@@ -353,9 +353,9 @@ async def _run_server(
     host: str, port: int, secret_registry: SecretRegistry, telemetry: Telemetry
 ) -> None:
     from kdive.health.probe import HealthProbe
+    from kdive.health.processes.server import build_oidc_ping, build_postgres_ping
     from kdive.health.server_checks import build_server_checks
     from kdive.mcp.app import build_app
-    from kdive.process_health.server import build_oidc_ping, build_postgres_ping
     from kdive.store.objectstore import object_store_from_env
 
     def build_probe(pool: AsyncConnectionPool) -> HealthProbe:
@@ -463,11 +463,11 @@ def _readiness(probe: HealthProbe) -> Callable[[], Awaitable[bool]]:
 
 
 async def _run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
+    from kdive.health.processes.server import build_postgres_ping
+    from kdive.health.processes.worker import build_worker_probe
     from kdive.jobs.worker import Worker, WorkerConfig
     from kdive.jobs.worker_telemetry import WorkerTelemetry
     from kdive.mcp.app import build_handler_registry
-    from kdive.process_health.server import build_postgres_ping
-    from kdive.process_health.worker import build_worker_probe
     from kdive.store.objectstore import object_store_from_env
 
     stop = _install_stop()
@@ -507,17 +507,9 @@ async def _run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> 
 
 
 async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
-    from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
-    from kdive.process_health.server import build_postgres_ping
-    from kdive.process_health.worker import build_worker_probe
-    from kdive.providers.assembly.composition import ProviderComposition
+    from kdive.health.processes.server import build_postgres_ping
+    from kdive.health.processes.worker import build_worker_probe
     from kdive.providers.infra.libvirt_event_loop import ensure_libvirt_event_loop
-    from kdive.reconciler.build_host_fleet import BuildHostTelemetry
-    from kdive.reconciler.console_telemetry import ConsoleTelemetry
-    from kdive.reconciler.fleet import FleetTelemetry
-    from kdive.reconciler.loop import ReconcileConfig, Reconciler
-    from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
-    from kdive.services.allocation.admission.metrics import AdmissionMetrics
     from kdive.store.objectstore import object_store_from_env
 
     # Before any libvirt connection opens: libvirt services stream events only on connections
@@ -534,65 +526,7 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
 
     async def run(pool: AsyncConnectionPool, heartbeat: Heartbeat, probe: HealthProbe) -> None:
         del probe
-        upload_store = _optional_reconciler_object_store(object_store_from_env)
-        provider_composition = ProviderComposition(secret_registry=secret_registry)
-        provider_resolver = provider_composition.build_provider_resolver()
-        discovery_task = asyncio.create_task(_register_provider_resources(pool, provider_resolver))
-        console_hosting = None
-        try:
-            console_hosting = await provider_composition.build_reconciler_console_hosting(
-                console_telemetry=ConsoleTelemetry(
-                    meter=telemetry.meter_provider.get_meter("kdive.reconciler")
-                ),
-            )
-            reconciler = Reconciler(
-                pool,
-                provider_composition.build_reconciler_reaper(),
-                config=ReconcileConfig(
-                    upload_store=upload_store,
-                    image_store=upload_store,
-                    report_artifact_retention=timedelta(
-                        days=config.require(REPORT_ARTIFACT_RETENTION_DAYS)
-                    ),
-                    investigation_cleanup_grace=timedelta(
-                        days=config.require(INVESTIGATION_CLEANUP_GRACE_DAYS)
-                    ),
-                    build_artifact_retention=timedelta(
-                        days=config.require(BUILD_ARTIFACT_RETENTION_DAYS)
-                    ),
-                    console_registry=console_hosting.registry if console_hosting else None,
-                    resetter=provider_composition.build_reconciler_transport_resetter(),
-                    dump_volume_reaper=provider_composition.build_reconciler_dump_volume_reaper(),
-                    build_vm_reaper=provider_composition.build_reconciler_build_vm_reaper(),
-                    build_host_prober=provider_composition.build_reconciler_build_host_prober(),
-                    heartbeat=heartbeat,
-                    telemetry=ReconcilerTelemetry(
-                        tracer=telemetry.tracer_provider.get_tracer("kdive.reconciler"),
-                        meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
-                    ),
-                    fleet_telemetry=FleetTelemetry(
-                        meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
-                    ),
-                    build_host_telemetry=BuildHostTelemetry(
-                        meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
-                    ),
-                    admission_metrics=AdmissionMetrics(
-                        meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
-                    ),
-                    debug_session_telemetry=DebugSessionTelemetry(
-                        meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
-                    ),
-                ),
-            )
-            hosting_task = start_console_hosting(console_hosting, stop)
-            try:
-                await reconciler.run(stop)
-            finally:
-                await _cancel(*([hosting_task] if hosting_task else []))
-                if console_hosting is not None:
-                    await console_hosting.close()
-        finally:
-            await _cancel(discovery_task)
+        await _run_reconciler_body(pool, heartbeat, stop, secret_registry, telemetry)
 
     await _run_process_runtime(
         process="reconciler",
@@ -602,6 +536,110 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
         heartbeat_stale_after=_RECONCILER_HEARTBEAT_STALE_SECONDS,
         probe_builder=build_probe,
         body=run,
+    )
+
+
+async def _run_reconciler_body(
+    pool: AsyncConnectionPool,
+    heartbeat: Heartbeat,
+    stop: asyncio.Event,
+    secret_registry: SecretRegistry,
+    telemetry: Telemetry,
+) -> None:
+    from kdive.providers.assembly.composition import ProviderComposition
+    from kdive.store.objectstore import object_store_from_env
+
+    upload_store = _optional_reconciler_object_store(object_store_from_env)
+    provider_composition = ProviderComposition(secret_registry=secret_registry)
+    provider_resolver = provider_composition.build_provider_resolver()
+    discovery_task = asyncio.create_task(_register_provider_resources(pool, provider_resolver))
+    try:
+        await _run_reconciler_with_composition(
+            pool,
+            heartbeat,
+            stop,
+            telemetry,
+            provider_composition,
+            upload_store,
+        )
+    finally:
+        await _cancel(discovery_task)
+
+
+async def _run_reconciler_with_composition(
+    pool: AsyncConnectionPool,
+    heartbeat: Heartbeat,
+    stop: asyncio.Event,
+    telemetry: Telemetry,
+    provider_composition: Any,
+    upload_store: ObjectStore | None,
+) -> None:
+    from kdive.observability.console_telemetry import ConsoleTelemetry
+    from kdive.reconciler.loop import Reconciler
+
+    console_hosting = await provider_composition.build_reconciler_console_hosting(
+        console_telemetry=ConsoleTelemetry(
+            meter=telemetry.meter_provider.get_meter("kdive.reconciler")
+        ),
+    )
+    reconciler = Reconciler(
+        pool,
+        provider_composition.build_reconciler_reaper(),
+        config=_build_reconcile_config(
+            provider_composition,
+            upload_store=upload_store,
+            console_registry=console_hosting.registry if console_hosting else None,
+            heartbeat=heartbeat,
+            telemetry=telemetry,
+        ),
+    )
+    hosting_task = start_console_hosting(console_hosting, stop)
+    try:
+        await reconciler.run(stop)
+    finally:
+        await _cancel(*([hosting_task] if hosting_task else []))
+        if console_hosting is not None:
+            await console_hosting.close()
+
+
+def _build_reconcile_config(
+    provider_composition: Any,
+    *,
+    upload_store: ObjectStore | None,
+    console_registry: Any,
+    heartbeat: Heartbeat,
+    telemetry: Telemetry,
+) -> Any:
+    from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
+    from kdive.reconciler.build_host_fleet import BuildHostTelemetry
+    from kdive.reconciler.fleet import FleetTelemetry
+    from kdive.reconciler.loop import ReconcileConfig
+    from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
+    from kdive.services.allocation.admission.metrics import AdmissionMetrics
+
+    meter = telemetry.meter_provider.get_meter("kdive.reconciler")
+    return ReconcileConfig(
+        upload_store=upload_store,
+        image_store=upload_store,
+        report_artifact_retention=timedelta(days=config.require(REPORT_ARTIFACT_RETENTION_DAYS)),
+        investigation_cleanup_grace=timedelta(
+            days=config.require(INVESTIGATION_CLEANUP_GRACE_DAYS)
+        ),
+        build_artifact_retention=timedelta(days=config.require(BUILD_ARTIFACT_RETENTION_DAYS)),
+        console_registry=console_registry,
+        resetter=provider_composition.build_reconciler_transport_resetter(),
+        dump_volume_reaper=provider_composition.build_reconciler_dump_volume_reaper(),
+        build_vm_reaper=provider_composition.build_reconciler_build_vm_reaper(),
+        build_host_prober=provider_composition.build_reconciler_build_host_prober(),
+        heartbeat=heartbeat,
+        telemetry=ReconcilerTelemetry(
+            tracer=telemetry.tracer_provider.get_tracer("kdive.reconciler"),
+            meter=meter,
+        ),
+        fleet_telemetry=FleetTelemetry(meter=meter),
+        build_host_telemetry=BuildHostTelemetry(meter=meter),
+        admission_metrics=AdmissionMetrics(meter=meter),
+        debug_session_telemetry=DebugSessionTelemetry(meter=meter),
     )
 
 

@@ -7,7 +7,7 @@ import logging
 from typing import Protocol, cast, runtime_checkable
 from uuid import UUID
 
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, sql
 from psycopg.rows import dict_row
 
 from kdive.db import upload_manifest
@@ -21,6 +21,10 @@ _UPLOAD_SYSTEM_OWNER_KIND = upload_manifest.SYSTEM_UPLOAD_OWNER
 _UPLOAD_PRE_FINALIZE_VALUES: dict[upload_manifest.UploadOwnerKind, str] = {
     _UPLOAD_RUN_OWNER_KIND: RunState.CREATED.value,
     _UPLOAD_SYSTEM_OWNER_KIND: SystemState.DEFINED.value,
+}
+_OWNER_PRE_FINALIZE_QUERIES: dict[upload_manifest.UploadOwnerKind, sql.SQL] = {
+    _UPLOAD_RUN_OWNER_KIND: sql.SQL("SELECT 1 FROM runs WHERE id = %s AND state = %s"),
+    _UPLOAD_SYSTEM_OWNER_KIND: sql.SQL("SELECT 1 FROM systems WHERE id = %s AND state = %s"),
 }
 
 
@@ -104,15 +108,12 @@ async def owner_pre_finalize(
     conn: AsyncConnection, owner_kind: upload_manifest.UploadOwnerKind, owner_id: UUID
 ) -> bool:
     """Report whether the owner is still in its pre-finalize state."""
-    if owner_kind == _UPLOAD_RUN_OWNER_KIND:
-        table = _UPLOAD_RUN_OWNER_KIND
-    elif owner_kind == _UPLOAD_SYSTEM_OWNER_KIND:
-        table = _UPLOAD_SYSTEM_OWNER_KIND
-    else:
+    query = _OWNER_PRE_FINALIZE_QUERIES.get(owner_kind)
+    if query is None:
         raise ValueError(f"unsupported upload owner kind: {owner_kind}")
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            f"SELECT 1 FROM {table} WHERE id = %s AND state = %s",  # noqa: S608 - 2-value whitelist
+            query,
             (owner_id, _UPLOAD_PRE_FINALIZE_VALUES[owner_kind]),
         )
         return await cur.fetchone() is not None

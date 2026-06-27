@@ -80,12 +80,16 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `allocation_id` | string (nullable) | no | Only Systems under this Allocation id. |
-| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
-| `limit` | integer | no | Maximum rows returned (capped at 200). |
-| `pcie` | string (nullable) | no | Only Systems whose Allocation claims a device matching this '<vendor>:<device>' spec. |
-| `shape` | string (nullable) | no | Only Systems with this named shape, or '__custom__' for full-custom (no shape). |
-| `state` | `defined`, `provisioning`, `ready`, `reprovisioning`, `crashed`, `torn_down`, `failed` (nullable) | no | Only Systems in this lifecycle state. |
+| `request` | object (nullable) | no | Systems list filters and pagination request. |
+
+`request` fields:
+
+- `allocation_id` (`string (nullable)`, optional) — Only Systems under this Allocation id.
+- `state` (``defined`, `provisioning`, `ready`, `reprovisioning`, `crashed`, `torn_down`, `failed` (nullable)`, optional) — Only Systems in this lifecycle state.
+- `shape` (`string (nullable)`, optional) — Only Systems with this named shape, or '__custom__' for full-custom.
+- `pcie` (`string (nullable)`, optional) — Only Systems whose Allocation claims a matching '<vendor>:<device>' spec.
+- `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
+- `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
 
 ## `systems.profile_examples`
 

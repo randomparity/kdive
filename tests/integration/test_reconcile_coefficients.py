@@ -9,7 +9,7 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.inventory.model import InventoryDoc
-from kdive.inventory.reconcile_coefficients import reconcile_coefficients
+from kdive.inventory.reconcile.coefficients import reconcile_coefficients
 
 
 def _doc(*classes: tuple[str, str]) -> InventoryDoc:

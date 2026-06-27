@@ -16,9 +16,13 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.tools.debug.session_registry import GdbMiSessionRegistry
-from kdive.providers.local_libvirt.debug import gdbmi as debug_gdbmi
-from kdive.providers.ports import GdbFrame, GdbMiAttachment, GdbStopRecord
+from kdive.providers.ports.debug import (
+    GdbFrame,
+    GdbMiAttachment,
+    GdbStopRecord,
+)
 from kdive.providers.shared.debug_common import gdbmi
+from kdive.providers.shared.debug_common.debuginfo import DebuginfoResolver
 from kdive.providers.shared.debug_common.execution import ExecutionControl
 from kdive.providers.shared.debug_common.gdbmi import (
     MAX_MEMORY_READ_BYTES,
@@ -102,7 +106,7 @@ def _attachment(controller: _FakeMiController, tmp_path: Path) -> GdbMiAttachmen
 
 
 def _engine(redactor: Redactor | None = None) -> GdbMiEngine:
-    return GdbMiEngine(redactor=redactor or Redactor())
+    return GdbMiEngine(redactor=redactor or Redactor(registry=SecretRegistry()))
 
 
 class _ExecutionEngine:
@@ -549,7 +553,7 @@ def test_read_memory_bytes_are_verbatim_not_redacted(tmp_path: Path) -> None:
     secret_hex = secret.encode().hex()
     byte_count = len(secret)
     controller = _memory_controller(0x4000, byte_count, secret_hex)
-    engine = _engine(Redactor(secret_values=[secret]))
+    engine = _engine(Redactor(secret_values=[secret], registry=SecretRegistry()))
     blob = engine.read_memory(
         _attachment(controller, tmp_path), address=0x4000, byte_count=byte_count
     )
@@ -559,7 +563,7 @@ def test_read_memory_bytes_are_verbatim_not_redacted(tmp_path: Path) -> None:
 def test_read_memory_transcript_line_is_redacted(tmp_path: Path) -> None:
     secret = "transcriptsecret"  # pragma: allowlist secret - fake test value
     attachment = _attachment(_memory_controller(0x5000, 4, "00112233"), tmp_path)
-    engine = _engine(Redactor(secret_values=[secret]))
+    engine = _engine(Redactor(secret_values=[secret], registry=SecretRegistry()))
     engine.append_transcript(
         attachment.transcript_path,
         "-break-insert panic",
@@ -601,7 +605,7 @@ def test_append_transcript_creates_parent_and_redacts_jsonl(tmp_path: Path) -> N
         transcript_path=transcript_path,
         command="<read>",
         records=[MiRecord(type="console", payload=f"loaded {secret}")],
-        redactor=Redactor(secret_values=[secret]),
+        redactor=Redactor(secret_values=[secret], registry=SecretRegistry()),
     )
 
     line = transcript_path.read_text(encoding="utf-8").strip()
@@ -1043,7 +1047,7 @@ def test_resolve_symbol_rejects_unparseable_value_and_redacts_it(tmp_path: Path)
             ]
         }
     )
-    engine = _engine(Redactor(secret_values=[secret]))
+    engine = _engine(Redactor(secret_values=[secret], registry=SecretRegistry()))
     with pytest.raises(CategorizedError) as exc:
         engine.resolve_symbol(_attachment(controller, tmp_path), "s")
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
@@ -1213,7 +1217,7 @@ class _RecordingFetch:
 
 def test_resolve_fetches_present_ref_to_dest(tmp_path: Path) -> None:
     fetch = _RecordingFetch(data=b"ELFDATA")
-    resolver = debug_gdbmi.DebuginfoResolver(
+    resolver = DebuginfoResolver(
         read_debuginfo_ref=lambda run_id: "local/runs/r1/vmlinux", fetch_object=fetch
     )
     dest = tmp_path / "vmlinux"
@@ -1225,9 +1229,7 @@ def test_resolve_fetches_present_ref_to_dest(tmp_path: Path) -> None:
 
 def test_resolve_none_ref_raises_no_debuginfo_before_fetch(tmp_path: Path) -> None:
     fetch = _RecordingFetch(data=b"unused")
-    resolver = debug_gdbmi.DebuginfoResolver(
-        read_debuginfo_ref=lambda run_id: None, fetch_object=fetch
-    )
+    resolver = DebuginfoResolver(read_debuginfo_ref=lambda run_id: None, fetch_object=fetch)
     dest = tmp_path / "vmlinux"
     with pytest.raises(CategorizedError) as exc:
         resolver.resolve("r1", dest)
@@ -1245,7 +1247,7 @@ def test_resolve_propagates_fetch_error(tmp_path: Path) -> None:
         "object store unreachable", category=ErrorCategory.INFRASTRUCTURE_FAILURE
     )
     fetch = _RecordingFetch(error=boom)
-    resolver = debug_gdbmi.DebuginfoResolver(
+    resolver = DebuginfoResolver(
         read_debuginfo_ref=lambda run_id: "local/runs/r1/vmlinux", fetch_object=fetch
     )
     dest = tmp_path / "vmlinux"
@@ -1259,9 +1261,7 @@ def test_resolve_writes_to_dest_not_run_id_derived_path(tmp_path: Path) -> None:
     # The resolver writes where it is told; it computes no run_id-derived path itself (the private
     # per-attach staging dir is the seam's responsibility). A hostile run_id never reaches the path.
     fetch = _RecordingFetch(data=b"SYMBOLS")
-    resolver = debug_gdbmi.DebuginfoResolver(
-        read_debuginfo_ref=lambda run_id: "key", fetch_object=fetch
-    )
+    resolver = DebuginfoResolver(read_debuginfo_ref=lambda run_id: "key", fetch_object=fetch)
     dest = tmp_path / "custom-name"
     resolver.resolve("../../etc/passwd", dest)
     assert dest.read_bytes() == b"SYMBOLS"

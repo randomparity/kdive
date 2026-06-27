@@ -17,6 +17,7 @@ import shutil
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol
 from uuid import UUID
 
 import psycopg
@@ -25,12 +26,19 @@ import kdive.config as config
 from kdive.config.core_settings import DATABASE_URL
 from kdive.db.artifact_queries import debuginfo_ref_for_run_sync
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import GdbMiAttachment
+from kdive.providers.ports.debug import AttachSeam, GdbMiAttachment
 from kdive.providers.shared.debug_common.crash_postmortem import default_fetch_object
 
 type _ReadDebuginfoRef = Callable[[str], str | None]
 type _FetchObject = Callable[[str], bytes]
 type _Attach = Callable[[Path], GdbMiAttachment]
+type _GdbMiEngineFactory = Callable[[], _GdbMiAttachEngine]
+
+
+class _GdbMiAttachEngine(Protocol):
+    def attach(
+        self, *, host: str, port: int, vmlinux_path: Path, transcript_path: Path
+    ) -> GdbMiAttachment: ...
 
 
 class DebuginfoResolver:
@@ -108,4 +116,28 @@ def stage_and_attach(
         raise
 
 
-__all__ = ["DebuginfoResolver", "real_read_debuginfo_ref", "stage_and_attach"]
+def gdb_attach_seam(*, engine_factory: _GdbMiEngineFactory) -> AttachSeam:
+    """Build a provider attach seam around shared debuginfo staging and a gdb-MI engine.
+
+    Local and remote providers differ only in how the engine is constructed: local uses the
+    loopback host policy default, remote supplies its ACL policy. The debuginfo lookup, private
+    staging directory, and failure cleanup stay here with the tested staging logic.
+    """
+
+    def attach_seam(*, host: str, port: int, run_id: str, transcript_path: Path) -> GdbMiAttachment:
+        def attach(vmlinux_path: Path) -> GdbMiAttachment:
+            return engine_factory().attach(
+                host=host, port=port, vmlinux_path=vmlinux_path, transcript_path=transcript_path
+            )
+
+        return stage_and_attach(run_id=run_id, attach=attach)
+
+    return attach_seam
+
+
+__all__ = [
+    "DebuginfoResolver",
+    "gdb_attach_seam",
+    "real_read_debuginfo_ref",
+    "stage_and_attach",
+]

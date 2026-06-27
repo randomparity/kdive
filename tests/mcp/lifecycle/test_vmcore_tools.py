@@ -26,7 +26,11 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
-from kdive.providers.ports import CaptureOutput, CrashOutput, CrashPostmortem
+from kdive.providers.ports.retrieve import (
+    CaptureOutput,
+    CrashOutput,
+    CrashPostmortem,
+)
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system

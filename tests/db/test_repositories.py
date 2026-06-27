@@ -25,7 +25,7 @@ from kdive.db.repositories import (
     SYSTEMS,
     ObjectNotFound,
 )
-from kdive.domain.accounting import Budget, LedgerEntry, LedgerEventType, Quota
+from kdive.domain.accounting.records import Budget, LedgerEntry, LedgerEventType, Quota
 from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
@@ -38,7 +38,14 @@ from kdive.domain.capacity.state import (
 )
 from kdive.domain.catalog.artifacts import Artifact, Sensitivity
 from kdive.domain.catalog.resources import Resource, ResourceKind
-from kdive.domain.lifecycle import Allocation, DebugSession, ExternalRef, Investigation, Run, System
+from kdive.domain.lifecycle.records import (
+    Allocation,
+    DebugSession,
+    ExternalRef,
+    Investigation,
+    Run,
+    System,
+)
 from kdive.domain.operations.jobs import Job, JobKind
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

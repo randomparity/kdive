@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 
 from kdive.domain.capacity.state import AllocationState
-from kdive.domain.lifecycle import Allocation
+from kdive.domain.lifecycle.records import Allocation
 from kdive.domain.operations.jobs import JobKind
 from kdive.mcp.auth import RequestContext
 from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
@@ -63,6 +63,11 @@ def test_opt_in_defaults_false() -> None:
             _ctx(Role.ADMIN), _allocation(), DestructiveOp(kind=JobKind.FORCE_CRASH)
         )
     assert exc.value.missing == ["profile_opt_in"]
+
+
+def test_non_destructive_job_kind_is_rejected() -> None:
+    with pytest.raises(ValueError, match="build is not a destructive job kind"):
+        DestructiveOp(kind=JobKind.BUILD, profile_opt_in=True)
 
 
 def test_both_absent_lists_role_then_opt_in() -> None:

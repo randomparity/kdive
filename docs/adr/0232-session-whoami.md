@@ -50,7 +50,7 @@ and role-less callers.
   write (the issue's acceptance), then chain into `projects.list` for the richer
   per-project view.
 - A new public tool on the MCP surface: a new module
-  `src/kdive/mcp/tools/catalog/session.py`, a registrar entry in `_PLANE_REGISTRARS`
+  `src/kdive/mcp/tools/identity/session.py`, a registrar entry in `_PLANE_REGISTRARS`
   (`mcp/app.py`), a `PUBLIC_TOOLS` entry (`mcp/exposure.py`), a regenerated
   agent-facing reference (`docs/guide/reference/session.md` + index), and a
   `test_tool_docs._BEHAVIOR_TESTS_BY_TOOL` mapping. No schema, migration, dependency,

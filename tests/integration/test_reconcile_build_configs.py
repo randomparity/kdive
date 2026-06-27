@@ -16,7 +16,7 @@ from kdive.build_configs.catalog import (
 )
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.inventory.model import InventoryDoc
-from kdive.inventory.reconcile_build_configs import reconcile_build_configs
+from kdive.inventory.reconcile.build_configs import reconcile_build_configs
 
 _KEY = "system/build-configs/kdump/kdump.config"
 
@@ -176,7 +176,7 @@ def test_reconcile_all_publishes_build_config_through_pipeline(migrated_url: str
     the pass in isolation: a doc carrying a [[build_config]] reconciled via reconcile_all must
     land the catalog row source='config' with the object bytes present at the reserved key.
     """
-    from kdive.inventory.reconcile_pipeline import reconcile_all
+    from kdive.inventory.reconcile.pipeline import reconcile_all
 
     async def _run() -> None:
         store = _FakeStore()

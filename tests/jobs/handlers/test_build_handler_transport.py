@@ -37,7 +37,7 @@ from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers import runs as runs_handlers
+from kdive.jobs.handlers.runs import registrar as runs_handlers
 from kdive.jobs.payloads import BuildPayload
 from kdive.profiles.build import BuildProfile, GitSourceRef, ServerBuildProfile
 from kdive.providers.local_libvirt.build import LocalLibvirtBuild
@@ -641,12 +641,14 @@ def test_run_build_on_host_passes_git_source_to_factory() -> None:
     parsed = cast(ServerBuildProfile, BuildProfile.parse(_GIT_PROFILE))
     asyncio.run(
         build_host_dispatch.run_build_on_host(
-            _TransportCapableRecordingBuilder(),
-            _ephemeral_host(),
-            run_id,
-            parsed,
-            secret_registry=SecretRegistry(),
-            kernel_src="",
+            build_host_dispatch.BuildHostDispatchRequest(
+                builder=_TransportCapableRecordingBuilder(),
+                host=_ephemeral_host(),
+                run_id=run_id,
+                parsed=parsed,
+                secret_registry=SecretRegistry(),
+                kernel_src="",
+            ),
             transport_factories={BuildHostKind.EPHEMERAL_LIBVIRT: _factory},
         )
     )

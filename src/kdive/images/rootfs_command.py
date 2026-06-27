@@ -11,13 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.families import family_for
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildPlane, RootfsBuildSpec
-from kdive.images.rootfs_catalog import (
-    CloudImageSource,
-    RootfsSource,
-    resolve_rootfs_entry,
-)
+from kdive.images.rootfs_specs import catalog_rootfs_build
 from kdive.providers.assembly.composition import build_local_rootfs_build_plane
 
 _log = logging.getLogger(__name__)
@@ -26,39 +21,13 @@ _DEFAULT_WORKSPACE = "/var/lib/kdive/build/images"
 _LOCAL_ROOTFS_DIR = "/var/lib/kdive/rootfs/local"
 
 
-# The guest-contract capability tags each ``--kind`` claims; the install package set is resolved
-# from the (EL-major-aware) FamilyCustomizer, not duplicated here (ADR-0251, #823).
-_KIND_CAPABILITIES: dict[str, tuple[str, ...]] = {
-    "debug": ("agent", "kdump", "drgn"),
-    "build": ("agent", "build"),
-}
-
-
 def add_build_fs_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Register `build-fs`: the operator's local-libvirt filesystem-image build."""
     build = sub.add_parser(
         "build-fs",
         help="build a local-libvirt kdive-ready filesystem qcow2 (debug guest or build host)",
     )
-    build.add_argument(
-        "--kind",
-        choices=tuple(_KIND_CAPABILITIES),
-        default="debug",
-        help="debug = guest crash/introspection rootfs; build = kernel-build-host toolchain image",
-    )
-    build.add_argument(
-        "--image",
-        default=None,
-        help=(
-            "rootfs catalog image name (e.g. fedora-kdive-ready-44); when given, name/distro/"
-            "releasever/dest and the base source are resolved from the catalog"
-        ),
-    )
-    build.add_argument(
-        "--distro",
-        default="fedora",
-        help="base-OS family for the no-`--image` path (extensibility seam; implemented: fedora)",
-    )
+    build.add_argument("--image", required=True, help="rootfs catalog image name")
     build.add_argument(
         "--workspace",
         default=_DEFAULT_WORKSPACE,
@@ -75,15 +44,12 @@ def add_build_fs_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]
             "/var/lib/kdive/rootfs/local/<name>.qcow2 (the catalog name with --image)"
         ),
     )
-    build.add_argument("--name", default="fedora-kdive-ready-43", help="catalog image name")
-    build.add_argument("--arch", default="x86_64")
-    build.add_argument("--releasever", default="43", help="release the image is built from")
     build.add_argument(
         "--package",
         action="append",
         default=None,
         dest="packages",
-        help="extra guest package (repeatable); defaults to the --kind's package set",
+        help="extra guest package (repeatable); defaults to the catalog image kind's package set",
     )
 
 
@@ -135,70 +101,33 @@ class _BuildParams:
     """The image identity and base-source provenance a ``build-fs`` invocation resolves to."""
 
     name: str
-    distro: str
-    releasever: str
     kind: str
     dest: str
-    source_image_digest: str
-    family: str
-
-
-def _source_image_digest(source: RootfsSource) -> str:
-    """Render the provenance ``source_image_digest`` for a resolved catalog base source."""
-    if isinstance(source, CloudImageSource):
-        return f"cloud-image:{source.url}@sha256:{source.sha256}"
-    return f"virt-builder:{source.template}"
+    spec: RootfsBuildSpec
 
 
 def _resolve_build_params(args: argparse.Namespace) -> _BuildParams:
-    """Resolve the build identity from ``--image`` (catalog-authoritative) or the CLI flags.
-
-    With ``--image`` the catalog row owns ``name``/``distro``/``releasever``/``kind``/``dest`` and
-    the base-source digest; without it the ``--distro``/``--releasever``/``--name``/``--dest``/
-    ``--kind`` flags drive the legacy ``virt-builder:<distro>-<releasever>`` path.
-    """
-    if args.image is not None:
-        entry = resolve_rootfs_entry(args.image)
-        return _BuildParams(
-            name=entry.name,
-            distro=entry.distro,
-            releasever=entry.version,
-            kind=entry.kind,
-            dest=args.dest or f"{_LOCAL_ROOTFS_DIR}/{entry.name}.qcow2",
-            source_image_digest=_source_image_digest(entry.source),
-            family=entry.family,
-        )
+    """Resolve the build identity from the catalog-authoritative ``--image`` value."""
+    build = catalog_rootfs_build(
+        "local-libvirt",
+        args.image,
+        packages=tuple(args.packages) if args.packages else (),
+    )
     return _BuildParams(
-        name=args.name,
-        distro=args.distro,
-        releasever=args.releasever,
-        kind=args.kind,
-        dest=args.dest or f"{_LOCAL_ROOTFS_DIR}/{args.name}.qcow2",
-        source_image_digest=f"virt-builder:{args.distro}-{args.releasever}",
-        family="rhel",
+        name=build.spec.name,
+        kind=_kind_for_capabilities(build.spec.capabilities),
+        dest=args.dest or f"{_LOCAL_ROOTFS_DIR}/{build.spec.name}.qcow2",
+        spec=build.spec,
     )
 
 
 def run_build_fs(args: argparse.Namespace) -> None:
     """Build a kdive-ready filesystem qcow2 via the local plane and move it to its destination."""
     params = _resolve_build_params(args)
-    family = family_for(params.family)
-    default_packages = family.packages(params.kind, params.distro, params.releasever)
-    packages = tuple(args.packages) if args.packages else default_packages
-    spec = RootfsBuildSpec(
-        provider="local-libvirt",
-        name=params.name,
-        arch=args.arch,
-        releasever=params.releasever,
-        packages=packages,
-        source_image_digest=params.source_image_digest,
-        capabilities=_KIND_CAPABILITIES[params.kind],
-        distro=params.distro,
-    )
     workspace = Path(args.workspace).resolve()
     _ensure_workspace_writable(workspace)
     plane = _build_local_rootfs_plane(workspace)
-    output: RootfsBuildOutput = plane.build(spec)
+    output: RootfsBuildOutput = plane.build(params.spec)
     dest = Path(params.dest).resolve()
     _publish_rootfs(output, dest)
     _log.info(
@@ -208,3 +137,10 @@ def run_build_fs(args: argparse.Namespace) -> None:
         output.digest,
     )
     print(f"export KDIVE_GUEST_IMAGE={shlex.quote(str(dest))}")
+
+
+def _kind_for_capabilities(capabilities: tuple[str, ...]) -> str:
+    """Return the operator-facing image kind label for logging."""
+    if "build" in capabilities:
+        return "build"
+    return "debug"

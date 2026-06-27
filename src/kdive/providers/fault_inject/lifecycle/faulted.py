@@ -28,7 +28,7 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.fault_inject.faulting.engine import FaultDecision, FaultEngine, FaultPlane
 from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
 from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
-from kdive.providers.ports import InstallRequest
+from kdive.providers.ports.lifecycle import InstallRequest
 
 _FIRST_ATTEMPT: Callable[[UUID], int] = lambda _system_id: 1  # noqa: E731 - a tiny default port
 _SyncSleep = Callable[[float], None]

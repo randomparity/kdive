@@ -15,7 +15,7 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import DebugSessionState
-from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
+from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.transport_reset import NullResetter
 from kdive.reconciler.repairs.debug_sessions import repair_dead_sessions
 from tests.reconciler.conftest import (

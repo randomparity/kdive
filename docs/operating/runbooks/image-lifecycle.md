@@ -53,15 +53,12 @@ digest) goes to **stderr** (the logger). That split makes the command's stdout `
 
 Flags that shape the build:
 
-- `--kind {debug,build}` (default `debug`) selects the image's role:
-  - `debug` — the guest crash/introspection rootfs (`drgn`, `kexec-tools`, `makedumpfile`;
-    capabilities `agent,kdump,drgn`). This is the `KDIVE_GUEST_IMAGE` the live spine boots.
-  - `build` — a kernel-build-host toolchain image (`gcc`, `make`, `bc`, `bison`, `flex`,
-    `openssl-devel`, `elfutils-libelf-devel`, `ncurses-devel`, `dwarves`, `rsync`, `git`;
-    capabilities `agent,build`). Use it as the base for an ssh/ephemeral-libvirt build target.
-- `--distro fedora` (default `fedora`) is the extensibility seam for the base OS; only `fedora`
-  is implemented today (it resolves to the `virt-builder` `fedora-<releasever>` template). Any
-  other value fails with a clear not-implemented message.
+- `--image NAME` is required. It selects a row from
+  `fixtures/local-libvirt/rootfs_catalog.toml`, which owns the image name, distro, release,
+  architecture, kind, family customizer, and pinned base source.
+- `fedora-kdive-ready-44` is the kdump-capable debug rootfs. `fedora-kdive-build-44` is the
+  cataloged build-host toolchain image. Add new images to the catalog rather than passing
+  ad hoc distro/release flags.
 - `--workspace DIR` (default `/var/lib/kdive/build/images`) is where the build stages and
   publishes the qcow2. Point it at a **user-writable** path to build first-run without a
   privileged `mkdir` of the root-owned default. A missing/un-writable workspace fails with an
@@ -69,11 +66,8 @@ Flags that shape the build:
 
 ```bash
 python -m kdive build-fs \
-  --kind debug \
+  --image fedora-kdive-ready-44 \
   --workspace ~/.local/share/kdive/build/images \
-  --dest /var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2 \
-  --name fedora-kdive-ready-43 \
-  --releasever 43 \
   --package drgn --package kexec-tools --package makedumpfile
 ```
 
@@ -81,10 +75,9 @@ Build a build-host toolchain image instead:
 
 ```bash
 python -m kdive build-fs \
-  --kind build \
+  --image fedora-kdive-build-44 \
   --workspace ~/.local/share/kdive/build/images \
-  --dest /var/lib/kdive/rootfs/local/fedora-build-host-43.qcow2 \
-  --name fedora-build-host-43 --releasever 43
+  --dest /var/lib/kdive/rootfs/local/fedora-kdive-build-44.qcow2
 ```
 
 To build and export `KDIVE_GUEST_IMAGE` in one step, capture stdout with `eval` (the stderr
@@ -92,9 +85,9 @@ summary still prints to your terminal):
 
 ```bash
 eval "$(python -m kdive build-fs \
+  --image fedora-kdive-ready-44 \
   --workspace ~/.local/share/kdive/build/images \
-  --dest /var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2 \
-  --name fedora-kdive-ready-43 --releasever 43)"
+  --dest /var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2)"
 # KDIVE_GUEST_IMAGE is now exported, pointing at the --dest path above
 ```
 
@@ -114,7 +107,7 @@ the `eval` form above, `KDIVE_GUEST_IMAGE` is already exported; otherwise set it
 exactly the line `build-fs` prints on stdout:
 
 ```bash
-export KDIVE_GUEST_IMAGE=/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2
+export KDIVE_GUEST_IMAGE=/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2
 bash scripts/fetch-kernel-tree.sh
 export KDIVE_KERNEL_SRC=/path/to/kernel-tree
 export KDIVE_LIVE_SSH_TARGET=<host>          # the criterion-5 env gate
@@ -132,12 +125,12 @@ The same plane runs inside the `IMAGE_BUILD` job behind the operator verb; publi
 built image to a public, row-first catalog entry that the async resolver hands to provisioning:
 
 ```bash
-kdivectl images build   --provider local-libvirt --name fedora-kdive-ready-43 \
-                        --arch x86_64 --releasever 43 \
+kdivectl images build   --provider local-libvirt --name fedora-kdive-ready-44 \
+                        --arch x86_64 --releasever 44 \
                         --source-image-digest sha256:<base> \
                         --capabilities agent,kdump,drgn,helpers
-kdivectl images publish --provider local-libvirt --name fedora-kdive-ready-43 \
-                        --arch x86_64 --releasever 43 \
+kdivectl images publish --provider local-libvirt --name fedora-kdive-ready-44 \
+                        --arch x86_64 --releasever 44 \
                         --source-image-digest sha256:<base> \
                         --capabilities agent,kdump,drgn,helpers
 kdivectl images list

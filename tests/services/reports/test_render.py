@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import csv
+import importlib
 import io
 from datetime import UTC, datetime
 
 import openpyxl
+import pytest
 
-from kdive.services.reports import Report, Section
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.services.reports.core import Report, Section
 from kdive.services.reports.render import render_csv, render_xlsx
 
 _AS_OF = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
@@ -54,3 +57,22 @@ def test_render_xlsx_truncation_note_present() -> None:
     workbook = openpyxl.load_workbook(io.BytesIO(render_xlsx(_report())))
     first_row = [cell.value for cell in workbook["leases"][1]]
     assert first_row[0] is not None and "truncated" in str(first_row[0]).lower()
+
+
+def test_render_xlsx_missing_openpyxl_reports_runtime_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = importlib.import_module
+
+    def missing_openpyxl(name: str, package: str | None = None) -> object:
+        if name == "openpyxl":
+            raise ImportError("missing")
+        return real_import(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", missing_openpyxl)
+
+    with pytest.raises(CategorizedError) as exc:
+        render_xlsx(_report())
+
+    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert exc.value.details == {"dependency": "openpyxl"}

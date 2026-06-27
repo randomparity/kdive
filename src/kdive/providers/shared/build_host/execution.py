@@ -39,19 +39,20 @@ class CapturedStep:
         stdout: str | None,
         stderr: str | None,
         *,
-        registry: SecretRegistry | None = None,
+        registry: SecretRegistry,
     ) -> CapturedStep:
         """Combine, redact, and tail-cap a step's captured streams into a `CapturedStep`."""
         return cls(returncode, redact_and_cap(stdout, stderr, registry=registry))
 
 
-def redact_and_cap(
-    stdout: str | None, stderr: str | None, *, registry: SecretRegistry | None = None
-) -> str:
+def redact_and_cap(stdout: str | None, stderr: str | None, *, registry: SecretRegistry) -> str:
     """Redact secrets from the combined stdout+stderr and keep the trailing build-log slice.
 
     The tail is kept (not the head): the failing recipe line and the compiler error live at the
-    end of build output, so a head cap would discard exactly the bytes an agent needs.
+    end of build output, so a head cap would discard exactly the bytes an agent needs. The
+    ``registry`` is mandatory (fail-closed): scrubbing build output against a fresh empty registry
+    would silently let a resolved secret value echoed by a recipe survive into the persisted,
+    agent-served build-log artifact (ADR-0238), so the caller must thread the app's registry.
     """
     combined = (stdout or "") + (stderr or "")
     redacted = Redactor(registry=registry).redact_text(combined)
@@ -81,6 +82,30 @@ def read_bytes_file(path: Path, *, category: ErrorCategory, output: str) -> byte
     """Read bytes or raise a categorized unreadable-output error."""
     try:
         return path.read_bytes()
+    except OSError as exc:
+        raise CategorizedError(
+            f"{output} is missing or unreadable",
+            category=category,
+            details={"output": output},
+        ) from exc
+
+
+def read_bytes_nofollow(path: Path, *, category: ErrorCategory, output: str) -> bytes:
+    """Read bytes refusing a final-component symlink, raising a categorized error.
+
+    The demoted-``objcopy`` build-id path hands its note file to the untrusted build user (so the
+    sandbox can write it) and the root worker reads it back. Re-opening by path with the default
+    follow-symlink semantics would let a build-user symlink swap redirect the root read at an
+    arbitrary file; ``O_NOFOLLOW`` rejects a swapped-in symlink so the read stays on the regular
+    file the sandbox produced.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                return handle.read()
+        finally:
+            os.close(fd)
     except OSError as exc:
         raise CategorizedError(
             f"{output} is missing or unreadable",
@@ -137,28 +162,46 @@ def real_read_vmlinux(workspace: Path) -> bytes:  # pragma: no cover - live_vm
     )
 
 
-def real_run_make(workspace: Path, sandbox: BuildSandbox | None = None) -> CapturedStep:
+def real_run_make(
+    workspace: Path, sandbox: BuildSandbox | None = None, *, registry: SecretRegistry
+) -> CapturedStep:
     """Run the default parallel kernel build (demoted when a sandbox is active)."""
-    return run_make_target(workspace, [f"-j{os.cpu_count() or 1}"], "make", sandbox=sandbox)
+    return run_make_target(
+        workspace, [f"-j{os.cpu_count() or 1}"], "make", sandbox=sandbox, registry=registry
+    )
 
 
-def real_run_olddefconfig(workspace: Path, sandbox: BuildSandbox | None = None) -> CapturedStep:
-    return run_make_target(workspace, ["olddefconfig"], "make olddefconfig", sandbox=sandbox)
+def real_run_olddefconfig(
+    workspace: Path, sandbox: BuildSandbox | None = None, *, registry: SecretRegistry
+) -> CapturedStep:
+    return run_make_target(
+        workspace, ["olddefconfig"], "make olddefconfig", sandbox=sandbox, registry=registry
+    )
 
 
 def real_run_modules_install(
-    workspace: Path, mod_root: Path, sandbox: BuildSandbox | None = None
+    workspace: Path,
+    mod_root: Path,
+    sandbox: BuildSandbox | None = None,
+    *,
+    registry: SecretRegistry,
 ) -> int:  # pragma: no cover
     return run_make_target(
         workspace,
         [f"INSTALL_MOD_PATH={mod_root}", "modules_install"],
         "make modules_install",
         sandbox=sandbox,
+        registry=registry,
     ).returncode
 
 
 def run_make_target(
-    workspace: Path, args: list[str], label: str, sandbox: BuildSandbox | None = None
+    workspace: Path,
+    args: list[str],
+    label: str,
+    sandbox: BuildSandbox | None = None,
+    *,
+    registry: SecretRegistry,
 ) -> CapturedStep:
     """Run ``make -C <workspace> <args...>`` (demoted when a sandbox is active); capture + map.
 
@@ -179,17 +222,21 @@ def run_make_target(
         raise CategorizedError(
             f"{label} exceeded the build timeout",
             category=ErrorCategory.BUILD_FAILURE,
-            details=_timeout_details(exc),
+            details=_timeout_details(exc, registry=registry),
         ) from exc
     except OSError as exc:
         raise launch_failure("make", exc, category=ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
-    return CapturedStep.from_streams(completed.returncode, completed.stdout, completed.stderr)
+    return CapturedStep.from_streams(
+        completed.returncode, completed.stdout, completed.stderr, registry=registry
+    )
 
 
-def _timeout_details(exc: subprocess.TimeoutExpired) -> dict[str, object]:
+def _timeout_details(
+    exc: subprocess.TimeoutExpired, *, registry: SecretRegistry
+) -> dict[str, object]:
     """Build-failure details for a timed-out make, carrying any partial captured output."""
     details: dict[str, object] = {"timeout_s": MAKE_TIMEOUT_S}
-    build_log = redact_and_cap(_as_text(exc.stdout), _as_text(exc.stderr))
+    build_log = redact_and_cap(_as_text(exc.stdout), _as_text(exc.stderr), registry=registry)
     if build_log:
         details["build_log"] = build_log
     return details
@@ -202,11 +249,23 @@ def _as_text(value: str | bytes | None) -> str | None:
     return value
 
 
-def real_read_build_id(workspace: Path) -> str:  # pragma: no cover - live_vm
-    """Extract the produced ``vmlinux`` GNU build-id from its merged ``.notes`` section."""
+def real_read_build_id(
+    workspace: Path, sandbox: BuildSandbox | None = None
+) -> str:  # pragma: no cover - live_vm
+    """Extract the produced ``vmlinux`` GNU build-id from its merged ``.notes`` section.
+
+    ``objcopy`` parses the build's ``vmlinux`` — an attacker-influenced ELF produced by the
+    unprivileged build — so when a sandbox is active the extraction is demoted to it (ADR-0214),
+    keeping a binutils ELF-parsing bug from running as the root worker. The note output file is
+    handed to the build user first so the demoted ``objcopy`` can write it; the root worker reads
+    it back afterward.
+    """
     with tempfile.NamedTemporaryFile(suffix=".note") as note_file:
+        if sandbox is not None:
+            sandbox.own(note_file.name)
         try:
-            subprocess.run(
+            sandbox_run(
+                sandbox,
                 [
                     "objcopy",
                     "-O",
@@ -233,7 +292,7 @@ def real_read_build_id(workspace: Path) -> str:  # pragma: no cover - live_vm
             raise launch_failure(
                 "objcopy", exc, category=ErrorCategory.INFRASTRUCTURE_FAILURE
             ) from exc
-        notes = read_bytes_file(
+        notes = read_bytes_nofollow(
             Path(note_file.name),
             category=ErrorCategory.BUILD_FAILURE,
             output="vmlinux notes",

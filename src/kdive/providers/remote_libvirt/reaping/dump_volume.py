@@ -25,14 +25,14 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import DumpVolume
+from kdive.providers.remote_libvirt.connection.transport import (
+    RemoteLibvirtConnections,
+)
 from kdive.providers.remote_libvirt.reaping.connections import (
     find_over_fleet,
     map_over_fleet,
     open_libvirt_reaper,
     remote_libvirt_reaper_connections,
-)
-from kdive.providers.remote_libvirt.transport import (
-    RemoteLibvirtConnections,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
-from kdive.providers.remote_libvirt.transport import RemoteLibvirtConnections
+from kdive.providers.remote_libvirt.connection.transport import RemoteLibvirtConnections
 
 _CERT_REFS = TlsCertRefs(
     client_cert_ref="secret://client-cert",

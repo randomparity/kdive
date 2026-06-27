@@ -34,7 +34,7 @@ import kdive.config as config
 from kdive.config.core_settings import DEBUG_DIR
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import DebugSession
+from kdive.domain.lifecycle.records import DebugSession
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
@@ -44,12 +44,12 @@ from kdive.mcp.tools.debug.session_context import (
 )
 from kdive.mcp.tools.debug.session_registry import GdbMiSessionRegistry
 from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
-from kdive.providers.ports import (
+from kdive.providers.ports.debug import (
     AttachSeam,
     GdbMiAttachment,
     GdbMiEngine,
-    TransportHandleData,
 )
+from kdive.providers.ports.lifecycle import TransportHandleData
 from kdive.security.authz.context import RequestContext
 
 _EngineOp = Callable[[GdbMiEngine, GdbMiAttachment], ToolResponse]

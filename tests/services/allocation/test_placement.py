@@ -14,7 +14,7 @@ from kdive.db.repositories import ALLOCATIONS, RESOURCES
 from kdive.domain.capacity.state import AllocationState, ResourceStatus
 from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.catalog.resources import Resource, ResourceKind
-from kdive.domain.lifecycle import Allocation
+from kdive.domain.lifecycle.records import Allocation
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeClaim, PCIeDescriptor
 from kdive.services.allocation.admission.placement import (
     PlacementRequest,

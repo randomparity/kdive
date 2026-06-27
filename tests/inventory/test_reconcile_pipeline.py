@@ -8,10 +8,10 @@ from typing import cast
 import pytest
 from psycopg import AsyncConnection
 
-from kdive.inventory import reconcile_pipeline
+import kdive.inventory.reconcile.pipeline as reconcile_pipeline
 from kdive.inventory.model import InventoryDoc
-from kdive.inventory.reconcile import ReconcileDiff
-from kdive.inventory.reconcile_images import ImageHeadStore
+from kdive.inventory.reconcile.images import ImageHeadStore
+from kdive.inventory.reconcile.records import ReconcileDiff
 
 
 def _recorder(name: str, calls: list[str], received: dict[str, tuple[object, ...]]):

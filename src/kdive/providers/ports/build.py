@@ -6,7 +6,7 @@ from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from kdive.build_artifacts.results import BuildOutput
-from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
+from kdive.observability.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -52,12 +52,10 @@ class TransportCapableBuilder(Builder, Protocol):
         git_remote: str,
         git_ref: str,
         secret_registry: SecretRegistry,
-        provenance_sink: dict[str, str] | None = None,
     ) -> Builder:
         """Return a sibling builder whose every build step runs on ``transport``'s host.
 
-        ``provenance_sink``, when given, receives the git clone's resolved-commit provenance
-        (``{remote, ref, resolved_commit}``, remote userinfo-stripped) for the build's record
-        (#778); the dispatch layer reads it back and adds ``build_host``.
+        The bound builder records git clone provenance on its returned ``BuildOutput`` when
+        checkout capture succeeds; the dispatch layer adds ``build_host`` afterward.
         """
         ...

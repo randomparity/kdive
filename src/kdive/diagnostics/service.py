@@ -29,16 +29,15 @@ from kdive.diagnostics.checks import (
     Check,
     CheckResult,
     CheckStatus,
-    EphemeralLibvirtBuildHostAgentCheck,
-    LocalKernelSrcCheck,
-    SecretRefCheck,
     Vantage,
     run_check,
 )
+from kdive.diagnostics.local_kernel_src_check import LocalKernelSrcCheck
 from kdive.diagnostics.provider_contracts import (
     DiagnosticProviderContribution,
     WorkerVantageDescriptor,
 )
+from kdive.diagnostics.secret_ref import SecretRefCheck
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secrets import read_secret_file
@@ -59,10 +58,8 @@ FEATURE_NOT_ENABLED_DETAIL = (
     "in this deployment"
 )
 
-# failure_category labels for the substituted worker-vantage results (ADR-0139). Kept as plain
-# strings, mirroring kdive.diagnostics.checks, so this module stays free of a domain-errors import.
-_TRANSPORT_FAILURE = "transport_failure"
-_NOT_IMPLEMENTED = "not_implemented"
+_TRANSPORT_FAILURE = ErrorCategory.TRANSPORT_FAILURE
+_NOT_IMPLEMENTED = ErrorCategory.NOT_IMPLEMENTED
 
 _DEFAULT_PER_CHECK_TIMEOUT = 10.0
 _DEFAULT_OVERALL_TIMEOUT = 30.0
@@ -97,7 +94,7 @@ _SUBSTITUTION_DETAIL: dict[WorkerVantageSubstitution, str] = {
     WorkerVantageSubstitution.WORKER_UNAVAILABLE: WORKER_UNAVAILABLE_DETAIL,
     WorkerVantageSubstitution.FEATURE_NOT_ENABLED: FEATURE_NOT_ENABLED_DETAIL,
 }
-_SUBSTITUTION_CATEGORY: dict[WorkerVantageSubstitution, str] = {
+_SUBSTITUTION_CATEGORY: dict[WorkerVantageSubstitution, ErrorCategory] = {
     WorkerVantageSubstitution.WORKER_UNAVAILABLE: _TRANSPORT_FAILURE,
     WorkerVantageSubstitution.FEATURE_NOT_ENABLED: _NOT_IMPLEMENTED,
 }
@@ -128,6 +125,19 @@ class WorkerVantageDispatchMode:
     """Delegate all worker-vantage outcomes to a dispatcher."""
 
     dispatcher: WorkerCheckDispatcher
+
+
+@dataclass(frozen=True, slots=True)
+class _CompositeWorkerCheckDispatcher:
+    """Run several provider dispatchers as one worker-vantage dispatcher."""
+
+    dispatchers: Sequence[WorkerCheckDispatcher]
+
+    async def run_worker_checks(self) -> list[CheckResult]:
+        results: list[CheckResult] = []
+        for dispatcher in self.dispatchers:
+            results.extend(await dispatcher.run_worker_checks())
+        return results
 
 
 type WorkerVantageMode = WorkerVantageSubstitutionMode | WorkerVantageDispatchMode
@@ -333,8 +343,10 @@ def _build_host_checks(pool: AsyncConnectionPool | None) -> list[Check]:
     ]
 
 
-def _buildhost_agent_check(pool: AsyncConnectionPool | None) -> EphemeralLibvirtBuildHostAgentCheck:
-    """Assemble the opt-in ephemeral build-host agent check; fail fast without a pool (ADR-0167).
+def _buildhost_agent_check(
+    contributions: Sequence[DiagnosticProviderContribution], pool: AsyncConnectionPool | None
+) -> Check:
+    """Assemble the provider-owned build-host agent check; fail fast without a pool (ADR-0167).
 
     The probe enumerates ``ephemeral_libvirt`` hosts and writes reaper markers, both of which need
     the async pool. A requested opt-in without a pool is a configuration error, not a silently
@@ -346,11 +358,25 @@ def _buildhost_agent_check(pool: AsyncConnectionPool | None) -> EphemeralLibvirt
             "enumerate build hosts; none is wired in this deployment (ADR-0167)",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    # Function-local import: diagnostics.buildhost_agent imports providers + db, so a top-level
-    # import here would widen this module's import graph; only needed when opted in.
-    from kdive.diagnostics.buildhost_agent import buildhost_agent_probe
+    for contribution in contributions:
+        if contribution.buildhost_agent_check is not None:
+            return contribution.buildhost_agent_check(pool)
+    raise CategorizedError(
+        "ephemeral_libvirt_buildhost_agent (--with-buildhost-agent) is not provided by any "
+        "diagnostic provider contribution in this deployment",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+    )
 
-    return EphemeralLibvirtBuildHostAgentCheck(probe=buildhost_agent_probe(pool))
+
+def _buildhost_agent_additions(
+    *,
+    with_buildhost_agent: bool,
+    contributions: Sequence[DiagnosticProviderContribution],
+    pool: AsyncConnectionPool | None,
+) -> tuple[list[Check], float, float | None]:
+    if not with_buildhost_agent:
+        return [], _DEFAULT_PER_CHECK_TIMEOUT, _DEFAULT_OVERALL_TIMEOUT
+    return [_buildhost_agent_check(contributions, pool)], _BUILDHOST_AGENT_PER_CHECK_TIMEOUT, None
 
 
 def _worker_vantage_checks(
@@ -360,6 +386,76 @@ def _worker_vantage_checks(
         WorkerVantageCheck(id=descriptor.id, provider=descriptor.provider)
         for descriptor in descriptors
     ]
+
+
+@dataclass(frozen=True, slots=True)
+class _EnabledDiagnosticContribution:
+    contribution: DiagnosticProviderContribution
+    unavailable_worker_checks: tuple[WorkerVantageDescriptor, ...]
+
+
+def _enabled_provider_contributions(
+    provider_contributions: Sequence[DiagnosticProviderContribution],
+) -> list[_EnabledDiagnosticContribution]:
+    enabled: list[_EnabledDiagnosticContribution] = []
+    for contribution in provider_contributions:
+        if contribution.enabled():
+            enabled.append(
+                _EnabledDiagnosticContribution(
+                    contribution=contribution,
+                    unavailable_worker_checks=tuple(contribution.unavailable_worker_checks()),
+                )
+            )
+    return enabled
+
+
+def _provider_checks(contributions: Sequence[_EnabledDiagnosticContribution]) -> list[Check]:
+    return [check for contribution in contributions for check in contribution.contribution.checks()]
+
+
+def _worker_vantage_mode(
+    *,
+    contributions: Sequence[_EnabledDiagnosticContribution],
+    pool: AsyncConnectionPool | None,
+) -> WorkerVantageMode | None:
+    if not contributions:
+        return None
+    if pool is None:
+        unavailable_worker_checks = [
+            check
+            for contribution in contributions
+            for check in _worker_vantage_checks(contribution.unavailable_worker_checks)
+        ]
+        return WorkerVantageSubstitutionMode(
+            WorkerVantageSubstitution.FEATURE_NOT_ENABLED,
+            unavailable_worker_checks,
+        )
+    return _worker_vantage_dispatch_mode(contributions=contributions, pool=pool)
+
+
+def _worker_vantage_dispatch_mode(
+    *,
+    contributions: Sequence[_EnabledDiagnosticContribution],
+    pool: AsyncConnectionPool,
+) -> WorkerVantageDispatchMode:
+    # Function-local import: worker_dispatch imports WORKER_UNAVAILABLE_DETAIL from this module,
+    # so a top-level import here would be a cycle (ADR-0164).
+    from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
+
+    dispatchers = [
+        JobWorkerCheckDispatcher(
+            pool,
+            provider=contribution.contribution.provider,
+            worker_check_ids=tuple(
+                descriptor.id for descriptor in contribution.unavailable_worker_checks
+            ),
+        )
+        for contribution in contributions
+    ]
+    dispatcher = (
+        dispatchers[0] if len(dispatchers) == 1 else _CompositeWorkerCheckDispatcher(dispatchers)
+    )
+    return WorkerVantageDispatchMode(dispatcher)
 
 
 def default_service_factory(
@@ -412,38 +508,19 @@ def default_service_factory(
             "target provider; none is wired in this deployment (ADR-0091, M2.4)",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    checks: list[Check] = [_secret_ref_check(), *_build_host_checks(pool)]
-    per_check_timeout = _DEFAULT_PER_CHECK_TIMEOUT
-    overall_timeout: float | None = _DEFAULT_OVERALL_TIMEOUT
-    if with_buildhost_agent:
-        checks.append(_buildhost_agent_check(pool))
-        per_check_timeout = _BUILDHOST_AGENT_PER_CHECK_TIMEOUT
-        overall_timeout = None
-    unavailable_worker_checks: list[WorkerVantageCheck] = []
-    worker_mode: WorkerVantageMode | None = None
-    for contribution in provider_contributions:
-        if not contribution.enabled():
-            continue
-        checks.extend(contribution.checks())
-        unavailable = contribution.unavailable_worker_checks()
-        if pool is not None:
-            # Function-local import: worker_dispatch imports WORKER_UNAVAILABLE_DETAIL from this
-            # module, so a top-level import here would be a cycle (ADR-0164).
-            from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
-
-            worker_mode = WorkerVantageDispatchMode(
-                JobWorkerCheckDispatcher(
-                    pool,
-                    provider=contribution.provider,
-                    worker_check_ids=tuple(descriptor.id for descriptor in unavailable),
-                )
-            )
-        else:
-            unavailable_worker_checks.extend(_worker_vantage_checks(unavailable))
-            worker_mode = WorkerVantageSubstitutionMode(
-                WorkerVantageSubstitution.FEATURE_NOT_ENABLED,
-                unavailable_worker_checks,
-            )
+    buildhost_checks, per_check_timeout, overall_timeout = _buildhost_agent_additions(
+        with_buildhost_agent=with_buildhost_agent,
+        contributions=provider_contributions,
+        pool=pool,
+    )
+    enabled_contributions = _enabled_provider_contributions(provider_contributions)
+    checks: list[Check] = [
+        _secret_ref_check(),
+        *_build_host_checks(pool),
+        *buildhost_checks,
+        *_provider_checks(enabled_contributions),
+    ]
+    worker_mode = _worker_vantage_mode(contributions=enabled_contributions, pool=pool)
     # When a dispatcher is wired it owns the worker-vantage outcome; otherwise FEATURE_NOT_ENABLED
     # keeps the substituted detail honest (provider_tls/gdbstub_acl are unwired here, not a worker
     # outage) — ADR-0139.

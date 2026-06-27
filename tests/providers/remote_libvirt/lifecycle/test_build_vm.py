@@ -18,6 +18,7 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import GitSourceRef
+from kdive.providers.remote_libvirt.connection.transport import remote_libvirt_connections
 from kdive.providers.remote_libvirt.guest.build_transport import GuestExecBuildTransport
 from kdive.providers.remote_libvirt.lifecycle.build_vm import (
     BuildVmTiming,
@@ -27,7 +28,6 @@ from kdive.providers.remote_libvirt.lifecycle.build_vm import (
     render_build_domain_xml,
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import recorded_gdb_port
-from kdive.providers.remote_libvirt.transport import remote_libvirt_connections
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error
 from tests.providers.remote_libvirt.lifecycle.test_provisioning import (

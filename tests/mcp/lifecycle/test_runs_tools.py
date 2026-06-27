@@ -31,15 +31,16 @@ from kdive.domain.capacity.state import (
 )
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Allocation, Investigation, Run, System
+from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.domain.pcie import PCIeClaim
-from kdive.jobs.handlers import runs as runs_handlers
-from kdive.jobs.handlers import runs_boot, runs_shared
-from kdive.jobs.handlers import runs_common as run_handler_common
+from kdive.jobs.handlers.runs import boot_evidence
+from kdive.jobs.handlers.runs import common as run_handler_common
+from kdive.jobs.handlers.runs import registrar as runs_handlers
+from kdive.jobs.handlers.runs import shared as runs_shared
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
+from kdive.mcp.tools._runtime_resolution import with_runtime_for_run_target_kind
 from kdive.mcp.tools.lifecycle import vmcore
 from kdive.mcp.tools.lifecycle.runs import common as runs_common
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest, bind_run
@@ -428,12 +429,12 @@ def test_cancel_unbound_run_succeeds(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_with_runtime_for_run_resolves_unbound_run(migrated_url: str) -> None:
+def test_with_runtime_for_run_target_kind_resolves_unbound_run(migrated_url: str) -> None:
     """The runs.build / runs.complete_build admission path resolves an unbound Run (ADR-0169).
 
-    Regression: with_runtime_for_run formerly joined runs->systems->resources, so an unbound Run
-    (system_id IS NULL) was NOT_FOUND and the whole create-unbound -> build flow failed at the
-    tool boundary. The runtime is now selected from the Run's committed target_kind.
+    The runs.build wrapper uses the target-kind helper, not the bound-run helper, because a Run can
+    be built before it is attached to a System. The runtime is selected from the Run's committed
+    target_kind.
     """
 
     async def _run() -> None:
@@ -446,7 +447,7 @@ def test_with_runtime_for_run_resolves_unbound_run(migrated_url: str) -> None:
                 seen.append(rid)
                 return ToolResponse.success(rid, "ok")
 
-            unbound_resp = await with_runtime_for_run(
+            unbound_resp = await with_runtime_for_run_target_kind(
                 pool,
                 provider_resolver(),
                 _ctx(),
@@ -454,7 +455,7 @@ def test_with_runtime_for_run_resolves_unbound_run(migrated_url: str) -> None:
                 lambda _r: _cb(unbound),
                 required_role=Role.OPERATOR,
             )
-            bound_resp = await with_runtime_for_run(
+            bound_resp = await with_runtime_for_run_target_kind(
                 pool,
                 provider_resolver(),
                 _ctx(),
@@ -3711,7 +3712,11 @@ def test_register_handlers_binds_build() -> None:
 
 from kdive.domain.capture import CaptureMethod  # noqa: E402
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy  # noqa: E402
-from kdive.providers.ports import Booter, Installer, InstallRequest  # noqa: E402
+from kdive.providers.ports.lifecycle import (  # noqa: E402
+    Booter,
+    Installer,
+    InstallRequest,
+)
 
 _LOCAL_POLICY = LocalLibvirtProfilePolicy()
 _SUCCEEDED_BUILD: dict[str, Any] = {
@@ -4534,7 +4539,7 @@ def test_boot_handler_registers_console_on_success(
     # The clean-boot console is the A/B baseline (the `ls /proc`-ran-without-panic
     # evidence) the feature exists to produce, so registration must fire on success too.
     # A real clean boot's console is non-empty (it prints the readiness marker).
-    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    monkeypatch.setattr(boot_evidence, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -4579,7 +4584,7 @@ def test_boot_handler_registers_console_even_on_failure(
 ) -> None:
     # On a crash the panic fires before readiness, but the oops console IS on disk — so a
     # non-empty console must still be captured even though the boot step raises.
-    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    monkeypatch.setattr(boot_evidence, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -4615,7 +4620,7 @@ def test_boot_handler_records_expected_crash_observed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    monkeypatch.setattr(boot_evidence, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -4663,7 +4668,7 @@ def test_expected_crash_observed_system_can_host_next_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    monkeypatch.setattr(boot_evidence, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -4704,7 +4709,7 @@ def test_boot_handler_expected_crash_requires_matching_console(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    monkeypatch.setattr(boot_evidence, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -4745,7 +4750,7 @@ def test_boot_handler_skips_empty_console(
     # An empty/unreadable console means capture FAILED (a real boot's console is non-empty).
     # Registering empty bytes as an `available` artifact would be indistinguishable from a
     # crash-free console and could drive a false "fixed" A/B verdict, so it must NOT register.
-    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    monkeypatch.setattr(boot_evidence, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -4795,7 +4800,7 @@ def test_boot_handler_preserves_console_read_failure(
             },
         )
 
-    monkeypatch.setattr(runs_boot, "read_console_log", fail_read_console_log)
+    monkeypatch.setattr(boot_evidence, "read_console_log", fail_read_console_log)
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -4837,7 +4842,7 @@ def test_boot_handler_console_is_readable_via_artifacts(
     """
     from kdive.mcp.tools.catalog.artifacts.reads import artifacts_list
 
-    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    monkeypatch.setattr(boot_evidence, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -4887,7 +4892,7 @@ def test_boot_handler_reboot_preserves_prior_run_console(
     The two boots run sequentially, matching M0 (a System's Runs boot one at a time). Two Runs
     booting one System *concurrently* is not serialized by boot_handler and is out of scope.
     """
-    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    monkeypatch.setattr(boot_evidence, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

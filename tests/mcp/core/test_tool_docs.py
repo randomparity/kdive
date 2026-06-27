@@ -100,17 +100,17 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "images.upload": ("tests/mcp/ops/test_images_tools.py",),
     "inventory.clear_override": ("tests/mcp/ops/test_inventory_clear_override.py",),
     "inventory.list": ("tests/mcp/ops/test_inventory_list.py",),
-    "investigations.close": ("tests/mcp/catalog/test_investigations_tools.py",),
-    "investigations.get": ("tests/mcp/catalog/test_investigations_tools.py",),
-    "investigations.link": ("tests/mcp/catalog/test_investigations_tools.py",),
-    "investigations.list": ("tests/mcp/catalog/test_investigations_tools.py",),
-    "investigations.open": ("tests/mcp/catalog/test_investigations_tools.py",),
-    "investigations.set": ("tests/mcp/catalog/test_investigations_tools.py",),
-    "investigations.unlink": ("tests/mcp/catalog/test_investigations_tools.py",),
-    "jobs.cancel": ("tests/mcp/catalog/test_jobs_tools.py",),
-    "jobs.get": ("tests/mcp/catalog/test_jobs_tools.py",),
-    "jobs.list": ("tests/mcp/catalog/test_jobs_tools.py",),
-    "jobs.wait": ("tests/mcp/catalog/test_jobs_tools.py",),
+    "investigations.close": ("tests/mcp/lifecycle/test_investigations_tools.py",),
+    "investigations.get": ("tests/mcp/lifecycle/test_investigations_tools.py",),
+    "investigations.link": ("tests/mcp/lifecycle/test_investigations_tools.py",),
+    "investigations.list": ("tests/mcp/lifecycle/test_investigations_tools.py",),
+    "investigations.open": ("tests/mcp/lifecycle/test_investigations_tools.py",),
+    "investigations.set": ("tests/mcp/lifecycle/test_investigations_tools.py",),
+    "investigations.unlink": ("tests/mcp/lifecycle/test_investigations_tools.py",),
+    "jobs.cancel": ("tests/mcp/jobs/test_jobs_tools.py",),
+    "jobs.get": ("tests/mcp/jobs/test_jobs_tools.py",),
+    "jobs.list": ("tests/mcp/jobs/test_jobs_tools.py",),
+    "jobs.wait": ("tests/mcp/jobs/test_jobs_tools.py",),
     "introspect.from_vmcore": ("tests/mcp/debug/test_introspect_tools.py",),
     "introspect.run": ("tests/mcp/debug/test_introspect_tools.py",),
     "introspect.script": ("tests/mcp/debug/test_introspect_tools.py",),
@@ -142,8 +142,8 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "resources.uncordon": ("tests/mcp/catalog/test_resources_tools.py",),
     "postmortem.crash": ("tests/mcp/lifecycle/test_vmcore_tools.py",),
     "postmortem.triage": ("tests/mcp/lifecycle/test_vmcore_tools.py",),
-    "projects.list": ("tests/mcp/catalog/test_projects_tools.py",),
-    "session.whoami": ("tests/mcp/catalog/test_session_tools.py",),
+    "projects.list": ("tests/mcp/identity/test_projects_tools.py",),
+    "session.whoami": ("tests/mcp/identity/test_session_tools.py",),
     "runs.bind": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.boot": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.build": ("tests/mcp/lifecycle/test_runs_tools.py",),
@@ -208,7 +208,7 @@ def _reaches_symbol(fn: Callable[..., Any], target: str) -> bool:
             return None
         try:
             hints = get_type_hints(factory, globalns=factory.__globals__, localns=nonlocals)
-        except NameError, TypeError:
+        except (NameError, TypeError) as _exc:
             return None
         owner_type = hints.get("return")
         delegate = getattr(owner_type, attr, None)
@@ -217,7 +217,7 @@ def _reaches_symbol(fn: Callable[..., Any], target: str) -> bool:
     def _walk(f: Callable[..., Any]) -> bool:
         try:
             tree = ast.parse(textwrap.dedent(inspect.getsource(f)))
-        except OSError, TypeError:
+        except (OSError, TypeError) as _exc:
             return False
         glb = getattr(f, "__globals__", {})
         try:
@@ -291,6 +291,34 @@ def test_every_parameter_has_a_description() -> None:
     assert not offenders, f"parameters missing a description: {offenders}"
 
 
+def _object_schema(schema: dict[str, object]) -> dict[str, object]:
+    if "anyOf" not in schema:
+        return schema
+    choices = schema["anyOf"]
+    assert isinstance(choices, list)
+    for choice in choices:
+        assert isinstance(choice, dict)
+        if choice.get("type") == "object":
+            return cast(dict[str, object], choice)
+    raise AssertionError(f"no object schema in {schema!r}")
+
+
+def test_filtered_list_tools_use_request_payloads() -> None:
+    tools = {t.name: t for t in TOOLS}
+    expected_fields = {
+        "debug.list_sessions": {"run_id", "system_id", "project", "state", "limit", "cursor"},
+        "investigations.list": {"project", "state", "limit", "cursor"},
+        "resources.list": {"kind", "limit", "cursor"},
+    }
+
+    for tool_name, fields in expected_fields.items():
+        params = tools[tool_name].parameters
+        assert set(params["properties"]) == {"request"}
+        request_schema = _object_schema(params["properties"]["request"])
+        request_properties = cast(dict[str, object], request_schema["properties"])
+        assert set(request_properties) == fields
+
+
 def test_run_cmdline_docs_describe_debug_args_only() -> None:
     """The agent-provided cmdline must not document platform-owned boot args."""
     tools = {t.name: t for t in TOOLS}
@@ -302,20 +330,25 @@ def test_run_cmdline_docs_describe_debug_args_only() -> None:
         assert "root=/dev/vda" not in description
 
 
-def test_run_lifecycle_tools_cross_reference_build_cmdline() -> None:
-    # #748: extra kernel cmdline args are only settable via runs.build.cmdline, but an agent
-    # working from runs.create / runs.boot / runs.get alone could not discover that seam. Each
-    # of those tools' schema text must now name runs.build.cmdline as the way to append params.
+def test_run_lifecycle_tools_cross_reference_real_cmdline_parameters() -> None:
+    # Extra kernel cmdline args are set on the real build/finalize tools, not through a
+    # phantom subtool. The discovery text must name the actual public parameters.
     tools = {t.name: t for t in TOOLS}
 
     create = tools["runs.create"]
-    create_text = (create.description or "") + create.parameters["properties"]["build_profile"][
-        "description"
-    ]
-    assert "runs.build.cmdline" in create_text
+    request_props = create.parameters["properties"]["request"]["properties"]
+    create_text = (create.description or "") + request_props["build_profile"]["description"]
+    assert "runs.build.cmdline" not in create_text
+    assert "runs.build" in create_text
+    assert "runs.complete_build" in create_text
+    assert "cmdline" in create_text
 
     for tool_name in ("runs.boot", "runs.get"):
-        assert "runs.build.cmdline" in (tools[tool_name].description or "")
+        description = tools[tool_name].description or ""
+        assert "runs.build.cmdline" not in description
+        assert "runs.build" in description
+        assert "runs.complete_build" in description
+        assert "cmdline" in description
 
 
 def test_runs_create_documents_warm_tree_is_provenance_only() -> None:
@@ -325,7 +358,8 @@ def test_runs_create_documents_warm_tree_is_provenance_only() -> None:
     # The build_profile schema text must state this inline so a cold agent need not open
     # the build-source-staging resource to understand the field.
     tools = {t.name: t for t in TOOLS}
-    description = tools["runs.create"].parameters["properties"]["build_profile"]["description"]
+    request_props = tools["runs.create"].parameters["properties"]["request"]["properties"]
+    description = request_props["build_profile"]["description"]
     lowered = description.lower()
     assert "provenance" in lowered
     assert "KDIVE_KERNEL_SRC" in description
@@ -339,9 +373,8 @@ def test_expected_boot_failure_documents_match_contract() -> None:
     # schema text must spell out that contract, not just give one example, so a black-box caller
     # writes a matching pattern from the surface alone.
     tools = {t.name: t for t in TOOLS}
-    description = tools["runs.create"].parameters["properties"]["expected_boot_failure"][
-        "description"
-    ]
+    request_props = tools["runs.create"].parameters["properties"]["request"]["properties"]
+    description = request_props["expected_boot_failure"]["description"]
     lowered = description.lower()
     assert "substring" in lowered
     assert "case-sensitive" in lowered
@@ -680,7 +713,8 @@ def test_systems_list_state_filter_is_enum_constrained() -> None:
     # schema layer (so an invalid value is a schema error the model sees up front), while the
     # open-value-set `shape`/`pcie` filters stay bare strings (shape is runtime-mutable via
     # shapes.set; pcie is a structured <vendor>:<device> format).
-    props = {t.name: t for t in TOOLS}["systems.list"].parameters["properties"]
+    request_schema = {t.name: t for t in TOOLS}["systems.list"].parameters["properties"]["request"]
+    props = request_schema["anyOf"][0]["properties"]
 
     state_enums = _collect_enums(props["state"])
     assert state_enums, "systems.list `state` advertises no enum; it must carry SystemState"

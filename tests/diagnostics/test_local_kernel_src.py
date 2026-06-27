@@ -19,16 +19,19 @@ from pathlib import Path
 import kdive.config as config
 import kdive.diagnostics.kernel_src as kernel_src
 from kdive.diagnostics.checks import (
-    LOCAL_KERNEL_SRC_FIX,
     LOCAL_KERNEL_SRC_ID,
     CheckStatus,
-    LocalKernelSrcCheck,
     Vantage,
+)
+from kdive.diagnostics.kernel_src import _git_head, warm_tree_source_probe
+from kdive.diagnostics.local_kernel_src_check import (
+    LOCAL_KERNEL_SRC_FIX,
+    LocalKernelSrcCheck,
     WarmTreeSourceOutcome,
     WarmTreeSourceProbe,
     WarmTreeSourceProbeResult,
 )
-from kdive.diagnostics.kernel_src import _git_head, warm_tree_source_probe
+from kdive.domain.errors import ErrorCategory
 
 # Fake commit fixtures. Deliberately non-hex (so the secret scanner does not flag them) while
 # still long enough to exercise the 12-char short-commit slice _git_head performs.
@@ -118,7 +121,7 @@ def test_unset_is_fail_with_the_build_lane_fix() -> None:
     result = asyncio.run(check.run())
     assert result.status is CheckStatus.FAIL
     assert result.fix == LOCAL_KERNEL_SRC_FIX
-    assert result.failure_category == "configuration_error"
+    assert result.failure_category is ErrorCategory.CONFIGURATION_ERROR
     assert result.provider is None
     assert "KDIVE_KERNEL_SRC" in result.detail
     assert "unset" in result.detail
@@ -129,7 +132,7 @@ def test_invalid_is_fail_with_the_build_lane_fix() -> None:
     result = asyncio.run(check.run())
     assert result.status is CheckStatus.FAIL
     assert result.fix == LOCAL_KERNEL_SRC_FIX
-    assert result.failure_category == "configuration_error"
+    assert result.failure_category is ErrorCategory.CONFIGURATION_ERROR
     assert result.provider is None
     assert "absolute path" in result.detail
 

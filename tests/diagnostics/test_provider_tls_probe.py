@@ -7,7 +7,7 @@ import ssl
 
 import pytest
 
-from kdive.diagnostics.checks import TlsProbeOutcome
+from kdive.diagnostics.provider_checks import TlsProbeOutcome
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.diagnostics.provider_tls import provider_tls_probe, tls_endpoint
 

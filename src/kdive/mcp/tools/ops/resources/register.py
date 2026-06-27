@@ -35,7 +35,7 @@ from kdive.domain.catalog.resource_capabilities import (
 )
 from kdive.domain.catalog.resources import ManagedBy, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.inventory.reconcile import resource_identity_lock
+from kdive.inventory.reconcile.locks import resource_identity_lock
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.tools.ops.resources._common import (
@@ -221,7 +221,7 @@ async def _authorize_registration(
     return None
 
 
-def _common_registration(
+def _validate_registration_and_resolve_owner(
     ctx: RequestContext,
     request: RuntimeResourceRegistration,
 ) -> tuple[ToolResponse | None, str | None]:
@@ -271,7 +271,7 @@ async def _register_with_plan(
     failure = await _authorize_registration(pool, ctx, tool=tool, name=request.name)
     if failure is not None:
         return failure
-    failure, owner_project = _common_registration(ctx, request)
+    failure, owner_project = _validate_registration_and_resolve_owner(ctx, request)
     if failure is not None:
         return failure
     if reachability_host_uri is None:

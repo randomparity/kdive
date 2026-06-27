@@ -17,6 +17,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import DumpVolumeReaper
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
+from kdive.providers.remote_libvirt.connection.transport import remote_libvirt_connections
 from kdive.providers.remote_libvirt.reaping.dump_volume import (
     OpenDumpReaperConnection,
     RemoteLibvirtDumpVolumeReaper,
@@ -24,7 +25,6 @@ from kdive.providers.remote_libvirt.reaping.dump_volume import (
     volume_mtime_epoch_s,
 )
 from kdive.providers.remote_libvirt.retrieve.host_dump_capture import host_dump_volume_name
-from kdive.providers.remote_libvirt.transport import remote_libvirt_connections
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import libvirt_error
 

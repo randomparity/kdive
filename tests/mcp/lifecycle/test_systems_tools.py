@@ -29,7 +29,7 @@ from kdive.domain.capacity.state import AllocationState, InvestigationState, Run
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Allocation, Investigation, Run, System
+from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers import systems as systems_handlers
@@ -2579,7 +2579,7 @@ def test_system_envelope_surfaces_placement_and_profile_summary() -> None:
     from uuid import uuid4
 
     from kdive.domain.capacity.state import SystemState
-    from kdive.domain.lifecycle import System
+    from kdive.domain.lifecycle.records import System
     from kdive.mcp.tools.lifecycle.systems.view import system_envelope
 
     dt = datetime(2026, 6, 18, tzinfo=UTC)

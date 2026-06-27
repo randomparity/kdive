@@ -115,7 +115,7 @@ def test_concurrent_reconciles_keep_row_and_object_consistent(
     """
     from kdive.build_configs.catalog import read_build_config_provenance
     from kdive.inventory.model import InventoryDoc
-    from kdive.inventory.reconcile_build_configs import reconcile_build_configs
+    from kdive.inventory.reconcile.build_configs import reconcile_build_configs
 
     key = "system/build-configs/kdump/kdump.config"
 

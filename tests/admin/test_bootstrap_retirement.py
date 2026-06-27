@@ -7,13 +7,14 @@ app tier) is the bring-up path that replaces them.
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 
 import pytest
 
 from kdive.__main__ import build_parser
-from kdive.admin.bootstrap import install_fixtures
 from kdive.admin.default_fixtures import LOCAL_LIBVIRT_FIXTURES
+from kdive.admin.fixtures import install_fixtures
 
 
 def test_removed_subcommands_exit_on_parse() -> None:
@@ -31,11 +32,9 @@ def test_retained_subcommands_still_parse() -> None:
     assert parser.parse_args(["install-fixtures"]).command == "install-fixtures"
 
 
-def test_run_stack_not_importable() -> None:
-    import kdive.admin.bootstrap as bootstrap
-
-    for removed in ("run_stack", "install_compose", "print_local_env", "supervisor_commands"):
-        assert not hasattr(bootstrap, removed)
+def test_retired_bootstrap_facade_not_importable() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("kdive.admin.bootstrap")
 
 
 def test_install_fixtures_writes_every_packaged_fixture_including_nested(tmp_path: Path) -> None:

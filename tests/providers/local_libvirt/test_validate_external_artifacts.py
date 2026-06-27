@@ -493,8 +493,8 @@ def test_oversized_section_size_is_build_failure() -> None:
 
 # --- Chunked artifacts (ADR-0104 §4) ----------------------------------------------------
 
+from kdive.artifacts.chunks import verify_chunks  # noqa: E402
 from kdive.artifacts.uploads import ChunkEntry  # noqa: E402
-from kdive.build_artifacts.validation import verify_chunks  # noqa: E402
 
 _PREFIX = "local/runs/rid/"
 

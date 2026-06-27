@@ -16,11 +16,12 @@ import asyncio
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import StoredArtifact
 from kdive.db.repositories import ARTIFACTS
-from kdive.providers.ports import ConsoleSnapshot
+from kdive.providers.ports.console import ConsoleSnapshot
 from kdive.providers.remote_libvirt.console.wiring import RemoteConsolePartStore
-from kdive.store.objectstore import object_store_from_env, register_artifact_row
+from kdive.store.objectstore import object_store_from_env
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection

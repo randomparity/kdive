@@ -13,15 +13,15 @@ existing caller changes.
 ## Acceptance criteria (from the issue)
 
 1. "my failed build jobs" resolves in a single call with no client-side filtering
-   (`jobs.list(status="failed", kind="build")`).
+   (`jobs.list(request={"status": "failed", "kind": "build"})`).
 2. "granted allocations" resolves in a single call with no client-side filtering
-   (`allocations.list(project=…, state="granted")`).
+   (`allocations.list(request={"project": …, "state": "granted"})`).
 3. Filters compose with the pagination contract (A3 / ADR-0192): following `next_cursor`
    drains the full *filtered* set with no skip or repeat.
 
 ## Contract
 
-### `jobs.list(status=, kind=, investigation_id=, limit=, cursor=)`
+### `jobs.list(request={status, kind, investigation_id, limit, cursor})`
 
 New optional parameters (all default `None` = no filter):
 
@@ -36,7 +36,7 @@ New optional parameters (all default `None` = no filter):
   via `invalid_uuid_error("investigation_id", …)`). When set, the query joins `runs` on
   `jobs.payload->>'run_id' = runs.id::text` and filters `runs.investigation_id = %s`.
 
-### `allocations.list(project=, state=, limit=, cursor=)`
+### `allocations.list(request={project, state, limit, cursor})`
 
 - `state: AllocationState | None` — typed enum on the tool parameter, bound as a `state`
   column equality predicate. `project` unchanged (still required).
@@ -139,5 +139,5 @@ typed signature — the handler never receives an invalid enum).
 CI also gates `just docs-check` and `just adr-status-check` **individually** (not via
 `just ci`), so after editing the `jobs.list`/`allocations.list` tool docstrings or
 parameters run `just docs` and commit the regenerated `docs/guide/reference/*.md`. Tests
-live beside the existing list-tool tests (`tests/mcp/catalog/test_jobs_tools.py`,
+live beside the existing list-tool tests (`tests/mcp/jobs/test_jobs_tools.py`,
 `tests/mcp/lifecycle/test_allocations_tools.py`, `tests/jobs/test_queue.py`).

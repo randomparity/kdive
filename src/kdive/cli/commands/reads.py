@@ -85,7 +85,10 @@ async def _record(name: str, args: argparse.Namespace, payload: Mapping[str, obj
 
 
 async def resources_list(args: argparse.Namespace) -> int:
-    return await _list("resources.list", args, ["id", "kind", "host"], "kind")
+    request = _payload(args, "kind")
+    envelope = await _fetch("resources.list", {"request": request} if request else {})
+    render(_rows(envelope), columns=["id", "kind", "host"], as_json=args.json)
+    return exit_code_for_envelope(envelope)
 
 
 async def resources_describe(args: argparse.Namespace) -> int:
@@ -98,7 +101,9 @@ async def images_describe(args: argparse.Namespace) -> int:
 
 
 async def allocations_list(args: argparse.Namespace) -> int:
-    return await _list("allocations.list", args, ["id", "project", "system", "state"], "project")
+    envelope = await _fetch("allocations.list", {"request": _payload(args, "project")})
+    render(_rows(envelope), columns=["id", "project", "system", "state"], as_json=args.json)
+    return exit_code_for_envelope(envelope)
 
 
 async def allocations_get(args: argparse.Namespace) -> int:
@@ -106,7 +111,9 @@ async def allocations_get(args: argparse.Namespace) -> int:
 
 
 async def systems_list(args: argparse.Namespace) -> int:
-    return await _list("systems.list", args, ["id", "project", "state"], "state")
+    envelope = await _fetch("systems.list", {"request": _payload(args, "state")})
+    render(_rows(envelope), columns=["id", "project", "state"], as_json=args.json)
+    return exit_code_for_envelope(envelope)
 
 
 async def systems_show(args: argparse.Namespace) -> int:
@@ -118,7 +125,9 @@ async def runs_show(args: argparse.Namespace) -> int:
 
 
 async def jobs_list(args: argparse.Namespace) -> int:
-    return await _list("jobs.list", args, ["id", "kind", "state"])
+    envelope = await _fetch("jobs.list", {"request": {}})
+    render(_rows(envelope), columns=["id", "kind", "state"], as_json=args.json)
+    return exit_code_for_envelope(envelope)
 
 
 async def jobs_get(args: argparse.Namespace) -> int:

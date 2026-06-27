@@ -20,8 +20,9 @@ import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from http.client import HTTPMessage
 from pathlib import Path
-from typing import Self
+from typing import IO, Self
 
 import kdive.config as config
 from kdive.config.cli_settings import CLI_CLIENT_ID
@@ -31,6 +32,7 @@ _DEFAULT_AUDIENCE = "kdive"
 _DEFAULT_CLIENT_ID = "kdive-test"
 _REDIRECT_URI = "http://localhost:1234/callback"
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_FETCH_SCHEMES = frozenset({"http", "https"})
 
 
 def _cache_path() -> Path:
@@ -63,6 +65,17 @@ def read_cached_token() -> str | None:
         return _cache_path().read_text().strip() or None
     except FileNotFoundError:
         return None
+
+
+def _validate_fetch_url(url: str, *, label: str) -> None:
+    scheme = urllib.parse.urlparse(url).scheme.lower()
+    if scheme not in _FETCH_SCHEMES:
+        got = scheme or "<missing>"
+        raise ValueError(f"{label} must use http or https, got {got}")
+
+
+def _validate_issuer_fetches(issuer: OidcIssuer) -> None:
+    _validate_fetch_url(issuer.base_url, label="OIDC issuer URL")
 
 
 @dataclass(frozen=True)
@@ -162,6 +175,27 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class _SchemeEnforcingRedirect(urllib.request.HTTPRedirectHandler):
+    """Re-validate the redirect target's scheme so a 3xx cannot escape http/https.
+
+    urllib's default redirect handler permits ``ftp://`` targets, so an allowlisted ``https``
+    issuer could 302-redirect the token fetch into ``ftp://internal-host``; re-running the same
+    allowlist on the redirect target keeps the http/https-only intent across redirects.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        _validate_fetch_url(newurl, label="OIDC redirect URL")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _authorization_code(issuer: OidcIssuer, claims: Mapping[str, object]) -> str:
     """Drive the login form and return the authorization ``code`` from the 302 redirect."""
     params = urllib.parse.urlencode(
@@ -204,7 +238,8 @@ def _exchange_code(issuer: OidcIssuer, code: str) -> str:
         }
     ).encode()
     request = urllib.request.Request(issuer.token_endpoint, data=body, method="POST")
-    with urllib.request.urlopen(request) as response:
+    opener = urllib.request.build_opener(_SchemeEnforcingRedirect())
+    with opener.open(request) as response:  # nosec B310 - issuer + redirects are http(s)-only.
         payload = json.loads(response.read())
     access_token = payload.get("access_token")
     if not isinstance(access_token, str) or not access_token:
@@ -248,6 +283,7 @@ def mint_local_token(
         ValueError: ``ttl_seconds`` is set but not positive.
     """
     issuer = OidcIssuer.from_config()
+    _validate_issuer_fetches(issuer)
     claims = _build_claims(
         subject=subject,
         audience=issuer.audience,
@@ -280,6 +316,7 @@ def login(platform_role: str | None) -> str:
         The minted access token.
     """
     issuer = OidcIssuer.from_config()
+    _validate_issuer_fetches(issuer)
     platform_roles = [platform_role] if platform_role is not None else None
     claims = _build_claims(
         subject="operator-cli",

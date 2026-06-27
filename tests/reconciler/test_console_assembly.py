@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections.abc import Callable
 from uuid import UUID
 
@@ -276,14 +275,15 @@ async def _wait_until(predicate: Callable[[], bool], *, timeout: float = 2.0) ->
 def test_asyncio_pump_runner_throttles_idle_collector(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _run() -> None:
         # An idle collector (pump_once -> False) must back off between pumps, not busy-loop.
-        # Pin a measurable backoff and run for a few backoff windows: the pump count stays
-        # small (throttled) yet nonzero (the loop keeps running). This kills both the
-        # `if not got` -> `if got` inversion (which would make an idle collector spin with no
-        # sleep, exploding the count) and the loop/sleep-removal mutants (count would be zero
-        # or unbounded).
+        # Drive two deterministic pump steps instead of relying on scheduler timing.
         backoff = 0.05
         monkeypatch.setattr(console_hosting, "_IDLE_PUMP_BACKOFF_SECONDS", backoff)
-        runner = console_hosting.AsyncioPumpRunner()
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            sleeps.append(delay)
+
+        runner = console_hosting.AsyncioPumpRunner(sleep=fake_sleep)
         idle = _FakeCollector(_SYSTEM_ID)
 
         def _idle_pump() -> bool:
@@ -292,19 +292,11 @@ def test_asyncio_pump_runner_throttles_idle_collector(monkeypatch: pytest.Monkey
 
         idle.pump_once = _idle_pump  # ty: ignore[invalid-assignment]
 
-        runner.start(idle)
-        task = runner._tasks[_SYSTEM_ID]
-        try:
-            await _wait_until(lambda: idle.pump_calls >= 1)
-            await asyncio.sleep(backoff * 6)
-            # ~6 backoff windows elapsed: a throttled loop pumps a handful of times. A
-            # busy-loop (no sleep on idle) would rack up hundreds in the same wall time.
-            assert 1 <= idle.pump_calls <= 30
-            assert task.done() is False
-        finally:
-            runner.cancel_all()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        await runner._pump_step(idle)
+        await runner._pump_step(idle)
+
+        assert idle.pump_calls == 2
+        assert sleeps == [backoff, backoff]
 
     asyncio.run(_run())
 
@@ -312,9 +304,13 @@ def test_asyncio_pump_runner_throttles_idle_collector(monkeypatch: pytest.Monkey
 def test_asyncio_pump_runner_isolates_pump_exception_and_continues() -> None:
     async def _run() -> None:
         # A pump_once that raises once must not kill the task: the except branch logs, backs
-        # off, and continues. A mutant dropping the continue/sleep or the handler would let the
-        # exception escape and the task would finish with an error instead of pumping again.
-        runner = console_hosting.AsyncioPumpRunner()
+        # off, and a later step can pump again.
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            sleeps.append(delay)
+
+        runner = console_hosting.AsyncioPumpRunner(sleep=fake_sleep)
         collector = _FakeCollector(_SYSTEM_ID)
 
         def _pump() -> bool:
@@ -325,18 +321,11 @@ def test_asyncio_pump_runner_isolates_pump_exception_and_continues() -> None:
 
         collector.pump_once = _pump  # ty: ignore[invalid-assignment]
 
-        runner.start(collector)
-        task = runner._tasks[_SYSTEM_ID]
-        try:
-            # The first call raises; the loop must recover and pump again. The error path
-            # backs off 1s, so allow a generous bound before the recovery pump lands.
-            await _wait_until(lambda: collector.pump_calls >= 2, timeout=4.0)
-            assert collector.pump_calls >= 2
-            assert task.done() is False
-        finally:
-            runner.cancel_all()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        await runner._pump_step(collector)
+        await runner._pump_step(collector)
+
+        assert collector.pump_calls == 2
+        assert sleeps == [1.0]
 
     asyncio.run(_run())
 

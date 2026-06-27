@@ -11,16 +11,16 @@ from pydantic import JsonValue
 
 from kdive.domain.errors import CategorizedError
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.catalog.artifacts.expected_uploads import EXPECTED_UPLOADS_TOOL
-from kdive.mcp.tools.catalog.artifacts.uploads import CREATE_RUN_UPLOAD_TOOL
-from kdive.providers.core.resolver import ProviderResolver
-from kdive.security.authz.context import RequestContext
-from kdive.services.idempotency.envelope import (
+from kdive.mcp.tools._idempotency import (
     record_envelope,
     resolve_conflict,
     resolve_envelope_replay,
     validate_idempotency_key,
 )
+from kdive.mcp.tools.catalog.artifacts.expected_uploads import EXPECTED_UPLOADS_TOOL
+from kdive.mcp.tools.catalog.artifacts.uploads import CREATE_RUN_UPLOAD_TOOL
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.security.authz.context import RequestContext
 from kdive.services.runs.admission import (
     TARGET_KIND_VOCAB_REASONS,
     RunCreateError,

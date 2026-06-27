@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import CrashResult
+from kdive.providers.ports.retrieve import CrashResult
 from kdive.providers.shared.debug_common import crash_postmortem
 from kdive.providers.shared.debug_common.crash_postmortem import (
     _real_run_crash,

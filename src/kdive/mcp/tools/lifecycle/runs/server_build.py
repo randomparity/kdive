@@ -19,7 +19,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Run
+from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import BuildPayload
@@ -28,12 +28,12 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._idempotency import keyed_mutation
 from kdive.mcp.tools.lifecycle.runs.common import RUN_BUILD_TERMINAL, run_job_envelope
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
-from kdive.services.idempotency.envelope import keyed_mutation
 from kdive.services.runs.build_host_selection import resolve_and_admit
 from kdive.services.runs.steps import platform_owned_cmdline_token
 

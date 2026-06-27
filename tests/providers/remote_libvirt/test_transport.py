@@ -11,12 +11,12 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
-from kdive.providers.remote_libvirt.transport import (
+from kdive.providers.remote_libvirt.connection.transport import (
     compose_pkipath_uri,
     materialized_pkipath,
     remote_connection,
 )
-from kdive.providers.remote_libvirt.uri_validation import (
+from kdive.providers.remote_libvirt.connection.uri_validation import (
     _query_param_names,
     validate_remote_uri,
 )
@@ -185,7 +185,9 @@ def test_pkipath_cleanup_failure_is_logged_and_never_masks_the_op_error(
     def _refuse(path: object, *args: object, **kwargs: object) -> None:
         raise OSError("permission denied")
 
-    monkeypatch.setattr("kdive.providers.remote_libvirt.transport.shutil.rmtree", _refuse)
+    monkeypatch.setattr(
+        "kdive.providers.remote_libvirt.connection.transport.shutil.rmtree", _refuse
+    )
     with (
         caplog.at_level("ERROR"),
         pytest.raises(RuntimeError, match="op error"),  # the op error survives

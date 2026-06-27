@@ -21,7 +21,7 @@ from fastmcp.tools.base import ToolResult
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from kdive.domain.errors import ErrorCategory
-from kdive.mcp.middleware import BindingErrorMiddleware
+from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload
 from kdive.mcp.tools.catalog.artifacts.reads import ArtifactSearchRequest
@@ -260,7 +260,7 @@ def test_field_level_error_on_allocations_request_is_reraised_not_collapsed() ->
 def test_end_to_end_malformed_profile_returns_envelope_not_toolerror() -> None:
     # The integration proof: a typed-profile tool behind the middleware returns the envelope for a
     # malformed profile rather than raising a client-side ToolError.
-    from kdive.mcp.app import _advertise_envelope_output_schema
+    from kdive.mcp.schema_advertising import advertise_envelope_output_schema
 
     app: FastMCP = FastMCP(name="probe")
     app.add_middleware(BindingErrorMiddleware())
@@ -273,7 +273,7 @@ def test_end_to_end_malformed_profile_returns_envelope_not_toolerror() -> None:
     # it here so the client can parse the structured envelope (the recursive ToolResponse schema
     # would otherwise break the per-call TypeAdapter). The fielded schema makes `result.data` a
     # pydantic model, so read the byte-stable envelope off `structured_content`.
-    _advertise_envelope_output_schema(app)
+    advertise_envelope_output_schema(app)
 
     async def _run() -> dict[str, Any] | None:
         async with Client(app) as client:
@@ -294,7 +294,7 @@ def test_end_to_end_runs_create_typed_build_profile_publishes_schema_and_envelop
     # The integration proof for #482: runs.create with a typed `build_profile` union publishes the
     # anyOf input schema, accepts a valid profile, and returns the envelope (not a ToolError) for a
     # malformed one — exercising the real _BINDING_CONVERSIONS["runs.create"] entry.
-    from kdive.mcp.app import _advertise_envelope_output_schema
+    from kdive.mcp.schema_advertising import advertise_envelope_output_schema
 
     app: FastMCP = FastMCP(name="probe")
     app.add_middleware(BindingErrorMiddleware())
@@ -305,7 +305,7 @@ def test_end_to_end_runs_create_typed_build_profile_publishes_schema_and_envelop
     ) -> ToolResponse:
         return ToolResponse.success(system_id, "created", data={"source": build_profile.source})
 
-    _advertise_envelope_output_schema(app)
+    advertise_envelope_output_schema(app)
 
     async def _run() -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
         async with Client(app) as client:
@@ -430,7 +430,7 @@ def test_end_to_end_search_text_over_cap_returns_named_envelope() -> None:
     # The integration proof for #733: an over-cap context arg behind the middleware returns the
     # bad_search_input envelope naming the field, not a raw FastMCP ToolError — exercising the real
     # _BINDING_CONVERSIONS["artifacts.search_text"] entry against the real ge=/le= schema.
-    from kdive.mcp.app import _advertise_envelope_output_schema
+    from kdive.mcp.schema_advertising import advertise_envelope_output_schema
 
     app: FastMCP = FastMCP(name="probe")
     app.add_middleware(BindingErrorMiddleware())
@@ -443,7 +443,7 @@ def test_end_to_end_search_text_over_cap_returns_named_envelope() -> None:
     ) -> ToolResponse:
         return ToolResponse.success(artifact_id, "searched")
 
-    _advertise_envelope_output_schema(app)
+    advertise_envelope_output_schema(app)
 
     async def _run() -> dict[str, Any] | None:
         async with Client(app) as client:

@@ -19,7 +19,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import CrashOutput, CrashResult
+from kdive.providers.ports.retrieve import (
+    CrashOutput,
+    CrashResult,
+)
 from kdive.security.artifacts.crash_commands import validate_crash_commands
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry

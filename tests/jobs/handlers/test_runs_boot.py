@@ -15,15 +15,18 @@ from kdive.artifacts.storage import StoredArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Run
+from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.handlers import runs, runs_boot
-from kdive.jobs.handlers.runs_build import BuildHostTransportFactories
+from kdive.jobs.handlers.runs import boot as runs_boot
+from kdive.jobs.handlers.runs import boot_evidence
+from kdive.jobs.handlers.runs import registrar as runs
+from kdive.jobs.handlers.runs import registrar as runs_registrar
+from kdive.jobs.handlers.runs.build import BuildHostTransportFactories
 from kdive.jobs.models import HandlerRegistry
+from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.runtime import ProfilePolicy
-from kdive.providers.ports import Connector
+from kdive.providers.ports.lifecycle import Connector
 from kdive.security.artifacts.artifact_search import (
     ArtifactSearchInputError,
     search_text,
@@ -35,8 +38,8 @@ from kdive.store.objectstore import ObjectStore
 
 def test_boot_handler_facade_and_leaf_console_patch_surface() -> None:
     assert runs.boot_handler is runs_boot.boot_handler
-    assert runs_boot.console_log_path is not None
-    assert runs_boot.read_console_log is not None
+    assert boot_evidence.console_log_path is not None
+    assert boot_evidence.read_console_log is not None
 
 
 class _FakeRun:
@@ -55,27 +58,27 @@ def test_expected_crash_returns_matched_line_when_pattern_is_found() -> None:
     # matched — the whole point of #840. The pattern is a substring of one line; the full
     # matched line text comes back.
     run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": "BUG at"}))
-    assert runs_boot._expected_crash_matched_line(run, _CONSOLE) == "kernel BUG at mm/slub.c:1"
+    assert boot_evidence.expected_crash_matched_line(run, _CONSOLE) == "kernel BUG at mm/slub.c:1"
 
 
 def test_expected_crash_none_when_pattern_absent() -> None:
     run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": "no-such-marker"}))
-    assert runs_boot._expected_crash_matched_line(run, _CONSOLE) is None
+    assert boot_evidence.expected_crash_matched_line(run, _CONSOLE) is None
 
 
 def test_expected_crash_none_when_no_expected_failure_declared() -> None:
     run = cast(Run, _FakeRun(None))
-    assert runs_boot._expected_crash_matched_line(run, _CONSOLE) is None
+    assert boot_evidence.expected_crash_matched_line(run, _CONSOLE) is None
 
 
 def test_expected_crash_none_for_non_console_crash_kind() -> None:
     run = cast(Run, _FakeRun({"kind": "exit_code", "pattern": "BUG at"}))
-    assert runs_boot._expected_crash_matched_line(run, _CONSOLE) is None
+    assert boot_evidence.expected_crash_matched_line(run, _CONSOLE) is None
 
 
 def test_expected_crash_none_when_pattern_is_not_a_string() -> None:
     run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": 123}))
-    assert runs_boot._expected_crash_matched_line(run, _CONSOLE) is None
+    assert boot_evidence.expected_crash_matched_line(run, _CONSOLE) is None
 
 
 def test_expected_crash_none_on_invalid_search_pattern() -> None:
@@ -86,7 +89,7 @@ def test_expected_crash_none_on_invalid_search_pattern() -> None:
     # Guard: the pattern truly drives search_text into the raising path.
     with pytest.raises(ArtifactSearchInputError):
         search_text(_CONSOLE, pattern="BUG at|", max_matches=1)
-    assert runs_boot._expected_crash_matched_line(run, _CONSOLE) is None
+    assert boot_evidence.expected_crash_matched_line(run, _CONSOLE) is None
 
 
 def test_expected_crash_fails_closed_when_search_raises(
@@ -97,9 +100,9 @@ def test_expected_crash_fails_closed_when_search_raises(
     def _boom(*_args: object, **_kwargs: object) -> object:
         raise ArtifactSearchInputError("forced")
 
-    monkeypatch.setattr(runs_boot, "search_text", _boom)
+    monkeypatch.setattr(boot_evidence, "search_text", _boom)
     run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": "BUG at"}))
-    assert runs_boot._expected_crash_matched_line(run, _CONSOLE) is None
+    assert boot_evidence.expected_crash_matched_line(run, _CONSOLE) is None
 
 
 def test_expected_crash_matched_line_is_redacted_at_source() -> None:
@@ -107,7 +110,7 @@ def test_expected_crash_matched_line_is_redacted_at_source() -> None:
     # secret the Redactor replaced upstream is the placeholder by the time the line is returned.
     redacted_console = b"line1\nkernel BUG at token=[REDACTED]\nline3\n"
     run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": "BUG at"}))
-    matched = runs_boot._expected_crash_matched_line(run, redacted_console)
+    matched = boot_evidence.expected_crash_matched_line(run, redacted_console)
     assert matched == "kernel BUG at token=[REDACTED]"
 
 
@@ -133,13 +136,19 @@ def test_register_handlers_binds_each_run_kind_to_its_handler(
         return label
 
     monkeypatch.setattr(
-        runs, "build_handler", lambda conn, job, **kw: _fake("build", conn, job, **kw)
+        runs_registrar,
+        "build_handler",
+        lambda conn, job, **kw: _fake("build", conn, job, **kw),
     )
     monkeypatch.setattr(
-        runs, "install_handler", lambda conn, job, **kw: _fake("install", conn, job, **kw)
+        runs_registrar,
+        "install_handler",
+        lambda conn, job, **kw: _fake("install", conn, job, **kw),
     )
     monkeypatch.setattr(
-        runs, "boot_handler", lambda conn, job, **kw: _fake("boot", conn, job, **kw)
+        runs_registrar,
+        "boot_handler",
+        lambda conn, job, **kw: _fake("boot", conn, job, **kw),
     )
 
     registry = HandlerRegistry()
@@ -241,21 +250,21 @@ def _pol(*, gdbstub: bool, host_dump: bool) -> ProfilePolicy:
 
 
 def test_available_capture_without_preserve() -> None:
-    out = runs_boot._available_capture(
+    out = boot_evidence.available_capture(
         _pol(gdbstub=True, host_dump=False), cast(ProvisioningProfile, object())
     )
     assert out == ["gdbstub", "console"]
 
 
 def test_available_capture_with_preserve() -> None:
-    out = runs_boot._available_capture(
+    out = boot_evidence.available_capture(
         _pol(gdbstub=True, host_dump=True), cast(ProvisioningProfile, object())
     )
     assert out == ["gdbstub", "console", "host_dump"]
 
 
 def test_inert_capture_empty_for_console_only_profile() -> None:
-    out = runs_boot._inert_capture(
+    out = boot_evidence.inert_capture(
         _pol(gdbstub=False, host_dump=False), cast(ProvisioningProfile, object())
     )
     assert out == []
@@ -263,24 +272,24 @@ def test_inert_capture_empty_for_console_only_profile() -> None:
 
 def test_inert_capture_orders_gdbstub_host_dump_kdump() -> None:
     pol = cast(ProfilePolicy, _Pol(gdbstub=True, host_dump=True, kdump=True))
-    out = runs_boot._inert_capture(pol, cast(ProvisioningProfile, object()))
+    out = boot_evidence.inert_capture(pol, cast(ProvisioningProfile, object()))
     assert out == ["gdbstub", "host_dump", "kdump"]
 
 
 def test_inert_capture_kdump_only_when_crashkernel_set() -> None:
     pol = cast(ProfilePolicy, _Pol(gdbstub=False, host_dump=False, kdump=True))
-    out = runs_boot._inert_capture(pol, cast(ProvisioningProfile, object()))
+    out = boot_evidence.inert_capture(pol, cast(ProvisioningProfile, object()))
     assert out == ["kdump"]
 
 
 def test_gdbstub_reachable_true_when_open_succeeds() -> None:
     conn = cast(Connector, _Connector(raises=False))
-    assert runs_boot._gdbstub_reachable(conn, uuid4()) is True
+    assert boot_evidence.gdbstub_reachable(conn, uuid4()) is True
 
 
 def test_gdbstub_reachable_false_when_open_raises() -> None:
     conn = cast(Connector, _Connector(raises=True))
-    assert runs_boot._gdbstub_reachable(conn, uuid4()) is False
+    assert boot_evidence.gdbstub_reachable(conn, uuid4()) is False
 
 
 @dataclass
@@ -304,17 +313,17 @@ def _record(
     async def _fake_capture(*_a: object, **_k: object) -> object:
         if console is None:
             return None
-        return runs_boot._ConsoleArtifact(uuid4(), "tenant/console", console)
+        return boot_evidence.ConsoleArtifact(uuid4(), "tenant/console", console)
 
     async def _fake_audit(_conn: object, _ctx: object, run: object) -> None:
         audits.append(run)
 
-    monkeypatch.setattr(runs_boot.SYSTEMS, "get", _fake_get)
-    monkeypatch.setattr(runs_boot, "_capture_console_artifact", _fake_capture)
-    monkeypatch.setattr(runs_boot, "_record_boot_audit", _fake_audit)
+    monkeypatch.setattr(boot_evidence.SYSTEMS, "get", _fake_get)
+    monkeypatch.setattr(boot_evidence, "_capture_console_artifact", _fake_capture)
+    monkeypatch.setattr(boot_evidence, "record_boot_audit", _fake_audit)
 
     async def _run() -> dict[str, object] | None:
-        return await runs_boot._record_crash_halted_live(
+        return await boot_evidence.record_crash_halted_live(
             cast(AsyncConnection, object()),
             cast(RequestContext, object()),
             cast(Run, _FakeRun(None)),
@@ -390,13 +399,13 @@ def _record_expected(
     async def _fake_audit(_conn: object, _ctx: object, run: object) -> None:
         audits.append(run)
 
-    monkeypatch.setattr(runs_boot.SYSTEMS, "get", _fake_get)
-    monkeypatch.setattr(runs_boot, "_record_boot_audit", _fake_audit)
+    monkeypatch.setattr(boot_evidence.SYSTEMS, "get", _fake_get)
+    monkeypatch.setattr(boot_evidence, "record_boot_audit", _fake_audit)
 
-    artifact = runs_boot._ConsoleArtifact(uuid4(), "tenant/console", _PANIC_CONSOLE)
+    artifact = boot_evidence.ConsoleArtifact(uuid4(), "tenant/console", _PANIC_CONSOLE)
 
     async def _run() -> dict[str, object] | None:
-        return await runs_boot._record_expected_crash(
+        return await boot_evidence.record_expected_crash(
             cast(AsyncConnection, object()),
             cast(RequestContext, object()),
             cast(Run, _FakeRun({"kind": "console_crash", "pattern": "panic"})),
@@ -441,7 +450,7 @@ def test_record_expected_crash_degrades_when_profile_unparseable(
     def _raise(_profile: object) -> object:
         raise CategorizedError("bad profile", category=ErrorCategory.CONFIGURATION_ERROR)
 
-    monkeypatch.setattr(runs_boot.ProvisioningProfile, "parse", staticmethod(_raise))
+    monkeypatch.setattr(boot_evidence.ProvisioningProfile, "parse", staticmethod(_raise))
     # System present + capture flags provisioned, but the profile fails to parse: the outcome is
     # still recorded (best-effort disclosure), inert set empty (ADR-0239).
     result, audits = _record_expected(
@@ -465,17 +474,17 @@ def test_local_console_artifact_is_per_run_immutable(migrated_url: str) -> None:
         key = f"local/systems/{system_id}/console-{run_id}"
         return StoredArtifact(key, etag, Sensitivity.REDACTED, "console")
 
-    async def _run() -> tuple[runs_boot._ConsoleArtifact, ...]:
+    async def _run() -> tuple[boot_evidence.ConsoleArtifact, ...]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
             await pool.open()
             async with pool.connection() as conn:
-                a1 = await runs_boot._upsert_console_artifact_row(
+                a1 = await boot_evidence._upsert_console_artifact_row(
                     conn, system_id, _stored(run_a, "etag-a"), b"crash-A"
                 )
-                b1 = await runs_boot._upsert_console_artifact_row(
+                b1 = await boot_evidence._upsert_console_artifact_row(
                     conn, system_id, _stored(run_b, "etag-b"), b"boot-B"
                 )
-                a2 = await runs_boot._upsert_console_artifact_row(
+                a2 = await boot_evidence._upsert_console_artifact_row(
                     conn, system_id, _stored(run_a, "etag-a2"), b"crash-A"
                 )
         return a1, b1, a2
@@ -494,9 +503,9 @@ def test_mark_boot_window_local_is_zero_regardless_of_log_size(tmp_path, monkeyp
     system_id = uuid4()
     log = tmp_path / f"{system_id}.log"
     log.write_bytes(b"prior boot bytes\n")
-    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: log)
+    monkeypatch.setattr(boot_evidence, "console_log_path", lambda sid: log)
 
-    assert asyncio.run(runs_boot._mark_boot_window(system_id, None)) == 0
+    assert asyncio.run(boot_evidence.mark_boot_window(system_id, None)) == 0
 
 
 def test_mark_boot_window_remote_uses_snapshotter() -> None:
@@ -507,7 +516,7 @@ def test_mark_boot_window_remote_uses_snapshotter() -> None:
         async def snapshot(self, conn, system_id, run_id, start_index=0):
             return None
 
-    assert asyncio.run(runs_boot._mark_boot_window(uuid4(), _Snap())) == 7
+    assert asyncio.run(boot_evidence.mark_boot_window(uuid4(), _Snap())) == 7
 
 
 def test_mark_boot_window_degrades_to_zero_on_failure() -> None:
@@ -519,16 +528,16 @@ def test_mark_boot_window_degrades_to_zero_on_failure() -> None:
             return None
 
     # Best-effort: a mark-read failure must not propagate; it degrades to cumulative (0).
-    assert asyncio.run(runs_boot._mark_boot_window(uuid4(), _Boom())) == 0
+    assert asyncio.run(boot_evidence.mark_boot_window(uuid4(), _Boom())) == 0
 
 
 def test_read_redacted_console_reads_whole_log(tmp_path, monkeypatch) -> None:
     system_id = uuid4()
     log = tmp_path / f"{system_id}.log"
     log.write_bytes(b"line one\nthis boot panic\n")
-    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: log)
+    monkeypatch.setattr(boot_evidence, "console_log_path", lambda sid: log)
 
-    redacted = asyncio.run(runs_boot._read_redacted_console(system_id, SecretRegistry()))
+    redacted = asyncio.run(boot_evidence.read_redacted_console(system_id, SecretRegistry()))
 
     assert redacted == b"line one\nthis boot panic\n"
 
@@ -536,17 +545,17 @@ def test_read_redacted_console_reads_whole_log(tmp_path, monkeypatch) -> None:
 def test_local_capture_excludes_prior_boot_panic_via_truncation(tmp_path, monkeypatch) -> None:
     system_id = uuid4()
     log = tmp_path / f"{system_id}.log"
-    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: log)
+    monkeypatch.setattr(boot_evidence, "console_log_path", lambda sid: log)
 
     # Run B power-cycles the domain; libvirt's append='off' serial <log> truncates on start
     # (ADR-0258), so by capture time the per-System log holds ONLY this boot's bytes — Run A's
     # prior panic is gone from disk, not merely sliced off by an offset.
     log.write_bytes(b"[run B] booted clean READY\n")
 
-    mark_b = asyncio.run(runs_boot._mark_boot_window(system_id, None))
+    mark_b = asyncio.run(boot_evidence.mark_boot_window(system_id, None))
     assert mark_b == 0  # local takes no slice
 
-    redacted_b = asyncio.run(runs_boot._read_redacted_console(system_id, SecretRegistry()))
+    redacted_b = asyncio.run(boot_evidence.read_redacted_console(system_id, SecretRegistry()))
 
     assert redacted_b == b"[run B] booted clean READY\n"
-    assert not runs_boot._generic_panic_matches(redacted_b)  # no prior panic in the truncated log
+    assert not boot_evidence.generic_panic_matches(redacted_b)

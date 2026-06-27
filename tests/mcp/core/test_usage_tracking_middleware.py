@@ -19,7 +19,7 @@ from fastmcp.tools.base import ToolResult
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import ErrorCategory
-from kdive.mcp.middleware import UsageTrackingMiddleware
+from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOpDenied
@@ -46,7 +46,7 @@ def _drive(
     cli_client_id: str = "cli-x",
 ) -> list[tuple[Any, ...]]:
     """Run the middleware over ``behavior``; return the recorded rows."""
-    monkeypatch.setattr("kdive.mcp.middleware.current_context", _ctx)
+    monkeypatch.setattr("kdive.mcp.middleware.shared.current_context", _ctx)
     monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", cli_client_id)
 
     async def _run() -> list[tuple[Any, ...]]:
@@ -122,7 +122,7 @@ def test_error_from_propagated_exception(
 
 def test_recording_failure_is_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
     # A never-opened pool makes recording fail; the success result must still return.
-    monkeypatch.setattr("kdive.mcp.middleware.current_context", _ctx)
+    monkeypatch.setattr("kdive.mcp.middleware.shared.current_context", _ctx)
     monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "cli-x")
 
     async def _run() -> Any:

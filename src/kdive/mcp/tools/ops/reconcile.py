@@ -65,30 +65,9 @@ async def reconcile_now(
     *,
     ports: ReconcileRepairPorts,
 ) -> ToolResponse:
-    """Run one ``reconcile_once`` pass on demand; return its per-class repair summary.
+    """Run one on-demand reconcile pass and return per-repair counts.
 
-    Gates ``platform_operator`` first (a denial writes no row and never touches the pool),
-    then runs the **same** advisory-locked ``reconcile_once`` as the periodic loop, audits
-    the action to ``platform_audit_log``, and returns the counts per repair class plus the
-    names of any repairs that raised this pass.
-
-    Args:
-        pool: The shared async pool ``reconcile_once`` draws a fresh connection per repair
-            from — the same pool the periodic reconciler uses, so the two passes share the
-            advisory locks.
-        ctx: The caller's request context; must hold ``platform_operator``.
-        ports: The assembled repair dependencies for this pass. ``ports.reaper`` handles
-            leaked-domain cleanup and is resolved through the same provider composition seam
-            as the periodic loop. ``ports.upload_store`` enables abandoned-upload repair;
-            ``None`` skips that repair, mirroring the periodic loop when ``KDIVE_S3_*`` is
-            unconfigured. ``ports.image_store`` enables leaked, dangling, and expired
-            private image sweeps; ``None`` skips those image repairs. ``ports`` also carries
-            the dump-volume and build-VM reapers; their null defaults skip those provider
-            cleanup classes when the deployment has no matching provider wiring.
-
-    Returns:
-        A success ``ToolResponse`` carrying the per-class counts and ``failures`` list, or a
-        ``ToolResponse.failure(AUTHORIZATION_DENIED)`` when the caller lacks the role.
+    Denials are audited before repair dependencies touch the database.
     """
     with bind_context(principal=ctx.principal):
         try:

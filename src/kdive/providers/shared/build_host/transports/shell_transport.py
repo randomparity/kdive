@@ -18,6 +18,11 @@ import logging
 from kdive.artifacts.storage import PresignedUpload
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.build_transport import CommandResult
+from kdive.providers.shared.build_host.clone_recipe import (
+    GitCloneFailureMessages,
+    GitCommandResult,
+    run_git_clone_recipe,
+)
 from kdive.providers.shared.build_host.configuration.git_source import (
     _UNSAFE_CHARS,
     validate_git_arg,
@@ -41,8 +46,16 @@ _UPLOAD_TIMEOUT_S = 5 * 60
 # diagnostics → providers), and matches the same pointer the registration rejection emits.
 _BUILDHOST_AGENT_DIAGNOSTIC = "ops.diagnostics --with-buildhost-agent"
 
+_REMOTE_CLONE_MESSAGES = GitCloneFailureMessages(
+    init_failed="git init failed on remote",
+    fetch_failed="git fetch failed on remote",
+    missing_fetch_head="git fetch produced no FETCH_HEAD on remote (the fetch did not complete)",
+    checkout_failed="git checkout FETCH_HEAD failed on remote",
+    head_failed="git rev-parse HEAD failed on remote",
+)
 
-def _is_command_not_found(result: CommandResult, stderr_tail: str) -> bool:
+
+def _is_command_not_found(result: GitCommandResult, stderr_tail: str) -> bool:
     """Return True when *result* is a ``git: not found``-class failure (ADR-0196).
 
     The reliable primary signal is exit code 127 (the guest-exec / SSH shell reports it for a
@@ -55,6 +68,18 @@ def _is_command_not_found(result: CommandResult, stderr_tail: str) -> bool:
         return True
     lowered = stderr_tail.lower()
     return "git" in lowered and ("not found" in lowered or "no such file" in lowered)
+
+
+def _map_remote_git_init_failure(
+    result: GitCommandResult, stderr_tail: str
+) -> CategorizedError | None:
+    if not _is_command_not_found(result, stderr_tail):
+        return None
+    return CategorizedError(
+        "the build host's base image is missing the kernel build toolchain (git)",
+        category=ErrorCategory.MISSING_DEPENDENCY,
+        details={"diagnostic": _BUILDHOST_AGENT_DIAGNOSTIC, "stderr": stderr_tail},
+    )
 
 
 def _validate_url(url: str) -> None:
@@ -199,64 +224,15 @@ class ShellBuildTransport:
         validate_git_arg(remote, "remote")
         validate_git_arg(ref, "ref")
 
-        init = self._run_remote(["git", "init", dest], cwd="/", timeout_s=_CLONE_TIMEOUT_S)
-        if init.returncode != 0:
-            init_stderr = redacted_tail(init.stderr, self._secret_registry)
-            if _is_command_not_found(init, init_stderr):
-                raise CategorizedError(
-                    "the build host's base image is missing the kernel build toolchain (git)",
-                    category=ErrorCategory.MISSING_DEPENDENCY,
-                    details={"diagnostic": _BUILDHOST_AGENT_DIAGNOSTIC, "stderr": init_stderr},
-                )
-            raise CategorizedError(
-                "git init failed on remote",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"stderr": init_stderr},
-            )
-        fetch = self._run_remote(
-            ["git", "-C", dest, "fetch", "--depth", "1", remote, ref],
-            cwd="/",
-            timeout_s=_CLONE_TIMEOUT_S,
+        return run_git_clone_recipe(
+            remote=remote,
+            ref=ref,
+            dest=dest,
+            run=lambda args: self._run_remote(["git", *args], cwd="/", timeout_s=_CLONE_TIMEOUT_S),
+            redact_stderr=lambda stderr: redacted_tail(stderr, self._secret_registry),
+            messages=_REMOTE_CLONE_MESSAGES,
+            map_init_failure=_map_remote_git_init_failure,
         )
-        if fetch.returncode != 0:
-            raise CategorizedError(
-                "git fetch failed on remote",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"stderr": redacted_tail(fetch.stderr, self._secret_registry)},
-            )
-        # ADR-0154: verify FETCH_HEAD regardless of the fetch's reported rc — a transport that
-        # masks the remote command's status to 0 (e.g. the guest-agent exec channel) would
-        # otherwise fall through to a checkout that fails with a misleading pathspec error.
-        verify = self._run_remote(
-            ["git", "-C", dest, "rev-parse", "--verify", "--quiet", "FETCH_HEAD"],
-            cwd="/",
-            timeout_s=_CLONE_TIMEOUT_S,
-        )
-        if verify.returncode != 0:
-            raise CategorizedError(
-                "git fetch produced no FETCH_HEAD on remote (the fetch did not complete)",
-                category=ErrorCategory.TRANSPORT_FAILURE,
-                details={"stderr": redacted_tail(fetch.stderr, self._secret_registry)},
-            )
-        result = self._run_remote(
-            ["git", "-C", dest, "checkout", "FETCH_HEAD"], cwd="/", timeout_s=_CLONE_TIMEOUT_S
-        )
-        if result.returncode != 0:
-            raise CategorizedError(
-                "git checkout FETCH_HEAD failed on remote",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"stderr": redacted_tail(result.stderr, self._secret_registry)},
-            )
-        head = self._run_remote(
-            ["git", "-C", dest, "rev-parse", "HEAD"], cwd="/", timeout_s=_CLONE_TIMEOUT_S
-        )
-        if head.returncode != 0:
-            raise CategorizedError(
-                "git rev-parse HEAD failed on remote",
-                category=ErrorCategory.TRANSPORT_FAILURE,
-                details={"stderr": redacted_tail(head.stderr, self._secret_registry)},
-            )
-        return head.stdout.strip()
 
     def upload_file(self, path: str, presigned: PresignedUpload) -> str:
         """Upload *path* from the host to *presigned* URL via ``curl``; return the ETag.

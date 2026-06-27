@@ -20,15 +20,18 @@ from typing import Any, Protocol
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import IntrospectOutput, LiveScriptOutput
+from kdive.providers.ports.retrieve import (
+    IntrospectOutput,
+    LiveScriptOutput,
+)
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
+from kdive.providers.remote_libvirt.connection.transport import remote_connection
 from kdive.providers.remote_libvirt.guest.agent import (
     AgentCommand,
     AgentExecResult,
     GuestAgentExec,
     qemu_agent_command,
 )
-from kdive.providers.remote_libvirt.transport import remote_connection
 from kdive.providers.shared.debug_common.drgn_program import (
     open_vmcore_program,
     read_vmcoreinfo_build_id,

@@ -42,6 +42,20 @@ def test_child_env_rebases_identity_onto_build_user() -> None:
     assert env["PATH"] == "/usr/bin"  # caller env preserved
 
 
+def test_child_env_drops_root_xdg_paths() -> None:
+    env = _sandbox()._child_env(
+        {
+            "HOME": "/root",
+            "PATH": "/usr/bin",
+            "XDG_RUNTIME_DIR": "/run/user/0",
+            "XDG_CACHE_HOME": "/root/.cache",
+        }
+    )
+    assert "XDG_RUNTIME_DIR" not in env
+    assert "XDG_CACHE_HOME" not in env
+    assert env["PATH"] == "/usr/bin"
+
+
 def test_run_layers_build_user_env_over_caller_env(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
     monkeypatch.setattr(sb.subprocess, "run", lambda argv, **kw: captured.update(kw))

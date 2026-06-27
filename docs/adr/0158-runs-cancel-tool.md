@@ -46,7 +46,7 @@ The relevant facts (confirmed against code):
 - The uniform envelope (`mcp/responses.py`) pairs `error_category` with a failure status
   iff the status is a failure; a terminal lifecycle state that is **not** itself a tool
   failure goes in `data`, not in `status` (the `jobs.cancel` precedent,
-  `catalog/jobs.py`).
+  `mcp/tools/jobs.py`).
 
 ## Decision
 

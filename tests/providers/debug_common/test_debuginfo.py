@@ -7,13 +7,14 @@ fetch, and gdb spawn are ``live_vm``-real and not exercised here.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import GdbMiAttachment
+from kdive.providers.ports.debug import GdbMiAttachment
 from kdive.providers.shared.debug_common import debuginfo
 
 
@@ -153,3 +154,46 @@ def test_stage_and_attach_removes_staging_dir_on_attach_failure(
     assert exc.value is boom
     # The staging dir was reclaimed on attach failure: nothing is left under the temp root.
     assert list(tmp_path.iterdir()) == []
+
+
+def test_gdb_attach_seam_uses_engine_factory_with_staged_vmlinux(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sentinel = _fake_attachment()
+    seen: dict[str, object] = {}
+    staged_vmlinux = tmp_path / "vmlinux"
+    transcript_path = tmp_path / "mi.log"
+
+    class FakeEngine:
+        def attach(
+            self, *, host: str, port: int, vmlinux_path: Path, transcript_path: Path
+        ) -> GdbMiAttachment:
+            seen["host"] = host
+            seen["port"] = port
+            seen["vmlinux_path"] = vmlinux_path
+            seen["transcript_path"] = transcript_path
+            return sentinel
+
+    def fake_stage_and_attach(
+        *,
+        run_id: str,
+        attach: Callable[[Path], GdbMiAttachment],
+        resolver: debuginfo.DebuginfoResolver | None = None,
+    ) -> GdbMiAttachment:
+        assert resolver is None
+        seen["run_id"] = run_id
+        return attach(staged_vmlinux)
+
+    monkeypatch.setattr(debuginfo, "stage_and_attach", fake_stage_and_attach)
+
+    seam = debuginfo.gdb_attach_seam(engine_factory=FakeEngine)
+    result = seam(host="127.0.0.1", port=1234, run_id="r1", transcript_path=transcript_path)
+
+    assert result is sentinel
+    assert seen == {
+        "host": "127.0.0.1",
+        "port": 1234,
+        "run_id": "r1",
+        "transcript_path": transcript_path,
+        "vmlinux_path": staged_vmlinux,
+    }

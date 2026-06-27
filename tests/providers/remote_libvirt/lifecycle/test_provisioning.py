@@ -15,6 +15,7 @@ from defusedxml.ElementTree import fromstring
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
+from kdive.providers.remote_libvirt.connection.transport import remote_libvirt_connections
 from kdive.providers.remote_libvirt.lifecycle.gdb import used_gdb_ports
 from kdive.providers.remote_libvirt.lifecycle.provisioning import (
     KDIVE_METADATA_NS,
@@ -32,7 +33,6 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     disk_pool,
     recorded_gdb_port_strict,
 )
-from kdive.providers.remote_libvirt.transport import remote_libvirt_connections
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error
 

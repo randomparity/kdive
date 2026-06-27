@@ -25,8 +25,8 @@ from pydantic import Field
 
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
-from kdive.domain.lifecycle import System
-from kdive.domain.operations.jobs import DestructiveJobKind, JobKind, PowerAction
+from kdive.domain.lifecycle.records import System
+from kdive.domain.operations.jobs import JobKind, PowerAction
 from kdive.jobs import queue
 from kdive.jobs.payloads import PowerPayload, SystemPayload
 from kdive.log import bind_context
@@ -46,13 +46,13 @@ from kdive.mcp.tools._common import (
     config_error as _config_error,
 )
 from kdive.mcp.tools._common import job_envelope
+from kdive.mcp.tools._idempotency import keyed_mutation
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
 from kdive.security.authz.rbac import Role, require_role
-from kdive.services.idempotency.envelope import keyed_mutation
 
 # Systems that have a started libvirt domain (so a power op has something to act on).
 _STARTED_SYSTEM = frozenset({SystemState.READY, SystemState.CRASHED})
@@ -140,7 +140,7 @@ async def _authorize_destructive(
     ctx: RequestContext,
     system: System,
     system_uid: UUID,
-    op_kind: DestructiveJobKind,
+    op_kind: JobKind,
     *,
     resolver: ProviderResolver,
     tool: str,
@@ -172,7 +172,7 @@ async def _authorize_destructive(
 
 
 async def _op_opt_in(
-    conn: AsyncConnection, system: System, op_kind: DestructiveJobKind, resolver: ProviderResolver
+    conn: AsyncConnection, system: System, op_kind: JobKind, resolver: ProviderResolver
 ) -> bool:
     """Resolve the gate's profile opt-in factor from the System's provisioning profile."""
     profile = ProvisioningProfile.parse(system.provisioning_profile)

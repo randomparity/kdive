@@ -765,40 +765,98 @@ def test_run_once_dequeues_when_ready_again(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_background_ticker_keeps_livez_live_across_a_long_blocking_job(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A run_once that blocks far past stale_after must NOT flip /livez stale (ADR-0090 §5).
+def test_background_ticker_keeps_livez_live_across_a_long_blocking_job() -> None:
+    """A ticker that advances fake time past stale_after keeps /livez fresh (ADR-0090 §5).
 
     The heartbeat is bumped by a background ticker, not by the claim loop, so a single
-    long-running job (here: a run_once that awaits past the stale bound) keeps the worker
-    live — the exact failure a per-job heartbeat would cause is avoided.
+    long-running job can outlast the stale bound without making the worker read not-live.
     """
 
     async def _run() -> None:
         from kdive.health.heartbeat import Heartbeat
 
-        # Real monotonic clock; a tiny stale bound and a sub-stale tick cadence.
-        hb = Heartbeat(stale_after=0.05)
+        now = 0.0
+        hb = Heartbeat(stale_after=1.0, now=lambda: now)
+        stop = asyncio.Event()
+        sleeps = 0
+
+        async def fake_sleep_until_stop(_stop: asyncio.Event, interval: float) -> None:
+            nonlocal now, sleeps
+            sleeps += 1
+            now += interval
+            if sleeps == 4:
+                _stop.set()
+            await asyncio.sleep(0)
+
+        await worker_module._tick_until_stop(
+            hb,
+            stop,
+            0.4,
+            sleep_until_stop=fake_sleep_until_stop,
+        )
+
+        assert sleeps == 4
+        assert now > 1.0
+        assert hb.is_live() is True
+
+    asyncio.run(_run())
+
+
+def test_run_schedules_ticker_concurrent_with_the_claim_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run() drives the heartbeat ticker concurrent with a long job, keeping /livez live.
+
+    Unlike the isolated _tick_until_stop tests, this drives the real worker.run(stop): a
+    run_once that blocks past the stale bound must NOT flip /livez stale (ADR-0090 §5). A
+    regression where run() fails to schedule the ticker, or awaits it before the claim loop,
+    would deadlock (the fake clock never advances) — so this test fences run()'s concurrency
+    wiring, which the isolated ticker tests do not exercise.
+    """
+
+    async def _run() -> None:
+        stop = asyncio.Event()
+        job_can_finish = asyncio.Event()
+        now = 0.0
+        waits: list[float] = []
+        live_during_job: list[bool] = []
+
+        hb = Heartbeat(stale_after=1.5, now=lambda: now)
+
+        async def heartbeat_sleep_until_stop(stop_evt: asyncio.Event, timeout: float) -> None:
+            nonlocal now
+            waits.append(timeout)
+            now += timeout
+            if len(waits) == 3:
+                # The ticker has ticked across a span longer than stale_after; the worker must
+                # still read live, and only now may the long job complete.
+                live_during_job.append(hb.is_live())
+                job_can_finish.set()
+                await stop_evt.wait()
+                return
+            await asyncio.sleep(0)
+
         worker = _worker(
             _unopened_pool(),
             HandlerRegistry(),
             worker_id="w1",
-            config=WorkerConfig(heartbeat=hb, heartbeat_tick=timedelta(milliseconds=5)),
+            config=WorkerConfig(
+                heartbeat=hb,
+                heartbeat_tick=timedelta(seconds=1),
+                heartbeat_sleep_until_stop=heartbeat_sleep_until_stop,
+                poll_interval=timedelta(seconds=30),
+            ),
         )
-        stop = asyncio.Event()
-        live_during_job: list[bool] = []
 
         async def long_run_once() -> Job | None:
-            # A "build" far longer than stale_after; the background ticker must keep us live.
-            await asyncio.sleep(0.2)
-            live_during_job.append(hb.is_live())
+            await job_can_finish.wait()  # a "build" outlasting stale_after; ticker keeps us live
             stop.set()
             return None
 
         monkeypatch.setattr(worker, "run_once", long_run_once)
-        await asyncio.wait_for(worker.run(stop), timeout=2)
-        assert live_during_job == [True]  # still live after a job that outlasted stale_after
+        await asyncio.wait_for(worker.run(stop), timeout=1)
+        assert waits == [1.0, 1.0, 1.0]  # the ticker really ran, on the injected clock
+        assert live_during_job == [True]  # still live across a job that outlasted stale_after
 
     asyncio.run(_run())
 

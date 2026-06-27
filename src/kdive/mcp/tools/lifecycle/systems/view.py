@@ -13,7 +13,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import RunState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import System
+from kdive.domain.lifecycle.records import System
 from kdive.domain.pcie import parse_match_spec
 from kdive.log import bind_context
 from kdive.mcp.responses import JsonValue, ToolResponse

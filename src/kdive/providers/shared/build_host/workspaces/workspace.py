@@ -6,14 +6,18 @@ import os
 import shutil
 import subprocess  # noqa: S404 - all calls use fixed argv and no shell
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
 from kdive.build_artifacts.results import BuildOutput
-from kdive.build_artifacts.validation import patch_target_paths, snapshot_file_bytes
 from kdive.db.build_host_policy import warm_tree_source_error
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import GitSourceRef, ServerBuildProfile, git_source_of
+from kdive.providers.shared.build_host.clone_recipe import (
+    GitCloneFailureMessages,
+    run_git_clone_recipe,
+)
 from kdive.providers.shared.build_host.configuration.config import resolve_local_ref
 from kdive.providers.shared.build_host.configuration.git_source import (
     remote_allowed,
@@ -27,6 +31,7 @@ from kdive.providers.shared.build_host.execution import (
     run_make_target,
     workspace_failure,
 )
+from kdive.providers.shared.build_host.patches import patch_target_paths, snapshot_file_bytes
 from kdive.providers.shared.build_host.sandbox import BuildSandbox, SandboxProvider, sandbox_run
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -58,7 +63,31 @@ _GIT_HARDENED_ENV = {
     "GIT_TERMINAL_PROMPT": "0",
 }
 
-type Checkout = Callable[[UUID, ServerBuildProfile, Path, bytes], None]
+_LOCAL_CLONE_MESSAGES = GitCloneFailureMessages(
+    init_failed="git init failed",
+    fetch_failed="git fetch failed",
+    missing_fetch_head="git fetch produced no FETCH_HEAD (the fetch did not complete)",
+    checkout_failed="git checkout FETCH_HEAD failed",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CloneProvenance:
+    """Resolved git-clone provenance captured by a checkout seam."""
+
+    remote: str
+    ref: str
+    resolved_commit: str
+
+    def dump(self) -> dict[str, str]:
+        return {
+            "remote": self.remote,
+            "ref": self.ref,
+            "resolved_commit": self.resolved_commit,
+        }
+
+
+type Checkout = Callable[[UUID, ServerBuildProfile, Path, bytes], CloneProvenance | None]
 
 
 def make_checkout(
@@ -67,7 +96,6 @@ def make_checkout(
     *,
     allowlist: Sequence[str] = (),
     sandbox_provider: SandboxProvider | None = None,
-    provenance_sink: dict[str, str] | None = None,
 ) -> Checkout:
     """Create the default checkout seam (warm tree or, for a git source, an allowlisted clone).
 
@@ -77,16 +105,13 @@ def make_checkout(
         allowlist: Remotes the local git-clone lane may clone (ADR-0162); empty disables it.
         sandbox_provider: Resolves the build-user demotion lazily at checkout time (ADR-0214); a
             root worker with no ``KDIVE_BUILD_USER`` fails closed here, before any subprocess.
-        provenance_sink: When given, the worker-local git lane records the clone's
-            ``{remote, ref, resolved_commit}`` (remote userinfo-stripped) into it (#778); the
-            dispatch layer reads it back and adds ``build_host``. Best-effort: never fails a build.
     """
 
     def _checkout(
         run_id: UUID, profile: ServerBuildProfile, workspace: Path, fragment_bytes: bytes
-    ) -> None:
+    ) -> CloneProvenance | None:
         sandbox = sandbox_provider.get() if sandbox_provider is not None else None
-        real_checkout(
+        return real_checkout(
             kernel_src,
             profile,
             workspace,
@@ -95,7 +120,6 @@ def make_checkout(
             secret_registry=secret_registry,
             allowlist=allowlist,
             sandbox=sandbox,
-            provenance_sink=provenance_sink,
         )
 
     return _checkout
@@ -111,31 +135,32 @@ def real_checkout(
     secret_registry: SecretRegistry,
     allowlist: Sequence[str] = (),
     sandbox: BuildSandbox | None = None,
-    provenance_sink: dict[str, str] | None = None,
-) -> None:
+) -> CloneProvenance | None:
     """Materialize a per-run workspace, merge config, and apply an optional patch.
 
     Dispatches on the profile's source provenance: a git ``kernel_source_ref`` clones the
     allowlisted remote (ADR-0162), a bare string mirrors the warm tree. When ``sandbox`` is set
     every build subprocess runs demoted and the workspace is handed to the build user (ADR-0214).
-    ``provenance_sink``, when given, receives the git lane's resolved-commit provenance (#778).
     """
     git_source = git_source_of(profile)
     if git_source is not None:
-        clone_tree(
+        provenance = clone_tree(
             git_source,
             workspace,
             allowlist,
             run_id=run_id,
             secret_registry=secret_registry,
             sandbox=sandbox,
-            provenance_sink=provenance_sink,
         )
     else:
         sync_tree(kernel_src, workspace, secret_registry, sandbox=sandbox)
-    merge_config(fragment_bytes, workspace, run_id, sandbox=sandbox)
+        provenance = None
+    merge_config(
+        fragment_bytes, workspace, run_id, sandbox=sandbox, secret_registry=secret_registry
+    )
     if profile.patch_ref is not None:
         apply_patch(profile.patch_ref, workspace, secret_registry, sandbox=sandbox)
+    return provenance
 
 
 def _run_git(
@@ -171,8 +196,7 @@ def clone_tree(
     run_id: UUID,
     secret_registry: SecretRegistry,
     sandbox: BuildSandbox | None = None,
-    provenance_sink: dict[str, str] | None = None,
-) -> None:
+) -> CloneProvenance | None:
     """Clone ``source.remote`` at ``source.ref`` into a clean ``workspace`` (ADR-0162).
 
     The remote is allowlist-gated (deny by default) and the clone uses the same
@@ -180,10 +204,7 @@ def clone_tree(
     be a server-advertised tag or branch; a bare commit SHA is not guaranteed fetchable
     shallowly and surfaces as the ``git fetch`` failure below.
 
-    When ``provenance_sink`` is supplied, the clone's ``{remote, ref, resolved_commit}`` — remote
-    userinfo-stripped, ``resolved_commit`` from the ``FETCH_HEAD`` rev-parse — is recorded into it
-    (#778); the dispatch layer reads it back and adds ``build_host``. The fill is best-effort: a
-    failure to record provenance never aborts the clone.
+    The returned provenance is best-effort: a failure to record it never aborts the clone.
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` for an unsafe/disallowed remote-ref (incl. an
@@ -220,78 +241,43 @@ def clone_tree(
         raise workspace_failure("mkdir", "build_workspace", exc) from exc
     if sandbox is not None:
         sandbox.own(workspace)  # demoted git writes into a build-user-owned dir (ADR-0214)
-    init = _run_git(["init", str(workspace)], cwd=None, run_id=run_id, sandbox=sandbox)
-    if init.returncode != 0:
-        raise CategorizedError(
-            "git init failed",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"stderr": redacted_tail(init.stderr, secret_registry)},
-        )
-    fetch = _run_git(
-        ["-C", str(workspace), "fetch", "--depth", "1", source.remote, source.ref],
-        cwd=None,
-        run_id=run_id,
-        sandbox=sandbox,
+    resolved_commit = run_git_clone_recipe(
+        remote=source.remote,
+        ref=source.ref,
+        dest=str(workspace),
+        run=lambda args: _run_git(args, cwd=None, run_id=run_id, sandbox=sandbox),
+        redact_stderr=lambda stderr: redacted_tail(stderr, secret_registry),
+        messages=_LOCAL_CLONE_MESSAGES,
     )
-    if fetch.returncode != 0:
-        raise CategorizedError(
-            "git fetch failed",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"stderr": redacted_tail(fetch.stderr, secret_registry)},
-        )
-    verify = _run_git(
-        ["-C", str(workspace), "rev-parse", "--verify", "--quiet", "FETCH_HEAD"],
-        cwd=None,
-        run_id=run_id,
-        sandbox=sandbox,
-    )
-    if verify.returncode != 0:
-        raise CategorizedError(
-            "git fetch produced no FETCH_HEAD (the fetch did not complete)",
-            category=ErrorCategory.TRANSPORT_FAILURE,
-            details={"stderr": redacted_tail(fetch.stderr, secret_registry)},
-        )
-    _fill_clone_provenance(provenance_sink, source, verify.stdout.strip())
-    checkout = _run_git(
-        ["-C", str(workspace), "checkout", "FETCH_HEAD"], cwd=None, run_id=run_id, sandbox=sandbox
-    )
-    if checkout.returncode != 0:
-        raise CategorizedError(
-            "git checkout FETCH_HEAD failed",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"stderr": redacted_tail(checkout.stderr, secret_registry)},
-        )
+    return _clone_provenance(source, resolved_commit)
 
 
-def _fill_clone_provenance(
-    sink: dict[str, str] | None, source: GitSourceRef, resolved_commit: str
-) -> None:
-    """Record ``{remote, ref, resolved_commit}`` into ``sink`` (remote userinfo-stripped) (#778).
+def _clone_provenance(source: GitSourceRef, resolved_commit: str) -> CloneProvenance | None:
+    """Return ``{remote, ref, resolved_commit}`` provenance with remote userinfo stripped.
 
-    Best-effort: a ``None`` sink is a no-op and any failure to record is swallowed so provenance
-    capture can never abort an otherwise-successful clone. A credentialed clone URL is
+    Best-effort: any failure to record is swallowed so provenance capture can never abort an
+    otherwise-successful clone. A credentialed clone URL is
     userinfo-stripped before it enters the sink, so it never reaches provenance, logs, or details.
     """
-    if sink is None:
-        return
     try:
-        sink["remote"] = strip_userinfo(source.remote)
-        sink["ref"] = source.ref
-        sink["resolved_commit"] = resolved_commit
+        return CloneProvenance(
+            remote=strip_userinfo(source.remote),
+            ref=source.ref,
+            resolved_commit=resolved_commit,
+        )
     except Exception:  # noqa: BLE001 - best-effort provenance must never fail the build (#778)
-        return
+        return None
 
 
-def attach_clone_provenance(result: BuildOutput, sink: dict[str, str] | None) -> BuildOutput:
-    """Attach the worker-local git clone's provenance from ``sink`` onto ``result`` (#778).
+def attach_clone_provenance(result: BuildOutput, provenance: CloneProvenance | None) -> BuildOutput:
+    """Attach the worker-local git clone's provenance onto ``result`` (#778).
 
-    A non-empty sink (the git lane recorded ``{remote, ref, resolved_commit}``) is snapshotted onto
-    ``build_provenance``; the dispatch layer adds ``build_host`` afterward. A ``None``/empty sink
-    (warm-tree build, or a clone that recorded nothing) leaves ``build_provenance`` untouched.
+    A recorded ``{remote, ref, resolved_commit}`` is snapshotted onto ``build_provenance``; the
+    dispatch layer adds ``build_host`` afterward. ``None`` leaves ``build_provenance`` untouched.
     """
-    if not sink:
+    if provenance is None:
         return result
-    return result._replace(build_provenance=dict(sink))
+    return result._replace(build_provenance=provenance.dump())
 
 
 def _write_fragment(fragment_bytes: bytes, workspace: Path, sandbox: BuildSandbox | None) -> None:
@@ -321,10 +307,18 @@ def _write_fragment(fragment_bytes: bytes, workspace: Path, sandbox: BuildSandbo
 
 
 def merge_config(
-    fragment_bytes: bytes, workspace: Path, run_id: UUID, sandbox: BuildSandbox | None = None
+    fragment_bytes: bytes,
+    workspace: Path,
+    run_id: UUID,
+    sandbox: BuildSandbox | None = None,
+    *,
+    secret_registry: SecretRegistry,
 ) -> None:  # pragma: no cover
     """Run base defconfig (demoted), merge the kdump fragment, leave olddefconfig to the caller."""
-    if run_make_target(workspace, ["defconfig"], "make defconfig", sandbox=sandbox).returncode != 0:
+    defconfig = run_make_target(
+        workspace, ["defconfig"], "make defconfig", sandbox=sandbox, registry=secret_registry
+    )
+    if defconfig.returncode != 0:
         raise build_failure("make defconfig exited non-zero", run_id)
     _write_fragment(fragment_bytes, workspace, sandbox)
     fragment_path = workspace / "kdump.config.fragment"

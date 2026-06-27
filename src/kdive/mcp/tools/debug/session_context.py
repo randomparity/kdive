@@ -10,10 +10,10 @@ from psycopg import AsyncConnection
 from kdive.db.repositories import DEBUG_SESSIONS, RUNS
 from kdive.domain.capacity.state import DebugSessionState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.lifecycle import DebugSession
+from kdive.domain.lifecycle.records import DebugSession
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
-from kdive.providers.ports import DebugTransportKind
+from kdive.providers.ports.lifecycle import DebugTransportKind
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 

@@ -10,7 +10,7 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from kdive.domain.capacity.state import AllocationState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.lifecycle import Allocation
+from kdive.domain.lifecycle.records import Allocation
 from kdive.services.allocation.admission.core import (
     AFFINITY_DENIAL_REASON,
     BUDGET_DENIAL_REASON,

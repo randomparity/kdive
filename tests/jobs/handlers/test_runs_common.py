@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kdive.jobs.handlers import runs_common
+from kdive.jobs.handlers.runs import common as runs_common
 
 
 def test_abandon_step_helper_owns_idempotency_patch_surface() -> None:

@@ -34,7 +34,7 @@ from kdive.domain.capacity.state import (
     SystemState,
 )
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.lifecycle import Allocation, DebugSession, Investigation, Run, System
+from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug import ops as debug_ops
@@ -47,7 +47,8 @@ from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
 from kdive.providers.core.runtime import DebugCapabilities, ProviderRuntime
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
-from kdive.providers.ports import GdbMiAttachment, TransportHandleData
+from kdive.providers.ports.debug import GdbMiAttachment
+from kdive.providers.ports.lifecycle import TransportHandleData
 from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry

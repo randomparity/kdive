@@ -5,14 +5,17 @@ from __future__ import annotations
 import hashlib
 from typing import cast
 
-from kdive.providers.ports import (
-    DEBUG_TRANSPORT_KINDS,
-    DebugTransportKind,
+from kdive.providers.ports._common import config_error
+from kdive.providers.ports.handles import (
     SystemHandle,
     TransportHandle,
 )
-from kdive.providers.ports._common import config_error
-from kdive.providers.ports.lifecycle import TransportHandleData, TransportHandleKind
+from kdive.providers.ports.lifecycle import (
+    DEBUG_TRANSPORT_KINDS,
+    DebugTransportKind,
+    TransportHandleData,
+    TransportHandleKind,
+)
 
 _LOOPBACK_HOST = "127.0.0.1"
 

@@ -21,6 +21,7 @@ from kdive.config.core_settings import BUILD_USER
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 _log = logging.getLogger(__name__)
+_CHILD_ENV_DROP = frozenset({"XDG_RUNTIME_DIR", "XDG_CACHE_HOME"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,9 +59,10 @@ class BuildSandbox:
         # and leaving an incomplete sandbox. Layer the build-user identity over the caller's env
         # (e.g. the hardened git env) rather than discarding it.
         base = dict(env if env is not None else os.environ)
+        base.update(dict.fromkeys(_CHILD_ENV_DROP, ""))
+        for key in _CHILD_ENV_DROP:
+            del base[key]
         base.update(HOME=self.home, USER=self.user_name, LOGNAME=self.user_name)
-        base.pop("XDG_RUNTIME_DIR", None)
-        base.pop("XDG_CACHE_HOME", None)
         return base
 
 

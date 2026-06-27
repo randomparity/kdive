@@ -8,7 +8,7 @@ from typing import cast
 
 from psycopg import AsyncConnection
 
-from kdive.services.reports import (
+from kdive.services.reports.core import (
     Report,
     ReportScope,
     ReportSection,

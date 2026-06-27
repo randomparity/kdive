@@ -10,7 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.capacity.state import AllocationState
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.lifecycle import Allocation
+from kdive.domain.lifecycle.records import Allocation
 from kdive.log import bind_context
 from kdive.mcp.exposure import visible_next_actions
 from kdive.mcp.responses import ToolResponse

@@ -131,7 +131,7 @@ def test_from_env_wires_named_instance_with_live_collaborators(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import kdive.config as config
-    from kdive.providers.remote_libvirt.transport import open_libvirt
+    from kdive.providers.remote_libvirt.connection.transport import open_libvirt
 
     path = tmp_path / "systems.toml"
     path.write_text(_INVENTORY)

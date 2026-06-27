@@ -13,6 +13,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.domain.capacity.state import AllocationState, DebugSessionState, RunState, SystemState
+from kdive.health.heartbeat import Heartbeat
 from kdive.providers.infra.reaping import DumpVolume, InfraReaper, NullReaper
 from kdive.reconciler import loop
 from kdive.reconciler.cleanup.gc import (
@@ -56,20 +57,25 @@ def test_null_reaper_lists_nothing_and_destroy_is_noop() -> None:
 
 
 def test_reconcile_report_holds_counts_and_failures() -> None:
-    report = ReconcileReport(
-        expired_allocations=5,
-        orphaned_systems=1,
-        abandoned_jobs=2,
-        dead_sessions=3,
-        leaked_domains=4,
-        idempotency_keys_gc_count=6,
-        failures=("abandoned_jobs",),
+    report = ReconcileReport.from_counts(
+        {
+            "expired_allocations": 5,
+            "orphaned_systems": 1,
+            "abandoned_jobs": 2,
+            "dead_sessions": 3,
+            "leaked_domains": 4,
+            "idempotency_keys_gc_count": 6,
+            "reconcile_inventory": 7,
+        },
+        ["abandoned_jobs"],
     )
     assert report.expired_allocations == 5
     assert report.orphaned_systems == 1
     assert report.idempotency_keys_gc_count == 6
-    assert report.reconciled_inventory == 0
+    assert report.reconciled_inventory == 7
     assert report.failures == ("abandoned_jobs",)
+    assert tuple(report.repair_counts) == loop.ALL_REPAIR_KINDS
+    assert report.repair_counts["abandoned_uploads"] == 0
 
 
 def test_orphaned_system_enqueues_gc_teardown(migrated_url: str) -> None:
@@ -646,6 +652,9 @@ def test_reconcile_once_counts_a_mixed_pass(migrated_url: str) -> None:
             idempotency_keys_gc_count=0,
             failures=(),
         )
+        assert tuple(report.repair_counts) == loop.ALL_REPAIR_KINDS
+        assert report.repair_counts["orphaned_systems"] == 1
+        assert report.repair_counts["abandoned_uploads"] == 0
         assert reaper.destroyed == ["vm-leak"]
 
     asyncio.run(_run())
@@ -725,6 +734,51 @@ def test_reconciler_run_wakes_promptly_when_stopped_during_interval(
         stop.set()
 
         await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(_run())
+
+
+def test_reconciler_heartbeat_ticks_during_long_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _run() -> None:
+        stop = asyncio.Event()
+        pass_can_finish = asyncio.Event()
+        now = 0.0
+        waits: list[float] = []
+
+        heartbeat = Heartbeat(stale_after=1.5, now=lambda: now)
+
+        async def _run_once(self: Reconciler) -> ReconcileReport:
+            await pass_can_finish.wait()
+            stop.set()
+            return ReconcileReport(0, 0, 0, 0, 0, 0, ())
+
+        async def _sleep_until_stop(stop: asyncio.Event, timeout: float) -> None:
+            nonlocal now
+            waits.append(timeout)
+            now += timeout
+            if len(waits) == 3:
+                pass_can_finish.set()
+                await stop.wait()
+                return
+            await asyncio.sleep(0)
+
+        monkeypatch.setattr(Reconciler, "run_once", _run_once)
+        pool = cast(AsyncConnectionPool, object())
+        reconciler = Reconciler(
+            pool,
+            NullReaper(),
+            config=ReconcileConfig(
+                interval=timedelta(seconds=30),
+                heartbeat=heartbeat,
+                heartbeat_tick=timedelta(seconds=1),
+                heartbeat_sleep_until_stop=_sleep_until_stop,
+            ),
+        )
+
+        await asyncio.wait_for(reconciler.run(stop), timeout=1.0)
+
+        assert waits == [1.0, 1.0, 1.0]
+        assert heartbeat.is_live() is True
 
     asyncio.run(_run())
 
@@ -1005,7 +1059,7 @@ def test_all_repair_kinds_matches_a_fully_populated_plan() -> None:
     plan = loop._repair_plan(
         reaper=NullReaper(), config=config, image_publish_grace=timedelta(seconds=1)
     )
-    assert {spec.name for spec in plan} == set(loop.ALL_REPAIR_KINDS)
+    assert tuple(spec.name for spec in plan) == loop.ALL_REPAIR_KINDS
 
 
 def test_build_artifact_repairs_are_in_all_repair_kinds() -> None:

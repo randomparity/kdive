@@ -17,19 +17,27 @@ from psycopg_pool import AsyncConnectionPool
 import kdive.config as config
 from kdive.diagnostics.checks import (
     BASE_IMAGE_STAGING_ID,
-    BASE_VOLUME_NOT_STAGED_FIX,
     GDBSTUB_ACL_ID,
     LOCAL_KERNEL_SRC_ID,
     PROVIDER_TLS_ID,
     REACHABILITY_ID,
     SECRET_REF_ID,
-    BaseImageStagingOutcome,
+    Check,
+    CheckResult,
     CheckStatus,
+)
+from kdive.diagnostics.provider_checks import (
+    BASE_VOLUME_NOT_STAGED_FIX,
+    BaseImageStagingOutcome,
     ReachabilityOutcome,
-    SecretRefCheck,
     TlsProbe,
     TlsProbeOutcome,
 )
+from kdive.diagnostics.provider_contracts import (
+    DiagnosticProviderContribution,
+    WorkerVantageDescriptor,
+)
+from kdive.diagnostics.secret_ref import SecretRefCheck
 from kdive.diagnostics.service import (
     FEATURE_NOT_ENABLED_DETAIL,
     WORKER_UNAVAILABLE_DETAIL,
@@ -378,7 +386,7 @@ def test_run_substitutes_tls_acl_and_runs_reachability_and_secret_ref(
         assert by_id[worker_id].provider == "remote-libvirt"
         assert FEATURE_NOT_ENABLED_DETAIL in by_id[worker_id].detail
         assert WORKER_UNAVAILABLE_DETAIL not in by_id[worker_id].detail
-        assert by_id[worker_id].failure_category == "not_implemented"
+        assert by_id[worker_id].failure_category is ErrorCategory.NOT_IMPLEMENTED
 
     # Server-vantage checks still run when worker-vantage checks are substituted.
     assert by_id[REACHABILITY_ID].status is CheckStatus.PASS
@@ -397,7 +405,7 @@ def test_run_reports_configuration_error_when_config_unresolvable_at_run_time(
     report = asyncio.run(_factory(None).run())
     by_id = {r.check_id: r for r in report.results}
     assert by_id[REACHABILITY_ID].status is CheckStatus.ERROR
-    assert by_id[REACHABILITY_ID].failure_category == "configuration_error"
+    assert by_id[REACHABILITY_ID].failure_category is ErrorCategory.CONFIGURATION_ERROR
     assert by_id[REACHABILITY_ID].fix is None
 
 
@@ -424,7 +432,7 @@ def test_base_image_staging_fails_when_volume_absent(monkeypatch, tmp_path: Path
     assert by_id[REACHABILITY_ID].status is CheckStatus.PASS
     assert by_id[BASE_IMAGE_STAGING_ID].status is CheckStatus.FAIL
     assert by_id[BASE_IMAGE_STAGING_ID].fix == BASE_VOLUME_NOT_STAGED_FIX
-    assert by_id[BASE_IMAGE_STAGING_ID].failure_category == "configuration_error"
+    assert by_id[BASE_IMAGE_STAGING_ID].failure_category is ErrorCategory.CONFIGURATION_ERROR
     assert report.has_failure is True
 
 
@@ -467,7 +475,7 @@ def test_local_kernel_src_fails_when_unset(monkeypatch, tmp_path: Path) -> None:
     report = asyncio.run(_factory(None).run())
     by_id = {r.check_id: r for r in report.results}
     assert by_id[LOCAL_KERNEL_SRC_ID].status is CheckStatus.FAIL
-    assert by_id[LOCAL_KERNEL_SRC_ID].failure_category == "configuration_error"
+    assert by_id[LOCAL_KERNEL_SRC_ID].failure_category is ErrorCategory.CONFIGURATION_ERROR
     assert by_id[LOCAL_KERNEL_SRC_ID].fix is not None
     assert by_id[LOCAL_KERNEL_SRC_ID].provider is None
     assert report.has_failure is True
@@ -533,6 +541,27 @@ def test_default_factory_keeps_tight_timeouts_without_the_flag(monkeypatch, tmp_
 # ---- worker-vantage dispatch wiring (ADR-0164, #514) ---------------------------------
 
 
+def _enabled_worker_contribution(
+    provider: str, worker_check_id: str
+) -> DiagnosticProviderContribution:
+    def _enabled() -> bool:
+        return True
+
+    def _no_checks() -> tuple[Check, ...]:
+        return ()
+
+    def _unavailable_worker_checks() -> tuple[WorkerVantageDescriptor, ...]:
+        return (WorkerVantageDescriptor(id=worker_check_id, provider=provider),)
+
+    return DiagnosticProviderContribution(
+        provider=provider,
+        enabled=_enabled,
+        checks=_no_checks,
+        unavailable_worker_checks=_unavailable_worker_checks,
+        worker_checks=_no_checks,
+    )
+
+
 def test_factory_wires_dispatcher_when_pool_and_remote_configured(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -551,6 +580,79 @@ def test_factory_keeps_substitution_when_no_pool(monkeypatch, tmp_path: Path) ->
     assert isinstance(service._worker_mode, WorkerVantageSubstitutionMode)  # noqa: SLF001
     unavailable_ids = {c.id for c in service._worker_mode.checks}  # noqa: SLF001
     assert unavailable_ids == {PROVIDER_TLS_ID, GDBSTUB_ACL_ID}
+
+
+def test_factory_substitutes_every_enabled_worker_contribution_without_pool(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _set_env(monkeypatch, tmp_path)
+    service = default_service_factory(
+        None,
+        provider_contributions=(
+            _enabled_worker_contribution("provider-a", "worker-a"),
+            _enabled_worker_contribution("provider-b", "worker-b"),
+        ),
+    )
+    assert isinstance(service._worker_mode, WorkerVantageSubstitutionMode)  # noqa: SLF001
+    unavailable = {
+        (check.id, check.provider)
+        for check in service._worker_mode.checks  # noqa: SLF001
+    }
+    assert unavailable == {("worker-a", "provider-a"), ("worker-b", "provider-b")}
+
+
+def test_factory_dispatches_every_enabled_worker_contribution_with_pool(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from typing import cast
+
+    import kdive.diagnostics.worker_dispatch as worker_dispatch
+
+    _set_env(monkeypatch, tmp_path)
+    created: list[tuple[str, tuple[str, ...]]] = []
+
+    class RecordingWorkerCheckDispatcher:
+        def __init__(
+            self,
+            pool: AsyncConnectionPool | None,
+            *,
+            provider: str,
+            worker_check_ids: tuple[str, ...],
+        ) -> None:
+            assert pool is not None
+            self.provider = provider
+            self.worker_check_ids = worker_check_ids
+            created.append((provider, worker_check_ids))
+
+        async def run_worker_checks(self) -> list[CheckResult]:
+            return [
+                CheckResult(
+                    check_id=check_id,
+                    status=CheckStatus.PASS,
+                    detail="ok",
+                    provider=self.provider,
+                )
+                for check_id in self.worker_check_ids
+            ]
+
+    monkeypatch.setattr(worker_dispatch, "JobWorkerCheckDispatcher", RecordingWorkerCheckDispatcher)
+    service = default_service_factory(
+        None,
+        pool=cast(AsyncConnectionPool, object()),
+        provider_contributions=(
+            _enabled_worker_contribution("provider-a", "worker-a"),
+            _enabled_worker_contribution("provider-b", "worker-b"),
+        ),
+    )
+    assert isinstance(service._worker_mode, WorkerVantageDispatchMode)  # noqa: SLF001
+    report = asyncio.run(service.run())
+    worker_results = {
+        (result.check_id, result.provider)
+        for result in report.results
+        if result.check_id.startswith("worker-")
+    }
+    assert created == [("provider-a", ("worker-a",)), ("provider-b", ("worker-b",))]
+    assert worker_results == {("worker-a", "provider-a"), ("worker-b", "provider-b")}
 
 
 def test_factory_no_dispatcher_when_pool_but_remote_not_configured(

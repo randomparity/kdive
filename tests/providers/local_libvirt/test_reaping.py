@@ -6,7 +6,7 @@ import asyncio
 from uuid import UUID
 
 from kdive.providers.local_libvirt.reaping import LibvirtInfraReaper
-from kdive.providers.ports import OwnedInfra
+from kdive.providers.ports.handles import OwnedInfra
 
 
 class _FakeDiscovery:

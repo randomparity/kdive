@@ -1,6 +1,7 @@
 """Remote-libvirt base-image-staging probe adapter (ADR-0150, #513).
 
-The libvirt boundary for :class:`~kdive.diagnostics.checks.BaseImageStagingCheck`: it resolves the
+The libvirt boundary for
+:class:`~kdive.diagnostics.provider_checks.BaseImageStagingCheck`: it resolves the
 single declared ``[[remote_libvirt]]`` instance's storage pool and staged base-image volume name,
 opens the mutual-TLS ``qemu+tls://`` connection through the shared ``remote_connection`` lifecycle,
 and looks the volume up on the pool via the shared :func:`lookup_volume_staged` helper. It mirrors
@@ -32,15 +33,18 @@ from typing import Protocol
 
 import libvirt
 
-from kdive.diagnostics.checks import BaseImageStagingOutcome, BaseImageStagingProbe
+from kdive.diagnostics.provider_checks import BaseImageStagingOutcome, BaseImageStagingProbe
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
+from kdive.providers.remote_libvirt.connection.transport import (
+    open_libvirt_protocol,
+    remote_connection,
+)
 from kdive.providers.remote_libvirt.lifecycle.storage import (
     StorageConn,
     VolumeStaging,
     lookup_volume_staged,
 )
-from kdive.providers.remote_libvirt.transport import open_libvirt_protocol, remote_connection
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 

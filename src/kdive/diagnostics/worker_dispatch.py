@@ -27,15 +27,15 @@ from kdive.diagnostics.checks import CheckResult, CheckStatus
 from kdive.diagnostics.result_codec import ResultCodecError, deserialize_results
 from kdive.diagnostics.service import WORKER_UNAVAILABLE_DETAIL
 from kdive.domain.capacity.state import JobState
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue as job_queue
 from kdive.jobs.payloads import Authorizing, DiagnosticsWorkerCheckPayload
 
 WORKER_DISPATCH_BUDGET = 15.0
 _POLL_INTERVAL_S = 0.25
-# Plain failure_category labels mirroring checks.py (no ErrorCategory import in this layer).
-_TRANSPORT_FAILURE = "transport_failure"
-_INFRASTRUCTURE_FAILURE = "infrastructure_failure"
+_TRANSPORT_FAILURE = ErrorCategory.TRANSPORT_FAILURE
+_INFRASTRUCTURE_FAILURE = ErrorCategory.INFRASTRUCTURE_FAILURE
 _TERMINAL = {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED}
 _log = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class WorkerCheckDispatcher(Protocol):
 
 
 def _unavailable(
-    detail: str, category: str, *, provider: str, check_ids: Sequence[str]
+    detail: str, category: ErrorCategory, *, provider: str, check_ids: Sequence[str]
 ) -> list[CheckResult]:
     return [
         CheckResult(
@@ -124,18 +124,37 @@ class JobWorkerCheckDispatcher:
         # synthetic `diagnostics` principal rather than threading the per-request operator identity
         # into this registration-time-built dispatcher. The provider id doubles as the (non-tenant)
         # project so the row is not scoped to any real project's `recent_jobs` view.
-        job = await self._enqueue(
-            dedup_key,
-            DiagnosticsWorkerCheckPayload(provider=self._provider),
-            Authorizing(principal="diagnostics", project=self._provider),
-        )
+        try:
+            job = await self._enqueue(
+                dedup_key,
+                DiagnosticsWorkerCheckPayload(provider=self._provider),
+                Authorizing(principal="diagnostics", project=self._provider),
+            )
+        except Exception:
+            _log.exception("diagnostics worker-check job enqueue failed (dedup_key=%s)", dedup_key)
+            return _unavailable(
+                "diagnostics worker job queue is unavailable",
+                _INFRASTRUCTURE_FAILURE,
+                provider=self._provider,
+                check_ids=self._worker_check_ids,
+            )
         _log.info("diagnostics worker-check job %s enqueued (dedup_key=%s)", job.id, dedup_key)
         start = self._clock()
         while True:
-            current = await self._get(dedup_key)
+            try:
+                current = await self._get(dedup_key)
+            except Exception:
+                _log.exception("diagnostics worker-check job poll failed (dedup_key=%s)", dedup_key)
+                return _unavailable(
+                    "diagnostics worker job queue is unavailable",
+                    _INFRASTRUCTURE_FAILURE,
+                    provider=self._provider,
+                    check_ids=self._worker_check_ids,
+                )
             if current is not None and current.state in _TERMINAL:
                 return self._from_terminal(current)
-            if self._clock() - start >= self._budget:
+            remaining = self._budget - (self._clock() - start)
+            if remaining <= 0:
                 _log.warning("diagnostics job %s not picked up within %ss", dedup_key, self._budget)
                 return _unavailable(
                     WORKER_UNAVAILABLE_DETAIL,
@@ -143,7 +162,7 @@ class JobWorkerCheckDispatcher:
                     provider=self._provider,
                     check_ids=self._worker_check_ids,
                 )
-            await self._sleep(self._poll_interval)
+            await self._sleep(min(self._poll_interval, remaining))
 
     def _from_terminal(self, job: Job) -> list[CheckResult]:
         if job.state is JobState.SUCCEEDED:
@@ -159,7 +178,7 @@ class JobWorkerCheckDispatcher:
                 )
             _log.info("diagnostics job %s succeeded", job.id)
             return results
-        category = job.error_category.value if job.error_category else _INFRASTRUCTURE_FAILURE
+        category = job.error_category or _INFRASTRUCTURE_FAILURE
         _log.warning("diagnostics job %s ended %s (%s)", job.id, job.state.value, category)
         return _unavailable(
             "diagnostics worker job failed",

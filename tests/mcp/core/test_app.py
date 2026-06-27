@@ -12,6 +12,9 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.mcp.app as app_module
+import kdive.mcp.schema_advertising as envelope_module
+import kdive.mcp.tool_registration as tool_module
+import kdive.mcp.worker_registration as handler_module
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.models import HandlerRegistry
@@ -152,11 +155,9 @@ def test_build_app_registers_doc_resources() -> None:
 def test_binding_error_middleware_is_registered_innermost() -> None:
     # BindingErrorMiddleware must sit after Telemetry + DenialAudit so a binding ValidationError
     # is converted to a returned envelope inside the telemetry span (ADR-0124; ADR-0132).
-    from kdive.mcp.middleware import (
-        BindingErrorMiddleware,
-        DenialAuditMiddleware,
-        TelemetryMiddleware,
-    )
+    from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
+    from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
+    from kdive.mcp.middleware.telemetry import TelemetryMiddleware
 
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
@@ -195,7 +196,7 @@ def test_build_app_uses_injected_composition_secret_registry(
         def _probe() -> str:
             return "ok"
 
-    monkeypatch.setattr(app_module, "_PLANE_REGISTRARS", (_capture_assembly,))
+    monkeypatch.setattr(app_module, "PLANE_REGISTRARS", (_capture_assembly,))
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     composition_registry = SecretRegistry()
     caller_registry = SecretRegistry()
@@ -234,7 +235,7 @@ def test_ops_images_registration_uses_standard_register_entrypoint(
         captured["image_store"] = image_store
         captured["upload_store"] = upload_store
 
-    monkeypatch.setattr(app_module.ops_images_tools, "register", _register)
+    monkeypatch.setattr(tool_module.ops_images_tools, "register", _register)
     assembly = SimpleNamespace(
         object_stores=ObjectStoreAssembly(
             optional_upload_store=cast(Any, store),
@@ -245,9 +246,9 @@ def test_ops_images_registration_uses_standard_register_entrypoint(
         )
     )
 
-    app_module._register_ops_images_tools(app, pool, cast(Any, assembly))
+    tool_module._register_ops_images_tools(app, pool, cast(Any, assembly))
 
-    assert not hasattr(app_module.ops_images_tools, "register_from_env")
+    assert not hasattr(tool_module.ops_images_tools, "register_from_env")
     assert captured == {
         "app": app,
         "pool": pool,
@@ -303,6 +304,8 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
     captured: dict[str, object | None] = {}
 
     class _FakeComposition:
+        secret_registry = caller_registry
+
         def build_provider_resolver(self) -> object:
             return resolver
 
@@ -318,7 +321,7 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
         captured["transports"] = assembly.transport_factories
         captured["object_stores"] = assembly.object_stores
 
-    monkeypatch.setattr(app_module, "_HANDLER_REGISTRARS", (_capture,))
+    monkeypatch.setattr(app_module, "HANDLER_REGISTRARS", (_capture,))
 
     build_handler_registry(
         secret_registry=caller_registry,
@@ -349,9 +352,9 @@ def test_image_build_handler_preserves_store_config_error(
     def _raise_store() -> object:
         raise error
 
-    app_module._register_image_build_handler(
+    handler_module._register_image_build_handler(
         registry,
-        app_module.WorkerHandlerAssembly(
+        handler_module.WorkerHandlerAssembly(
             resolver=cast(Any, None),
             secret_registry=SecretRegistry(),
             transport_factories=cast(Any, None),
@@ -491,7 +494,7 @@ def test_lifecycle_prompts_expected_maturity_matches_registry() -> None:
     app = _built_app()
     live = {
         tool.name: (tool.meta or {}).get("maturity", "implemented")
-        for tool in app_module._registered_tools(app)
+        for tool in envelope_module.registered_tools(app)
     }
     for tool, expected in _EXPECTED_STEP_MATURITY.items():
         assert tool in live, f"prompt references unregistered tool {tool!r}"
@@ -506,10 +509,10 @@ def test_prompts_add_no_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     with_prompts = {t.name for t in asyncio.run(_built_app().list_tools())}
 
     without = tuple(
-        r for r in app_module._PLANE_REGISTRARS if r is not app_module._register_lifecycle_prompts
+        r for r in app_module.PLANE_REGISTRARS if r is not tool_module._register_lifecycle_prompts
     )
-    assert len(without) == len(app_module._PLANE_REGISTRARS) - 1
-    monkeypatch.setattr(app_module, "_PLANE_REGISTRARS", without)
+    assert len(without) == len(app_module.PLANE_REGISTRARS) - 1
+    monkeypatch.setattr(app_module, "PLANE_REGISTRARS", without)
     without_prompts = {t.name for t in asyncio.run(_built_app().list_tools())}
 
     assert with_prompts == without_prompts

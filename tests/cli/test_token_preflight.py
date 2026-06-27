@@ -70,6 +70,12 @@ def test_refuses_jwt_with_undecodable_body() -> None:
         ensure_token_valid("x.!!!not-base64!!!.y", now=1000, margin_s=30)
 
 
+def test_refuses_jwt_with_non_json_body() -> None:
+    body = base64.urlsafe_b64encode(b"not-json").rstrip(b"=").decode()
+    with pytest.raises(TokenExpiringError):
+        ensure_token_valid(f"x.{body}.y", now=1000, margin_s=30)
+
+
 def test_refuses_empty_token() -> None:
     with pytest.raises(TokenExpiringError):
         ensure_token_valid("", now=1000, margin_s=30)

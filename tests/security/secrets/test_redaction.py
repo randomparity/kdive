@@ -8,6 +8,7 @@ from kdive.security.secrets.redaction import (
     REDACTION,
     Redactor,
     SecretRedactionFilter,
+    process_global_redactor,
     redact_url_credentials,
 )
 from kdive.security.secrets.secret_registry import PROCESS_SECRET_REGISTRY, SecretRegistry
@@ -42,12 +43,12 @@ def test_redact_url_credentials_handles_userinfo_with_empty_host() -> None:
 
 
 def test_redactor_masks_value_with_regex_metacharacters() -> None:
-    redactor = Redactor(["a.b*c+(d)"])
+    redactor = Redactor(["a.b*c+(d)"], registry=SecretRegistry())
     assert redactor.redact_text("prefix a.b*c+(d) suffix") == f"prefix {REDACTION} suffix"
 
 
 def test_redactor_masks_key_value_pairs() -> None:
-    redactor = Redactor()
+    redactor = Redactor(registry=SecretRegistry())
     assert REDACTION in redactor.redact_text("password=hunter2")
     assert REDACTION in redactor.redact_text("token: abc123")
 
@@ -55,45 +56,58 @@ def test_redactor_masks_key_value_pairs() -> None:
 def test_redactor_keeps_key_and_separator_but_replaces_only_the_value() -> None:
     # The substitution preserves the key (group 1) and separator (group 2) and masks the
     # value (group 3); the original value must not survive anywhere in the output.
-    redactor = Redactor()
+    redactor = Redactor(registry=SecretRegistry())
     assert redactor.redact_text("password=hunter2") == f"password={REDACTION}"
     assert redactor.redact_text("token: abc123") == f"token: {REDACTION}"
     assert "hunter2" not in redactor.redact_text("password=hunter2")
 
 
 def test_redactor_recurses_into_nested_structures() -> None:
-    redactor = Redactor(["sekret"])
+    redactor = Redactor(["sekret"], registry=SecretRegistry())
     result = redactor.redact_value({"outer": ["sekret", ("sekret",)]})
     assert result == {"outer": [REDACTION, (REDACTION,)]}
 
 
 def test_redactor_masks_sensitive_path_mapping() -> None:
-    redactor = Redactor()
+    redactor = Redactor(registry=SecretRegistry())
     result = redactor.redact_value({"sensitive": True, "path": "/secret/key"})
     assert result["path"] == REDACTION
 
 
 def test_redactor_keeps_a_path_when_the_mapping_is_not_sensitive() -> None:
     # "path" is masked only when the mapping is explicitly sensitive; a plain path is preserved.
-    redactor = Redactor()
+    redactor = Redactor(registry=SecretRegistry())
     result = redactor.redact_value({"path": "/etc/config"})
     assert result == {"path": "/etc/config"}
 
 
 def test_redactor_masks_a_secret_named_mapping_key() -> None:
     # A key whose name matches the secret-key pattern is masked regardless of sensitivity.
-    redactor = Redactor()
+    redactor = Redactor(registry=SecretRegistry())
     result = redactor.redact_value({"token": "abc123", "api_key": "k", "plain": "ok"})
     assert result == {"token": REDACTION, "api_key": REDACTION, "plain": "ok"}
 
 
-def test_redactor_seeds_from_process_global_registry() -> None:
+def test_process_global_redactor_seeds_from_process_global_registry() -> None:
     scope = object()
     PROCESS_SECRET_REGISTRY.register("process-global-sentinel-xyz", scope=scope)
     try:
-        redactor = Redactor()
+        redactor = process_global_redactor()
         assert redactor.redact_text("leak process-global-sentinel-xyz here") == (
             f"leak {REDACTION} here"
+        )
+    finally:
+        PROCESS_SECRET_REGISTRY.release(scope)
+
+
+def test_redactor_does_not_seed_from_process_global_registry() -> None:
+    scope = object()
+    PROCESS_SECRET_REGISTRY.register("ordinary-redactor-global-sentinel", scope=scope)
+    try:
+        redactor = Redactor(registry=SecretRegistry())
+        assert (
+            redactor.redact_text("leak ordinary-redactor-global-sentinel here")
+            == "leak ordinary-redactor-global-sentinel here"
         )
     finally:
         PROCESS_SECRET_REGISTRY.release(scope)

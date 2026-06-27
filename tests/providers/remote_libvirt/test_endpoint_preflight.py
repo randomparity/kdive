@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.endpoint_preflight import (
+from kdive.providers.remote_libvirt.connection.endpoint_preflight import (
     _host_of,
     validate_guest_routable_endpoint,
 )

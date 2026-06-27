@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from kdive.inventory.reconcile_cli import validate_systems
+from kdive.inventory.cli import validate_systems
 
 # fedora-kdive-ready-44 is the kdump-capable default (ADR-0251); 43 is retained as the #817
 # regression reference (its older makedumpfile cannot filter the newest kernels).

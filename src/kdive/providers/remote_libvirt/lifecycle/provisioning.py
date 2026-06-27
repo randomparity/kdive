@@ -32,6 +32,11 @@ from kdive.profiles.provisioning import (
     require_concrete_sizing,
 )
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
+from kdive.providers.remote_libvirt.connection.transport import (
+    RemoteLibvirtConnections,
+    open_libvirt_protocol,
+    remote_libvirt_connections,
+)
 from kdive.providers.remote_libvirt.lifecycle.gdb import (
     DOMAIN_PREFIX,
     allocate_gdb_port,
@@ -55,11 +60,6 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import (
     disk_pool_strict as _disk_pool_strict,
-)
-from kdive.providers.remote_libvirt.transport import (
-    RemoteLibvirtConnections,
-    open_libvirt_protocol,
-    remote_libvirt_connections,
 )
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry

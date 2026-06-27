@@ -1,14 +1,6 @@
-"""Local-libvirt Retrieve plane: capture a kdump vmcore and run crash postmortem (ADR-0031).
+"""Local-libvirt Retrieve plane: vmcore capture and crash postmortem (ADR-0031).
 
-`LocalLibvirtRetrieve` realizes two seam-injected ports, mirroring `LocalLibvirtBuild`:
-`Retriever.capture(system_id, run_id, method)` dispatches to the appropriate seam, stores the raw
-`sensitive` core and a `redacted` dmesg derivative under the crashing Run (ADR-0244), and returns
-both refs plus the core's build-id;
-`CrashPostmortem.run_crash_postmortem(...)` symbolizes the core against the Run's
-`debuginfo_ref` over an injected `crash` subprocess. The slow, host-bound operations are
-`live_vm`-gated seams, so the orchestration and the full error contract are unit-tested with
-fakes. The crash-command
-validator is the load-bearing security control at the port boundary: every caller command is
+The crash-command validator is the port-boundary security control: caller commands are
 sanitized and allowlist-checked before any `crash` invocation.
 """
 
@@ -21,7 +13,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
 import libvirt
@@ -46,7 +38,7 @@ from kdive.providers.local_libvirt.retrieve_kdump import (
     redact_dmesg,
 )
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
-from kdive.providers.ports import (
+from kdive.providers.ports.retrieve import (
     CaptureOutput,
     CrashOutput,
     CrashResult,
@@ -150,21 +142,7 @@ class LocalLibvirtRetrieve:
         )
 
     def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
-        """Capture a core via ``method``; store raw + redacted; return refs + build-id.
-
-        ``system_id`` locates the live domain/overlay; ``run_id`` owns the stored core
-        (``owner_kind='runs'``, ADR-0244). Both ``KDUMP`` (the ADR-0203 overlay harvest) and
-        ``HOST_DUMP`` (the ADR-0211 libvirt domain core dump) stream the captured core from a worker
-        temp file straight to the object store, never holding the whole core in one in-memory buffer
-        (#657); they differ only in the seam that produces that file.
-
-        Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` for capture/build-id provenance or
-                input failures propagated by injected seams; ``MISSING_DEPENDENCY`` when a
-                capture, build-id, or redaction seam is unavailable; ``READINESS_FAILURE``
-                if no complete core appears in the window; or ``INFRASTRUCTURE_FAILURE``
-                propagated from a failed artifact store.
-        """
+        """Capture a Run-owned core plus redacted dmesg, returning refs and build-id."""
         if method is CaptureMethod.HOST_DUMP:
             return self._capture_via_file(
                 system_id, run_id, method, self._host_dump_capture(system_id)
@@ -177,11 +155,7 @@ class LocalLibvirtRetrieve:
     def _capture_via_file(
         self, system_id: UUID, run_id: UUID, method: CaptureMethod, core: Path | None
     ) -> CaptureOutput:
-        """Stream ``core`` (a worker temp file) to the store as raw + redacted; own its cleanup.
-
-        ``core`` is the spooled file a capture seam produced (``None`` when no core exists). The
-        spool dir is removed in ``finally`` on every path once a core is present (#657).
-        """
+        """Store a captured core without whole-core buffering, then remove its spool dir."""
         if core is None:
             raise self._no_core(system_id)
         try:
@@ -353,6 +327,19 @@ type _DomainSettled = Callable[[], bool]
 type _Sleep = Callable[[float], None]
 
 
+class _GuestfsHandle(Protocol):  # pragma: no cover - live_vm (libguestfs binding surface)
+    """The subset of the unstubbed guestfs handle this reader drives."""
+
+    def add_drive_opts(self, filename: str, *, readonly: bool) -> None: ...
+    def launch(self) -> None: ...
+    def inspect_os(self) -> list[str]: ...
+    def mount_ro(self, root: str, mountpoint: str) -> None: ...
+    def glob_expand(self, pattern: str) -> list[str]: ...
+    def statns(self, path: str) -> dict[str, int]: ...
+    def download(self, path: str, dest: str) -> None: ...
+    def close(self) -> None: ...
+
+
 def _libvirt_uri() -> str:
     """The provider's configured libvirt URI (``KDIVE_LIBVIRT_URI``, default ``qemu:///system``)."""
     return config.require(LIBVIRT_URI)
@@ -412,7 +399,7 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
         )
 
     @staticmethod
-    def _mount(overlay: str):  # type: ignore[no-untyped-def]
+    def _mount(overlay: str) -> _GuestfsHandle:
         try:
             import guestfs  # noqa: PLC0415  # ty: ignore[unresolved-import]  # operator-provided
         except ImportError as exc:
@@ -420,7 +407,7 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
                 "libguestfs (the guestfs Python binding) is required for local kdump capture",
                 category=ErrorCategory.MISSING_DEPENDENCY,
             ) from exc
-        guest = guestfs.GuestFS(python_return_dict=True)
+        guest = cast("_GuestfsHandle", guestfs.GuestFS(python_return_dict=True))
         try:
             guest.add_drive_opts(overlay, readonly=True)
             guest.launch()

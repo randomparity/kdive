@@ -18,7 +18,7 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.mcp.middleware import DenialAuditMiddleware
+from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.security.audit import args_digest
 from kdive.security.authz.errors import ProjectMembershipDenied

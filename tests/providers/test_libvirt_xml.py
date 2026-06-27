@@ -49,6 +49,11 @@ def test_parse_capabilities_arch_returns_unknown_for_missing_or_malformed() -> N
     assert parse_capabilities_arch("<not-xml") == "unknown"
 
 
+def test_parse_capabilities_arch_returns_unknown_for_defused_xml_exception() -> None:
+    xml = "<!DOCTYPE x [<!ENTITY boom SYSTEM 'file:///etc/passwd'>]><capabilities>&boom;</capabilities>"
+    assert parse_capabilities_arch(xml) == "unknown"
+
+
 def test_parse_metadata_system_id_trims_text_and_rejects_empty_or_malformed() -> None:
     assert parse_metadata_system_id(f"<system xmlns='{KDIVE_METADATA_NS}'> sid </system>") == "sid"
     assert parse_metadata_system_id(f"<system xmlns='{KDIVE_METADATA_NS}' />") is None

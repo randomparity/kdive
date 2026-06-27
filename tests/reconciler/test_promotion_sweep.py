@@ -26,20 +26,20 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, RESOURCES
-from kdive.domain.accounting import Budget, Quota
 from kdive.domain.accounting.cost import Selector
+from kdive.domain.accounting.records import Budget, Quota
 from kdive.domain.capacity.state import AllocationState, ResourceStatus
 from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Allocation
+from kdive.domain.lifecycle.records import Allocation
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeClaim
 from kdive.mcp.auth import RequestContext
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import loop
-from kdive.reconciler.repairs.allocations import promote_pending, reap_queue_timeouts
 from kdive.security.audit import args_digest
 from kdive.services.allocation.admission.core import AllocationRequest, admit
+from kdive.services.allocation.promotion import promote_pending, reap_queue_timeouts
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.reconciler.conftest import connect, run_repair
 

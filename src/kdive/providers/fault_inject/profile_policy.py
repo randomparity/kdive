@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.operations.jobs import DestructiveJobKind
+from kdive.domain.operations.jobs import JobKind
 from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
 
 
@@ -22,7 +22,7 @@ class FaultInjectProfilePolicy:
     def validate_profile(self, profile: ProvisioningProfile) -> None:
         return None
 
-    def destructive_opt_in(self, profile: ProvisioningProfile, op: DestructiveJobKind) -> bool:
+    def destructive_opt_in(self, profile: ProvisioningProfile, op: JobKind) -> bool:
         return op.value in profile.provider.fault_inject.destructive_ops
 
     def capture_method(self, profile: ProvisioningProfile) -> CaptureMethod:

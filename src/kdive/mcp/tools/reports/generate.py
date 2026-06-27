@@ -45,9 +45,10 @@ from kdive.security.authz.rbac import (
     require_role,
 )
 from kdive.security.secrets.redaction import Redactor
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
-from kdive.services.reports import Report, ReportScope, Row, Section, generate_report
 from kdive.services.reports.artifacts import ReportArtifactStore, write_report_artifacts
+from kdive.services.reports.core import Report, ReportScope, Row, Section, generate_report
 from kdive.services.reports.sections import registry
 from kdive.store.objectstore import object_store_from_env
 
@@ -190,7 +191,9 @@ async def _spreadsheet_refs(
             report_id=report_id,
             ttl=config.require(ARTIFACT_DOWNLOAD_TTL_SECONDS),
         )
-    except CategorizedError:
+    except CategorizedError as exc:
+        if exc.category is ErrorCategory.MISSING_DEPENDENCY:
+            raise
         return {}, {"spreadsheet_unavailable": "store_error"}
     return refs, {}
 
@@ -201,6 +204,7 @@ async def _build_report(
     window: tuple[datetime | None, datetime | None] | None,
     formats: tuple[str, ...],
     *,
+    secret_registry: SecretRegistry,
     store_factory: StoreFactory,
     scope_label: str,
     next_tool: str,
@@ -208,7 +212,7 @@ async def _build_report(
     as_of = await _now(conn)
     report = _normalized_report(
         await generate_report(conn, scope, window, as_of, sections=registry()),
-        Redactor(),
+        Redactor(registry=secret_registry),
     )
     items = _inline_items(report, config.require(REPORT_INLINE_MAX_BYTES))
     report_id = uuid4()
@@ -242,6 +246,7 @@ async def generate_granted_set(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
+    secret_registry: SecretRegistry,
     projects: list[str] | None = None,
     window: object = None,
     formats: list[str] | None = None,
@@ -265,15 +270,21 @@ async def generate_granted_set(
             )
         scope = ReportScope(projects=tuple(targets), all_projects=False)
         async with pool.connection() as conn:
-            response = await _build_report(
-                conn,
-                scope,
-                parsed_window,
-                parsed_formats,
-                store_factory=store_factory,
-                scope_label=_GRANTED_SCOPE,
-                next_tool=_GRANTED_TOOL,
-            )
+            try:
+                response = await _build_report(
+                    conn,
+                    scope,
+                    parsed_window,
+                    parsed_formats,
+                    secret_registry=secret_registry,
+                    store_factory=store_factory,
+                    scope_label=_GRANTED_SCOPE,
+                    next_tool=_GRANTED_TOOL,
+                )
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(
+                    _REPORT_OBJECT_ID, exc, suggested_next_actions=[_GRANTED_TOOL]
+                )
             if len(targets) > 1:
                 await _audit_granted(conn, ctx, targets, parsed_window, parsed_formats)
         return response
@@ -283,6 +294,7 @@ async def generate_all_projects(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
+    secret_registry: SecretRegistry,
     window: object = None,
     formats: list[str] | None = None,
     store_factory: StoreFactory = object_store_from_env,
@@ -315,15 +327,21 @@ async def generate_all_projects(
             scope = ReportScope(
                 projects=tuple(await _all_projects_universe(conn)), all_projects=True
             )
-            response = await _build_report(
-                conn,
-                scope,
-                parsed_window,
-                parsed_formats,
-                store_factory=store_factory,
-                scope_label=ALL_PROJECTS_SCOPE,
-                next_tool=_ALL_PROJECTS_TOOL,
-            )
+            try:
+                response = await _build_report(
+                    conn,
+                    scope,
+                    parsed_window,
+                    parsed_formats,
+                    secret_registry=secret_registry,
+                    store_factory=store_factory,
+                    scope_label=ALL_PROJECTS_SCOPE,
+                    next_tool=_ALL_PROJECTS_TOOL,
+                )
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(
+                    _REPORT_OBJECT_ID, exc, suggested_next_actions=[_ALL_PROJECTS_TOOL]
+                )
             await _audit_all_projects(conn, ctx, parsed_window, parsed_formats)
         return response
 
@@ -372,7 +390,7 @@ async def _audit_all_projects(
         )
 
 
-def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+def register(app: FastMCP, pool: AsyncConnectionPool, *, secret_registry: SecretRegistry) -> None:
     """Register the report-generation tools on ``app``, bound to ``pool``."""
 
     @app.tool(
@@ -396,7 +414,12 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         """Generate a consolidated report over the caller's granted projects."""
         return await generate_granted_set(
-            pool, current_context(), projects=projects, window=window, formats=formats
+            pool,
+            current_context(),
+            secret_registry=secret_registry,
+            projects=projects,
+            window=window,
+            formats=formats,
         )
 
     @app.tool(
@@ -415,4 +438,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         ] = None,
     ) -> ToolResponse:
         """Generate a platform-wide consolidated report over every project."""
-        return await generate_all_projects(pool, current_context(), window=window, formats=formats)
+        return await generate_all_projects(
+            pool,
+            current_context(),
+            secret_registry=secret_registry,
+            window=window,
+            formats=formats,
+        )

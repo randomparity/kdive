@@ -21,11 +21,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from kdive.domain.operations.jobs import DestructiveJobKind
+from kdive.domain.operations.jobs import DESTRUCTIVE_JOB_KINDS, JobKind
 from kdive.security.authz.rbac import AuthorizationError, Role, require_role
 
 if TYPE_CHECKING:
-    from kdive.domain.lifecycle import Allocation
+    from kdive.domain.lifecycle.records import Allocation
     from kdive.security.authz.context import RequestContext
 
 
@@ -37,8 +37,12 @@ class DestructiveOp:
     opt-in is denied (deny-by-default).
     """
 
-    kind: DestructiveJobKind
+    kind: JobKind
     profile_opt_in: bool = False
+
+    def __post_init__(self) -> None:
+        if self.kind not in DESTRUCTIVE_JOB_KINDS:
+            raise ValueError(f"{self.kind.value} is not a destructive job kind")
 
 
 class DestructiveOpDenied(AuthorizationError):

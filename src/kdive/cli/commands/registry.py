@@ -160,7 +160,7 @@ REGISTRY: tuple[Verb, ...] = (
         "build",
         images.images_build,
         "images.build",
-        options=("provider", "name", "arch", "releasever", "source_image_digest", "capabilities"),
+        options=("provider", "name", "packages"),
         read_only=False,
     ),
     Verb(
@@ -168,7 +168,7 @@ REGISTRY: tuple[Verb, ...] = (
         "publish",
         images.images_publish,
         "images.publish",
-        options=("provider", "name", "arch", "releasever", "source_image_digest", "capabilities"),
+        options=("provider", "name", "packages"),
         read_only=False,
     ),
     Verb(
@@ -211,6 +211,9 @@ def _verb_parser(
     for positional in verb.positionals:
         parser.add_argument(positional)
     for option in verb.options:
+        if option == "packages":
+            parser.add_argument(f"--{option.replace('_', '-')}", dest=option, action="append")
+            continue
         parser.add_argument(f"--{option.replace('_', '-')}", dest=option, default=None)
     for option in verb.required_options:
         parser.add_argument(f"--{option.replace('_', '-')}", dest=option, required=True)

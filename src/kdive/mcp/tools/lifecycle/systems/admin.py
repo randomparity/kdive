@@ -16,8 +16,8 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.capacity.state import IllegalTransition, RunState, SystemState
 from kdive.domain.errors import CategorizedError
-from kdive.domain.lifecycle import System
-from kdive.domain.operations.jobs import DestructiveJobKind, Job, JobKind
+from kdive.domain.lifecycle.records import System
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import ReprovisionPayload, SystemPayload
 from kdive.log import bind_context
@@ -28,20 +28,19 @@ from kdive.mcp.tools._common import authz_denied as _authz_denied
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools._common import stale_handle as _stale_handle
-from kdive.profiles.provider_policy import reject_rootfs_upload_without_window
-from kdive.profiles.provisioning import ProvisioningProfile, dump_profile, profile_digest
-from kdive.profiles.types import ProvisioningProfileInput
-from kdive.providers.core.runtime import ProfilePolicy
-from kdive.security import audit
-from kdive.security.authz.context import RequestContext
-from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
-from kdive.security.authz.rbac import Role, RoleDenied, require_role
-from kdive.services.idempotency.envelope import (
+from kdive.mcp.tools._idempotency import (
     record_envelope,
     resolve_conflict,
     resolve_envelope_replay,
     validate_idempotency_key,
 )
+from kdive.profiles.provider_policy import ProfilePolicy, reject_rootfs_upload_without_window
+from kdive.profiles.provisioning import ProvisioningProfile, dump_profile, profile_digest
+from kdive.profiles.types import ProvisioningProfileInput
+from kdive.security import audit
+from kdive.security.authz.context import RequestContext
+from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
+from kdive.security.authz.rbac import Role, RoleDenied, require_role
 from kdive.services.systems.validation import (
     RootfsValidator,
     validate_profile_for_provider,
@@ -204,7 +203,7 @@ async def _audit_destructive_denied(
     conn: AsyncConnection,
     ctx: RequestContext,
     system: System,
-    op_kind: DestructiveJobKind,
+    op_kind: JobKind,
     missing: list[str],
 ) -> None:
     await audit.record(

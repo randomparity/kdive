@@ -40,17 +40,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.__main__ import _reconciler_probe
 from kdive.cli.commands import doctor
 from kdive.diagnostics.checks import (
-    BASE_VOLUME_NOT_STAGED_FIX,
-    BaseImageStagingCheck,
-    BaseImageStagingOutcome,
-    BaseImageStagingProbe,
     Check,
-    GdbstubAclCheck,
-    GdbstubAclProbe,
-    ProviderTlsCheck,
-    SecretRefCheck,
-    TlsProbe,
-    TlsProbeOutcome,
 )
 from kdive.diagnostics.egress_probe import (
     EGRESS_FIX,
@@ -60,12 +50,24 @@ from kdive.diagnostics.egress_probe import (
     ProbeGuest,
     SingleFlight,
 )
+from kdive.diagnostics.provider_checks import (
+    BASE_VOLUME_NOT_STAGED_FIX,
+    BaseImageStagingCheck,
+    BaseImageStagingOutcome,
+    BaseImageStagingProbe,
+    GdbstubAclCheck,
+    GdbstubAclProbe,
+    ProviderTlsCheck,
+    TlsProbe,
+    TlsProbeOutcome,
+)
+from kdive.diagnostics.secret_ref import SecretRefCheck
 from kdive.diagnostics.service import DiagnosticsService
 from kdive.health.probe import HealthProbe
+from kdive.health.processes.worker import build_worker_probe
 from kdive.health.server_checks import build_server_checks
 from kdive.health.worker_checks import build_worker_checks
 from kdive.mcp.tools.ops import diagnostics
-from kdive.process_health.worker import build_worker_probe
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 

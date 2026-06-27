@@ -40,6 +40,10 @@ from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
 from kdive.providers.shared.build_host import execution as build_host_execution
 from kdive.providers.shared.build_host.configuration import config as build_host_config
 from kdive.providers.shared.build_host.execution import CapturedStep
+from kdive.providers.shared.build_host.publishing.artifact_publish import (
+    ArtifactBytes,
+    ArtifactSource,
+)
 from kdive.providers.shared.build_host.publishing.kernel_bundle import local_kernel_bundle
 from kdive.providers.shared.build_host.workspaces import workspace as build_host_workspace
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -147,14 +151,14 @@ class _Seams:
         self.call_order.append("modules_install")
         return self.modules_install_returncode
 
-    def make_bundle(self, workspace: Path, mod_root: Path) -> build_module.ArtifactSource:
+    def make_bundle(self, workspace: Path, mod_root: Path) -> ArtifactSource:
         self.call_order.append("bundle")
         self.bundle_args.append((workspace, mod_root))
-        return build_module.ArtifactBytes(self.bundle_bytes)
+        return ArtifactBytes(self.bundle_bytes)
 
-    def read_vmlinux_source(self, workspace: Path) -> build_module.ArtifactSource:
+    def read_vmlinux_source(self, workspace: Path) -> ArtifactSource:
         self.vmlinux_workspaces.append(workspace)
-        return build_module.ArtifactBytes(b"vmlinux-bytes")
+        return ArtifactBytes(b"vmlinux-bytes")
 
     def read_build_id(self, workspace: Path) -> str:
         self.build_id_workspaces.append(workspace)
@@ -405,6 +409,83 @@ def test_from_env_does_not_spawn_make_or_connect_s3(monkeypatch: pytest.MonkeyPa
     assert isinstance(builder, RemoteLibvirtBuild)
 
 
+def test_from_env_threads_worker_sandbox_into_local_build_seams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KDIVE_BUILD_WORKSPACE", str(tmp_path / "ws"))
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", "/srv/linux")
+    store = _FakeStore()
+    staging = tmp_path / "mods"
+    captured: dict[str, object] = {}
+    sandbox_owns: list[Path] = []
+    sandbox_tokens: list[object] = []
+
+    class _Sandbox:
+        def own(self, path: Path) -> None:
+            sandbox_owns.append(path)
+
+    sandbox = _Sandbox()
+
+    class _SandboxProvider:
+        def get(self) -> object:
+            sandbox_tokens.append(sandbox)
+            return sandbox
+
+    provider = _SandboxProvider()
+
+    def _checkout_factory(
+        kernel_src: str,
+        secret_registry: SecretRegistry,
+        *,
+        sandbox_provider: object = None,
+    ) -> object:
+        captured["checkout"] = (kernel_src, secret_registry, sandbox_provider)
+        return lambda _run_id, _profile, _workspace, _fragment: None
+
+    monkeypatch.setattr(build_module, "object_store_from_env", lambda: store)
+    monkeypatch.setattr(build_module, "build_config_fetch_from_env", lambda: lambda _name: b"frag")
+    monkeypatch.setattr(build_module, "resolve_build_sandbox_provider", lambda: provider)
+    monkeypatch.setattr(build_module._build_workspace, "make_checkout", _checkout_factory)
+    monkeypatch.setattr(build_module._build_exec, "real_read_config", lambda _ws: _GOOD_CONFIG)
+    monkeypatch.setattr(build_module._build_exec, "real_read_build_id", lambda _ws: "build-id")
+    monkeypatch.setattr(build_module, "_real_staging_factory", lambda: staging)
+    monkeypatch.setattr(build_module, "_local_vmlinux_source", lambda _ws: ArtifactBytes(b"v"))
+    monkeypatch.setattr(build_module, "local_kernel_bundle", lambda _ws, _mr: ArtifactBytes(b"k"))
+
+    def _run_olddefconfig(
+        _workspace: Path, *, sandbox: object = None, registry: object = None
+    ) -> CapturedStep:
+        captured["olddefconfig_sandbox"] = sandbox
+        return CapturedStep(0, "")
+
+    def _run_make(
+        _workspace: Path, *, sandbox: object = None, registry: object = None
+    ) -> CapturedStep:
+        captured["make_sandbox"] = sandbox
+        return CapturedStep(0, "")
+
+    def _run_modules_install(
+        _workspace: Path, _mod_root: Path, *, sandbox: object = None, registry: object = None
+    ) -> int:
+        captured["modules_sandbox"] = sandbox
+        return 0
+
+    monkeypatch.setattr(build_module._build_exec, "real_run_olddefconfig", _run_olddefconfig)
+    monkeypatch.setattr(build_module._build_exec, "real_run_make", _run_make)
+    monkeypatch.setattr(build_module._build_exec, "real_run_modules_install", _run_modules_install)
+
+    registry = SecretRegistry()
+    builder = RemoteLibvirtBuild.from_env(secret_registry=registry)
+    builder.build(_RUN, _profile())
+
+    assert captured["checkout"] == ("/srv/linux", registry, provider)
+    assert captured["olddefconfig_sandbox"] is sandbox
+    assert captured["make_sandbox"] is sandbox
+    assert captured["modules_sandbox"] is sandbox
+    assert sandbox_owns == [staging]
+    assert sandbox_tokens == [sandbox, sandbox, sandbox, sandbox]
+
+
 def test_validate_config_ref_rejects_file_outside_roots(tmp_path: Path) -> None:
     allowed = tmp_path / "allowed"
     allowed.mkdir()
@@ -418,8 +499,8 @@ def test_validate_config_ref_rejects_file_outside_roots(tmp_path: Path) -> None:
         read_config=lambda _w: _GOOD_CONFIG,
         run_make=lambda _w: CapturedStep(0, ""),
         run_modules_install=lambda _w, _m: 0,
-        make_bundle=lambda _w, _m: build_module.ArtifactBytes(b"b"),
-        read_vmlinux_source=lambda _w: build_module.ArtifactBytes(b"v"),
+        make_bundle=lambda _w, _m: ArtifactBytes(b"b"),
+        read_vmlinux_source=lambda _w: ArtifactBytes(b"v"),
         read_build_id=lambda _w: "deadbeef",
         staging_factory=lambda: _make_staging(tmp_path),
         catalog_fetch=lambda _name: _FRAGMENT_BYTES,
@@ -448,8 +529,8 @@ def test_validate_config_ref_accepts_file_inside_roots(tmp_path: Path) -> None:
         read_config=lambda _w: _GOOD_CONFIG,
         run_make=lambda _w: CapturedStep(0, ""),
         run_modules_install=lambda _w, _m: 0,
-        make_bundle=lambda _w, _m: build_module.ArtifactBytes(b"b"),
-        read_vmlinux_source=lambda _w: build_module.ArtifactBytes(b"v"),
+        make_bundle=lambda _w, _m: ArtifactBytes(b"b"),
+        read_vmlinux_source=lambda _w: ArtifactBytes(b"v"),
         read_build_id=lambda _w: "deadbeef",
         staging_factory=lambda: _make_staging(tmp_path),
         catalog_fetch=lambda _name: _FRAGMENT_BYTES,
@@ -631,7 +712,12 @@ def test_real_run_modules_install_argv(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(subprocess, "run", _capture)
     # The make returncode is passed through unchanged (not normalized).
-    assert build_host_execution.real_run_modules_install(Path("/ws"), Path("/stage")) == 7
+    assert (
+        build_host_execution.real_run_modules_install(
+            Path("/ws"), Path("/stage"), registry=SecretRegistry()
+        )
+        == 7
+    )
     argv = captured[0]
     assert argv[:3] == ["make", "-C", "/ws"]
     assert "modules_install" in argv
@@ -651,7 +737,9 @@ def test_real_run_modules_install_timeout_is_build_failure(
     monkeypatch.setattr(subprocess, "run", _timeout)
 
     with pytest.raises(CategorizedError) as caught:
-        build_host_execution.real_run_modules_install(Path("/ws"), Path("/stage"))
+        build_host_execution.real_run_modules_install(
+            Path("/ws"), Path("/stage"), registry=SecretRegistry()
+        )
 
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
     assert str(caught.value) == "make modules_install exceeded the build timeout"
@@ -667,7 +755,9 @@ def test_real_run_modules_install_missing_make_is_missing_dependency(
     monkeypatch.setattr(subprocess, "run", _missing)
 
     with pytest.raises(CategorizedError) as caught:
-        build_host_execution.real_run_modules_install(Path("/ws"), Path("/stage"))
+        build_host_execution.real_run_modules_install(
+            Path("/ws"), Path("/stage"), registry=SecretRegistry()
+        )
 
     assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
     assert str(caught.value) == "make is required for kernel builds"
@@ -685,7 +775,9 @@ def test_real_run_modules_install_launch_oserror_is_infrastructure(
     monkeypatch.setattr(subprocess, "run", _oserror)
 
     with pytest.raises(CategorizedError) as caught:
-        build_host_execution.real_run_modules_install(Path("/ws"), Path("/stage"))
+        build_host_execution.real_run_modules_install(
+            Path("/ws"), Path("/stage"), registry=SecretRegistry()
+        )
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert caught.value.details == {"tool": "make", "op": "launch"}
@@ -705,7 +797,7 @@ def test_real_run_make_falls_back_to_one_job_without_cpu_count(
     monkeypatch.setattr(build_host_execution.os, "cpu_count", lambda: None)
     monkeypatch.setattr(subprocess, "run", _capture)
 
-    build_host_execution.real_run_make(Path("/ws"))
+    build_host_execution.real_run_make(Path("/ws"), registry=SecretRegistry())
 
     assert captured[0][3] == "-j1"
 
@@ -721,7 +813,9 @@ def test_real_run_make_argv_and_returncode(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(subprocess, "run", _capture)
 
-    assert build_host_execution.real_run_make(Path("/ws")).returncode == 3
+    assert (
+        build_host_execution.real_run_make(Path("/ws"), registry=SecretRegistry()).returncode == 3
+    )
     argv = captured[0]
     assert argv[:3] == ["make", "-C", "/ws"]
     expected_jobs = os.cpu_count() or 1
@@ -737,7 +831,7 @@ def test_real_run_make_timeout_is_build_failure(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(subprocess, "run", _timeout)
 
     with pytest.raises(CategorizedError) as caught:
-        build_host_execution.real_run_make(Path("/ws"))
+        build_host_execution.real_run_make(Path("/ws"), registry=SecretRegistry())
 
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
     assert str(caught.value) == "make exceeded the build timeout"
@@ -755,7 +849,7 @@ def test_real_run_make_launch_oserror_is_infrastructure_failure(
     monkeypatch.setattr(subprocess, "run", _oserror)
 
     with pytest.raises(CategorizedError) as caught:
-        build_host_execution.real_run_make(Path("/ws"))
+        build_host_execution.real_run_make(Path("/ws"), registry=SecretRegistry())
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert str(caught.value) == "make failed to launch"
@@ -1032,10 +1126,14 @@ def test_live_vm_real_make_bundle_has_modules() -> None:  # pragma: no cover - l
             checkout=lambda run_id, profile, ws, fragment: build_host_workspace.real_checkout(
                 src, profile, ws, fragment, run_id=run_id, secret_registry=SecretRegistry()
             ),
-            run_olddefconfig=build_host_execution.real_run_olddefconfig,
+            run_olddefconfig=lambda ws: build_host_execution.real_run_olddefconfig(
+                ws, registry=SecretRegistry()
+            ),
             read_config=build_host_execution.real_read_config,
-            run_make=build_host_execution.real_run_make,
-            run_modules_install=build_host_execution.real_run_modules_install,
+            run_make=lambda ws: build_host_execution.real_run_make(ws, registry=SecretRegistry()),
+            run_modules_install=lambda ws, mr: build_host_execution.real_run_modules_install(
+                ws, mr, registry=SecretRegistry()
+            ),
             make_bundle=local_kernel_bundle,
             read_vmlinux_source=build_module._local_vmlinux_source,
             read_build_id=build_host_execution.real_read_build_id,
@@ -1305,7 +1403,7 @@ def test_real_checkout_git_lane_clones_with_run_id_and_registry(
     monkeypatch.setattr(
         build_host_workspace,
         "merge_config",
-        lambda frag, ws, run_id, sandbox=None: calls.update(merge=(ws, run_id)),
+        lambda frag, ws, run_id, sandbox=None, *, secret_registry: calls.update(merge=(ws, run_id)),
     )
     monkeypatch.setattr(
         build_host_workspace,
@@ -1640,7 +1738,9 @@ def test_merge_config_defconfig_failure_is_build_failure(
     )
 
     with pytest.raises(CategorizedError) as caught:
-        build_host_workspace.merge_config(b"CONFIG_X=y\n", workspace, _RUN)
+        build_host_workspace.merge_config(
+            b"CONFIG_X=y\n", workspace, _RUN, secret_registry=SecretRegistry()
+        )
 
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
     assert str(caught.value) == "make defconfig exited non-zero"
@@ -1664,7 +1764,9 @@ def test_merge_config_runs_merge_script_and_propagates_failure(
     monkeypatch.setattr(build_host_workspace.subprocess, "run", _merge)
 
     with pytest.raises(CategorizedError) as caught:
-        build_host_workspace.merge_config(b"CONFIG_X=y\n", workspace, _RUN)
+        build_host_workspace.merge_config(
+            b"CONFIG_X=y\n", workspace, _RUN, secret_registry=SecretRegistry()
+        )
 
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
     assert str(caught.value) == "merge_config.sh -m exited non-zero"

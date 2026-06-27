@@ -84,7 +84,7 @@ def build_host_profile_examples(
             at least the seeded ``worker-local`` row, so the collection is normally
             non-empty; an empty list yields a valid empty collection.
         declared_instances: The declared ``[[remote_libvirt]]`` instance names (from
-            :func:`~kdive.services.runs.build_host_selection.declared_remote_instance_names`),
+            :func:`~kdive.providers.assembly.build_hosts.declared_remote_instance_names`),
             used to drop ``ephemeral_libvirt`` hosts with no backing instance.
 
     Returns:

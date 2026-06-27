@@ -18,7 +18,7 @@ import pytest
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import InstallRequest
+from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.guest.agent import AgentExecResult
 from kdive.providers.remote_libvirt.lifecycle.install import RemoteLibvirtInstall

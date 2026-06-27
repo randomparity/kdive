@@ -57,8 +57,8 @@ check `tests/mcp/` first).
 **Where it fits:** the bulk of the list surface; uses Task 1.
 
 **Files (handler + its test each):**
-- `src/kdive/jobs/queue.py` (`recent_jobs`) + `src/kdive/mcp/tools/catalog/jobs.py`
-  (`list_jobs`, `jobs_list` wrapper) + `tests/mcp/catalog/test_jobs_tools.py`
+- `src/kdive/jobs/queue.py` (`recent_jobs`) + `src/kdive/mcp/tools/jobs.py`
+  (`list_jobs`, `jobs_list` wrapper) + `tests/mcp/jobs/test_jobs_tools.py`
 - `src/kdive/mcp/tools/lifecycle/allocations/view.py` + its test
 - `src/kdive/mcp/tools/lifecycle/systems/view.py` + `tests/mcp/lifecycle/test_systems_tools.py`
 - `src/kdive/mcp/tools/catalog/investigations.py` + `tests/mcp/catalog/test_investigations_tools.py`

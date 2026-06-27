@@ -12,13 +12,13 @@ from uuid import UUID, uuid4
 import psycopg
 
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, RESOURCES
-from kdive.domain.accounting import Budget, Quota
 from kdive.domain.accounting.cost import Selector
+from kdive.domain.accounting.records import Budget, Quota
 from kdive.domain.capacity.state import AllocationState, ResourceStatus
 from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.lifecycle import Allocation
+from kdive.domain.lifecycle.records import Allocation
 from kdive.mcp.auth import RequestContext
 from kdive.security.audit import args_digest
 from kdive.services.allocation.admission.core import (

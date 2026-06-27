@@ -26,16 +26,10 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import re
-import shutil
-import subprocess  # noqa: S404 - virsh domstate is invoked with a fixed argv, no shell
-import tarfile
-import time
 import xml.etree.ElementTree as ET  # noqa: S405 - constructs/edits self-owned domain XML only
 from collections.abc import Callable
-from enum import StrEnum
 from pathlib import Path
-from typing import NamedTuple, Protocol, cast
+from typing import Protocol
 from uuid import UUID
 
 import libvirt
@@ -47,16 +41,31 @@ from kdive.artifacts.storage import FetchedArtifact
 from kdive.config.core_settings import INSTALL_STAGING
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.guest_kernel_writer import (
+    GuestKernelWriter,
+    _RealGuestKernelWriter,
+)
+from kdive.providers.local_libvirt.lifecycle.kernel_bundle import (
+    extract_boot_vmlinuz,
+    repack_modules_subtree,
+)
+from kdive.providers.local_libvirt.lifecycle.readiness import (
+    ReadinessResult,
+    _real_readiness,
+)
+from kdive.providers.local_libvirt.lifecycle.staged_write import write_staged_bytes
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
-from kdive.providers.ports import InstallRequest
+from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.libvirt_xml import register_kdive_namespace, register_qemu_namespace
-from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for, read_console_log
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.store.objectstore import object_store_from_env
 
 _log = logging.getLogger(__name__)
 
 _DEFAULT_BOOT_WINDOW_POLLS = 60
+
+
 # The boot window is _DEFAULT_BOOT_WINDOW_POLLS × _POLL_INTERVAL_SECONDS = 300s (ADR-0055 §7):
 # boot()._await_ready loops the poll count; _real_readiness owns the per-poll cadence. The window
 # accommodates the kdive-ready signal now ordering After=kdump.service (#817): a crash-capture
@@ -64,47 +73,6 @@ _DEFAULT_BOOT_WINDOW_POLLS = 60
 # it, which adds tens of seconds on the first dracut build. It is a timeout, not a fixed wait —
 # _await_ready returns the instant the marker appears, so the wider ceiling costs nothing on a fast
 # boot and the _CRASH_SIGNATURE fail-fast still surfaces a panicked boot immediately.
-_POLL_INTERVAL_SECONDS = 5.0
-_DOMSTATE_PROBE_TIMEOUT = 10
-_TERMINAL_DOMSTATES = frozenset({"shut off", "crashed"})
-_VIRSH = "virsh"
-
-_READINESS_MARKER = "kdive-ready"
-# Fatal/stall-grade kernel crash signatures (ADR-0055 §4). Fail-closed and additive.
-# The lookbehinds keep `BUG:`/`Oops:` from matching benign substrings (e.g. `DEBUG:`).
-_CRASH_SIGNATURE = re.compile(
-    r"Kernel panic"
-    r"|(?<![A-Za-z])BUG:"
-    r"|(?<![A-Za-z])Oops:"
-    r"|general protection fault"
-    r"|[Uu]nable to handle kernel"
-    r"|KASAN:"
-    r"|KFENCE:"
-    r"|detected stall"
-)
-
-
-class ConsoleVerdict(StrEnum):
-    READY = "ready"
-    CRASHED = "crashed"
-    PENDING = "pending"
-
-
-class ReadinessResult(NamedTuple):
-    """The run-readiness preflight result: did the System answer, and did its checks pass."""
-
-    answered: bool
-    ok: bool
-    probe_error: str | None = None
-
-
-class _DomainExitProbe(NamedTuple):
-    """The domstate probe result plus a bounded probe-failure diagnostic."""
-
-    exited: bool
-    error: str | None = None
-
-
 class _LibvirtDomain(Protocol):
     def XMLDesc(self, flags: int) -> str: ...  # noqa: N802 - mirrors the libvirt binding name
     def isActive(self) -> int: ...  # noqa: N802 - mirrors the libvirt binding name
@@ -116,21 +84,6 @@ class _LibvirtConn(Protocol):
     def lookupByName(self, name: str) -> _LibvirtDomain: ...  # noqa: N802 - libvirt name
     def defineXML(self, xml: str) -> _LibvirtDomain: ...  # noqa: N802 - libvirt name
     def close(self) -> int: ...
-
-
-class GuestKernelWriter(Protocol):
-    """Stage a built kernel into a System overlay: ``/lib/modules/<ver>`` + ``/boot/vmlinuz-<ver>``.
-
-    ``kernel_image`` is the from-source kernel already fetched for the direct-kernel ``<kernel>``
-    element; the writer also lands it at ``/boot/vmlinuz-<ver>`` so the guest's ``kdumpctl`` can
-    kexec-load a crash kernel (ADR-0207). ``modules_tar`` is the ``/lib/modules/<ver>`` tree.
-    ``vmlinux``, when given, is the run's DWARF ``vmlinux`` staged at
-    ``/usr/lib/debug/lib/modules/<ver>/vmlinux`` for in-guest live drgn (ADR-0221).
-    """
-
-    def inject(
-        self, overlay: str, kernel_image: Path, modules_tar: Path, vmlinux: Path | None = None
-    ) -> None: ...
 
 
 type Connect = Callable[[], _LibvirtConn]
@@ -486,29 +439,6 @@ class LocalLibvirtInstall:
         )
 
 
-def classify_console(data: bytes, *, marker: str = _READINESS_MARKER) -> ConsoleVerdict:
-    """Classify a console capture: did the System reach the marker, crash, or neither?
-
-    The marker is matched as a whole line — the readiness unit echoes the bare line
-    ``kdive-ready`` to the console, while systemd's ``Starting kdive-ready.service`` line
-    (same substring) is not the signal (ADR-0055 §3). A crash signature (§4) in the
-    pre-marker region wins (crash-wins, fail-closed). Bytes are decoded utf-8 with
-    ``errors="replace"`` so a partial multibyte tail or non-UTF-8 console never raises.
-
-    Returns:
-        ``"crashed"`` if a crash signature precedes the marker (or the marker is absent),
-        ``"ready"`` if a bare marker line is present with no crash before it, else
-        ``"pending"``.
-    """
-    text = data.decode("utf-8", errors="replace")
-    marker_re = re.compile(rf"^[^\S\n]*{re.escape(marker)}[^\S\n]*$", re.MULTILINE)
-    marker_match = marker_re.search(text)
-    region = text if marker_match is None else text[: marker_match.start()]
-    if _CRASH_SIGNATURE.search(region):
-        return ConsoleVerdict.CRASHED
-    return ConsoleVerdict.READY if marker_match is not None else ConsoleVerdict.PENDING
-
-
 class _ObjectReader(Protocol):
     def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact: ...
 
@@ -530,465 +460,21 @@ def _stage_object(store: _ObjectReader, ref: str, dest: Path) -> None:
             opaque ``OSError`` out of the seam.
     """
     data = store.get_artifact(ref, None).data
-    _write_staged_bytes(dest, data)
-
-
-def _write_staged_bytes(dest: Path, data: bytes) -> None:
-    """Write ``data`` through a sibling temp file, then atomically replace ``dest``."""
-    tmp = dest.with_name(dest.name + ".part")
-    try:
-        with tmp.open("wb") as handle:
-            handle.write(data)
-        tmp.replace(dest)
-    except OSError as exc:
-        with contextlib.suppress(OSError):
-            tmp.unlink()  # best-effort: drop any partial temp; never mask the real error
-        raise CategorizedError(
-            "failed to write the staged object to the per-Run path",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"op": "stage", "dest": str(dest)},
-        ) from exc
+    write_staged_bytes(dest, data)
 
 
 def _real_fetch(ref: str, dest: Path) -> None:  # pragma: no cover - live_vm
     _stage_object(object_store_from_env(), ref, dest)
 
 
-_KERNEL_BUNDLE_BOOT_MEMBER = "boot/vmlinuz"
-_MODULES_MEMBER_PREFIX = "lib/modules/"
-
-
-def _tar_member_path(name: str) -> str:
-    """Normalize a tar member name for prefix matching (drop a leading ``./`` and any ``/``)."""
-    if name.startswith("./"):
-        name = name[2:]
-    return name.lstrip("/")
-
-
-def extract_boot_vmlinuz(combined_tar: Path, dest: Path) -> None:
-    """Extract ``boot/vmlinuz`` from the combined kernel tar to ``dest`` (the ``<kernel>`` image).
-
-    The unified ``kernel`` artifact is a gzip tar of ``boot/vmlinuz`` + ``lib/modules/<ver>/``
-    (ADR-0234 §2). libvirt's direct-kernel ``<kernel>`` element needs a raw bzImage path, so the
-    bzImage is extracted host-side via temp-then-rename (a fault leaves no partial file the
-    redefine could point at).
-
-    Raises:
-        CategorizedError: ``INFRASTRUCTURE_FAILURE`` if the tar cannot be read, or carries no
-            ``boot/vmlinuz`` member (a malformed kernel artifact that upload/build should reject).
-    """
-    try:
-        with tarfile.open(combined_tar, "r:gz") as archive:
-            member = next(
-                (
-                    m
-                    for m in archive.getmembers()
-                    if _tar_member_path(m.name) == _KERNEL_BUNDLE_BOOT_MEMBER
-                ),
-                None,
-            )
-            extracted = archive.extractfile(member) if member is not None else None
-            data = extracted.read() if extracted is not None else None
-    except (OSError, tarfile.TarError) as exc:
-        raise CategorizedError(
-            "failed to read the combined kernel tar to extract boot/vmlinuz",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"op": "extract", "member": _KERNEL_BUNDLE_BOOT_MEMBER, "dest": str(dest)},
-        ) from exc
-    if data is None:
-        raise CategorizedError(
-            "combined kernel tar has no boot/vmlinuz member",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"member": _KERNEL_BUNDLE_BOOT_MEMBER, "tar": str(combined_tar)},
-        )
-    _write_staged_bytes(dest, data)
-
-
-def repack_modules_subtree(combined_tar: Path, dest: Path) -> bool:
-    """Repack the combined kernel tar's ``lib/modules/`` subtree into a modules-only gzip tar.
-
-    The libguestfs injector consumes a ``lib/modules/<ver>/`` tar; the combined ``kernel`` artifact
-    carries that subtree alongside ``boot/vmlinuz``. Copying just the ``lib/modules/`` members into
-    a fresh gzip tar keeps the injector's in-guest result byte-identical to the legacy
-    separate-modules artifact — no stray ``/boot/vmlinuz`` a whole-archive extract would plant.
-    Written via temp-then-rename.
-
-    Returns:
-        ``True`` if any ``lib/modules/`` member was found and repacked, else ``False`` (an
-        all-builtin or modules-absent tar — the caller decides whether that is a kdump error).
-
-    Raises:
-        CategorizedError: ``INFRASTRUCTURE_FAILURE`` on a tar read/write fault.
-    """
-    tmp = dest.with_name(dest.name + ".part")
-    found = False
-    try:
-        with tarfile.open(combined_tar, "r:gz") as src, tarfile.open(tmp, "w:gz") as out:
-            for member in src.getmembers():
-                normalized = _tar_member_path(member.name)
-                # Skip path-traversal members: a ``..`` segment in an externally-uploaded kernel
-                # tar (ADR-0234 §2 makes the uploaded `kernel` carry contributor-supplied modules)
-                # must not be carried into the in-guest libguestfs extract.
-                if ".." in normalized.split("/"):
-                    continue
-                if normalized.startswith(_MODULES_MEMBER_PREFIX):
-                    out.addfile(member, src.extractfile(member) if member.isfile() else None)
-                    found = True
-        if found:
-            tmp.replace(dest)
-        else:
-            tmp.unlink(missing_ok=True)
-    except (OSError, tarfile.TarError) as exc:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise CategorizedError(
-            "failed to repack the lib/modules subtree from the combined kernel tar",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"op": "repack", "dest": str(dest)},
-        ) from exc
-    return found
-
-
-_MODULES_ROOT = "/lib/modules"
-_BOOT_ROOT = "/boot"
-_DEBUGINFO_ROOT = "/usr/lib/debug/lib/modules"
-
-
-def _vmlinux_dest(version: str) -> str:
-    """The drgn-discoverable in-guest path for the running kernel's DWARF vmlinux (ADR-0221).
-
-    drgn's ``-k`` debuginfo finder searches ``/usr/lib/debug/lib/modules/<uname -r>/vmlinux``;
-    under direct-kernel boot ``uname -r`` is ``version`` (the ``/lib/modules/<ver>`` release), so
-    the DWARF vmlinux must land there for the in-guest ``kdive-drgn`` helper to resolve typed
-    symbols against ``/proc/kcore``.
-    """
-    return f"{_DEBUGINFO_ROOT}/{version}/vmlinux"
-
-
-def _verify_vmlinux_size(size: int, overlay: str, dest: str) -> None:
-    """Sentinel for the staged DWARF vmlinux: a zero-byte upload is always a failure (ADR-0221).
-
-    A vmlinux is never legitimately empty, so a zero size means the upload was truncated or never
-    landed and the in-guest drgn would fail to resolve types.
-
-    Raises:
-        CategorizedError: ``INFRASTRUCTURE_FAILURE`` (overlay + dest in details) if ``size`` is 0.
-    """
-    if size <= 0:
-        raise CategorizedError(
-            "vmlinux staging completed but the in-guest debuginfo file is empty after upload",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"overlay": overlay, "dest": dest},
-        )
-
-
-def _kernel_dest(version: str) -> str:
-    """The in-guest path the from-source kernel is staged to for ``kdumpctl`` (ADR-0207).
-
-    ``kdumpctl`` kexec-loads the crash kernel from ``/boot/vmlinuz-$(uname -r)``; under
-    direct-kernel boot ``uname -r`` is ``version`` (the ``/lib/modules/<ver>`` release), so the
-    kernel must land at exactly ``/boot/vmlinuz-<ver>``.
-    """
-    return f"{_BOOT_ROOT}/vmlinuz-{version}"
-
-
-def _verify_kernel_size(size: int, overlay: str, dest: str) -> None:
-    """Sentinel for the staged kernel: a zero-byte upload is always a failure (ADR-0207).
-
-    Unlike the modules ``modules.dep`` sentinel (which must accept a valid empty file for an
-    all-builtin kernel), a kernel image is never legitimately empty, so a zero size means the
-    upload was truncated or never landed.
-
-    Raises:
-        CategorizedError: ``INFRASTRUCTURE_FAILURE`` (overlay + dest in details) if ``size`` is 0.
-    """
-    if size <= 0:
-        raise CategorizedError(
-            "kernel staging completed but /boot/vmlinuz is empty after upload",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"overlay": overlay, "dest": dest},
-        )
-
-
-class _GuestFS(Protocol):  # pragma: no cover - live_vm (libguestfs binding surface)
-    """The subset of the libguestfs handle the kernel writer drives (typing only)."""
-
-    def add_drive_opts(
-        self, filename: str, *, format: str, readonly: bool | None = None
-    ) -> None: ...
-    def launch(self) -> None: ...
-    def inspect_os(self) -> list[str]: ...
-    def mount(self, device: str, mountpoint: str) -> None: ...
-    def rm_rf(self, path: str) -> None: ...
-    def tar_in(self, tarfile: str, directory: str, *, compress: str) -> None: ...
-    def command(self, arguments: list[str]) -> str: ...
-    def is_file(self, path: str) -> int: ...
-    def mkdir_p(self, path: str) -> None: ...
-    def upload(self, filename: str, remotefilename: str) -> None: ...
-    def statns(self, path: str) -> dict[str, int]: ...
-    def shutdown(self) -> None: ...
-    def close(self) -> None: ...
-
-
-class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
-    """Stage the built kernel into a System overlay rw via libguestfs (ADR-0203/0207).
-
-    Mirrors ``retrieve.py``'s ``_LibguestfsCoreReader`` idioms but mounts read-WRITE
-    (``readonly=False``). One rw session writes both the modules tree and the kernel image so the
-    kernel can never pair with a stale module tree (or vice versa). Injection is idempotent: the
-    module version directory is clobbered before the tarball is extracted, ``depmod`` is run, and
-    a ``modules.dep``-present sentinel is verified (an all-builtin kdump kernel leaves a valid
-    *empty* ``modules.dep``, so that sentinel checks existence, not size); then the kernel is
-    uploaded to ``/boot/vmlinuz-<ver>`` (``upload`` truncates/creates, so a retry self-heals a
-    partial write) and a *non-empty* size sentinel is verified. A missing ``guestfs`` binding is a
-    ``MISSING_DEPENDENCY``; any libguestfs/depmod fault is an ``INFRASTRUCTURE_FAILURE`` carrying
-    the overlay path.
-    """
-
-    def inject(
-        self, overlay: str, kernel_image: Path, modules_tar: Path, vmlinux: Path | None = None
-    ) -> None:
-        version = self._read_release(modules_tar, overlay)
-        guest = self._mount_rw(overlay)
-        try:
-            self._extract_and_index(guest, overlay, str(modules_tar), version)
-            self._stage_kernel(guest, overlay, str(kernel_image), version)
-            if vmlinux is not None:
-                self._stage_vmlinux(guest, overlay, str(vmlinux), version)
-        finally:
-            with contextlib.suppress(Exception):
-                guest.shutdown()
-            with contextlib.suppress(Exception):
-                guest.close()
-
-    @staticmethod
-    def _mount_rw(overlay: str) -> _GuestFS:
-        try:
-            import guestfs  # noqa: PLC0415  # ty: ignore[unresolved-import]  # operator-provided
-        except ImportError as exc:
-            raise CategorizedError(
-                "libguestfs (the guestfs Python binding) is required to stage the built kernel",
-                category=ErrorCategory.MISSING_DEPENDENCY,
-            ) from exc
-        # The real libguestfs handle is an untyped C-extension object; treat it as the `_GuestFS`
-        # subset we document and drive, so our code type-checks against that protocol whether or not
-        # the binding is installed (ty otherwise cross-checks the real handle's signatures — e.g.
-        # `mount`'s `mountable` vs our `device` — only when it happens to be present).
-        guest = cast("_GuestFS", guestfs.GuestFS(python_return_dict=True))
-        try:
-            guest.add_drive_opts(overlay, format="qcow2", readonly=False)
-            guest.launch()
-            roots = guest.inspect_os()
-        except Exception as exc:
-            guest.close()
-            raise _RealGuestKernelWriter._io_failure(
-                "opening the System overlay read-write", overlay, exc
-            ) from exc
-        if not roots:
-            guest.close()
-            raise CategorizedError(
-                "could not inspect the System overlay to stage the built kernel",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"overlay": overlay},
-            )
-        guest.mount(roots[0], "/")
-        return guest
-
-    @staticmethod
-    def _extract_and_index(guest: _GuestFS, overlay: str, tar: str, version: str) -> None:
-        version_dir = f"{_MODULES_ROOT}/{version}"
-        try:
-            guest.rm_rf(version_dir)  # clobber any partial prior write (idempotent re-extract)
-            guest.tar_in(tar, "/", compress="gzip")  # members are lib/modules/<ver>/...
-            guest.command(["depmod", "-a", version])
-        except Exception as exc:
-            raise _RealGuestKernelWriter._io_failure(
-                "extracting and indexing the kernel modules", overlay, exc
-            ) from exc
-        if not guest.is_file(f"{version_dir}/modules.dep"):
-            raise CategorizedError(
-                "module injection completed but modules.dep is absent after depmod",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"overlay": overlay, "version_dir": version_dir},
-            )
-
-    @staticmethod
-    def _stage_kernel(guest: _GuestFS, overlay: str, kernel_image: str, version: str) -> None:
-        """Upload the from-source kernel to ``/boot/vmlinuz-<ver>`` (ADR-0207), then verify size.
-
-        Idempotent: ``mkdir_p`` and ``upload`` (truncate/create) self-heal a partial prior write.
-        """
-        dest = _kernel_dest(version)
-        try:
-            guest.mkdir_p(_BOOT_ROOT)
-            guest.upload(kernel_image, dest)
-            size = guest.statns(dest)["st_size"]
-        except Exception as exc:
-            raise _RealGuestKernelWriter._io_failure(
-                "staging the from-source kernel into /boot", overlay, exc
-            ) from exc
-        _verify_kernel_size(size, overlay, dest)
-
-    @staticmethod
-    def _stage_vmlinux(guest: _GuestFS, overlay: str, vmlinux: str, version: str) -> None:
-        """Upload the DWARF vmlinux to the drgn debuginfo path, then verify size (ADR-0221).
-
-        Lands the run's ``vmlinux`` at ``/usr/lib/debug/lib/modules/<ver>/vmlinux`` so the
-        in-guest ``kdive-drgn`` helper's ``drgn -k`` resolves typed symbols against
-        ``/proc/kcore``. Idempotent: ``mkdir_p`` + truncating ``upload`` self-heal a partial write.
-        """
-        dest = _vmlinux_dest(version)
-        try:
-            guest.mkdir_p(f"{_DEBUGINFO_ROOT}/{version}")
-            guest.upload(vmlinux, dest)
-            size = guest.statns(dest)["st_size"]
-        except Exception as exc:
-            raise _RealGuestKernelWriter._io_failure(
-                "staging the DWARF vmlinux for live drgn", overlay, exc
-            ) from exc
-        _verify_vmlinux_size(size, overlay, dest)
-
-    @staticmethod
-    def _read_release(modules_tar: Path, overlay: str) -> str:
-        """The injected modules version: the dir name under ``lib/modules/`` in the host tarball.
-
-        The build seam stages members as ``lib/modules/<ver>/...`` (the remote-consistent layout),
-        so the version is the first path component after the ``lib/modules/`` prefix. It is read
-        from the host-side archive (the tarball is on the worker filesystem, not yet in the
-        appliance), avoiding a brittle appliance shell-out; the version drives the clobber target,
-        the ``depmod`` argument, and the ``/boot/vmlinuz-<ver>`` kernel destination (ADR-0207).
-        """
-        prefix = _MODULES_ROOT.strip("/") + "/"
-        try:
-            with tarfile.open(modules_tar, "r:gz") as archive:
-                for name in archive.getnames():
-                    normalized = name.strip("/")
-                    if normalized.startswith(prefix):
-                        version = normalized[len(prefix) :].split("/", 1)[0]
-                        if version:
-                            return version
-        except (OSError, tarfile.TarError) as exc:
-            raise _RealGuestKernelWriter._io_failure(
-                "reading the modules tarball version", overlay, exc
-            ) from exc
-        raise CategorizedError(
-            "the modules tarball is empty; cannot determine the kernel version",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"overlay": overlay},
-        )
-
-    @staticmethod
-    def _io_failure(op: str, overlay: str, exc: Exception) -> CategorizedError:
-        return CategorizedError(
-            f"libguestfs failed {op} for kernel staging",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"overlay": overlay, "error": type(exc).__name__},
-        )
-
-
-def _bounded_probe_error(message: str) -> str:
-    return message[:200]
-
-
-def _domain_exit_probe(domain_name: str) -> _DomainExitProbe:  # pragma: no cover - live_vm
-    """Return whether ``virsh domstate`` reports terminal state plus probe diagnostics.
-
-    A probe error/timeout or a transient non-running state (``paused``, ``in shutdown``)
-    is not proof of exit (v1: a flaky/slow probe keeps waiting), so ``exited`` is
-    ``False`` and the caller keeps polling (ADR-0055 §7). Probe failures keep a bounded
-    diagnostic so a final boot timeout can distinguish a silent guest from a broken host
-    probe.
-    """
-    uri = config.require(LIBVIRT_URI)
-    virsh = shutil.which(_VIRSH)
-    if virsh is None:
-        return _DomainExitProbe(False, "virsh executable not found")
-    try:
-        proc = subprocess.run(  # noqa: S603 - resolved virsh; URI/domain are argv data, no shell
-            [virsh, "-c", uri, "domstate", domain_name],
-            capture_output=True,
-            text=True,
-            timeout=_DOMSTATE_PROBE_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return _DomainExitProbe(
-            False,
-            f"virsh domstate timed out after {exc.timeout:g}s",
-        )
-    except FileNotFoundError:
-        return _DomainExitProbe(False, "virsh executable not found")
-    except (subprocess.SubprocessError, OSError) as exc:
-        return _DomainExitProbe(False, _bounded_probe_error(f"virsh domstate probe failed: {exc}"))
-    if proc.stdout.strip().lower() in _TERMINAL_DOMSTATES:
-        return _DomainExitProbe(True)
-    stderr = proc.stderr.strip().lower()
-    exited = (
-        proc.returncode != 0
-        and domain_name.startswith("kdive-")
-        and "failed to get domain" in stderr
-    )
-    if exited:
-        return _DomainExitProbe(True)
-    if proc.returncode != 0:
-        error = stderr or f"virsh domstate exited {proc.returncode}"
-        return _DomainExitProbe(False, _bounded_probe_error(error))
-    return _DomainExitProbe(False)
-
-
-def _domain_exited(domain_name: str) -> bool:  # pragma: no cover - live_vm
-    """True only if ``virsh domstate`` reports a terminal state (shut off / crashed)."""
-    return _domain_exit_probe(domain_name).exited
-
-
-def _verdict_to_result(verdict: ConsoleVerdict, *, exited: bool) -> ReadinessResult | None:
-    """Map a console verdict (+ domain-exited flag) to a readiness result, or ``None``.
-
-    Pure (host-free, the unit-tested core of the live probe, ADR-0055 §6/§7):
-
-    - ``ready`` → answered + ok (the marker line was reached).
-    - ``crashed`` → answered + not ok (a pre-marker crash signature — the demo's failure signal).
-    - ``pending`` with the guest **exited** → answered + not ok (v1's ``exited``: it stopped
-      without reaching the marker).
-    - ``pending`` with the guest still running → ``None``, meaning "no answer yet, keep polling".
-    """
-    if verdict is ConsoleVerdict.READY:
-        return ReadinessResult(answered=True, ok=True)
-    if verdict is ConsoleVerdict.CRASHED:
-        return ReadinessResult(answered=True, ok=False)
-    if exited:
-        return ReadinessResult(answered=True, ok=False)
-    return None
-
-
-def _real_readiness(system_id: UUID) -> ReadinessResult:  # pragma: no cover - live_vm
-    """One run-readiness probe of the System's truncated console (ADR-0055 §6/§7).
-
-    A single per-poll probe — ``boot()._await_ready`` drives the repetition. Reads the
-    console, classifies it (`classify_console`), and maps the verdict (`_verdict_to_result`).
-    On a ``pending`` verdict it re-reads once after a `virsh domstate` exit check so a marker
-    or crash that landed just before the guest stopped is honored; a still-running guest
-    sleeps one poll interval and stays unanswered, so the boot window (poll count × interval)
-    elapses as ``boot_timeout`` if the System never comes up.
-    """
-    log_path = console_log_path(system_id)
-    result = _verdict_to_result(classify_console(read_console_log(log_path)), exited=False)
-    if result is not None:
-        return result
-    probe = _domain_exit_probe(domain_name_for(system_id))
-    if probe.exited:
-        return _verdict_to_result(
-            classify_console(read_console_log(log_path)), exited=True
-        ) or ReadinessResult(answered=True, ok=False)
-    time.sleep(_POLL_INTERVAL_SECONDS)
-    return ReadinessResult(answered=False, ok=False, probe_error=probe.error)
-
-
 __all__ = [
     "LocalLibvirtInstall",
     "ReadinessResult",
-    "classify_console",
+    "Fetch",
+    "GuestKernelWriter",
+    "_RealGuestKernelWriter",
+    "_real_readiness",
+    "_stage_object",
     "extract_boot_vmlinuz",
-    "read_console_log",
     "repack_modules_subtree",
 ]

@@ -24,7 +24,7 @@ from kdive.domain.capacity.state import (
 )
 from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.catalog.resources import Resource, ResourceKind
-from kdive.domain.lifecycle import Allocation
+from kdive.domain.lifecycle.records import Allocation
 from kdive.reconciler.fleet import FleetSnapshot, FleetTelemetry, read_fleet_snapshot
 from tests.reconciler.conftest import connect
 

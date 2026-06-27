@@ -14,7 +14,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db.repositories import BUDGETS, QUOTAS
-from kdive.domain.accounting import Budget, Quota
+from kdive.domain.accounting.records import Budget, Quota
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
@@ -125,7 +125,7 @@ def _parse_non_negative_kcu(value: object) -> Decimal:
     """Parse ``value`` into a finite, non-negative kcu Decimal."""
     try:
         parsed = Decimal(str(value))
-    except InvalidOperation, DecimalException, ValueError, TypeError:
+    except (InvalidOperation, DecimalException, ValueError, TypeError) as _exc:
         raise CategorizedError(
             f"limit_kcu {value!r} is not a number",
             category=ErrorCategory.CONFIGURATION_ERROR,

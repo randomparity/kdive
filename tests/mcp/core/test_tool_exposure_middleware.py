@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from kdive.mcp.middleware import ToolExposureMiddleware
+from kdive.mcp.middleware.exposure import ToolExposureMiddleware
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.errors import AuthError
 from kdive.security.authz.rbac import PlatformRole, Role
@@ -61,7 +61,7 @@ def _ctx(
 
 def test_viewer_catalog_is_reduced(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "kdive.mcp.middleware.current_context", lambda: _ctx(roles={"a": Role.VIEWER})
+        "kdive.mcp.middleware.shared.current_context", lambda: _ctx(roles={"a": Role.VIEWER})
     )
     names = _run_filter(ToolExposureMiddleware())
     assert names == {"projects.list", "jobs.get"}
@@ -70,7 +70,7 @@ def test_viewer_catalog_is_reduced(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_operator_sees_operator_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "kdive.mcp.middleware.current_context", lambda: _ctx(roles={"a": Role.OPERATOR})
+        "kdive.mcp.middleware.shared.current_context", lambda: _ctx(roles={"a": Role.OPERATOR})
     )
     names = _run_filter(ToolExposureMiddleware())
     assert {"projects.list", "jobs.get", "allocations.request"} <= names
@@ -80,7 +80,7 @@ def test_operator_sees_operator_tools(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_platform_operator_sees_platform_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "kdive.mcp.middleware.current_context",
+        "kdive.mcp.middleware.shared.current_context",
         lambda: _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR})),
     )
     names = _run_filter(ToolExposureMiddleware())
@@ -94,7 +94,7 @@ def test_fail_open_when_context_missing(
     def _raise() -> RequestContext:
         raise AuthError("no token")
 
-    monkeypatch.setattr("kdive.mcp.middleware.current_context", _raise)
+    monkeypatch.setattr("kdive.mcp.middleware.shared.current_context", _raise)
     with caplog.at_level(logging.WARNING):
         names = _run_filter(ToolExposureMiddleware())
     assert names == {t.name for t in _ALL}  # unfiltered — discovery never breaks

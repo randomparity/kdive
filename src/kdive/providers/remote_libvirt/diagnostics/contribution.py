@@ -8,16 +8,17 @@ declared instance the behavior is unchanged (one row each); with N instances eac
 
 from __future__ import annotations
 
-from kdive.diagnostics.checks import (
-    GDBSTUB_ACL_ID,
-    PROVIDER_TLS_ID,
+from psycopg_pool import AsyncConnectionPool
+
+from kdive.diagnostics.buildhost_agent_check import EphemeralLibvirtBuildHostAgentCheck
+from kdive.diagnostics.checks import GDBSTUB_ACL_ID, PROVIDER_TLS_ID, Check
+from kdive.diagnostics.gdbstub_acl import gdbstub_acl_probe
+from kdive.diagnostics.provider_checks import (
     BaseImageStagingCheck,
-    Check,
     GdbstubAclCheck,
     ProviderTlsCheck,
     RemoteLibvirtReachabilityCheck,
 )
-from kdive.diagnostics.gdbstub_acl import gdbstub_acl_probe
 from kdive.diagnostics.provider_contracts import (
     DiagnosticProviderContribution,
     WorkerVantageDescriptor,
@@ -29,7 +30,11 @@ from kdive.providers.remote_libvirt.config import (
     remote_instance_names,
     resolve_base_image_staged_volume_for,
 )
-from kdive.providers.remote_libvirt.diagnostics import base_image_staging, reachability
+from kdive.providers.remote_libvirt.diagnostics import (
+    base_image_staging,
+    buildhost_agent,
+    reachability,
+)
 from kdive.providers.remote_libvirt.diagnostics.provider_tls import provider_tls_probe
 
 _REMOTE_PROVIDER = "remote-libvirt"
@@ -92,6 +97,10 @@ def _worker_checks() -> list[Check]:
     return checks
 
 
+def _buildhost_agent_check(pool: AsyncConnectionPool) -> Check:
+    return EphemeralLibvirtBuildHostAgentCheck(probe=buildhost_agent.buildhost_agent_probe(pool))
+
+
 def diagnostic_contribution() -> DiagnosticProviderContribution:
     return DiagnosticProviderContribution(
         provider=_REMOTE_PROVIDER,
@@ -99,4 +108,5 @@ def diagnostic_contribution() -> DiagnosticProviderContribution:
         checks=_checks,
         unavailable_worker_checks=_unavailable_worker_checks,
         worker_checks=_worker_checks,
+        buildhost_agent_check=_buildhost_agent_check,
     )

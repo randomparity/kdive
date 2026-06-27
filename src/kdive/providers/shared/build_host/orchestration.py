@@ -13,7 +13,7 @@ from kdive.components.references import ComponentRef
 from kdive.components.requirements import validate_config_requirements
 from kdive.domain.build_phase import BuildPhase
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
+from kdive.observability.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.shared.build_host.common import _dropped_fragment_symbols
 from kdive.providers.shared.build_host.configuration.config import (
@@ -24,7 +24,7 @@ from kdive.providers.shared.build_host.configuration.config import (
     validate_config_ref,
 )
 from kdive.providers.shared.build_host.execution import ReadConfig, RunStep, build_failure
-from kdive.providers.shared.build_host.workspaces.workspace import Checkout
+from kdive.providers.shared.build_host.workspaces.workspace import Checkout, CloneProvenance
 
 REQUIRED_KERNEL_CONFIG: tuple[tuple[str, ...], ...] = (
     ("CONFIG_CRASH_DUMP",),
@@ -39,6 +39,14 @@ type WorkspaceCleanup = Callable[[Path], None]
 def _default_workspace_cleanup(workspace: Path) -> None:
     """Best-effort removal of a worker-side per-run workspace; never raises on a missing tree."""
     shutil.rmtree(workspace, ignore_errors=True)
+
+
+@dataclass(slots=True)
+class BuildWorkspaceResult:
+    """Workspace path and any clone provenance produced during source checkout."""
+
+    workspace: Path
+    clone_provenance: CloneProvenance | None
 
 
 @dataclass(slots=True)
@@ -94,8 +102,8 @@ class BuildHostOrchestrator:
         *,
         recorder: BuildPhaseRecorder = DISABLED_RECORDER,
         provider: str = "",
-    ) -> Path:
-        """Resolve config, checkout, preflight, run ``make``, and return the workspace path."""
+    ) -> BuildWorkspaceResult:
+        """Resolve config, checkout, preflight, run ``make``, and return workspace metadata."""
         workspace = self.workspace_path(run_id)
         config_ref = profile.config or DEFAULT_CONFIG_REF
         fragment_bytes = resolve_config_bytes(
@@ -105,7 +113,7 @@ class BuildHostOrchestrator:
         )
         fragment_text = fragment_bytes.decode()
         with recorder.phase(BuildPhase.SOURCE_SYNC, provider):
-            self.checkout(run_id, profile, workspace, fragment_bytes)
+            clone_provenance = self.checkout(run_id, profile, workspace, fragment_bytes)
         with recorder.phase(BuildPhase.CONFIGURE, provider):
             olddefconfig = self.run_olddefconfig(workspace)
             if olddefconfig.returncode != 0:
@@ -118,10 +126,16 @@ class BuildHostOrchestrator:
             make = self.run_make(workspace)
             if make.returncode != 0:
                 raise build_failure("make exited non-zero", run_id, build_log=make.output)
-        return workspace
+        return BuildWorkspaceResult(workspace=workspace, clone_provenance=clone_provenance)
 
     def validate_config_ref(self, ref: ComponentRef) -> None:
-        """Validate a build config ref's shape at run-creation."""
+        """Validate a build config ref's shape at run-creation.
+
+        ``local`` refs must resolve under the provider's allowed component roots. ``catalog``
+        refs are shape-valid here; their existence is checked when a build fetches the config
+        because this seam has no database connection. Other ref kinds raise
+        ``CONFIGURATION_ERROR``.
+        """
         validate_config_ref(ref, allowed_component_roots=self.allowed_component_roots)
 
 

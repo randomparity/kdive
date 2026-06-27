@@ -31,7 +31,6 @@ from kdive.db.build_hosts import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import ServerBuildProfile, is_git_source
-from kdive.providers.remote_libvirt.config import remote_instance_names
 
 
 class SourceKind(StrEnum):
@@ -92,22 +91,6 @@ def build_host_resolves(
     if host_kind is BuildHostKind.EPHEMERAL_LIBVIRT:
         return host_name in declared_instances
     return True
-
-
-def declared_remote_instance_names() -> list[str]:
-    """The declared ``[[remote_libvirt]]`` instance names, degrading to empty on a config error.
-
-    Wraps :func:`~kdive.providers.remote_libvirt.config.remote_instance_names` (ADR-0187) for
-    the read-only discovery surfaces (``runs.profile_examples``, ``build_hosts.list``). A missing
-    ``systems.toml`` already returns an empty list there; a present-but-malformed file raises
-    ``CONFIGURATION_ERROR``, which this swallows to an empty list so a bad operator edit cannot
-    crash a read tool (ADR-0112 fault isolation). The precise parse error still surfaces
-    fail-closed at build time via ``remote_config_for_resource``.
-    """
-    try:
-        return remote_instance_names()
-    except CategorizedError:
-        return []
 
 
 def check_source_kind_compatibility(

@@ -42,8 +42,12 @@ from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
 from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.fault_inject.retrieve import FaultInjectRetrieve
-from kdive.providers.ports import DebugTransportKind, InstallRequest, SystemHandle
-from kdive.providers.ports.lifecycle import TransportHandleData
+from kdive.providers.ports.handles import SystemHandle
+from kdive.providers.ports.lifecycle import (
+    DebugTransportKind,
+    InstallRequest,
+    TransportHandleData,
+)
 from kdive.security.artifacts.crash_commands import validate_crash_commands
 
 

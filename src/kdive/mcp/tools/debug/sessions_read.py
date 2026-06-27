@@ -20,16 +20,22 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import DEBUG_SESSIONS, RUNS
 from kdive.domain.capacity.state import DebugSessionState
-from kdive.domain.lifecycle import DebugSession
+from kdive.domain.lifecycle.records import DebugSession
 from kdive.log import bind_context
 from kdive.mcp.responses import JsonValue, ToolResponse
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
+from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
+from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
 from kdive.mcp.tools._common import not_found as _not_found
+from kdive.mcp.tools._common import paginate as _paginate
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+
+_SESSIONS_LIST_TAG = "debug.list_sessions"
 
 # A session still holds the single-attach transport while `attach`/`live`; once `detached`
 # it occupies nothing. The active set is what a recovering agent needs to end or operate.
@@ -48,6 +54,7 @@ class SessionsListRequest:
     project: str | None = None
     state: str | None = None
     limit: int = DEFAULT_LIST_LIMIT
+    cursor: str | None = None
 
 
 def session_envelope(session: DebugSession, *, system_id: UUID | None) -> ToolResponse:
@@ -155,18 +162,38 @@ async def list_sessions(
         return filters
     clauses, params = filters
     capped = _clamp_list_limit(request.limit)
+    after = None
+    if request.cursor:
+        try:
+            after = _decode_ts_uuid_cursor(_SESSIONS_LIST_TAG, request.cursor)
+        except InvalidCursor:
+            return _invalid_cursor_error("debug_sessions")
     with bind_context(principal=ctx.principal):
         if not viewer_projects:
-            return _sessions_collection([])
+            return _sessions_collection([], truncated=False, next_cursor=None)
+        if after is not None:
+            clauses.append(sql.SQL("(s.created_at, s.id) < (%s, %s)"))
+            params.extend(after)
         query = sql.SQL(
             "SELECT s.*, r.system_id AS join_system_id FROM debug_sessions s "
             "JOIN runs r ON r.id = s.run_id "
-            "WHERE {where} ORDER BY s.created_at DESC, s.id LIMIT %s"
+            "WHERE {where} ORDER BY s.created_at DESC, s.id DESC LIMIT %s"
         ).format(where=sql.SQL(" AND ").join(clauses))
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(query, (*params, capped))
+            await cur.execute(query, (*params, capped + 1))
             rows = await cur.fetchall()
-        return _sessions_collection([_split_system_id(row) for row in rows])
+        kept, truncated = _paginate(rows, capped)
+        sessions = [_split_system_id(row) for row in kept]
+        next_cursor = (
+            _encode_ts_uuid_cursor(
+                _SESSIONS_LIST_TAG,
+                sessions[-1][0].created_at,
+                sessions[-1][0].id,
+            )
+            if truncated and sessions
+            else None
+        )
+        return _sessions_collection(sessions, truncated=truncated, next_cursor=next_cursor)
 
 
 def _split_system_id(row: dict[str, object]) -> tuple[DebugSession, UUID | None]:
@@ -176,13 +203,20 @@ def _split_system_id(row: dict[str, object]) -> tuple[DebugSession, UUID | None]
     return DebugSession.model_validate(row), system_id
 
 
-def _sessions_collection(sessions: list[tuple[DebugSession, UUID | None]]) -> ToolResponse:
+def _sessions_collection(
+    sessions: list[tuple[DebugSession, UUID | None]],
+    *,
+    truncated: bool,
+    next_cursor: str | None,
+) -> ToolResponse:
     """Render debug sessions into one collection envelope."""
+    data: dict[str, JsonValue] = {"truncated": truncated, "next_cursor": next_cursor}
     return ToolResponse.collection(
         "debug_sessions",
         "ok",
         [session_envelope(session, system_id=system_id) for session, system_id in sessions],
         suggested_next_actions=["debug.get_session"],
+        data=data,
     )
 
 

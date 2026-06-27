@@ -19,7 +19,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
 from kdive.domain._records import DomainModel
-from kdive.domain.accounting import Budget, CostClassCoefficient, LedgerEntry, Quota
+from kdive.domain.accounting.records import Budget, CostClassCoefficient, LedgerEntry, Quota
 from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
@@ -33,7 +33,14 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.artifacts import Artifact
 from kdive.domain.catalog.images import ImageCatalogEntry
 from kdive.domain.catalog.resources import Resource
-from kdive.domain.lifecycle import Allocation, DebugSession, Investigation, Run, System, SystemShape
+from kdive.domain.lifecycle.records import (
+    Allocation,
+    DebugSession,
+    Investigation,
+    Run,
+    System,
+    SystemShape,
+)
 from kdive.domain.operations.jobs import Job
 
 # DB-authoritative columns, omitted from inserts so their defaults/trigger apply.

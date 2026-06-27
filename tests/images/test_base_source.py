@@ -3,13 +3,43 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import urllib.request
+from http.client import HTTPMessage
 from pathlib import Path
 
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.base_source import acquire_base
+from kdive.images.base_source import _CloudImageRedirect, acquire_base
 from kdive.images.rootfs_catalog import CloudImageSource, VirtBuilderSource
+
+
+def _follow_redirect(newurl: str) -> urllib.request.Request | None:
+    return _CloudImageRedirect().redirect_request(
+        urllib.request.Request("https://allowed.example/base.qcow2"),
+        io.BytesIO(b""),
+        302,
+        "Found",
+        HTTPMessage(),
+        newurl,
+    )
+
+
+@pytest.mark.parametrize("target", ["ftp://internal-host/base.qcow2", "file:///etc/passwd"])
+def test_redirect_to_non_http_scheme_is_rejected(target: str) -> None:
+    """A 3xx into ftp:// or file:// is rejected — the allowlist is re-checked post-redirect.
+
+    urllib follows redirects and its handler permits ftp://, so without this an allowlisted
+    https server could 302 into ftp://internal-host, escaping the http/https-only intent.
+    """
+    with pytest.raises(CategorizedError) as e:
+        _follow_redirect(target)
+    assert e.value.details["reason"] == "unsupported_url_scheme"
+
+
+def test_redirect_to_https_is_allowed() -> None:
+    assert _follow_redirect("https://mirror/base.qcow2") is not None  # yields a follow-up Request
 
 
 def _unused(*args: object, **kwargs: object) -> None:
@@ -31,6 +61,46 @@ def test_cloud_image_sha256_match(tmp_path: Path) -> None:
         virt_builder=_unused,
         downloader=dl,
     )
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_cloud_image_accepts_http_and_https_urls(tmp_path: Path, scheme: str) -> None:
+    data = b"qcow2-bytes"
+    src = CloudImageSource(url=f"{scheme}://x/y.qcow2", sha256=hashlib.sha256(data).hexdigest())
+
+    def dl(url: str, dest: Path) -> None:
+        assert url == src.url
+        dest.write_bytes(data)
+
+    acquire_base(
+        src,
+        tmp_path / "scratch",
+        releasever="44",
+        arch="x86_64",
+        virt_builder=_unused,
+        downloader=dl,
+    )
+
+
+def test_cloud_image_rejects_non_http_url_before_downloader(tmp_path: Path) -> None:
+    src = CloudImageSource(
+        url="file:///tmp/base.qcow2",
+        sha256="0" * 64,  # pragma: allowlist secret
+    )
+
+    with pytest.raises(CategorizedError) as e:
+        acquire_base(
+            src,
+            tmp_path / "scratch",
+            releasever="44",
+            arch="x86_64",
+            virt_builder=_unused,
+            downloader=_unused,
+        )
+
+    assert e.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert e.value.details["reason"] == "unsupported_url_scheme"
+    assert e.value.details["scheme"] == "file"
 
 
 def test_cloud_image_sha256_mismatch_fails_closed(tmp_path: Path) -> None:

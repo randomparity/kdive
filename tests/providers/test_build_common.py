@@ -162,7 +162,9 @@ def test_build_host_orchestrator_runs_neutral_build_sequence(tmp_path: Path) -> 
         run_make=step("make"),
     )
 
-    assert orchestrator.build_workspace(_RUN, profile) == tmp_path / str(_RUN)
+    result = orchestrator.build_workspace(_RUN, profile)
+    assert result.workspace == tmp_path / str(_RUN)
+    assert result.clone_provenance is None
     assert calls == ["checkout", "olddefconfig", "read_config", "make"]
 
 

@@ -29,16 +29,16 @@ from kdive.mcp.tools._common import (
     config_error as _config_error,
 )
 from kdive.mcp.tools._common import job_envelope
-from kdive.mcp.tools.lifecycle.systems.view import defined_system_envelope
-from kdive.profiles.types import ProvisioningProfileInput
-from kdive.providers.core.runtime import ProfilePolicy
-from kdive.security.authz.context import RequestContext
-from kdive.services.idempotency.envelope import (
+from kdive.mcp.tools._idempotency import (
     record_envelope,
     resolve_conflict,
     resolve_envelope_replay,
     validate_idempotency_key,
 )
+from kdive.mcp.tools.lifecycle.systems.view import defined_system_envelope
+from kdive.profiles.provider_policy import ProfilePolicy
+from kdive.profiles.types import ProvisioningProfileInput
+from kdive.security.authz.context import RequestContext
 from kdive.services.systems.admission import (
     AdmissionFailure,
     AdmissionFailureReason,
@@ -194,14 +194,14 @@ class SystemProvisionHandlers:
         if uid is None:
             return _config_error(system_id)
 
-        async def _run(recorder: SystemRecorder | None) -> AdmissionResult:
+        async def _provision_defined(recorder: SystemRecorder | None) -> AdmissionResult:
             with bind_context(principal=ctx.principal):
                 return await self._admission().provision_defined(
                     pool, ctx, ProvisionDefinedRequest(system_id=uid, recorder=recorder)
                 )
 
         return await _with_idempotency(
-            pool, ctx, idempotency_key, "systems.provision_defined", system_id, _run
+            pool, ctx, idempotency_key, "systems.provision_defined", system_id, _provision_defined
         )
 
     async def define_system(
@@ -232,7 +232,7 @@ class SystemProvisionHandlers:
         profile: ProvisioningProfileInput,
         mode: CreateSystemMode,
     ) -> ToolResponse:
-        async def _run(recorder: SystemRecorder | None) -> AdmissionResult:
+        async def _create_for_allocation(recorder: SystemRecorder | None) -> AdmissionResult:
             with bind_context(principal=ctx.principal):
                 return await self._admission().create_for_allocation(
                     pool,
@@ -242,4 +242,6 @@ class SystemProvisionHandlers:
                     ),
                 )
 
-        return await _with_idempotency(pool, ctx, idempotency_key, kind, object_id, _run)
+        return await _with_idempotency(
+            pool, ctx, idempotency_key, kind, object_id, _create_for_allocation
+        )

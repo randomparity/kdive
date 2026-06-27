@@ -23,8 +23,8 @@ and the [four-method live run](../../docs/operating/runbooks/four-method-live-ru
 - Docker with a reachable daemon (for the Postgres / MinIO / mock-OIDC backends).
 - The repo synced (`uv sync --locked`) so `.venv/bin/python` can `import kdive`.
 - An operator-built guest image at
-  `/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2` (owned so the `qemu` user can
-  read it). Build one with `python -m kdive build-fs` — see the
+  `/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2` (owned so the `qemu` user can
+  read it). Build one with `python -m kdive build-fs --image fedora-kdive-ready-44` — see the
   [live-stack runbook §3](../../docs/operating/runbooks/live-stack.md).
 - A kernel source tree at `KDIVE_KERNEL_SRC` (default `~/src/linux`).
 - For the **kdump capture leg only**: the worker venv must `import guestfs, drgn`. The
@@ -127,7 +127,7 @@ Everything is overridable from the environment before running the scripts:
 |----------|---------|---------|
 | `KDIVE_PROJECT` | `local` | Project the stack seeds and the token grants `admin` on. |
 | `KDIVE_KERNEL_SRC` | `~/src/linux` | Kernel tree under test; where `.mcp.json` is installed. |
-| `KDIVE_GUEST_IMAGE` | `…/fedora-kdive-ready-43.qcow2` | Local-disk rootfs the System boots, passed into the provision profile as `rootfs = {kind = "local", path = …}`. A file on disk, not an `image_catalog` object. |
+| `KDIVE_GUEST_IMAGE` | `…/fedora-kdive-ready-44.qcow2` | Local-disk rootfs the System boots, passed into the provision profile as `rootfs = {kind = "local", path = …}`. A file on disk, not an `image_catalog` object. |
 | `KDIVE_LIBVIRT_URI` | `qemu:///system` | libvirt connection the worker drives. |
 | `KDIVE_PYTHON` | `<repo>/.venv/bin/python` | Interpreter for `python -m kdive` and the processes. |
 | `KDIVE_LIMIT_KCU` / `KDIVE_MAX_ALLOC` / `KDIVE_MAX_SYS` | `1000000` / `4` / `4` | Seeded budget and quota. |

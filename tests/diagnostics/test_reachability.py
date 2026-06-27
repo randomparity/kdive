@@ -18,10 +18,12 @@ import libvirt
 from kdive.diagnostics.checks import (
     REACHABILITY_ID,
     CheckStatus,
+    Vantage,
+)
+from kdive.diagnostics.provider_checks import (
     ReachabilityOutcome,
     ReachabilityProbe,
     RemoteLibvirtReachabilityCheck,
-    Vantage,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
@@ -91,7 +93,7 @@ def test_unreachable_is_fail_transport_failure_with_fix() -> None:
     )
     result = asyncio.run(check.run())
     assert result.status is CheckStatus.FAIL
-    assert result.failure_category == "transport_failure"
+    assert result.failure_category is ErrorCategory.TRANSPORT_FAILURE
     assert result.fix is not None
     assert result.provider == _PROVIDER
 
@@ -102,7 +104,7 @@ def test_misconfigured_is_error_configuration_error_no_fix() -> None:
     )
     result = asyncio.run(check.run())
     assert result.status is CheckStatus.ERROR
-    assert result.failure_category == "configuration_error"
+    assert result.failure_category is ErrorCategory.CONFIGURATION_ERROR
     assert result.fix is None
     assert result.provider == _PROVIDER
 

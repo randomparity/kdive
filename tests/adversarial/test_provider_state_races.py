@@ -28,7 +28,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import System
+from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.jobs import queue
 from kdive.jobs.handlers import control as control_plane

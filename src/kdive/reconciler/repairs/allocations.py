@@ -63,16 +63,6 @@ _LIVE_SYSTEM_STATE_VALUES = tuple(state.value for state in _LIVE_SYSTEM_STATES)
 DEFAULT_ORPHANED_ACTIVE_GRACE = timedelta(minutes=2)
 
 
-async def promote_pending(conn: AsyncConnection, metrics: AdmissionMetrics | None = None) -> int:
-    """Promote the oldest placeable queued request per resource (ADR-0069).
-
-    Delegates to :func:`kdive.services.allocation.promotion.promote_pending`, which replays
-    the shared admission gate under ``PROJECT -> RESOURCE -> ALLOCATION`` and records the
-    grant + wait metrics (ADR-0190 D) through ``metrics``.
-    """
-    return await allocation_promotion.promote_pending(conn, metrics)
-
-
 def reap_queue_timeouts_for(
     queue_max_wait: timedelta, metrics: AdmissionMetrics | None = None
 ) -> Callable[[AsyncConnection], Awaitable[int]]:
@@ -82,11 +72,6 @@ def reap_queue_timeouts_for(
         return await allocation_promotion.reap_queue_timeouts(conn, queue_max_wait, metrics)
 
     return _reap
-
-
-async def reap_queue_timeouts(conn: AsyncConnection, queue_max_wait: timedelta) -> int:
-    """Reap queued requests never placeable past ``queue_max_wait``."""
-    return await allocation_promotion.reap_queue_timeouts(conn, queue_max_wait)
 
 
 async def sweep_expired_allocations(conn: AsyncConnection) -> int:

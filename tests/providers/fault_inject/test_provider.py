@@ -28,8 +28,12 @@ from kdive.providers.fault_inject.lifecycle.control import FaultInjectControl
 from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
 from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
 from kdive.providers.fault_inject.retrieve import FaultInjectRetrieve
-from kdive.providers.ports import DebugTransportKind, InstallRequest, SystemHandle
-from kdive.providers.ports.lifecycle import TransportHandleData
+from kdive.providers.ports.handles import SystemHandle
+from kdive.providers.ports.lifecycle import (
+    DebugTransportKind,
+    InstallRequest,
+    TransportHandleData,
+)
 
 _SYSTEM = UUID("11111111-1111-1111-1111-111111111111")
 _RUN = UUID("22222222-2222-2222-2222-222222222222")

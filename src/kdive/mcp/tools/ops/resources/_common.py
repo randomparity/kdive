@@ -76,7 +76,7 @@ def secret_ref_resolves(ref: str, root: Path) -> bool:
     """
     try:
         read_secret_file(root, ref)
-    except PathSafetyError, OSError:
+    except (PathSafetyError, OSError) as _exc:
         return False
     return True
 
@@ -107,7 +107,7 @@ class TcpResourceProbe:
         try:
             fut = asyncio.open_connection(host, port)
             _, writer = await asyncio.wait_for(fut, timeout=self._timeout_s)
-        except OSError, TimeoutError:
+        except (OSError, TimeoutError) as _exc:
             _log.info("resource host %r unreachable on tcp %s:%d", host_uri, host, port)
             return False
         writer.close()

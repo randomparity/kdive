@@ -6,9 +6,12 @@ mock-oauth2-server is up; otherwise it skips (it never un-gates the integration 
 
 from __future__ import annotations
 
+import io
 import os
 import stat
+import urllib.request
 from collections.abc import Mapping
+from http.client import HTTPMessage
 from pathlib import Path
 
 import pytest
@@ -18,6 +21,32 @@ from kdive.cli import login, transport
 from kdive.cli.login import OidcIssuer
 from kdive.config.cli_settings import CLI_CLIENT_ID, TOKEN
 from tests.integration.live_stack.conftest import require_issuer
+
+
+def _follow_redirect(newurl: str) -> urllib.request.Request | None:
+    return login._SchemeEnforcingRedirect().redirect_request(
+        urllib.request.Request("https://issuer.example/token"),
+        io.BytesIO(b""),
+        302,
+        "Found",
+        HTTPMessage(),
+        newurl,
+    )
+
+
+@pytest.mark.parametrize("target", ["ftp://internal-host/token", "file:///etc/passwd"])
+def test_token_redirect_to_non_http_scheme_is_rejected(target: str) -> None:
+    """A 3xx into ftp:// or file:// during the token fetch is rejected post-redirect.
+
+    urllib follows redirects and its handler permits ftp://, so without this an allowlisted
+    https issuer could 302 the token fetch into ftp://internal-host.
+    """
+    with pytest.raises(ValueError, match="http or https"):
+        _follow_redirect(target)
+
+
+def test_token_redirect_to_https_is_allowed() -> None:
+    assert _follow_redirect("https://issuer.example/token2") is not None  # yields a follow-up
 
 
 def test_mint_local_token_carries_project_role_and_platform_roles(
@@ -103,6 +132,37 @@ def test_mint_local_token_rejects_nonpositive_ttl(monkeypatch: pytest.MonkeyPatc
 
     with pytest.raises(ValueError, match="ttl_seconds"):
         login.mint_local_token(project="local", ttl_seconds=0)
+
+
+def test_mint_local_token_rejects_non_http_issuer_before_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issuer = OidcIssuer(base_url="file:///tmp/issuer", audience="kdive")
+    monkeypatch.setattr(login.OidcIssuer, "from_config", classmethod(lambda cls: issuer))
+
+    def _unused_code(_issuer: OidcIssuer, _claims: Mapping[str, object]) -> str:
+        raise AssertionError("authorization endpoint should not be called")
+
+    def _unused_exchange(_issuer: OidcIssuer, _code: str) -> str:
+        raise AssertionError("token endpoint should not be called")
+
+    monkeypatch.setattr(login, "_authorization_code", _unused_code)
+    monkeypatch.setattr(login, "_exchange_code", _unused_exchange)
+
+    with pytest.raises(ValueError, match="http or https"):
+        login.mint_local_token(project="local")
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_mint_local_token_accepts_http_and_https_issuer_schemes(
+    monkeypatch: pytest.MonkeyPatch, scheme: str
+) -> None:
+    issuer = OidcIssuer(base_url=f"{scheme}://issuer.example/default", audience="kdive")
+    monkeypatch.setattr(login.OidcIssuer, "from_config", classmethod(lambda cls: issuer))
+    monkeypatch.setattr(login, "_authorization_code", lambda got_issuer, claims: "code")
+    monkeypatch.setattr(login, "_exchange_code", lambda got_issuer, code: f"token-for-{code}")
+
+    assert login.mint_local_token(project="local") == "token-for-code"
 
 
 @pytest.mark.oidc_issuer

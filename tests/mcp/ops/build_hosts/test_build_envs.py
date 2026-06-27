@@ -56,6 +56,17 @@ def _viewer_ctx() -> RequestContext:
     )
 
 
+def _roleless_ctx() -> RequestContext:
+    return RequestContext(
+        principal="roleless-user",
+        agent_session="sess-roleless",
+        projects=("proj-a",),
+        roles={},
+        platform_roles=frozenset(),
+        client_id=None,
+    )
+
+
 async def _seed_hosts(url: str) -> None:
     """Insert one ssh host (with toolchain_desc) and one ephemeral_libvirt (without)."""
     conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
@@ -89,7 +100,7 @@ def test_list_build_envs_projection(migrated_url: str) -> None:
         await _seed_hosts(migrated_url)
         conn = await psycopg.AsyncConnection.connect(migrated_url, autocommit=True)
         async with conn:
-            resp = await list_build_envs(conn)
+            resp = await list_build_envs(conn, _contributor_ctx())
 
         assert resp.status == "ok"
         raw_envs = resp.data["build_envs"]
@@ -131,7 +142,7 @@ def test_list_build_envs_each_item_has_exactly_four_keys(migrated_url: str) -> N
         await _seed_hosts(migrated_url)
         conn = await psycopg.AsyncConnection.connect(migrated_url, autocommit=True)
         async with conn:
-            resp = await list_build_envs(conn)
+            resp = await list_build_envs(conn, _contributor_ctx())
 
         raw_envs = resp.data["build_envs"]
         assert isinstance(raw_envs, list)
@@ -161,3 +172,29 @@ def test_build_envs_list_not_visible_to_viewer() -> None:
     """A project viewer does NOT see ``build_envs.list``."""
     viewer = _viewer_ctx()
     assert not tool_visible(_TOOL, viewer)
+
+
+def test_list_build_envs_denies_viewer_direct_invocation(migrated_url: str) -> None:
+    async def _run() -> None:
+        await _seed_hosts(migrated_url)
+        conn = await psycopg.AsyncConnection.connect(migrated_url, autocommit=True)
+        async with conn:
+            resp = await list_build_envs(conn, _viewer_ctx())
+
+        assert resp.status == "error"
+        assert resp.error_category == "authorization_denied"
+
+    asyncio.run(_run())
+
+
+def test_list_build_envs_denies_roleless_direct_invocation(migrated_url: str) -> None:
+    async def _run() -> None:
+        await _seed_hosts(migrated_url)
+        conn = await psycopg.AsyncConnection.connect(migrated_url, autocommit=True)
+        async with conn:
+            resp = await list_build_envs(conn, _roleless_ctx())
+
+        assert resp.status == "error"
+        assert resp.error_category == "authorization_denied"
+
+    asyncio.run(_run())

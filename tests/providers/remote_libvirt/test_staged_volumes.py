@@ -12,8 +12,8 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt import staged_volumes
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
+from kdive.providers.remote_libvirt.connection import staged_volumes
 from tests.providers.remote_libvirt.conftest import libvirt_error
 
 

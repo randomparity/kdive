@@ -99,11 +99,12 @@ registry-based dispatch.
 
 ### Two registrar seams keep the entrypoint stable
 
-`mcp/app.py` holds `_PLANE_REGISTRARS` (tools) and `_HANDLER_REGISTRARS` (worker job
-handlers). A new plane appends to a tuple; `build_app` / `build_handler_registry` never
-change. MCP tools (`mcp/tools/*.py`) are thin FastMCP wrappers over plain async handlers
-that take an injected pool + `RequestContext`, so they are tested directly without a
-transport.
+`mcp/app.py` is the assembly facade. Tool/resource/prompt registrars live in
+`mcp/tool_registration.py`; worker job-handler registrars live in `mcp/worker_registration.py`.
+A new plane appends to the appropriate registrar tuple, so `build_app` and
+`build_handler_registry` stay stable. MCP tools (`mcp/tools/*.py`) are thin FastMCP
+wrappers over plain async handlers that take an injected pool + `RequestContext`, so they
+are tested directly without a transport.
 
 ### Cross-cutting invariants (apply on every plane)
 

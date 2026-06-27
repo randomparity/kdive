@@ -20,6 +20,7 @@ from kdive.db.build_hosts import BuildHostKind
 from kdive.db.resource_discovery import ensure_discovered_resource_registered
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.images.planes.base import RootfsBuildPlane
+from kdive.observability.console_telemetry import ConsoleTelemetry
 from kdive.providers.core.discovery_registration import ProviderDiscoveryRegistration
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import DiscoveryRegistrar, ProviderRuntime
@@ -42,7 +43,6 @@ from kdive.providers.remote_libvirt import composition as remote_composition
 from kdive.providers.remote_libvirt.config import is_remote_libvirt_configured
 from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactory
 from kdive.providers.shared.build_host.reachability import BuildHostProber, SshBuildHostProber
-from kdive.reconciler.console_telemetry import ConsoleTelemetry
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 if TYPE_CHECKING:
@@ -146,18 +146,34 @@ def _local_libvirt_enabled(enable_local_libvirt: bool | None) -> bool:
 
 
 class _CompositeReaper:
-    """Fan out leaked-domain reconciliation across configured provider reapers."""
+    """Fan out leaked-domain listing, then route destroy to the provider that listed a domain."""
 
     def __init__(self, reapers: tuple[InfraReaper, ...]) -> None:
         self._reapers = reapers
+        self._owners: dict[str, InfraReaper] = {}
 
     async def list_owned(self) -> list[OwnedDomain]:
         domains: list[OwnedDomain] = []
+        owners: dict[str, InfraReaper] = {}
         for reaper in self._reapers:
-            domains.extend(await reaper.list_owned())
+            owned = await reaper.list_owned()
+            domains.extend(owned)
+            for domain in owned:
+                owners.setdefault(domain.name, reaper)
+        self._owners = owners
         return domains
 
     async def destroy(self, name: str) -> None:
+        owner = self._owners.get(name)
+        if owner is not None:
+            await owner.destroy(name)
+            return
+        # No prior list_owned() recorded an owner for this name — the reconciler's leaked-probe
+        # sweep destroys an egress-probe row by name with no preceding list_owned for it, and
+        # kdive-egress-probe-* names never match the kdive-<uuid> discovery convention anyway.
+        # Routing only via the list_owned side effect would silently no-op and leak the domain,
+        # so fan the destroy out to every child. Provider teardown is idempotent over an absent
+        # domain, so a destroy reaching a non-owner is harmless.
         for reaper in self._reapers:
             await reaper.destroy(name)
 

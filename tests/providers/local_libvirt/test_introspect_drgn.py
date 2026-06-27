@@ -20,7 +20,7 @@ from kdive.providers.local_libvirt.debug.introspect import (
     LocalLibvirtVmcoreIntrospect,
     VmcoreIntrospector,
 )
-from kdive.providers.ports import LiveScriptOutput
+from kdive.providers.ports.retrieve import LiveScriptOutput
 from kdive.providers.shared.debug_common.introspect import (
     _Module,
     _Program,
@@ -651,6 +651,41 @@ def test_real_seam_missing_managed_key_is_configuration_error_before_ssh(
             "ssh://127.0.0.1:2222", "tasks", secret_registry=SecretRegistry()
         )
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_live_ssh_argv_validates_key_registers_secret_and_appends_command(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kdive.providers.local_libvirt.debug import introspect as introspect_mod
+
+    key = tmp_path / "id_ed25519"
+    key.write_text("super-secret-key", encoding="utf-8")
+    monkeypatch.setattr(introspect_mod, "managed_private_key_path", lambda: key)
+    registry = SecretRegistry()
+
+    argv = introspect_mod._live_ssh_argv("ssh://127.0.0.1:2222", registry, ["run-script", "5"])
+
+    assert argv == [
+        "ssh",
+        "-i",
+        str(key),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=10",
+        "-p",
+        "2222",
+        "root@127.0.0.1",
+        "--",
+        "/usr/local/sbin/kdive-drgn",
+        "run-script",
+        "5",
+    ]
+    assert "super-secret-key" in registry.snapshot()
 
 
 # --- LocalLibvirtLiveIntrospect.run_script (ADR-0240, arbitrary drgn over SSH stdin) ---------

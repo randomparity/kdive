@@ -72,11 +72,16 @@ List the caller's debug sessions, filterable by run/system/project/state. Viewer
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `limit` | integer | no | Maximum rows returned (capped at 200). |
-| `project` | string (nullable) | no | Only sessions in this project (within your membership). |
-| `run_id` | string (nullable) | no | Only sessions for this Run id. |
-| `state` | `attach`, `live`, `detached` (nullable) | no | Only sessions in this lifecycle state. |
-| `system_id` | string (nullable) | no | Only sessions on this System id. |
+| `request` | object (nullable) | no | Debug session list filters. |
+
+`request` fields:
+
+- `run_id` (`string (nullable)`, optional) — Only sessions for this Run id.
+- `system_id` (`string (nullable)`, optional) — Only sessions on this System id.
+- `project` (`string (nullable)`, optional) — Only sessions in this project (within your membership).
+- `state` (``attach`, `live`, `detached` (nullable)`, optional) — Only sessions in this lifecycle state.
+- `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
+- `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
 
 ## `debug.read_memory`
 

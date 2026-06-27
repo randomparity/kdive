@@ -29,13 +29,12 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.ports.build_transport import CommandResult
-from kdive.providers.remote_libvirt.build import (
+from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild, transport_vmlinux_source
+from kdive.providers.shared.build_host.execution import CapturedStep
+from kdive.providers.shared.build_host.publishing.artifact_publish import (
     ArtifactBytes,
     ArtifactRemoteFile,
-    RemoteLibvirtBuild,
-    transport_vmlinux_source,
 )
-from kdive.providers.shared.build_host.execution import CapturedStep
 from kdive.providers.shared.build_host.publishing.kernel_bundle import transport_kernel_bundle
 from kdive.providers.shared.build_host.transports.transport_seams import (
     transport_read_build_id,

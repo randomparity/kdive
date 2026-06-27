@@ -16,7 +16,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.services.accounting import ledger as accounting_ledger
-from kdive.services.reports import (
+from kdive.services.reports.core import (
     ReportScope,
     ReportSection,
     Row,

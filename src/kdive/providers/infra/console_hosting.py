@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 from uuid import UUID
 
@@ -264,8 +265,9 @@ class ConsoleHostingLoop:
 class AsyncioPumpRunner:
     """Production :class:`PumpRunner`: one continuous off-loop task per collector."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         self._tasks: dict[UUID, asyncio.Task[None]] = {}
+        self._sleep = sleep
 
     def start(self, collector: Collector) -> None:
         system_id = collector.system_id
@@ -275,20 +277,24 @@ class AsyncioPumpRunner:
 
     async def _pump_forever(self, collector: Collector) -> None:
         while True:
-            try:
-                got = await asyncio.to_thread(collector.pump_once)
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001 - isolate one collector
-                _log.warning(
-                    "console pump task for %s errored; continuing",
-                    collector.system_id,
-                    exc_info=True,
-                )
-                await asyncio.sleep(1.0)
-                continue
-            if not got:
-                await asyncio.sleep(_IDLE_PUMP_BACKOFF_SECONDS)
+            await self._pump_step(collector)
+
+    async def _pump_step(self, collector: Collector) -> None:
+        """Run one pump iteration and any required backoff."""
+        try:
+            got = await asyncio.to_thread(collector.pump_once)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - isolate one collector
+            _log.warning(
+                "console pump task for %s errored; continuing",
+                collector.system_id,
+                exc_info=True,
+            )
+            await self._sleep(1.0)
+            return
+        if not got:
+            await self._sleep(_IDLE_PUMP_BACKOFF_SECONDS)
 
     def cancel(self, system_id: UUID) -> None:
         task = self._tasks.pop(system_id, None)

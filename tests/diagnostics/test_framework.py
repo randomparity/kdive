@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any, cast
 
 import pytest
 
 from kdive.diagnostics.checks import Check, CheckResult, CheckStatus, Vantage, run_check
+from kdive.domain.errors import ErrorCategory
 
 
 class _Static(Check):
@@ -66,7 +68,7 @@ def test_pass_result_forbids_a_failure_category() -> None:
             check_id="x",
             status=CheckStatus.PASS,
             detail="ok",
-            failure_category="transport_failure",
+            failure_category=ErrorCategory.TRANSPORT_FAILURE,
         )
 
 
@@ -76,9 +78,9 @@ def test_fail_result_may_carry_a_failure_category() -> None:
         status=CheckStatus.FAIL,
         detail="host down",
         fix="bring it up",
-        failure_category="transport_failure",
+        failure_category=ErrorCategory.TRANSPORT_FAILURE,
     )
-    assert result.failure_category == "transport_failure"
+    assert result.failure_category is ErrorCategory.TRANSPORT_FAILURE
 
 
 def test_error_result_may_carry_a_failure_category() -> None:
@@ -86,9 +88,19 @@ def test_error_result_may_carry_a_failure_category() -> None:
         check_id="x",
         status=CheckStatus.ERROR,
         detail="bad config",
-        failure_category="configuration_error",
+        failure_category=ErrorCategory.CONFIGURATION_ERROR,
     )
-    assert result.failure_category == "configuration_error"
+    assert result.failure_category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_failure_category_rejects_raw_string() -> None:
+    with pytest.raises(TypeError, match="ErrorCategory"):
+        CheckResult(
+            check_id="x",
+            status=CheckStatus.ERROR,
+            detail="bad config",
+            failure_category=cast(Any, "configuration_error"),
+        )
 
 
 def test_failure_category_defaults_to_none() -> None:
@@ -126,6 +138,7 @@ def test_run_check_maps_timeout_to_error() -> None:
     assert "did not respond within" in result.detail
     assert result.fix is None
     assert result.check_id == "slow"
+    assert result.failure_category is ErrorCategory.TRANSPORT_FAILURE
 
 
 def test_run_check_maps_unexpected_exception_to_error(caplog: pytest.LogCaptureFixture) -> None:
@@ -139,6 +152,7 @@ def test_run_check_maps_unexpected_exception_to_error(caplog: pytest.LogCaptureF
     assert result.status is CheckStatus.ERROR
     assert result.fix is None
     assert result.check_id == "boom"
+    assert result.failure_category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert "backend exploded" not in result.detail
     assert "backend exploded" in caplog.text
     assert any(record.exc_info is not None for record in caplog.records)

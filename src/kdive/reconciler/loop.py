@@ -18,7 +18,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -28,7 +28,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.config.core_settings import IMAGE_PUBLISH_GRACE
-from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
+from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.infra.console_hosting import CollectorRegistry
 from kdive.providers.infra.reaping import (
@@ -71,6 +71,7 @@ from kdive.reconciler.repairs import build_hosts as build_host_repairs
 from kdive.reconciler.repairs import debug_sessions as debug_session_repairs
 from kdive.reconciler.repairs import jobs as job_repairs
 from kdive.reconciler.repairs import systems as system_repairs
+from kdive.services.allocation import promotion as allocation_promotion
 from kdive.services.allocation.admission.metrics import AdmissionMetrics
 from kdive.services.images.retention import (
     ImageSweepStore,
@@ -96,11 +97,10 @@ _gc_idempotency_keys = gc_repairs.gc_idempotency_keys
 _gc_report_artifacts = gc_repairs.gc_report_artifacts
 _gc_investigation_artifacts = gc_repairs.gc_investigation_artifacts
 _gc_expired_build_artifacts = gc_repairs.gc_expired_build_artifacts
-_promote_pending = allocation_repairs.promote_pending
+_promote_pending = allocation_promotion.promote_pending
 _reap_console_collectors = gc_repairs.reap_console_collectors
 _reap_orphaned_dump_volumes = gc_repairs.reap_orphaned_dump_volumes
 _reap_orphaned_active_allocations = allocation_repairs.reap_orphaned_active_allocations
-_reap_queue_timeouts = allocation_repairs.reap_queue_timeouts
 _reap_queue_timeouts_for = allocation_repairs.reap_queue_timeouts_for
 _reclaim_build_host_leases = build_host_repairs.reclaim_orphan_build_host_leases
 _reap_orphan_build_vms = build_host_repairs.reap_orphan_build_vms
@@ -125,7 +125,6 @@ __all__ = [
     "_reap_orphaned_active_allocations",
     "_reap_console_collectors",
     "_reap_orphaned_dump_volumes",
-    "_reap_queue_timeouts",
     "_reclaim_build_host_leases",
     "_repair_abandoned_jobs",
     "_repair_dead_sessions",
@@ -176,6 +175,18 @@ class _RepairSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class _RepairCatalogEntry:
+    name: str
+    factory: Callable[[InfraReaper, ReconcileConfig, timedelta], _RepairFn | None]
+    report_field: str | None = None
+
+
+async def _sleep_until_stop(stop: asyncio.Event, timeout: float) -> None:
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(stop.wait(), timeout=timeout)
+
+
+@dataclass(frozen=True, slots=True)
 class ReconcileReport:
     """Per-category counts of one pass, plus the names of repairs that raised."""
 
@@ -210,6 +221,41 @@ class ReconcileReport:
     #: existing report-equality assertions stay meaningful without enumerating it.
     repair_counts: Mapping[str, int] = field(default_factory=dict, compare=False)
 
+    @classmethod
+    def from_counts(cls, counts: Mapping[str, int], failures: Sequence[str]) -> ReconcileReport:
+        full_counts = _repair_count_defaults(counts)
+        return cls(
+            expired_allocations=_report_count(full_counts, "expired_allocations"),
+            orphaned_systems=_report_count(full_counts, "orphaned_systems"),
+            abandoned_jobs=_report_count(full_counts, "abandoned_jobs"),
+            dead_sessions=_report_count(full_counts, "dead_sessions"),
+            leaked_domains=_report_count(full_counts, "leaked_domains"),
+            idempotency_keys_gc_count=_report_count(full_counts, "idempotency_keys_gc_count"),
+            failures=tuple(failures),
+            abandoned_uploads=_report_count(full_counts, "abandoned_uploads"),
+            reconciled_inventory=_report_count(full_counts, "reconciled_inventory"),
+            reaped_active_allocations=_report_count(full_counts, "reaped_active_allocations"),
+            promoted_allocations=_report_count(full_counts, "promoted_allocations"),
+            queue_timeouts=_report_count(full_counts, "queue_timeouts"),
+            leaked_probe_guests=_report_count(full_counts, "leaked_probe_guests"),
+            leaked_images=_report_count(full_counts, "leaked_images"),
+            dangling_images=_report_count(full_counts, "dangling_images"),
+            expired_private_images=_report_count(full_counts, "expired_private_images"),
+            console_collectors_reaped=_report_count(full_counts, "console_collectors_reaped"),
+            reaped_dump_volumes=_report_count(full_counts, "reaped_dump_volumes"),
+            reaped_build_vms=_report_count(full_counts, "reaped_build_vms"),
+            reclaimed_build_host_leases=_report_count(full_counts, "reclaimed_build_host_leases"),
+            build_host_states_changed=_report_count(full_counts, "build_host_states_changed"),
+            reaped_runtime_resources=_report_count(full_counts, "reaped_runtime_resources"),
+            investigation_artifacts_gc_count=_report_count(
+                full_counts, "investigation_artifacts_gc_count"
+            ),
+            expired_build_artifacts_gc_count=_report_count(
+                full_counts, "expired_build_artifacts_gc_count"
+            ),
+            repair_counts=full_counts,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ReconcileConfig:
@@ -233,6 +279,9 @@ class ReconcileConfig:
     dump_volume_grace: timedelta = DEFAULT_DUMP_VOLUME_GRACE
     heartbeat: Heartbeat | None = None
     heartbeat_tick: timedelta = timedelta(seconds=1)
+    heartbeat_sleep_until_stop: Callable[[asyncio.Event, float], Awaitable[None]] = (
+        _sleep_until_stop
+    )
     telemetry: ReconcilerTelemetry | None = None
     fleet_telemetry: FleetTelemetry | None = None
     build_host_telemetry: BuildHostTelemetry | None = None
@@ -243,132 +292,179 @@ class ReconcileConfig:
 _DEFAULT_RECONCILE_CONFIG = ReconcileConfig()
 
 
+def _reconcile_inventory_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    image_store = config.image_store
+    if image_store is None:
+        return None
+    return _INVENTORY_PASS.make_repair(image_store)
+
+
+def _leaked_images_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, image_publish_grace: timedelta
+) -> _RepairFn | None:
+    image_store = config.image_store
+    if image_store is None:
+        return None
+    return lambda conn: _repair_leaked_images(conn, image_store, image_publish_grace)
+
+
+def _dangling_images_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, image_publish_grace: timedelta
+) -> _RepairFn | None:
+    image_store = config.image_store
+    if image_store is None:
+        return None
+    return lambda conn: _repair_dangling_images(conn, image_store, image_publish_grace)
+
+
+def _expired_private_images_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    image_store = config.image_store
+    if image_store is None:
+        return None
+    return lambda conn: _repair_expired_private_images(conn, image_store)
+
+
+def _build_host_states_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    build_host_prober = config.build_host_prober
+    if build_host_prober is None:
+        return None
+    return lambda conn: _probe_build_host_reachability(conn, build_host_prober)
+
+
+def _abandoned_uploads_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    upload_store = config.upload_store
+    if upload_store is None:
+        return None
+    return lambda conn: _repair_abandoned_uploads(conn, upload_store)
+
+
+def _report_artifacts_gc_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    upload_store = config.upload_store
+    if upload_store is None:
+        return None
+    return lambda conn: _gc_report_artifacts(conn, upload_store, config.report_artifact_retention)
+
+
+def _investigation_artifacts_gc_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    upload_store = config.upload_store
+    if upload_store is None:
+        return None
+    return lambda conn: _gc_investigation_artifacts(
+        conn, upload_store, config.investigation_cleanup_grace
+    )
+
+
+def _expired_build_artifacts_gc_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    upload_store = config.upload_store
+    if upload_store is None:
+        return None
+    return lambda conn: _gc_expired_build_artifacts(
+        conn, upload_store, config.build_artifact_retention
+    )
+
+
+def _console_collectors_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    console_registry = config.console_registry
+    if console_registry is None:
+        return None
+    return lambda conn: _reap_console_collectors(conn, console_registry)
+
+
+_REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
+    _RepairCatalogEntry("expired_allocations", lambda _r, _c, _g: _sweep_expired_allocations),
+    _RepairCatalogEntry(
+        "reaped_active_allocations", lambda _r, _c, _g: _reap_orphaned_active_allocations
+    ),
+    _RepairCatalogEntry(
+        "promoted_allocations",
+        lambda _r, c, _g: lambda conn: _promote_pending(conn, c.admission_metrics),
+    ),
+    _RepairCatalogEntry(
+        "queue_timeouts",
+        lambda _r, c, _g: _reap_queue_timeouts_for(c.queue_max_wait, c.admission_metrics),
+    ),
+    _RepairCatalogEntry("orphaned_systems", lambda _r, _c, _g: _repair_orphaned_systems),
+    _RepairCatalogEntry("abandoned_jobs", lambda _r, _c, _g: _repair_abandoned_jobs),
+    _RepairCatalogEntry(
+        "reaped_runtime_resources",
+        lambda _r, c, _g: lambda conn: _reap_expired_runtime_resources(conn, c.resource_probe),
+    ),
+    _RepairCatalogEntry(
+        "reaped_build_vms",
+        lambda _r, c, _g: lambda conn: _reap_orphan_build_vms(conn, c.build_vm_reaper),
+    ),
+    _RepairCatalogEntry(
+        "reclaimed_build_host_leases", lambda _r, _c, _g: _reclaim_build_host_leases
+    ),
+    _RepairCatalogEntry(
+        "dead_sessions",
+        lambda _r, c, _g: (
+            lambda conn: _repair_dead_sessions(
+                conn,
+                c.debug_session_stale_after,
+                c.resetter,
+                c.debug_session_telemetry,
+            )
+        ),
+    ),
+    _RepairCatalogEntry(
+        "leaked_domains", lambda r, _c, _g: lambda conn: _repair_leaked_domains(conn, r)
+    ),
+    _RepairCatalogEntry(
+        "leaked_probe_guests", lambda r, _c, _g: lambda conn: _repair_leaked_probe_guests(conn, r)
+    ),
+    _RepairCatalogEntry(
+        "idempotency_keys_gc_count",
+        lambda _r, c, _g: lambda conn: _gc_idempotency_keys(conn, c.idempotency_retention),
+    ),
+    _RepairCatalogEntry(
+        "reaped_dump_volumes",
+        lambda _r, c, _g: (
+            lambda conn: _reap_orphaned_dump_volumes(
+                conn, c.dump_volume_reaper, c.dump_volume_grace
+            )
+        ),
+    ),
+    _RepairCatalogEntry("build_host_states_changed", _build_host_states_repair),
+    _RepairCatalogEntry("abandoned_uploads", _abandoned_uploads_repair),
+    _RepairCatalogEntry("report_artifacts_gc_count", _report_artifacts_gc_repair),
+    _RepairCatalogEntry("investigation_artifacts_gc_count", _investigation_artifacts_gc_repair),
+    _RepairCatalogEntry("expired_build_artifacts_gc_count", _expired_build_artifacts_gc_repair),
+    _RepairCatalogEntry("console_collectors_reaped", _console_collectors_repair),
+    _RepairCatalogEntry("reconcile_inventory", _reconcile_inventory_repair, "reconciled_inventory"),
+    _RepairCatalogEntry("leaked_images", _leaked_images_repair),
+    _RepairCatalogEntry("dangling_images", _dangling_images_repair),
+    _RepairCatalogEntry("expired_private_images", _expired_private_images_repair),
+)
+
+
 def _repair_plan(
     *,
     reaper: InfraReaper,
     config: ReconcileConfig,
     image_publish_grace: timedelta,
 ) -> tuple[_RepairSpec, ...]:
-    repairs = [
-        _RepairSpec("expired_allocations", _sweep_expired_allocations),
-        # Release leaked `active` allocations whose System is terminal/absent (ADR-0109) BEFORE
-        # the promotion sweep, so a host-cap slot this reaper frees is filled in the same pass.
-        _RepairSpec("reaped_active_allocations", _reap_orphaned_active_allocations),
-        _RepairSpec(
-            "promoted_allocations",
-            lambda conn: _promote_pending(conn, config.admission_metrics),
-        ),
-        _RepairSpec(
-            "queue_timeouts",
-            _reap_queue_timeouts_for(config.queue_max_wait, config.admission_metrics),
-        ),
-        _RepairSpec("orphaned_systems", _repair_orphaned_systems),
-        _RepairSpec("abandoned_jobs", _repair_abandoned_jobs),
-        # Reap (or cordon, if still live) runtime resources whose lease lapsed — the leak
-        # backstop for an agent that registered capacity then vanished (ADR-0112). Cordon-only
-        # / refuse-if-live: a live allocation is never auto-drained.
-        _RepairSpec(
-            "reaped_runtime_resources",
-            lambda conn: _reap_expired_runtime_resources(conn, config.resource_probe),
-        ),
-        # Reap leaked build VMs BEFORE reclaiming their lease, so a freed slot never coexists
-        # with a still-running leaked VM (ADR-0100 §4.6 over-admission window).
-        _RepairSpec(
-            "reaped_build_vms",
-            lambda conn: _reap_orphan_build_vms(conn, config.build_vm_reaper),
-        ),
-        _RepairSpec("reclaimed_build_host_leases", _reclaim_build_host_leases),
-        _RepairSpec(
-            "dead_sessions",
-            lambda conn: _repair_dead_sessions(
-                conn,
-                config.debug_session_stale_after,
-                config.resetter,
-                config.debug_session_telemetry,
-            ),
-        ),
-        _RepairSpec("leaked_domains", lambda conn: _repair_leaked_domains(conn, reaper)),
-        _RepairSpec("leaked_probe_guests", lambda conn: _repair_leaked_probe_guests(conn, reaper)),
-        _RepairSpec(
-            "idempotency_keys_gc_count",
-            lambda conn: _gc_idempotency_keys(conn, config.idempotency_retention),
-        ),
-        _RepairSpec(
-            "reaped_dump_volumes",
-            lambda conn: _reap_orphaned_dump_volumes(
-                conn, config.dump_volume_reaper, config.dump_volume_grace
-            ),
-        ),
-    ]
-    if config.build_host_prober is not None:
-        build_host_prober = config.build_host_prober
-        repairs.append(
-            _RepairSpec(
-                "build_host_states_changed",
-                lambda conn: _probe_build_host_reachability(conn, build_host_prober),
-            )
-        )
-    if config.upload_store is not None:
-        upload_store = config.upload_store
-        report_retention = config.report_artifact_retention
-        repairs.append(
-            _RepairSpec(
-                "abandoned_uploads",
-                lambda conn: _repair_abandoned_uploads(conn, upload_store),
-            )
-        )
-        # Reap report spreadsheet artifacts past retention (ADR-0212); the synthetic report
-        # owner has no teardown trigger, so this sweep is their only cleanup path.
-        repairs.append(
-            _RepairSpec(
-                "report_artifacts_gc_count",
-                lambda conn: _gc_report_artifacts(conn, upload_store, report_retention),
-            )
-        )
-        # Reclaim run-owned uploaded build artifacts: clear-on-close (grace-gated by the
-        # investigation cleanup marker) and a TTL backstop for never-closed investigations
-        # (ADR-0234 §4, #768). Never touch console/crash evidence (system-owned).
-        cleanup_grace = config.investigation_cleanup_grace
-        build_retention = config.build_artifact_retention
-        repairs.append(
-            _RepairSpec(
-                "investigation_artifacts_gc_count",
-                lambda conn: _gc_investigation_artifacts(conn, upload_store, cleanup_grace),
-            )
-        )
-        repairs.append(
-            _RepairSpec(
-                "expired_build_artifacts_gc_count",
-                lambda conn: _gc_expired_build_artifacts(conn, upload_store, build_retention),
-            )
-        )
-    if config.console_registry is not None:
-        console_registry = config.console_registry
-        repairs.append(
-            _RepairSpec(
-                "console_collectors_reaped",
-                lambda conn: _reap_console_collectors(conn, console_registry),
-            )
-        )
-    if config.image_store is not None:
-        image_store = config.image_store
-        repairs.append(_RepairSpec("reconcile_inventory", _INVENTORY_PASS.make_repair(image_store)))
-        repairs.extend(
-            (
-                _RepairSpec(
-                    "leaked_images",
-                    lambda conn: _repair_leaked_images(conn, image_store, image_publish_grace),
-                ),
-                _RepairSpec(
-                    "dangling_images",
-                    lambda conn: _repair_dangling_images(conn, image_store, image_publish_grace),
-                ),
-                _RepairSpec(
-                    "expired_private_images",
-                    lambda conn: _repair_expired_private_images(conn, image_store),
-                ),
-            )
-        )
+    repairs: list[_RepairSpec] = []
+    for entry in _REPAIR_CATALOG:
+        repair = entry.factory(reaper, config, image_publish_grace)
+        if repair is not None:
+            repairs.append(_RepairSpec(entry.name, repair))
     return tuple(repairs)
 
 
@@ -376,32 +472,19 @@ def _repair_plan(
 #: optional-port repairs (ADR-0190 A). Pinned to :func:`_repair_plan` by
 #: ``test_all_repair_kinds_matches_a_fully_populated_plan`` so the cardinality bound and the
 #: plan never drift. Bounded and low-cardinality; never a per-object identifier.
-ALL_REPAIR_KINDS: tuple[str, ...] = (
-    "expired_allocations",
-    "reaped_active_allocations",
-    "promoted_allocations",
-    "queue_timeouts",
-    "orphaned_systems",
-    "abandoned_jobs",
-    "reaped_runtime_resources",
-    "reaped_build_vms",
-    "reclaimed_build_host_leases",
-    "dead_sessions",
-    "leaked_domains",
-    "leaked_probe_guests",
-    "idempotency_keys_gc_count",
-    "reaped_dump_volumes",
-    "build_host_states_changed",
-    "abandoned_uploads",
-    "report_artifacts_gc_count",
-    "investigation_artifacts_gc_count",
-    "expired_build_artifacts_gc_count",
-    "console_collectors_reaped",
-    "reconcile_inventory",
-    "leaked_images",
-    "dangling_images",
-    "expired_private_images",
-)
+ALL_REPAIR_KINDS: tuple[str, ...] = tuple(entry.name for entry in _REPAIR_CATALOG)
+
+_REPORT_FIELD_TO_REPAIR_KIND = {
+    entry.report_field or entry.name: entry.name for entry in _REPAIR_CATALOG
+}
+
+
+def _repair_count_defaults(counts: Mapping[str, int]) -> dict[str, int]:
+    return {repair_kind: counts.get(repair_kind, 0) for repair_kind in ALL_REPAIR_KINDS}
+
+
+def _report_count(counts: Mapping[str, int], report_field: str) -> int:
+    return counts[_REPORT_FIELD_TO_REPAIR_KIND[report_field]]
 
 
 async def reconcile_once(
@@ -437,33 +520,7 @@ async def reconcile_once(
         ),
     )
 
-    return ReconcileReport(
-        expired_allocations=counts["expired_allocations"],
-        orphaned_systems=counts["orphaned_systems"],
-        abandoned_jobs=counts["abandoned_jobs"],
-        dead_sessions=counts["dead_sessions"],
-        leaked_domains=counts["leaked_domains"],
-        idempotency_keys_gc_count=counts["idempotency_keys_gc_count"],
-        failures=tuple(failures),
-        abandoned_uploads=counts["abandoned_uploads"],
-        reconciled_inventory=counts.get("reconcile_inventory", 0),
-        reaped_active_allocations=counts["reaped_active_allocations"],
-        promoted_allocations=counts["promoted_allocations"],
-        queue_timeouts=counts["queue_timeouts"],
-        leaked_probe_guests=counts["leaked_probe_guests"],
-        leaked_images=counts.get("leaked_images", 0),
-        dangling_images=counts.get("dangling_images", 0),
-        expired_private_images=counts.get("expired_private_images", 0),
-        console_collectors_reaped=counts.get("console_collectors_reaped", 0),
-        reaped_dump_volumes=counts.get("reaped_dump_volumes", 0),
-        reaped_build_vms=counts.get("reaped_build_vms", 0),
-        reclaimed_build_host_leases=counts["reclaimed_build_host_leases"],
-        build_host_states_changed=counts.get("build_host_states_changed", 0),
-        reaped_runtime_resources=counts["reaped_runtime_resources"],
-        investigation_artifacts_gc_count=counts.get("investigation_artifacts_gc_count", 0),
-        expired_build_artifacts_gc_count=counts.get("expired_build_artifacts_gc_count", 0),
-        repair_counts=dict(counts),
-    )
+    return ReconcileReport.from_counts(counts, failures)
 
 
 def _image_publish_grace() -> timedelta:
@@ -477,8 +534,7 @@ def _image_publish_grace() -> timedelta:
 async def _run_repair_plan(
     pool: AsyncConnectionPool, repairs: tuple[_RepairSpec, ...]
 ) -> tuple[dict[str, int], list[str]]:
-    counts = {spec.name: 0 for spec in repairs}
-    counts.setdefault("abandoned_uploads", 0)
+    counts = _repair_count_defaults({})
     failures: list[str] = []
     for spec in repairs:
         try:
@@ -572,7 +628,12 @@ class Reconciler:
         if self._config.heartbeat is None:
             return None
         return asyncio.create_task(
-            _tick_until_stop(self._config.heartbeat, stop, self._heartbeat_tick)
+            _tick_until_stop(
+                self._config.heartbeat,
+                stop,
+                self._heartbeat_tick,
+                self._config.heartbeat_sleep_until_stop,
+            )
         )
 
     async def _pass_loop(self, stop: asyncio.Event) -> None:
@@ -594,7 +655,12 @@ class Reconciler:
                 await asyncio.wait_for(stop.wait(), timeout=interval)
 
 
-async def _tick_until_stop(heartbeat: Heartbeat, stop: asyncio.Event, interval: float) -> None:
+async def _tick_until_stop(
+    heartbeat: Heartbeat,
+    stop: asyncio.Event,
+    interval: float,
+    sleep_until_stop: Callable[[asyncio.Event, float], Awaitable[None]] = _sleep_until_stop,
+) -> None:
     """Bump ``heartbeat`` every ``interval`` seconds until ``stop`` is set or cancelled.
 
     Runs concurrently with the pass loop so a long-running pass never starves the
@@ -603,8 +669,7 @@ async def _tick_until_stop(heartbeat: Heartbeat, stop: asyncio.Event, interval: 
     """
     heartbeat.tick()
     while not stop.is_set():
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(stop.wait(), timeout=interval)
+        await sleep_until_stop(stop, interval)
         if stop.is_set():
             break
         heartbeat.tick()

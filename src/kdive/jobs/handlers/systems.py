@@ -9,6 +9,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import StoredArtifact
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -16,24 +17,19 @@ from kdive.db.repositories import ARTIFACTS, SYSTEMS
 from kdive.domain.capacity.state import IllegalTransition, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import System
+from kdive.domain.lifecycle.records import System
 from kdive.domain.lifecycle.rules import TERMINAL_SYSTEM_STATES
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReprovisionPayload, SystemPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
-from kdive.profiles.provider_policy import rootfs_upload_window_allowed
+from kdive.profiles.provider_policy import ProfilePolicy, rootfs_upload_window_allowed
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.runtime import ProfilePolicy
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
-from kdive.store.objectstore import (
-    ObjectStore,
-    artifact_key,
-    register_artifact_row,
-)
+from kdive.store.objectstore import ObjectStore, artifact_key
 
 _log = logging.getLogger(__name__)
 

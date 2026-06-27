@@ -47,7 +47,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
     monkeypatch.setattr("kdive.mcp.app.build_handler_registry", lambda **kw: object())
     monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: object())
     monkeypatch.setattr(
-        "kdive.process_health.server.build_postgres_ping", lambda pool: lambda: None
+        "kdive.health.processes.server.build_postgres_ping", lambda pool: lambda: None
     )
 
     async def _no_serve(*a: object, **k: object) -> None:

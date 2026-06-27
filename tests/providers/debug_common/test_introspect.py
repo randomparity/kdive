@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kdive.providers.ports import LiveScriptOutput
+from kdive.providers.ports.retrieve import LiveScriptOutput
 from kdive.providers.shared.debug_common.introspect import assemble_script_output
 from kdive.security.secrets.secret_registry import SecretRegistry
 

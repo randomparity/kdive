@@ -18,6 +18,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import BuildVmReaper
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
+from kdive.providers.remote_libvirt.connection.transport import remote_libvirt_connections
 from kdive.providers.remote_libvirt.lifecycle.build_vm import (
     build_domain_name,
     build_overlay_volume_name,
@@ -28,7 +29,6 @@ from kdive.providers.remote_libvirt.reaping.build_vm import (
     run_id_from_build_vm_name,
 )
 from kdive.providers.remote_libvirt.reaping.dump_volume import system_id_from_dump_volume_name
-from kdive.providers.remote_libvirt.transport import remote_libvirt_connections
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import libvirt_error

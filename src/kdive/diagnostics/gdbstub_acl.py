@@ -17,7 +17,7 @@ import logging
 import socket
 from collections.abc import Callable
 
-from kdive.diagnostics.checks import GdbstubAclProbe
+from kdive.diagnostics.provider_checks import GdbstubAclProbe
 
 _CONNECT_TIMEOUT_S = 3.0
 _log = logging.getLogger(__name__)

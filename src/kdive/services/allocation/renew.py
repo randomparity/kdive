@@ -47,8 +47,8 @@ from kdive.domain.accounting.cost import (
 )
 from kdive.domain.capacity.state import AllocationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Allocation
 from kdive.domain.lifecycle.lease import LeaseExtension, clamp_extension_hours
+from kdive.domain.lifecycle.records import Allocation
 from kdive.security import audit
 from kdive.services.accounting import ledger as accounting
 from kdive.services.allocation.error_details import categorized_details

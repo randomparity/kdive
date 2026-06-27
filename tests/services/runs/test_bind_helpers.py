@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.lifecycle import Run
+from kdive.domain.lifecycle.records import Run
 from kdive.services.runs.bind import _run_bindable_error
 
 

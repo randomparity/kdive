@@ -19,11 +19,15 @@ from kdive.db.build_host_policy import KERNEL_SRC_UNSET_DETAIL
 from kdive.db.build_hosts import BuildHost, BuildHostKind, BuildHostState
 from kdive.domain.build_phase import BuildPhase
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.jobs.build_telemetry import BuildPhaseRecorder
+from kdive.observability.build_telemetry import BuildPhaseRecorder
 from kdive.profiles.build import BuildProfile, GitSourceRef, ServerBuildProfile
-from kdive.providers.ports import TransportCapableBuilder
+from kdive.providers.ports.build import (
+    Builder,
+    TransportCapableBuilder,
+)
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.shared.build_host.dispatch import (
+    BuildHostDispatchRequest,
     BuildHostTransportFactory,
     _build_over_transport_session,
     _git_coords,
@@ -80,17 +84,32 @@ def _parsed() -> ServerBuildProfile:
     return parsed
 
 
+def _request(
+    builder: object,
+    host: BuildHost,
+    parsed: ServerBuildProfile,
+    *,
+    kernel_src: str = "",
+    secret_registry: SecretRegistry | None = None,
+    provider: str = "",
+) -> BuildHostDispatchRequest:
+    return BuildHostDispatchRequest(
+        builder=cast(Builder, builder),
+        host=host,
+        run_id=_RUN_ID,
+        parsed=parsed,
+        secret_registry=secret_registry or SecretRegistry(),
+        kernel_src=kernel_src,
+        provider=provider,
+    )
+
+
 def test_empty_kernel_src_rejected_before_builder_runs() -> None:
     builder = _RecordingBuilder()
     with pytest.raises(CategorizedError) as excinfo:
         asyncio.run(
             run_build_on_host(
-                builder,
-                _local_host(),
-                _RUN_ID,
-                _parsed(),
-                secret_registry=SecretRegistry(),
-                kernel_src="",
+                _request(builder, _local_host(), _parsed()),
             )
         )
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
@@ -102,12 +121,7 @@ def test_usable_kernel_src_runs_builder(tmp_path: object) -> None:
     builder = _RecordingBuilder()
     out = asyncio.run(
         run_build_on_host(
-            builder,
-            _local_host(),
-            _RUN_ID,
-            _parsed(),
-            secret_registry=SecretRegistry(),
-            kernel_src=str(tmp_path),
+            _request(builder, _local_host(), _parsed(), kernel_src=str(tmp_path)),
         )
     )
     assert builder.called is True
@@ -181,12 +195,7 @@ def test_transport_session_runs_off_event_loop_thread() -> None:
     loop_thread = threading.current_thread()
     out = asyncio.run(
         run_build_on_host(
-            builder,
-            _ephemeral_host(),
-            _RUN_ID,
-            _git_parsed(),
-            secret_registry=SecretRegistry(),
-            kernel_src="",
+            _request(builder, _ephemeral_host(), _git_parsed()),
             transport_factories={BuildHostKind.EPHEMERAL_LIBVIRT: _factory},
         )
     )
@@ -221,12 +230,7 @@ def test_local_git_build_skips_warm_tree_admission() -> None:
     builder = _RecordingBuilder()
     out = asyncio.run(
         run_build_on_host(
-            builder,
-            _local_host(),
-            _RUN_ID,
-            git_profile,
-            secret_registry=SecretRegistry(),
-            kernel_src="",
+            _request(builder, _local_host(), git_profile),
         )
     )
     assert builder.called is True
@@ -429,24 +433,7 @@ def test_bind_over_transport_forwards_every_coordinate() -> None:
         "git_remote": "https://git.example/linux.git",
         "git_ref": "v6.9",
         "secret_registry": registry,
-        "provenance_sink": None,
     }
-
-
-def test_bind_over_transport_forwards_provenance_sink() -> None:
-    # The provenance sink the dispatch session creates must reach the builder's checkout seam.
-    builder = _BindRecordingBuilder()
-    sink: dict[str, str] = {}
-    bind_over_transport(
-        cast(TransportCapableBuilder, builder),
-        cast(BuildTransport, _FakeTransport()),
-        host_workspace_root="/build",
-        git_remote="https://git.example/linux.git",
-        git_ref="v6.9",
-        secret_registry=SecretRegistry(),
-        provenance_sink=sink,
-    )
-    assert builder.kwargs["provenance_sink"] is sink
 
 
 def test_require_transport_capable_rejects_plain_builder_with_host_and_run_id() -> None:
@@ -489,14 +476,14 @@ def test_local_build_forwards_run_id_parsed_recorder_provider(tmp_path: object) 
     parsed = _parsed()
     asyncio.run(
         run_build_on_host(
-            cast(TransportCapableBuilder, builder),
-            _local_host(),
-            _RUN_ID,
-            parsed,
-            secret_registry=SecretRegistry(),
-            kernel_src=str(tmp_path),
+            _request(
+                cast(TransportCapableBuilder, builder),
+                _local_host(),
+                parsed,
+                kernel_src=str(tmp_path),
+                provider="localvirt",
+            ),
             recorder=recorder,
-            provider="localvirt",
         )
     )
     assert builder.build_args == (_RUN_ID, parsed)
@@ -540,9 +527,6 @@ def test_transport_session_forwards_factory_args_and_build_args() -> None:
     assert builder.build_kwargs == {"recorder": recorder, "provider": "remotevirt"}
     # The transport (the ctx's __enter__ return) + workspace + git coords reach over_transport.
     assert builder.over_transport_args == (ctx.transport,)
-    # The session creates the provenance sink and forwards it (a fresh dict, not an identity pin).
-    sink = builder.over_transport_kwargs.pop("provenance_sink")
-    assert isinstance(sink, dict)
     assert builder.over_transport_kwargs == {
         "host_workspace_root": host.workspace_root,
         "git_remote": "https://git.example/linux.git",
@@ -613,17 +597,17 @@ def test_remote_build_wires_session_args_through_run_build_on_host() -> None:
     recorder = BuildPhaseRecorder.disabled()
     asyncio.run(
         run_build_on_host(
-            cast(TransportCapableBuilder, builder),
-            _ephemeral_host(),
-            _RUN_ID,
-            parsed,
-            secret_registry=registry,
-            kernel_src="",
+            _request(
+                cast(TransportCapableBuilder, builder),
+                _ephemeral_host(),
+                parsed,
+                secret_registry=registry,
+                provider="remotevirt",
+            ),
             transport_factories={
                 BuildHostKind.EPHEMERAL_LIBVIRT: cast(BuildHostTransportFactory, _factory)
             },
             recorder=recorder,
-            provider="remotevirt",
         )
     )
     # run_id, source (the git ref), secret_registry all flow to the factory.
@@ -647,12 +631,11 @@ def test_remote_build_default_provider_is_empty_string() -> None:
 
     asyncio.run(
         run_build_on_host(
-            cast(TransportCapableBuilder, _ArgRecordingBuilder()),
-            _ephemeral_host(),
-            _RUN_ID,
-            _git_parsed(),
-            secret_registry=SecretRegistry(),
-            kernel_src="",
+            _request(
+                cast(TransportCapableBuilder, _ArgRecordingBuilder()),
+                _ephemeral_host(),
+                _git_parsed(),
+            ),
             transport_factories={
                 BuildHostKind.EPHEMERAL_LIBVIRT: cast(BuildHostTransportFactory, _factory)
             },
@@ -670,12 +653,7 @@ def test_remote_build_rejects_non_transport_capable_builder() -> None:
     with pytest.raises(CategorizedError) as excinfo:
         asyncio.run(
             run_build_on_host(
-                _RecordingBuilder(),
-                _ephemeral_host(),
-                _RUN_ID,
-                _git_parsed(),
-                secret_registry=SecretRegistry(),
-                kernel_src="",
+                _request(_RecordingBuilder(), _ephemeral_host(), _git_parsed()),
                 transport_factories={
                     BuildHostKind.EPHEMERAL_LIBVIRT: cast(
                         BuildHostTransportFactory, lambda *a, **k: _FakeTransportCtx()

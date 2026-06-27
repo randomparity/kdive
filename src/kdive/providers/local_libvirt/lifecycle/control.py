@@ -26,7 +26,7 @@ import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import PowerAction
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
-from kdive.providers.ports import Controller as Controller
+from kdive.providers.ports.lifecycle import Controller as Controller
 
 _log = logging.getLogger(__name__)
 

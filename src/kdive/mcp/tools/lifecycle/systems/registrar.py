@@ -11,6 +11,7 @@ from pydantic import Field
 from kdive.domain.capacity.state import SystemState
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_allocation, with_runtime_for_system
@@ -42,6 +43,42 @@ from kdive.profiles.provisioning import ProvisioningProfile, dump_profile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security.authz.rbac import Role
+
+
+class _SystemsListPayload(ToolPayload):
+    """Public payload for ``systems.list`` filters and pagination."""
+
+    allocation_id: str | None = Field(
+        default=None, description="Only Systems under this Allocation id."
+    )
+    state: SystemState | None = Field(
+        default=None, description="Only Systems in this lifecycle state."
+    )
+    shape: str | None = Field(
+        default=None,
+        description="Only Systems with this named shape, or '__custom__' for full-custom.",
+    )
+    pcie: str | None = Field(
+        default=None,
+        description="Only Systems whose Allocation claims a matching '<vendor>:<device>' spec.",
+    )
+    limit: int = Field(
+        default=_DEFAULT_LIST_LIMIT, description="Maximum rows returned (capped at 200)."
+    )
+    cursor: str | None = Field(
+        default=None, description="Opaque continuation cursor from a prior page's next_cursor."
+    )
+
+    def to_list_request(self) -> _SystemsListRequest:
+        """Convert the public MCP payload into the handler request record."""
+        return _SystemsListRequest(
+            allocation_id=self.allocation_id,
+            state=self.state.value if self.state is not None else None,
+            shape=self.shape,
+            pcie=self.pcie,
+            limit=self.limit,
+            cursor=self.cursor,
+        )
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:
@@ -222,32 +259,9 @@ def _register_systems_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def systems_list(
-        allocation_id: Annotated[
-            str | None, Field(description="Only Systems under this Allocation id.")
-        ] = None,
-        state: Annotated[
-            SystemState | None, Field(description="Only Systems in this lifecycle state.")
-        ] = None,
-        shape: Annotated[
-            str | None,
-            Field(
-                description="Only Systems with this named shape, or '__custom__' for "
-                "full-custom (no shape)."
-            ),
-        ] = None,
-        pcie: Annotated[
-            str | None,
-            Field(
-                description="Only Systems whose Allocation claims a device matching this "
-                "'<vendor>:<device>' spec."
-            ),
-        ] = None,
-        limit: Annotated[
-            int, Field(description="Maximum rows returned (capped at 200).")
-        ] = _DEFAULT_LIST_LIMIT,
-        cursor: Annotated[
-            str | None,
-            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
+        request: Annotated[
+            _SystemsListPayload | None,
+            Field(description="Systems list filters and pagination request."),
         ] = None,
     ) -> ToolResponse:
         """List the caller's Systems, filterable by allocation/state/shape/PCIe. Requires viewer.
@@ -255,18 +269,10 @@ def _register_systems_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
         ``cursor`` for the next page.
         """
-        request = _SystemsListRequest(
-            allocation_id=allocation_id,
-            state=state,
-            shape=shape,
-            pcie=pcie,
-            limit=limit,
-            cursor=cursor,
-        )
         return await _list_systems(
             pool,
             current_context(),
-            request,
+            (request or _SystemsListPayload()).to_list_request(),
         )
 
 

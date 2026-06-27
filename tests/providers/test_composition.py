@@ -23,6 +23,7 @@ from kdive.db.build_hosts import BuildHostKind
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
+from kdive.observability.console_telemetry import ConsoleTelemetry
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.assembly import composition
@@ -32,14 +33,16 @@ from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.infra.reaping import OwnedDomain
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
-from kdive.providers.ports import (
-    CaptureOutput,
-    CrashOutput,
-    InstallRequest,
-    IntrospectOutput,
-    LiveScriptOutput,
+from kdive.providers.ports.handles import (
     SystemHandle,
     TransportHandle,
+)
+from kdive.providers.ports.lifecycle import InstallRequest
+from kdive.providers.ports.retrieve import (
+    CaptureOutput,
+    CrashOutput,
+    IntrospectOutput,
+    LiveScriptOutput,
 )
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
 from kdive.providers.remote_libvirt.lifecycle.control import RemoteLibvirtControl
@@ -48,7 +51,6 @@ from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtP
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
-from kdive.reconciler.console_telemetry import ConsoleTelemetry
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _RUN = UUID("22222222-2222-2222-2222-222222222222")
@@ -414,13 +416,30 @@ def test_configured_fault_inject_runtime_is_visible_to_reconciler_reaper() -> No
     )
 
     # The composite unions the (empty) libvirt reaper rows with the fault-inject rows, so the
-    # fault-inject domain is still visible and reapable.
+    # fault-inject domain is still visible and reapable by its owning child reaper.
     owned = asyncio.run(reaper.list_owned())
     assert domain in [item.name for item in owned]
     asyncio.run(reaper.destroy(domain))
-    # The composite fans the *requested* name out to each member reaper verbatim, not a
-    # placeholder.
-    assert fake_libvirt.destroyed == [domain]
+    owned_after = asyncio.run(reaper.list_owned())
+    assert domain not in [item.name for item in owned_after]
+    assert fake_libvirt.destroyed == []
+
+
+def test_composite_reaper_destroy_fans_out_for_unlisted_name() -> None:
+    """An unlisted name is fanned out to every child, not silently dropped (#840).
+
+    The reconciler's leaked-probe sweep calls destroy(name) without a preceding list_owned for
+    that name, and kdive-egress-probe-* names never match the kdive-<uuid> discovery convention —
+    so routing only via the list_owned side effect would no-op and leak the libvirt domain.
+    """
+    child_a = _FakeLibvirtReaper()
+    child_b = _FakeLibvirtReaper()
+    reaper = composition._CompositeReaper((child_a, child_b))
+
+    asyncio.run(reaper.destroy("kdive-egress-probe-xyz"))  # never returned by list_owned()
+
+    assert child_a.destroyed == ["kdive-egress-probe-xyz"]
+    assert child_b.destroyed == ["kdive-egress-probe-xyz"]
 
 
 def test_reconciler_reaper_is_null_when_local_libvirt_disabled() -> None:
@@ -579,7 +598,9 @@ def test_transport_resetter_is_null_without_remote() -> None:
 
 
 def test_transport_resetter_is_remote_when_enabled() -> None:
-    from kdive.providers.remote_libvirt.transport_reset import RemoteLibvirtTransportResetter
+    from kdive.providers.remote_libvirt.connection.transport_reset import (
+        RemoteLibvirtTransportResetter,
+    )
 
     comp = composition.ProviderComposition()
     resetter = comp.build_reconciler_transport_resetter(enable_remote_libvirt=True)

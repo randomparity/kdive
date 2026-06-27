@@ -11,9 +11,7 @@ returned sensitivity).
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID, uuid4
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -30,7 +28,7 @@ from kdive.artifacts.storage import (
     owner_prefix as owner_prefix,
 )
 from kdive.config.core_settings import S3_BUCKET, S3_ENDPOINT_URL, S3_REGION
-from kdive.domain.catalog.artifacts import Artifact, Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 # boto3 ships no inline types and boto3-stubs is not a dependency; alias the S3
@@ -243,7 +241,7 @@ class ObjectStore:
             raise _infrastructure_error("head_object", key, err) from err
         try:
             sensitivity = Sensitivity(resp["Metadata"]["sensitivity"])
-        except KeyError, ValueError:
+        except (KeyError, ValueError) as _exc:
             sensitivity = None
         return artifact_types.HeadResult(
             size_bytes=int(resp["ContentLength"]),
@@ -474,30 +472,6 @@ class ObjectStore:
                 (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
         """
         return self.head(key) is not None
-
-
-def register_artifact_row(
-    stored: artifact_types.StoredArtifact, *, owner_kind: str, owner_id: UUID
-) -> Artifact:
-    """Build the ``artifacts`` row for a stored object (no database access).
-
-    The sensitivity/retention come from ``stored`` so the row matches the object by
-    construction. The caller inserts and commits it after the object write
-    (ADR-0005 write-before-commit). Timestamps are advisory — the DB overwrites them
-    on insert (ADR-0016).
-    """
-    now = datetime.now(UTC)
-    return Artifact(
-        id=uuid4(),
-        created_at=now,
-        updated_at=now,
-        owner_kind=owner_kind,
-        owner_id=owner_id,
-        object_key=stored.key,
-        etag=stored.etag,
-        sensitivity=stored.sensitivity,
-        retention_class=stored.retention_class,
-    )
 
 
 def object_store_from_env() -> ObjectStore:

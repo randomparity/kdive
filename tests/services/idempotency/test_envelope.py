@@ -11,11 +11,11 @@ from psycopg.errors import UniqueViolation
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.mcp.responses import ToolResponse
 from kdive.services.idempotency.envelope import (
-    record_envelope,
+    StoredResult,
+    record_result,
     resolve_conflict,
-    resolve_envelope_replay,
+    resolve_replay,
     validate_idempotency_key,
 )
 
@@ -30,12 +30,17 @@ async def _open_pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
         await pool.close()
 
 
-def _envelope() -> ToolResponse:
-    return ToolResponse.success(
-        "11111111-1111-1111-1111-111111111111",
-        "created",
-        suggested_next_actions=["runs.get"],
-        data={"project": "proj", "target_kind": "local-libvirt"},
+def _result() -> StoredResult:
+    return StoredResult(
+        {
+            "object_id": "11111111-1111-1111-1111-111111111111",
+            "status": "created",
+            "suggested_next_actions": ["runs.get"],
+            "refs": [],
+            "error_category": None,
+            "detail": None,
+            "data": {"project": "proj", "target_kind": "local-libvirt"},
+        }
     )
 
 
@@ -51,21 +56,19 @@ def test_validate_idempotency_key_bounds() -> None:
 def test_record_then_resolve_returns_identical_envelope(migrated_url: str) -> None:
     async def _run() -> None:
         async with _open_pool(migrated_url) as pool, pool.connection() as conn:
-            env = _envelope()
+            result = _result()
             async with conn.transaction():
-                await record_envelope(
+                await record_result(
                     conn,
                     principal="alice",
                     key="k1",
                     project="proj",
                     kind="runs.create",
-                    envelope=env,
+                    result=result,
                 )
-            got = await resolve_envelope_replay(
-                conn, principal="alice", key="k1", kind="runs.create"
-            )
+            got = await resolve_replay(conn, principal="alice", key="k1", kind="runs.create")
             assert got is not None
-            assert got.model_dump() == env.model_dump()
+            assert got.document == result.document
 
     asyncio.run(_run())
 
@@ -74,27 +77,21 @@ def test_resolve_miss_returns_none(migrated_url: str) -> None:
     async def _run() -> None:
         async with _open_pool(migrated_url) as pool, pool.connection() as conn:
             async with conn.transaction():
-                await record_envelope(
+                await record_result(
                     conn,
                     principal="alice",
                     key="k1",
                     project="proj",
                     kind="runs.create",
-                    envelope=_envelope(),
+                    result=_result(),
                 )
             # Different principal, key, and kind each miss.
+            assert await resolve_replay(conn, principal="bob", key="k1", kind="runs.create") is None
             assert (
-                await resolve_envelope_replay(conn, principal="bob", key="k1", kind="runs.create")
-                is None
+                await resolve_replay(conn, principal="alice", key="k2", kind="runs.create") is None
             )
             assert (
-                await resolve_envelope_replay(conn, principal="alice", key="k2", kind="runs.create")
-                is None
-            )
-            assert (
-                await resolve_envelope_replay(
-                    conn, principal="alice", key="k1", kind="systems.provision"
-                )
+                await resolve_replay(conn, principal="alice", key="k1", kind="systems.provision")
                 is None
             )
 
@@ -106,30 +103,30 @@ def test_duplicate_record_raises_unique_violation_then_resolve_conflict_replays(
 ) -> None:
     async def _run() -> None:
         async with _open_pool(migrated_url) as pool, pool.connection() as conn:
-            env = _envelope()
+            result = _result()
             async with conn.transaction():
-                await record_envelope(
+                await record_result(
                     conn,
                     principal="alice",
                     key="k1",
                     project="proj",
                     kind="runs.create",
-                    envelope=env,
+                    result=result,
                 )
             # A second insert under the same (principal, key) aborts; resolve_conflict under
             # the same kind replays the first envelope (the self-race path).
             with pytest.raises(UniqueViolation):
                 async with conn.transaction():
-                    await record_envelope(
+                    await record_result(
                         conn,
                         principal="alice",
                         key="k1",
                         project="proj",
                         kind="runs.create",
-                        envelope=env,
+                        result=result,
                     )
             replay = await resolve_conflict(conn, principal="alice", key="k1", kind="runs.create")
-            assert replay.model_dump() == env.model_dump()
+            assert replay.document == result.document
 
     asyncio.run(_run())
 
@@ -138,13 +135,13 @@ def test_resolve_conflict_cross_tool_raises_conflict(migrated_url: str) -> None:
     async def _run() -> None:
         async with _open_pool(migrated_url) as pool, pool.connection() as conn:
             async with conn.transaction():
-                await record_envelope(
+                await record_result(
                     conn,
                     principal="alice",
                     key="shared",
                     project="proj",
                     kind="runs.create",
-                    envelope=_envelope(),
+                    result=_result(),
                 )
             # The same (principal, key) collides on the PK, but resolve_conflict under a
             # *different* tool's kind finds no matching row -> genuine cross-tool misuse.
