@@ -185,6 +185,21 @@ def test_serialize_omits_null_image_digest() -> None:
     assert 'object_key = "k"' in text
 
 
+def test_serialize_emits_one_root_device_key_per_image_block() -> None:
+    snap = _snapshot(
+        images=(
+            _image(name="base-a", volume="vol-a", state="registered"),
+            _image(name="base-b", object_key="obj-b", state="registered"),
+        )
+    )
+    text = serialize.serialize_inventory(snap)
+
+    image_blocks = [block for block in text.split("[[image]]") if "root_device =" in block]
+
+    assert len(image_blocks) == 2
+    assert all(block.count("\nroot_device = ") == 1 for block in image_blocks)
+
+
 def test_serialize_image_staged_source() -> None:
     snap = _snapshot(images=(_image(volume="vol-x", state="registered"),))
     text = serialize.serialize_inventory(snap)
