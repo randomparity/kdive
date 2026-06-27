@@ -14,7 +14,7 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
-from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
+from kdive.mcp.tools._runtime_resolution import with_runtime_for_run_target_kind
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest as _RunBindRequest
 from kdive.mcp.tools.lifecycle.runs.bind import bind_run as _bind_run
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run as _cancel_run
@@ -309,7 +309,7 @@ def _register_runs_build(
     ) -> ToolResponse:
         """Enqueue a kernel build for a run."""
         ctx = current_context()
-        return await with_runtime_for_run(
+        return await with_runtime_for_run_target_kind(
             pool,
             resolver,
             ctx,
@@ -353,7 +353,7 @@ def _register_runs_complete_build(
     ) -> ToolResponse:
         """Complete an externally built run."""
         ctx = current_context()
-        return await with_runtime_for_run(
+        return await with_runtime_for_run_target_kind(
             pool,
             resolver,
             ctx,

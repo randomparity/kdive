@@ -17,11 +17,13 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._runtime_resolution import (
     _AUTHORIZED_ALLOCATION_KIND,
+    _AUTHORIZED_BOUND_RUN_KIND,
     _AUTHORIZED_RUN_KIND,
     _AUTHORIZED_SYSTEM_KIND,
     RuntimeCallback,
     with_runtime_for_allocation,
     with_runtime_for_run,
+    with_runtime_for_run_target_kind,
     with_runtime_for_system,
 )
 from kdive.providers.core.resolver import ProviderResolver
@@ -35,8 +37,15 @@ type _RuntimeWrapper = Callable[
 ]
 
 _OBJECT_ID = "11111111-1111-1111-1111-111111111111"
+_OBJECT_UUID = UUID(_OBJECT_ID)
 _RUNTIME = cast(ProviderRuntime, object())
 _WRAPPERS: tuple[tuple[str, Callable[..., Coroutine[Any, Any, ToolResponse]]], ...] = (
+    ("allocation", with_runtime_for_allocation),
+    ("system", with_runtime_for_system),
+    ("run", with_runtime_for_run),
+    ("run", with_runtime_for_run_target_kind),
+)
+_BOUND_WRAPPERS: tuple[tuple[str, Callable[..., Coroutine[Any, Any, ToolResponse]]], ...] = (
     ("allocation", with_runtime_for_allocation),
     ("system", with_runtime_for_system),
     ("run", with_runtime_for_run),
@@ -44,7 +53,8 @@ _WRAPPERS: tuple[tuple[str, Callable[..., Coroutine[Any, Any, ToolResponse]]], .
 _WRAPPER_SQL: tuple[tuple[str, Callable[..., Coroutine[Any, Any, ToolResponse]], str], ...] = (
     ("allocation", with_runtime_for_allocation, _AUTHORIZED_ALLOCATION_KIND),
     ("system", with_runtime_for_system, _AUTHORIZED_SYSTEM_KIND),
-    ("run", with_runtime_for_run, _AUTHORIZED_RUN_KIND),
+    ("run", with_runtime_for_run, _AUTHORIZED_BOUND_RUN_KIND),
+    ("run", with_runtime_for_run_target_kind, _AUTHORIZED_RUN_KIND),
 )
 
 
@@ -111,12 +121,28 @@ class _FakeResolver:
     def __init__(self, *, error: CategorizedError | None = None) -> None:
         self.error = error
         self.calls: list[ResourceKind] = []
+        self.bound_calls: list[str] = []
 
     def resolve(self, kind: ResourceKind) -> ProviderRuntime:
         self.calls.append(kind)
         if self.error is not None:
             raise self.error
         return _RUNTIME
+
+    async def runtime_for_allocation(self, conn: object, allocation_id: UUID) -> ProviderRuntime:
+        del conn, allocation_id
+        self.bound_calls.append("allocation")
+        return self.resolve(ResourceKind.LOCAL_LIBVIRT)
+
+    async def runtime_for_system(self, conn: object, system_id: UUID) -> ProviderRuntime:
+        del conn, system_id
+        self.bound_calls.append("system")
+        return self.resolve(ResourceKind.LOCAL_LIBVIRT)
+
+    async def runtime_for_run(self, conn: object, run_id: UUID) -> ProviderRuntime:
+        del conn, run_id
+        self.bound_calls.append("run")
+        return self.resolve(ResourceKind.LOCAL_LIBVIRT)
 
 
 def _pool(pool: _FakePool) -> AsyncConnectionPool:
@@ -136,8 +162,14 @@ def _ctx(*, project: str = "proj", role: Role = Role.OPERATOR) -> RequestContext
     )
 
 
-def _row(*, project: str = "proj", kind: str | None = ResourceKind.LOCAL_LIBVIRT.value):
-    return {"project": project, "kind": kind}
+def _row(
+    *,
+    project: str = "proj",
+    kind: str | None = ResourceKind.LOCAL_LIBVIRT.value,
+    name: str = "host-a",
+    system_id: UUID | None = _OBJECT_UUID,
+):
+    return {"project": project, "kind": kind, "name": name, "system_id": system_id}
 
 
 async def _call(
@@ -256,6 +288,57 @@ def test_runtime_wrapper_resolves_and_invokes_callback_on_authorized_object(
     assert pool.conn.cursor_kwargs == {"row_factory": dict_row}
 
 
+@pytest.mark.parametrize(("kind", "wrapper"), _BOUND_WRAPPERS)
+def test_bound_runtime_wrapper_rebinds_runtime_to_resource_name(
+    kind: str, wrapper: Callable[..., Coroutine[Any, Any, ToolResponse]]
+) -> None:
+    del kind
+    pool = _FakePool(_row(name="host-bound"))
+    runtime = _BindableRuntime()
+    resolver = ProviderResolver(cast(dict, {ResourceKind.LOCAL_LIBVIRT: runtime}))
+
+    async def _callback(bound: ProviderRuntime) -> ToolResponse:
+        assert isinstance(bound, _BindableRuntime)
+        assert bound.bound_to == "host-bound"
+        return ToolResponse.success(_OBJECT_ID, "succeeded")
+
+    result = asyncio.run(
+        wrapper(
+            _pool(pool),
+            resolver,
+            _ctx(),
+            _OBJECT_ID,
+            _callback,
+            required_role=Role.OPERATOR,
+        )
+    )
+
+    assert result.status == "succeeded"
+    assert runtime.bound_to is None
+
+
+def test_bound_run_wrapper_preserves_unbound_run_configuration_error() -> None:
+    pool = _FakePool(_row(system_id=None))
+    resolver = _FakeResolver()
+
+    result = asyncio.run(_call(with_runtime_for_run, pool, resolver, _OBJECT_ID, _ctx()))
+
+    assert result.object_id == _OBJECT_ID
+    assert result.status == "error"
+    assert result.error_category == "configuration_error"
+    assert result.data == {"reason": "run_unbound"}
+    assert resolver.calls == []
+    assert resolver.bound_calls == []
+
+
 async def _success_response(runtime: ProviderRuntime) -> ToolResponse:
     assert runtime is _RUNTIME
     return ToolResponse.success(_OBJECT_ID, "succeeded")
+
+
+class _BindableRuntime:
+    def __init__(self, bound_to: str | None = None) -> None:
+        self.bound_to = bound_to
+
+    def for_resource(self, resource_name: str) -> _BindableRuntime:
+        return _BindableRuntime(resource_name)
