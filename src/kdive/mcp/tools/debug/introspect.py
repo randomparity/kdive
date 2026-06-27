@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+from collections.abc import Awaitable, Callable
 from typing import Annotated, NamedTuple, cast
 from uuid import UUID
 
@@ -150,6 +151,11 @@ class LiveDrgnSession(NamedTuple):
     session_id: UUID
 
 
+type _LiveIntrospectionAction = Callable[
+    [LiveDrgnSession, ProviderRuntime], Awaitable[ToolResponse]
+]
+
+
 async def resolve_live_drgn_session(
     conn: AsyncConnection, ctx: RequestContext, session_id: str
 ) -> LiveDrgnSession:
@@ -170,6 +176,27 @@ async def resolve_live_drgn_session(
     if isinstance(resolved, ToolResponse) or resolved.transport_handle is None:
         raise _session_config_error()
     return LiveDrgnSession(resolved.project, resolved.transport_handle, resolved.session_id)
+
+
+async def _with_live_introspection(
+    *,
+    pool: AsyncConnectionPool,
+    resolver: ProviderResolver,
+    ctx: RequestContext,
+    session_id: str,
+    mode: IntrospectionMode,
+    action: _LiveIntrospectionAction,
+) -> ToolResponse:
+    async with pool.connection() as conn:
+        try:
+            resolved = await resolve_live_drgn_session(conn, ctx, session_id)
+            runtime = await resolver.runtime_for_session(conn, resolved.session_id)
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(session_id, exc)
+    denied = _require_introspection(session_id, runtime, mode)
+    if denied is not None:
+        return denied
+    return await action(resolved, runtime)
 
 
 def _session_config_error() -> CategorizedError:
@@ -373,24 +400,22 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
         ],
     ) -> ToolResponse:
         """Run live drgn introspection over a live drgn-live DebugSession. Requires contributor."""
-        async with pool.connection() as conn:
-            try:
-                resolved = await resolve_live_drgn_session(conn, current_context(), session_id)
-            except CategorizedError as exc:
-                return ToolResponse.failure_from_error(session_id, exc)
-        async with pool.connection() as conn:
-            try:
-                runtime = await resolver.runtime_for_session(conn, resolved.session_id)
-            except CategorizedError as exc:
-                return ToolResponse.failure_from_error(session_id, exc)
-        denied = _require_introspection(session_id, runtime, _LIVE_INTROSPECTION)
-        if denied is not None:
-            return denied
-        return await _introspect_live_session(
-            session_id,
-            resolved=resolved,
-            helper=helper,
-            introspector=runtime.live_introspector,
+
+        async def _run(resolved: LiveDrgnSession, runtime: ProviderRuntime) -> ToolResponse:
+            return await _introspect_live_session(
+                session_id,
+                resolved=resolved,
+                helper=helper,
+                introspector=runtime.live_introspector,
+            )
+
+        return await _with_live_introspection(
+            pool=pool,
+            resolver=resolver,
+            ctx=current_context(),
+            session_id=session_id,
+            mode=_LIVE_INTROSPECTION,
+            action=_run,
         )
 
     @app.tool(
@@ -422,23 +447,21 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     ) -> ToolResponse:
         """Run a caller drgn script over a live drgn-live DebugSession. Requires contributor."""
         ctx = current_context()
-        async with pool.connection() as conn:
-            try:
-                resolved = await resolve_live_drgn_session(conn, ctx, session_id)
-            except CategorizedError as exc:
-                return ToolResponse.failure_from_error(session_id, exc)
-        async with pool.connection() as conn:
-            try:
-                runtime = await resolver.runtime_for_session(conn, resolved.session_id)
-            except CategorizedError as exc:
-                return ToolResponse.failure_from_error(session_id, exc)
-        denied = _require_introspection(session_id, runtime, _LIVE_SCRIPT)
-        if denied is not None:
-            return denied
-        return await _run_live_script(
-            session_id,
-            resolved=resolved,
-            script=script,
-            timeout_sec=timeout_sec,
-            introspector=runtime.live_introspector,
+
+        async def _run(resolved: LiveDrgnSession, runtime: ProviderRuntime) -> ToolResponse:
+            return await _run_live_script(
+                session_id,
+                resolved=resolved,
+                script=script,
+                timeout_sec=timeout_sec,
+                introspector=runtime.live_introspector,
+            )
+
+        return await _with_live_introspection(
+            pool=pool,
+            resolver=resolver,
+            ctx=ctx,
+            session_id=session_id,
+            mode=_LIVE_SCRIPT,
+            action=_run,
         )
