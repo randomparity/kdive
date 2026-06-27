@@ -171,20 +171,33 @@ def _artifact_read_handlers(store: _SearchStore) -> ArtifactReadHandlers:
     return ArtifactReadHandlers(lambda: store)
 
 
-def _search_request(
-    artifact_id: str,
-    pattern: str,
-    *,
-    before_lines: int = 2,
-    after_lines: int = 4,
-    max_matches: int = 20,
-) -> ArtifactSearchRequest:
+def _panic_search(artifact_id: str) -> ArtifactSearchRequest:
     return ArtifactSearchRequest(
         artifact_id=artifact_id,
-        pattern=pattern,
-        before_lines=before_lines,
-        after_lines=after_lines,
-        max_matches=max_matches,
+        pattern="panic",
+        before_lines=2,
+        after_lines=4,
+        max_matches=20,
+    )
+
+
+def _lookup_search_with_context(artifact_id: str) -> ArtifactSearchRequest:
+    return ArtifactSearchRequest(
+        artifact_id=artifact_id,
+        pattern="__d_lookup|Oops",
+        before_lines=1,
+        after_lines=1,
+        max_matches=20,
+    )
+
+
+def _invalid_pattern_search(artifact_id: str) -> ArtifactSearchRequest:
+    return ArtifactSearchRequest(
+        artifact_id=artifact_id,
+        pattern="a||b",
+        before_lines=2,
+        after_lines=4,
+        max_matches=20,
     )
 
 
@@ -196,7 +209,7 @@ def test_artifacts_search_text_maps_store_factory_failure() -> None:
 
     async def _run() -> ToolResponse:
         pool = AsyncConnectionPool("postgresql://unused", open=False)
-        request = _search_request("artifact-1", "panic")
+        request = _panic_search("artifact-1")
         return await ArtifactReadHandlers(_raise_store).artifacts_search_text(
             pool, _ctx(), request=request
         )
@@ -237,12 +250,7 @@ def test_artifacts_search_text_returns_bounded_matches(migrated_url: str) -> Non
             resp = await _artifact_read_handlers(store).artifacts_search_text(
                 pool,
                 _ctx(),
-                request=_search_request(
-                    red_id,
-                    "__d_lookup|Oops",
-                    before_lines=1,
-                    after_lines=1,
-                ),
+                request=_lookup_search_with_context(red_id),
             )
         assert resp.status == "searched"
         assert resp.data["match_count"] == "1"
@@ -261,7 +269,7 @@ def test_artifacts_search_text_sensitive_is_not_found(migrated_url: str) -> None
             resp = await _artifact_read_handlers(_SearchStore(b"panic")).artifacts_search_text(
                 pool,
                 _ctx(),
-                request=_search_request(sens_id, "panic"),
+                request=_panic_search(sens_id),
             )
         assert resp.status == "error"
         assert resp.error_category == "not_found"
@@ -275,7 +283,7 @@ def test_artifacts_search_text_requires_viewer(migrated_url: str) -> None:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             with pytest.raises(AuthorizationError):
                 await _artifact_read_handlers(_SearchStore(b"panic")).artifacts_search_text(
-                    pool, _ctx(role=None), request=_search_request(red_id, "panic")
+                    pool, _ctx(role=None), request=_panic_search(red_id)
                 )
 
     asyncio.run(_run())
@@ -287,7 +295,7 @@ def test_artifacts_search_text_rejects_oversized_before_get(migrated_url: str) -
             _, _, red_id = await _seed_system_with_artifacts(pool)
             store = _SearchStore(b"", size=1024 * 1024 + 1)
             resp = await _artifact_read_handlers(store).artifacts_search_text(
-                pool, _ctx(), request=_search_request(red_id, "panic")
+                pool, _ctx(), request=_panic_search(red_id)
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -303,7 +311,7 @@ def test_artifacts_search_text_missing_store_head_is_config_error(migrated_url: 
             _, _, red_id = await _seed_system_with_artifacts(pool)
             store = _SearchStore(b"panic", missing_head=True)
             resp = await _artifact_read_handlers(store).artifacts_search_text(
-                pool, _ctx(), request=_search_request(red_id, "panic")
+                pool, _ctx(), request=_panic_search(red_id)
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -323,7 +331,7 @@ def test_artifacts_search_text_maps_store_head_failure(migrated_url: str) -> Non
                 ),
             )
             resp = await _artifact_read_handlers(store).artifacts_search_text(
-                pool, _ctx(), request=_search_request(red_id, "panic")
+                pool, _ctx(), request=_panic_search(red_id)
             )
         assert resp.status == "error"
         assert resp.error_category == "infrastructure_failure"
@@ -338,7 +346,7 @@ def test_artifacts_search_text_rejects_non_redacted_fetch(migrated_url: str) -> 
             _, _, red_id = await _seed_system_with_artifacts(pool)
             store = _SearchStore(b"panic", sensitivity=Sensitivity.SENSITIVE)
             resp = await _artifact_read_handlers(store).artifacts_search_text(
-                pool, _ctx(), request=_search_request(red_id, "panic")
+                pool, _ctx(), request=_panic_search(red_id)
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -356,7 +364,7 @@ def test_artifacts_search_text_maps_store_get_failure(migrated_url: str) -> None
                 get_error=CategorizedError("stale", category=ErrorCategory.STALE_HANDLE),
             )
             resp = await _artifact_read_handlers(store).artifacts_search_text(
-                pool, _ctx(), request=_search_request(red_id, "panic")
+                pool, _ctx(), request=_panic_search(red_id)
             )
         assert resp.status == "error"
         assert resp.error_category == "stale_handle"
@@ -370,7 +378,7 @@ def test_artifacts_search_text_rejects_bad_pattern_before_head(migrated_url: str
             _, _, red_id = await _seed_system_with_artifacts(pool)
             store = _SearchStore(b"panic")
             resp = await _artifact_read_handlers(store).artifacts_search_text(
-                pool, _ctx(), request=_search_request(red_id, "a||b")
+                pool, _ctx(), request=_invalid_pattern_search(red_id)
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -1012,7 +1020,7 @@ def test_artifacts_search_text_quarantined_is_not_found(migrated_url: str) -> No
             quar_id = await _seed_quarantined_artifact(pool, sys_id)
             store = _SearchStore(b"panic")
             resp = await _artifact_read_handlers(store).artifacts_search_text(
-                pool, _ctx(), request=_search_request(quar_id, "panic")
+                pool, _ctx(), request=_panic_search(quar_id)
             )
         assert resp.status == "error"
         assert resp.error_category == "not_found"
