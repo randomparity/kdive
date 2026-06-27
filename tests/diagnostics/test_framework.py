@@ -138,6 +138,7 @@ def test_run_check_maps_timeout_to_error() -> None:
     assert "did not respond within" in result.detail
     assert result.fix is None
     assert result.check_id == "slow"
+    assert result.failure_category is ErrorCategory.TRANSPORT_FAILURE
 
 
 def test_run_check_maps_unexpected_exception_to_error(caplog: pytest.LogCaptureFixture) -> None:
@@ -151,6 +152,7 @@ def test_run_check_maps_unexpected_exception_to_error(caplog: pytest.LogCaptureF
     assert result.status is CheckStatus.ERROR
     assert result.fix is None
     assert result.check_id == "boom"
+    assert result.failure_category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert "backend exploded" not in result.detail
     assert "backend exploded" in caplog.text
     assert any(record.exc_info is not None for record in caplog.records)

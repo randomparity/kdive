@@ -193,6 +193,7 @@ async def run_check(check: Check, *, timeout: float) -> CheckResult:
             check_id=check.id,
             status=CheckStatus.ERROR,
             detail=f"check did not respond within {timeout:g}s",
+            failure_category=ErrorCategory.TRANSPORT_FAILURE,
         )
     except Exception as exc:  # noqa: BLE001 - backstop: a leaked error must not wedge the service
         _log.error("diagnostic check %s raised unexpectedly: %s", check.id, exc, exc_info=True)
@@ -200,6 +201,7 @@ async def run_check(check: Check, *, timeout: float) -> CheckResult:
             check_id=check.id,
             status=CheckStatus.ERROR,
             detail="check could not be run to a verdict (unexpected error)",
+            failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         )
 
 
