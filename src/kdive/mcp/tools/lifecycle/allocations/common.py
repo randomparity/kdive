@@ -7,8 +7,10 @@ from psycopg import AsyncConnection
 from kdive.domain.capacity.state import AllocationState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle import Allocation
+from kdive.mcp.exposure import visible_next_actions
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools.lifecycle._recovery import iso
+from kdive.security.authz.context import RequestContext
 
 POLL_INTERVAL_S = 0.5
 MAX_WAIT_S = 300.0
@@ -76,9 +78,14 @@ def _allocation_recovery(alloc: Allocation) -> dict[str, JsonValue]:
 
 
 def envelope_for_allocation(
-    alloc: Allocation, *, queue_position: int | None = None
+    alloc: Allocation, ctx: RequestContext, *, queue_position: int | None = None
 ) -> ToolResponse:
-    """Render an allocation as the public MCP response envelope."""
+    """Render an allocation as the public MCP response envelope.
+
+    Success-envelope ``suggested_next_actions`` are role-filtered against the caller's grant on
+    the allocation's project (ADR-0261), so a non-operator is never pointed at operator-only
+    ``systems.provision``.
+    """
     recovery = _allocation_recovery(alloc)
     if alloc.state is AllocationState.FAILED:
         category = alloc.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -94,11 +101,8 @@ def envelope_for_allocation(
     return ToolResponse.success(
         str(alloc.id),
         alloc.state.value,
-        suggested_next_actions=allocation_next_actions(alloc.state),
+        suggested_next_actions=visible_next_actions(
+            allocation_next_actions(alloc.state), ctx, alloc.project
+        ),
         data=data,
     )
-
-
-_allocation_next_actions = allocation_next_actions
-_queue_position = queue_position
-_envelope_for_allocation = envelope_for_allocation

@@ -15,6 +15,7 @@ from kdive.domain.capacity.state import AllocationState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle import Allocation
 from kdive.log import bind_context
+from kdive.mcp.exposure import visible_next_actions
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import ConfigErrorReason, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -56,7 +57,7 @@ async def get_allocation(
                 if alloc.state is AllocationState.REQUESTED
                 else None
             )
-        return envelope_for_allocation(alloc, queue_position=position)
+        return envelope_for_allocation(alloc, ctx, queue_position=position)
 
 
 async def wait_allocation(
@@ -93,7 +94,7 @@ async def wait_allocation(
                 )
             now = loop.time()
             if alloc.state is not AllocationState.REQUESTED or now >= deadline:
-                return envelope_for_allocation(alloc, queue_position=position)
+                return envelope_for_allocation(alloc, ctx, queue_position=position)
             await sleep(min(POLL_INTERVAL_S, deadline - now))
 
 
@@ -150,7 +151,7 @@ async def list_allocations(
         responses: list[ToolResponse] = []
         for row in kept:
             try:
-                responses.append(envelope_for_allocation(Allocation.model_validate(row)))
+                responses.append(envelope_for_allocation(Allocation.model_validate(row), ctx))
             except ValueError:
                 _log.warning("allocation row violates the response invariant; degraded")
                 responses.append(
@@ -170,6 +171,8 @@ async def list_allocations(
             "allocations",
             "ok",
             responses,
-            suggested_next_actions=["allocations.get", "allocations.release"],
+            suggested_next_actions=visible_next_actions(
+                ["allocations.get", "allocations.release"], ctx, project
+            ),
             data={"project": project, "truncated": truncated, "next_cursor": next_cursor},
         )

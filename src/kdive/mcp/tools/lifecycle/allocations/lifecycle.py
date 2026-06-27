@@ -10,6 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.repositories import ALLOCATIONS
 from kdive.domain.errors import ErrorCategory
 from kdive.log import bind_context
+from kdive.mcp.exposure import visible_next_actions
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
@@ -82,15 +83,19 @@ async def renew_allocation(
             outcome = await renew(
                 conn, ctx, allocation_id=uid, extend=extend, idempotency_key=idempotency_key
             )
-        return _renew_response(uid, outcome)
+        return _renew_response(uid, outcome, ctx)
 
 
-def _renew_response(uid: UUID, outcome: RenewOutcome) -> ToolResponse:
+def _renew_response(uid: UUID, outcome: RenewOutcome, ctx: RequestContext) -> ToolResponse:
     if outcome.renewed and outcome.allocation is not None:
         return ToolResponse.success(
             str(uid),
             outcome.allocation.state.value,
-            suggested_next_actions=allocation_next_actions(outcome.allocation.state),
+            suggested_next_actions=visible_next_actions(
+                allocation_next_actions(outcome.allocation.state),
+                ctx,
+                outcome.allocation.project,
+            ),
             data={"project": outcome.allocation.project},
         )
     category = outcome.category or ErrorCategory.ALLOCATION_DENIED
