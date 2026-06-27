@@ -14,7 +14,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db.repositories import BUDGETS, QUOTAS
-from kdive.domain.accounting import Budget, Quota
+from kdive.domain.accounting.records import Budget, Quota
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context

@@ -10,7 +10,7 @@ from typing import Any, TypedDict
 import pytest
 from pydantic import ValidationError
 
-from kdive.domain.accounting import (
+from kdive.domain.accounting.records import (
     Budget,
     CostClassCoefficient,
     LedgerEntry,
@@ -29,7 +29,7 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.artifacts import Artifact, Sensitivity
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import (
+from kdive.domain.lifecycle.records import (
     Allocation,
     DebugSession,
     ExpectedBootFailure,
@@ -476,7 +476,7 @@ def test_allocation_failure_category_coerces_and_defaults() -> None:
 
     from kdive.domain.capacity.state import AllocationState
     from kdive.domain.errors import ErrorCategory
-    from kdive.domain.lifecycle import Allocation
+    from kdive.domain.lifecycle.records import Allocation
 
     base = {
         "id": uuid4(),

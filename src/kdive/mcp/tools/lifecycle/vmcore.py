@@ -25,7 +25,7 @@ from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import System
+from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import CaptureVmcorePayload

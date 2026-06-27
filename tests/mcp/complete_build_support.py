@@ -23,7 +23,7 @@ from kdive.domain.capacity.state import (
     SystemState,
 )
 from kdive.domain.catalog.resources import Resource, ResourceKind
-from kdive.domain.lifecycle import Allocation, Investigation, Run, System
+from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.security.authz.rbac import Role
 

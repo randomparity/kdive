@@ -36,7 +36,7 @@ from kdive.db.repositories import SYSTEM_SHAPES
 from kdive.domain.capacity.state import AllocationState, ResourceStatus
 from kdive.domain.catalog.resources import Resource
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import SystemShape
+from kdive.domain.lifecycle.records import SystemShape
 from kdive.domain.lifecycle.rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
 from kdive.domain.pcie import (
     MatchOutcome,

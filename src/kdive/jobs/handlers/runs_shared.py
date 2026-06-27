@@ -8,7 +8,7 @@ from psycopg.types.json import Jsonb
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import RunState
-from kdive.domain.lifecycle import Run
+from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.security import audit

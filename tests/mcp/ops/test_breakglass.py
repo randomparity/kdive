@@ -29,7 +29,7 @@ from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, ResourceStatus, SystemState
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.lifecycle import Allocation, System
+from kdive.domain.lifecycle.records import Allocation, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.ops import breakglass
 from kdive.security.authz.rbac import PlatformRole

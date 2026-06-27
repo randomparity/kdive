@@ -105,7 +105,7 @@ async def _seed_system(pool: AsyncConnectionPool, project: str = "proj") -> None
 
 
 def _allocation(resource_id, project):  # noqa: ANN001, ANN202
-    from kdive.domain.lifecycle import Allocation
+    from kdive.domain.lifecycle.records import Allocation
 
     return Allocation(
         id=uuid4(),
@@ -119,7 +119,7 @@ def _allocation(resource_id, project):  # noqa: ANN001, ANN202
 
 
 def _system(allocation_id, project):  # noqa: ANN001, ANN202
-    from kdive.domain.lifecycle import System
+    from kdive.domain.lifecycle.records import System
 
     return System(
         id=uuid4(),

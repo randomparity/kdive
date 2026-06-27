@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from kdive.domain.capacity.state import AllocationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Allocation
+from kdive.domain.lifecycle.records import Allocation
 from kdive.mcp.tools.lifecycle.allocations.request import _outcome_for_metrics
 from kdive.services.allocation.admission.core import AdmissionOutcome
 from kdive.services.allocation.admission.metrics import (

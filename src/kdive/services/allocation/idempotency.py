@@ -11,7 +11,7 @@ from psycopg.types.json import Jsonb
 
 from kdive.db.repositories import ALLOCATIONS
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Allocation
+from kdive.domain.lifecycle.records import Allocation
 
 
 async def within_budget(conn: AsyncConnection, project: str, estimate: Decimal) -> bool:

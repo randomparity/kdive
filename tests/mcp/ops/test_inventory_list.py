@@ -26,7 +26,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, ResourceStatus, SystemState
 from kdive.domain.catalog.resources import Resource, ResourceKind
-from kdive.domain.lifecycle import Allocation, System
+from kdive.domain.lifecycle.records import Allocation, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.ops import inventory as inventory_tools

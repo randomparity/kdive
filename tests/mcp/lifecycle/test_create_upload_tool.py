@@ -26,7 +26,7 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Allocation, Investigation, Run, System
+from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog.artifacts import uploads as artifact_uploads

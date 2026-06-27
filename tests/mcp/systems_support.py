@@ -16,12 +16,12 @@ from kdive.components.references import ComponentKind
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS
 from kdive.db.resource_discovery import register_discovered_resource
-from kdive.domain.accounting import Budget, Quota
+from kdive.domain.accounting.records import Budget, Quota
 from kdive.domain.capacity.state import AllocationState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Allocation
+from kdive.domain.lifecycle.records import Allocation
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import SystemPayload

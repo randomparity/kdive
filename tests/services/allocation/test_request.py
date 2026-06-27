@@ -13,7 +13,7 @@ from psycopg import AsyncConnection
 from kdive.domain.capacity.state import AllocationState, ResourceStatus
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Allocation
+from kdive.domain.lifecycle.records import Allocation
 from kdive.domain.lifecycle.shapes import ResolvedSizing
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role

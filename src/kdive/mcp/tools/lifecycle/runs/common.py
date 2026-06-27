@@ -8,7 +8,7 @@ from uuid import UUID
 from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory, suppressed_detail
-from kdive.domain.lifecycle import Run
+from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import Job
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import job_envelope

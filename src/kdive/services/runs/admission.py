@@ -19,7 +19,13 @@ from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import InvestigationState, RunState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Allocation, ExpectedBootFailure, Investigation, Run, System
+from kdive.domain.lifecycle.records import (
+    Allocation,
+    ExpectedBootFailure,
+    Investigation,
+    Run,
+    System,
+)
 from kdive.domain.lifecycle.system_reuse import (
     ReuseRequirement,
     read_system_sizing,

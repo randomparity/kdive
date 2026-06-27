@@ -22,7 +22,7 @@ from opentelemetry.sdk.trace import TracerProvider
 
 from kdive.domain.capacity.state import JobState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.lifecycle import System
+from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers.systems import teardown_handler
 from kdive.jobs.provider_context import clear_provider_kind

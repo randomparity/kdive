@@ -49,7 +49,7 @@ from kdive.domain.capacity.state import (
     SystemState,
 )
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.lifecycle import Allocation, Investigation, Run, System
+from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.mcp.auth import AuthError

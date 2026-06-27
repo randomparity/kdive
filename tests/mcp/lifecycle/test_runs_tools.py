@@ -31,7 +31,7 @@ from kdive.domain.capacity.state import (
 )
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Allocation, Investigation, Run, System
+from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.domain.pcie import PCIeClaim
 from kdive.jobs.handlers import runs as runs_handlers

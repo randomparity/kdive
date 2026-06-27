@@ -30,7 +30,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, IllegalTransition, JobState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Allocation, System
+from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.lifecycle.sizing import MB_PER_GB, AllocationSizing
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue

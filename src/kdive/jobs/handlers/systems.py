@@ -16,7 +16,7 @@ from kdive.db.repositories import ARTIFACTS, SYSTEMS
 from kdive.domain.capacity.state import IllegalTransition, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import System
+from kdive.domain.lifecycle.records import System
 from kdive.domain.lifecycle.rules import TERMINAL_SYSTEM_STATES
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job

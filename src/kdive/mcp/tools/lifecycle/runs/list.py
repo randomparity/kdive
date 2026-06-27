@@ -16,7 +16,7 @@ from psycopg.sql import Composable
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import RunState
-from kdive.domain.lifecycle import Run
+from kdive.domain.lifecycle.records import Run
 from kdive.log import bind_context
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, ConfigErrorReason, InvalidCursor

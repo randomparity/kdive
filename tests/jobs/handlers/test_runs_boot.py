@@ -15,7 +15,7 @@ from kdive.artifacts.storage import StoredArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Run
+from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers import runs, runs_boot
 from kdive.jobs.handlers.runs_build import BuildHostTransportFactories

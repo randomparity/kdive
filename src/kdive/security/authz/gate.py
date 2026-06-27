@@ -25,7 +25,7 @@ from kdive.domain.operations.jobs import DestructiveJobKind
 from kdive.security.authz.rbac import AuthorizationError, Role, require_role
 
 if TYPE_CHECKING:
-    from kdive.domain.lifecycle import Allocation
+    from kdive.domain.lifecycle.records import Allocation
     from kdive.security.authz.context import RequestContext
 
 

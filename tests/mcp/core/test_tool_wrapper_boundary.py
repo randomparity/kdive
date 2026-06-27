@@ -21,10 +21,10 @@ import kdive.config as config
 from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, INVESTIGATIONS, QUOTAS, RUNS, SYSTEMS
 from kdive.db.resource_discovery import register_discovered_resource
-from kdive.domain.accounting import Budget, Quota
+from kdive.domain.accounting.records import Budget, Quota
 from kdive.domain.capacity.state import AllocationState, InvestigationState, RunState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.lifecycle import Allocation, Investigation, Run, System
+from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.mcp.app import build_app
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as resources_tools

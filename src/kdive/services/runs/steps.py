@@ -13,7 +13,7 @@ from psycopg.rows import dict_row
 from kdive.domain.capacity.state import JobState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.lifecycle import Run, System
+from kdive.domain.lifecycle.records import Run, System
 from kdive.images.families._fedora_customize import READINESS_MARKER
 from kdive.jobs import queue
 from kdive.profiles.provider_policy import capture_method

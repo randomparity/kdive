@@ -28,7 +28,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import INVESTIGATIONS
 from kdive.domain.capacity.state import IllegalTransition, InvestigationState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.lifecycle import ExternalRef, Investigation
+from kdive.domain.lifecycle.records import ExternalRef, Investigation
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse

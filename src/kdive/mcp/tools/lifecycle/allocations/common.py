@@ -6,7 +6,7 @@ from psycopg import AsyncConnection
 
 from kdive.domain.capacity.state import AllocationState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.lifecycle import Allocation
+from kdive.domain.lifecycle.records import Allocation
 from kdive.mcp.exposure import visible_next_actions
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools.lifecycle._recovery import iso

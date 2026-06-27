@@ -26,7 +26,7 @@ from kdive.db.repositories import (
     SYSTEMS,
 )
 from kdive.db.resource_discovery import register_discovered_resource
-from kdive.domain.accounting import Budget, Quota
+from kdive.domain.accounting.records import Budget, Quota
 from kdive.domain.capacity.state import (
     AllocationState,
     InvestigationState,
@@ -34,7 +34,7 @@ from kdive.domain.capacity.state import (
     SystemState,
 )
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.lifecycle import Allocation, Investigation, Run, System
+from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 

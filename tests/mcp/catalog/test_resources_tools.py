@@ -20,7 +20,7 @@ from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.lifecycle import Allocation, System
+from kdive.domain.lifecycle.records import Allocation, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as catalog_resources_tools

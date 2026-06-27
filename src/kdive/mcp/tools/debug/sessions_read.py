@@ -20,7 +20,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import DEBUG_SESSIONS, RUNS
 from kdive.domain.capacity.state import DebugSessionState
-from kdive.domain.lifecycle import DebugSession
+from kdive.domain.lifecycle.records import DebugSession
 from kdive.log import bind_context
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT

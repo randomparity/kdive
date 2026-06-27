@@ -30,7 +30,7 @@ from kdive.db.repositories import ARTIFACTS, RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Run
+from kdive.domain.lifecycle.records import Run
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid

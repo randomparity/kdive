@@ -20,7 +20,7 @@ from kdive.db.repositories import ARTIFACTS, RUNS
 from kdive.domain.capacity.state import IllegalTransition, RunState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import Run
+from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.jobs.context import context_from_job as job_context_from_job

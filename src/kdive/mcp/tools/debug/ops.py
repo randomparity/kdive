@@ -34,7 +34,7 @@ import kdive.config as config
 from kdive.config.core_settings import DEBUG_DIR
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle import DebugSession
+from kdive.domain.lifecycle.records import DebugSession
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse

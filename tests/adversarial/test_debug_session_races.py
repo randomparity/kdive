@@ -40,7 +40,7 @@ from kdive.domain.capacity.state import (
     SystemState,
 )
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.lifecycle import DebugSession, Investigation, Run, System
+from kdive.domain.lifecycle.records import DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.debug import sessions as debug_tools
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy

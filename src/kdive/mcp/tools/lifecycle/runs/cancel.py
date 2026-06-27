@@ -11,7 +11,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import JOBS, RUNS
 from kdive.domain.capacity.state import IllegalTransition, JobState, RunState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.lifecycle import Run
+from kdive.domain.lifecycle.records import Run
 from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse

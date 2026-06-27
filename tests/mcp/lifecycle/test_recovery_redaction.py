@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 from kdive.domain.capacity.state import RunState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.lifecycle import Run, System
+from kdive.domain.lifecycle.records import Run, System
 from kdive.mcp.responses import JsonValue
 from kdive.mcp.tools.lifecycle.runs.common import envelope_for_run
 from kdive.mcp.tools.lifecycle.systems.view import system_envelope

@@ -13,7 +13,7 @@ import pytest
 from kdive.db.repositories import ALLOCATIONS, RESOURCES
 from kdive.domain.capacity.state import AllocationState, ResourceStatus
 from kdive.domain.catalog.resources import Resource, ResourceKind
-from kdive.domain.lifecycle import Allocation
+from kdive.domain.lifecycle.records import Allocation
 from kdive.mcp.auth import AuthError, RequestContext
 from kdive.security.audit import (
     AuditEvent,

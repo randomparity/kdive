@@ -36,7 +36,7 @@ from kdive.domain.capacity.state import (
     SystemState,
 )
 from kdive.domain.catalog.resources import Resource, ResourceKind
-from kdive.domain.lifecycle import Allocation, DebugSession, Investigation, Run, System
+from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigation, Run, System
 from kdive.providers.infra.reaping import OwnedDomain
 from tests.db.conftest import migrated_url, pg_conn, postgres_url
 
