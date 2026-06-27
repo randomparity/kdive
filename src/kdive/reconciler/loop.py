@@ -71,6 +71,7 @@ from kdive.reconciler.repairs import build_hosts as build_host_repairs
 from kdive.reconciler.repairs import debug_sessions as debug_session_repairs
 from kdive.reconciler.repairs import jobs as job_repairs
 from kdive.reconciler.repairs import systems as system_repairs
+from kdive.services.allocation import promotion as allocation_promotion
 from kdive.services.allocation.admission.metrics import AdmissionMetrics
 from kdive.services.images.retention import (
     ImageSweepStore,
@@ -96,11 +97,10 @@ _gc_idempotency_keys = gc_repairs.gc_idempotency_keys
 _gc_report_artifacts = gc_repairs.gc_report_artifacts
 _gc_investigation_artifacts = gc_repairs.gc_investigation_artifacts
 _gc_expired_build_artifacts = gc_repairs.gc_expired_build_artifacts
-_promote_pending = allocation_repairs.promote_pending
+_promote_pending = allocation_promotion.promote_pending
 _reap_console_collectors = gc_repairs.reap_console_collectors
 _reap_orphaned_dump_volumes = gc_repairs.reap_orphaned_dump_volumes
 _reap_orphaned_active_allocations = allocation_repairs.reap_orphaned_active_allocations
-_reap_queue_timeouts = allocation_repairs.reap_queue_timeouts
 _reap_queue_timeouts_for = allocation_repairs.reap_queue_timeouts_for
 _reclaim_build_host_leases = build_host_repairs.reclaim_orphan_build_host_leases
 _reap_orphan_build_vms = build_host_repairs.reap_orphan_build_vms
@@ -125,7 +125,6 @@ __all__ = [
     "_reap_orphaned_active_allocations",
     "_reap_console_collectors",
     "_reap_orphaned_dump_volumes",
-    "_reap_queue_timeouts",
     "_reclaim_build_host_leases",
     "_repair_abandoned_jobs",
     "_repair_dead_sessions",

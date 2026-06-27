@@ -37,9 +37,9 @@ from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeClaim
 from kdive.mcp.auth import RequestContext
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import loop
-from kdive.reconciler.repairs.allocations import promote_pending, reap_queue_timeouts
 from kdive.security.audit import args_digest
 from kdive.services.allocation.admission.core import AllocationRequest, admit
+from kdive.services.allocation.promotion import promote_pending, reap_queue_timeouts
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.reconciler.conftest import connect, run_repair
 
