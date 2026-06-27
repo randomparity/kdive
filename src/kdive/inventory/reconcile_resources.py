@@ -31,7 +31,7 @@ live allocation is **cordoned**, not deleted (the reaper-style refuse-if-live co
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
@@ -49,7 +49,12 @@ from kdive.domain.catalog.resource_capabilities import (
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.inventory._row_typing import RowTyper
 from kdive.inventory.errors import InventoryError
-from kdive.inventory.model import InventoryDoc, LocalLibvirtInstance
+from kdive.inventory.model import (
+    FaultInjectInstance,
+    InventoryDoc,
+    LocalLibvirtInstance,
+    RemoteLibvirtInstance,
+)
 from kdive.inventory.overrides import (
     InventoryOverrideDisposition,
     InventorySourceKind,
@@ -133,6 +138,14 @@ class _DeclaredResource:
     pool: str
 
 
+@dataclass(frozen=True)
+class _ConfigResourceUpsert:
+    declared: _DeclaredResource
+    adopt_by_host: bool
+    discovery_owned_keys: tuple[str, ...] = ()
+    detached: bool = False
+
+
 async def reconcile_resources(conn: AsyncConnection, doc: InventoryDoc) -> ReconcileDiff:
     """Apply ``doc``'s provider instances onto ``resources`` and prune departed config rows.
 
@@ -180,57 +193,83 @@ async def _create_config_resources(
     rows for one host.
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-        for inst in doc.fault_inject:
-            disposition = _disposition(overrides, ResourceKind.FAULT_INJECT, inst.name)
-            if disposition is InventoryOverrideDisposition.REMOVED:
-                continue  # ledger suppresses this identity; the prune sweep deletes a live row
-            caps: ResourceCaps = {
-                VCPUS_KEY: inst.vcpus,
-                MEMORY_MB_KEY: inst.memory_mb,
-                CONCURRENT_ALLOCATION_CAP_KEY: inst.concurrent_allocation_cap,
-            }
-            declared = _DeclaredResource(
-                kind=ResourceKind.FAULT_INJECT,
-                name=inst.name,
-                host_uri=_FAULT_INJECT_HOST_URI,
-                cost_class=inst.cost_class,
-                caps=caps,
-                pool=inst.pool,
-            )
-            async with resource_identity_lock(conn, ResourceKind.FAULT_INJECT, inst.name):
+        for request in _config_resource_upserts(doc, overrides):
+            declared = request.declared
+            async with resource_identity_lock(conn, declared.kind, declared.name):
                 await _upsert_config_resource(
                     cur,
                     diff,
                     declared=declared,
-                    adopt_by_host=False,
-                    detached=disposition is InventoryOverrideDisposition.DETACHED,
+                    adopt_by_host=request.adopt_by_host,
+                    discovery_owned_keys=request.discovery_owned_keys,
+                    detached=request.detached,
                 )
-        for inst in doc.remote_libvirt:
-            disposition = _disposition(overrides, ResourceKind.REMOTE_LIBVIRT, inst.name)
-            if disposition is InventoryOverrideDisposition.REMOVED:
-                continue  # ledger suppresses this identity; the prune sweep deletes a live row
-            caps: ResourceCaps = {
-                VCPUS_KEY: inst.vcpus,
-                MEMORY_MB_KEY: inst.memory_mb,
-                CONCURRENT_ALLOCATION_CAP_KEY: inst.concurrent_allocation_cap,
-            }
-            declared = _DeclaredResource(
-                kind=ResourceKind.REMOTE_LIBVIRT,
-                name=inst.name,
-                host_uri=inst.uri,
-                cost_class=inst.cost_class,
-                caps=caps,
-                pool=inst.pool,
-            )
-            async with resource_identity_lock(conn, ResourceKind.REMOTE_LIBVIRT, inst.name):
-                await _upsert_config_resource(
-                    cur,
-                    diff,
-                    declared=declared,
-                    adopt_by_host=True,
-                    discovery_owned_keys=(VCPUS_KEY, MEMORY_MB_KEY),
-                    detached=disposition is InventoryOverrideDisposition.DETACHED,
-                )
+
+
+def _config_resource_upserts(
+    doc: InventoryDoc,
+    overrides: Mapping[tuple[str, str], Any],
+) -> Iterator[_ConfigResourceUpsert]:
+    """Yield config-owned provider resources with their provider-specific upsert options."""
+    for inst in doc.fault_inject:
+        request = _fault_inject_upsert(inst, overrides)
+        if request is not None:
+            yield request
+    for inst in doc.remote_libvirt:
+        request = _remote_libvirt_upsert(inst, overrides)
+        if request is not None:
+            yield request
+
+
+def _fault_inject_upsert(
+    inst: FaultInjectInstance,
+    overrides: Mapping[tuple[str, str], Any],
+) -> _ConfigResourceUpsert | None:
+    disposition = _disposition(overrides, ResourceKind.FAULT_INJECT, inst.name)
+    if disposition is InventoryOverrideDisposition.REMOVED:
+        return None
+    return _ConfigResourceUpsert(
+        declared=_DeclaredResource(
+            kind=ResourceKind.FAULT_INJECT,
+            name=inst.name,
+            host_uri=_FAULT_INJECT_HOST_URI,
+            cost_class=inst.cost_class,
+            caps=_declared_caps(inst),
+            pool=inst.pool,
+        ),
+        adopt_by_host=False,
+        detached=disposition is InventoryOverrideDisposition.DETACHED,
+    )
+
+
+def _remote_libvirt_upsert(
+    inst: RemoteLibvirtInstance,
+    overrides: Mapping[tuple[str, str], Any],
+) -> _ConfigResourceUpsert | None:
+    disposition = _disposition(overrides, ResourceKind.REMOTE_LIBVIRT, inst.name)
+    if disposition is InventoryOverrideDisposition.REMOVED:
+        return None
+    return _ConfigResourceUpsert(
+        declared=_DeclaredResource(
+            kind=ResourceKind.REMOTE_LIBVIRT,
+            name=inst.name,
+            host_uri=inst.uri,
+            cost_class=inst.cost_class,
+            caps=_declared_caps(inst),
+            pool=inst.pool,
+        ),
+        adopt_by_host=True,
+        discovery_owned_keys=(VCPUS_KEY, MEMORY_MB_KEY),
+        detached=disposition is InventoryOverrideDisposition.DETACHED,
+    )
+
+
+def _declared_caps(inst: FaultInjectInstance | RemoteLibvirtInstance) -> ResourceCaps:
+    return {
+        VCPUS_KEY: inst.vcpus,
+        MEMORY_MB_KEY: inst.memory_mb,
+        CONCURRENT_ALLOCATION_CAP_KEY: inst.concurrent_allocation_cap,
+    }
 
 
 async def _upsert_config_resource(
