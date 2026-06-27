@@ -113,6 +113,15 @@ class _RunsCreatePayload(ToolPayload):
         default=None,
         description="Replay-safe key; a repeated key returns the prior envelope.",
     )
+    label: str | None = Field(
+        default=None,
+        description=(
+            "Optional human handle for this Run, echoed back as data.label in runs.get / "
+            "runs.list so you thread fewer bare UUIDs. Freeform and non-unique: 1..200 "
+            "printable characters (surrounding whitespace trimmed); not a lookup key. Omit "
+            "for no handle."
+        ),
+    )
 
     def to_create_request(self) -> _RunCreateRequest:
         """Convert the public MCP payload into the service request record."""
@@ -123,6 +132,7 @@ class _RunsCreatePayload(ToolPayload):
             build_profile=dump_build_profile(self.build_profile),
             expected_boot_failure=self.expected_boot_failure,
             reuse_requirement=self.reuse_requirement,
+            label=self.label,
         )
 
 

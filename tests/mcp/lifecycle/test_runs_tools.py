@@ -239,6 +239,7 @@ async def _seed_run(
     build_profile: dict[str, Any] | None = None,
     project: str = "proj",
     provisioning_profile: dict[str, Any] | None = None,
+    label: str | None = None,
 ) -> str:
     inv_id = await _seed_investigation(pool, project=project)
     sys_id = await _seed_system(pool, project=project, provisioning_profile=provisioning_profile)
@@ -257,6 +258,7 @@ async def _seed_run(
                 state=state,
                 build_profile=_profile() if build_profile is None else build_profile,
                 failure_category=failure,
+                label=label,
             ),
         )
     return str(run.id)
@@ -821,6 +823,35 @@ def test_get_created_run(migrated_url: str) -> None:
             resp = await get_run(pool, _ctx(), run_id)
         assert resp.status == "created"
         assert resp.suggested_next_actions == ["runs.get", "runs.build"]
+
+    asyncio.run(_run())
+
+
+def test_get_run_echoes_label(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            labeled = await _seed_run(pool, state=RunState.CREATED, label="repro-A")
+            unlabeled = await _seed_run(pool, state=RunState.CREATED)
+            labeled_resp = await get_run(pool, _ctx(), labeled)
+            unlabeled_resp = await get_run(pool, _ctx(), unlabeled)
+        assert labeled_resp.data["label"] == "repro-A"
+        assert unlabeled_resp.data["label"] is None
+
+    asyncio.run(_run())
+
+
+def test_get_failed_run_carries_label(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(
+                pool,
+                state=RunState.FAILED,
+                failure=ErrorCategory.BUILD_FAILURE,
+                label="repro-fail",
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.error_category == ErrorCategory.BUILD_FAILURE
+        assert resp.data["label"] == "repro-fail"
 
     asyncio.run(_run())
 
@@ -1608,6 +1639,7 @@ async def _create(
     profile=None,
     reuse_requirement: RunReuseRequirementInput | None = None,
     idempotency_key: str | None = None,
+    label: str | None = None,
 ):
     return await create_run(
         pool,
@@ -1617,10 +1649,89 @@ async def _create(
             system_id=sys_id,
             build_profile=profile or _profile(),
             reuse_requirement=reuse_requirement,
+            label=label,
         ),
         resolver=provider_resolver(),
         idempotency_key=idempotency_key,
     )
+
+
+def test_create_with_label_echoes_and_persists(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            resp = await _create(pool, _ctx(), inv_id, sys_id, label="repro-A")
+            assert resp.status == "created"
+            assert resp.data["label"] == "repro-A"
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT label FROM runs WHERE id = %s", (resp.object_id,))
+                row = await cur.fetchone()
+        assert row is not None and row["label"] == "repro-A"
+
+    asyncio.run(_run())
+
+
+def test_create_without_label_stores_null(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            resp = await _create(pool, _ctx(), inv_id, sys_id)
+            assert resp.data["label"] is None
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT label FROM runs WHERE id = %s", (resp.object_id,))
+                row = await cur.fetchone()
+        assert row is not None and row["label"] is None
+
+    asyncio.run(_run())
+
+
+def test_create_label_is_stored_stripped(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            resp = await _create(pool, _ctx(), inv_id, sys_id, label="  spaced run  ")
+            assert resp.data["label"] == "spaced run"
+
+    asyncio.run(_run())
+
+
+def test_create_invalid_label_rejected_with_no_row_or_audit(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            resp = await _create(pool, _ctx(), inv_id, sys_id, label="bad\nlabel")
+            assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR
+            assert resp.data["reason"] == "invalid_label"
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM runs WHERE investigation_id = %s", (inv_id,)
+                )
+                runs = await cur.fetchone()
+                await cur.execute("SELECT count(*) AS n FROM audit_log WHERE tool = 'runs.create'")
+                audits = await cur.fetchone()
+        assert runs is not None and runs["n"] == 0
+        assert audits is not None and audits["n"] == 0
+
+    asyncio.run(_run())
+
+
+def test_create_keyed_replay_keeps_first_label(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            first = await _create(pool, _ctx(), inv_id, sys_id, idempotency_key="k1", label="first")
+            second = await _create(
+                pool, _ctx(), inv_id, sys_id, idempotency_key="k1", label="second"
+            )
+        assert first.data["label"] == "first"
+        assert second.data["label"] == "first"
+
+    asyncio.run(_run())
 
 
 def test_create_keyed_retry_replays_one_run(migrated_url: str) -> None:
