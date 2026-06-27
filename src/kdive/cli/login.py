@@ -20,8 +20,9 @@ import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from http.client import HTTPMessage
 from pathlib import Path
-from typing import Self
+from typing import IO, Self
 
 import kdive.config as config
 from kdive.config.cli_settings import CLI_CLIENT_ID
@@ -174,6 +175,27 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class _SchemeEnforcingRedirect(urllib.request.HTTPRedirectHandler):
+    """Re-validate the redirect target's scheme so a 3xx cannot escape http/https.
+
+    urllib's default redirect handler permits ``ftp://`` targets, so an allowlisted ``https``
+    issuer could 302-redirect the token fetch into ``ftp://internal-host``; re-running the same
+    allowlist on the redirect target keeps the http/https-only intent across redirects.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        _validate_fetch_url(newurl, label="OIDC redirect URL")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _authorization_code(issuer: OidcIssuer, claims: Mapping[str, object]) -> str:
     """Drive the login form and return the authorization ``code`` from the 302 redirect."""
     params = urllib.parse.urlencode(
@@ -216,7 +238,8 @@ def _exchange_code(issuer: OidcIssuer, code: str) -> str:
         }
     ).encode()
     request = urllib.request.Request(issuer.token_endpoint, data=body, method="POST")
-    with urllib.request.urlopen(request) as response:  # nosec B310 - issuer URL is http(s)-only.
+    opener = urllib.request.build_opener(_SchemeEnforcingRedirect())
+    with opener.open(request) as response:  # nosec B310 - issuer + redirects are http(s)-only.
         payload = json.loads(response.read())
     access_token = payload.get("access_token")
     if not isinstance(access_token, str) or not access_token:

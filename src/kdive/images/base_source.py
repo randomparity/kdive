@@ -13,7 +13,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from http.client import HTTPMessage
 from pathlib import Path
+from typing import IO
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.rootfs_catalog import CloudImageSource, RootfsSource, VirtBuilderSource
@@ -24,9 +26,31 @@ _DIGEST_CHUNK_BYTES = 1 << 20
 _FETCH_SCHEMES = frozenset({"http", "https"})
 
 
+class _CloudImageRedirect(urllib.request.HTTPRedirectHandler):
+    """Re-validate the post-redirect URL's scheme so a 3xx cannot escape http/https.
+
+    urllib's default redirect handler permits ``ftp://`` targets, so an allowlisted ``https``
+    server could 302-redirect into ``ftp://internal-host``, escaping the http/https-only intent.
+    Re-running the same allowlist on the redirect target keeps that intent across redirects.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        _validate_cloud_image_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _real_download(url: str, dest: Path) -> None:  # pragma: no cover - network IO
     """Stream ``url`` to ``dest`` using ``urllib`` (the default, un-unit-tested downloader)."""
-    with urllib.request.urlopen(url) as response, dest.open("wb") as handle:  # noqa: S310  # nosec B310
+    opener = urllib.request.build_opener(_CloudImageRedirect())
+    with opener.open(url) as response, dest.open("wb") as handle:  # noqa: S310  # nosec B310
         while chunk := response.read(_DIGEST_CHUNK_BYTES):
             handle.write(chunk)
 

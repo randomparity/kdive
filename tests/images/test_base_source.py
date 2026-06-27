@@ -3,13 +3,43 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import urllib.request
+from http.client import HTTPMessage
 from pathlib import Path
 
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.base_source import acquire_base
+from kdive.images.base_source import _CloudImageRedirect, acquire_base
 from kdive.images.rootfs_catalog import CloudImageSource, VirtBuilderSource
+
+
+def _follow_redirect(newurl: str) -> urllib.request.Request | None:
+    return _CloudImageRedirect().redirect_request(
+        urllib.request.Request("https://allowed.example/base.qcow2"),
+        io.BytesIO(b""),
+        302,
+        "Found",
+        HTTPMessage(),
+        newurl,
+    )
+
+
+@pytest.mark.parametrize("target", ["ftp://internal-host/base.qcow2", "file:///etc/passwd"])
+def test_redirect_to_non_http_scheme_is_rejected(target: str) -> None:
+    """A 3xx into ftp:// or file:// is rejected — the allowlist is re-checked post-redirect.
+
+    urllib follows redirects and its handler permits ftp://, so without this an allowlisted
+    https server could 302 into ftp://internal-host, escaping the http/https-only intent.
+    """
+    with pytest.raises(CategorizedError) as e:
+        _follow_redirect(target)
+    assert e.value.details["reason"] == "unsupported_url_scheme"
+
+
+def test_redirect_to_https_is_allowed() -> None:
+    assert _follow_redirect("https://mirror/base.qcow2") is not None  # yields a follow-up Request
 
 
 def _unused(*args: object, **kwargs: object) -> None:

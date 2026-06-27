@@ -6,9 +6,12 @@ mock-oauth2-server is up; otherwise it skips (it never un-gates the integration 
 
 from __future__ import annotations
 
+import io
 import os
 import stat
+import urllib.request
 from collections.abc import Mapping
+from http.client import HTTPMessage
 from pathlib import Path
 
 import pytest
@@ -18,6 +21,32 @@ from kdive.cli import login, transport
 from kdive.cli.login import OidcIssuer
 from kdive.config.cli_settings import CLI_CLIENT_ID, TOKEN
 from tests.integration.live_stack.conftest import require_issuer
+
+
+def _follow_redirect(newurl: str) -> urllib.request.Request | None:
+    return login._SchemeEnforcingRedirect().redirect_request(
+        urllib.request.Request("https://issuer.example/token"),
+        io.BytesIO(b""),
+        302,
+        "Found",
+        HTTPMessage(),
+        newurl,
+    )
+
+
+@pytest.mark.parametrize("target", ["ftp://internal-host/token", "file:///etc/passwd"])
+def test_token_redirect_to_non_http_scheme_is_rejected(target: str) -> None:
+    """A 3xx into ftp:// or file:// during the token fetch is rejected post-redirect.
+
+    urllib follows redirects and its handler permits ftp://, so without this an allowlisted
+    https issuer could 302 the token fetch into ftp://internal-host.
+    """
+    with pytest.raises(ValueError, match="http or https"):
+        _follow_redirect(target)
+
+
+def test_token_redirect_to_https_is_allowed() -> None:
+    assert _follow_redirect("https://issuer.example/token2") is not None  # yields a follow-up
 
 
 def test_mint_local_token_carries_project_role_and_platform_roles(
