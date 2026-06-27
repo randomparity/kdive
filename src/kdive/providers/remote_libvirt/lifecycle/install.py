@@ -30,14 +30,19 @@ from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports import InstallRequest
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
-from kdive.providers.remote_libvirt.endpoint_preflight import validate_guest_routable_endpoint
+from kdive.providers.remote_libvirt.connection.endpoint_preflight import (
+    validate_guest_routable_endpoint,
+)
+from kdive.providers.remote_libvirt.connection.transport import (
+    open_libvirt_protocol,
+    remote_connection,
+)
 from kdive.providers.remote_libvirt.guest.agent import (
     AgentCommand,
     GuestAgentExec,
     qemu_agent_command,
 )
 from kdive.providers.remote_libvirt.guest.artifact_channel import InTargetArtifactChannel
-from kdive.providers.remote_libvirt.transport import open_libvirt_protocol, remote_connection
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env

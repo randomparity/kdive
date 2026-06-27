@@ -579,7 +579,9 @@ def test_transport_resetter_is_null_without_remote() -> None:
 
 
 def test_transport_resetter_is_remote_when_enabled() -> None:
-    from kdive.providers.remote_libvirt.transport_reset import RemoteLibvirtTransportResetter
+    from kdive.providers.remote_libvirt.connection.transport_reset import (
+        RemoteLibvirtTransportResetter,
+    )
 
     comp = composition.ProviderComposition()
     resetter = comp.build_reconciler_transport_resetter(enable_remote_libvirt=True)

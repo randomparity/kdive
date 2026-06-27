@@ -34,6 +34,10 @@ from kdive.providers.remote_libvirt.config import (
     remote_config_for_resource,
     unbound_remote_config,
 )
+from kdive.providers.remote_libvirt.connection.transport import (
+    RemoteLibvirtConnections,
+    remote_libvirt_connections,
+)
 from kdive.providers.remote_libvirt.guest.agent import AgentCommand, qemu_agent_command
 from kdive.providers.remote_libvirt.guest.build_transport import GuestExecBuildTransport
 from kdive.providers.remote_libvirt.lifecycle.provisioning import (
@@ -50,10 +54,6 @@ from kdive.providers.remote_libvirt.lifecycle.storage import (
     delete_volume,
     ensure_named_overlay,
     lookup_pool,
-)
-from kdive.providers.remote_libvirt.transport import (
-    RemoteLibvirtConnections,
-    remote_libvirt_connections,
 )
 from kdive.providers.shared.build_host.workspaces.workspace import redacted_tail
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS, register_kdive_namespace

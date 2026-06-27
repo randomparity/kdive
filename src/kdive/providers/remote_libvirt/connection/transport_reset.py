@@ -24,7 +24,10 @@ import libvirt
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports import TransportHandleData
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, all_remote_configs
-from kdive.providers.remote_libvirt.transport import open_libvirt_protocol, remote_connection
+from kdive.providers.remote_libvirt.connection.transport import (
+    open_libvirt_protocol,
+    remote_connection,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 

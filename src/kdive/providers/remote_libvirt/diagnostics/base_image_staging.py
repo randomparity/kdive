@@ -35,12 +35,15 @@ import libvirt
 from kdive.diagnostics.checks import BaseImageStagingOutcome, BaseImageStagingProbe
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
+from kdive.providers.remote_libvirt.connection.transport import (
+    open_libvirt_protocol,
+    remote_connection,
+)
 from kdive.providers.remote_libvirt.lifecycle.storage import (
     StorageConn,
     VolumeStaging,
     lookup_volume_staged,
 )
-from kdive.providers.remote_libvirt.transport import open_libvirt_protocol, remote_connection
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 

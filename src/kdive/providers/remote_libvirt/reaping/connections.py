@@ -17,7 +17,7 @@ from contextlib import AbstractContextManager, ExitStack
 from typing import NoReturn, Protocol
 
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, all_remote_configs
-from kdive.providers.remote_libvirt.transport import (
+from kdive.providers.remote_libvirt.connection.transport import (
     ClosableConn,
     RemoteLibvirtConnections,
     open_libvirt_protocol,

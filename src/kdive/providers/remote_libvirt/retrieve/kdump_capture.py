@@ -16,7 +16,9 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports import CaptureOutput
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
-from kdive.providers.remote_libvirt.endpoint_preflight import validate_guest_routable_endpoint
+from kdive.providers.remote_libvirt.connection.endpoint_preflight import (
+    validate_guest_routable_endpoint,
+)
 from kdive.providers.remote_libvirt.guest.agent import (
     AgentCommand,
     AgentExecResult,

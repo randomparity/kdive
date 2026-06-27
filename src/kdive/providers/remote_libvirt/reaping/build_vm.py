@@ -22,6 +22,9 @@ import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import BuildVm
+from kdive.providers.remote_libvirt.connection.transport import (
+    RemoteLibvirtConnections,
+)
 from kdive.providers.remote_libvirt.lifecycle.build_vm import (
     BUILD_DOMAIN_PREFIX,
     build_overlay_volume_name,
@@ -32,9 +35,6 @@ from kdive.providers.remote_libvirt.reaping.connections import (
     map_over_fleet,
     open_libvirt_reaper,
     remote_libvirt_reaper_connections,
-)
-from kdive.providers.remote_libvirt.transport import (
-    RemoteLibvirtConnections,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 

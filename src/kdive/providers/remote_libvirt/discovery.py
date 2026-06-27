@@ -22,7 +22,7 @@ from kdive.domain.catalog.discovery import ResourceRecord
 from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_for_resource
-from kdive.providers.remote_libvirt.transport import (
+from kdive.providers.remote_libvirt.connection.transport import (
     OpenConnection,
     open_libvirt,
     remote_connection,

@@ -20,13 +20,13 @@ from urllib.parse import urlsplit
 
 from kdive.diagnostics.checks import TlsProbe, TlsProbeOutcome
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
-from kdive.providers.remote_libvirt.transport import materialized_pkipath
+from kdive.providers.remote_libvirt.connection.transport import materialized_pkipath
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 
 _DEFAULT_TLS_PORT = 16514
 _CONNECT_TIMEOUT_S = 5.0
-# libvirt's materialized pkipath filenames (kdive.providers.remote_libvirt.transport).
+# libvirt's materialized pkipath filenames (kdive.providers.remote_libvirt.connection.transport).
 _CA_CERT_NAME = "cacert.pem"
 _CLIENT_CERT_NAME = "clientcert.pem"
 _CLIENT_KEY_NAME = "clientkey.pem"  # pragma: allowlist secret - libvirt file name, not a value

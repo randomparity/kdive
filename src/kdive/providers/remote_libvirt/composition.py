@@ -45,6 +45,8 @@ from kdive.providers.remote_libvirt.config import (
     remote_config_for_resource,
     unbound_remote_config,
 )
+from kdive.providers.remote_libvirt.connection.staged_volumes import probe_staged_volumes
+from kdive.providers.remote_libvirt.connection.transport_reset import RemoteLibvirtTransportResetter
 from kdive.providers.remote_libvirt.console.collector import ConsoleCollector, ConsoleStream
 from kdive.providers.remote_libvirt.console.snapshot import RemoteLibvirtConsoleSnapshotter
 from kdive.providers.remote_libvirt.console.wiring import (
@@ -67,8 +69,6 @@ from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDump
 from kdive.providers.remote_libvirt.resource_details import project_resource_details
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
-from kdive.providers.remote_libvirt.staged_volumes import probe_staged_volumes
-from kdive.providers.remote_libvirt.transport_reset import RemoteLibvirtTransportResetter
 from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactory
 from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
 from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote

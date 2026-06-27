@@ -27,7 +27,7 @@ import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
-from kdive.providers.remote_libvirt.uri_validation import validate_remote_uri
+from kdive.providers.remote_libvirt.connection.uri_validation import validate_remote_uri
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
