@@ -461,8 +461,8 @@ def _upload_response(upload: _MaterializedUpload, *, next_action: str) -> ToolRe
         data={
             "name": upload.entry.name,
             "artifact_name": upload.entry.name,
-            "expires_in": str(_presign_ttl_seconds()),
-            **({"part_number": str(upload.part_number)} if upload.part_number is not None else {}),
+            "expires_in": _presign_ttl_seconds(),
+            **({"part_number": upload.part_number} if upload.part_number is not None else {}),
             **upload.presigned.required_headers,
         },
     )

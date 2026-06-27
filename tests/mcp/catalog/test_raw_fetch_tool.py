@@ -120,7 +120,7 @@ def test_fetch_raw_vmlinux_presigns_url(migrated_url: str) -> None:
         assert resp.status == "available"
         assert resp.refs["download_uri"] == store.url
         assert resp.data["asset"] == "vmlinux"
-        assert resp.data["size_bytes"] == "4096"
+        assert resp.data["size_bytes"] == 4096
         assert "content" not in resp.data
         assert store.presigned_keys == [_VMLINUX_REF]
 

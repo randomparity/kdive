@@ -811,7 +811,7 @@ def test_chunked_artifact_mints_one_url_per_chunk(migrated_url: str) -> None:
                 f"local/runs/{run_id}/vmlinux.part0002",
             ]
             assert [i.data["artifact_name"] for i in items] == ["vmlinux", "vmlinux"]
-            assert [i.data["part_number"] for i in items] == ["1", "2"]
+            assert [i.data["part_number"] for i in items] == [1, 2]
             # Each part URL is pinned to its own chunk checksum.
             assert {c[1] for c in store.calls} == {"c0", "c1"}
             async with pool.connection() as conn:
