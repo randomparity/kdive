@@ -19,23 +19,29 @@ from kdive.artifacts.storage import FetchedArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle import install
-from kdive.providers.local_libvirt.lifecycle.install import (
-    ConsoleVerdict,
-    Fetch,
+from kdive.providers.local_libvirt.lifecycle import readiness as readiness_mod
+from kdive.providers.local_libvirt.lifecycle.guest_kernel_writer import (
     GuestKernelWriter,
-    LocalLibvirtInstall,
-    ReadinessResult,
     _kernel_dest,
     _RealGuestKernelWriter,
-    _stage_object,
-    _verdict_to_result,
     _verify_kernel_size,
     _verify_vmlinux_size,
     _vmlinux_dest,
+)
+from kdive.providers.local_libvirt.lifecycle.install import (
+    Fetch,
+    LocalLibvirtInstall,
+    _stage_object,
+)
+from kdive.providers.local_libvirt.lifecycle.kernel_bundle import repack_modules_subtree
+from kdive.providers.local_libvirt.lifecycle.readiness import (
+    ConsoleVerdict,
+    ReadinessResult,
+    _verdict_to_result,
     classify_console,
 )
 from kdive.providers.ports import InstallRequest
+from kdive.providers.shared.runtime_paths import read_console_log
 from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
 
 _SYS = UUID("11111111-1111-1111-1111-111111111111")
@@ -298,7 +304,7 @@ def test_repack_modules_subtree_skips_path_traversal_members(tmp_path: Path) -> 
     combined.write_bytes(buf.getvalue())
 
     out = tmp_path / "modules.tar.gz"
-    assert install.repack_modules_subtree(combined, out)
+    assert repack_modules_subtree(combined, out)
     with tarfile.open(out, "r:gz") as repacked:
         names = set(repacked.getnames())
     assert "lib/modules/6.9.0/kernel/ok.ko" in names
@@ -575,7 +581,7 @@ def test_read_release_recovers_version_from_repacked_modules_tar(tmp_path: Path)
     combined = tmp_path / "kernel.tar.gz"
     combined.write_bytes(_combined_kernel_tar_bytes(version=version))
     modules_tar = tmp_path / "modules.tar.gz"
-    assert install.repack_modules_subtree(combined, modules_tar)
+    assert repack_modules_subtree(combined, modules_tar)
 
     assert _RealGuestKernelWriter._read_release(modules_tar, "ov") == version
 
@@ -756,16 +762,12 @@ def test_from_env_does_not_connect(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_read_console_log_returns_bytes(tmp_path: Path) -> None:
-    from kdive.providers.local_libvirt.lifecycle.install import read_console_log
-
     log = tmp_path / "sys.log"
     log.write_bytes(b"[ 0.0] Kernel panic - __d_lookup\n")
     assert b"__d_lookup" in read_console_log(log)
 
 
 def test_read_console_log_missing_is_empty(tmp_path: Path) -> None:
-    from kdive.providers.local_libvirt.lifecycle.install import read_console_log
-
     assert read_console_log(tmp_path / "absent.log") == b""
 
 
@@ -1031,10 +1033,14 @@ def test_verdict_to_result_pending_exited_is_answered_failure() -> None:
 def test_real_readiness_treats_missing_domain_as_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(install, "read_console_log", lambda path: b"")
-    monkeypatch.setattr(install, "_domain_exit_probe", lambda name: install._DomainExitProbe(True))
+    monkeypatch.setattr(readiness_mod, "read_console_log", lambda path: b"")
+    monkeypatch.setattr(
+        readiness_mod,
+        "_domain_exit_probe",
+        lambda name: readiness_mod._DomainExitProbe(True),
+    )
 
-    result = install._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
+    result = readiness_mod._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
 
     assert result.answered is True
     assert result.ok is False
@@ -1046,14 +1052,14 @@ def test_real_readiness_ready_marker_answers_without_probing_exit(
     # A console that already shows the readiness marker answers ok immediately — the domain
     # exit probe must NOT be consulted (it would be a wasted live-host call), guarding the
     # early-return on a non-None first verdict.
-    monkeypatch.setattr(install, "read_console_log", lambda path: b"kdive-ready\n")
+    monkeypatch.setattr(readiness_mod, "read_console_log", lambda path: b"kdive-ready\n")
 
-    def fail_probe(name: str) -> install._DomainExitProbe:
+    def fail_probe(name: str) -> readiness_mod._DomainExitProbe:
         raise AssertionError("exit probe must not run once the console already answered")
 
-    monkeypatch.setattr(install, "_domain_exit_probe", fail_probe)
+    monkeypatch.setattr(readiness_mod, "_domain_exit_probe", fail_probe)
 
-    result = install._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
+    result = readiness_mod._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
 
     assert result.answered is True
     assert result.ok is True
@@ -1065,15 +1071,15 @@ def test_real_readiness_running_guest_stays_unanswered_with_probe_error(
     # Pending console + a still-running guest: no answer yet, the loop must keep polling, and
     # the probe diagnostic is carried so a later boot timeout can explain itself. ok must be
     # False (not True) for an unanswered probe.
-    monkeypatch.setattr(install, "read_console_log", lambda path: b"booting...\n")
-    monkeypatch.setattr(install.time, "sleep", lambda _: None)
+    monkeypatch.setattr(readiness_mod, "read_console_log", lambda path: b"booting...\n")
+    monkeypatch.setattr(readiness_mod.time, "sleep", lambda _: None)
     monkeypatch.setattr(
-        install,
+        readiness_mod,
         "_domain_exit_probe",
-        lambda name: install._DomainExitProbe(False, "virsh hiccup"),
+        lambda name: readiness_mod._DomainExitProbe(False, "virsh hiccup"),
     )
 
-    result = install._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
+    result = readiness_mod._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
 
     assert result.answered is False
     assert result.ok is False
@@ -1088,10 +1094,14 @@ def test_real_readiness_reread_after_exit_honors_late_marker(
     # marker yields ok=True, which the generic exited fallback (answered=True, ok=False) can never
     # produce, so this pins the reread call site: dropping the reread would surface ok=False.
     reads = iter([b"booting...\n", b"kdive-ready\n"])
-    monkeypatch.setattr(install, "read_console_log", lambda path: next(reads))
-    monkeypatch.setattr(install, "_domain_exit_probe", lambda name: install._DomainExitProbe(True))
+    monkeypatch.setattr(readiness_mod, "read_console_log", lambda path: next(reads))
+    monkeypatch.setattr(
+        readiness_mod,
+        "_domain_exit_probe",
+        lambda name: readiness_mod._DomainExitProbe(True),
+    )
 
-    result = install._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
+    result = readiness_mod._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
 
     assert result.answered is True
     assert result.ok is True
@@ -1108,23 +1118,23 @@ def test_domain_exited_treats_missing_kdive_domain_as_terminal(
             stderr="error: failed to get domain 'kdive-22222222-2222-2222-2222-222222222222'",
         )
 
-    monkeypatch.setattr(install.shutil, "which", lambda tool: f"/usr/bin/{tool}")
-    monkeypatch.setattr(install.subprocess, "run", domstate_missing)
+    monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(readiness_mod.subprocess, "run", domstate_missing)
 
-    assert install._domain_exited("kdive-22222222-2222-2222-2222-222222222222") is True
+    assert readiness_mod._domain_exited("kdive-22222222-2222-2222-2222-222222222222") is True
 
 
 def test_domain_exit_probe_uses_resolved_virsh_path(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
-    monkeypatch.setattr(install.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: f"/usr/bin/{tool}")
 
     def domstate_running(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="running", stderr="")
 
-    monkeypatch.setattr(install.subprocess, "run", domstate_running)
+    monkeypatch.setattr(readiness_mod.subprocess, "run", domstate_running)
 
-    assert install._domain_exited("kdive-22222222-2222-2222-2222-222222222222") is False
+    assert readiness_mod._domain_exited("kdive-22222222-2222-2222-2222-222222222222") is False
     assert calls[0][0] == "/usr/bin/virsh"
 
 
@@ -1137,7 +1147,7 @@ def _capture_domstate(
 ) -> dict[str, object]:
     """Stub virsh + subprocess.run; return the recorded args/kwargs of the one call."""
     recorded: dict[str, object] = {}
-    monkeypatch.setattr(install.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: f"/usr/bin/{tool}")
 
     def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         recorded["args"] = args
@@ -1146,7 +1156,7 @@ def _capture_domstate(
             args=args, returncode=returncode, stdout=stdout, stderr=stderr
         )
 
-    monkeypatch.setattr(install.subprocess, "run", fake_run)
+    monkeypatch.setattr(readiness_mod.subprocess, "run", fake_run)
     return recorded
 
 
@@ -1156,7 +1166,7 @@ def test_domain_exit_probe_builds_connection_qualified_domstate_argv(
     monkeypatch.setenv("KDIVE_LIBVIRT_URI", "qemu+tls://probe.example/system")
     recorded = _capture_domstate(monkeypatch, returncode=0, stdout="running")
 
-    install._domain_exit_probe("kdive-abc")
+    readiness_mod._domain_exit_probe("kdive-abc")
 
     args = recorded["args"]
     assert isinstance(args, list)
@@ -1175,7 +1185,7 @@ def test_domain_exit_probe_runs_bounded_captured_no_raise(
 ) -> None:
     recorded = _capture_domstate(monkeypatch, returncode=0, stdout="running")
 
-    install._domain_exit_probe("kdive-abc")
+    readiness_mod._domain_exit_probe("kdive-abc")
 
     kwargs = cast("dict[str, object]", recorded["kwargs"])
     assert isinstance(kwargs, dict)
@@ -1184,14 +1194,14 @@ def test_domain_exit_probe_runs_bounded_captured_no_raise(
     # exit is inspected here rather than raising.
     assert kwargs["capture_output"] is True
     assert kwargs["text"] is True
-    assert kwargs["timeout"] == install._DOMSTATE_PROBE_TIMEOUT
+    assert kwargs["timeout"] == readiness_mod._DOMSTATE_PROBE_TIMEOUT
     assert kwargs["check"] is False
 
 
 def test_domain_exit_probe_terminal_domstate_is_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     _capture_domstate(monkeypatch, returncode=0, stdout="shut off")
 
-    probe = install._domain_exit_probe("kdive-abc")
+    probe = readiness_mod._domain_exit_probe("kdive-abc")
 
     # A terminal domstate (case-insensitive) means the guest stopped; nothing kept it alive.
     assert probe.exited is True
@@ -1201,7 +1211,7 @@ def test_domain_exit_probe_terminal_domstate_is_exit(monkeypatch: pytest.MonkeyP
 def test_domain_exit_probe_running_is_not_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     _capture_domstate(monkeypatch, returncode=0, stdout="running")
 
-    probe = install._domain_exit_probe("kdive-abc")
+    probe = readiness_mod._domain_exit_probe("kdive-abc")
 
     assert probe.exited is False
     assert probe.error is None
@@ -1218,7 +1228,7 @@ def test_domain_exit_probe_missing_domain_needs_both_prefix_and_signature(
         stdout="",
         stderr="error: failed to get domain 'kdive-abc'",
     )
-    assert install._domain_exit_probe("kdive-abc").exited is True
+    assert readiness_mod._domain_exit_probe("kdive-abc").exited is True
 
 
 def test_domain_exit_probe_missing_signature_for_foreign_name_is_not_exit(
@@ -1233,7 +1243,7 @@ def test_domain_exit_probe_missing_signature_for_foreign_name_is_not_exit(
         stdout="",
         stderr="error: failed to get domain 'other-vm'",
     )
-    probe = install._domain_exit_probe("other-vm")
+    probe = readiness_mod._domain_exit_probe("other-vm")
     assert probe.exited is False
     assert probe.error is not None
 
@@ -1249,7 +1259,7 @@ def test_domain_exit_probe_kdive_prefix_without_signature_is_not_exit(
         stdout="",
         stderr="error: connection refused",
     )
-    probe = install._domain_exit_probe("kdive-abc")
+    probe = readiness_mod._domain_exit_probe("kdive-abc")
     assert probe.exited is False
     assert probe.error == "error: connection refused"
 
@@ -1260,7 +1270,7 @@ def test_domain_exit_probe_zero_exit_unknown_state_is_not_exit(
     # returncode 0 with a non-terminal, non-running state (e.g. "paused") is not an exit and
     # carries no probe error (guards the returncode != 0 branch from firing on success).
     _capture_domstate(monkeypatch, returncode=0, stdout="paused")
-    probe = install._domain_exit_probe("kdive-abc")
+    probe = readiness_mod._domain_exit_probe("kdive-abc")
     assert probe.exited is False
     assert probe.error is None
 
@@ -1271,12 +1281,12 @@ def test_real_readiness_reports_domstate_probe_timeout(
     def domstate_timeout(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(["virsh"], timeout=2)
 
-    monkeypatch.setattr(install, "read_console_log", lambda path: b"")
-    monkeypatch.setattr(install.time, "sleep", lambda _: None)
-    monkeypatch.setattr(install.shutil, "which", lambda tool: f"/usr/bin/{tool}")
-    monkeypatch.setattr(install.subprocess, "run", domstate_timeout)
+    monkeypatch.setattr(readiness_mod, "read_console_log", lambda path: b"")
+    monkeypatch.setattr(readiness_mod.time, "sleep", lambda _: None)
+    monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(readiness_mod.subprocess, "run", domstate_timeout)
 
-    result = install._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
+    result = readiness_mod._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
 
     assert result.answered is False
     assert result.probe_error == "virsh domstate timed out after 2s"
