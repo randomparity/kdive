@@ -58,7 +58,7 @@ def test_seed_project_registers_discovered_resources(
 
     monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)
     monkeypatch.setattr(
-        "kdive.admin.bootstrap.register_discovered_resources",
+        "kdive.admin.projects.register_discovered_resources",
         fake_register,
     )
 
