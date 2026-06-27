@@ -62,15 +62,23 @@ then call it directly (the 1a model).
 **Build:**
 - New tool module under the meta/identity plane (mirror `session.whoami`'s registrar placement;
   confirm its home in `mcp/tools/identity/`). Register `name="tools.search"`, read-only annotation.
+- **Registry-enumeration prerequisite (verified, fastmcp 3.4.2).** The handler closes over the
+  `app` the registrar receives. Enumerate the **raw** registry with `await app.list_tools()` →
+  `list[fastmcp.tools.Tool]`; each `Tool.to_mcp_tool()` yields the MCP `{name, description,
+  inputSchema}` — the same serialization `list_tools` emits. **Verify** at implementation time that
+  `app.list_tools()` returns the unfiltered registry and is **not** itself wrapped by
+  `ToolExposureMiddleware.on_list_tools` (the connection tier filter); if it is, enumerate via the
+  tool manager directly so search spans **all tiers**. Tools' `name`/`description` for ranking come
+  from the same objects.
 - Handler: `query: str`, `limit: int = 8` (Field-bounded `1..=20`). Steps:
-  1. Build the candidate list from the **live registry** the same way `list_tools` does, then keep
-     only RBAC-visible names via `mcp.exposure.visible_tool_names(ctx, names)` — **all tiers**, not
-     core-filtered (search is the escape hatch out of the core set).
+  1. Enumerate the raw registry (above) → `(name, description)` candidates, then keep only
+     RBAC-visible names via `mcp.exposure.visible_tool_names(ctx, names)` — **all tiers**, not
+     core-filtered (search is the escape hatch out of the core set; do **not** apply `CORE_TOOLS`).
   2. Reject empty/whitespace `query` with a `configuration_error` whose `data` points at the
      namespace TOC (reason `empty_query`).
-  3. `rank_tools(query, candidates, limit=limit)` (T1), then serialise each hit through the **same
-     schema path that feeds `list_tools`** (full input schema + description + name) so the result
-     is sufficient to construct a call. Return them in `ToolResponse.data`.
+  3. `rank_tools(query, candidates, limit=limit)` (T1), then serialise each hit via
+     `Tool.to_mcp_tool()` (full input schema + description + name) so the result is sufficient to
+     construct a call. Return them in `ToolResponse.data`.
   4. Telemetry: a zero-result query emits a structured log (query + count). (The
      searched-but-never-invoked counter is observability wiring carried as T2-followup below, not a
      blocker for the tool itself.)
@@ -103,14 +111,22 @@ then call it directly (the 1a model).
   1. For each phase in `(build, install, boot)`: enqueue at the **service layer** (build via the
      `server_build` enqueue path / `ProviderRuntime`, install via `install_run`, boot via
      `boot_run` — `mcp/tools/lifecycle/runs/steps.py`), passing a **deterministic per-phase
-     `idempotency_key`** = `f"bib:{run_id}:{phase}"`. Then poll that job to terminal with
-     `mcp.tools.jobs.wait_job` (jobs.py:150, the same primitive `jobs.wait` uses; inject `sleep`
-     for tests). Emit an MCP progress notification per phase transition.
+     `idempotency_key`** = `f"bib:{run_id}:{phase}"`. Then poll that job to terminal with a
+     **re-poll loop** around `mcp.tools.jobs.wait_job` (jobs.py:150) — **not a single call**:
+     `wait_job` clamps `timeout_s` to `MAX_WAIT_S` (=300s, jobs.py:53) and on a non-terminal
+     deadline returns the job's *current* `queued`/`running` envelope (with `jobs.wait` in
+     `suggested_next_actions`), by design, because one long idle stream gets severed by an
+     intermediary proxy (its docstring). A kernel build routinely exceeds 300s, so the composite
+     loops: call `wait_job(job_id, per_iter_s)` with `per_iter_s ≤ MAX_WAIT_S`, inspect the returned
+     envelope's job state — terminal → advance to the next phase; still `queued`/`running` →
+     re-issue — accumulating elapsed against the caller `timeout` budget. Inject `sleep`/clock for
+     deterministic tests. Emit an MCP progress notification per phase transition.
   2. On the first phase whose job is not `succeeded`: return a terminal envelope with
      `data.failed_phase`, that phase `job_id`, the job error, and `run_id`. Stop.
-  3. On total `timeout` expiry: return a **non-terminal** envelope (category
-     `timeout`/`deadline`-style — confirm the existing category used by `jobs.wait` on timeout and
-     reuse it) naming the in-flight phase + `job_id`; jobs keep running.
+  3. On total `timeout` budget exhaustion: return the in-flight phase's **running envelope** —
+     mirroring `wait_job`'s own non-terminal return, **not** a new `timeout`/`deadline` error
+     category (none exists) — carrying `failed_phase=null`, the in-flight phase `job_id`, `run_id`,
+     and `runs.get`/`jobs.list` in `suggested_next_actions` as the reattach path; jobs keep running.
   4. On all-succeeded: return `get_run(...)` projection (same shape as `runs.get`).
 - Reuse the existing precondition errors (not-bound, not-built) by letting the underlying step
   functions return them — the composite surfaces the first step's failure envelope verbatim with
