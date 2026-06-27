@@ -99,6 +99,13 @@ class ExpectedBootFailure(DomainBase):
     canonical literal console pattern (`crash_signatures.CRASH_SIGNATURE_PRESETS`). A preset takes
     no ``pattern``; supplying both is rejected. The resolved doc keeps the preset name and the
     canonical pattern, so the record states which signature the Run was matched against.
+
+    This model validates the incoming request once and is then persisted as serialized JSON
+    (``SerializedExpectedBootFailure``); ``Run.expected_boot_failure`` holds that raw object, not
+    a re-parsed model. The model is therefore *not* idempotent under re-validation: feeding a
+    persisted preset doc (which carries both the preset ``kind`` and its resolved ``pattern``)
+    back through it is rejected by ``_resolve_preset``. Do not re-validate stored docs through
+    this model — match on the raw dict, as ``expected_crash_matched_line`` does.
     """
 
     kind: Literal["console_crash", "oops", "panic", "hung_task"]
