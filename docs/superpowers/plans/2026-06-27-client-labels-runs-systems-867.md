@@ -120,6 +120,11 @@ existing `tests/db` suite green.
 - `src/kdive/mcp/tools/lifecycle/runs/create.py`: in `_created_response`, add
   `data["label"] = result.label`.
 
+Note: the `RunCreateError` is converted by `ToolResponse.failure_from_error`, which
+surfaces the error's safe `details` into the envelope `data`; confirm
+`data["reason"] == "invalid_label"` round-trips (the Task-3 test asserts this). `_vocab_for`
+only enriches `target_kind` reasons, so it leaves an `invalid_label` failure untouched.
+
 **Tests first** (`tests/mcp/lifecycle/test_runs_tools.py`, the direct-handler boundary):
 - create with a valid label → success envelope `data["label"] == "<label>"`; a
   follow-up `runs.get` shows the same (covered in Task 5 too).
@@ -141,30 +146,38 @@ via `systems.get` / `systems.list` (Task 5); `systems.provision` returns a job
 envelope and `systems.define` a `defined_system_envelope`, so no create-envelope echo
 is required for systems.
 
+**Validate in the handler (primary path).** Reject the invalid label in the
+`provision.py` handlers, NOT in the service `AdmissionFailure` path:
+`AdmissionFailureReason` (`services/systems/admission.py:116-125`) is a **closed
+`StrEnum`** with no `invalid_label` member and `AdmissionFailure.reason` is typed to it,
+so a service-layer rejection would force extending that enum and its
+`_RECOVERY_ACTIONS` / `_admission_failure_data` maps (`provision.py:57-71`) — scope creep
+the spec/ADR did not authorize. The handler path is also strictly better: it runs before
+the idempotency-replay lookup and any DB connection, so "no System minted / no audit
+row" holds by construction.
+
 **Files:**
-- `src/kdive/services/systems/admission.py`:
-  - `CreateSystemRequest` (line ~101): add `label: str | None = None`.
-  - In `create_for_allocation` (the path that builds `System(...)` near line ~718), call
-    `validate_label(request.label)` as the **first step** (before allocation resolution
-    / lock / insert), raising the admission failure on `CategorizedError`
-    (`AdmissionFailure` with `reason`/`failure_details` carrying
-    `reason="invalid_label"`, surfaced as `configuration_error`). Pass the cleaned label
-    into `System(..., label=...)` at the insert site (line ~720).
 - `src/kdive/mcp/tools/lifecycle/systems/provision.py`:
-  - `provision_system`, `define_system`, and `_keyed_create` (lines 160-247): accept a
-    `label` param and pass it into `CreateSystemRequest(...)`.
+  - In `provision_system` and `define_system` (lines 160-222): right after the
+    `_as_uuid(allocation_id)` check and **before** `_keyed_create`, call
+    `validate_label(label)`; on `CategorizedError` return
+    `_config_error(allocation_id, detail="<bound/rule>", data={"reason": "invalid_label"})`
+    (the `config_error(..., data=...)` shape already used in `binding_errors.py:134-138`).
+    On success pass the cleaned label down through `_keyed_create` into
+    `CreateSystemRequest(...)`.
+  - `_keyed_create` (lines 224-247): add a `label` param threaded into
+    `CreateSystemRequest(...)`.
+- `src/kdive/services/systems/admission.py`:
+  - `CreateSystemRequest` (line ~101): add `label: str | None = None` (carries the
+    already-validated, cleaned label — persistence only, no rejection here).
+  - At the `System(...)` insert site (near line ~718-720) pass `label=request.label`.
 - `src/kdive/mcp/tools/lifecycle/systems/registrar.py`: add `label` Annotated param
   (`str | None = None`, description only, no `max_length`) to the `systems_define` and
   `systems_provision` tools; pass into `define_system` / `provision_system`.
 
-**Verify the validation layering:** confirm `validate_label` runs before the allocation
-is resolved/locked and before `SYSTEMS.insert`, so an invalid label mints no System and
-writes no audit row. If the admission structure makes "first step" awkward, validate in
-the `provision.py` handler (`provision_system`/`define_system`) right after the
-`allocation_id` UUID check and before `_keyed_create` — still before any lock/insert —
-and convert the `CategorizedError` to a `config_error` envelope. Either placement
-satisfies the ordering guarantee; prefer the handler placement if the service path is
-hard to thread early.
+**Verify the validation layering:** confirm `validate_label` runs in the handler before
+`_keyed_create` (hence before the replay lookup, the allocation lock, and
+`SYSTEMS.insert`), so an invalid label mints no System and writes no audit row.
 
 **Tests first** (`tests/mcp/lifecycle/test_systems_tools.py`):
 - `systems.define` and `systems.provision` with a valid label → System persisted with
