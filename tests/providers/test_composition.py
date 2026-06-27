@@ -425,6 +425,23 @@ def test_configured_fault_inject_runtime_is_visible_to_reconciler_reaper() -> No
     assert fake_libvirt.destroyed == []
 
 
+def test_composite_reaper_destroy_fans_out_for_unlisted_name() -> None:
+    """An unlisted name is fanned out to every child, not silently dropped (#840).
+
+    The reconciler's leaked-probe sweep calls destroy(name) without a preceding list_owned for
+    that name, and kdive-egress-probe-* names never match the kdive-<uuid> discovery convention —
+    so routing only via the list_owned side effect would no-op and leak the libvirt domain.
+    """
+    child_a = _FakeLibvirtReaper()
+    child_b = _FakeLibvirtReaper()
+    reaper = composition._CompositeReaper((child_a, child_b))
+
+    asyncio.run(reaper.destroy("kdive-egress-probe-xyz"))  # never returned by list_owned()
+
+    assert child_a.destroyed == ["kdive-egress-probe-xyz"]
+    assert child_b.destroyed == ["kdive-egress-probe-xyz"]
+
+
 def test_reconciler_reaper_is_null_when_local_libvirt_disabled() -> None:
     # A deployment with no local libvirt (e.g. k8s, remote-libvirt only) opts the local reaper
     # out so repair_leaked_domains never tries to open a non-existent qemu:///system socket.

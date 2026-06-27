@@ -167,6 +167,15 @@ class _CompositeReaper:
         owner = self._owners.get(name)
         if owner is not None:
             await owner.destroy(name)
+            return
+        # No prior list_owned() recorded an owner for this name — the reconciler's leaked-probe
+        # sweep destroys an egress-probe row by name with no preceding list_owned for it, and
+        # kdive-egress-probe-* names never match the kdive-<uuid> discovery convention anyway.
+        # Routing only via the list_owned side effect would silently no-op and leak the domain,
+        # so fan the destroy out to every child. Provider teardown is idempotent over an absent
+        # domain, so a destroy reaching a non-owner is harmless.
+        for reaper in self._reapers:
+            await reaper.destroy(name)
 
 
 class ProviderComposition:
