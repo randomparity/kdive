@@ -7,26 +7,10 @@ import tarfile
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.staged_write import write_staged_bytes
 
 _KERNEL_BUNDLE_BOOT_MEMBER = "boot/vmlinuz"
 _MODULES_MEMBER_PREFIX = "lib/modules/"
-
-
-def _write_staged_bytes(dest: Path, data: bytes) -> None:
-    """Write ``data`` through a sibling temp file, then atomically replace ``dest``."""
-    tmp = dest.with_name(dest.name + ".part")
-    try:
-        with tmp.open("wb") as handle:
-            handle.write(data)
-        tmp.replace(dest)
-    except OSError as exc:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise CategorizedError(
-            "failed to write the staged object to the per-Run path",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"op": "stage", "dest": str(dest)},
-        ) from exc
 
 
 def _tar_member_path(name: str) -> str:
@@ -67,7 +51,7 @@ def extract_boot_vmlinuz(combined_tar: Path, dest: Path) -> None:
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"member": _KERNEL_BUNDLE_BOOT_MEMBER, "tar": str(combined_tar)},
         )
-    _write_staged_bytes(dest, data)
+    write_staged_bytes(dest, data)
 
 
 def repack_modules_subtree(combined_tar: Path, dest: Path) -> bool:

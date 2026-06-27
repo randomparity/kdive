@@ -53,6 +53,7 @@ from kdive.providers.local_libvirt.lifecycle.readiness import (
     ReadinessResult,
     _real_readiness,
 )
+from kdive.providers.local_libvirt.lifecycle.staged_write import write_staged_bytes
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports import InstallRequest
@@ -459,24 +460,7 @@ def _stage_object(store: _ObjectReader, ref: str, dest: Path) -> None:
             opaque ``OSError`` out of the seam.
     """
     data = store.get_artifact(ref, None).data
-    _write_staged_bytes(dest, data)
-
-
-def _write_staged_bytes(dest: Path, data: bytes) -> None:
-    """Write ``data`` through a sibling temp file, then atomically replace ``dest``."""
-    tmp = dest.with_name(dest.name + ".part")
-    try:
-        with tmp.open("wb") as handle:
-            handle.write(data)
-        tmp.replace(dest)
-    except OSError as exc:
-        with contextlib.suppress(OSError):
-            tmp.unlink()  # best-effort: drop any partial temp; never mask the real error
-        raise CategorizedError(
-            "failed to write the staged object to the per-Run path",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"op": "stage", "dest": str(dest)},
-        ) from exc
+    write_staged_bytes(dest, data)
 
 
 def _real_fetch(ref: str, dest: Path) -> None:  # pragma: no cover - live_vm
