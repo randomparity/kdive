@@ -140,7 +140,7 @@ async def introspect_from_vmcore(
             suggested_next_actions=["introspect.from_vmcore", "artifacts.list"],
             data=cast(
                 ResponseData,
-                {"report": report, "truncated": str(output.truncated).lower()},
+                {"report": report, "truncated": output.truncated},
             ),
         )
 
@@ -274,7 +274,7 @@ async def _introspect_live_session(
             ResponseData,
             {
                 "report": report,
-                "truncated": str(output.truncated).lower(),
+                "truncated": output.truncated,
                 "transcript_sensitivity": "sensitive",
             },
         ),
@@ -336,8 +336,8 @@ async def _run_live_script(
             response_id,
             data={
                 "reason": "script_too_large",
-                "script_bytes": str(script_bytes),
-                "max_bytes": str(_MAX_SCRIPT_BYTES),
+                "script_bytes": script_bytes,
+                "max_bytes": _MAX_SCRIPT_BYTES,
             },
         )
     clamped = _clamp_timeout(timeout_sec)
@@ -358,7 +358,7 @@ async def _run_live_script(
             ResponseData,
             {
                 "output": output.output,
-                "truncated": str(output.truncated).lower(),
+                "truncated": output.truncated,
                 "transcript_sensitivity": "sensitive",
             },
         ),

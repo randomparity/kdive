@@ -51,6 +51,7 @@ from kdive.providers.ports.debug import (
 )
 from kdive.providers.ports.lifecycle import TransportHandleData
 from kdive.security.authz.context import RequestContext
+from kdive.serialization import JsonValue
 
 _EngineOp = Callable[[GdbMiEngine, GdbMiAttachment], ToolResponse]
 
@@ -282,7 +283,7 @@ def _read_memory_op(session_id: str, address: int, byte_count: int) -> _EngineOp
             suggested_next_actions=["debug.read_registers", "debug.continue"],
             data={
                 "address": f"0x{address:x}",
-                "byte_count": str(len(blob)),
+                "byte_count": len(blob),
                 "memory_hex": blob.hex(),
             },
         )
@@ -348,8 +349,8 @@ def _interrupt_op(session_id: str) -> _EngineOp:
     return op
 
 
-def _stop_data(reason: str | None, timed_out: bool) -> dict[str, str]:
-    data = {"timed_out": "true" if timed_out else "false"}
+def _stop_data(reason: str | None, timed_out: bool) -> dict[str, JsonValue]:
+    data: dict[str, JsonValue] = {"timed_out": timed_out}
     if reason is not None:
         data["reason"] = reason
     return data

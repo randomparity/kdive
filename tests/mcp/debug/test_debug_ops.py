@@ -329,7 +329,7 @@ def test_read_memory_returns_verbatim_hex(migrated_url: str) -> None:
             )
         assert resp.status == "read"
         assert resp.data["memory_hex"] == "deadbeef"  # bytes verbatim, not redacted
-        assert resp.data["byte_count"] == "4"
+        assert resp.data["byte_count"] == 4
         assert resp.data["address"] == "0x1000"
 
     asyncio.run(_run())
