@@ -146,10 +146,10 @@ The spine boots a real guest and builds a real kernel, so the suite needs an
 operator-provided guest image and kernel tree:
 
 ```bash
-python -m kdive build-fs --workspace ~/.local/share/kdive/build/images \
-  --dest /var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2
+python -m kdive build-fs --image fedora-kdive-ready-44 \
+  --workspace ~/.local/share/kdive/build/images
 bash scripts/fetch-kernel-tree.sh        # checks out the pinned kernel source tree
-export KDIVE_GUEST_IMAGE=/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2
+export KDIVE_GUEST_IMAGE=/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2
 export KDIVE_KERNEL_SRC=/path/to/kernel-tree
 ```
 
@@ -161,11 +161,11 @@ bash rootfs builder): it runs the unprivileged libguestfs stages (`virt-builder`
 `virt-make-fs` whole-disk ext4 qcow2 → fstab/crypttab/SELinux normalize), records the pinned
 inputs (distro, releasever, packages, source-image digest) as provenance, prints the qcow2 content
 digest, and moves the image to `--dest` (default
-`/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2`). The default `--kind debug` builds the
-guest crash/introspection rootfs the spine boots; pass `--releasever`/`--package` to change the
-base release or guest package set, or `--workspace` to stage under a user-writable path (no
-privileged `mkdir`). See [the image-lifecycle runbook](image-lifecycle.md) for the full flag set,
-including `--kind build` (a kernel-build-host toolchain image). For the default root-owned `--dest`
+`/var/lib/kdive/rootfs/local/<image>.qcow2`). `--image` selects a catalog row such as
+`fedora-kdive-ready-44` (debug guest) or `fedora-kdive-build-44` (build host); pass `--package`
+only to add packages on top of the catalog kind's default set, or `--workspace` to stage under a
+user-writable path (no privileged `mkdir`). See [the image-lifecycle runbook](image-lifecycle.md)
+for the full catalog list. For the default root-owned `--dest`
 an OS admin pre-prepares the output directory once and makes it writable by the build user; the
 per-build write and the final `chmod 0644` are unprivileged. The image is left `0644` so the
 separate `qemu` user can read it under `qemu:///system`. Under SELinux the file also needs the
@@ -235,7 +235,7 @@ Expected defaults:
 - Build workspace: `/var/lib/kdive/build`
 - Component roots: `/var/lib/kdive/build/components:/etc/kdive/fixtures`
 - Fixture catalog: `/etc/kdive/fixtures/local-libvirt`
-- Fedora kdive-ready rootfs: `/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2`
+- Fedora kdive-ready rootfs: `/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2`
 - Busybox rootfs: `/var/lib/kdive/rootfs/local/busybox-bare.qcow2`
 
 After the stack is up, use the live-stack harness to call MCP tools for:
@@ -245,7 +245,7 @@ After the stack is up, use the live-stack harness to call MCP tools for:
 - `resources.list`
 - `allocations.request`
 - `systems.provision` with
-  `rootfs: {"kind": "catalog", "provider": "local-libvirt", "name": "fedora-kdive-ready-43"}`
+  `rootfs: {"kind": "catalog", "provider": "local-libvirt", "name": "fedora-kdive-ready-44"}`
 - `runs.build` with a staged `.config`
 - `runs.install`
 - `runs.boot`

@@ -6,9 +6,7 @@ provenance** into the :class:`RootfsBuildOutput`. The pipeline is:
 
 1. resolve the kdive-managed SSH public key (ADR-0052 — the single source of truth shared with
    the connect-time ``ssh -i`` identity);
-2. resolve the catalog row for ``spec.name`` (its base ``source`` + ``family``); an uncataloged
-   old-style spec falls back to a ``virt-builder:<distro>-<releasever>`` template + the rhel family
-   so the legacy ``build-fs`` CLI keeps working until it moves to ``--image`` (Task 6, ADR-0251);
+2. resolve the catalog row for ``spec.name`` (its base ``source`` + ``family``);
 3. :func:`kdive.images.base_source.acquire_base` materializes the base into a scratch qcow2 — a
    ``virt-builder`` template or a sha256-pinned cloud image;
 4. ``virt-customize`` applies the family's argv (``family.customize_argv``): install the package
@@ -60,8 +58,7 @@ from kdive.images.rootfs_catalog import (
     CloudImageSource,
     RootfsCatalogEntry,
     RootfsSource,
-    VirtBuilderSource,
-    load_rootfs_catalog,
+    resolve_rootfs_entry,
 )
 from kdive.prereqs.managed_ssh_key import (
     ManagedKeyError,
@@ -170,32 +167,8 @@ class RootfsBuildTools:
 
 
 def _resolve_entry(spec: RootfsBuildSpec) -> RootfsCatalogEntry:
-    """Resolve the catalog row for ``spec.name``, synthesizing a virt-builder fallback if absent.
-
-    A spec built the old way (``build-fs`` without ``--image``, until Task 6) carries a name that
-    may not be a catalog row; it falls back to a ``virt-builder:<distro>-<releasever>`` template +
-    the rhel family so the legacy CLI keeps building. A malformed catalog still raises.
-    """
-    entry = load_rootfs_catalog().get(spec.name)
-    if entry is not None:
-        return entry
-    return RootfsCatalogEntry(
-        name=spec.name,
-        distro=spec.distro,
-        version=spec.releasever,
-        family="rhel",
-        arch=spec.arch,
-        kind=_kind_for(spec.capabilities),
-        source=VirtBuilderSource(template=f"{spec.distro}-{spec.releasever}"),
-        # A synthesized legacy row makes no makedumpfile-version claim; an empty value makes the
-        # computed predicate yield ``unverified`` (the build-time probe records the real version).
-        makedumpfile_version="",
-    )
-
-
-def _kind_for(capabilities: tuple[str, ...]) -> str:
-    """Derive the image ``kind`` for a synthesized fallback row from its capability tags."""
-    return "build" if "build" in capabilities else "debug"
+    """Resolve the catalog row for ``spec.name``; uncataloged builds are rejected."""
+    return resolve_rootfs_entry(spec.name)
 
 
 def _source_digest(source: RootfsSource) -> str:

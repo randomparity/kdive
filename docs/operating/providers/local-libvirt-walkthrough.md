@@ -236,7 +236,7 @@ The image is declared with a **`staged-path`** source (ADR-0228): the source is 
 local disk (the path `build-fs` writes to in Step 6), so its catalog row seeds **`registered`**
 (bootable) immediately — no object-store upload. That makes it discoverable from the MCP surface
 alone: `fixtures.list` / `systems.profile_examples` list it, and a System can be provisioned with a
-`catalog` reference (`{kind = "catalog", provider = "local-libvirt", name = "fedora-kdive-ready-43"}`)
+`catalog` reference (`{kind = "catalog", provider = "local-libvirt", name = "fedora-kdive-ready-44"}`)
 rather than a host path (Step 6). The file need not exist yet at reconcile time (declared, not
 probed) — provisioning re-validates it against the provider `allowed_roots`, so build it before you
 provision. (Declare an `s3` source instead only if you publish the qcow2 to the object store; an
@@ -280,7 +280,7 @@ one-time pieces of setup arm it:
 
    ```jsonc
    "provider": {"local-libvirt": {
-     "rootfs": {"kind": "local", "path": "/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2"},
+     "rootfs": {"kind": "local", "path": "/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2"},
      "ssh_credential_ref": "drgn-ssh"
    }}
    ```
@@ -303,11 +303,11 @@ one-time pieces of setup arm it:
 (`id_kdive_ed25519`, under `~/.local/share/kdive/ssh/` or `KDIVE_SSH_KEY_DIR`), whose public half
 `build-fs` injects into the debug rootfs at image-build time (ADR-0052/0219) — **not** the
 `ssh_credential_ref` contents, which the transport resolves only to gate the session and register
-the value for log redaction. drgn-live therefore works only on a System booted from a rootfs that
-carries the managed key: the `--kind debug` image from Step 6 does; a generic base qcow2 does not.
+the value for log redaction. drgn-live therefore works only on a System booted from a catalog
+debug rootfs such as `fedora-kdive-ready-44`; a generic base qcow2 does not carry the managed key.
 
 The debug rootfs also supplies the two guest-side pieces drgn needs, all automatic for the
-`--kind debug` image and a from-source build (listed here so a failure is diagnosable): the
+catalog debug image and a from-source build (listed here so a failure is diagnosable): the
 `kdive-drgn` helper at `/usr/local/sbin/` and `drgn` itself (ADR-0220), plus the per-Run DWARF
 `vmlinux` that the install step stages at `/usr/lib/debug/lib/modules/<ver>/vmlinux` so `drgn -k`
 can resolve typed kernel symbols (ADR-0221). A System missing the helper returns
@@ -452,7 +452,7 @@ systems.provision allocation_id=<granted id> profile={
   "schema_version": 1, "arch": "x86_64", "vcpu": 2, "memory_mb": 2048, "disk_gb": 10,
   "boot_method": "direct-kernel", "kernel_source_ref": "/path/to/linux",
   "provider": {"local-libvirt": {"rootfs":
-    {"kind": "catalog", "provider": "local-libvirt", "name": "fedora-kdive-ready-43"}}}
+    {"kind": "catalog", "provider": "local-libvirt", "name": "fedora-kdive-ready-44"}}}
 }
 # → status=queued; the worker define+starts a tagged libvirt domain. Poll systems.get until ready.
 ```
@@ -462,7 +462,7 @@ inventory, but the path is invisible to an agent without host access):
 
 ```text
   "provider": {"local-libvirt": {"rootfs":
-    {"kind": "local", "path": "/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2"}}}
+    {"kind": "local", "path": "/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2"}}}
 ```
 
 A successful provision yields a running `kdive-<system-id>` domain (`virsh -c qemu:///system list`)

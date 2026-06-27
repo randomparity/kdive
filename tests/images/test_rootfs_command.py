@@ -1,4 +1,4 @@
-"""CLI behavior for `build-fs`: the `--image` catalog path and the back-compat default."""
+"""CLI behavior for `build-fs`: the required `--image` catalog path."""
 
 from __future__ import annotations
 
@@ -88,21 +88,10 @@ def test_build_fs_unknown_image_is_configuration_error(tmp_path: Path) -> None:
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
-def test_build_fs_default_path_synthesizes_virt_builder_digest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The no-`--image` path keeps the legacy `virt-builder:<distro>-<releasever>` provenance."""
-    produced = tmp_path / "plane" / "img.qcow2"
-    produced.parent.mkdir(parents=True)
-    produced.write_bytes(b"image-bytes")
-    seen_specs: list[RootfsBuildSpec] = []
-    _patch_plane(monkeypatch, produced, seen_specs)
-    args = build_parser().parse_args(
-        ["build-fs", "--workspace", str(tmp_path / "ws"), "--dest", str(tmp_path / "out.qcow2")]
-    )
-    run_build_fs(args)
-    spec = seen_specs[0]
-    assert spec.source_image_digest == "virt-builder:fedora-43"
+def test_build_fs_requires_image() -> None:
+    """The legacy no-`--image` virt-builder path is no longer a CLI contract."""
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["build-fs"])
 
 
 def test_build_fs_image_resolves_el9_package_set_without_standalone_makedumpfile(

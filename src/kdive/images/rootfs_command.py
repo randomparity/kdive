@@ -26,8 +26,8 @@ _DEFAULT_WORKSPACE = "/var/lib/kdive/build/images"
 _LOCAL_ROOTFS_DIR = "/var/lib/kdive/rootfs/local"
 
 
-# The guest-contract capability tags each ``--kind`` claims; the install package set is resolved
-# from the (EL-major-aware) FamilyCustomizer, not duplicated here (ADR-0251, #823).
+# The guest-contract capability tags each catalog image kind claims; the install package set is
+# resolved from the (EL-major-aware) FamilyCustomizer, not duplicated here (ADR-0251, #823).
 _KIND_CAPABILITIES: dict[str, tuple[str, ...]] = {
     "debug": ("agent", "kdump", "drgn"),
     "build": ("agent", "build"),
@@ -40,25 +40,7 @@ def add_build_fs_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]
         "build-fs",
         help="build a local-libvirt kdive-ready filesystem qcow2 (debug guest or build host)",
     )
-    build.add_argument(
-        "--kind",
-        choices=tuple(_KIND_CAPABILITIES),
-        default="debug",
-        help="debug = guest crash/introspection rootfs; build = kernel-build-host toolchain image",
-    )
-    build.add_argument(
-        "--image",
-        default=None,
-        help=(
-            "rootfs catalog image name (e.g. fedora-kdive-ready-44); when given, name/distro/"
-            "releasever/dest and the base source are resolved from the catalog"
-        ),
-    )
-    build.add_argument(
-        "--distro",
-        default="fedora",
-        help="base-OS family for the no-`--image` path (extensibility seam; implemented: fedora)",
-    )
+    build.add_argument("--image", required=True, help="rootfs catalog image name")
     build.add_argument(
         "--workspace",
         default=_DEFAULT_WORKSPACE,
@@ -75,15 +57,12 @@ def add_build_fs_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]
             "/var/lib/kdive/rootfs/local/<name>.qcow2 (the catalog name with --image)"
         ),
     )
-    build.add_argument("--name", default="fedora-kdive-ready-43", help="catalog image name")
-    build.add_argument("--arch", default="x86_64")
-    build.add_argument("--releasever", default="43", help="release the image is built from")
     build.add_argument(
         "--package",
         action="append",
         default=None,
         dest="packages",
-        help="extra guest package (repeatable); defaults to the --kind's package set",
+        help="extra guest package (repeatable); defaults to the catalog image kind's package set",
     )
 
 
@@ -137,6 +116,7 @@ class _BuildParams:
     name: str
     distro: str
     releasever: str
+    arch: str
     kind: str
     dest: str
     source_image_digest: str
@@ -151,31 +131,17 @@ def _source_image_digest(source: RootfsSource) -> str:
 
 
 def _resolve_build_params(args: argparse.Namespace) -> _BuildParams:
-    """Resolve the build identity from ``--image`` (catalog-authoritative) or the CLI flags.
-
-    With ``--image`` the catalog row owns ``name``/``distro``/``releasever``/``kind``/``dest`` and
-    the base-source digest; without it the ``--distro``/``--releasever``/``--name``/``--dest``/
-    ``--kind`` flags drive the legacy ``virt-builder:<distro>-<releasever>`` path.
-    """
-    if args.image is not None:
-        entry = resolve_rootfs_entry(args.image)
-        return _BuildParams(
-            name=entry.name,
-            distro=entry.distro,
-            releasever=entry.version,
-            kind=entry.kind,
-            dest=args.dest or f"{_LOCAL_ROOTFS_DIR}/{entry.name}.qcow2",
-            source_image_digest=_source_image_digest(entry.source),
-            family=entry.family,
-        )
+    """Resolve the build identity from the catalog-authoritative ``--image`` value."""
+    entry = resolve_rootfs_entry(args.image)
     return _BuildParams(
-        name=args.name,
-        distro=args.distro,
-        releasever=args.releasever,
-        kind=args.kind,
-        dest=args.dest or f"{_LOCAL_ROOTFS_DIR}/{args.name}.qcow2",
-        source_image_digest=f"virt-builder:{args.distro}-{args.releasever}",
-        family="rhel",
+        name=entry.name,
+        distro=entry.distro,
+        releasever=entry.version,
+        arch=entry.arch,
+        kind=entry.kind,
+        dest=args.dest or f"{_LOCAL_ROOTFS_DIR}/{entry.name}.qcow2",
+        source_image_digest=_source_image_digest(entry.source),
+        family=entry.family,
     )
 
 
@@ -188,7 +154,7 @@ def run_build_fs(args: argparse.Namespace) -> None:
     spec = RootfsBuildSpec(
         provider="local-libvirt",
         name=params.name,
-        arch=args.arch,
+        arch=params.arch,
         releasever=params.releasever,
         packages=packages,
         source_image_digest=params.source_image_digest,

@@ -51,30 +51,37 @@ def test_server_uvicorn_config_sets_explicit_keepalive() -> None:
 
 
 def test_build_fs_subcommand_parses_with_defaults() -> None:
-    args = build_parser().parse_args(["build-fs"])
+    args = build_parser().parse_args(["build-fs", "--image", "fedora-kdive-ready-43"])
     assert args.command == "build-fs"
-    assert args.kind == "debug"
-    assert args.distro == "fedora"
+    assert args.image == "fedora-kdive-ready-43"
     assert args.workspace == "/var/lib/kdive/build/images"
-    assert args.name == "fedora-kdive-ready-43"
-    assert args.arch == "x86_64"
-    assert args.releasever == "43"
     # --dest defaults to None; the handler derives /var/lib/kdive/rootfs/local/<name>.qcow2 (or
     # the catalog name with --image) so an explicit --dest can override it.
     assert args.dest is None
-    assert args.packages is None  # falls back to the --kind's package set in the handler
+    assert args.packages is None  # falls back to the catalog image kind's package set
 
 
 def test_build_fs_subcommand_rejects_an_unknown_kind() -> None:
-    # --kind is constrained to the registered fs kinds; an unknown value is rejected at
-    # parse time rather than passed through to a KeyError in the handler.
+    # --kind is no longer accepted; image identity comes from the catalog row.
     with pytest.raises(SystemExit):
-        build_parser().parse_args(["build-fs", "--kind", "bogus"])
+        build_parser().parse_args(
+            ["build-fs", "--image", "fedora-kdive-ready-43", "--kind", "bogus"]
+        )
 
 
 def test_build_fs_subcommand_collects_repeated_packages() -> None:
     args = build_parser().parse_args(
-        ["build-fs", "--dest", "/tmp/out.qcow2", "--package", "drgn", "--package", "perf"]
+        [
+            "build-fs",
+            "--image",
+            "fedora-kdive-ready-43",
+            "--dest",
+            "/tmp/out.qcow2",
+            "--package",
+            "drgn",
+            "--package",
+            "perf",
+        ]
     )
     assert args.dest == "/tmp/out.qcow2"
     assert args.packages == ["drgn", "perf"]
@@ -107,16 +114,12 @@ def test_run_build_fs_moves_plane_output_to_dest(
     args = build_parser().parse_args(
         [
             "build-fs",
-            "--name",
-            "custom-name",
-            "--arch",
-            "aarch64",
+            "--image",
+            "fedora-kdive-ready-43",
             "--workspace",
             str(workspace),
             "--dest",
             str(dest),
-            "--releasever",
-            "42",
             "--package",
             "drgn",
         ]
@@ -127,17 +130,17 @@ def test_run_build_fs_moves_plane_output_to_dest(
     assert not produced.exists(), "the plane output is moved, not copied"
     assert oct(dest.stat().st_mode & 0o777) == "0o644"
     assert seen_workspaces == [workspace.resolve()]
-    assert seen_specs and seen_specs[0].releasever == "42"
+    assert seen_specs and seen_specs[0].releasever == "43"
     assert seen_specs[0].packages == ("drgn",)
     assert seen_specs[0].provider == "local-libvirt"
-    assert seen_specs[0].name == "custom-name"
-    assert seen_specs[0].arch == "aarch64"
+    assert seen_specs[0].name == "fedora-kdive-ready-43"
+    assert seen_specs[0].arch == "x86_64"
 
 
-def test_run_build_fs_debug_kind_sets_debug_packages_and_capabilities(
+def test_run_build_fs_debug_image_sets_debug_packages_and_capabilities(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--kind debug` selects the crash/introspection package set and capabilities."""
+    """A catalog image with kind=debug selects crash/introspection packages and capabilities."""
     produced = tmp_path / "plane-workspace" / "img.qcow2"
     produced.parent.mkdir(parents=True)
     produced.write_bytes(b"image-bytes")
@@ -152,8 +155,8 @@ def test_run_build_fs_debug_kind_sets_debug_packages_and_capabilities(
     args = build_parser().parse_args(
         [
             "build-fs",
-            "--kind",
-            "debug",
+            "--image",
+            "fedora-kdive-ready-43",
             "--workspace",
             str(tmp_path / "ws"),
             "--dest",
@@ -175,10 +178,10 @@ def test_run_build_fs_debug_kind_sets_debug_packages_and_capabilities(
     assert seen_specs[0].source_image_digest == "virt-builder:fedora-43"
 
 
-def test_run_build_fs_build_kind_sets_build_packages_and_capabilities(
+def test_run_build_fs_build_image_sets_build_packages_and_capabilities(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--kind build` selects the kernel-build-host toolchain and the ``build`` capability."""
+    """A catalog image with kind=build selects the kernel-build-host toolchain."""
     produced = tmp_path / "plane-workspace" / "img.qcow2"
     produced.parent.mkdir(parents=True)
     produced.write_bytes(b"image-bytes")
@@ -193,8 +196,8 @@ def test_run_build_fs_build_kind_sets_build_packages_and_capabilities(
     args = build_parser().parse_args(
         [
             "build-fs",
-            "--kind",
-            "build",
+            "--image",
+            "fedora-kdive-build-44",
             "--workspace",
             str(tmp_path / "ws"),
             "--dest",
@@ -207,10 +210,10 @@ def test_run_build_fs_build_kind_sets_build_packages_and_capabilities(
     assert seen_specs[0].capabilities == ("agent", "build")
 
 
-def test_run_build_fs_default_path_synthesizes_distro_passthrough_digest(
+def test_run_build_fs_uses_catalog_identity_and_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The no-`--image` path passes `--distro`/`--releasever` straight to a virt-builder digest."""
+    """The catalog row supplies distro/release and pinned source digest."""
     produced = tmp_path / "plane-workspace" / "img.qcow2"
     produced.parent.mkdir(parents=True)
     produced.write_bytes(b"image-bytes")
@@ -225,10 +228,8 @@ def test_run_build_fs_default_path_synthesizes_distro_passthrough_digest(
     args = build_parser().parse_args(
         [
             "build-fs",
-            "--distro",
-            "rocky",
-            "--releasever",
-            "9",
+            "--image",
+            "rocky-kdive-ready-9",
             "--workspace",
             str(tmp_path / "ws"),
             "--dest",
@@ -237,7 +238,8 @@ def test_run_build_fs_default_path_synthesizes_distro_passthrough_digest(
     )
     run_build_fs(args)
     assert seen_specs[0].distro == "rocky"
-    assert seen_specs[0].source_image_digest == "virt-builder:rocky-9"
+    assert seen_specs[0].releasever == "9"
+    assert seen_specs[0].source_image_digest.startswith("cloud-image:")
 
 
 def test_run_build_fs_unwritable_workspace_is_actionable(
@@ -257,7 +259,15 @@ def test_run_build_fs_unwritable_workspace_is_actionable(
     workspace.chmod(0o500)
     try:
         args = build_parser().parse_args(
-            ["build-fs", "--workspace", str(workspace), "--dest", str(tmp_path / "out.qcow2")]
+            [
+                "build-fs",
+                "--image",
+                "fedora-kdive-ready-43",
+                "--workspace",
+                str(workspace),
+                "--dest",
+                str(tmp_path / "out.qcow2"),
+            ]
         )
         with pytest.raises(CategorizedError) as caught:
             run_build_fs(args)
@@ -289,7 +299,15 @@ def test_run_build_fs_reuses_an_existing_writable_workspace(
     workspace.mkdir()  # pre-existing and writable
     dest = tmp_path / "out.qcow2"
     args = build_parser().parse_args(
-        ["build-fs", "--workspace", str(workspace), "--dest", str(dest)]
+        [
+            "build-fs",
+            "--image",
+            "fedora-kdive-ready-43",
+            "--workspace",
+            str(workspace),
+            "--dest",
+            str(dest),
+        ]
     )
     run_build_fs(args)
     assert dest.read_bytes() == b"image-bytes"
@@ -311,7 +329,15 @@ def test_run_build_fs_prints_eval_safe_export_line(
     _patch_plane(monkeypatch, _FakePlane())
     dest = tmp_path / "rootfs" / "out.qcow2"
     args = build_parser().parse_args(
-        ["build-fs", "--workspace", str(tmp_path / "ws"), "--dest", str(dest)]
+        [
+            "build-fs",
+            "--image",
+            "fedora-kdive-ready-43",
+            "--workspace",
+            str(tmp_path / "ws"),
+            "--dest",
+            str(dest),
+        ]
     )
     run_build_fs(args)
 
@@ -338,7 +364,15 @@ def test_run_build_fs_export_line_round_trips_a_path_with_spaces(
     _patch_plane(monkeypatch, _FakePlane())
     dest = tmp_path / "with space" / "out.qcow2"
     args = build_parser().parse_args(
-        ["build-fs", "--workspace", str(tmp_path / "ws"), "--dest", str(dest)]
+        [
+            "build-fs",
+            "--image",
+            "fedora-kdive-ready-43",
+            "--workspace",
+            str(tmp_path / "ws"),
+            "--dest",
+            str(dest),
+        ]
     )
     run_build_fs(args)
 
@@ -361,7 +395,15 @@ def test_run_build_fs_writes_nothing_to_stdout_on_build_failure(
     _patch_plane(monkeypatch, _FailingPlane())
     dest = tmp_path / "rootfs" / "out.qcow2"
     args = build_parser().parse_args(
-        ["build-fs", "--workspace", str(tmp_path / "ws"), "--dest", str(dest)]
+        [
+            "build-fs",
+            "--image",
+            "fedora-kdive-ready-43",
+            "--workspace",
+            str(tmp_path / "ws"),
+            "--dest",
+            str(dest),
+        ]
     )
     with pytest.raises(CategorizedError):
         run_build_fs(args)
@@ -388,7 +430,15 @@ def test_run_build_fs_destination_publish_failure_is_actionable(
     monkeypatch.setattr("kdive.images.rootfs_command.shutil.move", _move)
     dest = tmp_path / "rootfs" / "out.qcow2"
     args = build_parser().parse_args(
-        ["build-fs", "--workspace", str(tmp_path / "ws"), "--dest", str(dest)]
+        [
+            "build-fs",
+            "--image",
+            "fedora-kdive-ready-43",
+            "--workspace",
+            str(tmp_path / "ws"),
+            "--dest",
+            str(dest),
+        ]
     )
     with pytest.raises(CategorizedError) as caught:
         run_build_fs(args)

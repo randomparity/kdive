@@ -33,6 +33,16 @@ makedumpfile_version = "1.7.9"  # the kdump-capable default for a v7.0 kernel
 source = { kind = "cloud-image", url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2", sha256 = "28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f" }  # pragma: allowlist secret
 
 [[image]]
+name = "fedora-kdive-build-44"
+distro = "fedora"
+version = "44"
+family = "rhel"
+arch = "x86_64"
+kind = "build"
+makedumpfile_version = "1.7.9"  # irrelevant to build hosts, but required by the schema
+source = { kind = "cloud-image", url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2", sha256 = "28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f" }  # pragma: allowlist secret
+
+[[image]]
 name = "rocky-kdive-ready-8"
 distro = "rocky"
 version = "8"

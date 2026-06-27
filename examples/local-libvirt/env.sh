@@ -41,7 +41,7 @@ export KDIVE_LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
 # scripts pass this path straight into the provision profile as `rootfs = {kind = "local",
 # path = ...}`; it is a file on disk, not an image_catalog object (the catalog models only
 # s3/build/staged sources, none of which describe a local-disk file).
-export KDIVE_GUEST_IMAGE="${KDIVE_GUEST_IMAGE:-/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2}"
+export KDIVE_GUEST_IMAGE="${KDIVE_GUEST_IMAGE:-/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2}"
 
 # The interpreter that runs `python -m kdive ...` and the three processes. Defaults to the
 # repo venv; override for an installed deployment (e.g. /opt/kdive/.venv/bin/python).

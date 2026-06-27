@@ -330,14 +330,15 @@ def test_provenance_omits_makedumpfile_version_on_unparseable_probe(tmp_path: Pa
     assert "makedumpfile_version" not in out.provenance
 
 
-def test_build_falls_back_to_virt_builder_for_uncataloged_name(tmp_path: Path) -> None:
-    # An old-style spec whose name is absent from the catalog still builds: the plane synthesizes
-    # a virt-builder:<distro>-<releasever> source so the legacy CLI stays green (Task 6 moves it).
+def test_build_rejects_uncataloged_name(tmp_path: Path) -> None:
+    # The provider plane no longer synthesizes old-style virt-builder specs. New images must be
+    # real catalog entries so build-fs has one contract and catalog provenance stays falsifiable.
     rec = _Recorder(authorized_key=_key(tmp_path))
     spec = _spec(name="legacy-image-99", distro="fedora", releasever="41")
-    out = _plane(tmp_path, rec).build(spec)
-    assert rec.acquired_sources == [VirtBuilderSource(template="fedora-41")]
-    assert out.provenance["source_image_digest"] == "virt-builder:fedora-41"
+    with pytest.raises(CategorizedError) as exc:
+        _plane(tmp_path, rec).build(spec)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert rec.acquired_sources == []
 
 
 def test_build_fails_fast_when_authorized_key_unresolved(tmp_path: Path) -> None:
