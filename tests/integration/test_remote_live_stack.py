@@ -28,10 +28,18 @@ import asyncio
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 
+import kdive.config as config
+from kdive.domain.errors import CategorizedError
 from kdive.profiles.provisioning import ProvisioningProfile
+from kdive.providers.remote_libvirt.config import (
+    is_remote_libvirt_configured,
+    remote_config_for_resource,
+    remote_instance_names,
+)
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.harness import LiveStackClient, OidcIssuer
 from tests.integration.live_stack.spine import (
@@ -53,7 +61,6 @@ from tests.integration.live_stack.spine import (
 )
 from tests.mcp.json_data import data_mapping, data_str
 
-_REMOTE_URI_ENV = "KDIVE_REMOTE_LIBVIRT_URI"
 # Test/runbook input feeding the provision profile's base_image_volume — NOT provider config.
 _BASE_IMAGE_ENV = "KDIVE_REMOTE_BASE_IMAGE_VOLUME"
 # The remote base-image name is operator inventory (a `staged` [[image]] in systems.toml,
@@ -71,16 +78,6 @@ _DEFAULT_KERNEL_REF = "git+https://git.kernel.org/pub/scm/linux/kernel/git/stabl
 # guest reboots out of the kdump capture kernel, then uploads via the presigned PUT; budget the
 # drain above that plus the reboot.
 _CAPTURE_DEADLINE_S = 900.0
-
-# gdb_addr has no default and remote provisioning fails closed without it
-# (providers/remote_libvirt/provisioning.py), so a host missing it must skip — not fail at
-# provision. Require these alongside the URI for the clean-skip contract.
-_REQUIRED_REFS = (
-    "KDIVE_REMOTE_LIBVIRT_CLIENT_CERT_REF",
-    "KDIVE_REMOTE_LIBVIRT_CLIENT_KEY_REF",  # noqa: S105 — env-var name, not a secret
-    "KDIVE_REMOTE_LIBVIRT_CA_CERT_REF",
-    "KDIVE_REMOTE_LIBVIRT_GDB_ADDR",
-)
 
 
 def _remote_provision_profile() -> dict[str, object]:
@@ -118,15 +115,28 @@ def _build_profile() -> dict[str, object]:
 
 def _remote_spine_preflight() -> tuple[OidcIssuer, str, str]:
     """Resolve issuer + stack URL + DB URL for the remote spine, or skip with the exact fix."""
-    if not os.environ.get(_REMOTE_URI_ENV):
+    if not is_remote_libvirt_configured():
         pytest.skip(
-            f"{_REMOTE_URI_ENV} unset; configure the remote-libvirt host "
+            "no [[remote_libvirt]] instance declared in systems.toml; configure KDIVE_SYSTEMS_TOML "
             "(see docs/operating/runbooks/remote-live-stack.md)"
         )
-    for ref_env in _REQUIRED_REFS:
-        if not os.environ.get(ref_env):
+    configs = []
+    try:
+        names = remote_instance_names()
+        configs = [(name, remote_config_for_resource(name)) for name in names]
+    except CategorizedError as exc:
+        pytest.skip(
+            f"remote-libvirt systems.toml config is invalid: {exc} (remote-live-stack runbook)"
+        )
+    if not names:
+        pytest.skip(
+            "no [[remote_libvirt]] instance declared in systems.toml; configure KDIVE_SYSTEMS_TOML "
+            "(remote-live-stack runbook)"
+        )
+    for name, cfg in configs:
+        if not cfg.gdb_addr:
             pytest.skip(
-                f"{ref_env} unset; stage the TLS cert refs + gdbstub ACL address "
+                f"remote_libvirt[{name}].gdb_addr unset; declare the gdbstub ACL address "
                 "(remote-live-stack runbook)"
             )
     if not os.environ.get(_BASE_IMAGE_ENV):
@@ -180,12 +190,80 @@ def test_remote_provision_default_references_the_built_image_not_a_placeholder(
     assert _REMOTE_BASE_IMAGE_NAME in default_volume
 
 
-def test_remote_preflight_skips_without_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With the remote provider URI unset, the preflight skips with the actionable reason."""
-    monkeypatch.delenv(_REMOTE_URI_ENV, raising=False)
-    with pytest.raises(pytest.skip.Exception) as excinfo:
+def test_remote_preflight_skips_without_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no remote inventory instance, the preflight skips with the actionable reason."""
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
+    config.load()
+
+    def capture_skip(reason: str) -> None:
+        raise RuntimeError(reason)
+
+    monkeypatch.setattr(pytest, "skip", capture_skip)
+    with pytest.raises(RuntimeError) as excinfo:
         _remote_spine_preflight()
-    assert _REMOTE_URI_ENV in str(excinfo.value)
+    assert "[[remote_libvirt]]" in str(excinfo.value)
+
+
+def test_remote_preflight_uses_inventory_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The remote spine preflight follows systems.toml, not deleted singleton env vars."""
+    systems_toml = tmp_path / "systems.toml"
+    systems_toml.write_text(
+        """
+schema_version = 2
+
+[[image]]
+provider = "remote-libvirt"
+name = "fedora-kdive-remote-base-43"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+[image.source]
+kind = "staged"
+volume = "fedora-kdive-remote-base-43.qcow2"
+
+[[remote_libvirt]]
+name = "host"
+uri = "qemu+tls://host.example/system"
+gdb_addr = "10.0.0.5"
+gdbstub_range = "47000:47099"
+client_cert_ref = "remote/clientcert.pem"
+client_key_ref = "remote/clientkey.pem"  # pragma: allowlist secret
+ca_cert_ref = "remote/cacert.pem"
+base_image = "fedora-kdive-remote-base-43"
+cost_class = "remote"
+vcpus = 16
+memory_mb = 65536
+""",
+        encoding="utf-8",
+    )
+    for env in (
+        "KDIVE_REMOTE_LIBVIRT_URI",
+        "KDIVE_REMOTE_LIBVIRT_CLIENT_CERT_REF",
+        "KDIVE_REMOTE_LIBVIRT_CLIENT_KEY_REF",
+        "KDIVE_REMOTE_LIBVIRT_CA_CERT_REF",
+        "KDIVE_REMOTE_LIBVIRT_GDB_ADDR",
+    ):
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(systems_toml))
+    monkeypatch.setenv(_BASE_IMAGE_ENV, "fedora-kdive-remote-base-43.qcow2")
+    monkeypatch.setenv(_DATABASE_URL_ENV, "postgresql://kdive@example/kdive")
+    config.load()
+    issuer = OidcIssuer(base_url="http://issuer.example")
+    monkeypatch.setattr("tests.integration.test_remote_live_stack.require_issuer", lambda: issuer)
+    monkeypatch.setattr(
+        "tests.integration.test_remote_live_stack.require_stack", lambda: "http://stack.example"
+    )
+
+    assert _remote_spine_preflight() == (
+        issuer,
+        "http://stack.example",
+        "postgresql://kdive@example/kdive",
+    )
 
 
 # --- the full remote spine ------------------------------------------------------------------

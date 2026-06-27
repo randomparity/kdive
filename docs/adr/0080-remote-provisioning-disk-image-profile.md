@@ -152,23 +152,30 @@ log path is meaningless on a remote host's filesystem; remote console capture is
 TLS-connect failures propagate as `transport_failure` from the ADR-0077 transport, the
 spec's documented mapping for every remote plane.
 
-### 5. Configuration: pool and gdbstub knobs are host-level env config
+### 5. Configuration: inventory identity plus host-topology env config
 
-Which storage pool to use and which address/port-range the gdbstub binds are properties of
-the **host's** topology, not of one System's profile, so they live beside the URI in the
-operator env config (and are advertised into `resources.capabilities` by discovery, per the
-spec's "the gdbstub port range are `capabilities` config on the resource"):
+The remote host connection identity lives in the `systems.toml` inventory, not singleton
+`KDIVE_REMOTE_LIBVIRT_*` env vars. A declared `[[remote_libvirt]]` instance carries the
+validated URI, mutual-TLS secret refs, required `gdb_addr`, `gdbstub_range`, base image
+reference, and allocation cap. Discovery advertises the resolved gdbstub address/range into
+`resources.capabilities`, per the spec's "the gdbstub port range are `capabilities` config
+on the resource".
+
+The libvirt storage pool, network, and machine type remain operational env settings because
+they describe host topology outside the v2 inventory model:
 
 - `KDIVE_REMOTE_LIBVIRT_STORAGE_POOL` (default `default`).
-- `KDIVE_REMOTE_LIBVIRT_GDB_ADDR` — **required to provision, no default**. The listen
-  address is the ACL'd security boundary (ADR-0079: the ACL *is* the auth); defaulting it
-  (to `0.0.0.0` or anything else) would silently expose an unauthenticated kernel-control
-  port, so the operator must name it explicitly. Absent ⇒ provisioning fails
-  `CONFIGURATION_ERROR`; discovery/control (which don't need it) still work.
-- `KDIVE_REMOTE_LIBVIRT_GDB_PORT_MIN` / `_MAX` (default `47000`–`47099`).
+- `KDIVE_REMOTE_LIBVIRT_NETWORK` (default `default`).
+- `KDIVE_REMOTE_LIBVIRT_MACHINE` (default `pc`).
 
-The runtime stays **buildable without any of this** (ADR-0076): `RemoteLibvirtProvision`
-reads the config at op time, exactly as the discovery registrar does.
+`gdb_addr` is still **required to provision, no default**. The listen address is the ACL'd
+security boundary (ADR-0079: the ACL *is* the auth); defaulting it (to `0.0.0.0` or anything
+else) would silently expose an unauthenticated kernel-control port. Absent or malformed
+inventory config fails `CONFIGURATION_ERROR` when the selected remote host is used.
+
+The runtime stays **buildable without inventory** (ADR-0076): remote-libvirt composition is
+opt-in on a declared `[[remote_libvirt]]` instance, and per-op ports resolve the selected host
+config at operation time.
 
 ## Consequences
 

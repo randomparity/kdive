@@ -13,8 +13,8 @@ two-phase KDUMP capture). The design is in
 [the spec](../../archive/superpowers/specs/2026-06-09-remote-live-stack-e2e-207.md).
 
 This is **operator-run, not CI**: the suite is `live_stack`-marked and CI deselects it. The
-preflight skips cleanly — naming the missing variable — unless every prerequisite below is
-present, so `just test-live-stack` is safe to run on any host.
+preflight skips cleanly unless the inventory-backed remote provider config and every live-stack
+prerequisite below are present, so `just test-live-stack` is safe to run on any host.
 
 ## Prerequisites
 
@@ -50,6 +50,8 @@ client_key_ref = "clientkey.pem"                 # mutual-TLS client key  <!-- p
 ca_cert_ref = "cacert.pem"                       # CA to verify the libvirtd server cert
 base_image = "fedora-kdive-remote-base-43"       # an [[image]] name (the staged base volume)
 cost_class = "remote"
+vcpus = 16
+memory_mb = 65536
 ```
 
 The libvirt storage pool / network / machine knobs that the inventory model does not carry stay
