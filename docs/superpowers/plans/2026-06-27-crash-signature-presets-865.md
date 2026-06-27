@@ -37,13 +37,17 @@ Define:
 
 - Widen `ExpectedBootFailure.kind` to
   `Literal["console_crash", "oops", "panic", "hung_task"]`.
-- Make `pattern: str | None = Field(default=None, min_length=1, max_length=256)`.
-- Add `@model_validator(mode="before")` `_resolve_preset`:
+- Keep `pattern: str = Field(min_length=1, max_length=256)` **required** (do not give it a
+  default). A `mode="before"` validator fills the preset pattern before field validation runs, so
+  presets satisfy the required field while `console_crash` without a pattern still raises
+  "field required" (→ `bad_expected_boot_failure`). Making it optional would let `console_crash`
+  validate with `pattern=None` and then silently never match at boot — a regression.
+- Add `@model_validator(mode="before")` `_resolve_preset` (a `@classmethod`):
   - operate only on a `dict`; return other inputs untouched.
   - if `kind` in `CRASH_SIGNATURE_PRESETS`: if `pattern` is not None → raise
-    `ValueError("preset kind does not accept a custom pattern")`; else set
-    `pattern = CRASH_SIGNATURE_PRESETS[kind]` (return a new dict, do not mutate the input).
-  - leave `console_crash` untouched (pattern stays required → "field required" on omission).
+    `ValueError("preset kind does not accept a custom pattern")`; else return a new dict
+    `{**data, "pattern": CRASH_SIGNATURE_PRESETS[kind]}` (do not mutate the input).
+  - leave `console_crash` untouched (required `pattern` enforces presence).
 - The existing `_literal_or_pattern` field-validator continues to run over the resolved pattern.
 
 **Tests:** extend `tests/domain/test_models.py`
