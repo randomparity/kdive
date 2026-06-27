@@ -62,6 +62,9 @@ class _DebugSessionsListPayload(ToolPayload):
     limit: int = Field(
         default=_DEFAULT_LIST_LIMIT, description="Maximum rows returned (capped at 200)."
     )
+    cursor: str | None = Field(
+        default=None, description="Opaque continuation cursor from a prior page's next_cursor."
+    )
 
 
 class DebugSessionHandlers(_LifecycleDebugSessionHandlers):
@@ -176,6 +179,7 @@ def register(
             project=payload.project,
             state=payload.state.value if payload.state is not None else None,
             limit=payload.limit,
+            cursor=payload.cursor,
         )
         return await _list_sessions(pool, current_context(), list_request)
 

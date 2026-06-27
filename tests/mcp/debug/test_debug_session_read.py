@@ -335,6 +335,39 @@ def test_list_sessions_filters_by_state(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_list_sessions_returns_cursor_for_next_page(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc)
+            expected: set[str] = set()
+            for _ in range(3):
+                run_id = await _seed_run(pool, sys_id)
+                expected.add(await _seed_session(pool, run_id, DebugSessionState.LIVE))
+
+            first = await sessions_read.list_sessions(
+                pool, _ctx(), sessions_read.SessionsListRequest(limit=2)
+            )
+            next_cursor = first.data["next_cursor"]
+            assert first.data["truncated"] is True
+            assert isinstance(next_cursor, str)
+            assert len(first.items) == 2
+
+            second = await sessions_read.list_sessions(
+                pool,
+                _ctx(),
+                sessions_read.SessionsListRequest(limit=2, cursor=next_cursor),
+            )
+        assert second.data["truncated"] is False
+        assert second.data["next_cursor"] is None
+        assert {item.object_id for item in first.items}.isdisjoint(
+            {item.object_id for item in second.items}
+        )
+        assert {item.object_id for item in first.items + second.items} == expected
+
+    asyncio.run(_run())
+
+
 def test_list_sessions_cross_project_filter_yields_nothing(migrated_url: str) -> None:
     # A `project` filter naming a non-member project is intersected with membership, so it
     # returns zero rows rather than leaking that the project has sessions.
@@ -359,6 +392,19 @@ def test_list_sessions_bad_filter_uuid_is_config_error(migrated_url: str) -> Non
                 pool, _ctx(), sessions_read.SessionsListRequest(run_id="nope")
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
+def test_list_sessions_bad_cursor_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await sessions_read.list_sessions(
+                pool, _ctx(), sessions_read.SessionsListRequest(cursor="not-a-token")
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_cursor"
 
     asyncio.run(_run())
 
