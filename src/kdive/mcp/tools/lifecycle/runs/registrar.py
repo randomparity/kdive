@@ -125,6 +125,32 @@ class _RunsCreatePayload(ToolPayload):
         )
 
 
+class _RunsListPayload(ToolPayload):
+    """Public payload for ``runs.list`` filters and pagination."""
+
+    system_id: str | None = Field(default=None, description="Only Runs bound to this System id.")
+    investigation_id: str | None = Field(
+        default=None, description="Only Runs under this Investigation id."
+    )
+    state: RunState | None = Field(default=None, description="Only Runs in this build-phase state.")
+    limit: int = Field(
+        default=_DEFAULT_LIST_LIMIT, description="Maximum rows returned (capped at 200)."
+    )
+    cursor: str | None = Field(
+        default=None, description="Opaque continuation cursor from a prior page's next_cursor."
+    )
+
+    def to_list_request(self) -> _RunsListRequest:
+        """Convert the public MCP payload into the handler request record."""
+        return _RunsListRequest(
+            system_id=self.system_id,
+            investigation_id=self.investigation_id,
+            state=self.state.value if self.state is not None else None,
+            limit=self.limit,
+            cursor=self.cursor,
+        )
+
+
 def register(
     app: FastMCP,
     pool: AsyncConnectionPool,
@@ -180,21 +206,9 @@ def _register_runs_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def runs_list(
-        system_id: Annotated[
-            str | None, Field(description="Only Runs bound to this System id.")
-        ] = None,
-        investigation_id: Annotated[
-            str | None, Field(description="Only Runs under this Investigation id.")
-        ] = None,
-        state: Annotated[
-            RunState | None, Field(description="Only Runs in this build-phase state.")
-        ] = None,
-        limit: Annotated[
-            int, Field(description="Maximum rows returned (capped at 200).")
-        ] = _DEFAULT_LIST_LIMIT,
-        cursor: Annotated[
-            str | None,
-            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
+        request: Annotated[
+            _RunsListPayload | None,
+            Field(description="Runs list filters and pagination request."),
         ] = None,
     ) -> ToolResponse:
         """List the caller's Runs, filterable by system/investigation/state. Requires viewer.
@@ -202,14 +216,11 @@ def _register_runs_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
         ``cursor`` for the next page.
         """
-        request = _RunsListRequest(
-            system_id=system_id,
-            investigation_id=investigation_id,
-            state=state,
-            limit=limit,
-            cursor=cursor,
+        return await _list_runs(
+            pool,
+            current_context(),
+            (request or _RunsListPayload()).to_list_request(),
         )
-        return await _list_runs(pool, current_context(), request)
 
 
 def _register_runs_create(

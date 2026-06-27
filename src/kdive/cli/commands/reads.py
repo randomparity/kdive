@@ -98,7 +98,9 @@ async def images_describe(args: argparse.Namespace) -> int:
 
 
 async def allocations_list(args: argparse.Namespace) -> int:
-    return await _list("allocations.list", args, ["id", "project", "system", "state"], "project")
+    envelope = await _fetch("allocations.list", {"request": _payload(args, "project")})
+    render(_rows(envelope), columns=["id", "project", "system", "state"], as_json=args.json)
+    return exit_code_for_envelope(envelope)
 
 
 async def allocations_get(args: argparse.Namespace) -> int:
@@ -120,7 +122,9 @@ async def runs_show(args: argparse.Namespace) -> int:
 
 
 async def jobs_list(args: argparse.Namespace) -> int:
-    return await _list("jobs.list", args, ["id", "kind", "state"])
+    envelope = await _fetch("jobs.list", {"request": {}})
+    render(_rows(envelope), columns=["id", "kind", "state"], as_json=args.json)
+    return exit_code_for_envelope(envelope)
 
 
 async def jobs_get(args: argparse.Namespace) -> int:

@@ -100,7 +100,7 @@ def test_allocations_list_requires_project_in_payload(
 ) -> None:
     client = _install_session(monkeypatch, _collection([]))
     asyncio.run(reads.allocations_list(_args(project="proj-a")))
-    assert client.calls == [("allocations.list", {"project": "proj-a"})]
+    assert client.calls == [("allocations.list", {"request": {"project": "proj-a"}})]
 
 
 def test_resources_describe_renders_single_record(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -325,11 +325,12 @@ def test_systems_list_json_projects_columns_and_passes_state_filter(
 
 
 def test_jobs_list_json_projects_declared_columns(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    _install_session(
+    client = _install_session(
         monkeypatch,
         _collection([_item("jo-1", "queued", {"kind": "boot"})]),
     )
     asyncio.run(reads.jobs_list(argparse.Namespace(json=True, limit=None)))
+    assert client.calls == [("jobs.list", {"request": {}})]
     assert json.loads(capsys.readouterr().out) == [
         {"id": "jo-1", "kind": "boot", "state": "queued"}
     ]
@@ -381,7 +382,7 @@ def test_payload_omits_missing_optional_filter(monkeypatch: pytest.MonkeyPatch, 
     # A list verb whose optional filter attr is absent sends no filter, rather than raising.
     client = _install_session(monkeypatch, _collection([]))
     asyncio.run(reads.allocations_list(argparse.Namespace(json=False)))
-    assert client.calls == [("allocations.list", {})]
+    assert client.calls == [("allocations.list", {"request": {}})]
 
 
 def _report_collection(items: list[dict], totals: dict) -> dict:

@@ -33,6 +33,7 @@ from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -52,6 +53,25 @@ POLL_INTERVAL_S = 0.5
 MAX_WAIT_S = 300.0
 
 _TERMINAL = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED})
+
+
+class _JobsListPayload(ToolPayload):
+    """Public payload for ``jobs.list`` filters and pagination."""
+
+    status: JobState | None = Field(default=None, description="Only jobs in this lifecycle state.")
+    kind: JobKind | None = Field(default=None, description="Only jobs of this kind.")
+    investigation_id: str | None = Field(
+        default=None,
+        description=(
+            "Only run-bearing jobs (build/install/boot) whose Run belongs to this Investigation."
+        ),
+    )
+    limit: int = Field(
+        default=DEFAULT_LIST_LIMIT, description="Maximum rows returned (capped at 200)."
+    )
+    cursor: str | None = Field(
+        default=None, description="Opaque continuation cursor from a prior page's next_cursor."
+    )
 
 
 def _error(object_id: str, category: ErrorCategory) -> ToolResponse:
@@ -320,23 +340,9 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def jobs_list(
-        status: Annotated[
-            JobState | None, Field(description="Only jobs in this lifecycle state.")
-        ] = None,
-        kind: Annotated[JobKind | None, Field(description="Only jobs of this kind.")] = None,
-        investigation_id: Annotated[
-            str | None,
-            Field(
-                description="Only run-bearing jobs (build/install/boot) whose Run belongs to "
-                "this Investigation."
-            ),
-        ] = None,
-        limit: Annotated[
-            int, Field(description="Maximum rows returned (capped at 200).")
-        ] = DEFAULT_LIST_LIMIT,
-        cursor: Annotated[
-            str | None,
-            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
+        request: Annotated[
+            _JobsListPayload | None,
+            Field(description="Jobs list filters and pagination request."),
         ] = None,
     ) -> ToolResponse:
         """List jobs visible to the caller, newest first, filterable by status/kind/investigation.
@@ -344,12 +350,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
         ``cursor`` to read the next page. Filters compose with the cursor.
         """
+        request = request or _JobsListPayload()
         return await list_jobs(
             pool,
             current_context(),
-            limit=limit,
-            cursor=cursor,
-            status=status,
-            kind=kind,
-            investigation_id=investigation_id,
+            limit=request.limit,
+            cursor=request.cursor,
+            status=request.status,
+            kind=request.kind,
+            investigation_id=request.investigation_id,
         )
