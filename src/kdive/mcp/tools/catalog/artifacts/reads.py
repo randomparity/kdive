@@ -53,6 +53,16 @@ _MAX_WINDOWED_FETCH_BYTES = 1024 * 1024
 # (ADR-0247): 16 KiB ≈ 4k–5k tokens, sized to the tool-result token budget rather than the
 # 64 KiB `KDIVE_ARTIFACT_INLINE_MAX_BYTES` byte cap (which still bounds the per-call window).
 ARTIFACT_GET_WINDOW_DEFAULT_BYTES = 16 * 1024
+# Hard, non-configurable token-safe ceiling on a single `artifacts.get` window
+# (ADR-0257, #835). The MCP client bounds a tool-result in tokens (~25k); the server
+# bounds the window in bytes. The REDACTED artifacts served inline are line-oriented
+# text (console, redacted dmesg, build-log), so JSON escaping stays near 1:1 and
+# 24 KiB is <= ~8.3k tokens worst case (ADR-0247: 64 KiB ~ 16k–22k tokens, i.e.
+# <= ~0.336 tokens/byte) — about a third of the ceiling, leaving room for the rest
+# of the envelope. Unlike `KDIVE_ARTIFACT_INLINE_MAX_BYTES` this is not
+# operator-tunable, so the token-safety bound holds regardless of the caller's
+# `max_bytes` or the configured inline cap (which can only lower the window further).
+ARTIFACT_GET_WINDOW_MAX_BYTES = 24 * 1024
 _GET_SQL: LiteralString = (
     "SELECT id, object_key, owner_kind, owner_id FROM artifacts "
     "WHERE id = %s AND owner_kind IN ('systems', 'runs') AND sensitivity = %s"
@@ -228,7 +238,8 @@ async def artifacts_get(
     the redacted bytes inline (`data["content"]`) and a presigned download URL
     (`refs["download_uri"]`). The window is ``data[byte_offset : byte_offset +
     effective_max]`` where ``effective_max = min(max_bytes,
-    KDIVE_ARTIFACT_INLINE_MAX_BYTES)``; ``data["content_truncated"]`` is ``"true"`` and
+    KDIVE_ARTIFACT_INLINE_MAX_BYTES, ARTIFACT_GET_WINDOW_MAX_BYTES)`` (the last a hard
+    24 KiB token-safe ceiling, ADR-0257); ``data["content_truncated"]`` is ``"true"`` and
     ``data["next_offset"]`` carries the byte offset to resume paging when bytes remain
     after the window. A negative ``byte_offset`` reads from the start and a
     ``max_bytes <= 0`` floors to a 1-byte window (clamped, never rejected). Objects
@@ -278,7 +289,7 @@ async def _artifact_content(
     inline_cap = config.require(ARTIFACT_INLINE_MAX_BYTES)
     ttl = config.require(ARTIFACT_DOWNLOAD_TTL_SECONDS)
     byte_offset = max(byte_offset, 0)
-    effective_max = min(max(max_bytes, 1), inline_cap)
+    effective_max = min(max(max_bytes, 1), inline_cap, ARTIFACT_GET_WINDOW_MAX_BYTES)
     try:
         head = await asyncio.to_thread(store.head, key)
         if head is None:

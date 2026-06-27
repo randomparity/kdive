@@ -21,6 +21,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog.artifacts.reads import (
     _MAX_WINDOWED_FETCH_BYTES,
     ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
+    ARTIFACT_GET_WINDOW_MAX_BYTES,
     ArtifactReadHandlers,
     ArtifactSearchRequest,
     artifacts_get,
@@ -510,6 +511,86 @@ def test_artifacts_get_pages_to_completion(migrated_url: str) -> None:
                 offset = int(data_str(resp, "next_offset"))
         assert seen_final
         assert collected == body
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_caps_window_at_token_safe_ceiling(migrated_url: str) -> None:
+    # #835 (ADR-0257): an explicit max_bytes at/above the inline cap is still bounded
+    # to the hard 24 KiB token-safe ceiling so the result cannot overflow the client
+    # token budget. Truncation flags + next_offset signal the clamp so the caller pages.
+    async def _run() -> None:
+        body = b"L" * 40_000  # > ceiling, <= fetch ceiling
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            store = _SearchStore(body)
+            resp = await artifacts_get(
+                pool,
+                _ctx(),
+                artifact_id=red_id,
+                store_factory=lambda: store,
+                max_bytes=65536,
+            )
+        assert resp.status == "available"
+        assert len(data_str(resp, "content")) == ARTIFACT_GET_WINDOW_MAX_BYTES
+        assert data_str(resp, "content_truncated") == "true"
+        assert data_str(resp, "next_offset") == str(ARTIFACT_GET_WINDOW_MAX_BYTES)
+        assert data_str(resp, "size_bytes") == "40000"
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_pages_past_ceiling_to_completion(migrated_url: str) -> None:
+    # #835: even with an over-ceiling max_bytes, next_offset paging still reaches the
+    # rest of the object; concatenating the ASCII windows reproduces the source.
+    async def _run() -> None:
+        body = bytes((i % 26) + 65 for i in range(60_000))  # ASCII A–Z, byte==char
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            collected = b""
+            offset = 0
+            seen_final = False
+            for _ in range(100):  # bound the loop defensively
+                store = _SearchStore(body)
+                resp = await artifacts_get(
+                    pool,
+                    _ctx(),
+                    artifact_id=red_id,
+                    store_factory=lambda bound=store: bound,
+                    byte_offset=offset,
+                    max_bytes=65536,  # over the ceiling every call
+                )
+                window = data_str(resp, "content").encode("utf-8")
+                assert len(window) <= ARTIFACT_GET_WINDOW_MAX_BYTES  # ceiling honored each page
+                collected += window
+                if data_str(resp, "content_truncated") == "false":
+                    assert "next_offset" not in resp.data
+                    seen_final = True
+                    break
+                offset = int(data_str(resp, "next_offset"))
+        assert seen_final
+        assert collected == body
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_explicit_max_below_ceiling_is_exact(migrated_url: str) -> None:
+    # #835: the ceiling must not shrink a sub-ceiling explicit request.
+    async def _run() -> None:
+        body = b"M" * 20_000
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            store = _SearchStore(body)
+            resp = await artifacts_get(
+                pool,
+                _ctx(),
+                artifact_id=red_id,
+                store_factory=lambda: store,
+                max_bytes=8_000,
+            )
+        assert len(data_str(resp, "content")) == 8_000
+        assert data_str(resp, "content_truncated") == "true"
+        assert data_str(resp, "next_offset") == "8000"
 
     asyncio.run(_run())
 
