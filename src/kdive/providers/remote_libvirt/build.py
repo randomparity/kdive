@@ -229,36 +229,15 @@ class RemoteLibvirtBuild:
         recorder: BuildPhaseRecorder = DISABLED_RECORDER,
         provider: str = "",
     ) -> BuildOutput:
-        """Build a kernel, publish a vmlinuz+modules bundle + debuginfo; return refs + build-id.
-
-        Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` if the resolved ``.config`` omits a
-                kdump/debuginfo prerequisite (checked before ``make``); ``BUILD_FAILURE`` on a
-                non-zero ``make``/``olddefconfig``/``modules_install`` exit or a missing
-                build-id; ``INFRASTRUCTURE_FAILURE`` propagated from a failed artifact store.
-        """
+        """Run the shared build pipeline with remote-libvirt build seams."""
         return self._pipeline.build(run_id, profile, recorder=recorder, provider=provider)
 
     def validate_config_ref(self, ref: ComponentRef) -> None:
-        """Validate a build config ref's shape at run-creation (local path or catalog kind).
-
-        A ``local`` ref is resolved against the provider roots; a ``catalog`` ref is accepted by
-        kind (its existence is checked when the build fetches it, since this seam owns no DB
-        connection). Any other kind is a ``CONFIGURATION_ERROR``.
-        """
+        """Validate through the shared build-host orchestrator."""
         self._orchestrator.validate_config_ref(ref)
 
     def publish(self, run_id: UUID, name: str, source: ArtifactSource) -> StoredArtifact:
-        """Publish one build artifact under ``runs/<run_id>/<name>`` and return its row.
-
-        An :class:`ArtifactBytes` source is PUT directly from worker memory (the historical
-        path). An :class:`ArtifactRemoteFile` source is published via a presigned PUT whose
-        checksum is computed on the build host, so the worker never reads the file's bytes.
-
-        Raises:
-            CategorizedError: ``INFRASTRUCTURE_FAILURE`` propagated from a failed store
-                operation or presigned upload.
-        """
+        """Publish through the shared artifact pipeline."""
         return self._pipeline.publish(run_id, name, source)
 
 

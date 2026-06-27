@@ -129,7 +129,13 @@ class BuildHostOrchestrator:
         return BuildWorkspaceResult(workspace=workspace, clone_provenance=clone_provenance)
 
     def validate_config_ref(self, ref: ComponentRef) -> None:
-        """Validate a build config ref's shape at run-creation."""
+        """Validate a build config ref's shape at run-creation.
+
+        ``local`` refs must resolve under the provider's allowed component roots. ``catalog``
+        refs are shape-valid here; their existence is checked when a build fetches the config
+        because this seam has no database connection. Other ref kinds raise
+        ``CONFIGURATION_ERROR``.
+        """
         validate_config_ref(ref, allowed_component_roots=self.allowed_component_roots)
 
 

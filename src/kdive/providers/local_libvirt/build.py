@@ -246,37 +246,15 @@ class LocalLibvirtBuild:
         recorder: BuildPhaseRecorder = DISABLED_RECORDER,
         provider: str = "",
     ) -> BuildOutput:
-        """Build a kernel and store the combined ``kernel`` bundle + ``vmlinux``; return refs + id.
-
-        Always runs ``make modules_install`` and packages ``boot/vmlinuz`` + ``lib/modules/<ver>/``
-        into one ``kernel`` bundle (the unified artifact shape, ADR-0234 §2). The demoted
-        ``modules_install`` writes into a build-user-owned staging dir under the sandbox (ADR-0214).
-
-        Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` if the resolved ``.config`` omits a
-                kdump/debuginfo prerequisite (checked before ``make``); ``BUILD_FAILURE``
-                on a non-zero ``make``/``modules_install`` exit, a missing bzImage, or a missing
-                build-id; ``INFRASTRUCTURE_FAILURE`` propagated from a failed artifact store.
-        """
+        """Run the shared build pipeline with local-libvirt build seams."""
         return self._pipeline.build(run_id, profile, recorder=recorder, provider=provider)
 
     def validate_config_ref(self, ref: ComponentRef) -> None:
-        """Validate a build config ref's shape at run-creation (local path or catalog kind).
-
-        A ``local`` ref is resolved against the provider roots; a ``catalog`` ref is accepted by
-        kind (its existence is checked when the build fetches it, since this seam owns no DB
-        connection). Any other kind is a ``CONFIGURATION_ERROR``.
-        """
+        """Validate through the shared build-host orchestrator."""
         self._orchestrator.validate_config_ref(ref)
 
     def publish(self, run_id: UUID, name: str, source: ArtifactSource) -> StoredArtifact:
-        """Publish one build artifact; bytes PUT directly, host files via presigned PUT.
-
-        Raises:
-            CategorizedError: ``INFRASTRUCTURE_FAILURE`` propagated from a failed store
-                operation or presigned upload; ``BUILD_FAILURE`` if the host-side hash/size of a
-                remote file cannot be read.
-        """
+        """Publish through the shared artifact pipeline."""
         return self._pipeline.publish(run_id, name, source)
 
     def _own_staging_for_sandbox(self, mod_root: Path) -> None:

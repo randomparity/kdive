@@ -32,7 +32,14 @@ type StagingOwner = Callable[[Path], None]
 
 @dataclass(slots=True)
 class BuildArtifactPipeline:
-    """Run modules_install, publish build artifacts, and clean build-host state."""
+    """Run modules_install, publish build artifacts, and clean build-host state.
+
+    The pipeline always runs ``make modules_install`` and publishes two artifacts for the
+    run: a unified ``kernel`` bundle containing ``boot/vmlinuz`` plus ``lib/modules/<ver>/``,
+    and a ``vmlinux`` debuginfo artifact. Worker-local byte sources are PUT directly;
+    transport-backed remote files publish through presigned PUTs so the worker does not read
+    host-side artifact bytes.
+    """
 
     orchestrator: BuildHostOrchestrator
     tenant: str
@@ -56,7 +63,14 @@ class BuildArtifactPipeline:
         recorder: BuildPhaseRecorder,
         provider: str,
     ) -> BuildOutput:
-        """Build a workspace, publish kernel/vmlinux artifacts, and return their refs."""
+        """Build a workspace, publish kernel/vmlinux artifacts, and return their refs.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` if config resolution or final
+                ``.config`` validation fails; ``BUILD_FAILURE`` for non-zero build steps,
+                missing artifacts, missing build-id, or host-side size/hash failures; and
+                ``INFRASTRUCTURE_FAILURE`` from workspace, store, or presigned-upload IO.
+        """
         workspace = self.orchestrator.workspace_path(run_id)
         try:
             workspace_result = build_workspace_capturing_log(
