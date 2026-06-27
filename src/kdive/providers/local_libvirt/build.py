@@ -89,7 +89,10 @@ type _RunMake = _build_exec.RunStep
 
 
 class LocalLibvirtBuild:
-    """The realized Build port: ``make`` + a combined kernel+modules bundle (ADR-0234 §2)."""
+    """The realized Build port: ``make`` + a combined kernel+modules bundle (ADR-0234 §2).
+
+    The Build port methods delegate to ``BuildArtifactPipeline`` and ``BuildHostOrchestrator``.
+    """
 
     def __init__(
         self,
@@ -246,15 +249,12 @@ class LocalLibvirtBuild:
         recorder: BuildPhaseRecorder = DISABLED_RECORDER,
         provider: str = "",
     ) -> BuildOutput:
-        """Run the shared build pipeline with local-libvirt build seams."""
         return self._pipeline.build(run_id, profile, recorder=recorder, provider=provider)
 
     def validate_config_ref(self, ref: ComponentRef) -> None:
-        """Validate through the shared build-host orchestrator."""
         self._orchestrator.validate_config_ref(ref)
 
     def publish(self, run_id: UUID, name: str, source: ArtifactSource) -> StoredArtifact:
-        """Publish through the shared artifact pipeline."""
         return self._pipeline.publish(run_id, name, source)
 
     def _own_staging_for_sandbox(self, mod_root: Path) -> None:
