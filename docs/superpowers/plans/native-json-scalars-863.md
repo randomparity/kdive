@@ -18,23 +18,30 @@
 - Commit one logical group per task with an imperative subject ≤72 chars and the
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` trailer.
 
-## Task 1 — guardrail test (do first; it stays red until the sweep finishes)
+## Task 1 — define the guard idiom (no file yet; authored in Task 12)
 
-**What:** Add `tests/mcp/test_no_stringified_flags.py`. It walks every `.py` under
-`src/kdive/mcp/tools/`, parses each with `ast`, and fails if it finds either idiom:
-(a) a `Call` whose func is an `Attribute` `.lower` on a value that is itself a `str(...)`
-call; (b) a string `Constant` exactly equal to `"true"` or `"false"` appearing as a `Dict`
-value or as an `IfExp` body/orelse. Report `file:lineno` for each hit. No allowlist.
+The guard test (`tests/mcp/test_no_stringified_flags.py`) is **authored last** (Task 12),
+not now: an always-red test left on disk during the sweep would fail every full-suite run
+(pytest collects on-disk files regardless of git state) and risks an accidental commit that
+breaks `git bisect`. Task 1 only fixes the idiom the guard will enforce, so Tasks 2–11 know
+the target shape.
 
-**Fits:** the spec "Guardrail" section; prevents boolean-stringification regressions.
-**Files:** `tests/mcp/test_no_stringified_flags.py` (new).
-**Acceptance:** the test currently FAILS listing the known idiom sites (reports/generate,
-introspect, reads, build_hosts/lifecycle, debug/ops, diagnostics, queue, deregister); after
-all later tasks it PASSES. Run a one-off self-check that temporarily adding
-`x = "true" if c else "false"` to a tools file re-fails it.
-**Note:** this test is committed in the FINAL task once the tree is clean, to keep every
-commit green. Write it in Task 1 but hold its commit; or commit it last. (Chosen: write the
-file in Task 1, keep it staged-but-uncommitted locally, commit in Task 12 after the sweep.)
+**Guard idiom (implemented in Task 12):** AST-walk every `.py` under `src/kdive/mcp/tools/`
+and fail on either: (a) a `Call` whose func is an `Attribute` `.lower` on a value that is
+itself a `str(...)` call; (b) a string `Constant` exactly equal to `"true"` or `"false"`
+appearing as a `Dict` value or as an `IfExp` body/orelse. Report `file:lineno`. No allowlist
+— **every** such occurrence in `tools/` must be gone after the sweep, including the audit-arg
+one in Task 1a below. Prose Constants whose value merely *contains* the word (e.g.
+`'… content_truncated is "false".'`) are not exact matches and are not flagged.
+
+## Task 1a — convert `inventory_export` audit `persist` flag
+
+**Files:** `src/kdive/mcp/tools/ops/inventory_export.py`, its test (if any asserts `persist`).
+**What:** `inventory_export.py:168` emits `"persist": "true"` (a bare boolean literal) inside
+a `PlatformAuditEvent` `args=` mapping. Even though it is audit-only, the no-allowlist guard
+flags it. Convert it to native `True` — `args: Mapping[str, object]` accepts it and only a
+one-way digest is stored, so audit behavior is unchanged. This keeps the guard allowlist-free.
+**Acceptance:** `persist` is `True`; any test reading it adjusted; guard would not flag it.
 
 ## Task 2 — `resources.list` capability envelope (coercion)
 
@@ -76,10 +83,13 @@ add/adjust an assertion that `max_concurrent` is an `int` and `enabled` is a `bo
   `size_bytes` as int.
 - Update prose: `registrar.py:90` and `:102` `byte_offset` description (`content_truncated is
   "false"` → `false`), `reads.py:242` docstring, `runs/common.py:84` comment.
-**Tests:** flip `["match_count"] == "1"` → `== 1`; the many `data_str(resp,
-"content_truncated") == "false"/"true"` assertions in `test_artifacts_tools.py` → read the
-native bool (`resp.data["content_truncated"] is False/True`); adjust the `data_str` helper
-usages accordingly.
+**Tests:** flip `["match_count"] == "1"` → `== 1`. `content_truncated` appears in
+`test_artifacts_tools.py` not only in equality assertions but in **paging-loop predicates**
+(e.g. `if data_str(resp, "content_truncated") == "false": break`). `data_str` is a str-typed
+helper — do **not** use it for `content_truncated` post-change; read
+`resp.data["content_truncated"]` (bool) directly in both the assertions and every loop
+condition, or the loop compares a bool to the string `"false"` and never terminates / never
+runs. Verify each paging loop still iterates and breaks correctly.
 **Acceptance:** test green; `just docs` regenerates `artifacts.md` with `false` (boolean
 wording); residual-prose grep clean.
 
@@ -159,26 +169,29 @@ bool (data dict already `dict[str, JsonValue]`). `retention.py`: `pruned` → in
 native bool; assert byte_count/script_bytes ints.
 **Acceptance:** tests green.
 
-## Task 12 — commit guardrail + full sweep verification
+## Task 12 — author guardrail test + full sweep verification
 
-**What:** Now the tree has no stringified-flag idioms left. Commit the guardrail test from
-Task 1. Run the full suite and the guard.
+**What:** With Tasks 1a–11 done the tree has no stringified-flag idioms left. Now author
+`tests/mcp/test_no_stringified_flags.py` (the idiom is defined in Task 1) and commit it.
+Before committing, prove it bites: temporarily add `x = "true" if c else "false"` to a
+`tools/` file and confirm the guard fails, then remove it. Run the full suite and the guard.
 **Commands:** `just ci`; `uv run python -m pytest tests/mcp/test_no_stringified_flags.py -q`.
-**Acceptance:** guard passes with no allowlist; `just ci` green; `just docs` produces no
-uncommitted diff (regenerated reference committed in Task 4).
+**Acceptance:** guard passes with no allowlist (incl. the converted `inventory_export`
+`persist`); `just ci` green; `just docs` produces no uncommitted diff (regenerated reference
+committed in Task 4).
 
 ## Rollback / cleanup
 
 Each task is an isolated commit; reverting one restores that tool's prior string output.
 No migration, no persisted state, no config touched — rollback is a pure code revert.
 The only cross-task artifact is the regenerated `docs/guide/reference/artifacts.md` (Task 4)
-and the guard test (Task 12).
+and the guard test (authored in Task 12).
 
 ## Sequencing notes
 
-- Tasks 2–11 are independent (disjoint files) and may run in any order; each keeps its own
+- Tasks 1a–11 are independent (disjoint files) and may run in any order; each keeps its own
   commit green because it flips its own tests in the same commit.
-- The guard test (Task 1 write / Task 12 commit) is the only cross-cutting piece and must be
-  committed last so no intermediate commit lands with the guard red.
+- The guard test is authored only in Task 12, after the sweep, so no intermediate commit
+  lands with a red guard and no always-red test sits in the working tree during Tasks 1a–11.
 - `just docs` regeneration (Task 4) must be re-run and re-committed if it drifts after a base
   rebase.
