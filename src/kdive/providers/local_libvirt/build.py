@@ -41,8 +41,6 @@ from kdive.components.references import (
     ComponentRef,
 )
 from kdive.config.core_settings import BUILD_WORKSPACE, KERNEL_SRC
-from kdive.domain.build_phase import BuildPhase
-from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.ports.build_transport import BuildTransport
@@ -52,14 +50,18 @@ from kdive.providers.shared.build_host.configuration.git_source import (
     local_build_remote_allowlist_from_env,
 )
 from kdive.providers.shared.build_host.orchestration import BuildHostOrchestrator, WorkspaceCleanup
+from kdive.providers.shared.build_host.pipeline import (
+    BuildArtifactPipeline,
+    ReadArtifactSource,
+    StagingCleanup,
+    StagingFactory,
+)
 from kdive.providers.shared.build_host.publishing.artifact_publish import (
     ArtifactBytes,
     ArtifactRemoteFile,
     ArtifactSource,
     StorePort,
-    publish_artifact_source,
 )
-from kdive.providers.shared.build_host.publishing.build_log import build_workspace_capturing_log
 from kdive.providers.shared.build_host.publishing.kernel_bundle import (
     MakeKernelBundle,
     local_kernel_bundle,
@@ -81,15 +83,9 @@ from kdive.providers.shared.build_host.workspaces import workspace as _build_wor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import object_store_from_env
 
-_RETENTION_CLASS = "build"
-
-
 type _Checkout = _build_workspace.Checkout
 type _RunOlddefconfig = _build_exec.RunStep
 type _RunMake = _build_exec.RunStep
-type _ReadArtifactSource = Callable[[Path], ArtifactSource]
-type _StagingFactory = Callable[[], Path]
-type _StagingCleanup = Callable[[Path], None]
 
 
 class LocalLibvirtBuild:
@@ -106,11 +102,11 @@ class LocalLibvirtBuild:
         read_config: _build_exec.ReadConfig,
         run_make: _RunMake,
         make_bundle: MakeKernelBundle,
-        read_vmlinux_source: _ReadArtifactSource,
+        read_vmlinux_source: ReadArtifactSource,
         read_build_id: _build_exec.ReadBuildId,
         run_modules_install: _build_exec.RunModulesInstall,
-        staging_factory: _StagingFactory,
-        staging_cleanup: _StagingCleanup,
+        staging_factory: StagingFactory,
+        staging_cleanup: StagingCleanup,
         secret_registry: SecretRegistry,
         catalog_fetch: CatalogConfigFetch,
         allowed_component_roots: list[Path] | None = None,
@@ -119,7 +115,6 @@ class LocalLibvirtBuild:
     ) -> None:
         self._tenant = tenant
         self._sandbox_provider = sandbox_provider
-        self._workspace_root = workspace_root
         self._allowed_component_roots = allowed_component_roots or [
             Path(_build_config.DEFAULT_BUILD_COMPONENT_ROOT)
         ]
@@ -133,14 +128,19 @@ class LocalLibvirtBuild:
             allowed_component_roots=self._allowed_component_roots,
             cleanup=workspace_cleanup,
         )
+        self._pipeline = BuildArtifactPipeline(
+            orchestrator=self._orchestrator,
+            tenant=tenant,
+            store_factory=store_factory,
+            run_modules_install=run_modules_install,
+            make_bundle=make_bundle,
+            read_vmlinux_source=read_vmlinux_source,
+            read_build_id=read_build_id,
+            staging_factory=staging_factory,
+            staging_cleanup=staging_cleanup,
+            staging_owner=self._own_staging_for_sandbox,
+        )
         self._store_factory = store_factory
-        self._store: StorePort | None = None
-        self._make_bundle = make_bundle
-        self._read_vmlinux_source = read_vmlinux_source
-        self._read_build_id = read_build_id
-        self._run_modules_install = run_modules_install
-        self._staging_factory = staging_factory
-        self._staging_cleanup = staging_cleanup
         self._secret_registry = secret_registry
         self._catalog_fetch = catalog_fetch
 
@@ -258,42 +258,7 @@ class LocalLibvirtBuild:
                 on a non-zero ``make``/``modules_install`` exit, a missing bzImage, or a missing
                 build-id; ``INFRASTRUCTURE_FAILURE`` propagated from a failed artifact store.
         """
-        workspace = self._orchestrator.workspace_path(run_id)
-        try:
-            workspace_result = build_workspace_capturing_log(
-                lambda: self._orchestrator.build_workspace(
-                    run_id, profile, recorder=recorder, provider=provider
-                ),
-                self._store_for_publish(),
-                run_id,
-                tenant=self._tenant,
-            )
-            mod_root = self._staging_factory()
-            sandbox = self._sandbox_provider.get() if self._sandbox_provider is not None else None
-            if sandbox is not None:
-                sandbox.own(mod_root)  # demoted modules_install writes a build-user dir (ADR-0214)
-            try:
-                with recorder.phase(BuildPhase.MODULES, provider):
-                    if self._run_modules_install(workspace, mod_root) != 0:
-                        raise _build_exec.build_failure(
-                            "make modules_install exited non-zero", run_id
-                        )
-                with recorder.phase(BuildPhase.ARTIFACT, provider):
-                    build_id = self._read_build_id(workspace)
-                    kernel = self.publish(run_id, "kernel", self._make_bundle(workspace, mod_root))
-                    vmlinux = self.publish(run_id, "vmlinux", self._read_vmlinux_source(workspace))
-            finally:
-                self._staging_cleanup(mod_root)
-            return _build_workspace.attach_clone_provenance(
-                BuildOutput(
-                    kernel_ref=kernel.key,
-                    debuginfo_ref=vmlinux.key,
-                    build_id=build_id,
-                ),
-                workspace_result.clone_provenance,
-            )
-        finally:
-            self._orchestrator.cleanup_workspace(workspace)
+        return self._pipeline.build(run_id, profile, recorder=recorder, provider=provider)
 
     def validate_config_ref(self, ref: ComponentRef) -> None:
         """Validate a build config ref's shape at run-creation (local path or catalog kind).
@@ -304,11 +269,6 @@ class LocalLibvirtBuild:
         """
         self._orchestrator.validate_config_ref(ref)
 
-    def _store_for_publish(self) -> StorePort:
-        if self._store is None:
-            self._store = self._store_factory()
-        return self._store
-
     def publish(self, run_id: UUID, name: str, source: ArtifactSource) -> StoredArtifact:
         """Publish one build artifact; bytes PUT directly, host files via presigned PUT.
 
@@ -317,15 +277,12 @@ class LocalLibvirtBuild:
                 operation or presigned upload; ``BUILD_FAILURE`` if the host-side hash/size of a
                 remote file cannot be read.
         """
-        return publish_artifact_source(
-            self._store_for_publish(),
-            run_id,
-            name,
-            source,
-            tenant=self._tenant,
-            sensitivity=Sensitivity.SENSITIVE,
-            retention_class=_RETENTION_CLASS,
-        )
+        return self._pipeline.publish(run_id, name, source)
+
+    def _own_staging_for_sandbox(self, mod_root: Path) -> None:
+        sandbox = self._sandbox_provider.get() if self._sandbox_provider is not None else None
+        if sandbox is not None:
+            sandbox.own(mod_root)
 
 
 def _local_vmlinux_source(workspace: Path) -> ArtifactSource:  # pragma: no cover - live_vm

@@ -18,9 +18,9 @@ the historical behavior. The transport-backed seams (ADR-0099) produce the artif
 build host and publish each via a presigned PUT whose checksum is computed on the host, so the
 worker never reads the large bundle/vmlinux bytes (it only sees the host-computed sha256).
 
-This module is **independent** of ``local_libvirt`` (ADR-0076: no shared layer with the
-provider headed for removal); it reuses only the neutral artifact, component-reference, and
-build-artifact helpers and duplicates the build mechanics. The slow, environment-bound
+This module is **independent** of ``local_libvirt`` (ADR-0076: no provider-to-provider coupling);
+it reuses only the neutral build-host, artifact, component-reference, and build-artifact helpers.
+The slow, environment-bound
 operations are **injected seams** that default to the real implementations, so unit tests
 cover the orchestration/error contract without a toolchain; the real ``make`` path is
 exercised under the ``live_vm`` gate. `build()` is synchronous; the async build handler
@@ -44,7 +44,6 @@ from kdive.build_configs.defaults import (
 )
 from kdive.components.references import ComponentRef
 from kdive.config.core_settings import BUILD_WORKSPACE, KERNEL_SRC
-from kdive.domain.build_phase import BuildPhase
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import ServerBuildProfile
@@ -52,14 +51,18 @@ from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.shared.build_host import execution as _build_exec
 from kdive.providers.shared.build_host.configuration import config as _build_config
 from kdive.providers.shared.build_host.orchestration import BuildHostOrchestrator, WorkspaceCleanup
+from kdive.providers.shared.build_host.pipeline import (
+    BuildArtifactPipeline,
+    ReadArtifactSource,
+    StagingCleanup,
+    StagingFactory,
+)
 from kdive.providers.shared.build_host.publishing.artifact_publish import (
     ArtifactBytes,
     ArtifactRemoteFile,
     ArtifactSource,
     StorePort,
-    publish_artifact_source,
 )
-from kdive.providers.shared.build_host.publishing.build_log import build_workspace_capturing_log
 from kdive.providers.shared.build_host.publishing.kernel_bundle import (
     MakeKernelBundle,
     local_kernel_bundle,
@@ -82,11 +85,6 @@ _RETENTION_CLASS = "build"
 _SENSITIVITY = Sensitivity.SENSITIVE
 
 
-type _ReadVmlinuxSource = Callable[[Path], ArtifactSource]
-type _StagingFactory = Callable[[], Path]
-type _StagingCleanup = Callable[[Path], None]
-
-
 def _local_staging_cleanup(mod_root: Path) -> None:
     """Worker-local staging cleanup: ``shutil.rmtree`` the worker-side module-staging dir."""
     shutil.rmtree(mod_root, ignore_errors=True)
@@ -106,15 +104,14 @@ class RemoteLibvirtBuild:
         run_make: _build_exec.RunStep,
         run_modules_install: _build_exec.RunModulesInstall,
         make_bundle: MakeKernelBundle,
-        read_vmlinux_source: _ReadVmlinuxSource,
+        read_vmlinux_source: ReadArtifactSource,
         read_build_id: _build_exec.ReadBuildId,
-        staging_factory: _StagingFactory,
+        staging_factory: StagingFactory,
         catalog_fetch: CatalogConfigFetch,
         allowed_component_roots: list[Path] | None = None,
-        staging_cleanup: _StagingCleanup = _local_staging_cleanup,
+        staging_cleanup: StagingCleanup = _local_staging_cleanup,
         workspace_cleanup: WorkspaceCleanup | None = None,
     ) -> None:
-        self._workspace_root = workspace_root
         self._allowed_component_roots = allowed_component_roots or [
             Path(_build_config.DEFAULT_BUILD_COMPONENT_ROOT)
         ]
@@ -128,14 +125,20 @@ class RemoteLibvirtBuild:
             allowed_component_roots=self._allowed_component_roots,
             cleanup=workspace_cleanup,
         )
+        self._pipeline = BuildArtifactPipeline(
+            orchestrator=self._orchestrator,
+            tenant=_TENANT,
+            store_factory=store_factory,
+            run_modules_install=run_modules_install,
+            make_bundle=make_bundle,
+            read_vmlinux_source=read_vmlinux_source,
+            read_build_id=read_build_id,
+            staging_factory=staging_factory,
+            staging_cleanup=staging_cleanup,
+            sensitivity=_SENSITIVITY,
+            retention_class=_RETENTION_CLASS,
+        )
         self._store_factory = store_factory
-        self._store: StorePort | None = None
-        self._run_modules_install = run_modules_install
-        self._make_bundle = make_bundle
-        self._read_vmlinux_source = read_vmlinux_source
-        self._read_build_id = read_build_id
-        self._staging_factory = staging_factory
-        self._staging_cleanup = staging_cleanup
         self._catalog_fetch = catalog_fetch
 
     @classmethod
@@ -234,37 +237,7 @@ class RemoteLibvirtBuild:
                 non-zero ``make``/``olddefconfig``/``modules_install`` exit or a missing
                 build-id; ``INFRASTRUCTURE_FAILURE`` propagated from a failed artifact store.
         """
-        workspace = self._orchestrator.workspace_path(run_id)
-        try:
-            workspace_result = build_workspace_capturing_log(
-                lambda: self._orchestrator.build_workspace(
-                    run_id, profile, recorder=recorder, provider=provider
-                ),
-                self._store_for_publish(),
-                run_id,
-                tenant=_TENANT,
-            )
-            mod_root = self._staging_factory()
-            try:
-                with recorder.phase(BuildPhase.MODULES, provider):
-                    if self._run_modules_install(workspace, mod_root) != 0:
-                        raise _build_exec.build_failure(
-                            "make modules_install exited non-zero", run_id
-                        )
-                with recorder.phase(BuildPhase.ARTIFACT, provider):
-                    build_id = self._read_build_id(workspace)
-                    kernel_source = self._make_bundle(workspace, mod_root)
-                    vmlinux_source = self._read_vmlinux_source(workspace)
-                    kernel = self.publish(run_id, "kernel", kernel_source)
-                    vmlinux = self.publish(run_id, "vmlinux", vmlinux_source)
-            finally:
-                self._staging_cleanup(mod_root)
-            return _build_workspace.attach_clone_provenance(
-                BuildOutput(kernel_ref=kernel.key, debuginfo_ref=vmlinux.key, build_id=build_id),
-                workspace_result.clone_provenance,
-            )
-        finally:
-            self._orchestrator.cleanup_workspace(workspace)
+        return self._pipeline.build(run_id, profile, recorder=recorder, provider=provider)
 
     def validate_config_ref(self, ref: ComponentRef) -> None:
         """Validate a build config ref's shape at run-creation (local path or catalog kind).
@@ -286,20 +259,7 @@ class RemoteLibvirtBuild:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` propagated from a failed store
                 operation or presigned upload.
         """
-        return publish_artifact_source(
-            self._store_for_publish(),
-            run_id,
-            name,
-            source,
-            tenant=_TENANT,
-            sensitivity=_SENSITIVITY,
-            retention_class=_RETENTION_CLASS,
-        )
-
-    def _store_for_publish(self) -> StorePort:
-        if self._store is None:
-            self._store = self._store_factory()
-        return self._store
+        return self._pipeline.publish(run_id, name, source)
 
 
 def _local_vmlinux_source(workspace: Path) -> ArtifactSource:  # pragma: no cover - live_vm
@@ -307,7 +267,7 @@ def _local_vmlinux_source(workspace: Path) -> ArtifactSource:  # pragma: no cove
     return ArtifactBytes(_build_exec.real_read_vmlinux(workspace))
 
 
-def transport_vmlinux_source(t: BuildTransport) -> _ReadVmlinuxSource:
+def transport_vmlinux_source(t: BuildTransport) -> ReadArtifactSource:
     """Return a ``_ReadVmlinuxSource`` yielding the host-resident ``vmlinux`` debuginfo.
 
     The returned seam never reads ``vmlinux``; it points an :class:`ArtifactRemoteFile` at
