@@ -81,10 +81,16 @@ with `get_run`.
   `expected_boot_failure` is **not** a parameter — it is a create-time Run property
   (`runs.create`, persisted on the Run); the boot phase honors the Run's stored value unchanged, so
   a matched expected crash is a success exactly as in `runs.boot`.
-- **Idempotency.** Each phase is enqueued with a **deterministic per-phase `idempotency_key`**
-  derived from `run_id` + phase (the step functions already accept `idempotency_key` and dedup via
-  `keyed_mutation`). A client auto-retry of the long-blocking call therefore re-attaches to the
-  in-flight jobs rather than double-enqueuing build/install/boot.
+- **Idempotency (and single-shot semantics).** Each phase is enqueued with a **deterministic
+  per-phase `idempotency_key`** derived from `run_id` + phase (the step functions already accept
+  `idempotency_key` and dedup via `keyed_mutation`). A client auto-retry of the long-blocking call
+  therefore re-attaches to the in-flight jobs rather than double-enqueuing build/install/boot.
+  Because `keyed_mutation` returns the *stored* result for a key, this makes the composite
+  **single-shot per `run_id` by design**: once a phase's job is terminal — including terminal-
+  *failed* — re-calling the composite returns that prior result, not a fresh attempt. Retrying a
+  transiently-failed phase is therefore a granular-tool action on the same `run_id` (`runs.build`
+  etc. mint their own keys), which the failed-phase envelope (below) points the agent to. The
+  composite is a single-shot fast path, not a retry loop.
 - **Scope (boundary).** Deliberately starts post-`create`/post-`bind`. `allocations.request`,
   `systems.provision`, `runs.create`, `runs.bind` involve capacity, system selection, and reuse
   decisions an agent should make explicitly; the three job-bearing same-shaped steps over one
@@ -121,8 +127,13 @@ construct a valid call*, not a name hint. It reuses the same schema-serialisatio
 - **RBAC-filtered, not tier-filtered.** Results include only tools the caller could invoke under
   its grants (reusing `mcp/exposure.py`), but span *all* tiers — search is the escape hatch out of
   the core set, so a core-demoted tool must be findable.
-- **Ranking.** Deterministic lexical match over `name + description + curated keywords`, ranked by
-  match strength, `limit`-capped. Curated keywords live in a central reviewed map
+- **Ranking and limit.** Deterministic lexical match over `name + description + curated keywords`,
+  ranked by match strength with **deterministic tie-breaking** (lexicographic by tool name) so a
+  needed tool is never arbitrarily truncated. `limit` defaults to **8** and is capped at **20** — a
+  vague broad-matching query (`run`, `boot`) therefore can never re-dump a large slice of the
+  catalog and re-incur the cost the gateway removes; an empty/whitespace query is rejected with a
+  pointer to the namespace TOC rather than returning every tool. The precision/recall of the cap is
+  a tunable backed by search-miss telemetry. Curated keywords live in a central reviewed map
   (`mcp/tool_index.py`, the `_TOOL_SCOPES` idiom), defaulting to tokenised name+description when a
   tool has no entry.
 - **Search-miss telemetry.** A zero-result query is logged structured (query + result count) — the
@@ -160,7 +171,12 @@ removed.
   the full RBAC-scoped catalog (ADR-0148 behaviour), never an empty/broken listing.
 - **Escape valve.** A config switch `KDIVE_MCP_TOOL_GATEWAY` (default `on`) disables the tier
   intersection and restores the full RBAC-scoped catalog, for a client that cannot call a tool it
-  did not receive from `list_tools` (the 1a compatibility bet's release valve).
+  did not receive from `list_tools` (the 1a compatibility bet's release valve). The switch is
+  **server-global**: kdive assumes a homogeneous 1a-capable client fleet (the Claude family), so the
+  valve is a deploy-time all-or-nothing fallback. The filter already runs per-connection
+  (`on_list_tools` reads the per-connection `RequestContext`), so a future per-connection variant
+  keyed off the `initialize` client info can be chained in the same seam if a mixed fleet ever needs
+  it — out of scope here.
 - **Completeness guard.** A test asserts `CORE_TOOLS ⊆` the live registry, alongside the existing
   `CLASSIFIED_TOOLS | PUBLIC_TOOLS` guard, so a renamed/removed core tool fails loudly.
 
