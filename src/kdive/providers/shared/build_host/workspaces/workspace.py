@@ -14,6 +14,10 @@ from kdive.build_artifacts.results import BuildOutput
 from kdive.db.build_host_policy import warm_tree_source_error
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import GitSourceRef, ServerBuildProfile, git_source_of
+from kdive.providers.shared.build_host.clone_recipe import (
+    GitCloneFailureMessages,
+    run_git_clone_recipe,
+)
 from kdive.providers.shared.build_host.configuration.config import resolve_local_ref
 from kdive.providers.shared.build_host.configuration.git_source import (
     remote_allowed,
@@ -58,6 +62,13 @@ _GIT_HARDENED_ENV = {
     "GIT_PROTOCOL_FROM_USER": "0",
     "GIT_TERMINAL_PROMPT": "0",
 }
+
+_LOCAL_CLONE_MESSAGES = GitCloneFailureMessages(
+    init_failed="git init failed",
+    fetch_failed="git fetch failed",
+    missing_fetch_head="git fetch produced no FETCH_HEAD (the fetch did not complete)",
+    checkout_failed="git checkout FETCH_HEAD failed",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,48 +239,15 @@ def clone_tree(
         raise workspace_failure("mkdir", "build_workspace", exc) from exc
     if sandbox is not None:
         sandbox.own(workspace)  # demoted git writes into a build-user-owned dir (ADR-0214)
-    init = _run_git(["init", str(workspace)], cwd=None, run_id=run_id, sandbox=sandbox)
-    if init.returncode != 0:
-        raise CategorizedError(
-            "git init failed",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"stderr": redacted_tail(init.stderr, secret_registry)},
-        )
-    fetch = _run_git(
-        ["-C", str(workspace), "fetch", "--depth", "1", source.remote, source.ref],
-        cwd=None,
-        run_id=run_id,
-        sandbox=sandbox,
+    resolved_commit = run_git_clone_recipe(
+        remote=source.remote,
+        ref=source.ref,
+        dest=str(workspace),
+        run=lambda args: _run_git(args, cwd=None, run_id=run_id, sandbox=sandbox),
+        redact_stderr=lambda stderr: redacted_tail(stderr, secret_registry),
+        messages=_LOCAL_CLONE_MESSAGES,
     )
-    if fetch.returncode != 0:
-        raise CategorizedError(
-            "git fetch failed",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"stderr": redacted_tail(fetch.stderr, secret_registry)},
-        )
-    verify = _run_git(
-        ["-C", str(workspace), "rev-parse", "--verify", "--quiet", "FETCH_HEAD"],
-        cwd=None,
-        run_id=run_id,
-        sandbox=sandbox,
-    )
-    if verify.returncode != 0:
-        raise CategorizedError(
-            "git fetch produced no FETCH_HEAD (the fetch did not complete)",
-            category=ErrorCategory.TRANSPORT_FAILURE,
-            details={"stderr": redacted_tail(fetch.stderr, secret_registry)},
-        )
-    provenance = _clone_provenance(source, verify.stdout.strip())
-    checkout = _run_git(
-        ["-C", str(workspace), "checkout", "FETCH_HEAD"], cwd=None, run_id=run_id, sandbox=sandbox
-    )
-    if checkout.returncode != 0:
-        raise CategorizedError(
-            "git checkout FETCH_HEAD failed",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"stderr": redacted_tail(checkout.stderr, secret_registry)},
-        )
-    return provenance
+    return _clone_provenance(source, resolved_commit)
 
 
 def _clone_provenance(source: GitSourceRef, resolved_commit: str) -> CloneProvenance | None:
