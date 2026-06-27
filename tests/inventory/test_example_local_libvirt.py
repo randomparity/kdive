@@ -15,7 +15,7 @@ import tomllib
 from pathlib import Path
 
 from kdive.build_configs.seed import KDUMP_FRAGMENT_PATH
-from kdive.inventory.reconcile_cli import validate_systems
+from kdive.inventory.cli import validate_systems
 
 _EXAMPLE = (
     Path(__file__).resolve().parents[2]

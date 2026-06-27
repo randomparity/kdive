@@ -3,13 +3,13 @@
 This is the loop trigger of the M2.6 inventory engine (#391/#393). Each pass resolves the
 inventory path via :func:`kdive.inventory.path.systems_toml_path` (``KDIVE_SYSTEMS_TOML``, else
 the XDG default ``~/.config/kdive/systems.toml``) and reconciles it through the one ordered
-chain (:func:`kdive.inventory.reconcile_pipeline.reconcile_all`): into ``image_catalog`` via
-:func:`kdive.inventory.reconcile_images.reconcile_images`, prices ``cost_class_coefficients``
-via :func:`kdive.inventory.reconcile_coefficients.reconcile_coefficients` run **before** the
+chain (:func:`kdive.inventory.reconcile.pipeline.reconcile_all`): into ``image_catalog`` via
+:func:`kdive.inventory.reconcile.images.reconcile_images`, prices ``cost_class_coefficients``
+via :func:`kdive.inventory.reconcile.coefficients.reconcile_coefficients` run **before** the
 resource pass (ADR-0115), into ``resources`` via
-:func:`kdive.inventory.reconcile_resources.reconcile_resources` (the fault-inject/remote
+:func:`kdive.inventory.reconcile.resources.reconcile_resources` (the fault-inject/remote
 config overlay that supplies the sizing #385 lacked), and into ``build_hosts`` via
-:func:`kdive.inventory.reconcile_build_hosts.reconcile_build_hosts`.
+:func:`kdive.inventory.reconcile.build_hosts.reconcile_build_hosts`.
 
 Two load-bearing invariants (plan Task 1.6):
 
@@ -46,8 +46,8 @@ from kdive.inventory.loader import load_inventory_optional
 from kdive.inventory.model import InventoryDoc
 from kdive.inventory.path import systems_toml_path
 from kdive.inventory.reconcile import ReconcileDiff
-from kdive.inventory.reconcile_images import ImageHeadStore
-from kdive.inventory.reconcile_pipeline import reconcile_all
+from kdive.inventory.reconcile.images import ImageHeadStore
+from kdive.inventory.reconcile.pipeline import reconcile_all
 
 _log = logging.getLogger(__name__)
 

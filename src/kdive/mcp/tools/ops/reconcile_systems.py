@@ -28,8 +28,8 @@ from kdive.inventory.loader import load_inventory_optional
 from kdive.inventory.model import InventoryDoc
 from kdive.inventory.path import systems_toml_path
 from kdive.inventory.reconcile import ReconcileDiff, ReconcileRecord
-from kdive.inventory.reconcile_images import ImageHeadStore
-from kdive.inventory.reconcile_pipeline import reconcile_all
+from kdive.inventory.reconcile.images import ImageHeadStore
+from kdive.inventory.reconcile.pipeline import reconcile_all
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse

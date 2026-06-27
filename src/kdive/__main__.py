@@ -248,7 +248,7 @@ def _handle_reconcile_systems(
     args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
 ) -> None:
     del secret_registry, telemetry
-    from kdive.inventory.reconcile_cli import reconcile_systems, validate_systems
+    from kdive.inventory.cli import reconcile_systems, validate_systems
 
     if args.check:
         raise SystemExit(validate_systems(args.path))

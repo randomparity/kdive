@@ -43,9 +43,9 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.loader import load_inventory
 from kdive.inventory.model import InventoryDoc
 from kdive.inventory.reconcile import ReconcileDiff
-from kdive.inventory.reconcile_coefficients import reconcile_coefficients
-from kdive.inventory.reconcile_images import reconcile_images
-from kdive.inventory.reconcile_resources import reconcile_resources
+from kdive.inventory.reconcile.coefficients import reconcile_coefficients
+from kdive.inventory.reconcile.images import reconcile_images
+from kdive.inventory.reconcile.resources import reconcile_resources
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler.inventory import InventoryReconcilePass, _cwd_inventory_shadowed
 from kdive.reconciler.loop import ReconcileConfig, reconcile_once
@@ -1645,7 +1645,7 @@ async def _build_host_count(conn: psycopg.AsyncConnection, name: str) -> int:
 def test_build_host_reconciles_to_a_row(migrated_url: str, tmp_path: Path) -> None:
     # Task 3.2: a [[build_host]] reconciles into a build_hosts row carrying its config fields
     # and managed_by='config'.
-    from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
+    from kdive.inventory.reconcile.build_hosts import reconcile_build_hosts
 
     async def _run() -> None:
         doc = load_inventory(
@@ -1676,7 +1676,7 @@ def test_build_host_ssh_kind_warns_and_skips(migrated_url: str, tmp_path: Path) 
     # 'ssh' host cannot satisfy the build_hosts_fields_check (ssh requires both). Rather than
     # abort the pass on a CHECK violation, reconcile WARNS and skips it (ssh hosts are
     # registered imperatively via build_hosts.register_ssh, which carries those fields).
-    from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
+    from kdive.inventory.reconcile.build_hosts import reconcile_build_hosts
 
     async def _run() -> None:
         doc = load_inventory(_write_toml(tmp_path, _build_host_toml(name="bh-ssh", kind="ssh")))
@@ -1696,7 +1696,7 @@ def test_build_host_ssh_kind_warns_and_skips(migrated_url: str, tmp_path: Path) 
 def test_build_host_ephemeral_carries_base_image_volume(migrated_url: str, tmp_path: Path) -> None:
     # Task 3.2: an ephemeral_libvirt build host carries base_image_volume (the field CHECK in
     # 0029 requires it for that kind, and forbids address/ssh_credential_ref).
-    from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
+    from kdive.inventory.reconcile.build_hosts import reconcile_build_hosts
 
     async def _run() -> None:
         doc = load_inventory(
@@ -1729,7 +1729,7 @@ def test_build_host_adopts_existing_runtime_row_not_duplicated(
 ) -> None:
     # Task 3.2 adopt-on-collision: the seeded 'worker-local' row from 0027 is managed_by=
     # 'runtime'; declaring it in config ADOPTS it (flip to 'config'), never a second row.
-    from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
+    from kdive.inventory.reconcile.build_hosts import reconcile_build_hosts
 
     async def _run() -> None:
         doc = load_inventory(
@@ -1763,7 +1763,7 @@ def test_build_host_prune_of_busy_host_cordons_not_deletes(
     # Task 3.2 DB-guarded prune: build_host_leases FKs build_hosts(id) ON DELETE RESTRICT, so a
     # host with an in-flight lease cannot be deleted — prune must CORDON (enabled=false), never
     # attempt a DELETE that would abort the whole pass.
-    from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
+    from kdive.inventory.reconcile.build_hosts import reconcile_build_hosts
 
     async def _run() -> None:
         # First reconcile a config ssh host, then attach an in-flight lease, then reconcile an
@@ -1795,7 +1795,7 @@ def test_build_host_prune_of_busy_host_cordons_not_deletes(
 def test_build_host_prune_of_idle_config_host_deletes(migrated_url: str, tmp_path: Path) -> None:
     # An idle config build host that leaves the file is pruned (row deleted); a runtime host is
     # untouched (prune is config-only).
-    from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
+    from kdive.inventory.reconcile.build_hosts import reconcile_build_hosts
 
     async def _run() -> None:
         present = load_inventory(_write_toml(tmp_path, _build_host_toml(name="bh-idle")))
@@ -1911,7 +1911,7 @@ def test_build_host_prune_cordons_when_lease_wins_lock_first(
 
 def test_build_host_reconcile_is_idempotent(migrated_url: str, tmp_path: Path) -> None:
     # A second pass over an unchanged doc is a clean no-op (change-detecting upserts).
-    from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
+    from kdive.inventory.reconcile.build_hosts import reconcile_build_hosts
 
     async def _run() -> None:
         doc = load_inventory(_write_toml(tmp_path, _build_host_toml(name="bh-idem")))
@@ -2111,7 +2111,7 @@ async def _reconcile_on(pool: AsyncConnectionPool, doc: Any) -> ReconcileDiff:
 def test_build_host_readopt_clears_disabled_cordon(migrated_url: str, tmp_path: Path) -> None:
     # Re-declaring a cordoned (enabled=false) config host in the file re-enables it: the cordon
     # is a prune artifact, so an explicit re-declaration must clear it (idempotent recovery).
-    from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
+    from kdive.inventory.reconcile.build_hosts import reconcile_build_hosts
 
     async def _run() -> None:
         present = load_inventory(_write_toml(tmp_path, _build_host_toml(name="bh-revive")))
@@ -2287,8 +2287,8 @@ async def reconcile_all_for_test(conn: psycopg.AsyncConnection, doc: InventoryDo
     ledger tests touch neither, so this helper drives only the resource path plus the GC step the
     GC tests assert.
     """
-    from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
-    from kdive.inventory.reconcile_overrides import reconcile_overrides_gc
+    from kdive.inventory.reconcile.build_hosts import reconcile_build_hosts
+    from kdive.inventory.reconcile.overrides import reconcile_overrides_gc
 
     await reconcile_resources(conn, doc)
     await reconcile_build_hosts(conn, doc)
@@ -2489,7 +2489,7 @@ def test_no_entry_identity_is_still_drift_repaired(migrated_url: str, tmp_path: 
 
 
 def test_build_host_removed_ledger_skips_recreate(migrated_url: str, tmp_path: Path) -> None:
-    from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
+    from kdive.inventory.reconcile.build_hosts import reconcile_build_hosts
 
     async def _run() -> None:
         doc = load_inventory(_write_toml(tmp_path, _build_host_toml(name="bh-gone")))
@@ -2515,7 +2515,7 @@ def test_build_host_removed_ledger_skips_recreate(migrated_url: str, tmp_path: P
 def test_build_host_detached_preserves_runtime_max_concurrent(
     migrated_url: str, tmp_path: Path
 ) -> None:
-    from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
+    from kdive.inventory.reconcile.build_hosts import reconcile_build_hosts
 
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
@@ -2548,7 +2548,7 @@ def test_build_host_detached_preserves_runtime_max_concurrent(
 
 
 def test_build_host_no_entry_is_still_drift_repaired(migrated_url: str, tmp_path: Path) -> None:
-    from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
+    from kdive.inventory.reconcile.build_hosts import reconcile_build_hosts
 
     async def _run() -> None:
         doc = load_inventory(_write_toml(tmp_path, _build_host_toml(name="bh-drift")))

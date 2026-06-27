@@ -4,7 +4,7 @@ Runs one inventory reconcile pass against the catalog, prints the resulting
 :class:`~kdive.inventory.reconcile.ReconcileDiff`, and exits non-zero on an
 :class:`~kdive.inventory.InventoryError`. Unlike the ``kdivectl`` MCP-client verbs, this is a
 server-side command: it opens its own Postgres pool and object store and calls
-:func:`~kdive.inventory.reconcile_images.reconcile_images` directly, the same engine the
+:func:`~kdive.inventory.reconcile.images.reconcile_images` directly, the same engine the
 reconciler loop triggers.
 
 Path resolution mirrors the loop only for the default:
@@ -31,7 +31,7 @@ from kdive.inventory.loader import load_inventory, load_inventory_optional
 from kdive.inventory.model import InventoryDoc
 from kdive.inventory.path import systems_toml_path
 from kdive.inventory.reconcile import ReconcileDiff
-from kdive.inventory.reconcile_images import ImageHeadStore, reconcile_images
+from kdive.inventory.reconcile.images import ImageHeadStore, reconcile_images
 
 _EXIT_OK = 0
 _EXIT_INVENTORY_ERROR = 1
