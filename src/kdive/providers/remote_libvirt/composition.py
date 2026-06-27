@@ -28,7 +28,12 @@ from kdive.providers.core.discovery_registration import (
     DiscoveryRegistrationTarget,
     ProviderDiscoveryRegistration,
 )
-from kdive.providers.core.runtime import DebugCapabilities, ProviderRuntime
+from kdive.providers.core.runtime import (
+    DebugCapabilities,
+    ProviderRuntime,
+    ResourceDetailProjector,
+    StagedVolumeProbe,
+)
 from kdive.providers.core.transport_reset import TransportResetter
 from kdive.providers.infra.console_hosting import (
     AsyncioPumpRunner,
@@ -249,6 +254,42 @@ def _no_discovery_target() -> DiscoveryRegistrationTarget:
     )
 
 
+def _debug_capabilities(secret_registry: SecretRegistry) -> DebugCapabilities:
+    return DebugCapabilities(
+        attach_seam=remote_attach_seam,
+        engine=GdbMiEngine(
+            redactor_factory=lambda: Redactor(registry=secret_registry),
+            host_policy=allow_acl_remote,
+        ),
+    )
+
+
+def _staged_volume_probe(
+    config_factory: Callable[[], RemoteLibvirtConfig],
+) -> StagedVolumeProbe:
+    return lambda volumes: probe_staged_volumes(volumes, config_factory=config_factory)
+
+
+def _resource_detail_projector(
+    config_factory: Callable[[], RemoteLibvirtConfig],
+) -> ResourceDetailProjector:
+    return lambda pool, viewer_projects: project_resource_details(
+        pool,
+        viewer_projects,
+        staged_probe=_staged_volume_probe(config_factory),
+    )
+
+
+def _rebind_for_resource(secret_registry: SecretRegistry) -> Callable[[str], ProviderRuntime]:
+    def rebind(resource_name: str) -> ProviderRuntime:
+        return build_runtime(
+            secret_registry=secret_registry,
+            config_factory=lambda: remote_config_for_resource(resource_name),
+        )
+
+    return rebind
+
+
 def build_runtime(
     *,
     secret_registry: SecretRegistry,
@@ -304,27 +345,13 @@ def build_runtime(
         # RemoteLibvirtVmcoreIntrospect / RemoteLibvirtLiveIntrospect ports).
         supported_debug_transports=frozenset({"gdbstub", "drgn-live"}),
         supported_introspection=frozenset({"offline-vmcore", "live", "live-script"}),
-        debug=DebugCapabilities(
-            attach_seam=remote_attach_seam,
-            engine=GdbMiEngine(
-                redactor_factory=lambda: Redactor(registry=secret_registry),
-                host_policy=allow_acl_remote,
-            ),
-        ),
+        debug=_debug_capabilities(secret_registry),
         component_sources=_component_sources(),
         build_config_validator=builder.validate_config_ref,
         rootfs_validator=lambda _rootfs: None,
         rootfs_build_plane=RemoteLibvirtRootfsBuildPlane.from_env(),
-        staged_volume_probe=lambda volumes: probe_staged_volumes(
-            volumes, config_factory=config_factory
-        ),
-        resource_detail_projector=lambda pool, viewer_projects: project_resource_details(
-            pool,
-            viewer_projects,
-            staged_probe=lambda volumes: probe_staged_volumes(
-                volumes, config_factory=config_factory
-            ),
-        ),
+        staged_volume_probe=_staged_volume_probe(config_factory),
+        resource_detail_projector=_resource_detail_projector(config_factory),
         # ADR-0235: the reconciler-resident collector streams the console to S3 parts; the boot
         # worker assembles them into an immutable per-Run `console-<run>` artifact so a later boot
         # of the same System never overwrites earlier crash→fix evidence. Builds its store lazily
@@ -334,8 +361,5 @@ def build_runtime(
         # the correct root=UUID=… (inherited by the install helper's grubby --copy-default). The
         # platform must not inject a root device or it overrides that (ADR-0183, #587).
         platform_root_cmdline=None,
-        rebind_for_resource=lambda resource_name: build_runtime(
-            secret_registry=secret_registry,
-            config_factory=lambda: remote_config_for_resource(resource_name),
-        ),
+        rebind_for_resource=_rebind_for_resource(secret_registry),
     )
