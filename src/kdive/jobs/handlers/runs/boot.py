@@ -10,6 +10,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.db.idempotency import claim_run_step, complete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -37,10 +38,7 @@ from kdive.security.artifacts.artifact_search import ArtifactSearchInputError, s
 from kdive.security.authz.context import RequestContext
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.objectstore import (
-    ObjectStore,
-    register_artifact_row,
-)
+from kdive.store.objectstore import ObjectStore
 
 _log = logging.getLogger(__name__)
 

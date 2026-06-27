@@ -9,6 +9,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import StoredArtifact
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -29,11 +30,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProfilePolicy
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
-from kdive.store.objectstore import (
-    ObjectStore,
-    artifact_key,
-    register_artifact_row,
-)
+from kdive.store.objectstore import ObjectStore, artifact_key
 
 _log = logging.getLogger(__name__)
 

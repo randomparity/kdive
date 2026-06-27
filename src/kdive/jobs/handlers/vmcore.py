@@ -9,6 +9,7 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
+from kdive.artifacts.registration import register_artifact_row
 from kdive.db.artifact_queries import raw_vmcore_key
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, RUNS, SYSTEMS
@@ -23,7 +24,6 @@ from kdive.jobs.payloads import CaptureVmcorePayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
-from kdive.store.objectstore import register_artifact_row
 
 _DISABLED_TELEMETRY = CaptureTelemetry.disabled()
 

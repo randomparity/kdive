@@ -10,6 +10,7 @@ from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 
 import kdive.config as config
+from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import StoredArtifact
 from kdive.build_artifacts.results import BuildOutput
 from kdive.config.core_settings import KERNEL_SRC
@@ -42,7 +43,6 @@ from kdive.providers.shared.build_host.publishing.build_log import (
 from kdive.security import audit
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.runs.steps import BuildStepResult, existing_build_result
-from kdive.store.objectstore import register_artifact_row
 
 _log = logging.getLogger(__name__)
 

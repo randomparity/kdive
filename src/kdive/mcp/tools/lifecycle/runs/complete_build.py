@@ -17,6 +17,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.artifacts.reassembly import reassemble_chunked
+from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import HeadResult, StoredArtifact, chunk_key
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
@@ -43,10 +44,7 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.runs.steps import BuildStepResult, platform_owned_cmdline_token
 from kdive.services.runs.steps import existing_build_result as _existing_build_result
-from kdive.store.objectstore import (
-    object_store_from_env,
-    register_artifact_row,
-)
+from kdive.store.objectstore import object_store_from_env
 
 _log = logging.getLogger(__name__)
 
