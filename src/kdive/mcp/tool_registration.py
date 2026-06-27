@@ -205,6 +205,10 @@ def _register_ops_secrets_tools(
     ops_secrets_tools.register(app, pool, assembly.secret_registry)
 
 
+def _register_report_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:
+    register_report_tools(app, pool, secret_registry=assembly.secret_registry)
+
+
 def _register_doc_resources(
     app: FastMCP, _pool: AsyncConnectionPool, _assembly: AppAssembly
 ) -> None:
@@ -235,7 +239,7 @@ PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _pool_only_plane_registrar(register_accounting_usage),
     _pool_only_plane_registrar(register_accounting_reports),
     _pool_only_plane_registrar(register_accounting_admin),
-    _pool_only_plane_registrar(register_report_tools),
+    _register_report_tools,
     _register_reconcile_tools,
     _register_reconcile_systems_tools,
     _register_ops_resource_host_tools,
