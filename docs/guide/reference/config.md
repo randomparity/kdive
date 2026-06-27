@@ -7,7 +7,7 @@
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
 | `KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS` | server | `900` | no | Expiry in seconds of the presigned download URL `artifacts.get` mints in `refs.download_uri` for a redacted artifact (ADR-0140). |
-| `KDIVE_ARTIFACT_INLINE_MAX_BYTES` | server | `65536` | no | Maximum redacted-artifact size in bytes that `artifacts.get` returns inline in `data.content`. A larger artifact omits inline content and is retrieved via the presigned `refs.download_uri` (ADR-0140). |
+| `KDIVE_ARTIFACT_INLINE_MAX_BYTES` | server | `65536` | no | Upper bound in bytes on the `artifacts.get` inline window in `data.content`. The returned window is the smaller of this, the caller's `max_bytes`, and a fixed 24 KiB token-safe ceiling (ADR-0257) — so raising this above 24 KiB has no effect; lowering it narrows the window further. Objects above the 1 MiB fetch ceiling omit inline content and are retrieved via the presigned `refs.download_uri` (ADR-0140, ADR-0247). |
 
 ## build
 

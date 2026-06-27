@@ -91,10 +91,9 @@ is also greater than the 16 KiB default, so the default window path is untouched
 - A caller that explicitly requests ≤ 24 KiB is unchanged.
 - An operator who lowers `KDIVE_ARTIFACT_INLINE_MAX_BYTES` below 24 KiB is
   unchanged (the lowered cap still wins via `min`); one who raises it above 24 KiB
-  no longer widens the per-call window past the token-safe ceiling — the documented
-  effect of that setting is now "lower the window below 24 KiB", and its help text
-  is unchanged because it still bounds the inline payload, just no longer above the
-  ceiling.
+  no longer widens the per-call window past the token-safe ceiling. Its help text is
+  corrected to say so (it previously described the pre-ADR-0247 omit-threshold
+  semantics, stale since windowing landed), and the config reference is regenerated.
 - The change is contained to `reads.py` (constant + one `min` term + docstring) and
   `registrar.py` (param description + docstring), plus the regenerated tool
   reference and tests. No schema, migration, RBAC, tool-surface, or config-setting
