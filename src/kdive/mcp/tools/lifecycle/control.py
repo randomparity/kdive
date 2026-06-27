@@ -26,7 +26,7 @@ from pydantic import Field
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.lifecycle.records import System
-from kdive.domain.operations.jobs import DestructiveJobKind, JobKind, PowerAction
+from kdive.domain.operations.jobs import JobKind, PowerAction
 from kdive.jobs import queue
 from kdive.jobs.payloads import PowerPayload, SystemPayload
 from kdive.log import bind_context
@@ -140,7 +140,7 @@ async def _authorize_destructive(
     ctx: RequestContext,
     system: System,
     system_uid: UUID,
-    op_kind: DestructiveJobKind,
+    op_kind: JobKind,
     *,
     resolver: ProviderResolver,
     tool: str,
@@ -172,7 +172,7 @@ async def _authorize_destructive(
 
 
 async def _op_opt_in(
-    conn: AsyncConnection, system: System, op_kind: DestructiveJobKind, resolver: ProviderResolver
+    conn: AsyncConnection, system: System, op_kind: JobKind, resolver: ProviderResolver
 ) -> bool:
     """Resolve the gate's profile opt-in factor from the System's provisioning profile."""
     profile = ProvisioningProfile.parse(system.provisioning_profile)

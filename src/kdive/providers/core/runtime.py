@@ -16,7 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.components.references import ComponentRef
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.operations.jobs import DestructiveJobKind
+from kdive.domain.operations.jobs import JobKind
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
 from kdive.providers.ports import (
@@ -74,7 +74,7 @@ class ProfilePolicy(Protocol):
     def validate_profile(self, profile: ProvisioningProfile) -> None:
         """Run provider-specific static profile validation."""
 
-    def destructive_opt_in(self, profile: ProvisioningProfile, op: DestructiveJobKind) -> bool:
+    def destructive_opt_in(self, profile: ProvisioningProfile, op: JobKind) -> bool:
         """Return whether the profile opts into a destructive operation."""
 
     def capture_method(self, profile: ProvisioningProfile) -> CaptureMethod:

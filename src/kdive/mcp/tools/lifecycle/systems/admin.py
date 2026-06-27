@@ -17,7 +17,7 @@ from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.capacity.state import IllegalTransition, RunState, SystemState
 from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import System
-from kdive.domain.operations.jobs import DestructiveJobKind, Job, JobKind
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import ReprovisionPayload, SystemPayload
 from kdive.log import bind_context
@@ -204,7 +204,7 @@ async def _audit_destructive_denied(
     conn: AsyncConnection,
     ctx: RequestContext,
     system: System,
-    op_kind: DestructiveJobKind,
+    op_kind: JobKind,
     missing: list[str],
 ) -> None:
     await audit.record(

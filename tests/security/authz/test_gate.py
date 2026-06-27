@@ -65,6 +65,11 @@ def test_opt_in_defaults_false() -> None:
     assert exc.value.missing == ["profile_opt_in"]
 
 
+def test_non_destructive_job_kind_is_rejected() -> None:
+    with pytest.raises(ValueError, match="build is not a destructive job kind"):
+        DestructiveOp(kind=JobKind.BUILD, profile_opt_in=True)
+
+
 def test_both_absent_lists_role_then_opt_in() -> None:
     with pytest.raises(DestructiveOpDenied) as exc:
         assert_destructive_allowed(_ctx(Role.OPERATOR), _allocation(), _op(False))
