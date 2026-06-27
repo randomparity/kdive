@@ -1,6 +1,8 @@
 # ADR 0241 — Per-Run console slicing (one boot window) (#773)
 
-- **Status:** Accepted
+- **Status:** Accepted — the **local** byte-offset mechanism (§2 first bullet) is superseded by
+  [ADR-0258](0258-local-console-no-cross-boot-offset.md) (#836); the remote part-index
+  mechanism stands.
 - **Date:** 2026-06-24
 - **Deciders:** kdive maintainers
 - **Refines (does not supersede):** [ADR-0235](0235-per-run-console-evidence.md) (per-Run immutable
