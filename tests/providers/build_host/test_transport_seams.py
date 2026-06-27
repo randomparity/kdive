@@ -180,9 +180,9 @@ def _orchestrator(
         workspace_root=tmp_path / "workspace",
         catalog_fetch=lambda _name: _FRAGMENT_BYTES,
         checkout=transport_git_checkout(transport, git_remote, git_ref, registry),
-        run_olddefconfig=transport_run_olddefconfig(transport),
+        run_olddefconfig=transport_run_olddefconfig(transport, SecretRegistry()),
         read_config=transport_read_config(transport),
-        run_make=transport_run_make(transport),
+        run_make=transport_run_make(transport, SecretRegistry()),
     )
 
 
@@ -331,9 +331,9 @@ def test_build_workspace_dropped_fragment_symbol_raises_configuration_error(
         workspace_root=tmp_path / "workspace",
         catalog_fetch=lambda _name: fragment,
         checkout=transport_git_checkout(transport, _GIT_REMOTE, _GIT_REF, SecretRegistry()),
-        run_olddefconfig=transport_run_olddefconfig(transport),
+        run_olddefconfig=transport_run_olddefconfig(transport, SecretRegistry()),
         read_config=transport_read_config(transport),
-        run_make=transport_run_make(transport),
+        run_make=transport_run_make(transport, SecretRegistry()),
     )
 
     with pytest.raises(CategorizedError) as exc_info:
@@ -485,7 +485,7 @@ def test_transport_run_step_builds_make_argv(tmp_path: Path) -> None:
     """transport_run_step builds ['make', '-C', ws, *args] and calls t.run with them."""
     transport = FakeBuildTransport()
     ws = tmp_path / "ws"
-    step = transport_run_step(transport, ["olddefconfig"])
+    step = transport_run_step(transport, ["olddefconfig"], SecretRegistry())
 
     step(ws)
 
@@ -496,7 +496,7 @@ def test_transport_run_step_returns_transport_exit_code(tmp_path: Path) -> None:
     """transport_run_step surfaces the CommandResult.returncode on the CapturedStep."""
     transport = FakeBuildTransport(run_returncode=42)
     ws = tmp_path / "ws"
-    step = transport_run_step(transport, ["targets"])
+    step = transport_run_step(transport, ["targets"], SecretRegistry())
 
     assert step(ws).returncode == 42
 
@@ -507,7 +507,7 @@ def test_transport_run_step_captures_stdout_and_stderr(tmp_path: Path) -> None:
         run_results=[CommandResult(returncode=2, stdout="compiling foo.c", stderr="ld: error")]
     )
     ws = tmp_path / "ws"
-    step = transport_run_step(transport, ["targets"])
+    step = transport_run_step(transport, ["targets"], SecretRegistry())
 
     captured = step(ws)
     assert captured.returncode == 2
@@ -519,7 +519,7 @@ def test_transport_run_make_argv_includes_j_flag(tmp_path: Path) -> None:
     """transport_run_make builds ['make', '-C', ws, '-j<N>'] with N >= 1."""
     transport = FakeBuildTransport()
     ws = tmp_path / "ws"
-    step = transport_run_make(transport)
+    step = transport_run_make(transport, SecretRegistry())
 
     step(ws)
 
@@ -537,7 +537,7 @@ def test_transport_run_make_j_matches_cpu_count(tmp_path: Path) -> None:
     transport = FakeBuildTransport()
     ws = tmp_path / "ws"
     expected_j = os.cpu_count() or 1
-    step = transport_run_make(transport)
+    step = transport_run_make(transport, SecretRegistry())
 
     step(ws)
 
@@ -549,7 +549,7 @@ def test_transport_run_olddefconfig_argv(tmp_path: Path) -> None:
     """transport_run_olddefconfig builds ['make', '-C', ws, 'olddefconfig']."""
     transport = FakeBuildTransport()
     ws = tmp_path / "ws"
-    step = transport_run_olddefconfig(transport)
+    step = transport_run_olddefconfig(transport, SecretRegistry())
 
     step(ws)
 
@@ -627,7 +627,7 @@ def _run_calls(transport: FakeBuildTransport) -> list[_Call]:
 def test_transport_run_step_passes_cwd_and_timeout(tmp_path: Path) -> None:
     transport = FakeBuildTransport()
     ws = tmp_path / "ws"
-    transport_run_step(transport, ["targets"], timeout_s=123)(ws)
+    transport_run_step(transport, ["targets"], SecretRegistry(), timeout_s=123)(ws)
 
     call = _run_calls(transport)[0]
     assert call.args[0] == ["make", "-C", str(ws), "targets"]
@@ -637,7 +637,7 @@ def test_transport_run_step_passes_cwd_and_timeout(tmp_path: Path) -> None:
 def test_transport_run_step_defaults_timeout_to_make_timeout(tmp_path: Path) -> None:
     transport = FakeBuildTransport()
     ws = tmp_path / "ws"
-    transport_run_step(transport, ["x"])(ws)
+    transport_run_step(transport, ["x"], SecretRegistry())(ws)
 
     assert _run_calls(transport)[0].kwargs["timeout_s"] == MAKE_TIMEOUT_S
 
@@ -915,9 +915,9 @@ def test_build_workspace_patch_failure_redacts_with_run_secret_registry(tmp_path
         workspace_root=tmp_path / "workspace",
         catalog_fetch=lambda _name: _FRAGMENT_BYTES,
         checkout=transport_git_checkout(transport, _GIT_REMOTE, _GIT_REF, registry),
-        run_olddefconfig=transport_run_olddefconfig(transport),
+        run_olddefconfig=transport_run_olddefconfig(transport, SecretRegistry()),
         read_config=transport_read_config(transport),
-        run_make=transport_run_make(transport),
+        run_make=transport_run_make(transport, SecretRegistry()),
     )
 
     with pytest.raises(CategorizedError) as exc_info:

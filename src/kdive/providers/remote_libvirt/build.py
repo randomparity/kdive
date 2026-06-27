@@ -173,12 +173,14 @@ class RemoteLibvirtBuild:
                 kernel_src, secret_registry, sandbox_provider=sandbox_provider
             ),
             run_olddefconfig=lambda ws: _build_exec.real_run_olddefconfig(
-                ws, sandbox=sandbox_provider.get()
+                ws, sandbox=sandbox_provider.get(), registry=secret_registry
             ),
             read_config=_build_exec.real_read_config,
-            run_make=lambda ws: _build_exec.real_run_make(ws, sandbox=sandbox_provider.get()),
+            run_make=lambda ws: _build_exec.real_run_make(
+                ws, sandbox=sandbox_provider.get(), registry=secret_registry
+            ),
             run_modules_install=lambda ws, mr: _build_exec.real_run_modules_install(
-                ws, mr, sandbox=sandbox_provider.get()
+                ws, mr, sandbox=sandbox_provider.get(), registry=secret_registry
             ),
             make_bundle=local_kernel_bundle,
             read_vmlinux_source=_local_vmlinux_source,
@@ -225,9 +227,9 @@ class RemoteLibvirtBuild:
             workspace_root=host_root,
             store_factory=self._store_factory,
             checkout=transport_git_checkout(transport, git_remote, git_ref, secret_registry),
-            run_olddefconfig=transport_run_olddefconfig(transport),
+            run_olddefconfig=transport_run_olddefconfig(transport, secret_registry),
             read_config=transport_read_config(transport),
-            run_make=transport_run_make(transport),
+            run_make=transport_run_make(transport, secret_registry),
             run_modules_install=transport_run_modules_install(transport),
             make_bundle=transport_kernel_bundle(transport),
             read_vmlinux_source=transport_vmlinux_source(transport),

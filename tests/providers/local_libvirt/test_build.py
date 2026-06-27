@@ -890,7 +890,8 @@ def test_real_run_make_runs_parallel_jobs(monkeypatch: pytest.MonkeyPatch) -> No
         return subprocess.CompletedProcess(argv, 0)
 
     monkeypatch.setattr(subprocess, "run", _capture)
-    assert build_host_execution.real_run_make(Path("/ws")).returncode == 0
+    step = build_host_execution.real_run_make(Path("/ws"), registry=SecretRegistry())
+    assert step.returncode == 0
     argv = captured[0]
     assert argv[:3] == ["make", "-C", "/ws"]
     assert any(tok.startswith("-j") and tok[2:].isdigit() and int(tok[2:]) >= 1 for tok in argv), (
@@ -905,7 +906,7 @@ def test_real_run_make_timeout_is_build_failure(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(subprocess, "run", _timeout)
 
     with pytest.raises(CategorizedError) as caught:
-        build_host_execution.real_run_make(Path("/ws"))
+        build_host_execution.real_run_make(Path("/ws"), registry=SecretRegistry())
 
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
     assert caught.value.details["timeout_s"] == build_host_execution.MAKE_TIMEOUT_S
@@ -920,7 +921,7 @@ def test_real_run_make_missing_binary_is_missing_dependency(
     monkeypatch.setattr(subprocess, "run", _missing)
 
     with pytest.raises(CategorizedError) as caught:
-        build_host_execution.real_run_make(Path("/ws"))
+        build_host_execution.real_run_make(Path("/ws"), registry=SecretRegistry())
 
     assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
     assert caught.value.details == {"tool": "make"}
@@ -935,7 +936,7 @@ def test_real_run_make_launch_oserror_is_infrastructure_failure(
     monkeypatch.setattr(subprocess, "run", _launch_fault)
 
     with pytest.raises(CategorizedError) as caught:
-        build_host_execution.real_run_make(Path("/ws"))
+        build_host_execution.real_run_make(Path("/ws"), registry=SecretRegistry())
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert caught.value.details == {"tool": "make", "op": "launch"}
@@ -1031,15 +1032,19 @@ def test_live_vm_real_make_build_id_matches_readelf() -> None:  # pragma: no cov
             checkout=lambda run_id, profile, ws, fragment: build_host_workspace.real_checkout(
                 src, profile, ws, fragment, run_id=run_id, secret_registry=SecretRegistry()
             ),
-            run_olddefconfig=build_host_execution.real_run_olddefconfig,
+            run_olddefconfig=lambda ws: build_host_execution.real_run_olddefconfig(
+                ws, registry=SecretRegistry()
+            ),
             read_config=build_host_execution.real_read_config,
-            run_make=build_host_execution.real_run_make,
+            run_make=lambda ws: build_host_execution.real_run_make(ws, registry=SecretRegistry()),
             make_bundle=local_kernel_bundle,
             read_vmlinux_source=lambda ws: ArtifactBytes(
                 build_host_execution.real_read_vmlinux(ws)
             ),
             read_build_id=build_host_execution.real_read_build_id,
-            run_modules_install=build_host_execution.real_run_modules_install,
+            run_modules_install=lambda ws, mr: build_host_execution.real_run_modules_install(
+                ws, mr, registry=SecretRegistry()
+            ),
             staging_factory=build_module._real_staging_factory,
             staging_cleanup=lambda p: shutil.rmtree(p, ignore_errors=True),
             secret_registry=SecretRegistry(),
@@ -1312,7 +1317,9 @@ def test_merge_config_fragment_write_failure_is_infrastructure_failure(
     monkeypatch.setattr(build_host_workspace.os, "open", _open)
 
     with pytest.raises(CategorizedError) as caught:
-        build_host_workspace.merge_config(b"CONFIG_CRASH_DUMP=y\n", workspace, _RUN)
+        build_host_workspace.merge_config(
+            b"CONFIG_CRASH_DUMP=y\n", workspace, _RUN, secret_registry=SecretRegistry()
+        )
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert caught.value.details == {"op": "write", "path": "kdump.config.fragment"}
@@ -1736,8 +1743,15 @@ def test_real_checkout_calls_steps_in_order_with_right_args(
         order.append("sync")
         seen["sync"] = (kernel_src, ws)
 
-    def _merge(fragment_bytes: bytes, ws: Path, run_id: UUID, sandbox: object = None) -> None:
-        del sandbox
+    def _merge(
+        fragment_bytes: bytes,
+        ws: Path,
+        run_id: UUID,
+        sandbox: object = None,
+        *,
+        secret_registry: SecretRegistry,
+    ) -> None:
+        del sandbox, secret_registry
         order.append("merge")
         seen["merge"] = (fragment_bytes, ws, run_id)
 

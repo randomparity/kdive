@@ -8,6 +8,7 @@ import pytest
 
 from kdive.providers.shared.build_host import execution as ex
 from kdive.providers.shared.build_host import sandbox as sb
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 
 def _box() -> sb.BuildSandbox:
@@ -30,7 +31,7 @@ def test_run_make_passes_sandbox_to_chokepoint(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(ex, "sandbox_run", fake_sandbox_run)
     box = _box()
-    assert ex.real_run_make(Path("/ws"), sandbox=box).returncode == 0
+    assert ex.real_run_make(Path("/ws"), sandbox=box, registry=SecretRegistry()).returncode == 0
     assert seen["sandbox"] is box
     assert seen["argv"][0] == "make"
 
@@ -43,7 +44,7 @@ def test_run_make_default_sandbox_is_none(monkeypatch: pytest.MonkeyPatch) -> No
         return _R()
 
     monkeypatch.setattr(ex, "sandbox_run", fake_sandbox_run)
-    ex.real_run_make(Path("/ws"))
+    ex.real_run_make(Path("/ws"), registry=SecretRegistry())
     assert seen["sandbox"] is None
 
 
@@ -56,7 +57,7 @@ def test_olddefconfig_threads_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(ex, "sandbox_run", fake_sandbox_run)
     box = _box()
-    ex.real_run_olddefconfig(Path("/ws"), sandbox=box)
+    ex.real_run_olddefconfig(Path("/ws"), sandbox=box, registry=SecretRegistry())
     assert seen["sandbox"] is box
     assert "olddefconfig" in seen["argv"]
 
@@ -70,6 +71,6 @@ def test_modules_install_threads_sandbox(monkeypatch: pytest.MonkeyPatch) -> Non
 
     monkeypatch.setattr(ex, "sandbox_run", fake_sandbox_run)
     box = _box()
-    ex.real_run_modules_install(Path("/ws"), Path("/mod"), sandbox=box)
+    ex.real_run_modules_install(Path("/ws"), Path("/mod"), sandbox=box, registry=SecretRegistry())
     assert seen["sandbox"] is box
     assert "modules_install" in seen["argv"]

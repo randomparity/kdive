@@ -39,22 +39,22 @@ class CapturedStep:
         stdout: str | None,
         stderr: str | None,
         *,
-        registry: SecretRegistry | None = None,
+        registry: SecretRegistry,
     ) -> CapturedStep:
         """Combine, redact, and tail-cap a step's captured streams into a `CapturedStep`."""
         return cls(returncode, redact_and_cap(stdout, stderr, registry=registry))
 
 
-def redact_and_cap(
-    stdout: str | None, stderr: str | None, *, registry: SecretRegistry | None = None
-) -> str:
+def redact_and_cap(stdout: str | None, stderr: str | None, *, registry: SecretRegistry) -> str:
     """Redact secrets from the combined stdout+stderr and keep the trailing build-log slice.
 
     The tail is kept (not the head): the failing recipe line and the compiler error live at the
-    end of build output, so a head cap would discard exactly the bytes an agent needs.
+    end of build output, so a head cap would discard exactly the bytes an agent needs. The
+    ``registry`` is mandatory (fail-closed): scrubbing build output against a fresh empty registry
+    would silently let a resolved secret value echoed by a recipe survive into the persisted,
+    agent-served build-log artifact (ADR-0238), so the caller must thread the app's registry.
     """
     combined = (stdout or "") + (stderr or "")
-    registry = registry or SecretRegistry()
     redacted = Redactor(registry=registry).redact_text(combined)
     return redacted[-BUILD_LOG_TAIL_BYTES:]
 
@@ -138,28 +138,46 @@ def real_read_vmlinux(workspace: Path) -> bytes:  # pragma: no cover - live_vm
     )
 
 
-def real_run_make(workspace: Path, sandbox: BuildSandbox | None = None) -> CapturedStep:
+def real_run_make(
+    workspace: Path, sandbox: BuildSandbox | None = None, *, registry: SecretRegistry
+) -> CapturedStep:
     """Run the default parallel kernel build (demoted when a sandbox is active)."""
-    return run_make_target(workspace, [f"-j{os.cpu_count() or 1}"], "make", sandbox=sandbox)
+    return run_make_target(
+        workspace, [f"-j{os.cpu_count() or 1}"], "make", sandbox=sandbox, registry=registry
+    )
 
 
-def real_run_olddefconfig(workspace: Path, sandbox: BuildSandbox | None = None) -> CapturedStep:
-    return run_make_target(workspace, ["olddefconfig"], "make olddefconfig", sandbox=sandbox)
+def real_run_olddefconfig(
+    workspace: Path, sandbox: BuildSandbox | None = None, *, registry: SecretRegistry
+) -> CapturedStep:
+    return run_make_target(
+        workspace, ["olddefconfig"], "make olddefconfig", sandbox=sandbox, registry=registry
+    )
 
 
 def real_run_modules_install(
-    workspace: Path, mod_root: Path, sandbox: BuildSandbox | None = None
+    workspace: Path,
+    mod_root: Path,
+    sandbox: BuildSandbox | None = None,
+    *,
+    registry: SecretRegistry,
 ) -> int:  # pragma: no cover
     return run_make_target(
         workspace,
         [f"INSTALL_MOD_PATH={mod_root}", "modules_install"],
         "make modules_install",
         sandbox=sandbox,
+        registry=registry,
     ).returncode
 
 
 def run_make_target(
-    workspace: Path, args: list[str], label: str, sandbox: BuildSandbox | None = None
+    workspace: Path,
+    args: list[str],
+    label: str,
+    sandbox: BuildSandbox | None = None,
+    *,
+    registry: SecretRegistry,
 ) -> CapturedStep:
     """Run ``make -C <workspace> <args...>`` (demoted when a sandbox is active); capture + map.
 
@@ -180,17 +198,21 @@ def run_make_target(
         raise CategorizedError(
             f"{label} exceeded the build timeout",
             category=ErrorCategory.BUILD_FAILURE,
-            details=_timeout_details(exc),
+            details=_timeout_details(exc, registry=registry),
         ) from exc
     except OSError as exc:
         raise launch_failure("make", exc, category=ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
-    return CapturedStep.from_streams(completed.returncode, completed.stdout, completed.stderr)
+    return CapturedStep.from_streams(
+        completed.returncode, completed.stdout, completed.stderr, registry=registry
+    )
 
 
-def _timeout_details(exc: subprocess.TimeoutExpired) -> dict[str, object]:
+def _timeout_details(
+    exc: subprocess.TimeoutExpired, *, registry: SecretRegistry
+) -> dict[str, object]:
     """Build-failure details for a timed-out make, carrying any partial captured output."""
     details: dict[str, object] = {"timeout_s": MAKE_TIMEOUT_S}
-    build_log = redact_and_cap(_as_text(exc.stdout), _as_text(exc.stderr))
+    build_log = redact_and_cap(_as_text(exc.stdout), _as_text(exc.stderr), registry=registry)
     if build_log:
         details["build_log"] = build_log
     return details

@@ -155,7 +155,9 @@ def real_checkout(
     else:
         sync_tree(kernel_src, workspace, secret_registry, sandbox=sandbox)
         provenance = None
-    merge_config(fragment_bytes, workspace, run_id, sandbox=sandbox)
+    merge_config(
+        fragment_bytes, workspace, run_id, sandbox=sandbox, secret_registry=secret_registry
+    )
     if profile.patch_ref is not None:
         apply_patch(profile.patch_ref, workspace, secret_registry, sandbox=sandbox)
     return provenance
@@ -305,10 +307,18 @@ def _write_fragment(fragment_bytes: bytes, workspace: Path, sandbox: BuildSandbo
 
 
 def merge_config(
-    fragment_bytes: bytes, workspace: Path, run_id: UUID, sandbox: BuildSandbox | None = None
+    fragment_bytes: bytes,
+    workspace: Path,
+    run_id: UUID,
+    sandbox: BuildSandbox | None = None,
+    *,
+    secret_registry: SecretRegistry,
 ) -> None:  # pragma: no cover
     """Run base defconfig (demoted), merge the kdump fragment, leave olddefconfig to the caller."""
-    if run_make_target(workspace, ["defconfig"], "make defconfig", sandbox=sandbox).returncode != 0:
+    defconfig = run_make_target(
+        workspace, ["defconfig"], "make defconfig", sandbox=sandbox, registry=secret_registry
+    )
+    if defconfig.returncode != 0:
         raise build_failure("make defconfig exited non-zero", run_id)
     _write_fragment(fragment_bytes, workspace, sandbox)
     fragment_path = workspace / "kdump.config.fragment"

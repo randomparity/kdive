@@ -48,23 +48,27 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 def transport_run_step(
     t: BuildTransport,
     args: list[str],
+    secret_registry: SecretRegistry,
     timeout_s: int = MAKE_TIMEOUT_S,
 ) -> RunStep:
     def _step(ws: Path) -> CapturedStep:
-        # Preserve stdout+stderr so failed builds can persist a build-log artifact (#770).
+        # Preserve stdout+stderr so failed builds can persist a build-log artifact (#770); redact
+        # against the app registry so a resolved secret never survives into the artifact (#838).
         result = t.run(["make", "-C", str(ws), *args], cwd=str(ws), timeout_s=timeout_s)
-        return CapturedStep.from_streams(result.returncode, result.stdout, result.stderr)
+        return CapturedStep.from_streams(
+            result.returncode, result.stdout, result.stderr, registry=secret_registry
+        )
 
     return _step
 
 
-def transport_run_make(t: BuildTransport) -> RunStep:
+def transport_run_make(t: BuildTransport, secret_registry: SecretRegistry) -> RunStep:
     # Keep transport builds at parity with real_run_make's worker-local parallelism.
-    return transport_run_step(t, [f"-j{os.cpu_count() or 1}"])
+    return transport_run_step(t, [f"-j{os.cpu_count() or 1}"], secret_registry)
 
 
-def transport_run_olddefconfig(t: BuildTransport) -> RunStep:
-    return transport_run_step(t, ["olddefconfig"])
+def transport_run_olddefconfig(t: BuildTransport, secret_registry: SecretRegistry) -> RunStep:
+    return transport_run_step(t, ["olddefconfig"], secret_registry)
 
 
 def transport_read_config(t: BuildTransport) -> ReadConfig:
