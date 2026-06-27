@@ -81,7 +81,7 @@ def test_valid_rsp_frame_rejects_checksum_mismatch() -> None:
     assert valid_rsp_frame(b"$?#00") is False
 
 
-def test_rsp_reachable_returns_false_when_connection_fails(
+def test_rsp_reachable_raises_when_connection_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail_connect(address: tuple[str, int], *, timeout: float) -> object:
@@ -91,7 +91,8 @@ def test_rsp_reachable_returns_false_when_connection_fails(
 
     monkeypatch.setattr(rsp_mod.socket, "create_connection", fail_connect)
 
-    assert rsp_mod.rsp_reachable("127.0.0.1", 1234) is False
+    with pytest.raises(OSError, match="connection refused"):
+        rsp_mod.rsp_reachable("127.0.0.1", 1234)
 
 
 class _FakeSocket:
@@ -241,6 +242,28 @@ def test_open_transport_socket_fault_is_transport_failure() -> None:
     probe = _FakeProbe(raises=OSError("connection reset"))
     with pytest.raises(CategorizedError) as exc:
         _connector(probe, port=4242).open_transport(_SYSTEM, "gdbstub")
+    assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert str(exc.value) == "gdbstub transport socket fault"
+    assert exc.value.details == {"port": 4242}
+
+
+def test_open_transport_real_probe_connection_refused_is_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_connect(address: tuple[str, int], *, timeout: float) -> object:
+        assert address == ("127.0.0.1", 4242)
+        assert timeout > 0
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(rsp_mod.socket, "create_connection", fail_connect)
+    connector = LocalLibvirtConnect(
+        resolve_endpoint=lambda _system: ("127.0.0.1", 4242),
+        probe=connect_mod._real_probe,
+    )
+
+    with pytest.raises(CategorizedError) as exc:
+        connector.open_transport(_SYSTEM, "gdbstub")
+
     assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
     assert str(exc.value) == "gdbstub transport socket fault"
     assert exc.value.details == {"port": 4242}
@@ -493,7 +516,7 @@ class _FakeSshSocket:
         return None
 
 
-def test_real_ssh_connect_false_when_connection_fails(
+def test_real_ssh_connect_raises_when_connection_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail_connect(address: tuple[str, int], *, timeout: float) -> object:
@@ -502,7 +525,32 @@ def test_real_ssh_connect_false_when_connection_fails(
         raise OSError("connection refused")
 
     monkeypatch.setattr(connect_mod.socket, "create_connection", fail_connect)
-    assert connect_mod._real_ssh_connect("127.0.0.1", 2222) is False
+    with pytest.raises(OSError, match="connection refused"):
+        connect_mod._real_ssh_connect("127.0.0.1", 2222)
+
+
+def test_open_ssh_transport_real_probe_connection_refused_is_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_connect(address: tuple[str, int], *, timeout: float) -> object:
+        assert address == ("127.0.0.1", 2222)
+        assert timeout > 0
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(connect_mod.socket, "create_connection", fail_connect)
+    connector = LocalLibvirtConnect(
+        resolve_endpoint=lambda _system: ("127.0.0.1", 1234),
+        probe=_FakeProbe(),
+        resolve_ssh_endpoint=lambda _system: ("127.0.0.1", 2222),
+        ssh_connect=connect_mod._real_ssh_connect,
+    )
+
+    with pytest.raises(CategorizedError) as exc:
+        connector.open_transport(_SYSTEM, "drgn-live")
+
+    assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert str(exc.value) == "ssh transport socket fault"
+    assert exc.value.details == {"port": 2222}
 
 
 def test_real_ssh_connect_true_when_peer_sends_ssh_banner(

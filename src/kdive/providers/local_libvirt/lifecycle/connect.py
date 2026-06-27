@@ -352,10 +352,7 @@ def _real_ssh_connect(host: str, port: int) -> bool:  # pragma: no cover - live_
     ``live_vm`` gate.
     """
     deadline = time.monotonic() + _SSH_PROBE_TIMEOUT_S
-    try:
-        sock = socket.create_connection((host, port), timeout=_SSH_PROBE_TIMEOUT_S)
-    except OSError, TimeoutError:
-        return False
+    sock = socket.create_connection((host, port), timeout=_SSH_PROBE_TIMEOUT_S)
     buffer = b""
     try:
         while time.monotonic() < deadline:
@@ -364,6 +361,8 @@ def _real_ssh_connect(host: str, port: int) -> bool:  # pragma: no cover - live_
                 chunk = sock.recv(256)
             except TimeoutError:
                 continue
+            except OSError:
+                break
             if not chunk:
                 break
             buffer += chunk
