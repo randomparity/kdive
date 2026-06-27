@@ -135,7 +135,8 @@ Fetch a byte window of one redacted artifact's content by id.
 
 Returns the object ref plus, best-effort, a byte window of the redacted bytes
 inline in `data.content` (the window is `[byte_offset, byte_offset + max_bytes)`,
-capped at KDIVE_ARTIFACT_INLINE_MAX_BYTES). `data.content_truncated` and
+capped at a hard 24 KiB token-safe ceiling and KDIVE_ARTIFACT_INLINE_MAX_BYTES).
+`data.content_truncated` and
 `data.next_offset` page the rest; an artifact above the fetch ceiling sets
 `content_omitted` and is retrieved via the always-present presigned
 `refs.download_uri`. Requires viewer; sensitive ids are not-found.
@@ -144,7 +145,7 @@ capped at KDIVE_ARTIFACT_INLINE_MAX_BYTES). `data.content_truncated` and
 |---|---|---|---|
 | `artifact_id` | string | yes | The redacted artifact to fetch (sensitive ids are not-found). |
 | `byte_offset` | integer | no | Start byte of the inline window (0-based; a negative value reads from the start). Page through a large artifact with the returned data.next_offset until data.content_truncated is "false". |
-| `max_bytes` | integer | no | Maximum inline window bytes; default 16384, sized to the tool-result token budget. The server caps the window at KDIVE_ARTIFACT_INLINE_MAX_BYTES (default 65536); a larger artifact omits inline content — use refs.download_uri for the whole object. |
+| `max_bytes` | integer | no | Maximum inline window bytes; default 16384, sized to the tool-result token budget. The server caps the window at the smaller of a hard 24576-byte token-safe ceiling and KDIVE_ARTIFACT_INLINE_MAX_BYTES (default 65536), so a larger value still returns at most 24576 bytes with data.next_offset to page the rest; an artifact above the fetch ceiling omits inline content — use refs.download_uri for the whole object. |
 
 ## `artifacts.list`
 

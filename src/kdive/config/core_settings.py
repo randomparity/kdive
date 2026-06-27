@@ -200,9 +200,12 @@ ARTIFACT_INLINE_MAX_BYTES = Setting(
     group="artifacts",
     processes=_SERVER,
     help=(
-        "Maximum redacted-artifact size in bytes that `artifacts.get` returns inline in "
-        "`data.content`. A larger artifact omits inline content and is retrieved via the "
-        "presigned `refs.download_uri` (ADR-0140)."
+        "Upper bound in bytes on the `artifacts.get` inline window in `data.content`. The "
+        "returned window is the smaller of this, the caller's `max_bytes`, and a fixed "
+        "24 KiB token-safe ceiling (ADR-0257) — so raising this above 24 KiB has no effect; "
+        "lowering it narrows the window further. Objects above the 1 MiB fetch ceiling omit "
+        "inline content and are retrieved via the presigned `refs.download_uri` (ADR-0140, "
+        "ADR-0247)."
     ),
     suggest="an integer number of bytes, e.g. 65536 (64 KiB)",
 )
