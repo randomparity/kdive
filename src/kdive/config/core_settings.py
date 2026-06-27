@@ -547,6 +547,19 @@ FAULT_INJECT = Setting(
     help="Presence (1/true/yes) registers the fault-injection provider.",
 )
 
+MCP_TOOL_GATEWAY = Setting(
+    name="KDIVE_MCP_TOOL_GATEWAY",
+    parse=_str,
+    default="on",
+    group="mcp",
+    processes=_SERVER,
+    help=(
+        "Tool gateway (ADR-0267): 'on' (default) shrinks the list_tools catalog to the core "
+        "set, with the rest reachable via tools.search; set 'off' to advertise the full "
+        "RBAC-scoped catalog for a client that cannot call a tool absent from list_tools."
+    ),
+)
+
 LOCAL_LIBVIRT_ENABLED = Setting(
     name="KDIVE_LOCAL_LIBVIRT_ENABLED",
     parse=_str,
@@ -656,6 +669,7 @@ SETTINGS = [
     INVENTORY_WRITEBACK_CONFIGMAP,
     RESOURCE_LEASE_TTL_SECONDS,
     FAULT_INJECT,
+    MCP_TOOL_GATEWAY,
     LOCAL_LIBVIRT_ENABLED,
     OTEL_ENABLED,
     OTEL_EXPORTER_OTLP_ENDPOINT,

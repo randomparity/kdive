@@ -415,6 +415,26 @@ def test_exposure_map_covers_every_registered_tool() -> None:
     assert required_scopes("systems.define") == frozenset({ExposureScope.PROJECT_OPERATOR})
 
 
+def test_core_tools_subset_of_registry() -> None:
+    """Every CORE_TOOLS name is a live registered tool (ADR-0267 gateway guard).
+
+    A renamed/removed core tool would otherwise silently shrink the gateway's default surface
+    to a wrong set; this pins it to the registry so the rename fails loudly here.
+    """
+    from kdive.mcp.exposure import CORE_TOOLS
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+
+    async def _run() -> set[str]:
+        return {t.name for t in await app.list_tools()}
+
+    registered = asyncio.run(_run())
+    assert registered >= CORE_TOOLS, (
+        f"core tools absent from registry: {sorted(CORE_TOOLS - registered)}"
+    )
+
+
 # --- Canonical lifecycle prompts (ADR-0202) ---------------------------------------------
 
 # Independent, human-reviewed expected maturity per referenced prompt step (the drift
