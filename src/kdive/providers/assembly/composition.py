@@ -146,20 +146,27 @@ def _local_libvirt_enabled(enable_local_libvirt: bool | None) -> bool:
 
 
 class _CompositeReaper:
-    """Fan out leaked-domain reconciliation across configured provider reapers."""
+    """Fan out leaked-domain listing, then route destroy to the provider that listed a domain."""
 
     def __init__(self, reapers: tuple[InfraReaper, ...]) -> None:
         self._reapers = reapers
+        self._owners: dict[str, InfraReaper] = {}
 
     async def list_owned(self) -> list[OwnedDomain]:
         domains: list[OwnedDomain] = []
+        owners: dict[str, InfraReaper] = {}
         for reaper in self._reapers:
-            domains.extend(await reaper.list_owned())
+            owned = await reaper.list_owned()
+            domains.extend(owned)
+            for domain in owned:
+                owners.setdefault(domain.name, reaper)
+        self._owners = owners
         return domains
 
     async def destroy(self, name: str) -> None:
-        for reaper in self._reapers:
-            await reaper.destroy(name)
+        owner = self._owners.get(name)
+        if owner is not None:
+            await owner.destroy(name)
 
 
 class ProviderComposition:

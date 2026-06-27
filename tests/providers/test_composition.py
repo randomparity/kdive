@@ -414,13 +414,13 @@ def test_configured_fault_inject_runtime_is_visible_to_reconciler_reaper() -> No
     )
 
     # The composite unions the (empty) libvirt reaper rows with the fault-inject rows, so the
-    # fault-inject domain is still visible and reapable.
+    # fault-inject domain is still visible and reapable by its owning child reaper.
     owned = asyncio.run(reaper.list_owned())
     assert domain in [item.name for item in owned]
     asyncio.run(reaper.destroy(domain))
-    # The composite fans the *requested* name out to each member reaper verbatim, not a
-    # placeholder.
-    assert fake_libvirt.destroyed == [domain]
+    owned_after = asyncio.run(reaper.list_owned())
+    assert domain not in [item.name for item in owned_after]
+    assert fake_libvirt.destroyed == []
 
 
 def test_reconciler_reaper_is_null_when_local_libvirt_disabled() -> None:
