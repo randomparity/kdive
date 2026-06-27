@@ -28,6 +28,12 @@ from kdive.mcp.tools._common import authz_denied as _authz_denied
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools._common import stale_handle as _stale_handle
+from kdive.mcp.tools._idempotency import (
+    record_envelope,
+    resolve_conflict,
+    resolve_envelope_replay,
+    validate_idempotency_key,
+)
 from kdive.profiles.provider_policy import reject_rootfs_upload_without_window
 from kdive.profiles.provisioning import ProvisioningProfile, dump_profile, profile_digest
 from kdive.profiles.types import ProvisioningProfileInput
@@ -36,12 +42,6 @@ from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
 from kdive.security.authz.rbac import Role, RoleDenied, require_role
-from kdive.services.idempotency.envelope import (
-    record_envelope,
-    resolve_conflict,
-    resolve_envelope_replay,
-    validate_idempotency_key,
-)
 from kdive.services.systems.validation import (
     RootfsValidator,
     validate_profile_for_provider,

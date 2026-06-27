@@ -29,16 +29,16 @@ from kdive.mcp.tools._common import (
     config_error as _config_error,
 )
 from kdive.mcp.tools._common import job_envelope
-from kdive.mcp.tools.lifecycle.systems.view import defined_system_envelope
-from kdive.profiles.types import ProvisioningProfileInput
-from kdive.providers.core.runtime import ProfilePolicy
-from kdive.security.authz.context import RequestContext
-from kdive.services.idempotency.envelope import (
+from kdive.mcp.tools._idempotency import (
     record_envelope,
     resolve_conflict,
     resolve_envelope_replay,
     validate_idempotency_key,
 )
+from kdive.mcp.tools.lifecycle.systems.view import defined_system_envelope
+from kdive.profiles.types import ProvisioningProfileInput
+from kdive.providers.core.runtime import ProfilePolicy
+from kdive.security.authz.context import RequestContext
 from kdive.services.systems.admission import (
     AdmissionFailure,
     AdmissionFailureReason,

@@ -52,6 +52,7 @@ from kdive.mcp.tools._common import (
 from kdive.mcp.tools._common import (
     config_error_reason as _config_error_reason,
 )
+from kdive.mcp.tools._idempotency import keyed_mutation
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools._vmcore_targets import (
     CONSOLE_CRASH,
@@ -70,7 +71,6 @@ from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.artifacts.listing import RedactedArtifact, list_redacted_run_artifacts
-from kdive.services.idempotency.envelope import keyed_mutation
 
 _log = logging.getLogger(__name__)
 

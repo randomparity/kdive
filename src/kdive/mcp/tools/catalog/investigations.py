@@ -44,11 +44,11 @@ from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_erro
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
+from kdive.mcp.tools._idempotency import keyed_mutation
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext, require_project
 from kdive.security.authz.rbac import Role, projects_with_role, require_role
 from kdive.serialization import JsonValue
-from kdive.services.idempotency.envelope import keyed_mutation
 
 _log = logging.getLogger(__name__)
 type InvestigationListItem = Investigation | ToolResponse
