@@ -5631,6 +5631,40 @@ def test_get_succeeded_run_surfaces_build_provenance(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_get_succeeded_run_surfaces_warm_tree_dirty_as_native_bool(migrated_url: str) -> None:
+    # A warm-tree build records dirty as a native JSON bool (#861, ADR-0263/0265); it must reach
+    # data["build_provenance"]["dirty"] as a real bool through the JSON round-trip, not a string.
+    provenance = {
+        "label": "linux-6.9",
+        "resolved_commit": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",  # pragma: allowlist secret
+        "dirty": True,
+        "tree_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",  # pragma: allowlist secret
+    }
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(
+                pool,
+                run_id,
+                "build",
+                "succeeded",
+                {
+                    "kernel_ref": f"local/runs/{run_id}/kernel",
+                    "debuginfo_ref": f"local/runs/{run_id}/vmlinux",
+                    "build_id": "abc123",
+                    "build_provenance": provenance,
+                },
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        surfaced = resp.data["build_provenance"]
+        assert surfaced == provenance
+        assert isinstance(surfaced, dict)
+        assert surfaced["dirty"] is True
+
+    asyncio.run(_run())
+
+
 def test_get_succeeded_run_omits_build_provenance_key_when_absent(migrated_url: str) -> None:
     # A SUCCEEDED run whose build step recorded no provenance → "build_provenance" key must be
     # entirely absent from data (not present-as-null), so callers can key off its presence (#778).

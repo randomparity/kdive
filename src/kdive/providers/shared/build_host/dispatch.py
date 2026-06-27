@@ -8,7 +8,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from uuid import UUID
 
-from kdive.build_artifacts.provenance import rev_parse_head
+from kdive.build_artifacts.provenance import rev_parse_head, staged_tree_sha, working_tree_dirty
 from kdive.build_artifacts.results import BuildOutput
 from kdive.db.build_host_policy import check_warm_tree_source_admission
 from kdive.db.build_hosts import BuildHost, BuildHostKind
@@ -147,20 +147,33 @@ def _with_local_git_build_host(result: BuildOutput, host: BuildHost) -> BuildOut
 def _with_warm_tree_provenance(
     result: BuildOutput, parsed: ServerBuildProfile, kernel_src: str
 ) -> BuildOutput:
-    """Attach best-effort ``{label, resolved_commit?}`` warm-tree provenance to ``result`` (#778).
+    """Attach best-effort ``{label, resolved_commit, dirty, tree_sha?}`` provenance (#778, #861).
 
-    A warm-tree build rsyncs from ``$KDIVE_KERNEL_SRC`` and carries only a decorative label (the
-    bare ``kernel_source_ref``), not a remote. The label is always recorded; ``resolved_commit`` is
-    added only when ``git -C $KDIVE_KERNEL_SRC rev-parse HEAD`` succeeds against a staged git tree.
-    Capture is best-effort and never fails the build.
+    A warm-tree build rsyncs ``$KDIVE_KERNEL_SRC`` **working-tree state** (uncommitted edits and
+    untracked files included), not ``HEAD``, and the bare ``kernel_source_ref`` is a decorative
+    label, not a remote. The label is always recorded. When the staged tree is a git work tree
+    (``rev-parse HEAD`` succeeds) the HEAD it is based on is recorded as ``resolved_commit``
+    (decorative when dirty), plus ``dirty`` (does the tree differ from HEAD) and, for a dirty tree
+    with tracked changes, a content-deterministic ``tree_sha`` of the tracked working-tree state
+    (ADR-0265). Each probe is best-effort: a failed probe omits its key and never fails the build,
+    so a non-git tree degrades to ``{label}``. The probes read the live staged tree at
+    build-completion (the existing ``resolved_commit`` timing), and ``dirty``/``tree_sha`` cover
+    git-tracked content only.
     """
     label = parsed.kernel_source_ref
     if not isinstance(label, str):
         return result
-    provenance: dict[str, str] = {"label": label}
+    provenance: dict[str, str | bool] = {"label": label}
     commit = rev_parse_head(kernel_src)
     if commit is not None:
         provenance["resolved_commit"] = commit
+        dirty = working_tree_dirty(kernel_src)
+        if dirty is not None:
+            provenance["dirty"] = dirty
+            if dirty:
+                tree_sha = staged_tree_sha(kernel_src)
+                if tree_sha is not None:
+                    provenance["tree_sha"] = tree_sha
     return result._replace(build_provenance=provenance)
 
 
