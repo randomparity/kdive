@@ -15,6 +15,7 @@ from kdive.diagnostics.result_codec import (
     deserialize_results,
     serialize_results,
 )
+from kdive.domain.errors import ErrorCategory
 
 
 def test_roundtrip_preserves_three_state_and_fields() -> None:
@@ -26,7 +27,7 @@ def test_roundtrip_preserves_three_state_and_fields() -> None:
             "blocked",
             fix="open the ACL",
             provider="remote-libvirt",
-            failure_category="configuration_error",
+            failure_category=ErrorCategory.CONFIGURATION_ERROR,
         ),
     ]
     out = deserialize_results(serialize_results(src))

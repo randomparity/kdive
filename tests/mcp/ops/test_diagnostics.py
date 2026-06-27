@@ -26,6 +26,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.diagnostics.checks import Check, CheckResult, CheckStatus, Vantage
 from kdive.diagnostics.service import DiagnosticsService
+from kdive.domain.errors import ErrorCategory
 from kdive.mcp.tools.ops import diagnostics
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
@@ -330,7 +331,7 @@ def test_verdict_projects_failure_category(migrated_url: str) -> None:
             detail="host not reachable over qemu+tls",
             fix="bring the host up",
             provider="remote-libvirt",
-            failure_category="transport_failure",
+            failure_category=ErrorCategory.TRANSPORT_FAILURE,
         ),
         CheckResult(check_id="secret_ref", status=CheckStatus.PASS, detail="all resolve"),
     ]

@@ -23,6 +23,8 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
+from kdive.domain.errors import ErrorCategory
+
 SECRET_REF_ID = "secret_ref"
 PROVIDER_TLS_ID = "provider_tls"
 GDBSTUB_ACL_ID = "gdbstub_acl"
@@ -62,11 +64,8 @@ BASE_VOLUME_NOT_STAGED_FIX = (
     "operator-provided base image volume on the configured pool (ADR-0080), then retry"
 )
 
-# The failure-category labels the reachability verdict carries (ADR-0125). They mirror the
-# ``ErrorCategory`` the underlying connection raises, kept as plain strings so ``checks`` stays
-# free of provider/transport imports.
-_TRANSPORT_FAILURE = "transport_failure"
-_CONFIGURATION_ERROR = "configuration_error"
+_TRANSPORT_FAILURE = ErrorCategory.TRANSPORT_FAILURE
+_CONFIGURATION_ERROR = ErrorCategory.CONFIGURATION_ERROR
 
 _log = logging.getLogger(__name__)
 
@@ -128,11 +127,15 @@ class CheckResult:
     detail: str
     fix: str | None = None
     provider: str | None = None
-    failure_category: str | None = None
+    failure_category: ErrorCategory | None = None
     resource_id: str | None = None
     data: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
+        if self.failure_category is not None and not isinstance(
+            self.failure_category, ErrorCategory
+        ):
+            object.__setattr__(self, "failure_category", ErrorCategory(self.failure_category))
         if self.status is CheckStatus.FAIL and not self.fix:
             raise ValueError(f"{self.check_id}: a fail result must name a fix")
         if self.status is not CheckStatus.FAIL and self.fix is not None:
@@ -846,7 +849,7 @@ class EphemeralLibvirtBuildHostAgentCheck(Check):
         return f"ephemeral_libvirt build host(s) could not be reached: {names}"
 
     @staticmethod
-    def _error_category(unreachable: list[BuildHostProbeResult]) -> str:
+    def _error_category(unreachable: list[BuildHostProbeResult]) -> ErrorCategory:
         if unreachable and all(r.transport_error for r in unreachable):
             return _TRANSPORT_FAILURE
         return _CONFIGURATION_ERROR

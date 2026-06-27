@@ -27,15 +27,15 @@ from kdive.diagnostics.checks import CheckResult, CheckStatus
 from kdive.diagnostics.result_codec import ResultCodecError, deserialize_results
 from kdive.diagnostics.service import WORKER_UNAVAILABLE_DETAIL
 from kdive.domain.capacity.state import JobState
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue as job_queue
 from kdive.jobs.payloads import Authorizing, DiagnosticsWorkerCheckPayload
 
 WORKER_DISPATCH_BUDGET = 15.0
 _POLL_INTERVAL_S = 0.25
-# Plain failure_category labels mirroring checks.py (no ErrorCategory import in this layer).
-_TRANSPORT_FAILURE = "transport_failure"
-_INFRASTRUCTURE_FAILURE = "infrastructure_failure"
+_TRANSPORT_FAILURE = ErrorCategory.TRANSPORT_FAILURE
+_INFRASTRUCTURE_FAILURE = ErrorCategory.INFRASTRUCTURE_FAILURE
 _TERMINAL = {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED}
 _log = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class WorkerCheckDispatcher(Protocol):
 
 
 def _unavailable(
-    detail: str, category: str, *, provider: str, check_ids: Sequence[str]
+    detail: str, category: ErrorCategory, *, provider: str, check_ids: Sequence[str]
 ) -> list[CheckResult]:
     return [
         CheckResult(
@@ -159,7 +159,7 @@ class JobWorkerCheckDispatcher:
                 )
             _log.info("diagnostics job %s succeeded", job.id)
             return results
-        category = job.error_category.value if job.error_category else _INFRASTRUCTURE_FAILURE
+        category = job.error_category or _INFRASTRUCTURE_FAILURE
         _log.warning("diagnostics job %s ended %s (%s)", job.id, job.state.value, category)
         return _unavailable(
             "diagnostics worker job failed",

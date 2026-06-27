@@ -24,6 +24,7 @@ from kdive.diagnostics.service import (
     WorkerVantageSubstitutionMode,
     worker_unavailable_results,
 )
+from kdive.domain.errors import ErrorCategory
 
 
 class _Fixed(Check):
@@ -271,7 +272,7 @@ def test_server_and_real_worker_results_compose_into_one_verdict() -> None:
                 "blocked",
                 fix="open the ACL",
                 provider="remote-libvirt",
-                failure_category="configuration_error",
+                failure_category=ErrorCategory.CONFIGURATION_ERROR,
             ),
         ]
     )

@@ -14,6 +14,7 @@ import logging
 import pytest
 
 from kdive.diagnostics.checks import Check, CheckResult, CheckStatus, Vantage, run_check
+from kdive.domain.errors import ErrorCategory
 
 
 class _Static(Check):
@@ -66,7 +67,7 @@ def test_pass_result_forbids_a_failure_category() -> None:
             check_id="x",
             status=CheckStatus.PASS,
             detail="ok",
-            failure_category="transport_failure",
+            failure_category=ErrorCategory.TRANSPORT_FAILURE,
         )
 
 
@@ -76,7 +77,7 @@ def test_fail_result_may_carry_a_failure_category() -> None:
         status=CheckStatus.FAIL,
         detail="host down",
         fix="bring it up",
-        failure_category="transport_failure",
+        failure_category=ErrorCategory.TRANSPORT_FAILURE,
     )
     assert result.failure_category == "transport_failure"
 
@@ -86,7 +87,7 @@ def test_error_result_may_carry_a_failure_category() -> None:
         check_id="x",
         status=CheckStatus.ERROR,
         detail="bad config",
-        failure_category="configuration_error",
+        failure_category=ErrorCategory.CONFIGURATION_ERROR,
     )
     assert result.failure_category == "configuration_error"
 

@@ -58,10 +58,8 @@ FEATURE_NOT_ENABLED_DETAIL = (
     "in this deployment"
 )
 
-# failure_category labels for the substituted worker-vantage results (ADR-0139). Kept as plain
-# strings, mirroring kdive.diagnostics.checks, so this module stays free of a domain-errors import.
-_TRANSPORT_FAILURE = "transport_failure"
-_NOT_IMPLEMENTED = "not_implemented"
+_TRANSPORT_FAILURE = ErrorCategory.TRANSPORT_FAILURE
+_NOT_IMPLEMENTED = ErrorCategory.NOT_IMPLEMENTED
 
 _DEFAULT_PER_CHECK_TIMEOUT = 10.0
 _DEFAULT_OVERALL_TIMEOUT = 30.0
@@ -96,7 +94,7 @@ _SUBSTITUTION_DETAIL: dict[WorkerVantageSubstitution, str] = {
     WorkerVantageSubstitution.WORKER_UNAVAILABLE: WORKER_UNAVAILABLE_DETAIL,
     WorkerVantageSubstitution.FEATURE_NOT_ENABLED: FEATURE_NOT_ENABLED_DETAIL,
 }
-_SUBSTITUTION_CATEGORY: dict[WorkerVantageSubstitution, str] = {
+_SUBSTITUTION_CATEGORY: dict[WorkerVantageSubstitution, ErrorCategory] = {
     WorkerVantageSubstitution.WORKER_UNAVAILABLE: _TRANSPORT_FAILURE,
     WorkerVantageSubstitution.FEATURE_NOT_ENABLED: _NOT_IMPLEMENTED,
 }
