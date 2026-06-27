@@ -81,7 +81,10 @@ def render_domain_xml(
     ET.SubElement(disk, "source", file=disk_path)
     ET.SubElement(disk, "target", dev="vda", bus="virtio")
     serial = ET.SubElement(devices, "serial", type="pty")
-    ET.SubElement(serial, "log", file=str(console_log_path(system_id)))
+    # append="off" (libvirt's default, pinned explicitly) makes virtlogd truncate the serial log
+    # on every power-cycle, so the file holds only the current boot and each Run's capture reads
+    # it whole — no cross-boot byte offset (ADR-0258, supersedes ADR-0241's local offset, #836).
+    ET.SubElement(serial, "log", file=str(console_log_path(system_id)), append="off")
     ET.SubElement(serial, "target", port="0")
     console = ET.SubElement(devices, "console", type="pty")
     ET.SubElement(console, "target", type="serial", port="0")

@@ -1201,6 +1201,9 @@ def test_domain_xml_has_serial_console_with_log() -> None:
     log = serial.find("log")
     assert log is not None
     assert log.get("file") == str(console_log_path(sid))
+    # append='off' (libvirt's default, pinned explicitly) truncates the serial log on every
+    # power-cycle, so each boot's capture is the whole current file (ADR-0258, #836).
+    assert log.get("append") == "off"
     # The paired <console> redirect is what makes the serial device usable.
     console = root.find("./devices/console[@type='pty']")
     assert console is not None
