@@ -258,27 +258,44 @@ def test_background_ticker_keeps_livez_live_across_a_long_pass(
     """A pass that blocks far past stale_after must NOT flip /livez stale (ADR-0090 §5)."""
 
     async def _run() -> None:
-        hb = Heartbeat(stale_after=0.05)
+        stop = asyncio.Event()
+        pass_can_finish = asyncio.Event()
+        now = 0.0
+        waits: list[float] = []
+        live_during_pass: list[bool] = []
+
+        hb = Heartbeat(stale_after=1.5, now=lambda: now)
+
+        async def heartbeat_sleep_until_stop(stop: asyncio.Event, timeout: float) -> None:
+            nonlocal now
+            waits.append(timeout)
+            now += timeout
+            if len(waits) == 3:
+                live_during_pass.append(hb.is_live())
+                pass_can_finish.set()
+                await stop.wait()
+                return
+            await asyncio.sleep(0)
+
         reconciler = Reconciler(
             pool=_FakePool(),  # ty: ignore[invalid-argument-type]
             reaper=NullReaper(),
             config=ReconcileConfig(
                 interval=timedelta(milliseconds=1),
                 heartbeat=hb,
-                heartbeat_tick=timedelta(milliseconds=5),
+                heartbeat_tick=timedelta(seconds=1),
+                heartbeat_sleep_until_stop=heartbeat_sleep_until_stop,
             ),
         )
-        stop = asyncio.Event()
-        live_during_pass: list[bool] = []
 
         async def long_run_once() -> ReconcileReport:
-            await asyncio.sleep(0.2)  # a slow pass far longer than stale_after
-            live_during_pass.append(hb.is_live())
+            await pass_can_finish.wait()
             stop.set()
             return _empty_report()
 
         monkeypatch.setattr(reconciler, "run_once", long_run_once)
-        await asyncio.wait_for(reconciler.run(stop), timeout=2)
+        await asyncio.wait_for(reconciler.run(stop), timeout=1)
+        assert waits == [1.0, 1.0, 1.0]
         assert live_during_pass == [True]
 
     asyncio.run(_run())
@@ -486,7 +503,12 @@ def test_run_cancels_heartbeat_ticker_on_exit(monkeypatch: pytest.MonkeyPatch) -
 
     ticker_running = asyncio.Event()
 
-    async def _never_ending_ticker(heartbeat: object, stop: object, interval: float) -> None:
+    async def _never_ending_ticker(
+        heartbeat: object,
+        stop: object,
+        interval: float,
+        sleep_until_stop: object,
+    ) -> None:
         ticker_running.set()
         await asyncio.Event().wait()  # blocks forever until cancelled
 
