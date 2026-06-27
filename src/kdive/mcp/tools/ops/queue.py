@@ -89,7 +89,7 @@ async def _set_paused(
             _QUEUE_OBJECT_ID,
             "paused" if paused else "running",
             suggested_next_actions=[_JOBS_LIST_TOOL],
-            data={"queue_paused": "true" if paused else "false"},
+            data={"queue_paused": paused},
         )
 
 
@@ -183,7 +183,7 @@ def _jobs_response(depth: dict[str, int], jobs: list[Job]) -> ToolResponse:
         "ok",
         items,
         suggested_next_actions=[_PAUSE_TOOL, _RESUME_TOOL],
-        data={f"depth_{state}": str(count) for state, count in sorted(depth.items())},
+        data={f"depth_{state}": count for state, count in sorted(depth.items())},
     )
 
 

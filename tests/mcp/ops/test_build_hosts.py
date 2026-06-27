@@ -468,9 +468,11 @@ def test_list_marks_unresolvable_ephemeral_host_false(migrated_url: str) -> None
 
         assert list_resp.status == "ok"
         by_name = {item.data.get("name"): item.data for item in list_resp.items}
-        assert by_name["eph-noinstance"]["resolves"] == "false"
-        assert by_name["ssh-host"]["resolves"] == "true"
-        assert by_name["worker-local"]["resolves"] == "true"
+        assert by_name["eph-noinstance"]["resolves"] is False
+        assert by_name["ssh-host"]["resolves"] is True
+        assert by_name["worker-local"]["resolves"] is True
+        assert isinstance(by_name["ssh-host"]["max_concurrent"], int)
+        assert by_name["ssh-host"]["enabled"] is True
         # redaction intact: the credential ref string only, never key bytes
         assert by_name["ssh-host"]["ssh_credential_ref"] == _CRED_REF
         assert _SECRET_VALUE not in str(list_resp.model_dump())
@@ -498,7 +500,7 @@ def test_list_marks_resolvable_ephemeral_host_true(
             list_resp = await list_build_hosts(pool, _auditor_ctx())
 
         by_name = {item.data.get("name"): item.data for item in list_resp.items}
-        assert by_name["eph-ok"]["resolves"] == "true"
+        assert by_name["eph-ok"]["resolves"] is True
 
     asyncio.run(_run())
 

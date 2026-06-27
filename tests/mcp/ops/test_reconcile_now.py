@@ -103,7 +103,7 @@ def test_reconcile_now_resolves_orphaned_system_and_returns_summary(migrated_url
                 pool, _ctx(platform_roles=_OPERATOR), ports=_ports()
             )
         assert resp.status == "ok"
-        assert resp.data["orphaned_systems"] == "1"
+        assert resp.data["orphaned_systems"] == 1
         assert resp.data["failures"] == ""
         # The pending repair was actually performed, not just counted.
         assert await _teardown_job_count(migrated_url) == 1
@@ -142,12 +142,12 @@ def test_reconcile_now_clean_state_returns_zero_summary(migrated_url: str) -> No
                 pool, _ctx(platform_roles=_OPERATOR), ports=_ports()
             )
         assert resp.status == "ok"
-        assert resp.data["orphaned_systems"] == "0"
-        assert resp.data["expired_allocations"] == "0"
-        assert resp.data["reaped_active_allocations"] == "0"
-        assert resp.data["promoted_allocations"] == "0"
-        assert resp.data["queue_timeouts"] == "0"
-        assert resp.data["reconciled_inventory"] == "0"
+        assert resp.data["orphaned_systems"] == 0
+        assert resp.data["expired_allocations"] == 0
+        assert resp.data["reaped_active_allocations"] == 0
+        assert resp.data["promoted_allocations"] == 0
+        assert resp.data["queue_timeouts"] == 0
+        assert resp.data["reconciled_inventory"] == 0
         assert resp.data["failures"] == ""
         # A pass with nothing to repair is still audited (it ran a control action).
         assert await _platform_audit_count(migrated_url) == 1
@@ -244,7 +244,7 @@ def test_on_demand_pass_serializes_with_periodic_on_the_same_system_lock(
             # holder transaction committed -> lock released; the repair now proceeds.
             resp = await task
         assert resp.status == "ok"
-        assert resp.data["orphaned_systems"] == "1"
+        assert resp.data["orphaned_systems"] == 1
         assert await _teardown_job_count(migrated_url) == 1
 
     asyncio.run(_run())

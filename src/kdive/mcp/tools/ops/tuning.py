@@ -187,7 +187,7 @@ async def set_host_capacity(
             _CAPACITY_OBJECT_ID,
             "ok",
             suggested_next_actions=["resources.list", "allocations.request"],
-            data={"resource_id": resource_id, CONCURRENT_ALLOCATION_CAP_KEY: str(cap)},
+            data={"resource_id": resource_id, CONCURRENT_ALLOCATION_CAP_KEY: cap},
         )
 
 

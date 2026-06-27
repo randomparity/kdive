@@ -45,11 +45,27 @@ def test_resource_capability_data_flattens_known_capabilities() -> None:
     assert data == {
         "kind": "local-libvirt",
         "arch": "x86_64",
-        "vcpus": "8",
-        "memory_mb": "16384",
-        "concurrent_allocation_cap": "2",
+        "vcpus": 8,
+        "memory_mb": 16384,
+        "concurrent_allocation_cap": 2,
         "transports": "ssh,gdbstub",
     }
+
+
+def test_resource_capability_data_coerces_string_stored_numeric() -> None:
+    data = resource_capability_data(_resource(vcpus="8", memory_mb="16384"))
+
+    assert data["vcpus"] == 8
+    assert isinstance(data["vcpus"], int)
+    assert data["memory_mb"] == 16384
+    assert isinstance(data["memory_mb"], int)
+
+
+def test_resource_capability_data_drops_non_coercible_numeric() -> None:
+    data = resource_capability_data(_resource(vcpus="x", memory_mb=16384))
+
+    assert "vcpus" not in data
+    assert data["memory_mb"] == 16384
 
 
 def test_resource_envelope_uses_resource_status_and_next_actions() -> None:

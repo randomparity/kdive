@@ -148,9 +148,9 @@ def _section_item(section: Section, budget: int) -> tuple[ToolResponse, int]:
     preview, inline_truncated = _fit_preview(section.rows, budget)
     data: dict[str, JsonValue] = {
         "section": section.key,
-        "count": str(len(section.rows)),
-        "truncated": str(section.truncated).lower(),
-        "inline_truncated": str(inline_truncated).lower(),
+        "count": len(section.rows),
+        "truncated": section.truncated,
+        "inline_truncated": inline_truncated,
         "rows_json": json.dumps(preview),
     }
     item = ToolResponse.success(section.key, "ok", data=data)
@@ -222,7 +222,7 @@ async def _build_report(
         "window": _window_data(window),
         "as_of": as_of.isoformat(),
         "formats": list(formats),
-        "section_count": str(len(report.sections)),
+        "section_count": len(report.sections),
         "report_id": str(report_id),
         **extra,
     }

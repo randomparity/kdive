@@ -113,7 +113,7 @@ def test_from_vmcore_happy_path_returns_redacted_report(migrated_url: str) -> No
         report = data_mapping(resp, "report")
         sysinfo = json_mapping(report["sysinfo"])
         assert sysinfo["release"] == "6.8.0"
-        assert resp.data["truncated"] == "false"
+        assert resp.data["truncated"] is False
         assert port.kwargs["expected_build_id"] == "deadbeef"
         assert port.kwargs["debuginfo_ref"] == "k/runs/r/vmlinux"
         assert str(port.kwargs["vmcore_ref"]).endswith("/vmcore-host_dump")
@@ -130,7 +130,7 @@ def test_from_vmcore_surfaces_truncated_true(migrated_url: str) -> None:
                 pool, _ctx(), run_id=run_id, introspector=port
             )
         assert resp.status != "error"
-        assert resp.data["truncated"] == "true"
+        assert resp.data["truncated"] is True
 
     asyncio.run(_run())
 
@@ -769,7 +769,7 @@ def test_script_clamps_timeout_to_floor(migrated_url: str) -> None:
         assert resp.status != "error"
         assert port.kwargs["timeout_sec"] == 1.0
         assert resp.data["output"] == "ok"
-        assert resp.data["truncated"] == "false"
+        assert resp.data["truncated"] is False
 
     asyncio.run(_run())
 
@@ -872,6 +872,8 @@ def test_script_over_size_cap_is_configuration_error(migrated_url: str) -> None:
         assert resp.status == "error"
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR
         assert resp.data["reason"] == "script_too_large"
+        assert isinstance(resp.data["script_bytes"], int)
+        assert isinstance(resp.data["max_bytes"], int)
         assert port.kwargs == {}  # rejected before the seam ran
 
     asyncio.run(_run())

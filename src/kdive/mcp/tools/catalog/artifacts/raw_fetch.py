@@ -134,5 +134,5 @@ async def fetch_raw(
                 "available",
                 suggested_next_actions=["artifacts.fetch_raw"],
                 refs={"download_uri": url},
-                data={"asset": asset.value, "size_bytes": str(head.size_bytes), "ttl": str(ttl)},
+                data={"asset": asset.value, "size_bytes": head.size_bytes, "ttl": ttl},
             )

@@ -101,7 +101,7 @@ def test_reconcile_systems_runs_inventory_and_audits_diff(
                 pool, _ctx(platform_roles=_ADMIN), image_store=None
             )
         assert resp.status == "ok"
-        assert resp.data["created"] == "1"
+        assert resp.data["created"] == 1
         async with await _connect(migrated_url) as check, check.cursor() as cur:
             await cur.execute(
                 "SELECT managed_by FROM resources WHERE kind = 'fault-inject' AND name = 'fi-recon'"
@@ -140,7 +140,7 @@ def test_reconcile_systems_audits_prunes_for_attribution(
                 pool, _ctx(platform_roles=_ADMIN), image_store=None
             )
         assert resp.status == "ok"
-        assert resp.data["pruned"] == "1"
+        assert resp.data["pruned"] == 1
         assert resp.data["pruned_names"] == "fi-recon"
         rows = await _audit_rows(migrated_url)
         # The second (prune) pass's audit scope names the pruned identity (attributable).
@@ -222,8 +222,8 @@ def test_absent_default_systems_toml_is_quiet_no_op(
                 pool, _ctx(platform_roles=_ADMIN), image_store=None
             )
         assert resp.status == "ok"
-        assert resp.data["created"] == "0"
-        assert resp.data["pruned"] == "0"
+        assert resp.data["created"] == 0
+        assert resp.data["pruned"] == 0
         assert await _audit_count(migrated_url) == 1
 
     asyncio.run(_run())

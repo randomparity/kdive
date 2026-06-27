@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, DecimalException, InvalidOperation
@@ -23,6 +24,7 @@ from kdive.mcp.tools import _docmeta
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext, require_project
 from kdive.security.authz.rbac import Role, require_role
+from kdive.serialization import JsonValue
 
 _BUDGET_OBJECT_ID = "budget"
 _QUOTA_OBJECT_ID = "quota"
@@ -107,10 +109,10 @@ async def set_quota(
                     updated_at=now,
                 ),
             )
-            values = {
-                "max_concurrent_allocations": str(request.max_concurrent_allocations),
-                "max_concurrent_systems": str(request.max_concurrent_systems),
-                "max_pending_allocations": str(request.max_pending_allocations),
+            values: dict[str, JsonValue] = {
+                "max_concurrent_allocations": request.max_concurrent_allocations,
+                "max_concurrent_systems": request.max_concurrent_systems,
+                "max_pending_allocations": request.max_pending_allocations,
             }
             await _audit_set(conn, ctx, request.project, "set_quota", values)
             return ToolResponse.success(
@@ -141,7 +143,11 @@ def _parse_non_negative_kcu(value: object) -> Decimal:
 
 
 async def _audit_set(
-    conn: AsyncConnection, ctx: RequestContext, project: str, tool: str, values: dict[str, str]
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    project: str,
+    tool: str,
+    values: Mapping[str, object],
 ) -> None:
     """Audit an admin set-op under the nil UUID, carrying the project and values in args."""
     await audit.record(

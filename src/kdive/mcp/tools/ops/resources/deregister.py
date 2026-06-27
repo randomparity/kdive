@@ -159,7 +159,7 @@ async def _deregister_runtime(
         suggested_next_actions=["resources.list"],
         data={
             "id": resource_id,
-            "forced": "true" if force else "false",
+            "forced": force,
             "disposition": disposition,
         },
     )
@@ -270,7 +270,7 @@ async def _deregister_config_remote_libvirt(
         suggested_next_actions=["resources.list"],
         data={
             "id": resource_id,
-            "forced": "true" if force else "false",
+            "forced": force,
             "disposition": disposition,
         },
     )

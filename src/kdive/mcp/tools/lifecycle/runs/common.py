@@ -81,7 +81,7 @@ _BUILD_LOG_FAILURE_DETAIL = "failure_detail_build_log_artifact"
 # The two VIEWER-accessible read paths for the REDACTED ``refs["console"]`` artifact (ADR-0226),
 # surfaced as ``data["console_access"]`` so an agent learns both from the envelope, not out of
 # band (#864, ADR-0262): ``artifacts.search_text`` for a targeted query, and ``artifacts.get``
-# for the full log by paging ``next_offset`` until ``content_truncated`` is ``"false"`` (ADR-0247's
+# for the full log by paging ``next_offset`` until ``content_truncated`` is ``false`` (ADR-0247's
 # per-window cap means whole-log = paging). ``artifacts.fetch_raw`` is deliberately absent: it
 # egresses only the ``vmcore``/``vmlinux`` ``RawAsset`` allow-list keyed by ``run_id``+``asset``
 # and is ``contributor``-gated, so it neither serves the console artifact nor is callable by a

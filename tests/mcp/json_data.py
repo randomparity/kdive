@@ -14,6 +14,19 @@ def data_str(resp: ToolResponse, key: str) -> str:
     return value
 
 
+def data_int(resp: ToolResponse, key: str) -> int:
+    value = resp.data[key]
+    # `bool` is an `int` subclass; reject it so a flag misread as a count is caught.
+    assert isinstance(value, int) and not isinstance(value, bool)
+    return value
+
+
+def data_bool(resp: ToolResponse, key: str) -> bool:
+    value = resp.data[key]
+    assert isinstance(value, bool)
+    return value
+
+
 def data_mapping(resp: ToolResponse, key: str) -> Mapping[str, JsonValue]:
     value = resp.data[key]
     assert isinstance(value, Mapping)

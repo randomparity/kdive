@@ -133,8 +133,9 @@ def test_set_quota_creates_row(migrated_url: str) -> None:
                 "accounting.usage_project",
                 "allocations.request",
             ]
-            assert resp.data["max_concurrent_allocations"] == "3"
-            assert resp.data["max_concurrent_systems"] == "5"
+            assert resp.data["max_concurrent_allocations"] == 3
+            assert resp.data["max_concurrent_systems"] == 5
+            assert isinstance(resp.data["max_pending_allocations"], int)
             async with pool.connection() as conn:
                 quota = await QUOTAS.get(conn, "proj")
                 cur = await conn.execute("SELECT tool, object_kind, transition FROM audit_log")

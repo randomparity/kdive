@@ -109,7 +109,7 @@ def _exit_code(fields: Mapping[str, object]) -> int:
 
 def _flag(fields: Mapping[str, object], key: str) -> bool:
     data = _envelope_fields(fields.get("data"))
-    return data.get(key) == "true"
+    return data.get(key) is True
 
 
 async def doctor(args: argparse.Namespace) -> int:

@@ -494,6 +494,7 @@ def test_register_allocate_renew_deregister_round_trip(migrated_url: str, tmp_pa
             forced = await deregister_resource(pool, _admin_ctx(), resource_id=rid, force=True)
             assert forced.status == "deregistered", forced.model_dump()
             assert forced.data["disposition"] == "cordoned"
+            assert forced.data["forced"] is True
             final = await _resource_full_row(migrated_url, rid)
             assert final is not None
             assert final["cordoned"] is True

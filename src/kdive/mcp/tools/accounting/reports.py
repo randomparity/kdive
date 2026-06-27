@@ -295,7 +295,7 @@ def _report_response(
         data={
             "scope": scope,
             "group_by": group_by or "",
-            "project_count": str(len(targets)),
+            "project_count": len(targets),
             "total_project": total["project"],
             "total_principal": total["principal"],
             "total_reserved": total["reserved"],

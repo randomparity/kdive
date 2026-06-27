@@ -121,12 +121,10 @@ async def list_build_hosts(
                 "address": row["address"] or "",
                 "ssh_credential_ref": row["ssh_credential_ref"] or "",
                 "workspace_root": row["workspace_root"],
-                "max_concurrent": str(row["max_concurrent"]),
-                "enabled": str(row["enabled"]).lower(),
+                "max_concurrent": int(row["max_concurrent"]),
+                "enabled": bool(row["enabled"]),
                 "state": row["state"],
-                "resolves": str(
-                    build_host_resolves(BuildHostKind(row["kind"]), row["name"], declared)
-                ).lower(),
+                "resolves": build_host_resolves(BuildHostKind(row["kind"]), row["name"], declared),
                 "supported_source_kinds": [
                     kind.value for kind in accepted_source_kinds(BuildHostKind(row["kind"]))
                 ],
