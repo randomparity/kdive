@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 from uuid import UUID
 
-from kdive.build_artifacts.validation import parse_gnu_build_id, patch_target_paths
+from kdive.build_artifacts.validation import parse_gnu_build_id
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.ports.build_transport import BuildTransport
@@ -31,6 +31,7 @@ from kdive.providers.shared.build_host.execution import (
     RunStep,
     build_failure,
 )
+from kdive.providers.shared.build_host.patches import patch_target_paths
 from kdive.providers.shared.build_host.workspaces.workspace import (
     GIT_APPLY_TIMEOUT_S,
     Checkout,

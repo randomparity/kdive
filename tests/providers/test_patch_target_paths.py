@@ -14,18 +14,17 @@ from pathlib import Path
 
 import pytest
 
+from kdive.artifacts.chunks import verify_chunks
 from kdive.artifacts.storage import HeadResult
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 from kdive.build_artifacts.validation import (
     extract_build_id_ranged,
     parse_gnu_build_id,
-    patch_target_paths,
-    snapshot_file_bytes,
     validate_external_artifacts,
-    verify_chunks,
 )
 from kdive.components.requirements import ConfigRequirements
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.shared.build_host.patches import patch_target_paths, snapshot_file_bytes
 
 _MODIFY = "--- a/fs/dcache.c\n+++ b/fs/dcache.c\n@@ -1,2 +1,2 @@\n line1\n-line2\n+line2-patched\n"
 

@@ -11,7 +11,6 @@ from pathlib import Path
 from uuid import UUID
 
 from kdive.build_artifacts.results import BuildOutput
-from kdive.build_artifacts.validation import patch_target_paths, snapshot_file_bytes
 from kdive.db.build_host_policy import warm_tree_source_error
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import GitSourceRef, ServerBuildProfile, git_source_of
@@ -28,6 +27,7 @@ from kdive.providers.shared.build_host.execution import (
     run_make_target,
     workspace_failure,
 )
+from kdive.providers.shared.build_host.patches import patch_target_paths, snapshot_file_bytes
 from kdive.providers.shared.build_host.sandbox import BuildSandbox, SandboxProvider, sandbox_run
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry

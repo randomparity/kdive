@@ -8,10 +8,10 @@ import tarfile
 import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal, Protocol
 
-from kdive.artifacts.storage import HeadResult, chunk_key
+from kdive.artifacts.chunks import HeadStore
+from kdive.artifacts.storage import HeadResult
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.components.requirements import ConfigRequirements, validate_config_requirements
@@ -195,12 +195,6 @@ EXTERNAL_BUILD_CONTRACTS: Mapping[str, ArtifactContract] = {
 }
 
 
-class HeadStore(Protocol):
-    """The minimal object-store surface chunk HEAD-verification needs."""
-
-    def head(self, key: str) -> HeadResult | None: ...
-
-
 class ValidatorStore(HeadStore, Protocol):
     """Object-store operations needed by external build validation."""
 
@@ -232,47 +226,6 @@ def parse_gnu_build_id(notes: bytes) -> str:
         "vmlinux carries no GNU build-id note",
         category=ErrorCategory.BUILD_FAILURE,
     )
-
-
-def patch_target_paths(patch_text: str, *, strip: int = 1) -> set[Path]:
-    """Parse the workspace-relative file paths a unified diff touches.
-
-    Collects both the pre-image (``--- a/...``) and post-image (``+++ b/...``) sides so
-    created, modified, and deleted files are all covered, applying ``-p<strip>`` component
-    stripping (``strip=1`` drops the leading ``a/``/``b/``). The ``/dev/null`` side of an
-    add or delete, and any path shallower than ``strip``, are ignored.
-
-    Used to verify ``git apply`` actually changed the tree: a ``.git``-less build workspace
-    can make ``git apply`` exit 0 while silently skipping the patch (issue #227), so the
-    caller snapshots these paths before and after applying and fails if none changed.
-    """
-    paths: set[Path] = set()
-    for line in patch_text.splitlines():
-        if not (line.startswith("--- ") or line.startswith("+++ ")):
-            continue
-        spec = line[4:].split("\t", 1)[0].strip()
-        # git c-quotes paths with special/non-ASCII bytes ("b/...", octal escapes); decoding
-        # them here would be brittle, so skip them — the caller's `git apply` stderr check
-        # still catches a skipped quoted path, and we avoid wrongly flagging an applied one.
-        if not spec or spec == "/dev/null" or spec.startswith('"'):
-            continue
-        components = spec.split("/")
-        if len(components) <= strip:
-            continue
-        paths.add(Path(*components[strip:]))
-    return paths
-
-
-def snapshot_file_bytes(path: Path) -> bytes | None:
-    """Return ``path`` contents, or ``None`` if it does not exist or cannot be read.
-
-    Used by the build planes to snapshot a patch's target files before and after
-    ``git apply`` and detect a silent no-op apply (issue #227).
-    """
-    try:
-        return path.read_bytes()
-    except OSError:
-        return None
 
 
 def validate_external_artifacts(
@@ -384,41 +337,6 @@ def extract_build_id_ranged(store: ValidatorStore, key: str, *, max_size: int) -
         return _find_build_id_note(store, key, sht, shstr, e_shentsize, e_shnum, max_size=max_size)
     except (struct.error, ValueError, IndexError) as exc:
         raise _build_failure("vmlinux ELF is structurally malformed") from exc
-
-
-def verify_chunks(store: HeadStore, prefix: str, entry: ManifestEntry) -> None:
-    """HEAD-verify each declared chunk's stored ``(size, sha256)`` before reassembly.
-
-    For a chunked artifact the per-chunk SHA-256 pins are the integrity anchor (ADR-0104 §4):
-    each chunk object's stored checksum and size must match the manifest before the chunks are
-    reassembled into the final object.
-
-    Raises:
-        CategorizedError: a chunk was never uploaded
-            (:attr:`ErrorCategory.CONFIGURATION_ERROR`) or disagrees with its manifest entry
-            (:attr:`ErrorCategory.BUILD_FAILURE`).
-    """
-    if entry.chunks is None:
-        raise CategorizedError(
-            "artifact is not declared as chunked",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"name": entry.name},
-        )
-    for part_number, chunk in enumerate(entry.chunks, start=1):
-        key = chunk_key(prefix, entry.name, part_number)
-        head = store.head(key)
-        if head is None:
-            raise CategorizedError(
-                f"declared chunk {part_number} of {entry.name!r} was never uploaded",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"name": entry.name, "part_number": part_number},
-            )
-        if head.size_bytes != chunk.size_bytes or head.checksum_sha256 != chunk.sha256:
-            raise _build_failure(
-                "uploaded chunk disagrees with its manifest",
-                name=entry.name,
-                part_number=part_number,
-            )
 
 
 def _validate_one_artifact(
