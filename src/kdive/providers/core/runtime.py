@@ -36,11 +36,15 @@ from kdive.providers.ports import (
     Retriever,
     VmcoreIntrospector,
 )
+from kdive.serialization import JsonValue
 
 type DiscoveryRegistrar = Callable[[AsyncConnectionPool], Awaitable[None]]
 type BuildConfigValidator = Callable[[ComponentRef], None]
 type RootfsValidator = Callable[[RootfsSource], None]
 type StagedVolumeProbe = Callable[[list[str]], Awaitable[dict[str, str]]]
+type ResourceDetailProjector = Callable[
+    [AsyncConnectionPool, tuple[str, ...]], Awaitable[dict[str, JsonValue]]
+]
 
 
 def _unconfigured_component_sources() -> ComponentSourceCapabilities:
@@ -121,6 +125,7 @@ class ProviderRuntime:
     rootfs_validator: RootfsValidator | None = None
     rootfs_build_plane: RootfsBuildPlane | None = None
     staged_volume_probe: StagedVolumeProbe | None = None
+    resource_detail_projector: ResourceDetailProjector | None = None
     # Per-Run console snapshot (ADR-0235). Set by providers whose console is captured out-of-band
     # (remote-libvirt: reconciler-resident collector → S3 parts); the boot worker invokes it to
     # persist an immutable ``console-<run>`` artifact. ``None`` → the boot handler captures the

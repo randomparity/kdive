@@ -64,6 +64,7 @@ from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtP
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.providers.remote_libvirt.reaping.build_vm import RemoteLibvirtBuildVmReaper
 from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
+from kdive.providers.remote_libvirt.resource_details import project_resource_details
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.providers.remote_libvirt.staged_volumes import probe_staged_volumes
@@ -316,6 +317,13 @@ def build_runtime(
         rootfs_build_plane=RemoteLibvirtRootfsBuildPlane.from_env(),
         staged_volume_probe=lambda volumes: probe_staged_volumes(
             volumes, config_factory=config_factory
+        ),
+        resource_detail_projector=lambda pool, viewer_projects: project_resource_details(
+            pool,
+            viewer_projects,
+            staged_probe=lambda volumes: probe_staged_volumes(
+                volumes, config_factory=config_factory
+            ),
         ),
         # ADR-0235: the reconciler-resident collector streams the console to S3 parts; the boot
         # worker assembles them into an immutable per-Run `console-<run>` artifact so a later boot

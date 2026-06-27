@@ -28,6 +28,10 @@ from kdive.mcp.tools.ops.resources import host_ops as resources_tools
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
+from kdive.providers.remote_libvirt.resource_details import (
+    StagedVolumeProbe,
+    project_resource_details,
+)
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.allocation.release import ReleaseOutcome
 from tests.mcp.json_data import data_sequence, json_mapping
@@ -71,9 +75,7 @@ async def _register(pool: AsyncConnectionPool, *, host_uri: str = "qemu:///syste
     return str(res.id)
 
 
-def _resolver_with_staged_probe(
-    probe: catalog_resources_tools.StagedVolumeProbe,
-) -> ProviderResolver:
+def _resolver_with_staged_projector(probe: StagedVolumeProbe) -> ProviderResolver:
     unused_port = cast(Any, object())
     runtime = ProviderRuntime(
         profile_policy=unused_port,
@@ -87,7 +89,9 @@ def _resolver_with_staged_probe(
         crash_postmortem=unused_port,
         vmcore_introspector=unused_port,
         live_introspector=unused_port,
-        staged_volume_probe=probe,
+        resource_detail_projector=lambda pool, viewer_projects: project_resource_details(
+            pool, viewer_projects, staged_probe=probe
+        ),
     )
     return ProviderResolver({ResourceKind.REMOTE_LIBVIRT: runtime})
 
@@ -403,7 +407,7 @@ def test_describe_remote_reports_staged_base_images(migrated_url: str) -> None:
                 return {"fedora.qcow2": "staged", "dbg.qcow2": "absent"}
 
             return await catalog_resources_tools.describe_resource(
-                pool, CTX, res_id, staged_probe=fake_probe
+                pool, CTX, res_id, resolver=_resolver_with_staged_projector(fake_probe)
             )
 
     resp = asyncio.run(_run())
@@ -430,7 +434,7 @@ def test_describe_remote_uses_provider_runtime_staged_probe(migrated_url: str) -
                 pool,
                 CTX,
                 res_id,
-                resolver=_resolver_with_staged_probe(runtime_probe),
+                resolver=_resolver_with_staged_projector(runtime_probe),
             )
 
     resp = asyncio.run(_run())
@@ -441,12 +445,12 @@ def test_describe_remote_uses_provider_runtime_staged_probe(migrated_url: str) -
 
 def _resolver_with_rebound_staged_probe(
     *,
-    unbound: catalog_resources_tools.StagedVolumeProbe,
-    bound_by_name: dict[str, catalog_resources_tools.StagedVolumeProbe],
+    unbound: StagedVolumeProbe,
+    bound_by_name: dict[str, StagedVolumeProbe],
 ) -> ProviderResolver:
     unused_port = cast(Any, object())
 
-    def _runtime(probe: catalog_resources_tools.StagedVolumeProbe) -> ProviderRuntime:
+    def _runtime(probe: StagedVolumeProbe) -> ProviderRuntime:
         return ProviderRuntime(
             profile_policy=unused_port,
             provisioner=unused_port,
@@ -459,7 +463,9 @@ def _resolver_with_rebound_staged_probe(
             crash_postmortem=unused_port,
             vmcore_introspector=unused_port,
             live_introspector=unused_port,
-            staged_volume_probe=probe,
+            resource_detail_projector=lambda pool, viewer_projects: project_resource_details(
+                pool, viewer_projects, staged_probe=probe
+            ),
         )
 
     base = _runtime(unbound)
@@ -510,7 +516,7 @@ def test_describe_remote_probe_degraded_does_not_fail_describe(migrated_url: str
                 return dict.fromkeys(volumes, "unreachable")
 
             return await catalog_resources_tools.describe_resource(
-                pool, CTX, res_id, staged_probe=degraded
+                pool, CTX, res_id, resolver=_resolver_with_staged_projector(degraded)
             )
 
     resp = asyncio.run(_run())
@@ -528,7 +534,7 @@ def test_describe_no_staged_images_empty_list_probe_not_called(migrated_url: str
                 raise AssertionError("probe must not be called when there are no staged images")
 
             return await catalog_resources_tools.describe_resource(
-                pool, CTX, res_id, staged_probe=fail
+                pool, CTX, res_id, resolver=_resolver_with_staged_projector(fail)
             )
 
     resp = asyncio.run(_run())
@@ -544,7 +550,7 @@ def test_describe_local_resource_has_no_staged_base_images(migrated_url: str) ->
                 raise AssertionError("probe must not be called for a local resource")
 
             return await catalog_resources_tools.describe_resource(
-                pool, CTX, res_id, staged_probe=fail
+                pool, CTX, res_id, resolver=_resolver_with_staged_projector(fail)
             )
 
     resp = asyncio.run(_run())
@@ -564,7 +570,7 @@ def test_describe_remote_excludes_other_projects_private_image(migrated_url: str
 
             # VIEWER_CTX is a viewer on 'proj', not on the owning 'proj-b'.
             return await catalog_resources_tools.describe_resource(
-                pool, VIEWER_CTX, res_id, staged_probe=probe
+                pool, VIEWER_CTX, res_id, resolver=_resolver_with_staged_projector(probe)
             )
 
     resp = asyncio.run(_run())

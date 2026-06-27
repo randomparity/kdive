@@ -6,13 +6,12 @@ project affinity predicate used by allocation placement. Response ``data`` follo
 ADR-0019 ``dict[str, JsonValue]`` contract: the nested ``capabilities`` jsonb is projected
 to flat scalar fields (``kind``, ``arch``, ``vcpus``, ``memory_mb``,
 ``concurrent_allocation_cap``, and ``transports``), while ``resources.describe`` can add
-``pool``, ``cost_class``, ``host_uri``, and the remote-libvirt ``staged_base_images`` list.
+``pool``, ``cost_class``, ``host_uri``, and provider-owned detail fields.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -24,7 +23,6 @@ from pydantic import Field
 
 from kdive.db.repositories import RESOURCES
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
@@ -47,38 +45,6 @@ from kdive.services.allocation.admission.affinity import resource_visible_to_pro
 
 _log = logging.getLogger(__name__)
 type ResourceListItem = Resource | ToolResponse
-
-# A probe of `{volume: status}` for the caller-visible staged remote-libvirt base-image volumes
-# (ADR-0156). Injected so handler tests need no libvirt; the production default opens one
-# `qemu+tls://` connection and never raises.
-StagedVolumeProbe = Callable[[list[str]], Awaitable[dict[str, str]]]
-
-_STAGED_IMAGES_SQL = """
-    SELECT name, volume
-    FROM image_catalog
-    WHERE provider = %(provider)s
-      AND volume IS NOT NULL
-      AND (visibility = %(public)s
-           OR (visibility = %(private)s AND owner = ANY(%(projects)s)))
-    ORDER BY name, arch
-"""
-
-
-async def _staged_remote_images(
-    conn: AsyncConnection, ctx: RequestContext
-) -> list[tuple[str, str]]:
-    """Caller-visible staged remote-libvirt catalog images as ``(name, volume)``."""
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            _STAGED_IMAGES_SQL,
-            {
-                "provider": ResourceKind.REMOTE_LIBVIRT.value,
-                "public": ImageVisibility.PUBLIC.value,
-                "private": ImageVisibility.PRIVATE.value,
-                "projects": projects_with_role(ctx, Role.VIEWER),
-            },
-        )
-        return [(row["name"], row["volume"]) for row in await cur.fetchall()]
 
 
 async def _fetch_resource_rows(
@@ -197,16 +163,11 @@ async def describe_resource(
     resource_id: str,
     *,
     resolver: ProviderResolver | None = None,
-    staged_probe: StagedVolumeProbe | None = None,
 ) -> ToolResponse:
     """Return one resource's envelope with pool/cost_class/host_uri, or an error.
 
-    For a remote-libvirt resource, also report ``staged_base_images``: each caller-visible staged
-    base-image volume and whether it is staged on the host's pool (ADR-0156). The live probe is
-    bound to the described host (``for_resource``, ADR-0187/0194) so a reachable host reports a real
-    ``staged``/``absent``/``pool_absent`` status; ``"unknown"`` means the probe could not run. The
-    probe runs only after the DB connection is released, and degrades to a per-volume status — it
-    never fails the describe.
+    Provider-specific adornments are owned by the bound runtime's optional
+    ``resource_detail_projector`` and merged after the shared fields.
     """
     try:
         uid = UUID(resource_id)
@@ -218,35 +179,42 @@ async def describe_resource(
             resource = await RESOURCES.get(conn, uid)
             if resource is None or not resource_visible_to_projects(resource, viewer_projects):
                 return _not_found(resource_id)
-            staged_images: list[tuple[str, str]] = []
-            if resource.kind is ResourceKind.REMOTE_LIBVIRT:
-                staged_images = await _staged_remote_images(conn, ctx)
+        runtime = _runtime_for_resource(resolver, resource.kind, resource.name)
+        provider_data = await _resource_detail_data(pool, runtime, viewer_projects)
         envelope = resource_envelope(resource, next_actions=["allocations.request"])
         envelope.data["pool"] = resource.pool
         envelope.data["cost_class"] = resource.cost_class
         envelope.data["host_uri"] = resource.host_uri
-        _project_capabilities(envelope, resolver, resource.kind, resource.name)
-        if resource.kind is ResourceKind.REMOTE_LIBVIRT:
-            probe = staged_probe or _runtime_staged_probe(resolver, resource.kind, resource.name)
-            statuses = (
-                await probe([volume for _, volume in staged_images])
-                if probe is not None and staged_images
-                else {}
-            )
-            staged_base_images: list[JsonValue] = [
-                {"name": name, "volume": volume, "staged": statuses.get(volume, "unknown")}
-                for name, volume in staged_images
-            ]
-            envelope.data["staged_base_images"] = staged_base_images
+        _project_capabilities(envelope, runtime)
+        envelope.data.update(provider_data)
         return envelope
 
 
-def _project_capabilities(
-    envelope: ToolResponse,
-    resolver: ProviderResolver | None,
-    kind: ResourceKind,
-    name: str | None,
-) -> None:
+def _runtime_for_resource(
+    resolver: ProviderResolver | None, kind: ResourceKind, name: str | None
+) -> ProviderRuntime | None:
+    if resolver is None:
+        return None
+    try:
+        runtime = resolver.resolve(kind)
+        if name is not None:
+            return runtime.for_resource(name)
+        return runtime
+    except CategorizedError:
+        return None
+
+
+async def _resource_detail_data(
+    pool: AsyncConnectionPool,
+    runtime: ProviderRuntime | None,
+    viewer_projects: tuple[str, ...],
+) -> dict[str, JsonValue]:
+    if runtime is None or runtime.resource_detail_projector is None:
+        return {}
+    return await runtime.resource_detail_projector(pool, viewer_projects)
+
+
+def _project_capabilities(envelope: ToolResponse, runtime: ProviderRuntime | None) -> None:
     """Project the bound provider's capability descriptor onto a describe envelope (ADR-0208).
 
     Reads the resolved runtime's descriptor and emits a provider-neutral ``capabilities`` plane
@@ -255,13 +223,7 @@ def _project_capabilities(
     resolver is wired or the kind is unregistered — the same degrade-don't-fail contract as the
     staged-volume probe (ADR-0194).
     """
-    if resolver is None:
-        return
-    try:
-        runtime = resolver.resolve(kind)
-        if name is not None:
-            runtime = runtime.for_resource(name)
-    except CategorizedError:
+    if runtime is None:
         return
     capabilities: list[JsonValue] = [plane for plane in _capability_planes(runtime)]
     capture: list[JsonValue] = [
@@ -292,27 +254,6 @@ def _capability_planes(runtime: ProviderRuntime) -> list[str]:
     if runtime.supported_introspection:
         planes.add("introspect")
     return sorted(planes)
-
-
-def _runtime_staged_probe(
-    resolver: ProviderResolver | None, kind: ResourceKind, name: str | None
-) -> StagedVolumeProbe | None:
-    """Resolve the staged-volume probe bound to the described host (ADR-0187, ADR-0194).
-
-    A present ``name`` binds the runtime to that host via ``for_resource`` so the probe connects to
-    the described resource — without it the unbound remote-libvirt runtime's ``config_factory`` is
-    ``unbound_remote_config`` and degrades every volume to ``"unknown"``. A ``None`` name (a
-    non-reconciled resource row) keeps the prior unbound behavior.
-    """
-    if resolver is None:
-        return None
-    try:
-        runtime = resolver.resolve(kind)
-        if name is not None:
-            runtime = runtime.for_resource(name)
-        return runtime.staged_volume_probe
-    except CategorizedError:
-        return None
 
 
 def register(

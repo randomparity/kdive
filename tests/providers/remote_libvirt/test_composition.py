@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -280,4 +282,47 @@ def test_build_runtime_staged_volume_probe_threads_config_factory(
 
     assert result == "sentinel"
     assert captured["volumes"] == ["vol-1", "vol-2"]
+    assert captured["config_factory"] is fake_config_factory
+
+
+def test_build_runtime_resource_detail_projector_threads_config_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_config_factory() -> RemoteLibvirtConfig:
+        return RemoteLibvirtConfig(
+            uri="qemu+tls://host-a.example/system",
+            cert_refs=TlsCertRefs("c", "k", "ca"),  # pragma: allowlist secret
+            concurrent_allocation_cap=1,
+            gdb_addr="10.0.0.3",
+        )
+
+    def fake_probe(volumes: object, *, config_factory: object) -> str:
+        captured["volumes"] = volumes
+        captured["config_factory"] = config_factory
+        return "sentinel"
+
+    async def fake_project(
+        pool: object, viewer_projects: object, *, staged_probe: object
+    ) -> dict[str, object]:
+        captured["pool"] = pool
+        captured["viewer_projects"] = viewer_projects
+        captured["probe_result"] = staged_probe(["vol-1"])  # ty: ignore[call-non-callable]
+        return {"staged_base_images": []}
+
+    monkeypatch.setattr(composition, "probe_staged_volumes", fake_probe)
+    monkeypatch.setattr(composition, "project_resource_details", fake_project)
+    runtime = composition.build_runtime(
+        secret_registry=SecretRegistry(), config_factory=fake_config_factory
+    )
+    projector = runtime.resource_detail_projector
+    assert projector is not None
+    result = asyncio.run(projector(cast(Any, "pool"), ("proj",)))
+
+    assert result == {"staged_base_images": []}
+    assert captured["pool"] == "pool"
+    assert captured["viewer_projects"] == ("proj",)
+    assert captured["probe_result"] == "sentinel"
+    assert captured["volumes"] == ["vol-1"]
     assert captured["config_factory"] is fake_config_factory
