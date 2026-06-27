@@ -240,6 +240,23 @@ serves requests.
 constrained-debug allowlist, gdb-MI tier, drgn introspect/vmcore, crash
 postmortem, run-readiness preflight.
 
+### Artifact and catalog package ownership
+
+These packages are related but not interchangeable:
+
+| Package | Responsibility |
+|---|---|
+| `kdive.artifacts` | Artifact DTOs, keys, sensitivity, and upload metadata. |
+| `kdive.store` | Object-store clients and environment-backed store assembly. |
+| `kdive.build_artifacts` | Build-output result shapes and build-id validation. |
+| `kdive.build_configs` | Catalog-backed kernel config lookup and fetch ports. |
+| `kdive.components` | Typed component refs and config-requirement validation. |
+| `kdive.images` / `kdive.inventory` | Image inventory, catalog reconcile, and TOML shape. |
+| `kdive.mcp.tools.catalog.artifacts` | Agent artifact tools and upload/download authz. |
+
+Provider build semantics, provider filenames, S3 upload mechanics, and MCP response shaping stay
+outside these data-owner packages unless the package above names that responsibility.
+
 ## MCP tool surface
 
 Atomic primitives mapped to planes. Every tool returns structured JSON with the
