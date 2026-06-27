@@ -113,3 +113,7 @@ restart_host_processes
 
 banner "status"
 "${here}/status.sh"
+
+banner "next: fund a project"
+echo "The stack is up but no project is funded yet. Seed budget/quota + mint a token with:"
+echo "    just onboard            # project 'demo' (override with KDIVE_PROJECT)"

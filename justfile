@@ -23,6 +23,10 @@ check-local-libvirt:
 setup-local-libvirt:
     ./scripts/setup-local-libvirt.sh
 
+# Fund a dev-stack project + mint a token (preflight, migrate, seed, verify; KDIVE_PROJECT=demo). See #834.
+onboard:
+    ./scripts/live-stack/onboard.sh
+
 # Preflight: can the remote-libvirt provider reach a target host? (report-only)
 check-remote-libvirt host user="root" uri="":
     ./scripts/check-remote-libvirt.sh {{host}} {{user}} {{uri}}

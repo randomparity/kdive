@@ -28,6 +28,27 @@ Brings up only the compose backends (Postgres/MinIO/OIDC) and migrates the schem
 `just test-live-stack` suite, or to run the app tier from the compose reference
 (`docker compose up -d migrate server worker reconciler`). Does NOT start host processes or libvirt.
 
+## Fund a project — `just onboard` (#834)
+
+After the stack is up (`up.sh` or `just stack-up`), `just onboard` funds a project so a fresh
+agent's first `allocations.request` is granted instead of hitting the zero-quota/zero-budget wall.
+It runs against the **same** `env.sh` DB the rest of the live-stack uses: advisory preflight →
+`migrate` → `seed-project` → `verify-project` (the hard funding gate) → mint a 24 h token + print
+the **binding contract** (the project string is threaded through the seed, the token claims, and
+the contract, so the seeded key, the JWT `projects`/`roles` claim, and the `project` arg match).
+
+```bash
+just onboard                 # project "demo"
+KDIVE_PROJECT=acme just onboard
+```
+
+The minted token expires in 24 h; re-run `just onboard` (or `examples/local-libvirt/mint-token.sh`)
+and reconnect your MCP client when it does. `verify-project` echoes the credential-redacted target
+DB — if that is not the DB your server reads (a server started with an overriding
+`KDIVE_DATABASE_URL` not present here), the project will be funded in the wrong place. Demo-only:
+the bundled mock issuer mints a valid token for any caller; production onboards via the audited
+admin tools (`docs/operating/project-onboarding.md`).
+
 ## Shared
 
 `env.sh` and `lib.sh` are sourced (not run); `apply-migrations.sh` is the host migrator.
