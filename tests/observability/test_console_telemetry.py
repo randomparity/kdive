@@ -5,7 +5,7 @@ from __future__ import annotations
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
-from kdive.reconciler.console_telemetry import ConsoleTelemetry
+from kdive.observability.console_telemetry import ConsoleTelemetry
 
 
 def _points(reader: InMemoryMetricReader, name: str) -> list:

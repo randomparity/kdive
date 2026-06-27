@@ -509,11 +509,11 @@ async def _run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> 
 async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
     from kdive.health.processes.server import build_postgres_ping
     from kdive.health.processes.worker import build_worker_probe
+    from kdive.observability.console_telemetry import ConsoleTelemetry
     from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
     from kdive.providers.assembly.composition import ProviderComposition
     from kdive.providers.infra.libvirt_event_loop import ensure_libvirt_event_loop
     from kdive.reconciler.build_host_fleet import BuildHostTelemetry
-    from kdive.reconciler.console_telemetry import ConsoleTelemetry
     from kdive.reconciler.fleet import FleetTelemetry
     from kdive.reconciler.loop import ReconcileConfig, Reconciler
     from kdive.reconciler.loop_telemetry import ReconcilerTelemetry

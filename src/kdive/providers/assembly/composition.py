@@ -20,6 +20,7 @@ from kdive.db.build_hosts import BuildHostKind
 from kdive.db.resource_discovery import ensure_discovered_resource_registered
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.images.planes.base import RootfsBuildPlane
+from kdive.observability.console_telemetry import ConsoleTelemetry
 from kdive.providers.core.discovery_registration import ProviderDiscoveryRegistration
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import DiscoveryRegistrar, ProviderRuntime
@@ -42,7 +43,6 @@ from kdive.providers.remote_libvirt import composition as remote_composition
 from kdive.providers.remote_libvirt.config import is_remote_libvirt_configured
 from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactory
 from kdive.providers.shared.build_host.reachability import BuildHostProber, SshBuildHostProber
-from kdive.reconciler.console_telemetry import ConsoleTelemetry
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 if TYPE_CHECKING:

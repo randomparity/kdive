@@ -23,10 +23,10 @@ from kdive.jobs.build_telemetry import BuildPhaseRecorder
 from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.jobs.worker_telemetry import WorkerTelemetry
+from kdive.observability.console_telemetry import ConsoleTelemetry
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.observability.labels import ALLOWED_LABEL_KEYS
 from kdive.reconciler.build_host_fleet import BuildHostSnapshot, BuildHostTelemetry
-from kdive.reconciler.console_telemetry import ConsoleTelemetry
 from kdive.reconciler.fleet import FleetSnapshot, FleetTelemetry
 from kdive.reconciler.loop import ALL_REPAIR_KINDS
 from kdive.reconciler.loop_telemetry import ReconcilerTelemetry

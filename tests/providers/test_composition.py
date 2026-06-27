@@ -23,6 +23,7 @@ from kdive.db.build_hosts import BuildHostKind
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
+from kdive.observability.console_telemetry import ConsoleTelemetry
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.assembly import composition
@@ -48,7 +49,6 @@ from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtP
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
-from kdive.reconciler.console_telemetry import ConsoleTelemetry
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _RUN = UUID("22222222-2222-2222-2222-222222222222")

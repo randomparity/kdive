@@ -22,6 +22,7 @@ from kdive.db.pool import create_pool, database_url
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.observability.console_telemetry import ConsoleTelemetry
 from kdive.profiles.build import GitSourceRef
 from kdive.providers.core.discovery_registration import (
     DiscoveryRegistrationTarget,
@@ -72,7 +73,6 @@ from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuild
 from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactory
 from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
 from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote
-from kdive.reconciler.console_telemetry import ConsoleTelemetry
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
