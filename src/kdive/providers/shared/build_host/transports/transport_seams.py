@@ -49,14 +49,8 @@ def transport_run_step(
     args: list[str],
     timeout_s: int = MAKE_TIMEOUT_S,
 ) -> RunStep:
-    """Return a ``RunStep`` that runs ``make -C <ws> <args...>`` over the transport.
-
-    The transport already captures stdout+stderr in its ``CommandResult``; the returned step
-    surfaces both as a redacted, tail-capped ``CapturedStep`` so a failed build's output can be
-    persisted as a build-log artifact (#770).
-    """
-
     def _step(ws: Path) -> CapturedStep:
+        # Preserve stdout+stderr so failed builds can persist a build-log artifact (#770).
         result = t.run(["make", "-C", str(ws), *args], cwd=str(ws), timeout_s=timeout_s)
         return CapturedStep.from_streams(result.returncode, result.stdout, result.stderr)
 
@@ -64,21 +58,15 @@ def transport_run_step(
 
 
 def transport_run_make(t: BuildTransport) -> RunStep:
-    """Return a ``RunStep`` for the parallel kernel build, using ``os.cpu_count()`` jobs.
-
-    Mirrors ``real_run_make``'s ``-j{os.cpu_count() or 1}`` parallelism exactly.
-    """
+    # Keep transport builds at parity with real_run_make's worker-local parallelism.
     return transport_run_step(t, [f"-j{os.cpu_count() or 1}"])
 
 
 def transport_run_olddefconfig(t: BuildTransport) -> RunStep:
-    """Return a ``RunStep`` for ``make olddefconfig`` over the transport."""
     return transport_run_step(t, ["olddefconfig"])
 
 
 def transport_read_config(t: BuildTransport) -> ReadConfig:
-    """Return a ``ReadConfig`` that reads ``<workspace>/.config`` via the transport."""
-
     def _read(ws: Path) -> str:
         return t.read_text(str(ws / ".config"))
 
@@ -91,14 +79,8 @@ def transport_read_config(t: BuildTransport) -> ReadConfig:
 
 
 def transport_run_modules_install(t: BuildTransport) -> RunModulesInstall:
-    """Return a ``RunModulesInstall`` running ``make modules_install`` over the transport.
-
-    Mirrors ``real_run_modules_install``'s argv exactly — ``make -C <ws>
-    INSTALL_MOD_PATH=<mod_root> modules_install`` — staging the module tree at *mod_root* on
-    the transport's host.
-    """
-
     def _step(ws: Path, mod_root: Path) -> int:
+        # Keep argv parity with real_run_modules_install while staging modules on the host.
         argv = ["make", "-C", str(ws), f"INSTALL_MOD_PATH={mod_root}", "modules_install"]
         return t.run(argv, cwd=str(ws), timeout_s=MAKE_TIMEOUT_S).returncode
 
@@ -106,19 +88,8 @@ def transport_run_modules_install(t: BuildTransport) -> RunModulesInstall:
 
 
 def transport_read_build_id(t: BuildTransport) -> ReadBuildId:
-    """Return a ``ReadBuildId`` extracting ``vmlinux``'s GNU build-id over the transport.
-
-    Mirrors ``real_read_build_id``: ``objcopy`` writes the ``.notes`` section to a sibling
-    file on the host, the (small) note blob is read back to the worker via ``read_bytes``, and
-    :func:`parse_gnu_build_id` parses it on the worker. Only the note — never ``vmlinux`` —
-    crosses the transport.
-
-    Raises:
-        CategorizedError: ``BUILD_FAILURE`` if ``objcopy`` exits non-zero or the note carries
-            no GNU build-id (from :func:`parse_gnu_build_id`).
-    """
-
     def _read(ws: Path) -> str:
+        # Extract host-side and read back only the small notes blob, never vmlinux.
         note_path = str(ws / "vmlinux.note")
         argv = ["objcopy", "-O", "binary", "--only-section=.notes", str(ws / "vmlinux"), note_path]
         result = t.run(argv, cwd=str(ws), timeout_s=OBJCOPY_TIMEOUT_S)
