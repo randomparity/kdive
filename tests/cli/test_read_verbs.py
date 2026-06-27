@@ -318,7 +318,7 @@ def test_systems_list_json_projects_columns_and_passes_state_filter(
         _collection([_item("sy-1", "running", {"project": "p"})]),
     )
     asyncio.run(reads.systems_list(argparse.Namespace(json=True, state="running")))
-    assert client.calls == [("systems.list", {"state": "running"})]
+    assert client.calls == [("systems.list", {"request": {"state": "running"}})]
     assert json.loads(capsys.readouterr().out) == [
         {"id": "sy-1", "project": "p", "state": "running"}
     ]

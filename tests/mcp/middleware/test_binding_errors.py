@@ -142,16 +142,23 @@ def _ctx(name: str, arguments: Any) -> Any:
 
 def test_binding_object_id_reads_string_argument() -> None:
     ctx = _ctx("systems.define", {"allocation_id": "a-1"})
-    assert _binding_object_id(ctx, "allocation_id") == "a-1"
+    assert _binding_object_id(ctx, (("allocation_id",),)) == "a-1"
+
+
+def test_binding_object_id_reads_nested_string_argument() -> None:
+    ctx = _ctx("runs.create", {"request": {"system_id": "s-1"}})
+    assert _binding_object_id(ctx, (("request", "system_id"), ("system_id",))) == "s-1"
 
 
 def test_binding_object_id_falls_back_to_tool_name_for_non_string() -> None:
     ctx = _ctx("systems.define", {"allocation_id": 5})
-    assert _binding_object_id(ctx, "allocation_id") == "systems.define"
+    assert _binding_object_id(ctx, (("allocation_id",),)) == "systems.define"
 
 
 def test_binding_object_id_falls_back_when_arguments_not_a_dict() -> None:
-    assert _binding_object_id(_ctx("systems.define", None), "allocation_id") == "systems.define"
+    assert (
+        _binding_object_id(_ctx("systems.define", None), (("allocation_id",),)) == "systems.define"
+    )
 
 
 # --- on_call_tool (real ValidationError) ------------------------------------

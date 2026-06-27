@@ -453,10 +453,12 @@ def test_runs_wrappers_roundtrip_create_and_validation_through_fastmcp(
                     client,
                     "runs.create",
                     {
-                        "investigation_id": investigation_id,
-                        "system_id": system_id,
-                        "build_profile": _RUN_BUILD_PROFILE,
-                        "reuse_requirement": {"vcpus": 1, "memory_gb": 1, "disk_gb": 1},
+                        "request": {
+                            "investigation_id": investigation_id,
+                            "system_id": system_id,
+                            "build_profile": _RUN_BUILD_PROFILE,
+                            "reuse_requirement": {"vcpus": 1, "memory_gb": 1, "disk_gb": 1},
+                        }
                     },
                 )
                 invalid = await _call_tool(client, "runs.get", {"run_id": "not-a-uuid"})
@@ -491,7 +493,7 @@ def test_systems_wrappers_roundtrip_define_and_validation_through_fastmcp(
                 # post-binding configuration_error envelope (that path stays covered by the
                 # direct-handler tests in test_systems_list.py).
                 invalid_state_error = await _call_tool_schema_rejected(
-                    client, "systems.list", {"state": "bogus"}
+                    client, "systems.list", {"request": {"state": "bogus"}}
                 )
         return defined, invalid_state_error
 

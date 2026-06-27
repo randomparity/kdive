@@ -12,6 +12,7 @@ from kdive.db.build_hosts import list_all_hosts
 from kdive.domain.capacity.state import RunState
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run_target_kind
@@ -50,6 +51,78 @@ from kdive.providers.assembly.build_hosts import declared_remote_instance_names
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security.authz.rbac import Role
+
+
+class _RunsCreatePayload(ToolPayload):
+    """Public payload for ``runs.create``."""
+
+    investigation_id: str = Field(description="Investigation to attach the Run to.")
+    build_profile: ExternalBuildProfile | ServerBuildProfile = Field(
+        description=(
+            "Build profile for the Run's kernel. The recommended default is source='external': "
+            "ingest a prebuilt artifact (ADR-0234). After runs.create with source='external', "
+            "call artifacts.expected_uploads to learn the exact bytes to produce, "
+            "artifacts.create_run_upload to upload, then runs.complete_build. source='server' "
+            "builds from a kernel tree (kernel_source_ref required) and is a single-host "
+            "convenience: for a local build host a warm-tree kernel_source_ref is a provenance "
+            "label only - it does not select the tree; the operator stages the actual source "
+            "via KDIVE_KERNEL_SRC on the worker, and runs.get echoes the label and resolved "
+            "commit in data.build_provenance. The optional 'config' is a catalog ComponentRef "
+            "(e.g. {'kind':'catalog','provider':'system','name':'kdump'}); omit it to get the "
+            "seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a "
+            "kdump+debuginfo kernel. Call buildconfig.get to inspect a named fragment. Extra "
+            "kernel cmdline args (e.g. 'dhash_entries=1') are not set here: append them via "
+            "runs.build.cmdline (bound on the first server build). See "
+            "resource://kdive/docs/operating/external-build-upload.md for shaping a "
+            "source='external' upload, or resource://kdive/docs/operating/build-source-staging.md "
+            "for staging a server-build source."
+        )
+    )
+    system_id: str | None = Field(
+        default=None,
+        description=(
+            "Ready System to bind now. Omit to create an unbound Run that targets "
+            "`target_kind` and is bound later with runs.bind."
+        ),
+    )
+    target_kind: str | None = Field(
+        default=None,
+        description=(
+            "Resource kind the Run builds for. Required when system_id is omitted; derived "
+            "from the System when system_id is set."
+        ),
+    )
+    expected_boot_failure: ExpectedBootFailureInput | None = Field(
+        default=None,
+        description=(
+            "Optional declared boot crash, e.g. "
+            "{'kind':'console_crash','pattern':'Unable to handle kernel'}. The pattern is matched "
+            "as a case-sensitive literal substring (not a regex), tested line-by-line against the "
+            "redacted console log; a single line containing the substring is a match. Use '|' to "
+            "OR alternatives (e.g. 'Oops|Unable to handle kernel') - up to 16 terms, 256 "
+            "characters total, each term non-empty. A match makes the expected crash the Run's "
+            "success outcome."
+        ),
+    )
+    reuse_requirement: _RunReuseRequirementInput | None = Field(
+        default=None,
+        description="Optional System reuse assertion payload.",
+    )
+    idempotency_key: str | None = Field(
+        default=None,
+        description="Replay-safe key; a repeated key returns the prior envelope.",
+    )
+
+    def to_create_request(self) -> _RunCreateRequest:
+        """Convert the public MCP payload into the service request record."""
+        return _RunCreateRequest(
+            investigation_id=self.investigation_id,
+            system_id=self.system_id,
+            target_kind=self.target_kind,
+            build_profile=dump_build_profile(self.build_profile),
+            expected_boot_failure=self.expected_boot_failure,
+            reuse_requirement=self.reuse_requirement,
+        )
 
 
 def register(
@@ -148,93 +221,25 @@ def _register_runs_create(
         meta={"maturity": "implemented"},
     )
     async def runs_create(
-        investigation_id: Annotated[str, Field(description="Investigation to attach the Run to.")],
-        build_profile: Annotated[
-            ExternalBuildProfile | ServerBuildProfile,
+        request: Annotated[
+            _RunsCreatePayload,
             Field(
                 description=(
-                    "Build profile for the Run's kernel. The recommended default is "
-                    "source='external': ingest a prebuilt artifact (ADR-0234). After "
-                    "runs.create with source='external', call artifacts.expected_uploads to "
-                    "learn the exact bytes to produce, artifacts.create_run_upload to upload, "
-                    "then runs.complete_build. source='server' builds from a kernel tree "
-                    "(kernel_source_ref required) and is a single-host convenience: for a "
-                    "local build host a warm-tree kernel_source_ref is a provenance label "
-                    "only — it does not select the tree; the operator stages the actual source "
-                    "via KDIVE_KERNEL_SRC on the worker, and runs.get echoes the label and "
-                    "resolved commit in data.build_provenance. The optional 'config' is a "
-                    "catalog ComponentRef "
-                    "(e.g. {'kind':'catalog','provider':'system','name':'kdump'}); OMIT it to get "
-                    "the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) "
-                    "for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named "
-                    "fragment. Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set "
-                    "here: append them via runs.build.cmdline (bound on the first server build). "
-                    "See resource://kdive/docs/operating/external-build-upload.md for shaping a "
-                    "source='external' upload, or resource://kdive/docs/operating/"
-                    "build-source-staging.md for staging a server-build source."
+                    "Run creation request. After source='external', call "
+                    "artifacts.expected_uploads and artifacts.create_run_upload, then "
+                    "runs.complete_build. Extra server-build kernel cmdline args are appended "
+                    "later with runs.build.cmdline."
                 )
             ),
         ],
-        system_id: Annotated[
-            str | None,
-            Field(
-                description="Ready System (active Allocation) to bind now. OMIT to create an "
-                "unbound Run that builds against 'target_kind' and is attached to a System "
-                "later via runs.bind — this avoids holding target capacity to attempt a build."
-            ),
-        ] = None,
-        target_kind: Annotated[
-            str | None,
-            Field(
-                description="Resource kind the Run builds for (e.g. 'local-libvirt'). REQUIRED "
-                "when system_id is omitted; discover valid values from a runs.create error's "
-                "'available_target_kinds'. When system_id is set it is derived from the System, "
-                "and an explicit mismatched value is rejected."
-            ),
-        ] = None,
-        expected_boot_failure: Annotated[
-            ExpectedBootFailureInput | None,
-            Field(
-                description=(
-                    "Optional declared boot crash, e.g. "
-                    "{'kind':'console_crash','pattern':'Unable to handle kernel'}. The pattern is "
-                    "matched as a case-sensitive literal substring (NOT a regex), tested "
-                    "line-by-line against the redacted console log; a single line containing the "
-                    "substring is a match. Use '|' to OR alternatives (e.g. "
-                    "'Oops|Unable to handle kernel') — up to 16 terms, 256 characters total, each "
-                    "term non-empty. A match makes the expected crash the Run's success outcome."
-                )
-            ),
-        ] = None,
-        reuse_requirement: Annotated[
-            _RunReuseRequirementInput | None,
-            Field(
-                description=(
-                    "Optional System reuse assertion payload with vcpus, memory_gb, "
-                    "disk_gb, and pcie fields. Omit to skip extra reuse matching."
-                )
-            ),
-        ] = None,
-        idempotency_key: Annotated[
-            str | None,
-            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
-        ] = None,
     ) -> ToolResponse:
         """Create a run, bound to a system or unbound against a target_kind."""
-        request = _RunCreateRequest(
-            investigation_id=investigation_id,
-            system_id=system_id,
-            target_kind=target_kind,
-            build_profile=dump_build_profile(build_profile),
-            expected_boot_failure=expected_boot_failure,
-            reuse_requirement=reuse_requirement,
-        )
         return await _create_run(
             pool,
             current_context(),
-            request,
+            request.to_create_request(),
             resolver=resolver,
-            idempotency_key=idempotency_key,
+            idempotency_key=request.idempotency_key,
         )
 
 

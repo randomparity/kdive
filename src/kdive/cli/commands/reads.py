@@ -106,7 +106,9 @@ async def allocations_get(args: argparse.Namespace) -> int:
 
 
 async def systems_list(args: argparse.Namespace) -> int:
-    return await _list("systems.list", args, ["id", "project", "state"], "state")
+    envelope = await _fetch("systems.list", {"request": _payload(args, "state")})
+    render(_rows(envelope), columns=["id", "project", "state"], as_json=args.json)
+    return exit_code_for_envelope(envelope)
 
 
 async def systems_show(args: argparse.Namespace) -> int:
