@@ -91,14 +91,19 @@ For a GRANTED allocation on project `P`:
 - caller holds `Role.OPERATOR` on a *different* project, `Role.CONTRIBUTOR` on `P` →
   `systems.provision` dropped (project-scoped).
 
+The `allocations.list` collection-level breadcrumb (`["allocations.get", "allocations.release"]`,
+scoped to the list's `project`) filters the same way: a `contributor` listing keeps both, a
+`viewer` listing keeps `["allocations.get"]`.
+
 The same filter applies on `get` / `wait` / `list` / `renew`. No envelope schema, error
 category, RBAC enforcement, tool surface, or migration changes — execution-time `require_role`
 remains the boundary; this only stops advertising an unreachable breadcrumb.
 
 ## Failure modes / edges
 
-- **Empty result after filtering** is valid: an envelope may carry `suggested_next_actions: []`
-  (already permitted by the contract — release failures emit `[]`).
+- **Empty result after filtering** is valid: an envelope may carry `suggested_next_actions: []`.
+  `ToolResponse.success` stores `suggested_next_actions or []` and the model validator constrains
+  only `error_category`, so an empty success breadcrumb is permitted at construction.
 - **Unknown tool name** in a breadcrumb: `required_scopes` returns the empty set (public
   default) → kept. Not a concern here (all breadcrumbs are real classified tools); the
   completeness guard (`tests/mcp/core/test_app.py`) keeps that classification honest.
