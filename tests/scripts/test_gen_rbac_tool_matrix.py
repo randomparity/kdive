@@ -6,7 +6,26 @@ from pathlib import Path
 
 import pytest
 
+from kdive.mcp.exposure import ExposureScope
+from kdive.security.authz.rbac import PlatformRole, Role
 from scripts import gen_rbac_tool_matrix as gen
+
+
+def test_every_exposure_scope_has_a_label() -> None:
+    # A new ExposureScope without a label would KeyError in render(); pin it as a clear failure.
+    assert set(gen._SCOPE_LABEL) == set(ExposureScope)
+
+
+def test_profiles_have_a_dedicated_column_per_role() -> None:
+    # A new role without a matrix column makes its tools render blank across all columns —
+    # a clean-but-misleading table the drift guard (doc == render) cannot catch. Assert one
+    # column per role by each column's *own* grant, not by scope_satisfied (which role
+    # implication would let a single high-privilege column use to mask a missing lower one).
+    column_project_roles = {ctx.roles[ctx.projects[0]] for _, ctx in gen._PROFILES if ctx.projects}
+    column_platform_roles = {role for _, ctx in gen._PROFILES for role in ctx.platform_roles}
+    assert column_project_roles == set(Role)
+    assert column_platform_roles == set(PlatformRole)
+    assert len(gen._PROFILES) == len(Role) + len(PlatformRole)
 
 
 def test_render_hides_admin_only_tool_from_lower_roles() -> None:
