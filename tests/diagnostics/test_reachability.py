@@ -18,10 +18,12 @@ import libvirt
 from kdive.diagnostics.checks import (
     REACHABILITY_ID,
     CheckStatus,
+    Vantage,
+)
+from kdive.diagnostics.provider_checks import (
     ReachabilityOutcome,
     ReachabilityProbe,
     RemoteLibvirtReachabilityCheck,
-    Vantage,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs

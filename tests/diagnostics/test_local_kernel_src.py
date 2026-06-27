@@ -19,16 +19,18 @@ from pathlib import Path
 import kdive.config as config
 import kdive.diagnostics.kernel_src as kernel_src
 from kdive.diagnostics.checks import (
-    LOCAL_KERNEL_SRC_FIX,
     LOCAL_KERNEL_SRC_ID,
     CheckStatus,
-    LocalKernelSrcCheck,
     Vantage,
+)
+from kdive.diagnostics.kernel_src import _git_head, warm_tree_source_probe
+from kdive.diagnostics.local_kernel_src_check import (
+    LOCAL_KERNEL_SRC_FIX,
+    LocalKernelSrcCheck,
     WarmTreeSourceOutcome,
     WarmTreeSourceProbe,
     WarmTreeSourceProbeResult,
 )
-from kdive.diagnostics.kernel_src import _git_head, warm_tree_source_probe
 from kdive.domain.errors import ErrorCategory
 
 # Fake commit fixtures. Deliberately non-hex (so the secret scanner does not flag them) while

@@ -1,6 +1,7 @@
 """The production local warm-tree source probe adapter (ADR-0163, #533/#532).
 
-The build-host boundary for :class:`~kdive.diagnostics.checks.LocalKernelSrcCheck`: it resolves
+The build-host boundary for
+:class:`~kdive.diagnostics.local_kernel_src_check.LocalKernelSrcCheck`: it resolves
 ``KDIVE_KERNEL_SRC`` from the config snapshot and classifies it over the single shared
 ``warm_tree_source_error`` predicate (``db/build_host_policy.py``) — the same rule
 the build-time ``sync_tree`` and the admission-time ``check_warm_tree_source_admission`` enforce
@@ -33,7 +34,7 @@ from kdive.db.build_host_policy import (
     warm_tree_source_error,
 )
 from kdive.db.build_hosts import WORKER_LOCAL_ID, get_by_id
-from kdive.diagnostics.checks import (
+from kdive.diagnostics.local_kernel_src_check import (
     WarmTreeSourceOutcome,
     WarmTreeSourceProbe,
     WarmTreeSourceProbeResult,

@@ -13,7 +13,8 @@ import asyncio
 import logging
 import time
 
-from kdive.diagnostics.checks import CheckStatus, SecretRefCheck, run_check
+from kdive.diagnostics.checks import CheckStatus, run_check
+from kdive.diagnostics.secret_ref import SecretRefCheck
 
 _PLATFORM_REF = "platform/oidc-secret"
 _PROJECT_REF = "project/acme/db-password"

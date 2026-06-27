@@ -32,7 +32,7 @@ from pathlib import Path
 
 import libvirt
 
-from kdive.diagnostics.checks import ReachabilityOutcome, ReachabilityProbe
+from kdive.diagnostics.provider_checks import ReachabilityOutcome, ReachabilityProbe
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,

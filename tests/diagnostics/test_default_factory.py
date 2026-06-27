@@ -17,18 +17,19 @@ from psycopg_pool import AsyncConnectionPool
 import kdive.config as config
 from kdive.diagnostics.checks import (
     BASE_IMAGE_STAGING_ID,
-    BASE_VOLUME_NOT_STAGED_FIX,
     GDBSTUB_ACL_ID,
     LOCAL_KERNEL_SRC_ID,
     PROVIDER_TLS_ID,
     REACHABILITY_ID,
     SECRET_REF_ID,
-    BaseImageStagingOutcome,
     Check,
     CheckResult,
     CheckStatus,
+)
+from kdive.diagnostics.provider_checks import (
+    BASE_VOLUME_NOT_STAGED_FIX,
+    BaseImageStagingOutcome,
     ReachabilityOutcome,
-    SecretRefCheck,
     TlsProbe,
     TlsProbeOutcome,
 )
@@ -36,6 +37,7 @@ from kdive.diagnostics.provider_contracts import (
     DiagnosticProviderContribution,
     WorkerVantageDescriptor,
 )
+from kdive.diagnostics.secret_ref import SecretRefCheck
 from kdive.diagnostics.service import (
     FEATURE_NOT_ENABLED_DETAIL,
     WORKER_UNAVAILABLE_DETAIL,

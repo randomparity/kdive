@@ -16,11 +16,13 @@ import libvirt
 
 from kdive.diagnostics.checks import (
     BASE_IMAGE_STAGING_ID,
+    CheckStatus,
+    Vantage,
+)
+from kdive.diagnostics.provider_checks import (
     BASE_VOLUME_NOT_STAGED_FIX,
     BaseImageStagingCheck,
     BaseImageStagingOutcome,
-    CheckStatus,
-    Vantage,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs

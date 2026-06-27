@@ -14,6 +14,8 @@ from kdive.diagnostics.checks import (
     GDBSTUB_ACL_ID,
     PROVIDER_TLS_ID,
     CheckStatus,
+)
+from kdive.diagnostics.provider_checks import (
     GdbstubAclCheck,
     GdbstubAclProbe,
     ProviderTlsCheck,

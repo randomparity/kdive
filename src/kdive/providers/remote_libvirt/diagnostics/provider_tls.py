@@ -18,7 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from kdive.diagnostics.checks import TlsProbe, TlsProbeOutcome
+from kdive.diagnostics.provider_checks import TlsProbe, TlsProbeOutcome
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.connection.transport import materialized_pkipath
 from kdive.security.secrets.secret_registry import SecretRegistry

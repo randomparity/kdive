@@ -11,14 +11,16 @@ from __future__ import annotations
 
 import asyncio
 
-from kdive.diagnostics.checks import (
+from kdive.diagnostics.buildhost_agent_check import (
     BUILDHOST_AGENT_FIX,
-    BUILDHOST_AGENT_ID,
     BuildHostAgentOutcome,
     BuildHostAgentProbe,
     BuildHostProbeResult,
-    CheckStatus,
     EphemeralLibvirtBuildHostAgentCheck,
+)
+from kdive.diagnostics.checks import (
+    BUILDHOST_AGENT_ID,
+    CheckStatus,
     Vantage,
 )
 from kdive.domain.errors import ErrorCategory

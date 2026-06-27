@@ -1,9 +1,9 @@
 """Remote-libvirt probe adapter for the ephemeral build-host guest-agent check (ADR-0167).
 
 This provider-owned boundary backs
-:class:`~kdive.diagnostics.checks.EphemeralLibvirtBuildHostAgentCheck`. It enumerates the
-``ephemeral_libvirt`` + ``enabled`` build hosts at probe time, and for each provisions a throwaway
-builder via ``ephemeral_build_session`` with
+:class:`~kdive.diagnostics.buildhost_agent_check.EphemeralLibvirtBuildHostAgentCheck`.
+It enumerates the ``ephemeral_libvirt`` + ``enabled`` build hosts at probe time, and for each
+provisions a throwaway builder via ``ephemeral_build_session`` with
 ``wait_network=False``, waits for its guest agent, execs one trivial command, and tears it down —
 all under a reaper-visible heartbeat marker (``db.buildhost_agent_probes``) and a **module-level**
 per-host :class:`SingleFlight` so concurrent doctor runs in one process spin one builder per host.
@@ -36,7 +36,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db import buildhost_agent_probes as probes
 from kdive.db.build_hosts import BuildHost, BuildHostKind, list_all_hosts
-from kdive.diagnostics.checks import (
+from kdive.diagnostics.buildhost_agent_check import (
     BuildHostAgentOutcome,
     BuildHostAgentProbe,
     BuildHostProbeResult,

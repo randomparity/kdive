@@ -29,15 +29,15 @@ from kdive.diagnostics.checks import (
     Check,
     CheckResult,
     CheckStatus,
-    LocalKernelSrcCheck,
-    SecretRefCheck,
     Vantage,
     run_check,
 )
+from kdive.diagnostics.local_kernel_src_check import LocalKernelSrcCheck
 from kdive.diagnostics.provider_contracts import (
     DiagnosticProviderContribution,
     WorkerVantageDescriptor,
 )
+from kdive.diagnostics.secret_ref import SecretRefCheck
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secrets import read_secret_file

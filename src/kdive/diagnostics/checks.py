@@ -1,25 +1,21 @@
-"""The `Check` framework and the three read-only diagnostic checks (ADR-0091 §2).
+"""The shared diagnostic ``Check`` framework and stable check ids (ADR-0091 §2).
 
-A `Check` is an `id`, a `vantage`, and an async `run() -> CheckResult`, where
-`CheckResult.status` is **three-state**: `pass` (the contract holds), `fail` (the
-contract is violated and `fix` names the exact remediation), and `error` (the check
-could not be run to a verdict — the backend was down, the host was unreachable, the
-probe timed out — and `detail` says what blocked it, *never* a contract-fix string).
-Collapsing `error` into `fail` is the worst failure a diagnostic can have: it would emit
-a confident wrong fix from the one tool whose value is naming the right one.
+A ``Check`` is an ``id``, a ``vantage``, and an async ``run() -> CheckResult``, where
+``CheckResult.status`` is **three-state**: ``pass`` (the contract holds), ``fail`` (the
+contract is violated and ``fix`` names the exact remediation), and ``error`` (the check
+could not be run to a verdict, so ``detail`` says what blocked it).
 
-Every check runs through :func:`run_check`, which bounds it by a per-check timeout (a
-check that does not answer is `error`, not a hang) and converts any unexpected
-exception into `error` — so a check can never wedge or crash the aggregating service.
+Every check runs through :func:`run_check`, which bounds it by a per-check timeout and
+converts any unexpected exception into ``error`` so one broken probe cannot wedge the
+aggregating service.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -33,40 +29,6 @@ BASE_IMAGE_STAGING_ID = "remote_libvirt_base_image_staging"
 LOCAL_KERNEL_SRC_ID = "local_kernel_src"
 BUILDHOST_AGENT_ID = "ephemeral_libvirt_buildhost_agent"
 
-# The remediation the ephemeral build-host agent check surfaces as its ``fix`` (ADR-0167). Owned in
-# diagnostics (diagnostic-output policy), like LOCAL_KERNEL_SRC_FIX / BASE_VOLUME_NOT_STAGED_FIX:
-# the only legal import direction out of diagnostics is to providers/db, so the policy lives here.
-BUILDHOST_AGENT_FIX = (
-    "an ephemeral_libvirt build host's throwaway builder boots but its qemu-guest-agent never "
-    "becomes usable; rebuild or repair the operator-staged base build image so its guest agent "
-    "starts (resource://kdive/docs/operating/build-source-staging.md), then re-run doctor "
-    "--with-buildhost-agent"
-)
-
-# The build-lane remediation the local-kernel-src check surfaces as its ``fix`` (ADR-0163). It is
-# owned here, not in the provider's ``workspace.py``: ``diagnostics → providers`` is the only legal
-# import direction, so the diagnostic output policy lives in diagnostics. It names the same two
-# lanes as ``workspace.py``'s ``_BUILD_LANE_GUIDANCE`` (stage a warm tree + set
-# ``KDIVE_KERNEL_SRC``, or register a git build host) as an independent literal, so ``checks``
-# stays free of a provider import.
-LOCAL_KERNEL_SRC_FIX = (
-    "stage a kernel source tree on the build worker and set KDIVE_KERNEL_SRC to its absolute "
-    "path (resource://kdive/docs/operating/build-source-staging.md), or route builds to a "
-    "registered git build host (build_hosts.register_ssh / build_hosts.register_ephemeral_libvirt)"
-)
-
-# The operator remediation the base-image-staging check surfaces as its ``fix`` (ADR-0080,
-# ADR-0150). It is owned here, not in the provider's ``storage.py``: ``diagnostics → providers``
-# is the only legal import direction, so the diagnostic output policy lives in diagnostics. It
-# describes the same operator action as ``storage.py``'s provision-time error message.
-BASE_VOLUME_NOT_STAGED_FIX = (
-    "base image volume is not staged on the remote host's storage pool; stage the "
-    "operator-provided base image volume on the configured pool (ADR-0080), then retry"
-)
-
-_TRANSPORT_FAILURE = ErrorCategory.TRANSPORT_FAILURE
-_CONFIGURATION_ERROR = ErrorCategory.CONFIGURATION_ERROR
-
 _log = logging.getLogger(__name__)
 
 
@@ -79,11 +41,7 @@ class CheckStatus(StrEnum):
 
 
 class Vantage(StrEnum):
-    """Where a check must run from to observe the contract it probes.
-
-    ``kdivectl`` on an operator laptop cannot see the worker→hypervisor TLS chain, so a
-    check declares its vantage and the deployment runs it from there (ADR-0091 §1).
-    """
+    """Where a check must run from to observe the contract it probes."""
 
     SERVER = "server"
     WORKER = "worker"
@@ -96,30 +54,16 @@ class CheckResult:
     Args:
         check_id: The stable id of the check that produced this result.
         status: The three-state verdict.
-        detail: On ``fail``, what contract is violated; on ``error``, what *blocked* the
-            check (never a fix string); on ``pass``, a short confirmation.
-        fix: The exact remediation — mandatory on ``fail``, forbidden otherwise (an
-            ``error``/``pass`` carrying a fix is a producer bug).
-        provider: The provider this result pertains to, or ``None`` for a
-            provider-independent check (``secret_ref``).
-        failure_category: The :class:`ErrorCategory` for *why* the contract was
-            violated (``fail``) or the check could not run (``error``) — e.g.
-            ``transport_failure`` vs ``configuration_error`` for a reachability probe. ``None``
-            on ``pass`` (a clean read has no failure to categorize); a ``pass`` carrying one is a
-            producer bug, mirroring the ``fix``-only-on-``fail`` rule.
-        resource_id: The registered resource this result pertains to — for remote-libvirt the
-            ``[[remote_libvirt]]`` instance ``name`` (= the resource row's ``name`` under the
-            ``(kind, name)`` identity, ADR-0112/0187), so a fanned-out fleet check names *which*
-            host it probed. ``None`` for a fleet-aggregate or resource-independent check
-            (``secret_ref``, ``local_kernel_src``, ``ephemeral_libvirt_buildhost_agent``), like
-            ``provider`` is ``None`` for a provider-independent check. Legal on any status — an
-            operator most needs the host name on a failing/erroring host (ADR-0194).
-        data: Structured, machine-readable fields a check chooses to surface alongside the
-            prose ``detail`` — string-valued, non-secret, and read programmatically by a
-            caller (e.g. ``local_kernel_src`` discloses the resolved ``KDIVE_KERNEL_SRC`` path
-            and git HEAD, #845). ``None`` when the check emits none. Legal on any status, like
-            ``resource_id``; unlike ``detail`` it is the fielded path, not the
-            credential-careful prose, so a caller need not parse strings.
+        detail: On ``fail``, what contract is violated; on ``error``, what blocked the
+            check; on ``pass``, a short confirmation.
+        fix: The exact remediation. Mandatory on ``fail`` and forbidden otherwise.
+        provider: The provider this result pertains to, or ``None`` for provider-independent
+            checks.
+        failure_category: The :class:`ErrorCategory` for why the contract was violated or
+            why the check could not run. ``None`` on ``pass``.
+        resource_id: The registered resource this result pertains to, when the check is
+            scoped to a concrete resource.
+        data: Structured, machine-readable non-secret fields surfaced with the verdict.
     """
 
     check_id: str
@@ -159,7 +103,7 @@ class Check(ABC):
     @property
     @abstractmethod
     def id(self) -> str:
-        """The stable check id (e.g. ``secret_ref``)."""
+        """The stable check id."""
 
     @property
     @abstractmethod
@@ -168,23 +112,11 @@ class Check(ABC):
 
     @abstractmethod
     async def run(self) -> CheckResult:
-        """Probe the contract and return a three-state result.
-
-        Implementations return ``error`` for an indeterminate run rather than raising;
-        :func:`run_check` is the backstop that maps a leaked exception or timeout to
-        ``error`` so the aggregating service can never wedge.
-        """
+        """Probe the contract and return a three-state result."""
 
 
 async def run_check(check: Check, *, timeout: float) -> CheckResult:
-    """Run ``check`` bounded by ``timeout``; map a timeout or unexpected error to ``error``.
-
-    A check that does not answer within ``timeout`` is an ``error`` with a
-    "did not respond within N" detail — never a hang and never a contract ``fail``. Any
-    exception the check leaks is also mapped to ``error`` with a generic blocked-reason
-    detail (the exception text is not surfaced, so an unexpected backend message cannot
-    leak through the verdict).
-    """
+    """Run ``check`` bounded by ``timeout``; map timeout or unexpected error to ``error``."""
     try:
         async with asyncio.timeout(timeout):
             return await check.run()
@@ -195,7 +127,7 @@ async def run_check(check: Check, *, timeout: float) -> CheckResult:
             detail=f"check did not respond within {timeout:g}s",
             failure_category=ErrorCategory.TRANSPORT_FAILURE,
         )
-    except Exception as exc:  # noqa: BLE001 - backstop: a leaked error must not wedge the service
+    except Exception as exc:  # noqa: BLE001 - a leaked error must not wedge the service
         _log.error("diagnostic check %s raised unexpectedly: %s", check.id, exc, exc_info=True)
         return CheckResult(
             check_id=check.id,
@@ -203,658 +135,3 @@ async def run_check(check: Check, *, timeout: float) -> CheckResult:
             detail="check could not be run to a verdict (unexpected error)",
             failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         )
-
-
-# A resolver raises on an unresolved ref; the secret backend's own unreachable-exception
-# type (passed separately) is the error-vs-fail discriminator.
-SecretResolve = Callable[[str], object]
-
-
-def _redact_exception_args(exc: Exception) -> None:
-    """Remove ref-bearing exception args before traceback logging formats the exception."""
-    with contextlib.suppress(Exception):
-        exc.args = (f"{type(exc).__name__} while resolving configured secret ref",)
-
-
-class SecretRefCheck(Check):
-    """Server-vantage: every configured secret ref resolves in the backend (ADR-0091 §2).
-
-    Full coverage spans both platform and per-tenant refs (the motivating M2 fault did not
-    assume which kind). Non-disclosure is enforced on the **reporting** surface: the verdict
-    reports aggregate pass/fail counts and platform-ref detail only — a per-tenant ref that
-    fails to resolve is counted but its identifier is never surfaced, so the diagnostic
-    catches every unresolved ref without becoming a cross-tenant secret-presence disclosure.
-
-    A backend that cannot be reached at all (``backend_unreachable`` raised) is ``error``,
-    not a contract ``fail`` — the refs may all be fine.
-    """
-
-    def __init__(
-        self,
-        *,
-        refs: Sequence[tuple[str, bool]],
-        resolve: SecretResolve,
-        backend_unreachable: type[Exception] | tuple[type[Exception], ...] = (),
-    ) -> None:
-        """Build the check.
-
-        Args:
-            refs: ``(ref, is_platform)`` pairs for every configured secret ref. The
-                ``is_platform`` flag gates whether the ref identifier may appear in
-                ``detail`` (platform refs are operator-owned config, not tenant data).
-            resolve: Resolves one ref, raising on a ref that does not resolve.
-            backend_unreachable: Exception type(s) signalling the backend itself is
-                unreachable (→ ``error``), distinct from a per-ref miss (→ ``fail``).
-        """
-        self._refs = list(refs)
-        self._resolve = resolve
-        self._unreachable = backend_unreachable
-
-    @property
-    def id(self) -> str:
-        return SECRET_REF_ID
-
-    @property
-    def vantage(self) -> Vantage:
-        return Vantage.SERVER
-
-    async def run(self) -> CheckResult:
-        unresolved_platform: list[str] = []
-        unresolved_count = 0
-        try:
-            for ref, is_platform in self._refs:
-                if not await self._resolves(ref, is_platform=is_platform):
-                    unresolved_count += 1
-                    if is_platform:
-                        unresolved_platform.append(ref)
-        except self._unreachable_types():
-            return CheckResult(
-                check_id=self.id,
-                status=CheckStatus.ERROR,
-                detail="secret backend unreachable; cannot verify any ref",
-            )
-        return self._verdict(unresolved_count, unresolved_platform)
-
-    async def _resolves(self, ref: str, *, is_platform: bool) -> bool:
-        try:
-            await asyncio.to_thread(self._resolve, ref)
-        except self._unreachable_types():
-            raise
-        except Exception as exc:  # noqa: BLE001 - any per-ref resolution failure is unresolved
-            _redact_exception_args(exc)
-            _log.warning(
-                "secret_ref resolver failed for %s ref: %s",
-                "platform" if is_platform else "non-platform",
-                type(exc).__name__,
-                exc_info=True,
-            )
-            return False
-        return True
-
-    def _unreachable_types(self) -> tuple[type[Exception], ...]:
-        if isinstance(self._unreachable, tuple):
-            return self._unreachable
-        return (self._unreachable,)
-
-    def _verdict(self, unresolved: int, unresolved_platform: list[str]) -> CheckResult:
-        total = len(self._refs)
-        if unresolved == 0:
-            return CheckResult(
-                check_id=self.id,
-                status=CheckStatus.PASS,
-                detail=f"all {total} configured secret refs resolve",
-            )
-        platform_detail = (
-            f" (unresolved platform refs: {', '.join(sorted(unresolved_platform))})"
-            if unresolved_platform
-            else ""
-        )
-        return CheckResult(
-            check_id=self.id,
-            status=CheckStatus.FAIL,
-            detail=f"{unresolved} of {total} configured secret refs do not resolve"
-            + platform_detail,
-            fix=(
-                "secret ref does not resolve under KDIVE_SECRETS_ROOT; "
-                "create the file-ref or fix the path"
-            ),
-        )
-
-
-class TlsProbeOutcome(StrEnum):
-    """The three observable outcomes of a provider TLS probe."""
-
-    VALID = "valid"
-    INVALID = "invalid"
-    UNREACHABLE = "unreachable"
-
-
-TlsProbe = Callable[[str], Awaitable[TlsProbeOutcome]]
-
-
-class ProviderTlsCheck(Check):
-    """Worker-vantage: the provider TLS chain validates against the configured CA.
-
-    Host-unreachable is ``error`` (the chain may be fine; the host is simply down);
-    cert-invalid is ``fail`` with the reissue/CA-path remediation (ADR-0091 §2).
-    """
-
-    def __init__(self, *, provider: str, ca_path: str, probe: TlsProbe) -> None:
-        self._provider = provider
-        self._ca_path = ca_path
-        self._probe = probe
-
-    @property
-    def id(self) -> str:
-        return PROVIDER_TLS_ID
-
-    @property
-    def vantage(self) -> Vantage:
-        return Vantage.WORKER
-
-    async def run(self) -> CheckResult:
-        outcome = await self._probe(self._ca_path)
-        if outcome is TlsProbeOutcome.VALID:
-            return CheckResult(
-                check_id=self.id,
-                status=CheckStatus.PASS,
-                detail=f"provider TLS chain validates against {self._ca_path}",
-                provider=self._provider,
-            )
-        if outcome is TlsProbeOutcome.UNREACHABLE:
-            return CheckResult(
-                check_id=self.id,
-                status=CheckStatus.ERROR,
-                detail="provider host unreachable; cannot validate the TLS chain",
-                provider=self._provider,
-            )
-        return CheckResult(
-            check_id=self.id,
-            status=CheckStatus.FAIL,
-            detail=f"provider cert not signed by configured CA {self._ca_path}",
-            fix=(
-                f"provider cert not signed by configured CA {self._ca_path}; "
-                "reissue or set KDIVE_PROVIDER_CA"
-            ),
-            provider=self._provider,
-        )
-
-
-# Returns True if the ACL admits the range, False if blocked, None if indeterminate.
-GdbstubAclProbe = Callable[[str, str], Awaitable[bool | None]]
-
-
-class GdbstubAclCheck(Check):
-    """Worker-vantage: the host ACL on ``config.gdb_addr`` admits the gdbstub port range.
-
-    A **policy** check, not a live-port check: the gdbstub port is assigned per-domain
-    (ADR-0083), so a cold preflight with zero running guests has no concrete port —
-    validating that the ACL admits the configured range needs no live domain and catches
-    the M2 fault (a closed ACL) directly. The probe connects to the reserved ACL-probe port
-    (the lowest port of the range, never assigned to a System; ADR-0184), so it never pauses a
-    live guest; ``port_range`` is the full configured firewall range named in the operator
-    message. An indeterminate probe (``None``) is ``error``.
-    """
-
-    def __init__(
-        self, *, provider: str, host: str, port_range: str, probe: GdbstubAclProbe
-    ) -> None:
-        self._provider = provider
-        self._host = host
-        self._port_range = port_range
-        self._probe = probe
-
-    @property
-    def id(self) -> str:
-        return GDBSTUB_ACL_ID
-
-    @property
-    def vantage(self) -> Vantage:
-        return Vantage.WORKER
-
-    async def run(self) -> CheckResult:
-        admitted = await self._probe(self._host, self._port_range)
-        if admitted is None:
-            return CheckResult(
-                check_id=self.id,
-                status=CheckStatus.ERROR,
-                detail=f"could not determine the ACL on {self._host} for {self._port_range}",
-                provider=self._provider,
-            )
-        if admitted:
-            return CheckResult(
-                check_id=self.id,
-                status=CheckStatus.PASS,
-                detail=f"ACL on {self._host} admits gdbstub range {self._port_range}",
-                provider=self._provider,
-            )
-        return CheckResult(
-            check_id=self.id,
-            status=CheckStatus.FAIL,
-            detail=f"gdbstub port range {self._port_range} on {self._host} blocked",
-            fix=(
-                f"gdbstub port range {self._port_range} on {self._host} blocked; "
-                "open the host firewall / ACL for it"
-            ),
-            provider=self._provider,
-        )
-
-
-class ReachabilityOutcome(StrEnum):
-    """The three observable outcomes of a remote-libvirt reachability probe (ADR-0125).
-
-    ``REACHABLE`` — the ``qemu+tls://`` connection opened and ``getInfo()`` returned.
-    ``UNREACHABLE`` — the TLS connect failed (host down / port closed): a contract ``fail``.
-    ``MISCONFIGURED`` — the probe could not run (bad URI/cert/inventory): an ``error``, never a
-    confident "host down".
-    """
-
-    REACHABLE = "reachable"
-    UNREACHABLE = "unreachable"
-    MISCONFIGURED = "misconfigured"
-
-
-ReachabilityProbe = Callable[[], Awaitable[ReachabilityOutcome]]
-
-
-class RemoteLibvirtReachabilityCheck(Check):
-    """Server-vantage: the remote-libvirt ``qemu+tls://`` host is libvirt-reachable (ADR-0125).
-
-    The server itself opens the libvirt client connection, so this is ``Vantage.SERVER`` (it must
-    run even when the worker is down — that is exactly when an operator needs to know whether the
-    host is reachable). The verdict is scoped to **libvirt-reachability**: a reachable-but-
-    misconfigured host (no storage pool/network) still reports ``pass`` and surfaces its config
-    failure at provision time. Host-down is a contract ``fail`` (``transport_failure``); a probe
-    that could not run (bad URI/cert/inventory) is ``error`` (``configuration_error``) — emitting a
-    "host down" fix when the operator's own config blocked the probe is the confident-wrong-fix
-    failure ADR-0091 forbids.
-    """
-
-    def __init__(
-        self, *, provider: str, probe: ReachabilityProbe, resource_id: str | None = None
-    ) -> None:
-        self._provider = provider
-        self._probe = probe
-        self._resource_id = resource_id
-
-    @property
-    def id(self) -> str:
-        return REACHABILITY_ID
-
-    @property
-    def vantage(self) -> Vantage:
-        return Vantage.SERVER
-
-    async def run(self) -> CheckResult:
-        outcome = await self._probe()
-        if outcome is ReachabilityOutcome.REACHABLE:
-            return CheckResult(
-                check_id=self.id,
-                status=CheckStatus.PASS,
-                detail="remote-libvirt host is reachable over qemu+tls (libvirt-reachable only; "
-                "config usability still surfaces at provision)",
-                provider=self._provider,
-                resource_id=self._resource_id,
-            )
-        if outcome is ReachabilityOutcome.UNREACHABLE:
-            return CheckResult(
-                check_id=self.id,
-                status=CheckStatus.FAIL,
-                detail="remote-libvirt host is not reachable over qemu+tls",
-                fix=(
-                    "remote-libvirt host unreachable; bring the host up and open its libvirt "
-                    "TLS port (16514), then retry"
-                ),
-                provider=self._provider,
-                failure_category=_TRANSPORT_FAILURE,
-                resource_id=self._resource_id,
-            )
-        return CheckResult(
-            check_id=self.id,
-            status=CheckStatus.ERROR,
-            detail="remote-libvirt reachability could not be probed; check the [[remote_libvirt]] "
-            "URI, TLS cert refs, and systems.toml inventory",
-            provider=self._provider,
-            resource_id=self._resource_id,
-            failure_category=_CONFIGURATION_ERROR,
-        )
-
-
-class BaseImageStagingOutcome(StrEnum):
-    """The observable outcomes of a remote-libvirt base-image-staging probe (ADR-0150).
-
-    ``STAGED`` — the pool exists and the configured base-image volume is staged.
-    ``NOT_STAGED`` — the pool exists but the volume is absent: a contract ``fail``.
-    ``UNREACHABLE`` — the ``qemu+tls://`` connect failed (host down / port closed): an ``error``.
-    ``INDETERMINATE`` — the probe could not reach a verdict (absent pool, unresolvable inventory,
-    a non-staged base image, a storage RPC that failed after open): an ``error``, never a confident
-    "volume missing".
-    """
-
-    STAGED = "staged"
-    NOT_STAGED = "not_staged"
-    UNREACHABLE = "unreachable"
-    INDETERMINATE = "indeterminate"
-
-
-BaseImageStagingProbe = Callable[[], Awaitable[BaseImageStagingOutcome]]
-
-
-class BaseImageStagingCheck(Check):
-    """Server-vantage: the operator-staged base-image volume is present on the host pool (ADR-0150).
-
-    Reachability (ADR-0125) proves only that the ``qemu+tls://`` host answers; it explicitly does
-    not check usability. This check probes the one operator prerequisite that blocks provisioning —
-    the base-image volume staged on the host's storage pool (ADR-0080) — from the same server
-    vantage, so an unstaged volume is a ``fail`` (with the staging fix) before a caller burns an
-    allocation on the provision-time failure. A missing pool / unresolvable inventory / host-down is
-    an ``error``: emitting a stage-the-volume fix for any of those is the confident-wrong-fix
-    failure ADR-0091 forbids.
-    """
-
-    def __init__(
-        self, *, provider: str, probe: BaseImageStagingProbe, resource_id: str | None = None
-    ) -> None:
-        self._provider = provider
-        self._probe = probe
-        self._resource_id = resource_id
-
-    @property
-    def id(self) -> str:
-        return BASE_IMAGE_STAGING_ID
-
-    @property
-    def vantage(self) -> Vantage:
-        return Vantage.SERVER
-
-    async def run(self) -> CheckResult:
-        outcome = await self._probe()
-        if outcome is BaseImageStagingOutcome.STAGED:
-            return CheckResult(
-                check_id=self.id,
-                status=CheckStatus.PASS,
-                detail="base image volume is staged on the remote host's storage pool",
-                provider=self._provider,
-                resource_id=self._resource_id,
-            )
-        if outcome is BaseImageStagingOutcome.NOT_STAGED:
-            return CheckResult(
-                check_id=self.id,
-                status=CheckStatus.FAIL,
-                detail="base image volume is not staged on the remote host's storage pool",
-                fix=BASE_VOLUME_NOT_STAGED_FIX,
-                provider=self._provider,
-                failure_category=_CONFIGURATION_ERROR,
-                resource_id=self._resource_id,
-            )
-        if outcome is BaseImageStagingOutcome.UNREACHABLE:
-            return CheckResult(
-                check_id=self.id,
-                status=CheckStatus.ERROR,
-                detail="remote-libvirt host unreachable; cannot verify base-image staging",
-                provider=self._provider,
-                failure_category=_TRANSPORT_FAILURE,
-                resource_id=self._resource_id,
-            )
-        return CheckResult(
-            check_id=self.id,
-            status=CheckStatus.ERROR,
-            detail="base-image staging could not be probed; check the [[remote_libvirt]] "
-            "base_image / [[image]] staged volume, the storage pool, and the inventory",
-            provider=self._provider,
-            failure_category=_CONFIGURATION_ERROR,
-            resource_id=self._resource_id,
-        )
-
-
-class WarmTreeSourceOutcome(StrEnum):
-    """The three observable outcomes of a local warm-tree source probe (ADR-0163, ADR-0161).
-
-    ``USABLE`` — ``KDIVE_KERNEL_SRC`` points at an existing absolute directory.
-    ``UNSET`` — it is unset/empty/whitespace: a contract ``fail``.
-    ``INVALID`` — it is set but not an existing absolute tree: a contract ``fail``.
-
-    There is no indeterminate outcome: a config read plus a local ``stat`` always reaches a
-    verdict, so this check has no ``error`` branch (unlike the libvirt probes, whose RPC can be
-    unreachable).
-    """
-
-    USABLE = "usable"
-    UNSET = "unset"
-    INVALID = "invalid"
-
-
-@dataclass(frozen=True, slots=True)
-class WarmTreeSourceProbeResult:
-    """A warm-tree source probe's verdict plus the structured data to disclose (#845).
-
-    ``outcome`` is the unchanged three-state verdict. The remaining fields are populated only
-    on ``USABLE`` and only when known, so the check can surface ``CheckResult.data`` without
-    touching the filesystem or git itself (it stays unit-testable on an injected result):
-
-    - ``resolved_path`` — the resolved absolute ``KDIVE_KERNEL_SRC`` value (server vantage).
-    - ``head_commit`` — the git HEAD short-commit, when the tree is a git checkout.
-    - ``branch`` — the current branch, when on a named branch (``None`` on a detached HEAD).
-
-    The git fields are best-effort: a non-git tree, an absent ``git``, or a slow read leaves
-    them ``None`` and never changes ``outcome``.
-    """
-
-    outcome: WarmTreeSourceOutcome
-    resolved_path: str | None = None
-    head_commit: str | None = None
-    branch: str | None = None
-
-
-WarmTreeSourceProbe = Callable[[], Awaitable[WarmTreeSourceProbeResult]]
-
-
-def _warm_tree_source_data(result: WarmTreeSourceProbeResult) -> dict[str, str]:
-    """Build the ``CheckResult.data`` for a ``USABLE`` warm-tree source (#845).
-
-    Always carries ``vantage=server`` (the disclosure reflects the server process's env, not the
-    build worker's — ADR-0163) and the ``resolved_path``; the git fields are included only when
-    the probe resolved them (a git checkout on a named branch).
-    """
-    data: dict[str, str] = {"vantage": Vantage.SERVER.value}
-    if result.resolved_path is not None:
-        data["resolved_path"] = result.resolved_path
-    if result.head_commit is not None:
-        data["head_commit"] = result.head_commit
-    if result.branch is not None:
-        data["branch"] = result.branch
-    return data
-
-
-async def _always_enabled() -> bool:
-    """Default enabled probe: assume the local build host is enabled (ADR-0167).
-
-    Keeps `LocalKernelSrcCheck`'s prior behavior for unit tests and any pool-free assembly; the
-    production factory injects a probe that reads the seeded host's `enabled` flag via the pool.
-    """
-    return True
-
-
-class LocalKernelSrcCheck(Check):
-    """Server-vantage: the seeded local build host's warm-tree source is usable (ADR-0163).
-
-    ``ops.diagnostics`` validated the remote-libvirt runtime provider and the secret backend but
-    had no check touching any build host, so it reported healthy while every local warm-tree build
-    failed deterministically on an unusable ``KDIVE_KERNEL_SRC`` (#532). The seeded ``worker-local``
-    ``LOCAL`` host is a database invariant, so this check is always assembled; it resolves
-    ``KDIVE_KERNEL_SRC`` over the same ``warm_tree_source_error`` predicate the build-time
-    ``sync_tree`` and admission-time ``check_warm_tree_source_admission`` enforce (ADR-0161), via an
-    injected probe so the check holds the three-state policy and is unit-tested without the
-    filesystem or config.
-
-    The verdict is provider-independent (``provider=None``, like ``secret_ref``): it is a property
-    of the build environment, not a runtime provider. ``PASS`` asserts source-path usability, not
-    that the directory is a valid/buildable kernel tree — the predicate does not inspect tree
-    contents.
-
-    It reads the **server** process's ``KDIVE_KERNEL_SRC``, which is authoritative only when server
-    and worker share an environment (the default single-host / compose deployment). On a split
-    deployment the build worker can carry a different ``KDIVE_KERNEL_SRC``, so a server-read pass
-    does not prove the worker's source is usable — every result detail discloses the server vantage
-    so the green is not mistaken for a build-worker guarantee (#701). Probing the worker's effective
-    env is the worker-vantage refinement deferred in ADR-0163 ("Considered & rejected", #514): it
-    needs a provider-neutral worker-job dispatch path this always-on, provider-independent check
-    lacks today. The ``vantage`` stays :class:`Vantage.SERVER` to reflect where the read happens.
-    """
-
-    def __init__(
-        self,
-        *,
-        probe: WarmTreeSourceProbe,
-        enabled_probe: Callable[[], Awaitable[bool]] = _always_enabled,
-    ) -> None:
-        self._probe = probe
-        self._enabled_probe = enabled_probe
-
-    @property
-    def id(self) -> str:
-        return LOCAL_KERNEL_SRC_ID
-
-    @property
-    def vantage(self) -> Vantage:
-        return Vantage.SERVER
-
-    async def run(self) -> CheckResult:
-        if not await self._enabled_probe():
-            return CheckResult(
-                check_id=self.id,
-                status=CheckStatus.PASS,
-                detail="the seeded local build host is disabled; KDIVE_KERNEL_SRC is not required "
-                "(n/a — no local warm-tree lane to validate)",
-            )
-        result = await self._probe()
-        if result.outcome is WarmTreeSourceOutcome.USABLE:
-            return CheckResult(
-                check_id=self.id,
-                status=CheckStatus.PASS,
-                detail="the server's KDIVE_KERNEL_SRC points at an existing absolute tree "
-                "(server vantage — not authoritative for a split-deployment build worker, "
-                "whose env may differ; ADR-0163)",
-                data=_warm_tree_source_data(result),
-            )
-        if result.outcome is WarmTreeSourceOutcome.UNSET:
-            return CheckResult(
-                check_id=self.id,
-                status=CheckStatus.FAIL,
-                detail="the server's KDIVE_KERNEL_SRC is unset, so the local warm-tree build lane "
-                "has no kernel source and every local warm-tree build fails (server vantage; "
-                "a split-deployment build worker may also need it set — ADR-0163)",
-                fix=LOCAL_KERNEL_SRC_FIX,
-                failure_category=_CONFIGURATION_ERROR,
-            )
-        return CheckResult(
-            check_id=self.id,
-            status=CheckStatus.FAIL,
-            detail="the server's KDIVE_KERNEL_SRC is set but is not an absolute path to an "
-            "existing kernel source tree, so every local warm-tree build fails (server vantage; "
-            "ADR-0163)",
-            fix=LOCAL_KERNEL_SRC_FIX,
-            failure_category=_CONFIGURATION_ERROR,
-        )
-
-
-class BuildHostAgentOutcome(StrEnum):
-    """The per-host observable outcomes of the ephemeral build-host agent probe (ADR-0167).
-
-    ``AGENT_READY`` — the builder booted, its guest agent connected, and a trivial command ran.
-    ``AGENT_UNREACHABLE`` — the builder started but never reached a usable agent (the agent never
-    connected, the trivial command returned non-zero, or the agent dropped mid-exec): a contract
-    ``fail``. ``HOST_UNREACHABLE`` — the host/config could not be reached before the agent connected
-    (TLS down, missing pool/base image, a probe already in flight): an ``error``, never a confident
-    "agent broken".
-    """
-
-    AGENT_READY = "agent_ready"
-    AGENT_UNREACHABLE = "agent_unreachable"
-    HOST_UNREACHABLE = "host_unreachable"
-
-
-@dataclass(frozen=True, slots=True)
-class BuildHostProbeResult:
-    """One probed host's outcome.
-
-    Args:
-        host_name: The build host's name (named in a ``fail``/``error`` detail).
-        outcome: The per-host three-state outcome.
-        transport_error: Marks a ``HOST_UNREACHABLE`` that was a transport drop (vs a config cause),
-            for the deterministic aggregate ``failure_category`` rule. Ignored for other outcomes.
-    """
-
-    host_name: str
-    outcome: BuildHostAgentOutcome
-    transport_error: bool = False
-
-
-BuildHostAgentProbe = Callable[[], Awaitable[list[BuildHostProbeResult]]]
-
-
-class EphemeralLibvirtBuildHostAgentCheck(Check):
-    """Server-vantage: every ephemeral_libvirt build host's builder reaches its guest agent.
-
-    Aggregates the per-host outcomes from an injected probe into one three-state verdict (the
-    ``secret_ref`` precedent for many sub-probes → one result): any ``AGENT_UNREACHABLE`` →
-    ``fail`` (a build routed there fails deterministically); else any ``HOST_UNREACHABLE`` or no
-    hosts → ``error`` (an indeterminate or absent target is never a confident ``fail`` and never a
-    silent ``pass``); else ``pass``. The aggregate ``error`` ``failure_category`` is
-    ``transport_failure`` only when every error cause was a transport drop, else
-    ``configuration_error`` — a fixed rule, so the category is stable for programmatic triage.
-    """
-
-    def __init__(self, *, probe: BuildHostAgentProbe) -> None:
-        self._probe = probe
-
-    @property
-    def id(self) -> str:
-        return BUILDHOST_AGENT_ID
-
-    @property
-    def vantage(self) -> Vantage:
-        return Vantage.SERVER
-
-    async def run(self) -> CheckResult:
-        results = await self._probe()
-        failed = sorted(
-            r.host_name for r in results if r.outcome is BuildHostAgentOutcome.AGENT_UNREACHABLE
-        )
-        if failed:
-            return CheckResult(
-                check_id=self.id,
-                status=CheckStatus.FAIL,
-                detail="ephemeral_libvirt build host(s) reachable but their guest agent never "
-                f"became usable: {', '.join(failed)}",
-                fix=BUILDHOST_AGENT_FIX,
-                failure_category=_CONFIGURATION_ERROR,
-            )
-        unreachable = [r for r in results if r.outcome is BuildHostAgentOutcome.HOST_UNREACHABLE]
-        if unreachable or not results:
-            return CheckResult(
-                check_id=self.id,
-                status=CheckStatus.ERROR,
-                detail=self._error_detail(unreachable, results),
-                failure_category=self._error_category(unreachable),
-            )
-        return CheckResult(
-            check_id=self.id,
-            status=CheckStatus.PASS,
-            detail=f"all {len(results)} ephemeral_libvirt build host(s) reached their guest agent",
-        )
-
-    @staticmethod
-    def _error_detail(
-        unreachable: list[BuildHostProbeResult], results: list[BuildHostProbeResult]
-    ) -> str:
-        if not results:
-            return "no ephemeral_libvirt build host is registered; nothing to probe"
-        names = ", ".join(sorted(r.host_name for r in unreachable))
-        return f"ephemeral_libvirt build host(s) could not be reached: {names}"
-
-    @staticmethod
-    def _error_category(unreachable: list[BuildHostProbeResult]) -> ErrorCategory:
-        if unreachable and all(r.transport_error for r in unreachable):
-            return _TRANSPORT_FAILURE
-        return _CONFIGURATION_ERROR

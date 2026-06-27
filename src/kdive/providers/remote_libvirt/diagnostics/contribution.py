@@ -10,17 +10,15 @@ from __future__ import annotations
 
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.diagnostics.checks import (
-    GDBSTUB_ACL_ID,
-    PROVIDER_TLS_ID,
+from kdive.diagnostics.buildhost_agent_check import EphemeralLibvirtBuildHostAgentCheck
+from kdive.diagnostics.checks import GDBSTUB_ACL_ID, PROVIDER_TLS_ID, Check
+from kdive.diagnostics.gdbstub_acl import gdbstub_acl_probe
+from kdive.diagnostics.provider_checks import (
     BaseImageStagingCheck,
-    Check,
-    EphemeralLibvirtBuildHostAgentCheck,
     GdbstubAclCheck,
     ProviderTlsCheck,
     RemoteLibvirtReachabilityCheck,
 )
-from kdive.diagnostics.gdbstub_acl import gdbstub_acl_probe
 from kdive.diagnostics.provider_contracts import (
     DiagnosticProviderContribution,
     WorkerVantageDescriptor,
