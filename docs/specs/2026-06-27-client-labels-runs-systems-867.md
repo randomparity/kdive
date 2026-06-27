@@ -106,6 +106,17 @@ envelope wins (`_idempotency.py`), so a repeated call with the same key but a *c
 existing replay contract — the label is request input that the key dedups — not a new
 behavior; it is called out here so the precedence is not a surprise.
 
+One cross-tool nuance follows from where each tool validates: `runs.create` validates
+the label inside `create_run`, *after* the keyed path resolves a replay, so a keyed
+retry whose label changed to an *invalid* value still replays the first call's stored
+success (the bad label is ignored). `systems.define` / `systems.provision` validate in
+the handler *before* the replay lookup (the placement that keeps `AdmissionFailureReason`
+closed and guarantees no row/audit on reject), so the same keyed retry with a *changed
+invalid* label returns `invalid_label` instead of replaying. A legitimate idempotency
+retry resends the same valid label and is unaffected on both; only a malformed retry
+payload sees the difference. Accepted divergence — exact parity would force the systems
+replay lookup ahead of validation and weaken the no-DB-before-reject property.
+
 ## Surfacing contract
 
 - `runs.get` / `runs.list`: add `data.label` (the stored value, or `null`). Built in

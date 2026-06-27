@@ -62,7 +62,16 @@ confirms its handle round-tripped. The label is the caller's own input — like
 redactor (the redactor governs guest/console/gdb machine output, not request input);
 the length/character validation bounds what can be stored.
 
-No RBAC, config, idempotency, or state-machine change.
+No RBAC, config, or state-machine change. Idempotency is unchanged for legitimate
+retries (same payload), but the validation placement differs by tool: `runs.create`
+validates inside `create_run` after the keyed replay resolves, while `systems.*`
+validates in the handler before the replay lookup (kept there because
+`AdmissionFailureReason` is closed and early validation guarantees no row/audit on
+reject). The only observable effect is a keyed retry that changes the label to an
+*invalid* value: `runs.create` replays the stored success (ignores the bad label),
+`systems.*` returns `invalid_label`. A real retry resends the same valid label and is
+identical on both; the divergence is accepted rather than forcing the systems replay
+ahead of validation.
 
 ## Consequences
 
