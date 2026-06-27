@@ -1,7 +1,7 @@
 """CSV and XLSX rendering of a Report (ADR-0212).
 
-``openpyxl`` is imported lazily only for XLSX output. A truncated section carries a header
-note in both formats so a clipped spreadsheet is never read as complete.
+``openpyxl`` is imported lazily only for XLSX output. A truncated section carries a
+header note in both formats so a clipped spreadsheet is never read as complete.
 """
 
 from __future__ import annotations
@@ -16,19 +16,17 @@ from kdive.services.reports.core import Report, Section
 
 _TRUNCATED_NOTE = "# truncated: section row cap reached; full data in the spreadsheet"
 _SHEET_TITLE_LIMIT = 31
-_XLSX_EXTRA = "report-xlsx"
 
 
 def _workbook_class() -> Any:
-    """Return openpyxl's Workbook class, or raise the documented missing-extra error."""
+    """Return openpyxl's Workbook class, or raise the documented dependency error."""
     try:
         module = importlib.import_module("openpyxl")
     except ImportError as exc:
         raise CategorizedError(
-            "XLSX report rendering requires optional dependency openpyxl; install "
-            f"kdive[{_XLSX_EXTRA}]",
+            "XLSX report rendering requires the openpyxl runtime dependency",
             category=ErrorCategory.MISSING_DEPENDENCY,
-            details={"dependency": "openpyxl", "extra": _XLSX_EXTRA},
+            details={"dependency": "openpyxl"},
         ) from exc
     return cast(Any, module).Workbook
 

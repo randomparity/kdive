@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -244,6 +245,38 @@ def test_store_outage_degrades_to_inline(migrated_url: str) -> None:
         assert resp.refs == {}
         assert resp.data["spreadsheet_unavailable"] == "store_error"
         assert {item.data["section"] for item in resp.items} == _SECTIONS
+
+    asyncio.run(_run())
+
+
+def test_missing_xlsx_dependency_is_not_reported_as_store_error(
+    migrated_url: str, monkeypatch
+) -> None:  # noqa: ANN001
+    real_import = importlib.import_module
+
+    def missing_openpyxl(name: str, package: str | None = None) -> object:
+        if name == "openpyxl":
+            raise ImportError("missing")
+        return real_import(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", missing_openpyxl)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_system(pool)
+            resp = await generate_granted_set(
+                pool,
+                _ctx(),
+                secret_registry=_secret_registry(),
+                projects=None,
+                window=None,
+                formats=["xlsx"],
+                store_factory=_store_factory,
+            )
+        assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.MISSING_DEPENDENCY.value
+        assert resp.data["dependency"] == "openpyxl"
+        assert "spreadsheet_unavailable" not in resp.data
 
     asyncio.run(_run())
 

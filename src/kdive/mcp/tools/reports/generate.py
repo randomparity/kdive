@@ -191,7 +191,9 @@ async def _spreadsheet_refs(
             report_id=report_id,
             ttl=config.require(ARTIFACT_DOWNLOAD_TTL_SECONDS),
         )
-    except CategorizedError:
+    except CategorizedError as exc:
+        if exc.category is ErrorCategory.MISSING_DEPENDENCY:
+            raise
         return {}, {"spreadsheet_unavailable": "store_error"}
     return refs, {}
 
@@ -268,16 +270,21 @@ async def generate_granted_set(
             )
         scope = ReportScope(projects=tuple(targets), all_projects=False)
         async with pool.connection() as conn:
-            response = await _build_report(
-                conn,
-                scope,
-                parsed_window,
-                parsed_formats,
-                secret_registry=secret_registry,
-                store_factory=store_factory,
-                scope_label=_GRANTED_SCOPE,
-                next_tool=_GRANTED_TOOL,
-            )
+            try:
+                response = await _build_report(
+                    conn,
+                    scope,
+                    parsed_window,
+                    parsed_formats,
+                    secret_registry=secret_registry,
+                    store_factory=store_factory,
+                    scope_label=_GRANTED_SCOPE,
+                    next_tool=_GRANTED_TOOL,
+                )
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(
+                    _REPORT_OBJECT_ID, exc, suggested_next_actions=[_GRANTED_TOOL]
+                )
             if len(targets) > 1:
                 await _audit_granted(conn, ctx, targets, parsed_window, parsed_formats)
         return response
@@ -320,16 +327,21 @@ async def generate_all_projects(
             scope = ReportScope(
                 projects=tuple(await _all_projects_universe(conn)), all_projects=True
             )
-            response = await _build_report(
-                conn,
-                scope,
-                parsed_window,
-                parsed_formats,
-                secret_registry=secret_registry,
-                store_factory=store_factory,
-                scope_label=ALL_PROJECTS_SCOPE,
-                next_tool=_ALL_PROJECTS_TOOL,
-            )
+            try:
+                response = await _build_report(
+                    conn,
+                    scope,
+                    parsed_window,
+                    parsed_formats,
+                    secret_registry=secret_registry,
+                    store_factory=store_factory,
+                    scope_label=ALL_PROJECTS_SCOPE,
+                    next_tool=_ALL_PROJECTS_TOOL,
+                )
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(
+                    _REPORT_OBJECT_ID, exc, suggested_next_actions=[_ALL_PROJECTS_TOOL]
+                )
             await _audit_all_projects(conn, ctx, parsed_window, parsed_formats)
         return response
 

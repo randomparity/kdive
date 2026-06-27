@@ -59,7 +59,7 @@ def test_render_xlsx_truncation_note_present() -> None:
     assert first_row[0] is not None and "truncated" in str(first_row[0]).lower()
 
 
-def test_render_xlsx_missing_openpyxl_reports_optional_extra(
+def test_render_xlsx_missing_openpyxl_reports_runtime_dependency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     real_import = importlib.import_module
@@ -75,4 +75,4 @@ def test_render_xlsx_missing_openpyxl_reports_optional_extra(
         render_xlsx(_report())
 
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
-    assert exc.value.details == {"dependency": "openpyxl", "extra": "report-xlsx"}
+    assert exc.value.details == {"dependency": "openpyxl"}
