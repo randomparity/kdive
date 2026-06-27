@@ -114,6 +114,24 @@ class _FakeSocket:
         return None
 
 
+class _FailingRspSocket:
+    def __init__(self, *, fail_send: bool = False) -> None:
+        self._fail_send = fail_send
+
+    def sendall(self, _data: bytes) -> None:
+        if self._fail_send:
+            raise OSError("send failed")
+
+    def settimeout(self, _timeout: float) -> None:
+        return None
+
+    def recv(self, _size: int) -> bytes:
+        raise OSError("recv failed")
+
+    def close(self) -> None:
+        return None
+
+
 def test_rsp_reachable_true_when_peer_answers_valid_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -123,6 +141,24 @@ def test_rsp_reachable_true_when_peer_answers_valid_frame(
         rsp_mod.socket, "create_connection", lambda _addr, *, timeout: _FakeSocket()
     )
     assert rsp_mod.rsp_reachable("127.0.0.1", 1234) is True
+
+
+def test_rsp_reachable_raises_when_send_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        rsp_mod.socket,
+        "create_connection",
+        lambda _addr, *, timeout: _FailingRspSocket(fail_send=True),
+    )
+    with pytest.raises(OSError, match="send failed"):
+        rsp_mod.rsp_reachable("127.0.0.1", 1234)
+
+
+def test_rsp_reachable_raises_when_recv_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        rsp_mod.socket, "create_connection", lambda _addr, *, timeout: _FailingRspSocket()
+    )
+    with pytest.raises(OSError, match="recv failed"):
+        rsp_mod.rsp_reachable("127.0.0.1", 1234)
 
 
 # --- TransportHandleData codec -------------------------------------------------------------
@@ -516,6 +552,14 @@ class _FakeSshSocket:
         return None
 
 
+class _FailingSshSocket(_FakeSshSocket):
+    def __init__(self) -> None:
+        super().__init__([])
+
+    def recv(self, _size: int) -> bytes:
+        raise OSError("recv failed")
+
+
 def test_real_ssh_connect_raises_when_connection_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -526,6 +570,16 @@ def test_real_ssh_connect_raises_when_connection_fails(
 
     monkeypatch.setattr(connect_mod.socket, "create_connection", fail_connect)
     with pytest.raises(OSError, match="connection refused"):
+        connect_mod._real_ssh_connect("127.0.0.1", 2222)
+
+
+def test_real_ssh_connect_raises_when_recv_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        connect_mod.socket,
+        "create_connection",
+        lambda _addr, *, timeout: _FailingSshSocket(),
+    )
+    with pytest.raises(OSError, match="recv failed"):
         connect_mod._real_ssh_connect("127.0.0.1", 2222)
 
 

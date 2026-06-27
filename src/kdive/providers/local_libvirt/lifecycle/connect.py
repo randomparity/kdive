@@ -361,8 +361,6 @@ def _real_ssh_connect(host: str, port: int) -> bool:  # pragma: no cover - live_
                 chunk = sock.recv(256)
             except TimeoutError:
                 continue
-            except OSError:
-                break
             if not chunk:
                 break
             buffer += chunk

@@ -59,18 +59,13 @@ def rsp_reachable(host: str, port: int) -> bool:  # pragma: no cover - live_vm
     sock = socket.create_connection((host, port), timeout=_PROBE_TIMEOUT_S)
     buffer = b""
     try:
-        try:
-            sock.sendall(b"+" + rsp_frame("?"))
-        except OSError:
-            return False
+        sock.sendall(b"+" + rsp_frame("?"))
         while time.monotonic() < deadline:
             sock.settimeout(max(0.05, deadline - time.monotonic()))
             try:
                 chunk = sock.recv(256)
             except TimeoutError:
                 continue
-            except OSError:
-                break
             if not chunk:
                 break
             buffer += chunk
