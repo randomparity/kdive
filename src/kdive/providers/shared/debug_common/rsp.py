@@ -1,9 +1,10 @@
 """RSP framing codec + bounded reachability probe (ported v1, ADR-0032/0083).
 
 Shared by every provider's gdbstub Connect plane: ``rsp_frame`` builds a ``$payload#xx``
-packet, ``valid_rsp_frame`` validates a complete checksum-correct reply, and ``rsp_reachable``
-exchanges one read-only ``?`` halt-reason query and accepts only a valid frame (a stale or
-non-RSP listener is rejected). The real socket path runs only under the ``live_vm`` gate.
+packet, ``valid_rsp_frame`` validates the first complete checksum-correct reply in a buffer, and
+``rsp_reachable`` exchanges one read-only ``?`` halt-reason query and accepts only a valid frame
+(a stale or non-RSP listener is rejected). The real socket path runs only under the ``live_vm``
+gate.
 """
 
 from __future__ import annotations
@@ -27,16 +28,17 @@ def rsp_frame(payload: str) -> bytes:
 def valid_rsp_frame(buffer: bytes) -> bool:
     """Report whether ``buffer`` holds a complete, checksum-valid RSP packet.
 
-    A complete ``$<payload>#<2 hex>`` whose checksum equals ``sum(payload) % 256`` is valid
-    (a leading ``+``/``-`` ack is ignored). A bare ``+``, an unterminated ``$...`` with no
-    ``#``, a non-hex checksum, or a checksum mismatch is invalid — so a non-RSP listener that
-    merely writes ``+`` or ``$hello`` is rejected.
+    The first complete ``$<payload>#<2 hex>`` whose checksum equals ``sum(payload) % 256`` is
+    valid (a leading ``+``/``-`` ack is ignored). Bytes after that first frame may already be
+    coalesced in the socket buffer and do not invalidate it. A bare ``+``, an unterminated
+    ``$...`` with no ``#``, a non-hex checksum, or a checksum mismatch is invalid — so a non-RSP
+    listener that merely writes ``+`` or ``$hello`` is rejected.
     """
     start = 1 if buffer.startswith((b"+", b"-")) else 0
     if not buffer[start:].startswith(b"$"):
         return False
     hash_idx = buffer.find(b"#", start)
-    if hash_idx == -1 or hash_idx + 3 != len(buffer):
+    if hash_idx == -1 or hash_idx + 3 > len(buffer):
         return False
     payload = buffer[start + 1 : hash_idx]
     checksum_hex = buffer[hash_idx + 1 : hash_idx + 3]

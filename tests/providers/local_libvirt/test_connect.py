@@ -57,12 +57,12 @@ def test_valid_rsp_frame_uses_first_hash_as_terminator() -> None:
     assert valid_rsp_frame(b"$a##84") is False
 
 
-def test_valid_rsp_frame_rejects_trailing_bytes() -> None:
-    assert valid_rsp_frame(b"$?#3fJUNK") is False
+def test_valid_rsp_frame_accepts_trailing_coalesced_bytes() -> None:
+    assert valid_rsp_frame(b"$?#3fJUNK") is True
 
 
-def test_valid_rsp_frame_rejects_trailing_bytes_after_leading_ack() -> None:
-    assert valid_rsp_frame(b"+$?#3fJUNK") is False
+def test_valid_rsp_frame_accepts_trailing_bytes_after_leading_ack() -> None:
+    assert valid_rsp_frame(b"+$?#3fJUNK") is True
 
 
 def test_valid_rsp_frame_rejects_bare_ack() -> None:
