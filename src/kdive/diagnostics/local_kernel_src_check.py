@@ -84,7 +84,7 @@ class LocalKernelSrcCheck(Check):
                 check_id=self.id,
                 status=CheckStatus.PASS,
                 detail="the seeded local build host is disabled; KDIVE_KERNEL_SRC is not required "
-                "(n/a - no local warm-tree lane to validate)",
+                "(n/a — no local warm-tree lane to validate)",
             )
         result = await self._probe()
         if result.outcome is WarmTreeSourceOutcome.USABLE:
@@ -92,7 +92,7 @@ class LocalKernelSrcCheck(Check):
                 check_id=self.id,
                 status=CheckStatus.PASS,
                 detail="the server's KDIVE_KERNEL_SRC points at an existing absolute tree "
-                "(server vantage - not authoritative for a split-deployment build worker, "
+                "(server vantage — not authoritative for a split-deployment build worker, "
                 "whose env may differ; ADR-0163)",
                 data=_warm_tree_source_data(result),
             )
@@ -102,7 +102,7 @@ class LocalKernelSrcCheck(Check):
                 status=CheckStatus.FAIL,
                 detail="the server's KDIVE_KERNEL_SRC is unset, so the local warm-tree build lane "
                 "has no kernel source and every local warm-tree build fails (server vantage; "
-                "a split-deployment build worker may also need it set - ADR-0163)",
+                "a split-deployment build worker may also need it set — ADR-0163)",
                 fix=LOCAL_KERNEL_SRC_FIX,
                 failure_category=ErrorCategory.CONFIGURATION_ERROR,
             )
