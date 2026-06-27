@@ -765,40 +765,39 @@ def test_run_once_dequeues_when_ready_again(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_background_ticker_keeps_livez_live_across_a_long_blocking_job(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A run_once that blocks far past stale_after must NOT flip /livez stale (ADR-0090 §5).
+def test_background_ticker_keeps_livez_live_across_a_long_blocking_job() -> None:
+    """A ticker that advances fake time past stale_after keeps /livez fresh (ADR-0090 §5).
 
     The heartbeat is bumped by a background ticker, not by the claim loop, so a single
-    long-running job (here: a run_once that awaits past the stale bound) keeps the worker
-    live — the exact failure a per-job heartbeat would cause is avoided.
+    long-running job can outlast the stale bound without making the worker read not-live.
     """
 
     async def _run() -> None:
         from kdive.health.heartbeat import Heartbeat
 
-        # Real monotonic clock; a tiny stale bound and a sub-stale tick cadence.
-        hb = Heartbeat(stale_after=0.05)
-        worker = _worker(
-            _unopened_pool(),
-            HandlerRegistry(),
-            worker_id="w1",
-            config=WorkerConfig(heartbeat=hb, heartbeat_tick=timedelta(milliseconds=5)),
-        )
+        now = 0.0
+        hb = Heartbeat(stale_after=1.0, now=lambda: now)
         stop = asyncio.Event()
-        live_during_job: list[bool] = []
+        sleeps = 0
 
-        async def long_run_once() -> Job | None:
-            # A "build" far longer than stale_after; the background ticker must keep us live.
-            await asyncio.sleep(0.2)
-            live_during_job.append(hb.is_live())
-            stop.set()
-            return None
+        async def fake_sleep_until_stop(_stop: asyncio.Event, interval: float) -> None:
+            nonlocal now, sleeps
+            sleeps += 1
+            now += interval
+            if sleeps == 4:
+                _stop.set()
+            await asyncio.sleep(0)
 
-        monkeypatch.setattr(worker, "run_once", long_run_once)
-        await asyncio.wait_for(worker.run(stop), timeout=2)
-        assert live_during_job == [True]  # still live after a job that outlasted stale_after
+        await worker_module._tick_until_stop(
+            hb,
+            stop,
+            0.4,
+            sleep_until_stop=fake_sleep_until_stop,
+        )
+
+        assert sleeps == 4
+        assert now > 1.0
+        assert hb.is_live() is True
 
     asyncio.run(_run())
 

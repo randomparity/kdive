@@ -342,7 +342,12 @@ async def _sleep_until_stop(stop: asyncio.Event, timeout: float) -> None:
         await asyncio.wait_for(stop.wait(), timeout=timeout)
 
 
-async def _tick_until_stop(heartbeat: Heartbeat, stop: asyncio.Event, interval: float) -> None:
+async def _tick_until_stop(
+    heartbeat: Heartbeat,
+    stop: asyncio.Event,
+    interval: float,
+    sleep_until_stop: Callable[[asyncio.Event, float], Awaitable[None]] = _sleep_until_stop,
+) -> None:
     """Bump ``heartbeat`` every ``interval`` seconds until ``stop`` is set or cancelled.
 
     Runs concurrently with the claim loop so a long-running job never starves the
@@ -351,7 +356,7 @@ async def _tick_until_stop(heartbeat: Heartbeat, stop: asyncio.Event, interval: 
     """
     heartbeat.tick()
     while not stop.is_set():
-        await _sleep_until_stop(stop, interval)
+        await sleep_until_stop(stop, interval)
         if stop.is_set():
             break
         heartbeat.tick()
