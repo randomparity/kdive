@@ -12,7 +12,7 @@ class ProjectMembershipDenied(AuthError):
 
     Subclasses :class:`AuthError` so existing membership semantics and broad ``AuthError``
     catches are preserved unchanged. The MCP dispatch boundary
-    (:class:`~kdive.mcp.middleware.DenialAuditMiddleware`) catches this *subclass*
+    (:class:`~kdive.mcp.middleware.denial_audit.DenialAuditMiddleware`) catches this *subclass*
     specifically to envelope it as ``authorization_denied`` (exit 3), while a bare
     :class:`AuthError` (an authentication failure — no subject, no token) keeps raising. The
     denial is **not** audited: it is the non-member case, excluded to avoid write-amplification

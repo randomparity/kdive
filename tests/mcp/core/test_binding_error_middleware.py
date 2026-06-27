@@ -21,7 +21,7 @@ from fastmcp.tools.base import ToolResult
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from kdive.domain.errors import ErrorCategory
-from kdive.mcp.middleware import BindingErrorMiddleware
+from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload
 from kdive.mcp.tools.catalog.artifacts.reads import ArtifactSearchRequest

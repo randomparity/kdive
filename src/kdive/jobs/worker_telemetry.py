@@ -1,6 +1,6 @@
 """Per-job worker telemetry: a span + job-duration / queue-depth metrics (ADR-0090 §5).
 
-Mirrors the server's :class:`~kdive.mcp.middleware.TelemetryMiddleware` for the worker's
+Mirrors the server's :class:`~kdive.mcp.middleware.telemetry.TelemetryMiddleware` for the worker's
 dispatch boundary: one span per job carrying only allowlisted labels (``job_kind`` and
 ``outcome`` — never a tenant/principal identifier, ADR-0090 §4), a job-duration
 histogram, and a queue-depth gauge sampled at each poll. Secret values that reach a span

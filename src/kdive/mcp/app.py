@@ -9,13 +9,11 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.auth import build_verifier
-from kdive.mcp.middleware import (
-    BindingErrorMiddleware,
-    DenialAuditMiddleware,
-    TelemetryMiddleware,
-    ToolExposureMiddleware,
-    UsageTrackingMiddleware,
-)
+from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
+from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
+from kdive.mcp.middleware.exposure import ToolExposureMiddleware
+from kdive.mcp.middleware.telemetry import TelemetryMiddleware
+from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.tool_registration import PLANE_REGISTRARS, AppAssembly
 from kdive.mcp.worker_registration import HANDLER_REGISTRARS, WorkerHandlerAssembly

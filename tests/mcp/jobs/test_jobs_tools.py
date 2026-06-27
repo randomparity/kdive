@@ -19,7 +19,7 @@ from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import Authorizing, BuildPayload, SystemPayload
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.middleware import DenialAuditMiddleware
+from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
 from kdive.mcp.tools import jobs as jobs_tools
 from kdive.security.authz.rbac import Role, RoleDenied
 

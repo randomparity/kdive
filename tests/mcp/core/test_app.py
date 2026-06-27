@@ -155,11 +155,9 @@ def test_build_app_registers_doc_resources() -> None:
 def test_binding_error_middleware_is_registered_innermost() -> None:
     # BindingErrorMiddleware must sit after Telemetry + DenialAudit so a binding ValidationError
     # is converted to a returned envelope inside the telemetry span (ADR-0124; ADR-0132).
-    from kdive.mcp.middleware import (
-        BindingErrorMiddleware,
-        DenialAuditMiddleware,
-        TelemetryMiddleware,
-    )
+    from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
+    from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
+    from kdive.mcp.middleware.telemetry import TelemetryMiddleware
 
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())

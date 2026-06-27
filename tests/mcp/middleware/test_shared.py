@@ -50,7 +50,7 @@ def test_result_error_category_none_for_plain_object() -> None:
     assert result_error_category(object()) is None
 
 
-def test_request_context_resolves_through_package_patch_point(monkeypatch) -> None:
+def test_request_context_resolves_through_shared_patch_point(monkeypatch) -> None:
     sentinel = object()
-    monkeypatch.setattr("kdive.mcp.middleware.current_context", lambda: sentinel)
+    monkeypatch.setattr("kdive.mcp.middleware.shared.current_context", lambda: sentinel)
     assert request_context() is sentinel

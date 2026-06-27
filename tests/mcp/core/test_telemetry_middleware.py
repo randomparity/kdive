@@ -20,7 +20,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from kdive.domain.errors import ErrorCategory
-from kdive.mcp.middleware import TelemetryMiddleware
+from kdive.mcp.middleware.telemetry import TelemetryMiddleware
 from kdive.mcp.responses import ToolResponse
 
 

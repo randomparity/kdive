@@ -5,6 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
+from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 
 
@@ -17,14 +18,8 @@ class ToolOutcome(StrEnum):
 
 
 def request_context() -> Any:
-    """Return the current request context through the public middleware package.
-
-    Tests and callers historically monkeypatch ``kdive.mcp.middleware.current_context``.
-    Resolving through the package preserves that public patch point after the package split.
-    """
-    import kdive.mcp.middleware as middleware
-
-    return middleware.current_context()
+    """Return the current request context through the middleware-local patch point."""
+    return current_context()
 
 
 def result_error_category(result: Any) -> str | None:
