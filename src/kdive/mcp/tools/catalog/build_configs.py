@@ -104,21 +104,7 @@ async def read_build_config(
     *,
     name: str,
 ) -> ToolResponse:
-    """Fetch the seeded build-config fragment by name, returning bytes, sha256, and merge recipe.
-
-    Args:
-        conn: An open async psycopg connection.
-        store: The object store that holds the fragment bytes.
-        name: The fragment name to retrieve (e.g. ``"kdump"``).
-
-    Returns:
-        A :class:`ToolResponse` carrying ``content`` (the raw fragment text),
-        ``sha256`` (the catalog digest), and ``merge_recipe`` (the ``merge_config.sh``
-        invocation to apply the fragment onto a defconfig).
-
-    Raises:
-        CategorizedError: CONFIGURATION_ERROR when ``name`` is unknown.
-    """
+    """Return one fragment's bytes plus digest and merge recipe."""
     entry = await get_build_config(conn, name)
     if entry is None:
         raise CategorizedError(
@@ -228,20 +214,7 @@ def _entry_envelope(entry: BuildConfigEntry) -> ToolResponse:
 
 
 async def list_build_config_entries(pool: AsyncConnectionPool, ctx: RequestContext) -> ToolResponse:
-    """List every build-config fragment as a sorted catalog index (authenticated; no RBAC).
-
-    Returns identity + provenance (``name``, ``sha256``, ``source``, ``description``) per row,
-    never the fragment bytes — ``buildconfig.get`` serves those by name. An empty catalog is an
-    empty ``ok`` collection. The catalog is shared, non-sensitive infra, so any authenticated
-    caller may read it (the ``buildconfig.get`` / ``images.list`` / ``shapes.list`` precedent).
-
-    Args:
-        pool: The async connection pool.
-        ctx: The caller's request context (authenticated; no project scope needed).
-
-    Returns:
-        A collection :class:`ToolResponse` of per-row sub-envelopes, sorted by ``name``.
-    """
+    """List shared build-config metadata for authenticated callers; no fragment bytes."""
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             entries = await list_build_configs(conn)
@@ -259,24 +232,8 @@ async def delete_build_config(
 ) -> ToolResponse:
     """Delete an operator-published fragment (``platform_admin``; audited).
 
-    Mirrors :func:`set_build_config`'s gate exactly: a non-``platform_admin`` caller is denied
-    and, when it holds some platform role, the denial is audited. Serialized per ``name`` on
-    :attr:`LockScope.BUILD_CONFIG` (the same lock ``set``/seed take), so the source-scoped
-    delete and its provenance-for-reason read cannot interleave with a concurrent ``set``.
-    Removes only a ``source='operator'`` row; a ``seed``/``config`` row is refused with
-    ``CONFIGURATION_ERROR`` + ``data.reason='not_operator_source'`` (a ``config`` row is
-    re-asserted by the reconcile pass; a ``seed`` is the packaged baseline), and a missing name
-    is ``CONFIGURATION_ERROR`` + ``data.reason='not_found'``. Only a successful removal writes a
-    success audit row. The fragment's object-store bytes are left in place (ADR-0231).
-
-    Args:
-        pool: The async connection pool.
-        ctx: The caller's request context.
-        name: The fragment name to remove.
-
-    Returns:
-        A ``deleted`` :class:`ToolResponse` on success, or a failure envelope
-        (``AUTHORIZATION_DENIED`` / ``CONFIGURATION_ERROR``).
+    Only ``source='operator'`` rows are removable; seeded/configured rows are refused, and
+    object-store bytes are intentionally retained (ADR-0231).
     """
     try:
         require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)
