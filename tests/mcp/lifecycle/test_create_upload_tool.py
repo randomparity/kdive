@@ -692,6 +692,36 @@ def test_create_upload_for_defined_system_mints_rootfs_and_persists(migrated_url
     asyncio.run(_run())
 
 
+def test_create_system_upload_resolves_provider_runtime_once(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _defined_system_via_tool(pool)
+            resolver = provider_resolver()
+            original = resolver.runtime_for_system
+            calls: list[UUID] = []
+
+            async def _counting_runtime_for_system(conn: Any, system_id: UUID) -> Any:
+                calls.append(system_id)
+                return await original(conn, system_id)
+
+            monkeypatch.setattr(resolver, "runtime_for_system", _counting_runtime_for_system)
+            responses = await create_system_upload(
+                pool,
+                _ctx(),
+                system_id=sys_id,
+                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
+                resolver=resolver,
+                store=_FakeStore(),
+            )
+
+        assert responses.status == "upload_ready"
+        assert calls == [UUID(sys_id)]
+
+    asyncio.run(_run())
+
+
 def test_create_upload_rejects_non_upload_kind_defined_system(migrated_url: str) -> None:
     # A DEFINED System whose stored profile is local-kind cannot open an upload window —
     # else the object would be minted, never committed, and orphaned past the reaper (#111).
