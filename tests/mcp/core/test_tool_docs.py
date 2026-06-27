@@ -144,6 +144,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "postmortem.triage": ("tests/mcp/lifecycle/test_vmcore_tools.py",),
     "projects.list": ("tests/mcp/identity/test_projects_tools.py",),
     "session.whoami": ("tests/mcp/identity/test_session_tools.py",),
+    "tools.search": ("tests/mcp/identity/test_search_tools.py",),
     "runs.bind": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.boot": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.build": ("tests/mcp/lifecycle/test_runs_tools.py",),
