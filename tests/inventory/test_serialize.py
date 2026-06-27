@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import tomllib
+from dataclasses import replace
 from decimal import Decimal
 
 import psycopg
@@ -63,30 +64,43 @@ def test_toml_int() -> None:
 # ---- serialize_inventory (pure) -------------------------------------------------------
 
 
-def _image(
-    *,
-    name: str = "ubuntu",
-    provider: str = "remote-libvirt",
-    arch: str = "x86_64",
-    object_key: str | None = None,
-    digest: str | None = None,
-    volume: str | None = None,
-    path: str | None = None,
-    state: str = "defined",
+_BASE_IMAGE = serialize.ImageRow(
+    provider="remote-libvirt",
+    name="ubuntu",
+    arch="x86_64",
+    format="qcow2",
+    root_device="/dev/vda",
+    visibility="public",
+    capabilities=[],
+    object_key=None,
+    digest=None,
+    volume=None,
+    path=None,
+    state="defined",
+)
+
+
+def _s3_image(
+    *, name: str = "ubuntu", object_key: str = "object-key", digest: str | None = None
 ) -> serialize.ImageRow:
-    return serialize.ImageRow(
-        provider=provider,
+    return replace(_BASE_IMAGE, name=name, object_key=object_key, digest=digest, state="registered")
+
+
+def _staged_image(*, name: str = "ubuntu", volume: str = "vol-x") -> serialize.ImageRow:
+    return replace(_BASE_IMAGE, name=name, volume=volume, state="registered")
+
+
+def _staged_path_image(
+    *,
+    name: str = "local-rootfs",
+    path: str = "/var/lib/kdive/rootfs/local-rootfs.qcow2",
+) -> serialize.ImageRow:
+    return replace(
+        _BASE_IMAGE,
+        provider="local-libvirt",
         name=name,
-        arch=arch,
-        format="qcow2",
-        root_device="/dev/vda",
-        visibility="public",
-        capabilities=[],
-        object_key=object_key,
-        digest=digest,
-        volume=volume,
         path=path,
-        state=state,
+        state="registered",
     )
 
 
@@ -179,7 +193,7 @@ def test_serialize_omits_null_base_image_volume_for_local_build_host() -> None:
 
 
 def test_serialize_omits_null_image_digest() -> None:
-    snap = _snapshot(images=(_image(object_key="k", digest=None, state="registered"),))
+    snap = _snapshot(images=(_s3_image(object_key="k", digest=None),))
     text = serialize.serialize_inventory(snap)
     assert "digest" not in text
     assert 'object_key = "k"' in text
@@ -188,8 +202,8 @@ def test_serialize_omits_null_image_digest() -> None:
 def test_serialize_emits_one_root_device_key_per_image_block() -> None:
     snap = _snapshot(
         images=(
-            _image(name="base-a", volume="vol-a", state="registered"),
-            _image(name="base-b", object_key="obj-b", state="registered"),
+            _staged_image(name="base-a", volume="vol-a"),
+            _s3_image(name="base-b", object_key="obj-b"),
         )
     )
     text = serialize.serialize_inventory(snap)
@@ -201,7 +215,7 @@ def test_serialize_emits_one_root_device_key_per_image_block() -> None:
 
 
 def test_serialize_image_staged_source() -> None:
-    snap = _snapshot(images=(_image(volume="vol-x", state="registered"),))
+    snap = _snapshot(images=(_staged_image(volume="vol-x"),))
     text = serialize.serialize_inventory(snap)
     assert 'kind = "staged"' in text
     assert 'volume = "vol-x"' in text
@@ -210,11 +224,9 @@ def test_serialize_image_staged_source() -> None:
 def test_serialize_image_staged_path_source() -> None:
     snap = _snapshot(
         images=(
-            _image(
-                provider="local-libvirt",
+            _staged_path_image(
                 name="local-rootfs",
                 path="/var/lib/kdive/rootfs/local-rootfs.qcow2",
-                state="registered",
             ),
         )
     )
@@ -230,7 +242,7 @@ def test_serialize_image_staged_path_source() -> None:
 
 def test_completed_remote_skeleton_parses_after_filling_placeholders() -> None:
     snap = _snapshot(
-        images=(_image(name="base", volume="vol-x", state="registered"),),
+        images=(_staged_image(name="base", volume="vol-x"),),
         remote_libvirt=(_remote("host-a"),),
         cost_classes=(("remote", Decimal("1.0")),),
     )
@@ -245,7 +257,7 @@ def test_completed_remote_skeleton_parses_after_filling_placeholders() -> None:
 
 def test_unedited_remote_skeleton_does_not_parse() -> None:
     snap = _snapshot(
-        images=(_image(name="base", volume="vol-x", state="registered"),),
+        images=(_staged_image(name="base", volume="vol-x"),),
         remote_libvirt=(_remote("host-a"),),
     )
     text = serialize.serialize_inventory(snap)
