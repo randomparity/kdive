@@ -78,6 +78,20 @@ def _run_recovery(run: Run) -> dict[str, JsonValue]:
 # ``refs["build-log"]``.
 _BUILD_LOG_FAILURE_DETAIL = "failure_detail_build_log_artifact"
 
+# The two VIEWER-accessible read paths for the REDACTED ``refs["console"]`` artifact (ADR-0226),
+# surfaced as ``data["console_access"]`` so an agent learns both from the envelope, not out of
+# band (#864, ADR-0262): ``artifacts.search_text`` for a targeted query, and ``artifacts.get``
+# for the full log by paging ``next_offset`` until ``content_truncated`` is ``"false"`` (ADR-0247's
+# per-window cap means whole-log = paging). ``artifacts.fetch_raw`` is deliberately absent: it
+# egresses only the ``vmcore``/``vmlinux`` ``RawAsset`` allow-list keyed by ``run_id``+``asset``
+# and is ``contributor``-gated, so it neither serves the console artifact nor is callable by a
+# console-ref viewer. Copied per envelope so the shared constant stays immutable.
+_CONSOLE_ACCESS_HINT: dict[str, str] = {
+    "ref": "console",
+    "search": "artifacts.search_text",
+    "full_text": "artifacts.get",
+}
+
 
 def _run_artifact_refs(
     run: Run, *, console_ref: str | None = None, build_log_ref: str | None = None
@@ -85,10 +99,13 @@ def _run_artifact_refs(
     """The Run's object-store artifact keys, for the envelope ``refs`` slot.
 
     ``console_ref`` is the boot step's console evidence artifact id (ADR-0226), surfaced as
-    ``console`` so an agent resolves it directly via ``artifacts.get``; it is supplied only on
-    the ``runs.get`` success path (which loads the boot step), and omitted when no boot step
-    recorded evidence. ``build_log_ref`` is the failed build's build-log artifact id (ADR-0238),
-    surfaced as ``build-log`` on the failed-Run path; omitted when the build captured no log.
+    ``console``; the REDACTED console artifact is read via ``artifacts.get`` (windowed, paged) or
+    searched via ``artifacts.search_text``, and ``data["console_access"]`` names both
+    (``_CONSOLE_ACCESS_HINT``, ADR-0262) so the agent need not know them out of band. It is
+    supplied only on the ``runs.get`` success path (which loads the boot step), and omitted when no
+    boot step recorded evidence. ``build_log_ref`` is the failed build's build-log artifact id
+    (ADR-0238), surfaced as ``build-log`` on the failed-Run path; omitted when the build captured
+    no log.
     """
     refs: dict[str, str] = {}
     if run.kernel_ref:
@@ -230,6 +247,8 @@ def envelope_for_run(
         data["build_provenance"] = cast(JsonValue, build_provenance)
     data.update(_run_recovery(run))
     console_ref = step_progress.console_evidence_artifact_id if step_progress is not None else None
+    if console_ref is not None:
+        data["console_access"] = cast(JsonValue, dict(_CONSOLE_ACCESS_HINT))
     return ToolResponse.success(
         str(run.id),
         run.state.value,

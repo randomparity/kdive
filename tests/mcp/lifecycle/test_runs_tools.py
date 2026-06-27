@@ -648,6 +648,71 @@ def test_envelope_for_run_matched_line_absent_when_progress_has_none() -> None:
     assert "expected_boot_failure_matched_line" not in resp.data
 
 
+_CONSOLE_ACCESS_EXPECTED = {
+    "ref": "console",
+    "search": "artifacts.search_text",
+    "full_text": "artifacts.get",
+}
+
+
+def test_envelope_for_run_surfaces_console_access_hint() -> None:
+    # When refs.console is present, name the two VIEWER-accessible read paths for the
+    # redacted console artifact so an agent learns both from the envelope (#864, ADR-0262).
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(
+            install="succeeded",
+            boot="succeeded",
+            boot_outcome="ready",
+            console_evidence_artifact_id="console-artifact-1",
+        ),
+    )
+
+    assert resp.refs["console"] == "console-artifact-1"
+    console_access = resp.data["console_access"]
+    assert isinstance(console_access, dict)
+    assert console_access == _CONSOLE_ACCESS_EXPECTED
+    # fetch_raw cannot serve the console artifact and is contributor-gated; never named here.
+    assert "artifacts.fetch_raw" not in console_access.values()
+
+
+def test_envelope_for_run_console_access_hint_for_expected_crash() -> None:
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(
+            install="succeeded",
+            boot="succeeded",
+            boot_outcome="expected_crash_observed",
+            console_evidence_artifact_id="console-artifact-2",
+        ),
+    )
+
+    assert resp.refs["console"] == "console-artifact-2"
+    assert resp.data["console_access"] == _CONSOLE_ACCESS_EXPECTED
+
+
+def test_envelope_for_run_console_access_hint_absent_without_console_ref() -> None:
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(
+            install="succeeded",
+            boot="succeeded",
+            boot_outcome="ready",
+            console_evidence_artifact_id=None,
+        ),
+    )
+
+    assert "console" not in resp.refs
+    assert "console_access" not in resp.data
+
+
+def test_envelope_for_run_console_access_hint_absent_without_step_progress() -> None:
+    resp = runs_common.envelope_for_run(_run_model(RunState.SUCCEEDED))
+
+    assert "console" not in resp.refs
+    assert "console_access" not in resp.data
+
+
 def _ready_progress(boot_outcome: str | None) -> StepProgress:
     return StepProgress(install="succeeded", boot="succeeded", boot_outcome=boot_outcome)
 
