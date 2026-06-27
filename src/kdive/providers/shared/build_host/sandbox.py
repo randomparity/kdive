@@ -58,11 +58,10 @@ class BuildSandbox:
         # child inherits the root worker's HOME=/root etc., breaking tools that write under $HOME
         # and leaving an incomplete sandbox. Layer the build-user identity over the caller's env
         # (e.g. the hardened git env) rather than discarding it.
-        base = {
-            key: value
-            for key, value in (env if env is not None else os.environ).items()
-            if key not in _CHILD_ENV_DROP
-        }
+        base = dict(env if env is not None else os.environ)
+        base.update(dict.fromkeys(_CHILD_ENV_DROP, ""))
+        for key in _CHILD_ENV_DROP:
+            del base[key]
         base.update(HOME=self.home, USER=self.user_name, LOGNAME=self.user_name)
         return base
 
