@@ -18,10 +18,10 @@ import libvirt
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.build_hosts import BuildHost, BuildHostKind, BuildHostState
-from kdive.diagnostics import buildhost_agent as adapter
 from kdive.diagnostics.checks import BuildHostAgentOutcome
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.build_transport import CommandResult
+from kdive.providers.remote_libvirt.diagnostics import buildhost_agent as adapter
 from kdive.providers.remote_libvirt.lifecycle.readiness import wait_for_agent_responsive
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import libvirt_error

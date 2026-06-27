@@ -29,7 +29,6 @@ from kdive.diagnostics.checks import (
     Check,
     CheckResult,
     CheckStatus,
-    EphemeralLibvirtBuildHostAgentCheck,
     LocalKernelSrcCheck,
     SecretRefCheck,
     Vantage,
@@ -333,8 +332,10 @@ def _build_host_checks(pool: AsyncConnectionPool | None) -> list[Check]:
     ]
 
 
-def _buildhost_agent_check(pool: AsyncConnectionPool | None) -> EphemeralLibvirtBuildHostAgentCheck:
-    """Assemble the opt-in ephemeral build-host agent check; fail fast without a pool (ADR-0167).
+def _buildhost_agent_check(
+    contributions: Sequence[DiagnosticProviderContribution], pool: AsyncConnectionPool | None
+) -> Check:
+    """Assemble the provider-owned build-host agent check; fail fast without a pool (ADR-0167).
 
     The probe enumerates ``ephemeral_libvirt`` hosts and writes reaper markers, both of which need
     the async pool. A requested opt-in without a pool is a configuration error, not a silently
@@ -346,11 +347,14 @@ def _buildhost_agent_check(pool: AsyncConnectionPool | None) -> EphemeralLibvirt
             "enumerate build hosts; none is wired in this deployment (ADR-0167)",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    # Function-local import: diagnostics.buildhost_agent imports providers + db, so a top-level
-    # import here would widen this module's import graph; only needed when opted in.
-    from kdive.diagnostics.buildhost_agent import buildhost_agent_probe
-
-    return EphemeralLibvirtBuildHostAgentCheck(probe=buildhost_agent_probe(pool))
+    for contribution in contributions:
+        if contribution.buildhost_agent_check is not None:
+            return contribution.buildhost_agent_check(pool)
+    raise CategorizedError(
+        "ephemeral_libvirt_buildhost_agent (--with-buildhost-agent) is not provided by any "
+        "diagnostic provider contribution in this deployment",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+    )
 
 
 def _worker_vantage_checks(
@@ -416,7 +420,7 @@ def default_service_factory(
     per_check_timeout = _DEFAULT_PER_CHECK_TIMEOUT
     overall_timeout: float | None = _DEFAULT_OVERALL_TIMEOUT
     if with_buildhost_agent:
-        checks.append(_buildhost_agent_check(pool))
+        checks.append(_buildhost_agent_check(provider_contributions, pool))
         per_check_timeout = _BUILDHOST_AGENT_PER_CHECK_TIMEOUT
         overall_timeout = None
     unavailable_worker_checks: list[WorkerVantageCheck] = []
