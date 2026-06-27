@@ -37,4 +37,4 @@ def default_attach_seam(
     return stage_and_attach(run_id=run_id, attach=attach)
 
 
-__all__ = ["GdbMiEngine", "default_attach_seam"]
+__all__ = ["default_attach_seam"]
