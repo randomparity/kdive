@@ -70,12 +70,17 @@ tool reference (`docs/guide/reference/artifacts.md`) is regenerated.
 
 ### Why 24 KiB
 
-The client ceiling is ~25k tokens. Worst-case expansion for arbitrary redacted log
-bytes is ≈0.336 tokens/byte (ADR-0247's "64 KiB ≈ 16k–22k tokens"). A 24 KiB
-window is ≤ 24576 × 0.336 ≈ 8.3k tokens — about one third of the ceiling, leaving
-ample headroom for the rest of the envelope (the presigned `download_uri` alone is
+The client ceiling is ~25k tokens. The estimate rests on one assumption: the
+REDACTED artifacts `artifacts.get` serves inline are line-oriented text (console,
+redacted dmesg, build-log); SENSITIVE binaries (vmcore/vmlinux) are never inlined
+(ADR-0140/0243). Text keeps JSON escaping near 1:1, so worst-case expansion is
+≈0.336 tokens/byte (ADR-0247's "64 KiB ≈ 16k–22k tokens"). A 24 KiB window is
+≤ 24576 × 0.336 ≈ 8.3k tokens — about one third of the ceiling, leaving ample
+headroom for the rest of the envelope (the presigned `download_uri` alone is
 several hundred tokens) and other content already in the caller's context. 24 KiB
 is also greater than the 16 KiB default, so the default window path is untouched.
+(A future REDACTED artifact kind carrying non-text bytes would JSON-escape at up to
+6 chars/byte and require re-deriving this ceiling — none exists today.)
 
 ## Consequences
 

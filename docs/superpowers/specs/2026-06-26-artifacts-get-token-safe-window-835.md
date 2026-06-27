@@ -59,13 +59,23 @@ as the existing configurable knob that can only lower the window further
 
 ### Why 24 KiB
 
-The client ceiling is ~25k tokens. Worst-case expansion for arbitrary redacted log
-bytes is ≈0.33 tokens/byte (ADR-0247's "64 KiB ≈ 16k–22k tokens", i.e. up to
-≈22000/65536 ≈ 0.336). A 24 KiB window is therefore ≤ 24576 × 0.336 ≈ 8.3k tokens
-worst case — about one third of the ceiling, leaving ample room for the rest of the
-envelope (the presigned `refs.download_uri` is itself several hundred tokens) and
-any other content already in the caller's tool-result. 24 KiB is also > the 16 KiB
-default, so the default window is untouched.
+The client ceiling is ~25k tokens. The estimate below is load-bearing on one
+assumption: **REDACTED artifacts are line-oriented text** — the only REDACTED kinds
+`artifacts.get` serves are the console, the redacted dmesg, and the build-log
+(SENSITIVE binaries like vmcore/vmlinux are never served inline; ADR-0140/0243).
+Text keeps JSON escaping near 1:1 (a printable byte is one JSON char), so the
+token/byte ratio stays low. (A hypothetical REDACTED artifact full of C0 control
+bytes would JSON-escape `\uXXXX` at 6 chars/byte and could blow the estimate — but
+no such artifact kind exists; if one is ever added, this ceiling must be
+re-derived.)
+
+Under that assumption, worst-case expansion is ≈0.33 tokens/byte (ADR-0247's
+"64 KiB ≈ 16k–22k tokens", i.e. up to ≈22000/65536 ≈ 0.336). A 24 KiB window is
+therefore ≤ 24576 × 0.336 ≈ 8.3k tokens worst case — about one third of the
+ceiling, leaving ample room for the rest of the envelope (the presigned
+`refs.download_uri` is itself several hundred tokens) and any other content already
+in the caller's tool-result. 24 KiB is also > the 16 KiB default, so the default
+window is untouched.
 
 ## Behavior
 
@@ -85,8 +95,11 @@ default, so the default window is untouched.
 
 1. `max_bytes=65536` on a >24 KiB redacted artifact returns a window of exactly
    24 KiB, `content_truncated="true"`, `next_offset="24576"`.
-2. Paging from that `next_offset` continues to reach the rest of the object, and
-   concatenating windows reproduces the source bytes.
+2. Paging from that `next_offset` continues to reach the rest of the object. With
+   single-byte (ASCII) fixture content, concatenating the decoded windows
+   reproduces the source; for exact byte-level reconstruction independent of the
+   `errors="replace"` decode at window edges, re-fetch by `byte_offset` (matching
+   ADR-0247's existing paging test).
 3. The default (no `max_bytes`) call still returns a 16 KiB window.
 4. An explicit `max_bytes` below the ceiling (e.g. 8000) is honored exactly.
 5. Lowering `KDIVE_ARTIFACT_INLINE_MAX_BYTES` below 24 KiB still bounds the window
