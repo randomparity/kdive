@@ -157,7 +157,7 @@ def _handle_migrate(
     args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
 ) -> None:
     del args, secret_registry, telemetry
-    from kdive.admin.bootstrap import migrate
+    from kdive.admin.migrations import migrate
 
     migrate()
 
@@ -166,7 +166,7 @@ def _handle_seed_build_configs(
     args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
 ) -> None:
     del args, secret_registry, telemetry
-    from kdive.admin.bootstrap import seed_build_configs_step
+    from kdive.admin.build_configs import seed_build_configs_step
 
     seed_build_configs_step()
 
@@ -177,7 +177,7 @@ def _handle_install_fixtures(
     del secret_registry, telemetry
     from pathlib import Path
 
-    from kdive.admin.bootstrap import install_fixtures
+    from kdive.admin.fixtures import install_fixtures
 
     install_fixtures(Path(args.dest), force=args.force)
 
@@ -188,7 +188,7 @@ def _handle_seed_project(
     del secret_registry, telemetry
     from decimal import Decimal
 
-    from kdive.admin.bootstrap import seed_project
+    from kdive.admin.projects import seed_project
 
     asyncio.run(
         seed_project(
@@ -208,7 +208,7 @@ def _handle_verify_project(
     args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
 ) -> None:
     del secret_registry, telemetry
-    from kdive.admin.bootstrap import format_verify_result, redact_database_url, verify_project
+    from kdive.admin.projects import format_verify_result, redact_database_url, verify_project
     from kdive.db.pool import database_url
 
     status = asyncio.run(verify_project(project=args.project))

@@ -7,11 +7,10 @@ import psycopg
 import pytest
 
 import kdive.config as config
-from kdive.admin.bootstrap import (
-    default_fixture_files,
-    install_fixtures,
-    migrate,
-    seed_build_configs_step,
+from kdive.admin.build_configs import seed_build_configs_step
+from kdive.admin.fixtures import default_fixture_files, install_fixtures
+from kdive.admin.migrations import migrate
+from kdive.admin.projects import (
     seed_project,
     seed_project_statements,
 )
@@ -83,7 +82,7 @@ def test_register_discovered_resources_skips_local_when_disabled(
     # never constructs the local discovery target (which would open the libvirt socket).
     from psycopg_pool import AsyncConnectionPool
 
-    from kdive.admin.bootstrap import register_discovered_resources
+    from kdive.admin.projects import register_discovered_resources
 
     monkeypatch.setenv("KDIVE_LOCAL_LIBVIRT_ENABLED", "false")
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
@@ -220,7 +219,7 @@ def test_seed_build_configs_command_dispatches_to_step(monkeypatch: pytest.Monke
 
     called: list[str] = []
     monkeypatch.setattr(
-        "kdive.admin.bootstrap.seed_build_configs_step",
+        "kdive.admin.build_configs.seed_build_configs_step",
         lambda: called.append("seeded"),
     )
     args = main_mod.build_parser().parse_args(["seed-build-configs"])
@@ -256,7 +255,7 @@ def _seed_rows(url: str, *, budget: bool, quota: bool, project: str = "demo") ->
 
 
 def test_redact_database_url_masks_url_password() -> None:
-    from kdive.admin.bootstrap import redact_database_url
+    from kdive.admin.projects import redact_database_url
 
     secret = "p4ss-w0rd"  # noqa: S105 # pragma: allowlist secret - test literal
     redacted = redact_database_url(f"postgresql://kdive:{secret}@db.example:5432/kdive")
@@ -269,7 +268,7 @@ def test_redact_database_url_masks_url_password() -> None:
 
 
 def test_redact_database_url_leaves_passwordless_url_unchanged() -> None:
-    from kdive.admin.bootstrap import redact_database_url
+    from kdive.admin.projects import redact_database_url
 
     url = "postgresql://kdive@db.example:5432/kdive"
     assert redact_database_url(url) == url
@@ -277,7 +276,7 @@ def test_redact_database_url_leaves_passwordless_url_unchanged() -> None:
 
 
 def test_redact_database_url_blanket_redacts_conninfo_with_password() -> None:
-    from kdive.admin.bootstrap import redact_database_url
+    from kdive.admin.projects import redact_database_url
 
     secret = "s3cr3t"  # noqa: S105 # pragma: allowlist secret - test literal
     # A keyword/value conninfo is redacted wholesale: a token regex would only partially mask a
@@ -293,7 +292,7 @@ def test_redact_database_url_blanket_redacts_conninfo_with_password() -> None:
 
 
 def test_redact_database_url_passwordless_conninfo_unchanged() -> None:
-    from kdive.admin.bootstrap import redact_database_url
+    from kdive.admin.projects import redact_database_url
 
     conninfo = "host=db.example dbname=kdive user=kdive"
     assert redact_database_url(conninfo) == conninfo
@@ -302,7 +301,7 @@ def test_redact_database_url_passwordless_conninfo_unchanged() -> None:
 def test_verify_project_both_rows_present(
     monkeypatch: pytest.MonkeyPatch, migrated_url: str
 ) -> None:
-    from kdive.admin.bootstrap import verify_project
+    from kdive.admin.projects import verify_project
 
     _seed_rows(migrated_url, budget=True, quota=True)
     monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)
@@ -319,7 +318,7 @@ def test_verify_project_both_rows_present(
 
 
 def test_verify_project_missing_budget(monkeypatch: pytest.MonkeyPatch, migrated_url: str) -> None:
-    from kdive.admin.bootstrap import verify_project
+    from kdive.admin.projects import verify_project
 
     _seed_rows(migrated_url, budget=False, quota=True)
     monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)
@@ -333,7 +332,7 @@ def test_verify_project_missing_budget(monkeypatch: pytest.MonkeyPatch, migrated
 
 
 def test_verify_project_missing_quota(monkeypatch: pytest.MonkeyPatch, migrated_url: str) -> None:
-    from kdive.admin.bootstrap import verify_project
+    from kdive.admin.projects import verify_project
 
     _seed_rows(migrated_url, budget=True, quota=False)
     monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)
@@ -347,7 +346,7 @@ def test_verify_project_missing_quota(monkeypatch: pytest.MonkeyPatch, migrated_
 
 
 def test_verify_project_neither_row(monkeypatch: pytest.MonkeyPatch, migrated_url: str) -> None:
-    from kdive.admin.bootstrap import verify_project
+    from kdive.admin.projects import verify_project
 
     monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)
 
@@ -359,7 +358,7 @@ def test_verify_project_neither_row(monkeypatch: pytest.MonkeyPatch, migrated_ur
 
 
 def test_format_verify_result_funded_returns_zero() -> None:
-    from kdive.admin.bootstrap import ProjectFundingStatus, format_verify_result
+    from kdive.admin.projects import ProjectFundingStatus, format_verify_result
 
     status = ProjectFundingStatus(
         budget_present=True,
@@ -424,7 +423,7 @@ def test_verify_project_command_exits_zero_when_seeded(
 
 
 def test_format_verify_result_missing_row_returns_nonzero() -> None:
-    from kdive.admin.bootstrap import ProjectFundingStatus, format_verify_result
+    from kdive.admin.projects import ProjectFundingStatus, format_verify_result
 
     status = ProjectFundingStatus(
         budget_present=False,

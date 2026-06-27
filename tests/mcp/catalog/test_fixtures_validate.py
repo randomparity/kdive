@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from kdive.admin.bootstrap import install_fixtures
+from kdive.admin.fixtures import install_fixtures
 from kdive.mcp.tools.catalog import fixtures
 from tests.mcp.json_data import data_sequence, data_str, json_mapping
 
