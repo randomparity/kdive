@@ -89,7 +89,7 @@ def _resolve_managed_public_key() -> Path:
         ) from exc
 
 
-def _run(argv: list[str], *, stage: str, timeout_s: int) -> None:
+def _run_libguestfs_tool(argv: list[str], *, stage: str, timeout_s: int) -> None:
     """Run a fixed-argv libguestfs tool, mapping failure onto a categorized error."""
     run_guestfs_tool(
         argv,
@@ -101,7 +101,7 @@ def _run(argv: list[str], *, stage: str, timeout_s: int) -> None:
 
 def _real_virt_builder(*, template: str, output: Path) -> None:  # pragma: no cover - live_vm
     """Acquire a base scratch image from a ``virt-builder`` template (the acquire_base seam)."""
-    _run(
+    _run_libguestfs_tool(
         ["virt-builder", template, "--format", "qcow2", "--output", str(output)],
         stage="virt-builder",
         timeout_s=_ACQUIRE_TIMEOUT_S,
@@ -110,7 +110,7 @@ def _real_virt_builder(*, template: str, output: Path) -> None:  # pragma: no co
 
 def _real_virt_customize(qcow2: Path, argv: list[str]) -> None:  # pragma: no cover - live_vm
     """Apply the family's customization argv to the acquired scratch via ``virt-customize``."""
-    _run(
+    _run_libguestfs_tool(
         ["virt-customize", "-a", str(qcow2), *argv],
         stage="virt-customize",
         timeout_s=_CUSTOMIZE_TIMEOUT_S,
@@ -122,12 +122,12 @@ def _real_repack_whole_disk_ext4(*, scratch: Path, qcow2: Path, size: str) -> No
     with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as handle:
         tar_path = Path(handle.name)
     try:
-        _run(
+        _run_libguestfs_tool(
             ["virt-tar-out", "-a", str(scratch), "/", str(tar_path)],
             stage="virt-tar-out",
             timeout_s=_REPACK_TIMEOUT_S,
         )
-        _run(
+        _run_libguestfs_tool(
             [
                 "virt-make-fs",
                 "--type=ext4",

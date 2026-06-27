@@ -63,7 +63,7 @@ _DEFAULT_IMAGE_SIZE = "10G"
 _VIRT_BUILDER_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 
 
-def _run(argv: list[str], *, stage: str, timeout_s: int) -> None:
+def _run_libguestfs_tool(argv: list[str], *, stage: str, timeout_s: int) -> None:
     """Run a fixed-argv libguestfs tool, mapping failure onto a categorized error."""
     run_guestfs_tool(
         argv,
@@ -98,7 +98,7 @@ def _real_virt_builder(
         "--run-command",
         f"systemctl enable {_GUEST_AGENT_PACKAGE}.service",
     ]
-    _run(argv, stage="virt-builder", timeout_s=_VIRT_BUILDER_TIMEOUT_S)
+    _run_libguestfs_tool(argv, stage="virt-builder", timeout_s=_VIRT_BUILDER_TIMEOUT_S)
 
 
 type VirtBuilder = Callable[..., None]
