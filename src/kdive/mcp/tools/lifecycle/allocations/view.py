@@ -7,7 +7,9 @@ import logging
 import math
 from collections.abc import Awaitable, Callable
 
+from psycopg import sql
 from psycopg.rows import dict_row
+from psycopg.sql import Composable
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS
@@ -129,23 +131,21 @@ async def list_allocations(
             after = _decode_ts_uuid_cursor(_ALLOCATIONS_LIST_TAG, cursor)
         except InvalidCursor:
             return _invalid_cursor_error("allocations")
-    filters = ""
+    where_parts: list[Composable] = [sql.SQL("project = %s")]
     params: list[object] = [project]
     if state is not None:
-        filters += " AND state = %s"
+        where_parts.append(sql.SQL("state = %s"))
         params.append(state.value)
     if after is not None:
-        filters += " AND (created_at, id) < (%s, %s)"
+        where_parts.append(sql.SQL("(created_at, id) < (%s, %s)"))
         params.extend(after)
     params.append(capped + 1)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(
-                "SELECT * FROM allocations WHERE project = %s"
-                + filters
-                + " ORDER BY created_at DESC, id DESC LIMIT %s",
-                params,
-            )
+            query = sql.SQL(
+                "SELECT * FROM allocations WHERE {where} ORDER BY created_at DESC, id DESC LIMIT %s"
+            ).format(where=sql.SQL(" AND ").join(where_parts))
+            await cur.execute(query, params)
             rows = await cur.fetchall()
         kept, truncated = _paginate(rows, capped)
         responses: list[ToolResponse] = []
