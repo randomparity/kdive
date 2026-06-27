@@ -82,8 +82,10 @@ with a caller pattern was rejected (ADR): it makes the matched signature ambiguo
 - An unknown/legacy `kind` not in `{console_crash, oops, panic, hung_task}` fails validation at
   create (`bad_expected_boot_failure`); a persisted row carrying an unrecognized kind fails the
   boot matcher closed to "no match" (no exception), the existing defensive behavior.
-- A persisted preset doc missing its `pattern` (corruption) matches nothing — the matcher still
-  guards `pattern` is a non-empty `str`.
+- A persisted preset doc missing its `pattern` (corruption) matches nothing: the matcher guards
+  `isinstance(pattern, str)`, and an empty/whitespace pattern that slips past that is rejected one
+  layer down by `parse_literal_terms` inside `search_text`, which the matcher catches and fails
+  closed to `None`.
 - Redaction and length-bounding are unchanged: matching runs over the already-redacted console
   and the matched line is clipped by `search_text` (ADR-0260).
 
