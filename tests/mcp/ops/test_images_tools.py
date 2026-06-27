@@ -669,7 +669,7 @@ def test_prune_expired_admin_runs_sweep_and_audits(migrated_url: str) -> None:
                 pool, _admin_ctx(), reason="cleanup", image_store=_FakeImageStore()
             )
         assert resp.status not in {"error", "failed"}
-        assert resp.data["pruned"] == "1"
+        assert resp.data["pruned"] == 1
         assert await _image_exists(migrated_url, expired) is False
         audit = await _platform_audit_rows(migrated_url)
         assert audit and audit[0][2] == "images.prune_expired"

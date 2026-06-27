@@ -57,7 +57,7 @@ async def prune_expired(
         async with pool.connection() as conn:
             pruned = await repair_expired_private_images(conn, image_store)
         _log.warning("break-glass prune of %d expired private images by %s", pruned, ctx.principal)
-        return ToolResponse.success(PRUNE_OBJECT_ID, "pruned", data={"pruned": str(pruned)})
+        return ToolResponse.success(PRUNE_OBJECT_ID, "pruned", data={"pruned": pruned})
 
 
 def _ceiling(now: datetime) -> datetime:

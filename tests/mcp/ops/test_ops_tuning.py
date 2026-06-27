@@ -286,7 +286,7 @@ def test_set_capacity_updates_capabilities_jsonb(migrated_url: str) -> None:
                 pool, _OPERATOR, resource_id=str(res), concurrent_allocation_cap=2
             )
             assert resp.status == "ok"
-            assert resp.data[CONCURRENT_ALLOCATION_CAP_KEY] == "2"
+            assert resp.data[CONCURRENT_ALLOCATION_CAP_KEY] == 2
             async with pool.connection() as conn:
                 row = await RESOURCES.get(conn, res)
             assert row is not None
