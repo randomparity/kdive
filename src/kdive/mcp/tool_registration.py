@@ -10,9 +10,9 @@ from opentelemetry import metrics
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.diagnostics.service import DiagnosticsService, default_service_factory
-from kdive.mcp.envelope_schema import registered_tools
 from kdive.mcp.prompts import registrar as lifecycle_prompts
 from kdive.mcp.resources import registrar as doc_resources
+from kdive.mcp.schema_advertising import registered_tools
 from kdive.mcp.tools import jobs
 from kdive.mcp.tools.accounting.admin import register as register_accounting_admin
 from kdive.mcp.tools.accounting.estimate import register as register_accounting_estimate

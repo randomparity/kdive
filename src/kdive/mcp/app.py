@@ -9,8 +9,6 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.auth import build_verifier
-from kdive.mcp.envelope_schema import advertise_envelope_output_schema
-from kdive.mcp.handler_registration import HANDLER_REGISTRARS, WorkerHandlerAssembly
 from kdive.mcp.middleware import (
     BindingErrorMiddleware,
     DenialAuditMiddleware,
@@ -18,7 +16,9 @@ from kdive.mcp.middleware import (
     ToolExposureMiddleware,
     UsageTrackingMiddleware,
 )
+from kdive.mcp.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.tool_registration import PLANE_REGISTRARS, AppAssembly
+from kdive.mcp.worker_registration import HANDLER_REGISTRARS, WorkerHandlerAssembly
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import build_object_store_assembly

@@ -12,9 +12,9 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.mcp.app as app_module
-import kdive.mcp.envelope_schema as envelope_module
-import kdive.mcp.handler_registration as handler_module
+import kdive.mcp.schema_advertising as envelope_module
 import kdive.mcp.tool_registration as tool_module
+import kdive.mcp.worker_registration as handler_module
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.models import HandlerRegistry
