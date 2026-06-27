@@ -22,7 +22,6 @@ from kdive.mcp.tools.catalog import (
     availability,
     build_configs,
     fixtures,
-    investigations,
     resources,
     shapes,
 )
@@ -32,6 +31,7 @@ from kdive.mcp.tools.debug import introspect
 from kdive.mcp.tools.debug import sessions as debug_tools
 from kdive.mcp.tools.identity import projects, session
 from kdive.mcp.tools.lifecycle import control as control_tools
+from kdive.mcp.tools.lifecycle import investigations
 from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
 from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_tools
 from kdive.mcp.tools.lifecycle.runs import registrar as runs_tools

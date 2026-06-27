@@ -30,7 +30,7 @@ from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
 from kdive.mcp.tools._idempotency import keyed_mutation
-from kdive.mcp.tools.catalog.investigations_view import (
+from kdive.mcp.tools.lifecycle.investigations_view import (
     attachments_for_investigations,
     envelope_for_investigation,
     investigation_envelope,

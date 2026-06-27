@@ -14,7 +14,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT
-from kdive.mcp.tools.catalog.investigations_handlers import (
+from kdive.mcp.tools.lifecycle.investigations_handlers import (
     ExternalRefInput,
     ExternalRefKey,
     close_investigation,

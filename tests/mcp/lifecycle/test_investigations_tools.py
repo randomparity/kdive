@@ -15,8 +15,8 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import InvestigationState
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.catalog import investigations_handlers as inv_tools
-from kdive.mcp.tools.catalog import investigations_view as inv_view
+from kdive.mcp.tools.lifecycle import investigations_handlers as inv_tools
+from kdive.mcp.tools.lifecycle import investigations_view as inv_view
 from kdive.security.authz.rbac import AuthorizationError, Role
 from tests.db_waits import wait_until_any_backend_waiting
 
