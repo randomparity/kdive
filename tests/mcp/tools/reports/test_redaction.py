@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from kdive.mcp.tools.reports.generate import _normalized_report
 from kdive.security.secrets.redaction import REDACTION, Redactor
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.reports.core import Report, Section
 from kdive.services.reports.render import render_csv, render_xlsx
 
@@ -24,7 +25,7 @@ def _report_with_secret() -> Report:
 
 
 def test_normalized_report_redacts_registered_secret() -> None:
-    redactor = Redactor(secret_values=[_SECRET])
+    redactor = Redactor(secret_values=[_SECRET], registry=SecretRegistry())
     redacted = _normalized_report(_report_with_secret(), redactor)
     note = redacted.sections[0].rows[0]["note"]
     assert isinstance(note, str)
@@ -33,7 +34,7 @@ def test_normalized_report_redacts_registered_secret() -> None:
 
 
 def test_secret_absent_from_rendered_artifacts() -> None:
-    redactor = Redactor(secret_values=[_SECRET])
+    redactor = Redactor(secret_values=[_SECRET], registry=SecretRegistry())
     redacted = _normalized_report(_report_with_secret(), redactor)
     assert _SECRET.encode() not in render_csv(redacted)["inventory"]
     assert _SECRET.encode() not in render_xlsx(redacted)

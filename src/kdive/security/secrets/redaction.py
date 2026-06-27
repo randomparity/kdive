@@ -1,9 +1,9 @@
 """Value/pattern redaction for the return/persistence and logging paths (ADR-0027).
 
-Ported from the PoC ``kdive.safety.redaction``. Runtime code should pass the
-app-owned ``SecretRegistry`` so ``Redactor`` and ``SecretRedactionFilter`` share
-the same source of registered values. ``PROCESS_SECRET_REGISTRY`` remains the
-default for tests and small CLI helpers.
+Ported from the PoC ``kdive.safety.redaction``. Runtime code passes the app-owned
+``SecretRegistry`` so ``Redactor`` and ``SecretRedactionFilter`` share the same
+source of registered values. Tests and small CLI helpers that intentionally use the
+process-global registry call :func:`process_global_redactor`.
 """
 
 from __future__ import annotations
@@ -56,9 +56,8 @@ class Redactor:
         self,
         secret_values: list[str] | None = None,
         *,
-        registry: SecretRegistry | None = None,
+        registry: SecretRegistry,
     ) -> None:
-        registry = PROCESS_SECRET_REGISTRY if registry is None else registry
         merged = [*registry.snapshot(), *(secret_values or [])]
         self._secret_values = [value for value in merged if value]
         secret_name = r"[A-Za-z0-9_-]*(?:password|passwd|token|api[_-]?key|secret)[A-Za-z0-9_-]*"
@@ -93,6 +92,11 @@ class Redactor:
         if isinstance(value, tuple):
             return tuple(self.redact_value(item) for item in value)
         return value
+
+
+def process_global_redactor(secret_values: list[str] | None = None) -> Redactor:
+    """Build a redactor from the process-global registry for tests and CLI helpers."""
+    return Redactor(secret_values, registry=PROCESS_SECRET_REGISTRY)
 
 
 class SecretRedactionFilter(logging.Filter):

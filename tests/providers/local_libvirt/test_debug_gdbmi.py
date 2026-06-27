@@ -102,7 +102,7 @@ def _attachment(controller: _FakeMiController, tmp_path: Path) -> GdbMiAttachmen
 
 
 def _engine(redactor: Redactor | None = None) -> GdbMiEngine:
-    return GdbMiEngine(redactor=redactor or Redactor())
+    return GdbMiEngine(redactor=redactor or Redactor(registry=SecretRegistry()))
 
 
 class _ExecutionEngine:
@@ -549,7 +549,7 @@ def test_read_memory_bytes_are_verbatim_not_redacted(tmp_path: Path) -> None:
     secret_hex = secret.encode().hex()
     byte_count = len(secret)
     controller = _memory_controller(0x4000, byte_count, secret_hex)
-    engine = _engine(Redactor(secret_values=[secret]))
+    engine = _engine(Redactor(secret_values=[secret], registry=SecretRegistry()))
     blob = engine.read_memory(
         _attachment(controller, tmp_path), address=0x4000, byte_count=byte_count
     )
@@ -559,7 +559,7 @@ def test_read_memory_bytes_are_verbatim_not_redacted(tmp_path: Path) -> None:
 def test_read_memory_transcript_line_is_redacted(tmp_path: Path) -> None:
     secret = "transcriptsecret"  # pragma: allowlist secret - fake test value
     attachment = _attachment(_memory_controller(0x5000, 4, "00112233"), tmp_path)
-    engine = _engine(Redactor(secret_values=[secret]))
+    engine = _engine(Redactor(secret_values=[secret], registry=SecretRegistry()))
     engine.append_transcript(
         attachment.transcript_path,
         "-break-insert panic",
@@ -601,7 +601,7 @@ def test_append_transcript_creates_parent_and_redacts_jsonl(tmp_path: Path) -> N
         transcript_path=transcript_path,
         command="<read>",
         records=[MiRecord(type="console", payload=f"loaded {secret}")],
-        redactor=Redactor(secret_values=[secret]),
+        redactor=Redactor(secret_values=[secret], registry=SecretRegistry()),
     )
 
     line = transcript_path.read_text(encoding="utf-8").strip()
@@ -1043,7 +1043,7 @@ def test_resolve_symbol_rejects_unparseable_value_and_redacts_it(tmp_path: Path)
             ]
         }
     )
-    engine = _engine(Redactor(secret_values=[secret]))
+    engine = _engine(Redactor(secret_values=[secret], registry=SecretRegistry()))
     with pytest.raises(CategorizedError) as exc:
         engine.resolve_symbol(_attachment(controller, tmp_path), "s")
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE

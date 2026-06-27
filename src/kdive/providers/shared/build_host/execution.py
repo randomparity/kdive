@@ -54,6 +54,7 @@ def redact_and_cap(
     end of build output, so a head cap would discard exactly the bytes an agent needs.
     """
     combined = (stdout or "") + (stderr or "")
+    registry = registry or SecretRegistry()
     redacted = Redactor(registry=registry).redact_text(combined)
     return redacted[-BUILD_LOG_TAIL_BYTES:]
 
