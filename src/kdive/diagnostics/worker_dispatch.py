@@ -124,15 +124,33 @@ class JobWorkerCheckDispatcher:
         # synthetic `diagnostics` principal rather than threading the per-request operator identity
         # into this registration-time-built dispatcher. The provider id doubles as the (non-tenant)
         # project so the row is not scoped to any real project's `recent_jobs` view.
-        job = await self._enqueue(
-            dedup_key,
-            DiagnosticsWorkerCheckPayload(provider=self._provider),
-            Authorizing(principal="diagnostics", project=self._provider),
-        )
+        try:
+            job = await self._enqueue(
+                dedup_key,
+                DiagnosticsWorkerCheckPayload(provider=self._provider),
+                Authorizing(principal="diagnostics", project=self._provider),
+            )
+        except Exception:
+            _log.exception("diagnostics worker-check job enqueue failed (dedup_key=%s)", dedup_key)
+            return _unavailable(
+                "diagnostics worker job queue is unavailable",
+                _INFRASTRUCTURE_FAILURE,
+                provider=self._provider,
+                check_ids=self._worker_check_ids,
+            )
         _log.info("diagnostics worker-check job %s enqueued (dedup_key=%s)", job.id, dedup_key)
         start = self._clock()
         while True:
-            current = await self._get(dedup_key)
+            try:
+                current = await self._get(dedup_key)
+            except Exception:
+                _log.exception("diagnostics worker-check job poll failed (dedup_key=%s)", dedup_key)
+                return _unavailable(
+                    "diagnostics worker job queue is unavailable",
+                    _INFRASTRUCTURE_FAILURE,
+                    provider=self._provider,
+                    check_ids=self._worker_check_ids,
+                )
             if current is not None and current.state in _TERMINAL:
                 return self._from_terminal(current)
             remaining = self._budget - (self._clock() - start)

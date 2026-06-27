@@ -114,6 +114,54 @@ def test_malformed_result_maps_to_error() -> None:
     assert all(r.status is CheckStatus.ERROR for r in results)
 
 
+def test_enqueue_failure_maps_to_infrastructure_error() -> None:
+    queue = _FakeQueue([])
+
+    async def _raise_enqueue(
+        _dedup_key: str, _payload: DiagnosticsWorkerCheckPayload, _authorizing: Authorizing
+    ) -> _FakeJob:
+        raise OSError("database unavailable")
+
+    dispatcher = JobWorkerCheckDispatcher(
+        pool=None,
+        provider="remote-libvirt",
+        worker_check_ids=(PROVIDER_TLS_ID, GDBSTUB_ACL_ID),
+        enqueue_fn=_raise_enqueue,  # ty: ignore[invalid-argument-type]
+        get_fn=queue.get_by_dedup_key,  # ty: ignore[invalid-argument-type]
+        dedup_suffix="fixed",
+    )
+
+    results = asyncio.run(dispatcher.run_worker_checks())
+
+    assert all(r.status is CheckStatus.ERROR for r in results)
+    assert all(r.failure_category is ErrorCategory.INFRASTRUCTURE_FAILURE for r in results)
+    assert all(r.detail == "diagnostics worker job queue is unavailable" for r in results)
+
+
+def test_poll_failure_maps_to_infrastructure_error() -> None:
+    queue = _FakeQueue([])
+
+    async def _raise_get(_dedup_key: str) -> _FakeJob | None:
+        raise OSError("database unavailable")
+
+    dispatcher = JobWorkerCheckDispatcher(
+        pool=None,
+        provider="remote-libvirt",
+        worker_check_ids=(PROVIDER_TLS_ID, GDBSTUB_ACL_ID),
+        enqueue_fn=queue.enqueue,  # ty: ignore[invalid-argument-type]
+        get_fn=_raise_get,  # ty: ignore[invalid-argument-type]
+        clock=lambda: 0.0,
+        sleep_fn=_noop_sleep,
+        dedup_suffix="fixed",
+    )
+
+    results = asyncio.run(dispatcher.run_worker_checks())
+
+    assert all(r.status is CheckStatus.ERROR for r in results)
+    assert all(r.failure_category is ErrorCategory.INFRASTRUCTURE_FAILURE for r in results)
+    assert all(r.detail == "diagnostics worker job queue is unavailable" for r in results)
+
+
 def test_pending_then_budget_exhausted_returns_worker_unavailable() -> None:
     queue = _FakeQueue([_FakeJob(JobState.QUEUED)])
     # start clock=0.0; after one pending read, clock=100.0 exceeds budget -> WORKER_UNAVAILABLE
