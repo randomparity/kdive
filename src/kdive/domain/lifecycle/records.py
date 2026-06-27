@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from kdive.domain._records import DomainBase, DomainModel
 from kdive.domain.capacity.state import (
@@ -18,6 +18,7 @@ from kdive.domain.capacity.state import (
 )
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lifecycle.crash_signatures import CRASH_SIGNATURE_PRESETS
 from kdive.domain.lifecycle.sizing import MB_PER_GB
 from kdive.domain.pcie import PCIeClaim
 from kdive.domain.profile_documents import (
@@ -91,11 +92,37 @@ class Investigation(DomainModel, Attribution):
 
 
 class ExpectedBootFailure(DomainBase):
-    """Run-scoped expected boot failure metadata (ADR-0064)."""
+    """Run-scoped expected boot failure metadata (ADR-0064, ADR-0266).
 
-    kind: Literal["console_crash"]
+    ``kind`` is either the custom-pattern lane ``console_crash`` (the caller supplies
+    ``pattern``) or one of the named presets ``oops``/``panic``/``hung_task``, which resolve to a
+    canonical literal console pattern (`crash_signatures.CRASH_SIGNATURE_PRESETS`). A preset takes
+    no ``pattern``; supplying both is rejected. The resolved doc keeps the preset name and the
+    canonical pattern, so the record states which signature the Run was matched against.
+
+    This model validates the incoming request once and is then persisted as serialized JSON
+    (``SerializedExpectedBootFailure``); ``Run.expected_boot_failure`` holds that raw object, not
+    a re-parsed model. The model is therefore *not* idempotent under re-validation: feeding a
+    persisted preset doc (which carries both the preset ``kind`` and its resolved ``pattern``)
+    back through it is rejected by ``_resolve_preset``. Do not re-validate stored docs through
+    this model — match on the raw dict, as ``expected_crash_matched_line`` does.
+    """
+
+    kind: Literal["console_crash", "oops", "panic", "hung_task"]
     pattern: str = Field(min_length=1, max_length=256)
     description: str | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_preset(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        kind = data.get("kind")
+        if not (isinstance(kind, str) and kind in CRASH_SIGNATURE_PRESETS):
+            return data
+        if data.get("pattern") is not None:
+            raise ValueError("preset kind does not accept a custom pattern; use console_crash")
+        return {**data, "pattern": CRASH_SIGNATURE_PRESETS[kind]}
 
     @field_validator("pattern")
     @classmethod

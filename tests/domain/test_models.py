@@ -29,6 +29,7 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.artifacts import Artifact, Sensitivity
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lifecycle.crash_signatures import CRASH_SIGNATURE_PRESETS
 from kdive.domain.lifecycle.records import (
     Allocation,
     DebugSession,
@@ -223,6 +224,49 @@ def test_expected_boot_failure_model_and_run_field() -> None:
         "pattern": "__d_lookup|Oops",
         "description": "dcache one-bucket hash crash",
     }
+
+
+@pytest.mark.parametrize(
+    ("preset", "expected_pattern"),
+    [
+        ("panic", "Kernel panic"),
+        ("oops", CRASH_SIGNATURE_PRESETS["oops"]),
+        ("hung_task", CRASH_SIGNATURE_PRESETS["hung_task"]),
+    ],
+)
+def test_expected_boot_failure_preset_resolves_to_canonical_pattern(
+    preset: str, expected_pattern: str
+) -> None:
+    model = ExpectedBootFailure.model_validate({"kind": preset})
+    assert model.kind == preset
+    assert model.pattern == expected_pattern
+
+
+def test_expected_boot_failure_preset_keeps_description() -> None:
+    model = ExpectedBootFailure.model_validate({"kind": "panic", "description": "init death"})
+    assert model.pattern == "Kernel panic"
+    assert model.description == "init death"
+
+
+def test_expected_boot_failure_preset_rejects_custom_pattern() -> None:
+    with pytest.raises(ValidationError):
+        ExpectedBootFailure.model_validate({"kind": "panic", "pattern": "Kernel panic"})
+
+
+def test_expected_boot_failure_console_crash_still_requires_pattern() -> None:
+    with pytest.raises(ValidationError):
+        ExpectedBootFailure.model_validate({"kind": "console_crash"})
+
+
+def test_expected_boot_failure_console_crash_pattern_round_trips() -> None:
+    model = ExpectedBootFailure.model_validate({"kind": "console_crash", "pattern": "Oops"})
+    assert model.kind == "console_crash"
+    assert model.pattern == "Oops"
+
+
+def test_expected_boot_failure_unknown_kind_rejected() -> None:
+    with pytest.raises(ValidationError):
+        ExpectedBootFailure.model_validate({"kind": "exit_code", "pattern": "x"})
 
 
 def test_debug_session_fields() -> None:

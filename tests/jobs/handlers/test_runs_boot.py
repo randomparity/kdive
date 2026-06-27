@@ -76,6 +76,34 @@ def test_expected_crash_none_for_non_console_crash_kind() -> None:
     assert boot_evidence.expected_crash_matched_line(run, _CONSOLE) is None
 
 
+def test_expected_crash_matches_resolved_panic_preset() -> None:
+    # A persisted preset doc carries its resolved canonical pattern; the matcher treats a preset
+    # kind identically to console_crash (ADR-0266).
+    console = b"line1\nKernel panic - not syncing: Attempted to kill init!\nline3\n"
+    run = cast(Run, _FakeRun({"kind": "panic", "pattern": "Kernel panic"}))
+    matched = boot_evidence.expected_crash_matched_line(run, console)
+    assert matched == "Kernel panic - not syncing: Attempted to kill init!"
+
+
+def test_expected_crash_matches_resolved_oops_preset_el8_wording() -> None:
+    console = b"prior\nBUG: unable to handle kernel paging request at 0000000000000010\nafter\n"
+    run = cast(
+        Run,
+        _FakeRun(
+            {
+                "kind": "oops",
+                "pattern": (
+                    "Oops:|BUG: unable to handle page fault for address"
+                    "|BUG: kernel NULL pointer dereference|BUG: unable to handle kernel"
+                    "|kernel BUG at"
+                ),
+            }
+        ),
+    )
+    matched = boot_evidence.expected_crash_matched_line(run, console)
+    assert matched == "BUG: unable to handle kernel paging request at 0000000000000010"
+
+
 def test_expected_crash_none_when_pattern_is_not_a_string() -> None:
     run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": 123}))
     assert boot_evidence.expected_crash_matched_line(run, _CONSOLE) is None

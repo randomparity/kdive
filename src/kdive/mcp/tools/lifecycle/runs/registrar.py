@@ -99,12 +99,15 @@ class _RunsCreatePayload(ToolPayload):
     expected_boot_failure: ExpectedBootFailureInput | None = Field(
         default=None,
         description=(
-            "Optional declared boot crash, e.g. "
-            "{'kind':'console_crash','pattern':'Unable to handle kernel'}. The pattern is matched "
-            "as a case-sensitive literal substring (not a regex), tested line-by-line against the "
-            "redacted console log; a single line containing the substring is a match. Use '|' to "
-            "OR alternatives (e.g. 'Oops|Unable to handle kernel') - up to 16 terms, 256 "
-            "characters total, each term non-empty. A match makes the expected crash the Run's "
+            "Optional declared boot crash. Use a named preset for a maintained, version- and "
+            "arch-robust signature: {'kind':'panic'}, {'kind':'oops'}, or {'kind':'hung_task'} - "
+            "a preset takes no 'pattern' and expands to a canonical kernel console signature. "
+            "For a custom signature use {'kind':'console_crash','pattern':'Unable to handle "
+            "kernel'}; a preset and a custom 'pattern' are mutually exclusive. The pattern is "
+            "matched as a case-sensitive literal substring (not a regex), tested line-by-line "
+            "against the redacted console log; a single line containing the substring is a match. "
+            "Use '|' to OR alternatives (e.g. 'Oops|Unable to handle kernel') - up to 16 terms, "
+            "256 characters total, each term non-empty. A match makes the expected crash the Run's "
             "success outcome."
         ),
     )

@@ -197,3 +197,15 @@ def test_parse_expected_boot_failure_invalid_dict_rejected() -> None:
         _parse_expected_boot_failure("obj", {"kind": "not-a-real-kind"})
     assert exc.value.object_id == "obj"
     assert exc.value.details == {"reason": "bad_expected_boot_failure"}
+
+
+def test_parse_expected_boot_failure_preset_resolves_to_canonical_pattern() -> None:
+    result = _parse_expected_boot_failure("obj", {"kind": "panic"})
+    assert result == {"kind": "panic", "pattern": "Kernel panic"}
+
+
+def test_parse_expected_boot_failure_preset_with_custom_pattern_rejected() -> None:
+    with pytest.raises(RunCreateError) as exc:
+        _parse_expected_boot_failure("obj", {"kind": "panic", "pattern": "Kernel panic"})
+    assert exc.value.object_id == "obj"
+    assert exc.value.details == {"reason": "bad_expected_boot_failure"}
