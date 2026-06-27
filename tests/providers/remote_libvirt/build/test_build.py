@@ -40,6 +40,10 @@ from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
 from kdive.providers.shared.build_host import execution as build_host_execution
 from kdive.providers.shared.build_host.configuration import config as build_host_config
 from kdive.providers.shared.build_host.execution import CapturedStep
+from kdive.providers.shared.build_host.publishing.artifact_publish import (
+    ArtifactBytes,
+    ArtifactSource,
+)
 from kdive.providers.shared.build_host.publishing.kernel_bundle import local_kernel_bundle
 from kdive.providers.shared.build_host.workspaces import workspace as build_host_workspace
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -147,14 +151,14 @@ class _Seams:
         self.call_order.append("modules_install")
         return self.modules_install_returncode
 
-    def make_bundle(self, workspace: Path, mod_root: Path) -> build_module.ArtifactSource:
+    def make_bundle(self, workspace: Path, mod_root: Path) -> ArtifactSource:
         self.call_order.append("bundle")
         self.bundle_args.append((workspace, mod_root))
-        return build_module.ArtifactBytes(self.bundle_bytes)
+        return ArtifactBytes(self.bundle_bytes)
 
-    def read_vmlinux_source(self, workspace: Path) -> build_module.ArtifactSource:
+    def read_vmlinux_source(self, workspace: Path) -> ArtifactSource:
         self.vmlinux_workspaces.append(workspace)
-        return build_module.ArtifactBytes(b"vmlinux-bytes")
+        return ArtifactBytes(b"vmlinux-bytes")
 
     def read_build_id(self, workspace: Path) -> str:
         self.build_id_workspaces.append(workspace)
@@ -418,8 +422,8 @@ def test_validate_config_ref_rejects_file_outside_roots(tmp_path: Path) -> None:
         read_config=lambda _w: _GOOD_CONFIG,
         run_make=lambda _w: CapturedStep(0, ""),
         run_modules_install=lambda _w, _m: 0,
-        make_bundle=lambda _w, _m: build_module.ArtifactBytes(b"b"),
-        read_vmlinux_source=lambda _w: build_module.ArtifactBytes(b"v"),
+        make_bundle=lambda _w, _m: ArtifactBytes(b"b"),
+        read_vmlinux_source=lambda _w: ArtifactBytes(b"v"),
         read_build_id=lambda _w: "deadbeef",
         staging_factory=lambda: _make_staging(tmp_path),
         catalog_fetch=lambda _name: _FRAGMENT_BYTES,
@@ -448,8 +452,8 @@ def test_validate_config_ref_accepts_file_inside_roots(tmp_path: Path) -> None:
         read_config=lambda _w: _GOOD_CONFIG,
         run_make=lambda _w: CapturedStep(0, ""),
         run_modules_install=lambda _w, _m: 0,
-        make_bundle=lambda _w, _m: build_module.ArtifactBytes(b"b"),
-        read_vmlinux_source=lambda _w: build_module.ArtifactBytes(b"v"),
+        make_bundle=lambda _w, _m: ArtifactBytes(b"b"),
+        read_vmlinux_source=lambda _w: ArtifactBytes(b"v"),
         read_build_id=lambda _w: "deadbeef",
         staging_factory=lambda: _make_staging(tmp_path),
         catalog_fetch=lambda _name: _FRAGMENT_BYTES,

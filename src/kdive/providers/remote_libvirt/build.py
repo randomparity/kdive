@@ -271,9 +271,6 @@ def _real_staging_factory() -> Path:  # pragma: no cover - live_vm
 
 
 __all__ = [
-    "ArtifactBytes",
-    "ArtifactRemoteFile",
-    "ArtifactSource",
     "RemoteLibvirtBuild",
     "transport_vmlinux_source",
 ]
