@@ -161,9 +161,9 @@ def test_list_returns_seed_sorted(migrated_url: str) -> None:
         assert resp.data["count"] == 4
         assert [item.object_id for item in resp.items] == _SEED_NAMES
         small = next(item for item in resp.items if item.object_id == "small")
-        assert small.data["vcpus"] == "1"
-        assert small.data["memory_mb"] == "1024"
-        assert small.data["disk_gb"] == "10"
+        assert small.data["vcpus"] == 1
+        assert small.data["memory_mb"] == 1024
+        assert small.data["disk_gb"] == 10
 
     asyncio.run(_run())
 

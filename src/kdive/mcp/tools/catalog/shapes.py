@@ -26,6 +26,7 @@ accountability rule, ADR-0043 §4). Only a successful mutation writes a success 
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated
 
@@ -45,6 +46,7 @@ from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.security import audit
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
+from kdive.serialization import JsonValue
 
 if TYPE_CHECKING:
     from kdive.security.authz.context import RequestContext
@@ -195,12 +197,12 @@ def _shape_envelope(shape: SystemShape) -> ToolResponse:
     )
 
 
-def _shape_args(shape: SystemShape) -> dict[str, str]:
-    data = {
+def _shape_args(shape: SystemShape) -> dict[str, JsonValue]:
+    data: dict[str, JsonValue] = {
         "name": shape.name,
-        "vcpus": str(shape.vcpus),
-        "memory_mb": str(shape.memory_mb),
-        "disk_gb": str(shape.disk_gb),
+        "vcpus": shape.vcpus,
+        "memory_mb": shape.memory_mb,
+        "disk_gb": shape.disk_gb,
     }
     if shape.pcie_match is not None:
         data["pcie_match"] = shape.pcie_match
@@ -212,7 +214,7 @@ async def _audit_applied(
     ctx: RequestContext,
     tool: str,
     name: str,
-    values: dict[str, str],
+    values: Mapping[str, object],
 ) -> None:
     await audit.record_platform(
         conn,
