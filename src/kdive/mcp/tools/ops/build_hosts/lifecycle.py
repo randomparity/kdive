@@ -42,13 +42,13 @@ from kdive.mcp.tools._platform_auth import (
     held_platform_roles,
 )
 from kdive.mcp.tools.ops import _reads
+from kdive.providers.assembly.build_hosts import declared_remote_instance_names
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
 from kdive.services.runs.build_host_selection import (
     accepted_source_kinds,
     build_host_resolves,
-    declared_remote_instance_names,
 )
 
 _log = logging.getLogger(__name__)

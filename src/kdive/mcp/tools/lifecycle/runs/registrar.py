@@ -46,10 +46,10 @@ from kdive.profiles.build import (
     dump_build_profile,
 )
 from kdive.profiles.types import BuildProfileInput, ExpectedBootFailureInput
+from kdive.providers.assembly.build_hosts import declared_remote_instance_names
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security.authz.rbac import Role
-from kdive.services.runs.build_host_selection import declared_remote_instance_names
 
 
 def register(
