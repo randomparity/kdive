@@ -32,6 +32,28 @@ ref and already report `{remote, ref, resolved_commit, build_host}`.
 6. Docs state the warm-tree lane builds working-tree state (not HEAD) and define
    `resolved_commit`/`dirty`/`tree_sha`.
 
+### Scope of the dirty/tree_sha guarantee (deliberate limits)
+
+These bound what `dirty=false` and `tree_sha` actually promise; both are stated in the docs so
+an agent does not over-trust them:
+
+- **git-tracked state only.** `git status --porcelain` and `git stash create` ignore
+  gitignored paths, but the warm-tree rsync (`rsync -a --delete`, no excludes) mirrors the
+  **whole** directory — including gitignored content. So a staged tree that differs from
+  `resolved_commit` only in gitignored files (e.g. a modified `.config`, or stale `.o` build
+  objects an incremental `make` could reuse) reports `dirty=false` with no `tree_sha`.
+  `dirty=false` therefore means "no **tracked** changes," **not** "byte-identical to a clean
+  checkout of `resolved_commit`." Using `--ignored` was rejected: any operator tree carrying
+  build output would then read `dirty=true` always (noise), and a full-content digest of the
+  mirrored bytes was rejected in the ADR for cost.
+- **Probed at build-completion, from the live staged tree.** Provenance is read from
+  `$KDIVE_KERNEL_SRC` after the build returns (the existing `resolved_commit` timing), not from
+  the rsync snapshot taken at build start. For the single-actor agent flow (edit tree → build,
+  nothing else touches it) this equals what was built. If the staged tree is mutated **during**
+  a build, provenance describes the post-build tree, which may differ from what was compiled.
+  Capturing at sync time is out of scope (it would thread provenance through the builder
+  protocol; the issue asks only to disambiguate dirty builds).
+
 ## Provenance shapes (after this change)
 
 | Staged tree | `build_provenance` |
@@ -48,8 +70,8 @@ ref and already report `{remote, ref, resolved_commit, build_host}`.
 ## Success criteria (falsifiable)
 
 - A staged git tree with an uncommitted edit to a tracked file yields
-  `dirty=true` and a `tree_sha` that differs from the `resolved_commit`'s own tree and is
-  stable across two builds of identical content.
+  `dirty=true` and a `tree_sha` that differs from `git rev-parse <resolved_commit>^{tree}` (the
+  commit's tree, not the commit SHA) and is stable across two builds of identical content.
 - The same tree committed (clean) yields `dirty=false` and no `tree_sha`.
 - A staged git tree with only an untracked new file yields `dirty=true` and no `tree_sha`.
 - A non-git staged tree yields `{label}` only.

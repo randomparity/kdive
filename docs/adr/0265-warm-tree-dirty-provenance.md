@@ -82,6 +82,20 @@ No schema, migration, RBAC, or config change.
   deliberate cost/honesty trade (see rejected alternatives): the common agent edit is to a
   tracked source file, `dirty` still tells the agent the build is not `resolved_commit`, and
   capturing untracked content would require walking and hashing the whole tree.
+- **`dirty`/`tree_sha` cover git-tracked state only; gitignored content is invisible.** The
+  warm-tree rsync (`rsync -a --delete`, no excludes) mirrors the whole directory, but
+  `git status --porcelain` and `git stash create` ignore gitignored paths. So a staged tree
+  diverging from `resolved_commit` only in gitignored files — a modified `.config`, or stale
+  `.o` objects an incremental `make` could reuse — reports `dirty=false`. `dirty=false` means
+  "no **tracked** changes," not "byte-identical to a clean `resolved_commit` checkout." Using
+  `--ignored` was rejected (any tree carrying build output would read `dirty=true` always); the
+  full mirrored-content digest was rejected for cost (below). The limit is documented in the
+  spec and the warm-tree prose so an agent does not over-trust `dirty=false`.
+- **Provenance is probed at build-completion from the live staged tree**, not from the rsync
+  snapshot taken at build start — the same timing `resolved_commit` already has. For the
+  single-actor agent flow (edit → build, nothing else touches the tree) this equals what was
+  built; a concurrent mutation of `$KDIVE_KERNEL_SRC` during a build would make provenance
+  describe the post-build tree. Capturing at sync time is out of scope here.
 - The provenance value type widens to `dict[str, str | bool]`; a persisted provenance with a
   malformed (non-`str`/`bool`) value degrades to `None`, same failure posture as the prior
   str-only coercion.
