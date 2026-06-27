@@ -2,9 +2,8 @@
 
 Binds the generic, dependency-set-agnostic :mod:`kdive.health` primitives to the
 server's concrete backends: a Postgres ``SELECT 1`` over the shared pool and an OIDC
-discovery/JWKS reachability ``GET``. Kept out of :mod:`kdive.health` so that package
-stays free of server-stack imports (the worker/reconciler reuse it with their own
-probes in issue #267).
+discovery/JWKS reachability ``GET``. The process-specific package keeps those backend
+imports out of the reusable health primitives.
 """
 
 from __future__ import annotations

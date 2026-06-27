@@ -1,8 +1,8 @@
 """Worker/reconciler readiness probe wiring (ADR-0090 §5).
 
 Binds the dependency-set-agnostic :mod:`kdive.health` primitives to the worker's and
-reconciler's concrete backends — Postgres + MinIO, **no OIDC** — kept out of
-:mod:`kdive.health` so that package stays free of server-stack imports.
+reconciler's concrete backends — Postgres + MinIO, **no OIDC** — through the
+process-specific health package.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 
 from kdive.health.probe import HealthProbe
-from kdive.process_health.worker import build_worker_probe
+from kdive.health.processes.worker import build_worker_probe
 
 
 class _FakeStore:

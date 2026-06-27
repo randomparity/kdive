@@ -11,7 +11,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.process_health import server
+from kdive.health.processes import server
 
 
 def test_oidc_ping_requires_jwks_uri() -> None:

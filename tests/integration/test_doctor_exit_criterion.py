@@ -62,10 +62,10 @@ from kdive.diagnostics.egress_probe import (
 )
 from kdive.diagnostics.service import DiagnosticsService
 from kdive.health.probe import HealthProbe
+from kdive.health.processes.worker import build_worker_probe
 from kdive.health.server_checks import build_server_checks
 from kdive.health.worker_checks import build_worker_checks
 from kdive.mcp.tools.ops import diagnostics
-from kdive.process_health.worker import build_worker_probe
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 

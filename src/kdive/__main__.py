@@ -353,9 +353,9 @@ async def _run_server(
     host: str, port: int, secret_registry: SecretRegistry, telemetry: Telemetry
 ) -> None:
     from kdive.health.probe import HealthProbe
+    from kdive.health.processes.server import build_oidc_ping, build_postgres_ping
     from kdive.health.server_checks import build_server_checks
     from kdive.mcp.app import build_app
-    from kdive.process_health.server import build_oidc_ping, build_postgres_ping
     from kdive.store.objectstore import object_store_from_env
 
     def build_probe(pool: AsyncConnectionPool) -> HealthProbe:
@@ -463,11 +463,11 @@ def _readiness(probe: HealthProbe) -> Callable[[], Awaitable[bool]]:
 
 
 async def _run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
+    from kdive.health.processes.server import build_postgres_ping
+    from kdive.health.processes.worker import build_worker_probe
     from kdive.jobs.worker import Worker, WorkerConfig
     from kdive.jobs.worker_telemetry import WorkerTelemetry
     from kdive.mcp.app import build_handler_registry
-    from kdive.process_health.server import build_postgres_ping
-    from kdive.process_health.worker import build_worker_probe
     from kdive.store.objectstore import object_store_from_env
 
     stop = _install_stop()
@@ -507,9 +507,9 @@ async def _run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> 
 
 
 async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
+    from kdive.health.processes.server import build_postgres_ping
+    from kdive.health.processes.worker import build_worker_probe
     from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
-    from kdive.process_health.server import build_postgres_ping
-    from kdive.process_health.worker import build_worker_probe
     from kdive.providers.assembly.composition import ProviderComposition
     from kdive.providers.infra.libvirt_event_loop import ensure_libvirt_event_loop
     from kdive.reconciler.build_host_fleet import BuildHostTelemetry

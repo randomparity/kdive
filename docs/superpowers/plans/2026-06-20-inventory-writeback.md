@@ -21,7 +21,7 @@ Derived from [the spec](../../specs/2026-06-20-inventory-writeback.md) and
   auto-write alternative.
 
 **No new dependency.** The ConfigMap patch uses `httpx` (already a dependency); the idiom is
-`async with httpx.AsyncClient(...) as client` (see `src/kdive/process_health/server.py:51`). Do NOT
+`async with httpx.AsyncClient(...) as client` (see `src/kdive/health/processes/server.py:51`). Do NOT
 add a Kubernetes client library.
 
 ---
@@ -142,7 +142,7 @@ the file adapter writes a tmp path).
 
 **`resolve_writeback_target() -> WritebackTarget | None`:**
 - Closes over `kdive.config` directly (`import kdive.config as config`; the established idiom, e.g.
-  `process_health/server.py`). Read `config.get(INVENTORY_WRITEBACK)`. `None`/empty/`"off"` →
+  `health/processes/server.py`). Read `config.get(INVENTORY_WRITEBACK)`. `None`/empty/`"off"` →
   `None`. `"configmap"` → `ConfigMapWriteback.from_in_cluster(name=config.get(
   INVENTORY_WRITEBACK_CONFIGMAP), key=_CONFIGMAP_KEY)`. `"file"` →
   `MountedFileWriteback(Path(config.require(SYSTEMS_TOML)))`. Any other value →
