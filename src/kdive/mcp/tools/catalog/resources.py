@@ -28,6 +28,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
@@ -45,6 +46,21 @@ from kdive.services.allocation.admission.affinity import resource_visible_to_pro
 
 _log = logging.getLogger(__name__)
 type ResourceListItem = Resource | ToolResponse
+
+
+class _ResourcesListPayload(ToolPayload):
+    """Public payload for ``resources.list`` filters and pagination."""
+
+    kind: ResourceKind | None = Field(
+        default=None,
+        description="Filter by resource kind (e.g. 'local-libvirt'); omit for all.",
+    )
+    limit: int = Field(
+        default=DEFAULT_LIST_LIMIT, description="Maximum rows returned (capped at 200)."
+    )
+    cursor: str | None = Field(
+        default=None, description="Opaque continuation cursor from a prior page's next_cursor."
+    )
 
 
 async def _fetch_resource_rows(
@@ -267,16 +283,9 @@ def register(
         meta={"maturity": "implemented"},
     )
     async def resources_list(
-        kind: Annotated[
-            str | None,
-            Field(description="Filter by resource kind (e.g. 'local-libvirt'); omit for all."),
-        ] = None,
-        limit: Annotated[
-            int, Field(description="Maximum rows returned (capped at 200).")
-        ] = DEFAULT_LIST_LIMIT,
-        cursor: Annotated[
-            str | None,
-            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
+        request: Annotated[
+            _ResourcesListPayload | None,
+            Field(description="Resource list filters and pagination request."),
         ] = None,
     ) -> ToolResponse:
         """List runtime resources visible to the caller.
@@ -284,7 +293,11 @@ def register(
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
         ``cursor`` for the next page.
         """
-        return await list_resources(pool, current_context(), kind=kind, limit=limit, cursor=cursor)
+        payload = request or _ResourcesListPayload()
+        kind = payload.kind.value if payload.kind is not None else None
+        return await list_resources(
+            pool, current_context(), kind=kind, limit=payload.limit, cursor=payload.cursor
+        )
 
     @app.tool(
         name="resources.describe",

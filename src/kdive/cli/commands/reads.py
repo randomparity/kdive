@@ -85,7 +85,10 @@ async def _record(name: str, args: argparse.Namespace, payload: Mapping[str, obj
 
 
 async def resources_list(args: argparse.Namespace) -> int:
-    return await _list("resources.list", args, ["id", "kind", "host"], "kind")
+    request = _payload(args, "kind")
+    envelope = await _fetch("resources.list", {"request": request} if request else {})
+    render(_rows(envelope), columns=["id", "kind", "host"], as_json=args.json)
+    return exit_code_for_envelope(envelope)
 
 
 async def resources_describe(args: argparse.Namespace) -> int:

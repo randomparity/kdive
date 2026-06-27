@@ -66,7 +66,7 @@ Complete an externally built run.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `build_id` | string (nullable) | no | GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff a vmlinux was uploaded. Case-insensitive. |
-| `cmdline` | string | yes | Kernel debug args appended to the platform-required boot args (e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot via runs.install/runs.boot (ADR-0061). |
+| `cmdline` | string (nullable) | no | Kernel debug args appended to the platform-required boot args (e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot via runs.install/runs.boot (ADR-0061). |
 | `run_id` | string | yes | The external-build Run to finalize. |
 
 ## `runs.create`
@@ -77,58 +77,56 @@ Create a run, bound to a system or unbound against a target_kind.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `build_profile` | object(source=external) \| object(source=server) | yes | Build profile for the Run's kernel. The recommended default is source='external': ingest a prebuilt artifact (ADR-0234). After runs.create with source='external', call artifacts.expected_uploads to learn the exact bytes to produce, artifacts.create_run_upload to upload, then runs.complete_build. source='server' builds from a kernel tree (kernel_source_ref required) and is a single-host convenience: for a local build host a warm-tree kernel_source_ref is a provenance label only — it does not select the tree; the operator stages the actual source via KDIVE_KERNEL_SRC on the worker, and runs.get echoes the label and resolved commit in data.build_provenance. The optional 'config' is a catalog ComponentRef (e.g. {'kind':'catalog','provider':'system','name':'kdump'}); OMIT it to get the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named fragment. Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: append them via runs.build.cmdline (bound on the first server build). See resource://kdive/docs/operating/external-build-upload.md for shaping a source='external' upload, or resource://kdive/docs/operating/build-source-staging.md for staging a server-build source. |
-| `expected_boot_failure` | object(free-form) (nullable) | no | Optional declared boot crash, e.g. {'kind':'console_crash','pattern':'Unable to handle kernel'}. The pattern is matched as a case-sensitive literal substring (NOT a regex), tested line-by-line against the redacted console log; a single line containing the substring is a match. Use '\|' to OR alternatives (e.g. 'Oops\|Unable to handle kernel') — up to 16 terms, 256 characters total, each term non-empty. A match makes the expected crash the Run's success outcome. |
-| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
-| `investigation_id` | string | yes | Investigation to attach the Run to. |
-| `reuse_requirement` | object (nullable) | no | Optional System reuse assertion payload with vcpus, memory_gb, disk_gb, and pcie fields. Omit to skip extra reuse matching. |
-| `system_id` | string (nullable) | no | Ready System (active Allocation) to bind now. OMIT to create an unbound Run that builds against 'target_kind' and is attached to a System later via runs.bind — this avoids holding target capacity to attempt a build. |
-| `target_kind` | string (nullable) | no | Resource kind the Run builds for (e.g. 'local-libvirt'). REQUIRED when system_id is omitted; discover valid values from a runs.create error's 'available_target_kinds'. When system_id is set it is derived from the System, and an explicit mismatched value is rejected. |
+| `request` | object | yes | Run creation request. After source='external', call artifacts.expected_uploads and artifacts.create_run_upload, then runs.complete_build. Extra server-build kernel cmdline args are appended later with runs.build.cmdline. |
 
-`build_profile` fields:
+`request` fields:
 
-- _variant object(source=external):_
-  - `schema_version` (``=1``, required)
-  - `source` (``=external``, required)
-  - `profile_requirements` (`object (nullable)`, optional)
-    - `provider` (`string`, required)
-    - `name` (`string`, required)
-- _variant object(source=server):_
-  - `schema_version` (``=1``, required)
-  - `source` (``=server``, optional)
-  - `kernel_source_ref` (`string \| object`, required)
-    - `git` (`object`, required) — Remote + ref coordinates for a git-cloned kernel source.
-      - `remote` (`string`, required)
-      - `ref` (`string`, required)
-  - `config` (`object(kind=local) \| object(kind=artifact) \| object(kind=component-upload) \| object(kind=catalog) (nullable)`, optional)
-    - _variant object(kind=local):_
-      - `kind` (``=local``, required)
-      - `path` (`string`, required)
-      - `sha256` (`string (nullable)`, optional)
-    - _variant object(kind=artifact):_
-      - `kind` (``=artifact``, required)
-      - `artifact_id` (`string`, required)
-      - `sha256` (`string (nullable)`, optional)
-    - _variant object(kind=component-upload):_
-      - `kind` (``=component-upload``, required)
-      - `upload_id` (`string`, required)
-      - `sha256` (`string (nullable)`, optional)
-    - _variant object(kind=catalog):_
-      - `kind` (``=catalog``, required)
+- `investigation_id` (`string`, required) — Investigation to attach the Run to.
+- `build_profile` (`object(source=external) \| object(source=server)`, required) — Build profile for the Run's kernel. The recommended default is source='external': ingest a prebuilt artifact (ADR-0234). After runs.create with source='external', call artifacts.expected_uploads to learn the exact bytes to produce, artifacts.create_run_upload to upload, then runs.complete_build. source='server' builds from a kernel tree (kernel_source_ref required) and is a single-host convenience: for a local build host a warm-tree kernel_source_ref is a provenance label only - it does not select the tree; the operator stages the actual source via KDIVE_KERNEL_SRC on the worker, and runs.get echoes the label and resolved commit in data.build_provenance. The optional 'config' is a catalog ComponentRef (e.g. {'kind':'catalog','provider':'system','name':'kdump'}); omit it to get the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named fragment. Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: append them via runs.build.cmdline (bound on the first server build). See resource://kdive/docs/operating/external-build-upload.md for shaping a source='external' upload, or resource://kdive/docs/operating/build-source-staging.md for staging a server-build source.
+  - _variant object(source=external):_
+    - `schema_version` (``=1``, required)
+    - `source` (``=external``, required)
+    - `profile_requirements` (`object (nullable)`, optional)
       - `provider` (`string`, required)
       - `name` (`string`, required)
-  - `profile_requirements` (`object (nullable)`, optional)
-    - `provider` (`string`, required)
-    - `name` (`string`, required)
-  - `patch_ref` (`string (nullable)`, optional)
-  - `build_host` (`string (nullable)`, optional)
-
-`reuse_requirement` fields:
-
-- `vcpus` (`integer (nullable)`, optional)
-- `memory_gb` (`integer (nullable)`, optional)
-- `disk_gb` (`integer (nullable)`, optional)
-- `pcie` (`array<string> (nullable)`, optional)
+  - _variant object(source=server):_
+    - `schema_version` (``=1``, required)
+    - `source` (``=server``, optional)
+    - `kernel_source_ref` (`string \| object`, required)
+      - `git` (`object`, required) — Remote + ref coordinates for a git-cloned kernel source.
+        - `remote` (`string`, required)
+        - `ref` (`string`, required)
+    - `config` (`object(kind=local) \| object(kind=artifact) \| object(kind=component-upload) \| object(kind=catalog) (nullable)`, optional)
+      - _variant object(kind=local):_
+        - `kind` (``=local``, required)
+        - `path` (`string`, required)
+        - `sha256` (`string (nullable)`, optional)
+      - _variant object(kind=artifact):_
+        - `kind` (``=artifact``, required)
+        - `artifact_id` (`string`, required)
+        - `sha256` (`string (nullable)`, optional)
+      - _variant object(kind=component-upload):_
+        - `kind` (``=component-upload``, required)
+        - `upload_id` (`string`, required)
+        - `sha256` (`string (nullable)`, optional)
+      - _variant object(kind=catalog):_
+        - `kind` (``=catalog``, required)
+        - `provider` (`string`, required)
+        - `name` (`string`, required)
+    - `profile_requirements` (`object (nullable)`, optional)
+      - `provider` (`string`, required)
+      - `name` (`string`, required)
+    - `patch_ref` (`string (nullable)`, optional)
+    - `build_host` (`string (nullable)`, optional)
+- `system_id` (`string (nullable)`, optional) — Ready System to bind now. Omit to create an unbound Run that targets `target_kind` and is bound later with runs.bind.
+- `target_kind` (`string (nullable)`, optional) — Resource kind the Run builds for. Required when system_id is omitted; derived from the System when system_id is set.
+- `expected_boot_failure` (`object(free-form) (nullable)`, optional) — Optional declared boot crash, e.g. {'kind':'console_crash','pattern':'Unable to handle kernel'}. The pattern is matched as a case-sensitive literal substring (not a regex), tested line-by-line against the redacted console log; a single line containing the substring is a match. Use '|' to OR alternatives (e.g. 'Oops|Unable to handle kernel') - up to 16 terms, 256 characters total, each term non-empty. A match makes the expected crash the Run's success outcome.
+- `reuse_requirement` (`object (nullable)`, optional) — Optional System reuse assertion payload.
+  - `vcpus` (`integer (nullable)`, optional)
+  - `memory_gb` (`integer (nullable)`, optional)
+  - `disk_gb` (`integer (nullable)`, optional)
+  - `pcie` (`array<string> (nullable)`, optional)
+- `idempotency_key` (`string (nullable)`, optional) — Replay-safe key; a repeated key returns the prior envelope.
 
 `build_profile` examples:
 
@@ -201,11 +199,15 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
-| `investigation_id` | string (nullable) | no | Only Runs under this Investigation id. |
-| `limit` | integer | no | Maximum rows returned (capped at 200). |
-| `state` | `created`, `running`, `succeeded`, `failed`, `canceled` (nullable) | no | Only Runs in this build-phase state. |
-| `system_id` | string (nullable) | no | Only Runs bound to this System id. |
+| `request` | object (nullable) | no | Runs list filters and pagination request. |
+
+`request` fields:
+
+- `system_id` (`string (nullable)`, optional) — Only Runs bound to this System id.
+- `investigation_id` (`string (nullable)`, optional) — Only Runs under this Investigation id.
+- `state` (``created`, `running`, `succeeded`, `failed`, `canceled` (nullable)`, optional) — Only Runs in this build-phase state.
+- `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
+- `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
 
 ## `runs.profile_examples`
 

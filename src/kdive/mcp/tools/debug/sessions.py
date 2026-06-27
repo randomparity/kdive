@@ -13,6 +13,7 @@ from pydantic import Field
 from kdive.domain.capacity.state import DebugSessionState
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools.debug.ops import DebugRuntimeResolver, _register_debug_ops
@@ -43,6 +44,24 @@ __all__ = [
     "_insert_session_locked",
     "register",
 ]
+
+
+class _DebugSessionsListPayload(ToolPayload):
+    """Public payload for ``debug.list_sessions`` filters."""
+
+    run_id: str | None = Field(default=None, description="Only sessions for this Run id.")
+    system_id: str | None = Field(default=None, description="Only sessions on this System id.")
+    project: str | None = Field(
+        default=None,
+        description="Only sessions in this project (within your membership).",
+    )
+    state: DebugSessionState | None = Field(
+        default=None,
+        description="Only sessions in this lifecycle state.",
+    )
+    limit: int = Field(
+        default=_DEFAULT_LIST_LIMIT, description="Maximum rows returned (capped at 200)."
+    )
 
 
 class DebugSessionHandlers(_LifecycleDebugSessionHandlers):
@@ -144,30 +163,20 @@ def register(
         meta={"maturity": "implemented"},
     )
     async def debug_list_sessions(
-        run_id: Annotated[str | None, Field(description="Only sessions for this Run id.")] = None,
-        system_id: Annotated[
-            str | None, Field(description="Only sessions on this System id.")
+        request: Annotated[
+            _DebugSessionsListPayload | None,
+            Field(description="Debug session list filters."),
         ] = None,
-        project: Annotated[
-            str | None,
-            Field(description="Only sessions in this project (within your membership)."),
-        ] = None,
-        state: Annotated[
-            DebugSessionState | None,
-            Field(description="Only sessions in this lifecycle state."),
-        ] = None,
-        limit: Annotated[
-            int, Field(description="Maximum rows returned (capped at 200).")
-        ] = _DEFAULT_LIST_LIMIT,
     ) -> ToolResponse:
         """List the caller's debug sessions, filterable by run/system/project/state. Viewer."""
-        request = _SessionsListRequest(
-            run_id=run_id,
-            system_id=system_id,
-            project=project,
-            state=state,
-            limit=limit,
+        payload = request or _DebugSessionsListPayload()
+        list_request = _SessionsListRequest(
+            run_id=payload.run_id,
+            system_id=payload.system_id,
+            project=payload.project,
+            state=payload.state.value if payload.state is not None else None,
+            limit=payload.limit,
         )
-        return await _list_sessions(pool, current_context(), request)
+        return await _list_sessions(pool, current_context(), list_request)
 
     _register_debug_ops(app, pool, runtime)

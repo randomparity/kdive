@@ -70,9 +70,13 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
-| `kind` | string (nullable) | no | Filter by resource kind (e.g. 'local-libvirt'); omit for all. |
-| `limit` | integer | no | Maximum rows returned (capped at 200). |
+| `request` | object (nullable) | no | Resource list filters and pagination request. |
+
+`request` fields:
+
+- `kind` (``local-libvirt`, `fault-inject`, `remote-libvirt` (nullable)`, optional) — Filter by resource kind (e.g. 'local-libvirt'); omit for all.
+- `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
+- `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
 
 ## `resources.register_fault_inject`
 

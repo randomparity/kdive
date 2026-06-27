@@ -50,10 +50,14 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
-| `limit` | integer | no | Maximum rows returned (capped at 200). |
-| `project` | string (nullable) | no | Restrict to one project you can view; omit for all. |
-| `state` | string (nullable) | no | Filter by state (open/active/closed/abandoned). |
+| `request` | object (nullable) | no | Investigation list filters and pagination request. |
+
+`request` fields:
+
+- `project` (`string (nullable)`, optional) — Restrict to one project you can view; omit for all.
+- `state` (``open`, `active`, `closed`, `abandoned` (nullable)`, optional) — Filter by state (open/active/closed/abandoned).
+- `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
+- `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
 
 ## `investigations.open`
 

@@ -291,6 +291,34 @@ def test_every_parameter_has_a_description() -> None:
     assert not offenders, f"parameters missing a description: {offenders}"
 
 
+def _object_schema(schema: dict[str, object]) -> dict[str, object]:
+    if "anyOf" not in schema:
+        return schema
+    choices = schema["anyOf"]
+    assert isinstance(choices, list)
+    for choice in choices:
+        assert isinstance(choice, dict)
+        if choice.get("type") == "object":
+            return cast(dict[str, object], choice)
+    raise AssertionError(f"no object schema in {schema!r}")
+
+
+def test_filtered_list_tools_use_request_payloads() -> None:
+    tools = {t.name: t for t in TOOLS}
+    expected_fields = {
+        "debug.list_sessions": {"run_id", "system_id", "project", "state", "limit"},
+        "investigations.list": {"project", "state", "limit", "cursor"},
+        "resources.list": {"kind", "limit", "cursor"},
+    }
+
+    for tool_name, fields in expected_fields.items():
+        params = tools[tool_name].parameters
+        assert set(params["properties"]) == {"request"}
+        request_schema = _object_schema(params["properties"]["request"])
+        request_properties = cast(dict[str, object], request_schema["properties"])
+        assert set(request_properties) == fields
+
+
 def test_run_cmdline_docs_describe_debug_args_only() -> None:
     """The agent-provided cmdline must not document platform-owned boot args."""
     tools = {t.name: t for t in TOOLS}

@@ -10,18 +10,13 @@ Enqueue an image build job.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object(format=qcow2) | yes | Public image build request. |
+| `request` | object | yes | Public image build request. |
 
 `request` fields:
 
 - `provider` (`string`, required) — The provider whose plane builds or built the image.
 - `name` (`string`, required) — The catalog image name.
-- `arch` (`string`, required) — The target architecture.
-- `releasever` (`string`, required) — The distro release version.
-- `source_image_digest` (`string`, required) — The base image content digest.
-- `capabilities` (`array<string>`, optional) — The guest-contract tags the image must satisfy.
-- `format` (``=qcow2``, optional) — The image format.
-- `root_device` (`string`, optional) — The guest root device path.
+- `packages` (`array<string>`, optional) — Optional package override; omitted uses the provider catalog default.
 
 ## `images.delete`
 
@@ -92,18 +87,13 @@ Publish a built image into the catalog.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object(format=qcow2) | yes | Public image publish request. |
+| `request` | object | yes | Public image publish request. |
 
 `request` fields:
 
 - `provider` (`string`, required) — The provider whose plane builds or built the image.
 - `name` (`string`, required) — The catalog image name.
-- `arch` (`string`, required) — The target architecture.
-- `releasever` (`string`, required) — The distro release version.
-- `source_image_digest` (`string`, required) — The base image content digest.
-- `capabilities` (`array<string>`, optional) — The guest-contract tags the image must satisfy.
-- `format` (``=qcow2``, optional) — The image format.
-- `root_device` (`string`, optional) — The guest root device path.
+- `packages` (`array<string>`, optional) — Optional package override; omitted uses the provider catalog default.
 
 ## `images.upload`
 

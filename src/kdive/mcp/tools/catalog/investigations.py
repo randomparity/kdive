@@ -32,6 +32,7 @@ from kdive.domain.lifecycle.records import ExternalRef, Investigation
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, ConfigErrorReason, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -57,6 +58,23 @@ _TERMINAL_INVESTIGATION = frozenset({InvestigationState.CLOSED, InvestigationSta
 
 _TITLE_MAX = 200
 _DESCRIPTION_MAX = 4096
+
+
+class _InvestigationsListPayload(ToolPayload):
+    """Public payload for ``investigations.list`` filters and pagination."""
+
+    project: str | None = Field(
+        default=None, description="Restrict to one project you can view; omit for all."
+    )
+    state: InvestigationState | None = Field(
+        default=None, description="Filter by state (open/active/closed/abandoned)."
+    )
+    limit: int = Field(
+        default=DEFAULT_LIST_LIMIT, description="Maximum rows returned (capped at 200)."
+    )
+    cursor: str | None = Field(
+        default=None, description="Opaque continuation cursor from a prior page's next_cursor."
+    )
 
 
 def _validate_text(title: str | None, description: str | None) -> bool:
@@ -840,20 +858,9 @@ def _register_investigations_list(app: FastMCP, pool: AsyncConnectionPool) -> No
         meta={"maturity": "implemented"},
     )
     async def investigations_list(
-        project: Annotated[
-            str | None,
-            Field(description="Restrict to one project you can view; omit for all."),
-        ] = None,
-        state: Annotated[
-            str | None,
-            Field(description="Filter by state (open/active/closed/abandoned)."),
-        ] = None,
-        limit: Annotated[
-            int, Field(description="Maximum rows returned (capped at 200).")
-        ] = DEFAULT_LIST_LIMIT,
-        cursor: Annotated[
-            str | None,
-            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
+        request: Annotated[
+            _InvestigationsListPayload | None,
+            Field(description="Investigation list filters and pagination request."),
         ] = None,
     ) -> ToolResponse:
         """List the Investigations you can view, newest-first, for reporting.
@@ -861,6 +868,12 @@ def _register_investigations_list(app: FastMCP, pool: AsyncConnectionPool) -> No
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
         ``cursor`` for the next page.
         """
+        payload = request or _InvestigationsListPayload()
         return await list_investigations(
-            pool, current_context(), project=project, state=state, limit=limit, cursor=cursor
+            pool,
+            current_context(),
+            project=payload.project,
+            state=payload.state.value if payload.state is not None else None,
+            limit=payload.limit,
+            cursor=payload.cursor,
         )

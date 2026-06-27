@@ -33,11 +33,15 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
-| `investigation_id` | string (nullable) | no | Only run-bearing jobs (build/install/boot) whose Run belongs to this Investigation. |
-| `kind` | `provision`, `reprovision`, `teardown`, `build`, `install`, `boot`, `force_crash`, `power`, `capture_vmcore`, `image_build`, `diagnostics_worker_check` (nullable) | no | Only jobs of this kind. |
-| `limit` | integer | no | Maximum rows returned (capped at 200). |
-| `status` | `queued`, `running`, `succeeded`, `failed`, `canceled` (nullable) | no | Only jobs in this lifecycle state. |
+| `request` | object (nullable) | no | Jobs list filters and pagination request. |
+
+`request` fields:
+
+- `status` (``queued`, `running`, `succeeded`, `failed`, `canceled` (nullable)`, optional) — Only jobs in this lifecycle state.
+- `kind` (``provision`, `reprovision`, `teardown`, `build`, `install`, `boot`, `force_crash`, `power`, `capture_vmcore`, `image_build`, `diagnostics_worker_check` (nullable)`, optional) — Only jobs of this kind.
+- `investigation_id` (`string (nullable)`, optional) — Only run-bearing jobs (build/install/boot) whose Run belongs to this Investigation.
+- `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
+- `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
 
 ## `jobs.wait`
 

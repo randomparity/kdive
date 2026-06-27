@@ -79,7 +79,7 @@ def test_resources_list_flattens_items_and_renders(monkeypatch: pytest.MonkeyPat
 def test_resources_list_passes_kind_filter(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     client = _install_session(monkeypatch, _collection([]))
     asyncio.run(reads.resources_list(_args(kind="remote-libvirt")))
-    assert client.calls == [("resources.list", {"kind": "remote-libvirt"})]
+    assert client.calls == [("resources.list", {"request": {"kind": "remote-libvirt"}})]
 
 
 def test_list_verb_id_comes_from_object_id_and_state_from_status(
