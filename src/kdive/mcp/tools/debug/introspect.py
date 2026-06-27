@@ -225,7 +225,9 @@ async def introspect_run(
     """
     with bind_context(principal=ctx.principal):
 
-        async def _run(resolved: LiveDrgnSession, runtime: ProviderRuntime) -> ToolResponse:
+        async def _run_live_helper(
+            resolved: LiveDrgnSession, runtime: ProviderRuntime
+        ) -> ToolResponse:
             return await _introspect_live_session(
                 session_id,
                 resolved=resolved,
@@ -239,7 +241,7 @@ async def introspect_run(
             ctx=ctx,
             session_id=session_id,
             mode=_LIVE_INTROSPECTION,
-            action=_run,
+            action=_run_live_helper,
         )
 
 
@@ -296,7 +298,9 @@ async def introspect_script(
     """
     with bind_context(principal=ctx.principal):
 
-        async def _run(resolved: LiveDrgnSession, runtime: ProviderRuntime) -> ToolResponse:
+        async def _run_live_script_callback(
+            resolved: LiveDrgnSession, runtime: ProviderRuntime
+        ) -> ToolResponse:
             return await _run_live_script(
                 session_id,
                 resolved=resolved,
@@ -311,7 +315,7 @@ async def introspect_script(
             ctx=ctx,
             session_id=session_id,
             mode=_LIVE_SCRIPT,
-            action=_run,
+            action=_run_live_script_callback,
         )
 
 
