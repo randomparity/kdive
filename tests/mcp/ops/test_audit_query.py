@@ -143,21 +143,25 @@ def _rows(resp: ToolResponse) -> list[dict[str, object]]:
     return [cast(dict[str, object], item.data) for item in resp.items]
 
 
-def _project_query(
-    project: str,
-    *,
-    principal: str | None = None,
-    object_id: str | None = None,
-    transition: str | None = None,
-    window: list[str | None] | None = None,
-) -> audit_tools.ProjectAuditQuery:
+def _project_query(project: str) -> audit_tools.ProjectAuditQuery:
     return audit_tools.ProjectAuditQuery(
         scope="project",
         project=project,
-        principal=principal,
+        principal=None,
+        object_id=None,
+        transition=None,
+        window=None,
+    )
+
+
+def _project_object_query(project: str, object_id: str) -> audit_tools.ProjectAuditQuery:
+    return audit_tools.ProjectAuditQuery(
+        scope="project",
+        project=project,
+        principal=None,
         object_id=object_id,
-        transition=transition,
-        window=window,
+        transition=None,
+        window=None,
     )
 
 
@@ -380,7 +384,7 @@ def test_filter_by_object_project_form(migrated_url: str) -> None:
             resp = await audit_tools.query_project(
                 pool,
                 ctx,
-                request=_project_query("proj-a", object_id=str(ids["a2"])),
+                request=_project_object_query("proj-a", str(ids["a2"])),
             )
         assert resp.status == "ok"
         rows = _rows(resp)
@@ -435,7 +439,7 @@ def test_malformed_object_id_is_config_error(migrated_url: str) -> None:
             resp = await audit_tools.query_project(
                 pool,
                 ctx,
-                request=_project_query("proj-a", object_id="not-a-uuid"),
+                request=_project_object_query("proj-a", "not-a-uuid"),
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
