@@ -776,7 +776,7 @@ def test_artifacts_get_rejects_non_redacted_fetch(migrated_url: str) -> None:
             resp = await artifacts_get(
                 pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
             )
-        # The redaction gate: a sensitive object at a redacted row's key is not-found-shaped.
+        # The redaction gate: a sensitive object at a redacted row's key is drift.
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert store.got is True
@@ -806,7 +806,7 @@ def test_artifacts_get_oversized_honors_head_redaction_gate(migrated_url: str) -
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            # An oversized object whose metadata says sensitive: no URI, not-found-shaped.
+            # An oversized object whose metadata says sensitive: no URI, drift error.
             store = _SearchStore(
                 b"", size=_MAX_WINDOWED_FETCH_BYTES + 1, head_sensitivity=Sensitivity.SENSITIVE
             )
@@ -894,7 +894,7 @@ def test_artifacts_get_requires_viewer_role(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_artifacts_get_sensitive_is_not_found_shaped(migrated_url: str) -> None:
+def test_artifacts_get_sensitive_is_not_found(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, sens_id, _ = await _seed_system_with_artifacts(pool)
@@ -904,7 +904,7 @@ def test_artifacts_get_sensitive_is_not_found_shaped(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_artifacts_get_cross_project_is_not_found_shaped(migrated_url: str) -> None:
+def test_artifacts_get_cross_project_is_not_found(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
@@ -950,7 +950,7 @@ def test_artifacts_get_excludes_quarantined(migrated_url: str) -> None:
             quar_resp = await artifacts_get(pool, _ctx(), artifact_id=quar_id)
             red_resp = await artifacts_get(pool, _ctx(), artifact_id=red_id)
         # Positive control: a redacted artifact in the same DB state IS served, so the
-        # quarantined error is specifically the sensitivity gate, not a not-found/authz miss.
+        # quarantined error is specifically the row-sensitivity gate.
         assert red_resp.status == "available"
         assert quar_resp.status == "error"
         assert quar_resp.error_category == "not_found"

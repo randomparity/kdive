@@ -232,7 +232,7 @@ async def artifacts_get(
     max_bytes: int = ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
     store_factory: Callable[[], _SearchStore] = object_store_from_env,
 ) -> ToolResponse:
-    """Return one `redacted` artifact's content window, or a not-found-shaped config error.
+    """Return one `redacted` artifact's content window.
 
     On success the envelope carries the object ref plus, best-effort, a byte window of
     the redacted bytes inline (`data["content"]`) and a presigned download URL
@@ -246,7 +246,10 @@ async def artifacts_get(
     larger than ``_MAX_WINDOWED_FETCH_BYTES`` omit inline content
     (``content_omitted``) and are retrieved via ``refs["download_uri"]``. A store
     outage degrades the content/URI enrichment to a ``data["content_unavailable"]``
-    reason; the metadata envelope still returns (ADR-0140, ADR-0247).
+    reason; the metadata envelope still returns (ADR-0140, ADR-0247). Missing or
+    unauthorized rows return ``not_found``. A visible redacted row whose object
+    metadata or fetched object is no longer redacted is redaction drift and returns
+    ``configuration_error``.
     """
     authorized = await _authorized_redacted_artifact(pool, ctx, artifact_id=artifact_id)
     if isinstance(authorized, ToolResponse):
@@ -278,9 +281,10 @@ async def _artifact_content(
 
     Best-effort: any store failure yields a ``content_unavailable`` reason and leaves
     ``refs`` without a ``download_uri`` rather than failing the tool. Returns ``None``
-    when the fetched object's sensitivity is not `REDACTED` (the caller maps that to a
-    not-found-shaped config error — the same redaction gate `artifacts_search_text`
-    applies). ``byte_offset``/``max_bytes`` are clamped here (ADR-0247), never rejected.
+    when the fetched object's sensitivity is not `REDACTED` (the caller maps that to
+    ``configuration_error`` redaction drift — the same redaction gate
+    `artifacts_search_text` applies). ``byte_offset``/``max_bytes`` are clamped here
+    (ADR-0247), never rejected.
     """
     try:
         store = store_factory()
@@ -294,8 +298,8 @@ async def _artifact_content(
         head = await asyncio.to_thread(store.head, key)
         if head is None:
             return {"content_unavailable": "store_error"}
-        # The redaction gate, enforced before the URI is minted so it covers every size:
-        # a sensitive object at a redacted row's key is not-found-shaped (DB/object drift).
+        # The redaction gate, enforced before the URI is minted so it covers every size.
+        # A sensitive object at a redacted row's key is DB/object drift.
         if head.sensitivity is not Sensitivity.REDACTED:
             return None
         refs["download_uri"] = await asyncio.to_thread(store.presign_get, key, expires_in=ttl)

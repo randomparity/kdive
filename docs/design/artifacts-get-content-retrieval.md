@@ -50,7 +50,7 @@ matching `search_text`'s return scale) and routes anything larger to the URI:
 
 - `size_bytes <= KDIVE_ARTIFACT_INLINE_MAX_BYTES`: fetch via
   `get_artifact(key, head.etag)`, re-verify `fetched.sensitivity is REDACTED`
-  (reject to a not-found-shaped `configuration_error` otherwise), and return the
+  (reject with `configuration_error` redaction drift otherwise), and return the
   decoded bytes in `data["content"]`.
 - `size_bytes > KDIVE_ARTIFACT_INLINE_MAX_BYTES`: omit `content`; set
   `data["content_omitted"] = "artifact_too_large"`; `get_artifact` is never called.
@@ -81,7 +81,7 @@ A store outage never turns a successful `get` into a tool failure.
   configured TTL. The URI is minted **only after `head().sensitivity is REDACTED`**,
   so the URI path enforces the same object-metadata redaction gate as the inline
   path for every size (including oversized artifacts whose body is never fetched);
-  a DB-row/object sensitivity drift is not-found-shaped on both paths.
+  DB-row/object sensitivity drift fails as `configuration_error` on both paths.
 - No new redaction pass is run on fetched bytes — the persisted object is already
   the redactor's output; the gate is the sensitivity re-check, identical to
   `search_text`.
@@ -105,15 +105,16 @@ Handler-level, injected store seam (mirrors the `search_text` tests):
 - redacted >`KDIVE_ARTIFACT_INLINE_MAX_BYTES` (but small object): `content` absent,
   `content_omitted: artifact_too_large`, `download_uri` present, `get_artifact`
   never called (`store.got is False`).
-- fetched object `sensitivity != REDACTED` at a redacted row's key: not-found-shaped
-  `configuration_error` (the post-fetch redaction gate).
-- `head().sensitivity != REDACTED` at a redacted row's key (object/row drift): not-found-shaped
+- fetched object `sensitivity != REDACTED` at a redacted row's key:
+  `configuration_error` redaction drift (the post-fetch redaction gate).
+- `head().sensitivity != REDACTED` at a redacted row's key (object/row drift):
   `configuration_error`, URI never minted, body never fetched — for both an
   inline-eligible and an oversized object (the pre-URI redaction gate).
 - store factory raises: metadata envelope + `content_unavailable: store_unconfigured`,
   no URI.
 - `head`/`presign_get` raises: metadata envelope + `content_unavailable: store_error`.
-- sensitive / quarantined / cross-project / malformed-uuid id: unchanged
-  not-found-shaped behavior (no content, no URI).
+- sensitive / quarantined / cross-project id: unchanged `not_found` behavior
+  (no content, no URI).
+- malformed-uuid id: unchanged `configuration_error` behavior.
 - viewer-role gate unchanged.
 - `KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS` is passed to `presign_get` as `expires_in`.
