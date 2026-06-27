@@ -9,6 +9,7 @@ project-only token), deterministic ordering, and duplicate-grant dedup.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import cast
 
 from kdive.mcp.auth import RequestContext
@@ -17,21 +18,15 @@ from kdive.mcp.tools.identity.projects import whoami
 from kdive.security.authz.rbac import PlatformRole, Role
 from tests.mcp.json_data import data_sequence, data_str
 
+_BASE_CTX = RequestContext(principal="user-1", agent_session="sess-1", projects=())
 
-def _ctx(
-    *,
-    principal: str = "user-1",
-    projects: tuple[str, ...] = (),
-    roles: dict[str, Role] | None = None,
-    platform_roles: frozenset[PlatformRole] = frozenset(),
-) -> RequestContext:
-    return RequestContext(
-        principal=principal,
-        agent_session="sess-1",
-        projects=projects,
-        roles=roles or {},
-        platform_roles=platform_roles,
-    )
+
+def _project_ctx(*, projects: tuple[str, ...], roles: dict[str, Role]) -> RequestContext:
+    return replace(_BASE_CTX, projects=projects, roles=roles)
+
+
+def _platform_ctx(*roles: PlatformRole) -> RequestContext:
+    return replace(_BASE_CTX, platform_roles=frozenset(roles))
 
 
 def _items(resp: ToolResponse) -> list[dict[str, object]]:
@@ -39,8 +34,9 @@ def _items(resp: ToolResponse) -> list[dict[str, object]]:
 
 
 def test_role_bearing_grant_names_project_role_and_platform_roles() -> None:
-    ctx = _ctx(
+    ctx = RequestContext(
         principal="kdive-demo",
+        agent_session="sess-1",
         projects=("demo",),
         roles={"demo": Role.ADMIN},
         platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}),
@@ -57,14 +53,14 @@ def test_role_bearing_grant_names_project_role_and_platform_roles() -> None:
 
 def test_role_less_membership_is_surfaced_with_empty_role() -> None:
     # The discovery gap #426 deferred here: a member with no role is named, role "".
-    ctx = _ctx(projects=("x",), roles={})
+    ctx = _project_ctx(projects=("x",), roles={})
     resp = whoami(ctx)
     assert resp.status == "ok"
     assert _items(resp) == [{"project": "x", "role": ""}]
 
 
 def test_each_granted_project_item_has_ok_status() -> None:
-    ctx = _ctx(
+    ctx = _project_ctx(
         projects=("a", "b"),
         roles={"a": Role.VIEWER, "b": Role.OPERATOR},
     )
@@ -73,10 +69,7 @@ def test_each_granted_project_item_has_ok_status() -> None:
 
 
 def test_platform_only_token_has_no_items_but_reports_platform_roles() -> None:
-    ctx = _ctx(
-        projects=(),
-        platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}),
-    )
+    ctx = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
     resp = whoami(ctx)
     assert resp.status == "ok"
     assert _items(resp) == []
@@ -88,7 +81,7 @@ def test_platform_only_token_has_no_items_but_reports_platform_roles() -> None:
 def test_project_only_token_reports_empty_platform_roles_list() -> None:
     # platform_roles is always present as a list — [] (not omitted/None) — so a client
     # can read it unconditionally.
-    ctx = _ctx(projects=("demo",), roles={"demo": Role.VIEWER})
+    ctx = _project_ctx(projects=("demo",), roles={"demo": Role.VIEWER})
     resp = whoami(ctx)
     assert resp.status == "ok"
     platform_roles = data_sequence(resp, "platform_roles")
@@ -98,7 +91,7 @@ def test_project_only_token_reports_empty_platform_roles_list() -> None:
 
 def test_items_are_sorted_and_duplicates_collapse() -> None:
     # ctx.projects is not deduplicated upstream (#426); the whoami names each once, sorted.
-    ctx = _ctx(
+    ctx = _project_ctx(
         projects=("c", "a", "a", "b"),
         roles={"a": Role.VIEWER, "b": Role.OPERATOR, "c": Role.ADMIN},
     )
@@ -110,9 +103,7 @@ def test_items_are_sorted_and_duplicates_collapse() -> None:
 def test_platform_roles_serializes_as_a_json_list() -> None:
     # A list-valued data field is JSON-safe (fixtures.list precedent) and survives the
     # envelope's structured serialization as an actual array.
-    ctx = _ctx(
-        platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN, PlatformRole.PLATFORM_AUDITOR}),
-    )
+    ctx = _platform_ctx(PlatformRole.PLATFORM_ADMIN, PlatformRole.PLATFORM_AUDITOR)
     resp = whoami(ctx)
     dumped = resp.model_dump(mode="json")
     assert dumped["data"]["platform_roles"] == ["platform_admin", "platform_auditor"]
