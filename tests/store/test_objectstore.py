@@ -364,6 +364,17 @@ def test_head_404_returns_none_other_status_raises() -> None:
     assert str(excinfo.value) == "object-store head_object for 'k' failed: x"
 
 
+def test_head_invalid_sensitivity_metadata_returns_unknown_sensitivity() -> None:
+    class _BadHeadMetaClient:
+        def head_object(self, **_kwargs: object) -> dict[str, object]:
+            return {"ContentLength": 1, "ETag": '"etag"', "Metadata": {"sensitivity": "bogus"}}
+
+    head = ObjectStore(_BadHeadMetaClient(), "bucket").head("k")
+
+    assert head is not None
+    assert head.sensitivity is None
+
+
 class _MidStreamFailureClient:
     """A stub whose ``get_object`` succeeds but whose body read fails mid-stream."""
 

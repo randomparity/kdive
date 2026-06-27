@@ -312,5 +312,5 @@ class GuestAgentExec:
 def _domain_name(domain: GuestDomain) -> str:
     try:
         return domain.name()
-    except libvirt.libvirtError, AttributeError:
+    except (libvirt.libvirtError, AttributeError) as _exc:
         return "<unknown>"

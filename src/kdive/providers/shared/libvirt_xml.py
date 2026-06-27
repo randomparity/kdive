@@ -35,7 +35,7 @@ def parse_capabilities_arch(caps_xml: str) -> str:
     """Read ``<host><cpu><arch>`` from libvirt capabilities XML; ``unknown`` if malformed."""
     try:
         root: ET.Element = _safe_fromstring(caps_xml)
-    except ET.ParseError, DefusedXmlException:
+    except (ET.ParseError, DefusedXmlException) as _exc:
         return "unknown"
     return root.findtext("./host/cpu/arch") or "unknown"
 
@@ -44,7 +44,7 @@ def parse_metadata_system_id(meta_xml: str) -> str | None:
     """Read the System id from a kdive metadata XML element; ``None`` if empty/malformed."""
     try:
         element: ET.Element = _safe_fromstring(meta_xml)
-    except ET.ParseError, DefusedXmlException:
+    except (ET.ParseError, DefusedXmlException) as _exc:
         return None
     text = (element.text or "").strip()
     return text or None
@@ -76,7 +76,7 @@ def recorded_gdb_port(domain_xml: str) -> int | None:
     """The gdbstub port a domain's XML records, or ``None`` if absent/malformed."""
     try:
         root: ET.Element = _safe_fromstring(domain_xml)
-    except ET.ParseError, DefusedXmlException:
+    except (ET.ParseError, DefusedXmlException) as _exc:
         return None
     return recorded_gdb_port_from_root(root)
 
@@ -112,6 +112,6 @@ def recorded_ssh_port(domain_xml: str) -> int | None:
     """The forwarded loopback SSH port a domain's XML records, or ``None`` if absent/malformed."""
     try:
         root: ET.Element = _safe_fromstring(domain_xml)
-    except ET.ParseError, DefusedXmlException:
+    except (ET.ParseError, DefusedXmlException) as _exc:
         return None
     return recorded_ssh_port_from_root(root)

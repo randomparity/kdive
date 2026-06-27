@@ -19,7 +19,7 @@ def rev_parse_head(tree: str, *, timeout: float = DEFAULT_GIT_READ_TIMEOUT) -> s
             timeout=timeout,
             check=False,
         )
-    except OSError, subprocess.SubprocessError:
+    except (OSError, subprocess.SubprocessError) as _exc:
         return None
     if proc.returncode != 0:
         return None

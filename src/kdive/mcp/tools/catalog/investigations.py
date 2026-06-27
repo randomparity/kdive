@@ -221,7 +221,7 @@ async def open_investigation(
         normalized_description = description or None  # "" -> None on open (ADR-0135 §2)
         try:
             refs = _parse_external_refs(external_refs)
-        except ValidationError, TypeError:
+        except (ValidationError, TypeError) as _exc:
             return _config_error_reason(
                 project,
                 ConfigErrorReason.INVALID_EXTERNAL_REF,

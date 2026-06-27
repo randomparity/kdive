@@ -76,7 +76,7 @@ def _rev_parse_branch(tree: str) -> str | None:
             timeout=_GIT_READ_TIMEOUT,
             check=False,
         )
-    except OSError, subprocess.SubprocessError:
+    except (OSError, subprocess.SubprocessError) as _exc:
         return None
     if proc.returncode != 0:
         return None

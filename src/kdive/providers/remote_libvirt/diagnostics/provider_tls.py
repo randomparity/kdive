@@ -94,7 +94,7 @@ def _probe_sync(
         connector(host, port, context)
     except ssl.SSLCertVerificationError:
         return TlsProbeOutcome.INVALID
-    except ConnectionRefusedError, TimeoutError, OSError, ssl.SSLError:
+    except (ConnectionRefusedError, TimeoutError, OSError, ssl.SSLError) as _exc:
         _log.warning("provider_tls handshake to %s:%s did not validate", host, port, exc_info=True)
         return TlsProbeOutcome.UNREACHABLE
     return TlsProbeOutcome.VALID

@@ -15,7 +15,7 @@ def _issuer_reachable(issuer: OidcIssuer) -> bool:
     try:
         with urllib.request.urlopen(issuer.jwks_uri, timeout=5) as response:
             return response.status == 200
-    except urllib.error.URLError, TimeoutError, OSError:
+    except (urllib.error.URLError, TimeoutError, OSError) as _exc:
         return False
 
 
