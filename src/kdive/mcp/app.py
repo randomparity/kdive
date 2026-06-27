@@ -55,7 +55,6 @@ from kdive.mcp.tools.catalog import images as catalog_images
 from kdive.mcp.tools.catalog.artifacts import registrar as artifacts_tools
 from kdive.mcp.tools.debug import introspect
 from kdive.mcp.tools.debug import sessions as debug_tools
-from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
 from kdive.mcp.tools.lifecycle import control as control_tools
 from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
 from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_tools
@@ -75,6 +74,7 @@ from kdive.mcp.tools.ops.images import registrar as ops_images_tools
 from kdive.mcp.tools.ops.resources import host_ops as ops_resource_host_tools
 from kdive.mcp.tools.ops.resources import registrar as ops_resource_mutation_tools
 from kdive.mcp.tools.reports import register as register_report_tools
+from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver

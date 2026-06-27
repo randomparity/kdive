@@ -33,7 +33,7 @@ from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigati
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.debug import sessions as debug_tools
 from kdive.mcp.tools.debug import sessions_lifecycle as _sessions_lifecycle_mod
-from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
+from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.ports import (

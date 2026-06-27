@@ -7,7 +7,7 @@ from typing import Any
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
-from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
+from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 
 
 def _points(reader: InMemoryMetricReader, name: str) -> list[Any]:

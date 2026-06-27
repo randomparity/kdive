@@ -28,7 +28,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.config.core_settings import IMAGE_PUBLISH_GRACE
-from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
+from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.infra.console_hosting import CollectorRegistry
 from kdive.providers.infra.reaping import (

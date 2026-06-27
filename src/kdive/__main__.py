@@ -507,7 +507,7 @@ async def _run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> 
 
 
 async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
-    from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
+    from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
     from kdive.process_health.server import build_postgres_ping
     from kdive.process_health.worker import build_worker_probe
     from kdive.providers.assembly.composition import ProviderComposition

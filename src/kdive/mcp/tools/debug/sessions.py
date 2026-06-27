@@ -15,7 +15,6 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
-from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
 from kdive.mcp.tools.debug.ops import DebugRuntimeResolver, _register_debug_ops
 from kdive.mcp.tools.debug.sessions_lifecycle import (
     _GDBSTUB,
@@ -32,6 +31,7 @@ from kdive.mcp.tools.debug.sessions_lifecycle import (
 from kdive.mcp.tools.debug.sessions_read import SessionsListRequest as _SessionsListRequest
 from kdive.mcp.tools.debug.sessions_read import get_session as _get_session
 from kdive.mcp.tools.debug.sessions_read import list_sessions as _list_sessions
+from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
