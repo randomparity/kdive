@@ -90,6 +90,30 @@ def read_bytes_file(path: Path, *, category: ErrorCategory, output: str) -> byte
         ) from exc
 
 
+def read_bytes_nofollow(path: Path, *, category: ErrorCategory, output: str) -> bytes:
+    """Read bytes refusing a final-component symlink, raising a categorized error.
+
+    The demoted-``objcopy`` build-id path hands its note file to the untrusted build user (so the
+    sandbox can write it) and the root worker reads it back. Re-opening by path with the default
+    follow-symlink semantics would let a build-user symlink swap redirect the root read at an
+    arbitrary file; ``O_NOFOLLOW`` rejects a swapped-in symlink so the read stays on the regular
+    file the sandbox produced.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                return handle.read()
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise CategorizedError(
+            f"{output} is missing or unreadable",
+            category=category,
+            details={"output": output},
+        ) from exc
+
+
 def launch_failure(tool: str, exc: OSError, *, category: ErrorCategory) -> CategorizedError:
     """Map a subprocess launch failure into the provider error taxonomy."""
     if isinstance(exc, FileNotFoundError):
@@ -268,7 +292,7 @@ def real_read_build_id(
             raise launch_failure(
                 "objcopy", exc, category=ErrorCategory.INFRASTRUCTURE_FAILURE
             ) from exc
-        notes = read_bytes_file(
+        notes = read_bytes_nofollow(
             Path(note_file.name),
             category=ErrorCategory.BUILD_FAILURE,
             output="vmlinux notes",
