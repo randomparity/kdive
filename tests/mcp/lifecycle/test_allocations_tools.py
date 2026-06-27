@@ -270,6 +270,37 @@ def test_request_under_cap_grants(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_request_grant_drops_systems_provision_for_contributor(migrated_url: str) -> None:
+    # #862/ADR-0261: a contributor's granted request must not be pointed at operator-only
+    # systems.provision (allocations.request needs only contributor).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2)
+            resp = await _request(pool, _ctx(role=Role.CONTRIBUTOR))
+        assert resp.status == "granted"
+        assert "systems.provision" not in resp.suggested_next_actions
+        assert resp.suggested_next_actions == ["allocations.get", "allocations.release"]
+
+    asyncio.run(_run())
+
+
+def test_get_granted_filters_next_actions_by_role(migrated_url: str) -> None:
+    # #862/ADR-0261: the same filter applies on the read side.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2)
+            granted = await _request(pool, _ctx(role=Role.OPERATOR))
+            alloc_id = granted.object_id
+            viewer = await get_allocation(pool, _ctx(role=Role.VIEWER), alloc_id)
+            contributor = await get_allocation(pool, _ctx(role=Role.CONTRIBUTOR), alloc_id)
+            operator = await get_allocation(pool, _ctx(role=Role.OPERATOR), alloc_id)
+        assert viewer.suggested_next_actions == ["allocations.get"]
+        assert contributor.suggested_next_actions == ["allocations.get", "allocations.release"]
+        assert "systems.provision" in operator.suggested_next_actions
+
+    asyncio.run(_run())
+
+
 def test_request_at_cap_denied(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -881,9 +912,68 @@ def test_renew_response_includes_service_error_details() -> None:
         details={"window": "0"},
     )
 
-    resp = _renew_response(uid, outcome)
+    resp = _renew_response(uid, outcome, _ctx())
 
     assert resp.data["window"] == "0"
+
+
+def _granted_alloc(*, project: str = "proj") -> Allocation:
+    """A minimal GRANTED allocation for envelope role-filter tests (#862)."""
+    return Allocation(
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="user-1",
+        agent_session="s",
+        project=project,
+        state=AllocationState.GRANTED,
+        resource_id=uuid4(),
+    )
+
+
+def test_envelope_role_filters_success_next_actions() -> None:
+    # ADR-0261: a GRANTED envelope's breadcrumb is filtered by the caller's role on the
+    # allocation's project, so a non-operator is never pointed at operator-only systems.provision.
+    alloc = _granted_alloc()
+    operator = _envelope_for_allocation(alloc, _ctx(role=Role.OPERATOR))
+    contributor = _envelope_for_allocation(alloc, _ctx(role=Role.CONTRIBUTOR))
+    viewer = _envelope_for_allocation(alloc, _ctx(role=Role.VIEWER))
+    role_less = _envelope_for_allocation(alloc, _ctx(role=None))
+
+    assert operator.suggested_next_actions == [
+        "allocations.get",
+        "systems.provision",
+        "allocations.release",
+    ]
+    assert contributor.suggested_next_actions == ["allocations.get", "allocations.release"]
+    assert viewer.suggested_next_actions == ["allocations.get"]
+    assert role_less.suggested_next_actions == []
+
+
+def test_envelope_filter_is_per_project_not_connection_union() -> None:
+    # Operator on "other", only contributor on the allocation's project: systems.provision must
+    # be dropped — the per-project leak the connection-scoped exposure filter cannot catch.
+    alloc = _granted_alloc(project="proj")
+    ctx = RequestContext(
+        principal="user-1",
+        agent_session="s",
+        projects=("proj", "other"),
+        roles={"proj": Role.CONTRIBUTOR, "other": Role.OPERATOR},
+    )
+    resp = _envelope_for_allocation(alloc, ctx)
+    assert "systems.provision" not in resp.suggested_next_actions
+    assert resp.suggested_next_actions == ["allocations.get", "allocations.release"]
+
+
+def test_renew_response_role_filters_success_next_actions() -> None:
+    # A renew that keeps a GRANTED allocation re-emits the breadcrumb; filter it too (#862).
+    alloc = _granted_alloc()
+    outcome = RenewOutcome(renewed=True, allocation=alloc)
+    contributor = _renew_response(alloc.id, outcome, _ctx(role=Role.CONTRIBUTOR))
+    operator = _renew_response(alloc.id, outcome, _ctx(role=Role.OPERATOR))
+
+    assert "systems.provision" not in contributor.suggested_next_actions
+    assert "systems.provision" in operator.suggested_next_actions
 
 
 def test_list_returns_project_allocations(migrated_url: str) -> None:
@@ -1220,15 +1310,15 @@ def test_failed_envelope_reports_failure_category_else_infrastructure() -> None:
         )
 
     # NULL cause -> the unchanged infrastructure_failure fallback.
-    null_cause = _envelope_for_allocation(_make())
+    null_cause = _envelope_for_allocation(_make(), _ctx())
     assert null_cause.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE.value
     assert null_cause.retryable is True
     # A budget terminate -> allocation_denied, terminal.
-    budget = _envelope_for_allocation(_make(ErrorCategory.ALLOCATION_DENIED))
+    budget = _envelope_for_allocation(_make(ErrorCategory.ALLOCATION_DENIED), _ctx())
     assert budget.error_category == ErrorCategory.ALLOCATION_DENIED.value
     assert budget.retryable is False
     # A queue timeout -> queue_timeout, retryable.
-    timed_out = _envelope_for_allocation(_make(ErrorCategory.QUEUE_TIMEOUT))
+    timed_out = _envelope_for_allocation(_make(ErrorCategory.QUEUE_TIMEOUT), _ctx())
     assert timed_out.error_category == ErrorCategory.QUEUE_TIMEOUT.value
     assert timed_out.retryable is True
 
@@ -1382,7 +1472,7 @@ def test_envelope_surfaces_recovery_context_on_granted() -> None:
         requested_disk_gb=40,
         shape="small",
     )
-    data = _envelope_for_allocation(alloc).data
+    data = _envelope_for_allocation(alloc, _ctx()).data
     assert data["resource_id"] == str(res)
     assert data["requested_kind"] == ResourceKind.LOCAL_LIBVIRT.value
     assert data["requested_vcpus"] == 4
@@ -1405,7 +1495,7 @@ def test_envelope_surfaces_requested_pool() -> None:
         state=AllocationState.REQUESTED,
         requested_pool="big-remote",
     )
-    data = _envelope_for_allocation(alloc).data
+    data = _envelope_for_allocation(alloc, _ctx()).data
     assert data["requested_pool"] == "big-remote"
     assert data["requested_kind"] is None
 
@@ -1422,7 +1512,7 @@ def test_envelope_surfaces_selector_on_failed() -> None:
         requested_kind=ResourceKind.LOCAL_LIBVIRT,
         failure_category=ErrorCategory.ALLOCATION_DENIED,
     )
-    resp = _envelope_for_allocation(alloc)
+    resp = _envelope_for_allocation(alloc, _ctx())
     assert resp.status == "error"
     assert resp.data["requested_kind"] == ResourceKind.LOCAL_LIBVIRT.value
     assert resp.data["resource_id"] is None

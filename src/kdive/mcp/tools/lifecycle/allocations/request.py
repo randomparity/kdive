@@ -12,6 +12,7 @@ from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle import Allocation
 from kdive.log import bind_context
+from kdive.mcp.exposure import visible_next_actions
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload, ResourceById, ResourceByPool
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -130,7 +131,7 @@ def _request_response(result: RequestAdmissionResult, ctx: RequestContext) -> To
     if result.resource is None:
         return _no_resource_response(result)
     if result.allocation is not None:
-        return _grant_or_enqueue_response(result.resource, result.project, result.allocation)
+        return _grant_or_enqueue_response(result.resource, result.project, result.allocation, ctx)
     if result.denial is not None:
         caller_is_admin = result.project in projects_with_role(ctx, Role.ADMIN)
         return _denial_response(
@@ -161,7 +162,7 @@ def _no_resource_response(result: RequestAdmissionResult) -> ToolResponse:
 
 
 def _grant_or_enqueue_response(
-    resource: Resource, project: str, allocation: Allocation
+    resource: Resource, project: str, allocation: Allocation, ctx: RequestContext
 ) -> ToolResponse:
     data = {"project": project}
     if allocation.state is not AllocationState.REQUESTED:
@@ -169,7 +170,9 @@ def _grant_or_enqueue_response(
     return ToolResponse.success(
         str(allocation.id),
         allocation.state.value,
-        suggested_next_actions=allocation_next_actions(allocation.state),
+        suggested_next_actions=visible_next_actions(
+            allocation_next_actions(allocation.state), ctx, project
+        ),
         data=data,
     )
 
