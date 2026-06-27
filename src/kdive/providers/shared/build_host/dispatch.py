@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import subprocess  # noqa: S404 - fixed argv, no shell, best-effort provenance read
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from uuid import UUID
 
+from kdive.build_artifacts.provenance import rev_parse_head
 from kdive.build_artifacts.results import BuildOutput
 from kdive.db.build_host_policy import check_warm_tree_source_admission
 from kdive.db.build_hosts import BuildHost, BuildHostKind
@@ -155,30 +155,10 @@ def _with_warm_tree_provenance(
     if not isinstance(label, str):
         return result
     provenance: dict[str, str] = {"label": label}
-    commit = _rev_parse_head(kernel_src)
+    commit = rev_parse_head(kernel_src)
     if commit is not None:
         provenance["resolved_commit"] = commit
     return result._replace(build_provenance=provenance)
-
-
-def _rev_parse_head(tree: str) -> str | None:
-    """Return ``git -C <tree> rev-parse HEAD`` output, or ``None`` on any failure (best-effort)."""
-    if not tree:
-        return None
-    try:
-        proc = subprocess.run(
-            ["git", "-C", tree, "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    except OSError, subprocess.SubprocessError:
-        return None
-    if proc.returncode != 0:
-        return None
-    commit = proc.stdout.strip()
-    return commit or None
 
 
 def _transport_factories(
