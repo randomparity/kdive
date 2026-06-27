@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
+import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, RESOURCES
@@ -27,9 +28,25 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import renew_allocation
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.services.accounting import ledger as accounting
+from kdive.services.allocation import renew as renew_service
 from kdive.services.allocation.renew import _RENEW_KIND
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+class _FrozenClock:
+    """A ``datetime`` stand-in whose ``now`` returns a fixed instant.
+
+    Monkeypatched over the renew service's module-level ``datetime`` so the clamp
+    ceiling (``now + KDIVE_LEASE_MAX``) is sampled from the same instant the test seeds
+    the lease against, instead of an independently-sampled wall clock (issue #854).
+    """
+
+    def __init__(self, instant: datetime) -> None:
+        self._instant = instant
+
+    def now(self, _tz: object = None) -> datetime:
+        return self._instant
 
 
 def _ctx(
@@ -78,11 +95,17 @@ async def _seed_metered_alloc(
     *,
     state: AllocationState = AllocationState.GRANTED,
     lease_hours_from_now: float = 2.0,
+    lease_expiry: datetime | None = None,
     limit_kcu: str = "1000",
     estimate: str = "9.0000",
 ) -> tuple[UUID, datetime]:
-    """Seed a budget, an allocation with a lease and reserved row; return (id, lease_expiry)."""
-    lease_expiry = datetime.now(UTC) + timedelta(hours=lease_hours_from_now)
+    """Seed a budget, an allocation with a lease and reserved row; return (id, lease_expiry).
+
+    ``lease_expiry`` pins the lease to an absolute instant; when omitted it defaults to
+    ``now + lease_hours_from_now`` (the wall-clock-relative form most tests use).
+    """
+    if lease_expiry is None:
+        lease_expiry = datetime.now(UTC) + timedelta(hours=lease_hours_from_now)
     async with pool.connection() as conn:
         await BUDGETS.upsert(
             conn,
@@ -242,19 +265,26 @@ def test_renew_at_cap_is_config_error_window_unchanged(migrated_url: str) -> Non
     asyncio.run(_run())
 
 
-def test_renew_clamps_added_window_to_cap(migrated_url: str) -> None:
-    # Lease 20h out; +10h target = 30h, clamped to 24h -> bill 4h = 12.0 kcu.
+def test_renew_clamps_added_window_to_cap(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Lease 20h out; +10h target = 30h, clamped to 24h -> bill 4h = 12.0 kcu. The clamp
+    # ceiling (now + 24h) is sampled inside the service, so freezing the renew clock and
+    # pinning the seeded lease to the same instant keeps the billed window exactly 4h; an
+    # unfrozen clock let a few ms of seed-vs-renew drift surface as 12.0001 (issue #854).
+    frozen = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(renew_service, "datetime", _FrozenClock(frozen))
+
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             res_id = await _seed_resource(pool)
-            alloc_id, _ = await _seed_metered_alloc(pool, res_id, lease_hours_from_now=20.0)
-            now = datetime.now(UTC)
+            alloc_id, _ = await _seed_metered_alloc(
+                pool, res_id, lease_expiry=frozen + timedelta(hours=20)
+            )
             resp = await renew_allocation(pool, _ctx(), str(alloc_id), extend=10)
             assert resp.status == "granted"
             after = (await _alloc(pool, alloc_id)).lease_expiry
-            assert after is not None
-            # New expiry ~24h from now (clamp), within a small wall-clock slack.
-            assert timedelta(hours=23, minutes=59) < after - now < timedelta(hours=24, minutes=1)
+            assert after == frozen + timedelta(hours=24)  # clamped exactly to now + cap
             reserved = [r for r in await _ledger_rows(pool, alloc_id) if r[0] == "reserved"]
             assert reserved[1][1] == Decimal("12.0000")  # 4h * 3.0 kcu/hr
 
