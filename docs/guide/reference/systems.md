@@ -14,6 +14,7 @@ Use `systems.provision` instead when the profile needs no upload window. Operato
 |---|---|---|---|
 | `allocation_id` | string | yes | Granted Allocation to create a DEFINED System for. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
+| `label` | string (nullable) | no | Optional human handle for this System, echoed back as data.label in systems.get / systems.list so you thread fewer bare UUIDs. Freeform and non-unique: 1..200 printable characters (surrounding whitespace trimmed); not a lookup key. Omit for no handle. |
 | `profile` | object(schema_version=1) | yes | Provisioning profile for the System; an 'upload' rootfs opens a pre-provision rootfs-upload window. |
 
 `profile` fields:
@@ -112,6 +113,7 @@ System. Operator only.
 |---|---|---|---|
 | `allocation_id` | string | yes | Granted Allocation to provision a System for. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
+| `label` | string (nullable) | no | Optional human handle for this System, echoed back as data.label in systems.get / systems.list so you thread fewer bare UUIDs. Freeform and non-unique: 1..200 printable characters (surrounding whitespace trimmed); not a lookup key. Omit for no handle. |
 | `profile` | object(schema_version=1) | yes | Provisioning profile for the System create lane. |
 
 `profile` fields:
