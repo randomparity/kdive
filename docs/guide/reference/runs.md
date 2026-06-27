@@ -212,3 +212,13 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 `implemented` · `read-only`
 
 Return a ready-to-edit build profile per registered build host. Requires a token.
+
+## `runs.validate_profile`
+
+`implemented` · `read-only`
+
+Validate a build profile without inserting a Run. Requires a token.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `build_profile` | object(free-form) | yes | A build_profile document to check before runs.create, returning the typed validation envelope WITHOUT inserting a Run or consuming capacity. It runs the same checks runs.create runs: structural parse (source='server' vs 'external'; warm-tree string vs {'git':{'remote','ref'}} kernel_source_ref) and build-host/source-kind compatibility for a registered build_host. A 'valid' verdict means the document parses and (for a registered named host) is source-kind compatible — it does NOT guarantee the source tree exists, the config resolves, the kernel builds, or capacity is free; those are checked later at runs.build/runs.complete_build. An unregistered build_host is not rejected (data.build_host_registered=false discloses the compat check was skipped). Call runs.profile_examples for a ready-to-edit shape. |

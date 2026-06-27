@@ -36,13 +36,16 @@ from kdive.mcp.tools.lifecycle.runs.profile_examples import (
 from kdive.mcp.tools.lifecycle.runs.server_build import BuildRunHandlers as _BuildRunHandlers
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run as _boot_run
 from kdive.mcp.tools.lifecycle.runs.steps import install_run as _install_run
+from kdive.mcp.tools.lifecycle.runs.validate_profile import (
+    validate_build_profile as _validate_build_profile,
+)
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.profiles.build import (
     ExternalBuildProfile,
     ServerBuildProfile,
     dump_build_profile,
 )
-from kdive.profiles.types import ExpectedBootFailureInput
+from kdive.profiles.types import BuildProfileInput, ExpectedBootFailureInput
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security.authz.rbac import Role
@@ -66,6 +69,7 @@ def register(
     _register_runs_install(app, pool)
     _register_runs_boot(app, pool)
     _register_runs_profile_examples(app, pool)
+    _register_runs_validate_profile(app, pool)
 
 
 def _build_handlers(runtime: ProviderRuntime) -> _BuildRunHandlers:
@@ -415,3 +419,38 @@ def _register_runs_profile_examples(app: FastMCP, pool: AsyncConnectionPool) -> 
         async with pool.connection() as conn:
             hosts = await list_all_hosts(conn)
         return _build_host_profile_examples(hosts, declared)
+
+
+def _register_runs_validate_profile(app: FastMCP, pool: AsyncConnectionPool) -> None:
+    @app.tool(
+        name="runs.validate_profile",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def runs_validate_profile(
+        build_profile: Annotated[
+            BuildProfileInput,
+            Field(
+                description=(
+                    "A build_profile document to check before runs.create, returning the typed "
+                    "validation envelope WITHOUT inserting a Run or consuming capacity. It runs "
+                    "the same checks runs.create runs: structural parse (source='server' vs "
+                    "'external'; warm-tree string vs {'git':{'remote','ref'}} kernel_source_ref) "
+                    "and build-host/source-kind compatibility for a registered build_host. A "
+                    "'valid' verdict means the document parses and (for a registered named host) "
+                    "is source-kind compatible — it does NOT guarantee the source tree exists, "
+                    "the config resolves, the kernel builds, or capacity is free; those are "
+                    "checked later at runs.build/runs.complete_build. An unregistered build_host "
+                    "is not rejected (data.build_host_registered=false discloses the compat check "
+                    "was skipped). Call runs.profile_examples for a ready-to-edit shape."
+                )
+            ),
+        ],
+    ) -> ToolResponse:
+        """Validate a build profile without inserting a Run. Requires a token."""
+        # Auth-only (ADR-0117/0160), as runs.profile_examples: the verifier already gated the
+        # transport; enforce token presence as defence-in-depth. No platform/project gate, no
+        # audit — the tool only validates caller-supplied input and reads the public build-host
+        # projection runs.profile_examples already exposes.
+        current_context()
+        return await _validate_build_profile(pool, build_profile)

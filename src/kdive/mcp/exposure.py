@@ -232,6 +232,7 @@ PUBLIC_TOOLS: frozenset[str] = frozenset(
         "resources.describe",
         "resources.list",
         "runs.profile_examples",
+        "runs.validate_profile",
         "session.whoami",
         "shapes.list",
         "systems.profile_examples",

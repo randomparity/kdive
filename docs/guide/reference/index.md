@@ -114,6 +114,7 @@
 | [`runs.install`](runs.md#runsinstall) | `implemented` |
 | [`runs.list`](runs.md#runslist) | `implemented` |
 | [`runs.profile_examples`](runs.md#runsprofile_examples) | `implemented` |
+| [`runs.validate_profile`](runs.md#runsvalidate_profile) | `implemented` |
 | [`secrets.list`](secrets.md#secretslist) | `implemented` |
 | [`session.whoami`](session.md#sessionwhoami) | `implemented` |
 | [`shapes.delete`](shapes.md#shapesdelete) | `implemented` |
