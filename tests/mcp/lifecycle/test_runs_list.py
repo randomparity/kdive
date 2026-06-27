@@ -166,6 +166,7 @@ async def _seed_run(
     investigation_id: UUID | None = None,
     failure: ErrorCategory | None = None,
     created_at: datetime = _DT,
+    label: str | None = None,
 ) -> UUID:
     """Insert a Run, seeding its prerequisite Investigation/System when not supplied."""
     if investigation_id is None:
@@ -185,6 +186,7 @@ async def _seed_run(
                 state=state,
                 build_profile=copy.deepcopy(_PROFILE),
                 failure_category=failure,
+                label=label,
             ),
         )
     return run.id
@@ -219,6 +221,19 @@ def test_item_carries_investigation_and_target_kind(migrated_url: str) -> None:
         item = resp.items[0]
         assert item.data["investigation_id"] == str(inv)
         assert item.data["target_kind"] == "local-libvirt"
+
+    asyncio.run(_run())
+
+
+def test_item_carries_label(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv = await _seed_investigation(pool, project="proj")
+            await _seed_run(pool, investigation_id=inv, state=RunState.RUNNING, label="repro-A")
+            await _seed_run(pool, investigation_id=inv, state=RunState.CREATED)
+            resp = await _list_runs(pool, _ctx())
+        labels = {item.data["label"] for item in resp.items}
+        assert labels == {None, "repro-A"}
 
     asyncio.run(_run())
 

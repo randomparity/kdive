@@ -149,6 +149,7 @@ async def _seed_system(
     state: SystemState = SystemState.READY,
     shape: str | None = None,
     created_at: datetime = _DT,
+    label: str | None = None,
 ) -> UUID:
     async with pool.connection() as conn:
         system = await SYSTEMS.insert(
@@ -163,6 +164,7 @@ async def _seed_system(
                 state=state,
                 provisioning_profile=copy.deepcopy(_PROFILE),
                 shape=shape,
+                label=label,
             ),
         )
     return system.id
@@ -468,6 +470,22 @@ def test_list_surfaces_placement_no_per_item_keys(migrated_url: str) -> None:
         assert item.data["allocation_id"] == str(alloc)
         assert "active_run" not in item.data
         assert "active_debug_session_ids" not in item.data
+
+    asyncio.run(_run())
+
+
+def test_list_item_carries_label(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_budget_quota(pool, "proj")
+            res = await _seed_resource(pool)
+            alloc = await _seed_allocation(pool, resource_id=res)
+            await _seed_system(pool, allocation_id=alloc, label="sys-A")
+            alloc2 = await _seed_allocation(pool, resource_id=res)
+            await _seed_system(pool, allocation_id=alloc2)
+            resp = await _list_systems(pool, _ctx())
+        labels = {item.data["label"] for item in resp.items}
+        assert labels == {"sys-A", None}
 
     asyncio.run(_run())
 

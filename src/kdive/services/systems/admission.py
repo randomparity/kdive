@@ -105,6 +105,9 @@ class CreateSystemRequest:
     # Idempotency recorder (ADR-0193): awaited with the success result inside the admission
     # transaction so the key and the System/job commit atomically. None = no idempotency.
     recorder: SystemRecorder | None = None
+    # Optional client label, already validated/stripped at the handler (ADR-0264, #867);
+    # persistence only — the handler owns rejection (AdmissionFailureReason is closed).
+    label: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +331,7 @@ class SystemAdmission:
                     profile_policy=self.profile_policy,
                     rootfs_validator=self.rootfs_validator,
                     timeout=timeout,
+                    label=request.label,
                 )
             else:
                 result = await _define_create_response(
@@ -339,6 +343,7 @@ class SystemAdmission:
                     profile_policy=self.profile_policy,
                     rootfs_validator=self.rootfs_validator,
                     timeout=timeout,
+                    label=request.label,
                 )
             # Record the success envelope inside the admission transaction (idempotency,
             # ADR-0193) — atomic with the System insert / job enqueue. A failure is not cached.
@@ -466,10 +471,11 @@ async def _provision_create_response(
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
     timeout: PreMutationTimeout,
+    label: str | None = None,
 ) -> AdmissionResult:
     if existing is None:
         return await _insert_provisioning_system(
-            conn, ctx, alloc, profile, profile_policy, rootfs_validator, timeout
+            conn, ctx, alloc, profile, profile_policy, rootfs_validator, timeout, label
         )
     if existing.state is SystemState.DEFINED:
         return AdmissionFailure(
@@ -510,10 +516,11 @@ async def _define_create_response(
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
     timeout: PreMutationTimeout,
+    label: str | None = None,
 ) -> AdmissionResult:
     if existing is None:
         return await _insert_defined_system(
-            conn, ctx, alloc, profile, profile_policy, rootfs_validator, timeout
+            conn, ctx, alloc, profile, profile_policy, rootfs_validator, timeout, label
         )
     if existing.state is SystemState.DEFINED:
         return DefinedSystemAdmitted(existing)  # idempotent re-define
@@ -713,6 +720,7 @@ async def _insert_system_and_activate(
     state: SystemState,
     tool: str,
     transition: str,
+    label: str | None = None,
 ) -> System:
     now = datetime.now(UTC)  # placeholder; the DB sets created_at/updated_at
     system = await SYSTEMS.insert(
@@ -728,6 +736,7 @@ async def _insert_system_and_activate(
             state=state,
             provisioning_profile=dump_profile(profile),
             shape=alloc.shape,
+            label=label,
         ),
     )
     await audit.record(
@@ -766,6 +775,7 @@ async def _insert_defined_system(
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
     timeout: PreMutationTimeout,
+    label: str | None = None,
 ) -> AdmissionResult:
     blocked = await _new_system_allowed(conn, alloc, profile, profile_policy, rootfs_validator)
     if blocked is not None:
@@ -779,6 +789,7 @@ async def _insert_defined_system(
         state=SystemState.DEFINED,
         tool="systems.define",
         transition="->defined",
+        label=label,
     )
     return DefinedSystemAdmitted(system)
 
@@ -791,6 +802,7 @@ async def _insert_provisioning_system(
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
     timeout: PreMutationTimeout,
+    label: str | None = None,
 ) -> AdmissionResult:
     try:
         reject_rootfs_upload_without_window(profile_policy, profile)
@@ -808,6 +820,7 @@ async def _insert_provisioning_system(
         state=SystemState.PROVISIONING,
         tool="systems.provision",
         transition="->provisioning",
+        label=label,
     )
     return await _enqueue_provision_job(
         conn,

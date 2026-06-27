@@ -19,6 +19,7 @@ from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import InvestigationState, RunState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.labels import validate_label
 from kdive.domain.lifecycle.records import (
     Allocation,
     ExpectedBootFailure,
@@ -100,6 +101,7 @@ class RunCreateRequest:
     target_kind: str | None = None
     expected_boot_failure: ExpectedBootFailureInput | None = None
     reuse_requirement: RunReuseRequirementInput | None = None
+    label: str | None = None
 
     def domain_reuse_requirement(self) -> ReuseRequirement:
         if self.reuse_requirement is None:
@@ -142,6 +144,7 @@ class RunCreateResult:
     target_kind: ResourceKind
     system_id: UUID | None = None
     expected_boot_failure_kind: str | None = None
+    label: str | None = None
     is_external: bool = False
     """True for a source='external' build: the response chains into the upload loop, not build."""
 
@@ -171,6 +174,10 @@ async def create_run(
     atomically. It may raise (e.g. a key collision); the caller handles that.
     """
     object_id = request.object_id()
+    try:
+        label = validate_label(request.label)
+    except CategorizedError as exc:
+        _raise_from_error(object_id, exc)
     investigation_id = _parse_uuid(request.investigation_id)
     try:
         parsed_build_profile = BuildProfile.parse(request.build_profile)
@@ -194,6 +201,7 @@ async def create_run(
                     requirement=requirement,
                     resolver=resolver,
                     recorder=recorder,
+                    label=label,
                 )
             system_id = _parse_uuid(request.system_id)
             targets, project = await _resolve_targets(conn, ctx, investigation_id, system_id)
@@ -207,6 +215,7 @@ async def create_run(
                 requirement=requirement,
                 explicit_target_kind=request.target_kind,
                 recorder=recorder,
+                label=label,
             )
 
 
@@ -479,6 +488,7 @@ async def _create_locked(
     requirement: ReuseRequirement,
     explicit_target_kind: str | None,
     recorder: RunCreateRecorder | None = None,
+    label: str | None = None,
 ) -> RunCreateResult:
     # Global total lock order PROJECT < RESOURCE < ALLOCATION < SYSTEM, then INVESTIGATION →
     # RUN (locks.py, ADR-0040 §1): ALLOCATION must precede SYSTEM. The reconciler →expired
@@ -524,6 +534,7 @@ async def _create_locked(
             expected_boot_failure,
             project,
             target_kind=target_kind,
+            label=label,
         )
         await _flip_investigation_if_open(conn, ctx, inv, targets.investigation_id, project)
         result = _created_result(
@@ -546,6 +557,7 @@ async def _insert_run(
     project: str,
     *,
     target_kind: ResourceKind,
+    label: str | None = None,
 ) -> Run:
     now = datetime.now(UTC)
     run = await RUNS.insert(
@@ -563,6 +575,7 @@ async def _insert_run(
             state=RunState.CREATED,
             build_profile=dump_build_profile(build_profile),
             expected_boot_failure=expected_boot_failure,
+            label=label,
         ),
     )
     await audit.record(
@@ -624,6 +637,7 @@ def _created_result(
         target_kind=run.target_kind,
         system_id=run.system_id,
         expected_boot_failure_kind=kind,
+        label=run.label,
         is_external=is_external,
     )
 
@@ -660,6 +674,7 @@ async def _create_unbound(
     requirement: ReuseRequirement,
     resolver: ProviderResolver,
     recorder: RunCreateRecorder | None = None,
+    label: str | None = None,
 ) -> RunCreateResult:
     """Create a Run with no System (ADR-0169): commit a ``target_kind``, hold no capacity.
 
@@ -690,7 +705,14 @@ async def _create_unbound(
         if compat_block is not None:
             raise compat_block
         run = await _insert_unbound_run(
-            conn, ctx, investigation_id, build_profile, expected_boot_failure, project, target_kind
+            conn,
+            ctx,
+            investigation_id,
+            build_profile,
+            expected_boot_failure,
+            project,
+            target_kind,
+            label=label,
         )
         await _flip_investigation_if_open(conn, ctx, locked_inv, investigation_id, project)
         result = _created_result(
@@ -712,6 +734,8 @@ async def _insert_unbound_run(
     expected_boot_failure: SerializedExpectedBootFailure | None,
     project: str,
     target_kind: ResourceKind,
+    *,
+    label: str | None = None,
 ) -> Run:
     now = datetime.now(UTC)
     run = await RUNS.insert(
@@ -729,6 +753,7 @@ async def _insert_unbound_run(
             state=RunState.CREATED,
             build_profile=dump_build_profile(build_profile),
             expected_boot_failure=expected_boot_failure,
+            label=label,
         ),
     )
     await audit.record(

@@ -44,6 +44,12 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security.authz.rbac import Role
 
+_LABEL_DESCRIPTION = (
+    "Optional human handle for this System, echoed back as data.label in systems.get / "
+    "systems.list so you thread fewer bare UUIDs. Freeform and non-unique: 1..200 printable "
+    "characters (surrounding whitespace trimmed); not a lookup key. Omit for no handle."
+)
+
 
 class _SystemsListPayload(ToolPayload):
     """Public payload for ``systems.list`` filters and pagination."""
@@ -134,6 +140,10 @@ def _register_systems_define(
             str | None,
             Field(description="Replay-safe key; a repeated key returns the prior envelope."),
         ] = None,
+        label: Annotated[
+            str | None,
+            Field(description=_LABEL_DESCRIPTION),
+        ] = None,
     ) -> ToolResponse:
         """Create a System in 'defined' for a granted Allocation, opening a pre-provision
         rootfs-upload window; follow with `systems.provision_defined` once the upload is done.
@@ -151,6 +161,7 @@ def _register_systems_define(
                 allocation_id=allocation_id,
                 profile=dump_profile(profile),
                 idempotency_key=idempotency_key,
+                label=label,
             ),
             required_role=Role.OPERATOR,
         )
@@ -176,6 +187,10 @@ def _register_systems_provision(
             str | None,
             Field(description="Replay-safe key; a repeated key returns the prior envelope."),
         ] = None,
+        label: Annotated[
+            str | None,
+            Field(description=_LABEL_DESCRIPTION),
+        ] = None,
     ) -> ToolResponse:
         """Mint a System for a granted Allocation and enqueue provision directly (no upload
         window). Use `systems.define` then `systems.provision_defined` instead when the rootfs
@@ -196,6 +211,7 @@ def _register_systems_provision(
                 allocation_id=allocation_id,
                 profile=dump_profile(profile),
                 idempotency_key=idempotency_key,
+                label=label,
             ),
             required_role=Role.OPERATOR,
         )

@@ -220,6 +220,7 @@ async def _provision(
     profile: dict[str, Any],
     *,
     idempotency_key: str | None = None,
+    label: str | None = None,
 ):
     return await _SYSTEM_PROVISION_HANDLERS.provision_system(
         pool,
@@ -227,6 +228,7 @@ async def _provision(
         allocation_id=alloc_id,
         profile=profile,
         idempotency_key=idempotency_key,
+        label=label,
     )
 
 
@@ -321,6 +323,62 @@ def test_provision_mints_system_active_allocation_and_job(migrated_url: str) -> 
         assert str(sys_row["allocation_id"]) == alloc_id
         assert alloc_row is not None and alloc_row["state"] == "active"
         assert job_row is not None and job_row["n"] == 1
+
+    asyncio.run(_run())
+
+
+def test_provision_with_label_persists_and_systems_get_echoes(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            resp = await _provision(pool, _ctx(), alloc_id, _profile(), label="  edge-case A  ")
+            assert resp.status == "queued"
+            system_id = str(resp.data["system_id"])
+            get_resp = await get_system(pool, _ctx(), system_id)
+        assert get_resp.data["label"] == "edge-case A"  # stored stripped, echoed verbatim
+
+    asyncio.run(_run())
+
+
+def test_define_with_label_echoes_on_systems_get(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            resp = await _define(pool, _ctx(), alloc_id, _upload_profile(), label="defined-A")
+            assert resp.status == "defined"
+            get_resp = await get_system(pool, _ctx(), resp.object_id)
+        assert get_resp.data["label"] == "defined-A"
+
+    asyncio.run(_run())
+
+
+def test_provision_without_label_echoes_null(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+            get_resp = await get_system(pool, _ctx(), str(resp.data["system_id"]))
+        assert get_resp.data["label"] is None
+
+    asyncio.run(_run())
+
+
+def test_provision_invalid_label_rejected_no_system_or_audit(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            resp = await _provision(pool, _ctx(), alloc_id, _profile(), label="bad\tlabel")
+            assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR
+            assert resp.data["reason"] == "invalid_label"
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM systems")
+                sys_n = await cur.fetchone()
+                await cur.execute(
+                    "SELECT count(*) AS n FROM audit_log WHERE tool = 'systems.provision'"
+                )
+                audit_n = await cur.fetchone()
+        assert sys_n is not None and sys_n["n"] == 0
+        assert audit_n is not None and audit_n["n"] == 0
 
     asyncio.run(_run())
 

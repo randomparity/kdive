@@ -72,6 +72,9 @@ class System(DomainModel, Attribution):
     target_fingerprint: str | None = None
     domain_name: str | None = None
     shape: str | None = None
+    #: Optional client-supplied human handle, set at mint (ADR-0264, #867). Validated by
+    #: `validate_label` before persistence; echoed in the systems read envelopes.
+    label: str | None = None
 
 
 class Investigation(DomainModel, Attribution):
@@ -126,6 +129,9 @@ class Run(DomainModel, Attribution):
     debuginfo_ref: str | None = None
     failure_category: ErrorCategory | None = None
     failing_job_id: UUID | None = None
+    #: Optional client-supplied human handle, set at create (ADR-0264, #867). Validated by
+    #: `validate_label` before persistence; echoed in the runs read/create envelopes.
+    label: str | None = None
 
     def require_system_id(self) -> UUID:
         """Return the bound System id, or fail closed for an unbound Run (ADR-0169).

@@ -67,6 +67,7 @@ def system_envelope(
         "project": system.project,
         "allocation_id": str(system.allocation_id),
         "shape": system.shape,
+        "label": system.label,
         "created_at": iso(system.created_at),
         "updated_at": iso(system.updated_at),
         **provisioning_profile_summary(system.provisioning_profile),

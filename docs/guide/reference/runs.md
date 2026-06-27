@@ -128,6 +128,7 @@ Create a run, bound to a system or unbound against a target_kind.
   - `disk_gb` (`integer (nullable)`, optional)
   - `pcie` (`array<string> (nullable)`, optional)
 - `idempotency_key` (`string (nullable)`, optional) — Replay-safe key; a repeated key returns the prior envelope.
+- `label` (`string (nullable)`, optional) — Optional human handle for this Run, echoed back as data.label in runs.get / runs.list so you thread fewer bare UUIDs. Freeform and non-unique: 1..200 printable characters (surrounding whitespace trimmed); not a lookup key. Omit for no handle.
 
 `build_profile` examples:
 

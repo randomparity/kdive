@@ -66,9 +66,15 @@ def no_job_failure_detail(category: ErrorCategory) -> str:
 
 
 def _run_recovery(run: Run) -> dict[str, JsonValue]:
-    """Investigation link + redaction-safe build summary, on the Run row (#568)."""
+    """Investigation link + redaction-safe build summary, on the Run row (#568).
+
+    Carries the optional client `label` (ADR-0264, #867) so every Run read path — success,
+    failed, and `runs.list` — echoes it; it is the caller's own validated input, surfaced
+    verbatim like `investigations.title`.
+    """
     return {
         "investigation_id": str(run.investigation_id),
+        "label": run.label,
         **build_profile_summary(run.build_profile),
     }
 

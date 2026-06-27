@@ -20,6 +20,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.domain.errors import CategorizedError, suppressed_detail
+from kdive.domain.labels import validate_label
 from kdive.log import bind_context
 from kdive.mcp.responses import ResponseData, ToolResponse
 from kdive.mcp.tools._common import (
@@ -60,6 +61,20 @@ _RECOVERY_ACTIONS: dict[AdmissionRecovery, list[str]] = {
     AdmissionRecovery.RECYCLE_ALLOCATION: ["allocations.release", "allocations.request"],
     AdmissionRecovery.RETRY_PROVISION: ["systems.provision"],
 }
+
+
+def _validated_label(object_id: str, label: str | None) -> str | None | ToolResponse:
+    """Validate the client label, or return a ``configuration_error`` envelope (ADR-0264).
+
+    Validation lives in the handler, not the service ``AdmissionFailure`` path:
+    ``AdmissionFailureReason`` is a closed enum with no ``invalid_label`` member, and a handler
+    check runs before the idempotency-replay lookup and any DB work, so an invalid label mints
+    no System and writes no audit row.
+    """
+    try:
+        return validate_label(label)
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(object_id, exc)
 
 
 def _admission_failure_data(result: AdmissionFailure) -> ResponseData:
@@ -165,11 +180,15 @@ class SystemProvisionHandlers:
         allocation_id: str,
         profile: ProvisioningProfileInput,
         idempotency_key: str | None = None,
+        label: str | None = None,
     ) -> ToolResponse:
         """Mint a System for a ``granted`` Allocation and enqueue its provision job."""
         uid = _as_uuid(allocation_id)
         if uid is None:
             return _config_error(allocation_id)
+        cleaned = _validated_label(allocation_id, label)
+        if isinstance(cleaned, ToolResponse):
+            return cleaned
         return await self._keyed_create(
             pool,
             ctx,
@@ -179,6 +198,7 @@ class SystemProvisionHandlers:
             uid,
             profile,
             "provision",
+            cleaned,
         )
 
     async def provision_defined_system(
@@ -212,13 +232,25 @@ class SystemProvisionHandlers:
         allocation_id: str,
         profile: ProvisioningProfileInput,
         idempotency_key: str | None = None,
+        label: str | None = None,
     ) -> ToolResponse:
         """Create a System in ``defined`` for a ``granted`` Allocation."""
         uid = _as_uuid(allocation_id)
         if uid is None:
             return _config_error(allocation_id)
+        cleaned = _validated_label(allocation_id, label)
+        if isinstance(cleaned, ToolResponse):
+            return cleaned
         return await self._keyed_create(
-            pool, ctx, allocation_id, idempotency_key, "systems.define", uid, profile, "define"
+            pool,
+            ctx,
+            allocation_id,
+            idempotency_key,
+            "systems.define",
+            uid,
+            profile,
+            "define",
+            cleaned,
         )
 
     async def _keyed_create(
@@ -231,6 +263,7 @@ class SystemProvisionHandlers:
         allocation_id: UUID,
         profile: ProvisioningProfileInput,
         mode: CreateSystemMode,
+        label: str | None = None,
     ) -> ToolResponse:
         async def _create_for_allocation(recorder: SystemRecorder | None) -> AdmissionResult:
             with bind_context(principal=ctx.principal):
@@ -238,7 +271,11 @@ class SystemProvisionHandlers:
                     pool,
                     ctx,
                     CreateSystemRequest(
-                        allocation_id=allocation_id, profile=profile, mode=mode, recorder=recorder
+                        allocation_id=allocation_id,
+                        profile=profile,
+                        mode=mode,
+                        recorder=recorder,
+                        label=label,
                     ),
                 )
 

@@ -120,6 +120,7 @@ def _created_response(result: RunCreateResult) -> ToolResponse:
         "investigation_id": str(result.investigation_id),
         "system_id": str(result.system_id) if result.system_id is not None else None,
         "target_kind": result.target_kind.value,
+        "label": result.label,
     }
     if result.expected_boot_failure_kind is not None:
         data["expected_boot_failure"] = result.expected_boot_failure_kind
