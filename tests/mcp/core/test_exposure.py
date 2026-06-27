@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from kdive.mcp.exposure import (
     ExposureScope,
+    project_tool_visible,
     required_scopes,
     scope_satisfied,
     tool_visible,
+    visible_next_actions,
     visible_tool_names,
 )
 from kdive.security.authz.context import RequestContext
@@ -296,3 +298,50 @@ def test_live_session_family_classified_contributor_not_viewer() -> None:
 def test_viewer_sees_no_live_session_tool() -> None:
     viewer = _ctx(roles={"a": Role.VIEWER})
     assert visible_tool_names(viewer, _LIVE_SESSION_FAMILY) == frozenset()
+
+
+# --- project-scoped visibility (#862, ADR-0261) -------------------------------------------
+
+
+def test_project_tool_visible_honours_role_on_the_named_project() -> None:
+    # systems.provision is project-operator: only an operator+ on the named project sees it.
+    contributor = _ctx(roles={"a": Role.CONTRIBUTOR})
+    operator = _ctx(roles={"a": Role.OPERATOR})
+    assert not project_tool_visible("systems.provision", contributor, "a")
+    assert project_tool_visible("systems.provision", operator, "a")
+
+
+def test_project_tool_visible_is_per_project_not_connection_union() -> None:
+    # Operator on b, contributor on a: provisioning a's allocation must NOT be advertised,
+    # even though the connection-scoped tool_visible would admit it (the #862 bug class).
+    mixed = _ctx(roles={"a": Role.CONTRIBUTOR, "b": Role.OPERATOR})
+    assert tool_visible("systems.provision", mixed)  # connection union admits it
+    assert not project_tool_visible("systems.provision", mixed, "a")
+    assert project_tool_visible("systems.provision", mixed, "b")
+
+
+def test_project_tool_visible_member_without_role_sees_only_public() -> None:
+    role_less = _ctx(projects=("a",))  # member of a, no role
+    assert not project_tool_visible("allocations.get", role_less, "a")  # viewer-gated
+    assert project_tool_visible("projects.list", role_less, "a")  # public
+
+
+def test_project_tool_visible_platform_scope_uses_connection_grant() -> None:
+    # A platform-gated tool is not project-scoped; the platform grant decides regardless of project.
+    auditor = _ctx(platform=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+    assert project_tool_visible("build_hosts.list", auditor, "a")
+    assert not project_tool_visible("build_hosts.list", _ctx(roles={"a": Role.ADMIN}), "a")
+
+
+def test_visible_next_actions_filters_preserves_order_no_dedup() -> None:
+    contributor = _ctx(roles={"a": Role.CONTRIBUTOR})
+    actions = ["allocations.get", "systems.provision", "allocations.release"]
+    assert visible_next_actions(actions, contributor, "a") == [
+        "allocations.get",
+        "allocations.release",
+    ]
+    viewer = _ctx(roles={"a": Role.VIEWER})
+    assert visible_next_actions(actions, viewer, "a") == ["allocations.get"]
+    operator = _ctx(roles={"a": Role.OPERATOR})
+    assert visible_next_actions(actions, operator, "a") == actions
+    assert visible_next_actions([], contributor, "a") == []

@@ -285,3 +285,39 @@ def tool_visible(tool_name: str, ctx: RequestContext) -> bool:
 def visible_tool_names(ctx: RequestContext, names: Iterable[str]) -> set[str]:
     """The subset of ``names`` visible to ``ctx``."""
     return {name for name in names if tool_visible(name, ctx)}
+
+
+def _project_scope_satisfied(scope: ExposureScope, ctx: RequestContext, project: str) -> bool:
+    """Whether ``ctx`` holds ``scope`` *for ``project``* (ADR-0261).
+
+    A project-role scope is satisfied only by the role held on ``project`` itself — not the
+    connection-wide maximum :func:`scope_satisfied` uses — so a caller who is operator on another
+    project does not thereby satisfy a project scope here. A platform-role scope is not
+    project-scoped, so it reuses the connection's platform grants.
+    """
+    project_role = _PROJECT_SCOPE.get(scope)
+    if project_role is not None:
+        held = ctx.roles.get(project)
+        return held is not None and _ROLE_RANK[held] >= _ROLE_RANK[project_role]
+    return _has_platform(ctx, _PLATFORM_SCOPE[scope])
+
+
+def project_tool_visible(tool_name: str, ctx: RequestContext, project: str) -> bool:
+    """Whether ``ctx`` could invoke ``tool_name`` *for ``project``* (public ⇒ always, ADR-0261).
+
+    The project-scoped counterpart to :func:`tool_visible`: an allocation belongs to one project,
+    so a success-envelope breadcrumb must be filtered against the role held on *that* project, not
+    the connection-wide union. Used by :func:`visible_next_actions`.
+    """
+    scopes = required_scopes(tool_name)
+    if not scopes:
+        return True
+    return any(_project_scope_satisfied(scope, ctx, project) for scope in scopes)
+
+
+def visible_next_actions(actions: Iterable[str], ctx: RequestContext, project: str) -> list[str]:
+    """Drop suggested next-action tool names ``ctx`` cannot invoke for ``project`` (ADR-0261).
+
+    Preserves order and does not deduplicate; an all-filtered or empty input yields ``[]``.
+    """
+    return [name for name in actions if project_tool_visible(name, ctx, project)]
