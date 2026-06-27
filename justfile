@@ -294,6 +294,14 @@ resources-docs:
 resources-docs-check:
     uv run python scripts/gen_doc_resources.py --check
 
+# Regenerate the role->tool visibility matrix in docs/guide/safety-and-rbac.md (#347).
+rbac-matrix:
+    uv run python scripts/gen_rbac_tool_matrix.py
+
+# Verify the committed role->tool visibility matrix is current (also gated by `just test`).
+rbac-matrix-check:
+    uv run python scripts/gen_rbac_tool_matrix.py --check
+
 # Structural guard: no KDIVE_* env read outside kdive.config (ADR-0087). Stdlib-only.
 config-guard:
     uv run python scripts/config_env_guard.py
