@@ -42,9 +42,9 @@ from kdive.artifacts.storage import ObjectListing
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.loader import load_inventory
 from kdive.inventory.model import InventoryDoc
-from kdive.inventory.reconcile import ReconcileDiff
 from kdive.inventory.reconcile.coefficients import reconcile_coefficients
 from kdive.inventory.reconcile.images import reconcile_images
+from kdive.inventory.reconcile.records import ReconcileDiff
 from kdive.inventory.reconcile.resources import reconcile_resources
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler.inventory import InventoryReconcilePass, _cwd_inventory_shadowed
@@ -1880,7 +1880,7 @@ def test_build_host_prune_cordons_when_lease_wins_lock_first(
     # then sees the lease and CORDONS (enabled=false), never attempting the RESTRICT-aborting
     # DELETE. This is the same as the busy-host test but via the helper directly, closing the
     # "lease committed first" half of the race.
-    from kdive.inventory.reconcile import prune_or_cordon_build_host
+    from kdive.inventory.reconcile.prune import prune_or_cordon_build_host
 
     async def _run() -> None:
         async with await _connect(migrated_url) as seed:

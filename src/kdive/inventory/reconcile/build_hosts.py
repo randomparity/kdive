@@ -56,13 +56,9 @@ from kdive.inventory.overrides import (
     InventorySourceKind,
     lookup_many,
 )
-from kdive.inventory.reconcile import (
-    CONFIG_MANAGED_BY,
-    ReconcileDiff,
-    ReconcileRecord,
-    inventory_pass_lock,
-    prune_or_cordon_build_host,
-)
+from kdive.inventory.reconcile.locks import inventory_pass_lock
+from kdive.inventory.reconcile.prune import prune_or_cordon_build_host
+from kdive.inventory.reconcile.records import CONFIG_MANAGED_BY, ReconcileDiff, ReconcileRecord
 
 _log = logging.getLogger(__name__)
 

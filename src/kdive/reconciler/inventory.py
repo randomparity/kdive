@@ -45,9 +45,9 @@ from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory_optional
 from kdive.inventory.model import InventoryDoc
 from kdive.inventory.path import systems_toml_path
-from kdive.inventory.reconcile import ReconcileDiff
 from kdive.inventory.reconcile.images import ImageHeadStore
 from kdive.inventory.reconcile.pipeline import reconcile_all
+from kdive.inventory.reconcile.records import ReconcileDiff
 
 _log = logging.getLogger(__name__)
 

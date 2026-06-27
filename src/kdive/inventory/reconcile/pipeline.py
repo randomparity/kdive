@@ -14,12 +14,12 @@ from __future__ import annotations
 from psycopg import AsyncConnection
 
 from kdive.inventory.model import InventoryDoc
-from kdive.inventory.reconcile import ReconcileDiff
 from kdive.inventory.reconcile.build_configs import reconcile_build_configs
 from kdive.inventory.reconcile.build_hosts import reconcile_build_hosts
 from kdive.inventory.reconcile.coefficients import reconcile_coefficients
 from kdive.inventory.reconcile.images import ImageHeadStore, reconcile_images
 from kdive.inventory.reconcile.overrides import reconcile_overrides_gc
+from kdive.inventory.reconcile.records import ReconcileDiff
 from kdive.inventory.reconcile.resources import reconcile_resources
 
 

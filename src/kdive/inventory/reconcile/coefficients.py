@@ -26,7 +26,8 @@ from decimal import Decimal
 from psycopg import AsyncConnection
 
 from kdive.inventory.model import CostClassEntry, InventoryDoc
-from kdive.inventory.reconcile import ReconcileDiff, ReconcileRecord, inventory_pass_lock
+from kdive.inventory.reconcile.locks import inventory_pass_lock
+from kdive.inventory.reconcile.records import ReconcileDiff, ReconcileRecord
 
 _log = logging.getLogger(__name__)
 

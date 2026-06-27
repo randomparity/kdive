@@ -42,7 +42,7 @@ from kdive.inventory.overrides import (
     OverrideIdentity,
     set_override,
 )
-from kdive.inventory.reconcile import resource_identity_lock
+from kdive.inventory.reconcile.locks import resource_identity_lock
 from kdive.inventory.serialize import read_inventory_snapshot, serialize_inventory
 from kdive.inventory.writeback import (
     WritebackTarget,

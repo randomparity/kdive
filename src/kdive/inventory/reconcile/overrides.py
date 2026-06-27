@@ -45,7 +45,7 @@ from kdive.inventory.overrides import (
     clear_override,
     lookup_many,
 )
-from kdive.inventory.reconcile import inventory_pass_lock
+from kdive.inventory.reconcile.locks import inventory_pass_lock
 
 # fault-inject shares one synthetic host_uri (mirrors reconcile_resources); the file's host_uri for
 # a fault-inject identity is therefore not a divergence signal.

@@ -30,7 +30,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import BuildConfigDecl, InventoryDoc
-from kdive.inventory.reconcile import ReconcileDiff, ReconcileRecord
+from kdive.inventory.reconcile.records import ReconcileDiff, ReconcileRecord
 
 _log = logging.getLogger(__name__)
 

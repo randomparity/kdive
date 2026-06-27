@@ -34,7 +34,7 @@ from psycopg.rows import dict_row
 from kdive.domain.catalog.resources import ManagedBy
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
-from kdive.inventory.reconcile import PruneOutcome
+from kdive.inventory.reconcile.records import PruneOutcome
 
 _log = logging.getLogger(__name__)
 

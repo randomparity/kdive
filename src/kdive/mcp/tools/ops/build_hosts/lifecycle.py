@@ -33,7 +33,7 @@ from kdive.inventory.overrides import (
     OverrideIdentity,
     set_override,
 )
-from kdive.inventory.reconcile import CONFIG_MANAGED_BY
+from kdive.inventory.reconcile.records import CONFIG_MANAGED_BY
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._platform_auth import (
     ALL_PROJECTS_SCOPE,
