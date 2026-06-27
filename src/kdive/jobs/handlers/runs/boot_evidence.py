@@ -16,6 +16,7 @@ from kdive.db.repositories import ARTIFACTS, SYSTEMS
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError
+from kdive.domain.lifecycle.crash_signatures import CONSOLE_CRASH_KINDS
 from kdive.domain.lifecycle.records import Run
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
@@ -194,7 +195,7 @@ async def _upsert_console_artifact_row(
 def expected_crash_matched_line(run: Run, redacted_console: bytes) -> str | None:
     """Return the first redacted console line matching this Run's console-crash expectation."""
     expected = run.expected_boot_failure
-    if expected is None or expected.get("kind") != "console_crash":
+    if expected is None or expected.get("kind") not in CONSOLE_CRASH_KINDS:
         return None
     pattern = expected.get("pattern")
     if not isinstance(pattern, str):
