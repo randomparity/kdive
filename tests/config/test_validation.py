@@ -15,20 +15,20 @@ def _str(raw: str) -> str:
 
 
 def _uri_set(env: Mapping[str, str]) -> bool:
-    return bool(env.get("KDIVE_REMOTE_LIBVIRT_URI"))
+    return bool(env.get("KDIVE_TEST_PROVIDER_URI"))
 
 
 URI = Setting(
-    name="KDIVE_REMOTE_LIBVIRT_URI",
+    name="KDIVE_TEST_PROVIDER_URI",
     parse=_str,
-    group="remote-libvirt",
+    group="test-provider",
     processes=frozenset({"worker", "reconciler"}),
 )
 CA = Setting(
-    name="KDIVE_REMOTE_LIBVIRT_CA_CERT_REF",
+    name="KDIVE_TEST_PROVIDER_CA_CERT_REF",
     parse=_str,
     secret=True,
-    group="remote-libvirt",
+    group="test-provider",
     processes=frozenset({"worker", "reconciler"}),
     required_when=_uri_set,
     suggest="set the CA cert secret ref",
@@ -43,17 +43,17 @@ def test_required_when_false_does_not_require_optional_provider_setting() -> Non
 
 def test_required_when_true_requires_the_setting() -> None:
     reg = Registry([URI, CA])
-    reg.load({"KDIVE_REMOTE_LIBVIRT_URI": "qemu+tls://host/system"})
+    reg.load({"KDIVE_TEST_PROVIDER_URI": "test://host/system"})
     with pytest.raises(CategorizedError) as ei:
         reg.validate("worker")
     assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert "KDIVE_REMOTE_LIBVIRT_CA_CERT_REF" in str(ei.value)
-    assert ei.value.details["missing"] == ["KDIVE_REMOTE_LIBVIRT_CA_CERT_REF"]
+    assert "KDIVE_TEST_PROVIDER_CA_CERT_REF" in str(ei.value)
+    assert ei.value.details["missing"] == ["KDIVE_TEST_PROVIDER_CA_CERT_REF"]
 
 
 def test_validate_only_checks_settings_for_the_role() -> None:
     reg = Registry([URI, CA])
-    reg.load({"KDIVE_REMOTE_LIBVIRT_URI": "qemu+tls://host/system"})
+    reg.load({"KDIVE_TEST_PROVIDER_URI": "test://host/system"})
     reg.validate("server")  # server does not consume these → no raise
 
 
