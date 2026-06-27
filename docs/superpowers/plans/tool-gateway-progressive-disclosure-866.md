@@ -106,6 +106,17 @@ then call it directly (the 1a model).
 **Where it fits:** the gateway "floor" — collapses build→install→boot→get into one call.
 
 **Build:**
+- **Registrar wiring prerequisite.** Unlike `install`/`boot` (whose `install_run`/`boot_run` take
+  only `pool`+`ctx`), the **build** enqueue needs a `ProviderResolver`/runtime — `runs.build`'s
+  registrar is `_register_runs_build(app, pool, resolver: ProviderResolver)` (registrar.py:322).
+  The plane registrar already receives the `assembly` (`app.py` `PLANE_REGISTRARS` →
+  `register(app, pool, assembly)`), which carries the resolver. The composite registrar must
+  therefore receive and the handler must close over that same `ProviderResolver`, not just `pool`.
+- **Progress-delivery verification.** `Context.report_progress` exists (fastmcp 3.4.2), but confirm
+  during implementation that notifications emitted inside this single long-running call actually
+  flush to the client **mid-call** over kdive's transport (not buffered until return). If they do
+  not, drop the "not blind" claim from the spec/plan and rely on the bounded per-iteration re-poll
+  instead — do not silently ship a hollow mitigation.
 - New handler in the runs lifecycle plane. `run_id: str`, `timeout: float | None` (Field-bounded;
   server cap constant). Orchestration:
   1. For each phase in `(build, install, boot)`: enqueue at the **service layer** (build via the
@@ -133,8 +144,9 @@ then call it directly (the 1a model).
   `failed_phase` added.
 - Classify as **CONTRIBUTOR** in `_TOOL_SCOPES`.
 
-**Files:** `src/kdive/mcp/tools/lifecycle/runs/` (new `build_install_boot.py` + registrar wiring),
-`mcp/exposure.py` (`_TOOL_SCOPES`), `tests/mcp/.../test_build_install_boot.py`.
+**Files:** `src/kdive/mcp/tools/lifecycle/runs/` (new `build_install_boot.py` + registrar wiring
+that threads the `ProviderResolver` to the build phase), `mcp/exposure.py` (`_TOOL_SCOPES`),
+`tests/mcp/.../test_build_install_boot.py`.
 
 **Acceptance (integration, injected `sleep`/fake queue):**
 - Happy path: three jobs enqueued in order, each polled to `succeeded`, returns the terminal
