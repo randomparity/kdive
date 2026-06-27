@@ -94,7 +94,7 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
     @staticmethod
     def _mount_rw(overlay: str) -> _GuestFS:
         try:
-            import guestfs  # noqa: PLC0415  # operator-provided
+            import guestfs  # noqa: PLC0415  # ty: ignore[unresolved-import]  # operator-provided
         except ImportError as exc:
             raise CategorizedError(
                 "libguestfs (the guestfs Python binding) is required to stage the built kernel",
