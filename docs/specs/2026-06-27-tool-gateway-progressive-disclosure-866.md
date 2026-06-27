@@ -65,13 +65,26 @@ This builds directly on machinery ADR-0148 already shipped: the `on_list_tools` 
 
 ### 1. `runs.build_install_boot` — the composite (raises the floor)
 
-A single OPERATOR tool that orchestrates `build → install → boot → get` over an
-**already-created, already-bound** Run, blocking each phase to terminal internally. It calls the
-service layer (`_build_run` / `_install_run` / `_boot_run` / `_get_run` — confirmed thin under the
-existing `runs.*` handlers), not the MCP tools, so there is no envelope re-entry.
+A single CONTRIBUTOR tool that orchestrates `build → install → boot → get` over an
+**already-created, already-bound** Run.
 
-- **Input:** `run_id` (a created, bound, not-yet-built Run). Optional `expected_boot_failure`
-  passthrough is unchanged — a matched expected crash is a success exactly as in `runs.boot`.
+**Mechanism — enqueue-then-poll, not "the service layer blocks."** The step service functions do
+*not* block: `build_run`-equivalent (the `server_build` path, `_enqueue_build` over a
+`ProviderRuntime`), `install_run`, and `boot_run` (`tools/lifecycle/runs/steps.py`) each *enqueue*
+a job and return a job-accepted envelope — that asynchrony is exactly the `jobs.wait` ceremony #866
+names. So the composite supplies the blocking itself: for each phase it enqueues the step at the
+service layer (not via the MCP tool, so no envelope re-entry) and then polls that job to terminal
+using the same primitive `jobs.wait` uses, before enqueuing the next phase. It reads the final Run
+with `get_run`.
+
+- **Input:** `run_id` (a created, bound, not-yet-built Run) and an optional `timeout` budget.
+  `expected_boot_failure` is **not** a parameter — it is a create-time Run property
+  (`runs.create`, persisted on the Run); the boot phase honors the Run's stored value unchanged, so
+  a matched expected crash is a success exactly as in `runs.boot`.
+- **Idempotency.** Each phase is enqueued with a **deterministic per-phase `idempotency_key`**
+  derived from `run_id` + phase (the step functions already accept `idempotency_key` and dedup via
+  `keyed_mutation`). A client auto-retry of the long-blocking call therefore re-attaches to the
+  in-flight jobs rather than double-enqueuing build/install/boot.
 - **Scope (boundary).** Deliberately starts post-`create`/post-`bind`. `allocations.request`,
   `systems.provision`, `runs.create`, `runs.bind` involve capacity, system selection, and reuse
   decisions an agent should make explicitly; the three job-bearing same-shaped steps over one
@@ -79,12 +92,21 @@ existing `runs.*` handlers), not the MCP tools, so there is no envelope re-entry
   conflating capacity decisions into the reproduce step.
 - **Progress.** Emits MCP progress notifications per phase (phase name + underlying job state) so a
   multi-minute block is not blind.
-- **Success contract.** Returns the terminal `runs.get` projection (same shape) — boot outcome
-  plus the artifacts pointer — in one response.
-- **Failure contract.** Stops at the first phase that does not reach `succeeded`, and returns a
+- **Success contract.** Returns the terminal `get_run` projection (same shape as `runs.get`) — boot
+  outcome plus the artifacts pointer — in one response.
+- **Failure contract.** Stops at the first phase whose job does not reach `succeeded`, and returns a
   terminal envelope carrying `data.failed_phase` (`build` | `install` | `boot`), that phase's
   `job_id` and error, and `run_id`. The agent then drops into the granular tools (which it
   discovers via `tools.search`) to inspect or retry. The composite does not retry or resume.
+
+**Timeout and dropped-call contract.** The composite blocks one MCP request across all three
+phases — potentially many minutes (the build dominates). Define a **total `timeout`** (caller-
+supplied, with a server cap); on expiry the composite returns a non-terminal envelope naming the
+phase still in flight and its `job_id`, and the **underlying jobs keep running** server-side. If the
+client connection drops instead, the jobs likewise survive. In **both** cases the agent reattaches
+with `runs.get` / `jobs.list` on the `run_id` — it does **not** re-call the composite blindly, and
+because re-enqueue is idempotent (above) a re-call would re-attach rather than rebuild. This is the
+deliberate seam where the non-resumable composite hands off to the granular/poll tools.
 
 Rejected name `runs.reproduce` (implies crash-only; the tool equally validates a clean boot).
 
@@ -159,7 +181,7 @@ namespace appears.
 
 ## Surface delta
 
-- **New tools:** `tools.search` (PUBLIC), `runs.build_install_boot` (OPERATOR) → +2 registered.
+- **New tools:** `tools.search` (PUBLIC), `runs.build_install_boot` (CONTRIBUTOR) → +2 registered.
 - **Default `list_tools`:** 83 → ~9 (core set, then RBAC-scoped).
 - **Demoted (searchable, not removed):** ~76 tools incl. `runs.build`/`install`/`boot`.
 - **Capability:** unchanged — every tool reachable via `tools.search` at native schema fidelity.
@@ -175,14 +197,38 @@ keyword curation.
 ## RBAC / migration
 
 - `tools.search`: PUBLIC — it returns only schemas the caller's RBAC already permits.
-- `runs.build_install_boot`: OPERATOR — the max role of its constituent steps.
+- `runs.build_install_boot`: **CONTRIBUTOR** — the max role of its constituent steps. `runs.build`,
+  `runs.install`, and `runs.boot` each `require_role(... CONTRIBUTOR)` (`runs/steps.py`,
+  `runs/server_build.py`; exposure scope `_CONTRIBUTOR`). `systems.provision` is OPERATOR but is
+  *not* part of the composite (it starts post-bind), so it does not raise the bar.
 - No DB migration: `CORE_TOOLS`, curated keywords, and the TOC are code maps; search-miss is logged.
+
+## Verification
+
+The surface deltas are directly assertable; the behavioral goal is not, so it gets an explicit
+signal rather than "should improve."
+
+- **Surface (unit/guard tests):** default `list_tools` for a contributor connection returns exactly
+  the core set; `tools.search` returns a constructible schema for a demoted tool (e.g. `runs.boot`)
+  and that tool then executes; `CORE_TOOLS ⊆` live registry guard; namespace-TOC completeness guard.
+- **Composite (integration):** happy path returns the terminal `runs.get` projection in one call; a
+  forced build failure returns `data.failed_phase=build` with the job's error; a retried blocking
+  call re-attaches (no second build enqueued — assert one `runs.build` job per `run_id`).
+- **Behavioral signal (observability, not a unit test):** the goal is selection accuracy, which is
+  unfalsifiable in CI. Treat two `tool_invocation`-derived signals as the production acceptance
+  signal: (a) composite success rate and per-phase failure distribution, and (b) a
+  **searched-but-never-invoked** counter — a search that returns a tool the caller then never calls
+  within the session is the detectable signature of an incompatible client (the 1a bet failing) or a
+  mis-ranked result, distinct from a healthy search→call. Zero-result searches (§Telemetry) cover
+  the "found nothing" case; this counter covers the "found it, client couldn't use it" case that
+  would otherwise be silent.
 
 ## Risks
 
 - **Client compatibility (the 1a bet).** A client that only lets its model call tools from
   `list_tools` would not reach demoted tools. Mitigations: the explicit `instructions` pattern, the
-  `KDIVE_MCP_TOOL_GATEWAY=off` escape valve, and fail-open on filter error.
+  `KDIVE_MCP_TOOL_GATEWAY=off` escape valve, fail-open on filter error, and the
+  searched-but-never-invoked signal (§Verification) so the failure is detectable, not silent.
 - **Discovery-index quality.** A bad keyword map silently strips capability (agent searches, finds
   nothing, gives up). Mitigations: curated keywords, search-miss telemetry as the correction loop,
   and the TOC so the agent knows what to search for.

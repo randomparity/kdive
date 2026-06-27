@@ -26,15 +26,22 @@ default surface instead of growing it, keeping the full 83-tool capability reach
 
 ### 1. `runs.build_install_boot` composite
 
-An OPERATOR tool orchestrating `build → install → boot → get` over an already-created,
-already-bound Run via the service layer (`_build_run`/`_install_run`/`_boot_run`/`_get_run`), each
-phase blocking to terminal internally. It emits per-phase MCP progress notifications. On full
-success it returns the terminal `runs.get` projection (boot outcome + artifacts pointer) in one
-response. On the first non-`succeeded` phase it stops and returns `data.failed_phase`
-(`build`|`install`|`boot`) with that phase's `job_id`, error, and `run_id`; recovery uses the
-granular tools. It does not retry or resume. `expected_boot_failure` passes through unchanged.
-Scope deliberately starts post-`create`/`bind` — capacity and System-selection are explicit agent
-decisions, not part of the reproduce step.
+A CONTRIBUTOR tool orchestrating `build → install → boot → get` over an already-created,
+already-bound Run. The step service functions (`server_build` enqueue path, `install_run`,
+`boot_run` in `runs/steps.py`) **enqueue a job and return** — they do not block — so the composite
+supplies the blocking: per phase it enqueues at the service layer (no MCP envelope re-entry) and
+polls that job to terminal with the same primitive `jobs.wait` uses, then enqueues the next phase,
+and reads the final Run with `get_run`. Each phase is enqueued with a deterministic per-phase
+`idempotency_key` (`run_id` + phase) so a retried blocking call re-attaches to in-flight jobs
+instead of double-enqueuing. It emits per-phase MCP progress notifications. On full success it
+returns the terminal `runs.get` projection (boot outcome + artifacts pointer) in one response. On
+the first non-`succeeded` phase it stops and returns `data.failed_phase` (`build`|`install`|`boot`)
+with that phase's `job_id`, error, and `run_id`; recovery uses the granular tools. On caller-
+supplied `timeout` expiry or a dropped connection it returns the in-flight phase + `job_id` and the
+underlying jobs keep running — the agent reattaches via `runs.get`/`jobs.list`. It does not retry or
+resume. `expected_boot_failure` is a create-time Run property (not a composite input); the boot
+phase honors the Run's stored value unchanged. Scope deliberately starts post-`create`/`bind` —
+capacity and System-selection are explicit agent decisions, not part of the reproduce step.
 
 ### 2. `tools.search` discovery tool (1a model)
 
@@ -70,9 +77,13 @@ namespace appears.
 ## Consequences
 
 - Default `list_tools`: 83 → ~9 (then RBAC-scoped). Happy path over a bound Run: 3 job calls + 3
-  polls → 1. Surface: +2 registered tools (`tools.search`, `runs.build_install_boot`); ~76 tools
-  demoted to searchable-only. No capability removed — every tool reachable via `tools.search` at
-  native schema fidelity.
+  polls → 1. Surface: +2 registered tools (`tools.search` PUBLIC, `runs.build_install_boot`
+  CONTRIBUTOR); ~76 tools demoted to searchable-only. No capability removed — every tool reachable
+  via `tools.search` at native schema fidelity.
+- Verification: surface deltas are asserted by guard/integration tests (core-set listing, demoted-
+  tool search-then-call, idempotent re-call enqueues one build); the unfalsifiable accuracy goal is
+  carried by two `tool_invocation` signals — composite success/failure-phase distribution and a
+  searched-but-never-invoked counter that makes an incompatible client detectable, not silent.
 - `UsageTrackingMiddleware` attribution is unchanged: under 1a the searched-then-called tool runs
   for real, so each call still writes its own `tool_invocation` row (no proxy to re-attribute).
 - **Not a security control.** An agent could already call any registered tool by name under
