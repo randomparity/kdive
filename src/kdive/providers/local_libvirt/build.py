@@ -180,7 +180,9 @@ class LocalLibvirtBuild:
             ),
             make_bundle=local_kernel_bundle,
             read_vmlinux_source=_local_vmlinux_source,
-            read_build_id=_build_exec.real_read_build_id,
+            read_build_id=lambda ws: _build_exec.real_read_build_id(
+                ws, sandbox=sandbox_provider.get()
+            ),
             run_modules_install=lambda ws, mr: _build_exec.real_run_modules_install(
                 ws, mr, sandbox=sandbox_provider.get(), registry=secret_registry
             ),

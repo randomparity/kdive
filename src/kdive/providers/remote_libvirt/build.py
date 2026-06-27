@@ -184,7 +184,9 @@ class RemoteLibvirtBuild:
             ),
             make_bundle=local_kernel_bundle,
             read_vmlinux_source=_local_vmlinux_source,
-            read_build_id=_build_exec.real_read_build_id,
+            read_build_id=lambda ws: _build_exec.real_read_build_id(
+                ws, sandbox=sandbox_provider.get()
+            ),
             staging_factory=_real_staging_factory,
             catalog_fetch=build_config_fetch_from_env(),
             allowed_component_roots=allowed_component_roots,

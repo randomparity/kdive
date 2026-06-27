@@ -225,11 +225,23 @@ def _as_text(value: str | bytes | None) -> str | None:
     return value
 
 
-def real_read_build_id(workspace: Path) -> str:  # pragma: no cover - live_vm
-    """Extract the produced ``vmlinux`` GNU build-id from its merged ``.notes`` section."""
+def real_read_build_id(
+    workspace: Path, sandbox: BuildSandbox | None = None
+) -> str:  # pragma: no cover - live_vm
+    """Extract the produced ``vmlinux`` GNU build-id from its merged ``.notes`` section.
+
+    ``objcopy`` parses the build's ``vmlinux`` — an attacker-influenced ELF produced by the
+    unprivileged build — so when a sandbox is active the extraction is demoted to it (ADR-0214),
+    keeping a binutils ELF-parsing bug from running as the root worker. The note output file is
+    handed to the build user first so the demoted ``objcopy`` can write it; the root worker reads
+    it back afterward.
+    """
     with tempfile.NamedTemporaryFile(suffix=".note") as note_file:
+        if sandbox is not None:
+            sandbox.own(note_file.name)
         try:
-            subprocess.run(
+            sandbox_run(
+                sandbox,
                 [
                     "objcopy",
                     "-O",

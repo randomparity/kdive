@@ -74,3 +74,28 @@ def test_modules_install_threads_sandbox(monkeypatch: pytest.MonkeyPatch) -> Non
     ex.real_run_modules_install(Path("/ws"), Path("/mod"), sandbox=box, registry=SecretRegistry())
     assert seen["sandbox"] is box
     assert "modules_install" in seen["argv"]
+
+
+def test_read_build_id_extracts_through_sandbox_chokepoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """objcopy runs demoted via sandbox_run when a sandbox is active (ADR-0214, #838).
+
+    The root worker must not parse the build's attacker-influenced vmlinux ELF directly; the
+    note output file is first handed to the build user so the demoted objcopy can write it.
+    """
+    seen: dict = {}
+    chowned: list = []
+
+    def fake_sandbox_run(sandbox, argv, **kwargs):
+        seen.update(sandbox=sandbox, argv=argv)
+        return _R()
+
+    box = _box()
+    monkeypatch.setattr(ex, "sandbox_run", fake_sandbox_run)
+    monkeypatch.setattr(sb.os, "chown", lambda p, u, g, **kw: chowned.append(p))
+    monkeypatch.setattr(ex, "parse_gnu_build_id", lambda _notes: "deadbeef")
+    monkeypatch.setattr(ex, "read_bytes_file", lambda _p, **_kw: b"notes")
+
+    assert ex.real_read_build_id(Path("/ws"), box) == "deadbeef"
+    assert seen["sandbox"] is box
+    assert seen["argv"][0] == "objcopy"
+    assert chowned and chowned[0] == seen["argv"][-1]  # note file handed to the build user first
