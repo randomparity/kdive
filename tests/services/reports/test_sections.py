@@ -38,7 +38,7 @@ from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisi
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.services.accounting import ledger as accounting
-from kdive.services.reports import ReportScope
+from kdive.services.reports.core import ReportScope
 from kdive.services.reports.sections import (
     ActivitySection,
     CostsSection,

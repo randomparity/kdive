@@ -11,7 +11,7 @@ import openpyxl
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.services.reports import Report, Section
+from kdive.services.reports.core import Report, Section
 from kdive.services.reports.render import render_csv, render_xlsx
 
 _AS_OF = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)

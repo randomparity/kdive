@@ -12,7 +12,7 @@ import io
 from typing import Any, cast
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.services.reports import Report, Section
+from kdive.services.reports.core import Report, Section
 
 _TRUNCATED_NOTE = "# truncated: section row cap reached; full data in the spreadsheet"
 _SHEET_TITLE_LIMIT = 31

@@ -46,8 +46,8 @@ from kdive.security.authz.rbac import (
 )
 from kdive.security.secrets.redaction import Redactor
 from kdive.serialization import JsonValue
-from kdive.services.reports import Report, ReportScope, Row, Section, generate_report
 from kdive.services.reports.artifacts import ReportArtifactStore, write_report_artifacts
+from kdive.services.reports.core import Report, ReportScope, Row, Section, generate_report
 from kdive.services.reports.sections import registry
 from kdive.store.objectstore import object_store_from_env
 
