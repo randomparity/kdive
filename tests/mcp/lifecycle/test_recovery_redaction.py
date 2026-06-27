@@ -17,6 +17,18 @@ _PLANTED = "PLANTED-DO-NOT-LEAK"  # a benign marker; the test asserts it never l
 _DT = datetime(2026, 6, 18, tzinfo=UTC)
 _CREATED = datetime(2026, 6, 18, 1, tzinfo=UTC)
 _UPDATED = datetime(2026, 6, 18, 2, tzinfo=UTC)
+_RUN_TEMPLATE = Run(
+    id=uuid4(),
+    created_at=_DT,
+    updated_at=_DT,
+    principal="u",
+    project="proj",
+    investigation_id=uuid4(),
+    system_id=None,
+    target_kind=ResourceKind.LOCAL_LIBVIRT,
+    state=RunState.RUNNING,
+    build_profile={"source": "server", "build_host": "build-1"},
+)
 
 
 def _system(
@@ -44,29 +56,26 @@ def _system(
     )
 
 
-def _run(
-    *,
-    state: RunState = RunState.RUNNING,
-    system_id: UUID | None = None,
-    expected_boot_failure: dict[str, object] | None = None,
-    kernel_ref: str | None = None,
-    debuginfo_ref: str | None = None,
-) -> Run:
-    return Run(
-        id=uuid4(),
-        created_at=_DT,
-        updated_at=_DT,
-        principal="u",
-        project="proj",
-        investigation_id=uuid4(),
-        system_id=system_id,
-        target_kind=ResourceKind.LOCAL_LIBVIRT,
-        state=state,
-        build_profile={"source": "server", "build_host": "build-1"},
-        expected_boot_failure=expected_boot_failure,
-        kernel_ref=kernel_ref,
-        debuginfo_ref=debuginfo_ref,
+def _fresh_run(update: dict[str, object]) -> Run:
+    return _RUN_TEMPLATE.model_copy(update={"id": uuid4(), "investigation_id": uuid4(), **update})
+
+
+def _bound_run(state: RunState = RunState.RUNNING, *, system_id: UUID | None = None) -> Run:
+    return _fresh_run({"state": state, "system_id": system_id or uuid4()})
+
+
+def _unbound_run(state: RunState = RunState.RUNNING) -> Run:
+    return _fresh_run({"state": state, "system_id": None})
+
+
+def _run_with_artifact_refs(*, kernel_ref: str, debuginfo_ref: str) -> Run:
+    return _bound_run(RunState.SUCCEEDED).model_copy(
+        update={"kernel_ref": kernel_ref, "debuginfo_ref": debuginfo_ref}
     )
+
+
+def _run_with_expected_boot_failure(detail: dict[str, object]) -> Run:
+    return _bound_run().model_copy(update={"expected_boot_failure": detail})
 
 
 def test_system_envelope_excludes_ssh_credential_ref() -> None:
@@ -119,7 +128,7 @@ def test_run_envelope_excludes_git_remote_token() -> None:
 
 
 def test_envelope_created_run_advances_to_build() -> None:
-    run = _run(state=RunState.CREATED, system_id=uuid4())
+    run = _bound_run(RunState.CREATED)
 
     resp = envelope_for_run(run)
 
@@ -129,7 +138,7 @@ def test_envelope_created_run_advances_to_build() -> None:
 
 
 def test_envelope_running_run_advances_to_build() -> None:
-    run = _run(state=RunState.RUNNING, system_id=uuid4())
+    run = _bound_run()
 
     resp = envelope_for_run(run)
 
@@ -137,7 +146,7 @@ def test_envelope_running_run_advances_to_build() -> None:
 
 
 def test_envelope_canceled_run_only_offers_get() -> None:
-    run = _run(state=RunState.CANCELED, system_id=uuid4())
+    run = _bound_run(RunState.CANCELED)
 
     resp = envelope_for_run(run)
 
@@ -145,7 +154,7 @@ def test_envelope_canceled_run_only_offers_get() -> None:
 
 
 def test_envelope_succeeded_run_surfaces_steps_and_next_step() -> None:
-    run = _run(state=RunState.SUCCEEDED, system_id=uuid4())
+    run = _bound_run(RunState.SUCCEEDED)
     progress = StepProgress(install="succeeded", boot="succeeded", boot_outcome=None)
 
     resp = envelope_for_run(run, step_progress=progress)
@@ -155,7 +164,7 @@ def test_envelope_succeeded_run_surfaces_steps_and_next_step() -> None:
 
 
 def test_envelope_succeeded_run_without_progress_omits_steps_and_installs_next() -> None:
-    run = _run(state=RunState.SUCCEEDED, system_id=uuid4())
+    run = _bound_run(RunState.SUCCEEDED)
 
     resp = envelope_for_run(run)
 
@@ -166,7 +175,7 @@ def test_envelope_succeeded_run_without_progress_omits_steps_and_installs_next()
 
 def test_envelope_data_carries_run_identity_fields() -> None:
     system_id = uuid4()
-    run = _run(state=RunState.RUNNING, system_id=system_id)
+    run = _bound_run(system_id=system_id)
 
     data = envelope_for_run(run).data
 
@@ -179,7 +188,7 @@ def test_envelope_data_carries_run_identity_fields() -> None:
 
 def test_envelope_succeeded_unbound_run_must_bind_first() -> None:
     # A SUCCEEDED Run with no bound System advances to runs.bind before install.
-    run = _run(state=RunState.SUCCEEDED, system_id=None)
+    run = _unbound_run(RunState.SUCCEEDED)
 
     resp = envelope_for_run(run)
 
@@ -187,13 +196,13 @@ def test_envelope_succeeded_unbound_run_must_bind_first() -> None:
 
 
 def test_envelope_unbound_run_reports_null_system_id() -> None:
-    run = _run(state=RunState.RUNNING, system_id=None)
+    run = _unbound_run()
 
     assert envelope_for_run(run).data["system_id"] is None
 
 
 def test_envelope_surfaces_active_debug_session_ids() -> None:
-    run = _run(state=RunState.RUNNING, system_id=uuid4())
+    run = _bound_run()
 
     data = envelope_for_run(run, active_debug_session_ids=["sess-1", "sess-2"]).data
 
@@ -201,7 +210,7 @@ def test_envelope_surfaces_active_debug_session_ids() -> None:
 
 
 def test_envelope_includes_required_cmdline_when_supplied() -> None:
-    run = _run(state=RunState.RUNNING, system_id=uuid4())
+    run = _bound_run()
 
     with_cmdline = envelope_for_run(run, required_cmdline="console=ttyS0").data
     without_cmdline = envelope_for_run(run).data
@@ -211,9 +220,7 @@ def test_envelope_includes_required_cmdline_when_supplied() -> None:
 
 
 def test_envelope_refs_carry_artifact_keys() -> None:
-    run = _run(
-        state=RunState.SUCCEEDED,
-        system_id=uuid4(),
+    run = _run_with_artifact_refs(
         kernel_ref="s3://b/kernel",
         debuginfo_ref="s3://b/debuginfo",
     )
@@ -224,11 +231,7 @@ def test_envelope_refs_carry_artifact_keys() -> None:
 
 
 def test_envelope_surfaces_expected_boot_failure_kind() -> None:
-    run = _run(
-        state=RunState.RUNNING,
-        system_id=uuid4(),
-        expected_boot_failure={"kind": "panic"},
-    )
+    run = _run_with_expected_boot_failure({"kind": "panic"})
 
     data = envelope_for_run(run).data
 
