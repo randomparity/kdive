@@ -71,8 +71,9 @@ class _RunsCreatePayload(ToolPayload):
             "(e.g. {'kind':'catalog','provider':'system','name':'kdump'}); omit it to get the "
             "seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a "
             "kdump+debuginfo kernel. Call buildconfig.get to inspect a named fragment. Extra "
-            "kernel cmdline args (e.g. 'dhash_entries=1') are not set here: append them via "
-            "runs.build.cmdline (bound on the first server build). See "
+            "kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the cmdline "
+            "parameter to runs.build for server builds, or to runs.complete_build for external "
+            "builds. See "
             "resource://kdive/docs/operating/external-build-upload.md for shaping a "
             "source='external' upload, or resource://kdive/docs/operating/build-source-staging.md "
             "for staging a server-build source."
@@ -194,7 +195,8 @@ def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: Provid
         """Return one run; `succeeded` means build done. `data.steps` has install/boot status.
 
         `data.required_cmdline` is the platform-required boot args; append extra kernel debug
-        args (e.g. `dhash_entries=1`) via `runs.build.cmdline` (bound on the Run's first build).
+        args (e.g. `dhash_entries=1`) with the `cmdline` parameter on `runs.build` for server
+        builds, or `runs.complete_build` for external builds.
         """
         return await _get_run(pool, current_context(), run_id, resolver=resolver)
 
@@ -238,8 +240,9 @@ def _register_runs_create(
                 description=(
                     "Run creation request. After source='external', call "
                     "artifacts.expected_uploads and artifacts.create_run_upload, then "
-                    "runs.complete_build. Extra server-build kernel cmdline args are appended "
-                    "later with runs.build.cmdline."
+                    "runs.complete_build. Extra kernel cmdline args are passed later as "
+                    "`cmdline` on runs.build for server builds, or runs.complete_build for "
+                    "external builds."
                 )
             ),
         ],
@@ -414,7 +417,8 @@ def _register_runs_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """Boot an installed run.
 
         The kernel cmdline is fixed at build time; append extra debug args (e.g.
-        `dhash_entries=1`) via `runs.build.cmdline` (bound on the Run's first build), not here.
+        `dhash_entries=1`) with the `cmdline` parameter on `runs.build` for server builds,
+        or `runs.complete_build` for external builds; do not pass them here.
         """
         return await _boot_run(pool, current_context(), run_id, idempotency_key=idempotency_key)
 

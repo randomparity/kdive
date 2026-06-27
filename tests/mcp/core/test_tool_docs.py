@@ -330,19 +330,25 @@ def test_run_cmdline_docs_describe_debug_args_only() -> None:
         assert "root=/dev/vda" not in description
 
 
-def test_run_lifecycle_tools_cross_reference_build_cmdline() -> None:
-    # #748: extra kernel cmdline args are only settable via runs.build.cmdline, but an agent
-    # working from runs.create / runs.boot / runs.get alone could not discover that seam. Each
-    # of those tools' schema text must now name runs.build.cmdline as the way to append params.
+def test_run_lifecycle_tools_cross_reference_real_cmdline_parameters() -> None:
+    # Extra kernel cmdline args are set on the real build/finalize tools, not through a
+    # phantom subtool. The discovery text must name the actual public parameters.
     tools = {t.name: t for t in TOOLS}
 
     create = tools["runs.create"]
     request_props = create.parameters["properties"]["request"]["properties"]
     create_text = (create.description or "") + request_props["build_profile"]["description"]
-    assert "runs.build.cmdline" in create_text
+    assert "runs.build.cmdline" not in create_text
+    assert "runs.build" in create_text
+    assert "runs.complete_build" in create_text
+    assert "cmdline" in create_text
 
     for tool_name in ("runs.boot", "runs.get"):
-        assert "runs.build.cmdline" in (tools[tool_name].description or "")
+        description = tools[tool_name].description or ""
+        assert "runs.build.cmdline" not in description
+        assert "runs.build" in description
+        assert "runs.complete_build" in description
+        assert "cmdline" in description
 
 
 def test_runs_create_documents_warm_tree_is_provenance_only() -> None:
