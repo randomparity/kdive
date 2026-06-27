@@ -283,10 +283,13 @@ async def define_system(
     request_ctx: RequestContext,
     alloc_id: str,
     profile: dict[str, Any],
+    *,
+    label: str | None = None,
 ):
     return await SYSTEM_PROVISION_HANDLERS.define_system(
         conn_pool,
         request_ctx,
         allocation_id=alloc_id,
         profile=profile,
+        label=label,
     )
