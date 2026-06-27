@@ -40,6 +40,7 @@ from kdive.mcp.tools.ops import audit as audit_tools
 from kdive.mcp.tools.ops import breakglass as ops_breakglass_tools
 from kdive.mcp.tools.ops import diagnostics as ops_diagnostics_tools
 from kdive.mcp.tools.ops import inventory as inventory_tools
+from kdive.mcp.tools.ops import inventory_export as ops_inventory_export_tools
 from kdive.mcp.tools.ops import queue as ops_queue_tools
 from kdive.mcp.tools.ops import reconcile as ops_reconcile_tools
 from kdive.mcp.tools.ops import reconcile_systems as ops_reconcile_systems_tools
@@ -257,6 +258,7 @@ PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _register_introspection_tools,
     _pool_only_plane_registrar(ops_queue_tools.register),
     _pool_only_plane_registrar(ops_tuning_tools.register),
+    _pool_only_plane_registrar(ops_inventory_export_tools.register),
     _pool_only_plane_registrar(audit_tools.register),
     _register_diagnostics_tools,
     _pool_only_plane_registrar(inventory_tools.register),

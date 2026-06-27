@@ -36,7 +36,7 @@ from kdive.domain.lifecycle.records import Allocation
 from kdive.inventory import writeback
 from kdive.inventory.model import InventoryDoc
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.ops import tuning
+from kdive.mcp.tools.ops import inventory_export, tuning
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.allocation.admission.core import AllocationRequest, admit
 
@@ -582,7 +582,7 @@ async def _seed_inventory(conn: psycopg.AsyncConnection) -> None:
 def test_export_systems_toml_requires_platform_operator(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await tuning.export_systems_toml(pool, _ctx())
+            resp = await inventory_export.export_systems_toml(pool, _ctx())
             assert resp.status == "error"
             assert resp.error_category == "authorization_denied"
         assert await _count_platform_audit(migrated_url) == 0
@@ -594,7 +594,7 @@ def test_export_systems_toml_auditor_denied_but_audited(migrated_url: str) -> No
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
-            resp = await tuning.export_systems_toml(pool, ctx)
+            resp = await inventory_export.export_systems_toml(pool, ctx)
             assert resp.status == "error"
             assert resp.error_category == "authorization_denied"
         rows = await _platform_audit_rows(migrated_url)
@@ -609,7 +609,7 @@ def test_export_systems_toml_emits_and_audits(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
                 await _seed_inventory(conn)
-            resp = await tuning.export_systems_toml(pool, _OPERATOR)
+            resp = await inventory_export.export_systems_toml(pool, _OPERATOR)
             assert resp.status == "ok"
             toml_text = str(resp.data["toml"])
             assert "schema_version = 2" in toml_text
@@ -628,8 +628,8 @@ def test_export_systems_toml_is_byte_deterministic(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
                 await _seed_inventory(conn)
-            first = await tuning.export_systems_toml(pool, _OPERATOR)
-            second = await tuning.export_systems_toml(pool, _OPERATOR)
+            first = await inventory_export.export_systems_toml(pool, _OPERATOR)
+            second = await inventory_export.export_systems_toml(pool, _OPERATOR)
             assert first.data["toml"] == second.data["toml"]
 
     asyncio.run(_run())
@@ -645,7 +645,7 @@ def test_export_systems_toml_omits_removed_identity(migrated_url: str) -> None:
                     "(source_kind, resource_kind, name, disposition, reason, actor) "
                     "VALUES ('resource', 'remote-libvirt', 'host-a', 'removed', 'gone', 'op')"
                 )
-            resp = await tuning.export_systems_toml(pool, _OPERATOR)
+            resp = await inventory_export.export_systems_toml(pool, _OPERATOR)
             toml_text = str(resp.data["toml"])
         assert "host-a" not in toml_text  # removed identity omitted
 
@@ -659,7 +659,7 @@ def test_export_systems_toml_round_trips_through_reconcile(migrated_url: str) ->
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
                 await _seed_inventory(conn)
-            resp = await tuning.export_systems_toml(pool, _OPERATOR)
+            resp = await inventory_export.export_systems_toml(pool, _OPERATOR)
             toml_text = str(resp.data["toml"])
         completed = _complete_remote(toml_text, base_image="base")
         doc = InventoryDoc.parse(tomllib.loads(completed))
@@ -696,7 +696,7 @@ def test_persist_without_writeback_target_is_configuration_error(migrated_url: s
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
                 await _seed_non_remote_inventory(conn)
-            resp = await tuning.export_systems_toml(
+            resp = await inventory_export.export_systems_toml(
                 pool, _OPERATOR, persist=True, resolve_target=lambda: None
             )
             assert resp.status == "error"
@@ -718,7 +718,7 @@ def test_persist_clean_export_writes_and_reports(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
                 await _seed_non_remote_inventory(conn)
-            resp = await tuning.export_systems_toml(
+            resp = await inventory_export.export_systems_toml(
                 pool, _OPERATOR, persist=True, resolve_target=lambda: fake
             )
             assert resp.status == "ok"
@@ -743,7 +743,7 @@ def test_persist_skeleton_is_refused_and_writes_nothing(migrated_url: str) -> No
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
                 await _seed_inventory(conn)
-            resp = await tuning.export_systems_toml(
+            resp = await inventory_export.export_systems_toml(
                 pool, _OPERATOR, persist=True, resolve_target=lambda: fake
             )
             assert resp.status == "error"
@@ -763,9 +763,9 @@ def test_persist_with_completed_document_writes_verbatim(migrated_url: str) -> N
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
                 await _seed_inventory(conn)
-            exported = await tuning.export_systems_toml(pool, _OPERATOR)
+            exported = await inventory_export.export_systems_toml(pool, _OPERATOR)
             completed = _complete_remote(str(exported.data["toml"]), base_image="base")
-            resp = await tuning.export_systems_toml(
+            resp = await inventory_export.export_systems_toml(
                 pool, _OPERATOR, persist=True, document=completed, resolve_target=lambda: fake
             )
             assert resp.status == "ok"
@@ -786,8 +786,8 @@ def test_persist_with_uncompleted_document_is_refused(migrated_url: str) -> None
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
                 await _seed_inventory(conn)
-            exported = await tuning.export_systems_toml(pool, _OPERATOR)
-            resp = await tuning.export_systems_toml(
+            exported = await inventory_export.export_systems_toml(pool, _OPERATOR)
+            resp = await inventory_export.export_systems_toml(
                 pool,
                 _OPERATOR,
                 persist=True,
@@ -808,7 +808,7 @@ def test_document_without_persist_is_refused(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
                 await _seed_non_remote_inventory(conn)
-            resp = await tuning.export_systems_toml(
+            resp = await inventory_export.export_systems_toml(
                 pool, _OPERATOR, document="schema_version = 2\n", resolve_target=lambda: fake
             )
             assert resp.status == "error"
@@ -829,7 +829,7 @@ def test_persist_oversized_document_is_refused(migrated_url: str, monkeypatch: o
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
                 await _seed_non_remote_inventory(conn)
-            resp = await tuning.export_systems_toml(
+            resp = await inventory_export.export_systems_toml(
                 pool,
                 _OPERATOR,
                 persist=True,
@@ -853,7 +853,7 @@ def test_persist_write_failure_is_surfaced(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
                 await _seed_non_remote_inventory(conn)
-            resp = await tuning.export_systems_toml(
+            resp = await inventory_export.export_systems_toml(
                 pool, _OPERATOR, persist=True, resolve_target=lambda: fake
             )
             assert resp.status == "error"
@@ -872,7 +872,7 @@ def test_persist_denied_for_non_operator_writes_nothing(migrated_url: str) -> No
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await tuning.export_systems_toml(
+            resp = await inventory_export.export_systems_toml(
                 pool, _ctx(), persist=True, resolve_target=lambda: fake
             )
             assert resp.status == "error"
