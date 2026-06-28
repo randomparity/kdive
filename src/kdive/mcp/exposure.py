@@ -238,6 +238,7 @@ PUBLIC_TOOLS: frozenset[str] = frozenset(
         "shapes.list",
         "systems.profile_examples",
         "tools.invoke",
+        "tools.search",
     }
 )
 
