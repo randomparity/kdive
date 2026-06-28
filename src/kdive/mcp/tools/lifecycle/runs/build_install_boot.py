@@ -39,7 +39,7 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run_target_kind
-from kdive.mcp.tools.lifecycle.runs.server_build import BuildRunHandlers
+from kdive.mcp.tools.lifecycle.runs.server_build import build_handlers_for
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run
 from kdive.providers.core.resolver import ProviderResolver
@@ -72,10 +72,7 @@ async def _enqueue_phase(
         return await boot_run(pool, ctx, run_id, idempotency_key=key)
 
     def _build(runtime: ProviderRuntime) -> Awaitable[ToolResponse]:
-        handlers = BuildRunHandlers(
-            runtime.component_sources, config_validator=runtime.build_config_validator
-        )
-        return handlers.build_run(pool, ctx, run_id, idempotency_key=key)
+        return build_handlers_for(runtime).build_run(pool, ctx, run_id, idempotency_key=key)
 
     return await with_runtime_for_run_target_kind(
         pool, resolver, ctx, run_id, _build, required_role=Role.CONTRIBUTOR

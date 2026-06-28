@@ -36,6 +36,7 @@ from kdive.mcp.tools.lifecycle.runs.profile_examples import (
     build_host_profile_examples as _build_host_profile_examples,
 )
 from kdive.mcp.tools.lifecycle.runs.server_build import BuildRunHandlers as _BuildRunHandlers
+from kdive.mcp.tools.lifecycle.runs.server_build import build_handlers_for
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run as _boot_run
 from kdive.mcp.tools.lifecycle.runs.steps import install_run as _install_run
 from kdive.mcp.tools.lifecycle.runs.validate_profile import (
@@ -191,10 +192,7 @@ def register(
 
 
 def _build_handlers(runtime: ProviderRuntime) -> _BuildRunHandlers:
-    return _BuildRunHandlers(
-        runtime.component_sources,
-        config_validator=runtime.build_config_validator,
-    )
+    return build_handlers_for(runtime)
 
 
 def _complete_build_handlers() -> _CompleteBuildHandlers:
