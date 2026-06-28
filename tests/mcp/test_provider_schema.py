@@ -79,7 +79,7 @@ def test_assert_kind_composed_rejects_non_composed() -> None:
         assert_kind_composed(FAULT, frozenset({LOCAL}))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details["kind"] == "fault-inject"
-    assert exc.value.details["registered"] == ["local-libvirt"]
+    assert exc.value.details["available"] == ["local-libvirt"]
 
 
 def test_assert_kind_composed_empty_set_message() -> None:

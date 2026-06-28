@@ -62,7 +62,7 @@ def assert_kind_composed(kind: ResourceKind, kinds: frozenset[ResourceKind]) -> 
     """
     if kind in kinds:
         return
-    registered = sorted(k.value for k in kinds)
+    available = sorted(k.value for k in kinds)
     message = (
         "no providers configured"
         if not kinds
@@ -71,5 +71,5 @@ def assert_kind_composed(kind: ResourceKind, kinds: frozenset[ResourceKind]) -> 
     raise CategorizedError(
         message,
         category=ErrorCategory.CONFIGURATION_ERROR,
-        details={"kind": kind.value, "registered": registered},
+        details={"kind": kind.value, "available": available},
     )

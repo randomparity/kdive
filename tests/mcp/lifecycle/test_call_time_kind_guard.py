@@ -154,3 +154,32 @@ def test_gateway_rejects_non_composed_kind_via_tools_invoke(
     resp = asyncio.run(_run())
     assert resp.error_category == "configuration_error"
     assert "fault-inject" in (resp.detail or "")
+
+
+def test_rejection_envelope_enumerates_composed_kinds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Composed kinds survive serialization into the delivered envelope (ADR-0269).
+
+    This is the regression test for the ``"registered"`` → ``"available"`` rename:
+    ``safe_error_details`` only preserves lists under keys in ``_ENUMERATION_KEYS``
+    (``{"accepted_values", "available"}``).  Emitting under ``"registered"`` silently
+    dropped the list; ``"available"`` preserves it so callers can enumerate valid kinds.
+    """
+    resolver = _local_libvirt_only_resolver()
+    app = _build_test_app(resolver)
+    monkeypatch.setattr(allocations_registrar, "current_context", _ctx)
+
+    async def _run() -> ToolResponse:
+        result = await app.call_tool("allocations.request", _NON_COMPOSED_REQUEST_ARGS)
+        return ToolResponse.model_validate(result.structured_content)
+
+    resp = asyncio.run(_run())
+    assert resp.error_category == "configuration_error"
+    # The envelope's data must carry the composed-kinds list after safe_error_details
+    # filtering.  If "available" is not in _ENUMERATION_KEYS, the list is dropped and
+    # this assertion fails — catching the serialization drop that ADR-0269 requires.
+    data = resp.data or {}
+    available = data.get("available")
+    assert isinstance(available, list), f"expected 'available' list in envelope data, got: {data!r}"
+    assert "local-libvirt" in available
