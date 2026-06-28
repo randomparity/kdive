@@ -150,10 +150,12 @@ terminal) run against the Claude Code client and recorded in that follow-up PR.
   validation fidelity. Unlike the reverted 1a gateway, demoted tools are *invocable*.
 - **Telemetry/audit** native and clean (skip-set keeps one row per real call across the whole chain).
 - **Annotation/consent granularity collapses.** A client that prompts per tool sees only
-  `tools.invoke`, so it cannot distinguish a read from a destructive teardown at prompt time. The
-  server-side destructive-op gate (ADR-0043) still fires on the inner call and remains the real
-  boundary; only the client-side prompt granularity degrades. `tools.invoke` is annotated
-  conservatively (`mutating`).
+  `tools.invoke`, so it cannot distinguish a read from a destructive teardown at prompt time.
+  `tools.invoke` is annotated `destructive()` (the prompting client errs toward prompting), but it is
+  **not** in `DESTRUCTIVE_TOOLS` — the kdive destructive-op gate (ADR-0043) keys off that set and
+  fires on the re-entered inner call, so a destructive inner tool is gated and a read is not. The
+  annotation is the client hint; `DESTRUCTIVE_TOOLS` membership is the server-side boundary, and only
+  the client-side prompt granularity degrades.
 - **Not a security control.** An agent could already call any registered tool under ADR-0148's
   fail-open advisory filter; this adds no new exposure. Execution-time `require_role` / the
   destructive-op gate remain the only boundary.

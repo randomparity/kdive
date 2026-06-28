@@ -82,7 +82,7 @@ A PUBLIC tool, `tools.invoke(name: str, arguments: object | None)`, that re-ente
 call path:
 
 ```python
-@app.tool(name="tools.invoke", annotations=_docmeta.mutating())
+@app.tool(name="tools.invoke", annotations=_docmeta.destructive())
 async def tools_invoke(name: str, arguments: dict[str, Any] | None = None) -> ToolResult:
     try:
         return await app.call_tool(name, arguments or {}, run_middleware=True)
@@ -91,6 +91,14 @@ async def tools_invoke(name: str, arguments: dict[str, Any] | None = None) -> To
     except ValidationError as exc:
         return _bad_arguments_response(name, exc)  # configuration_error, inner field errors
 ```
+
+The dispatcher's static annotation cannot mirror the inner tool, which may be a read or a teardown.
+It is annotated `destructive()` so a consent-prompting client errs toward prompting (the safe
+direction). Crucially, `tools.invoke` is **not** added to `_docmeta.DESTRUCTIVE_TOOLS`: the kdive
+destructive-op gate (ADR-0043/0047) keys off that set, and it must fire on the **inner** re-entered
+call (so a destructive inner tool is gated and a read is not), not blanket-gate every gateway call.
+The `destructive()` annotation is the client-facing MCP hint; `DESTRUCTIVE_TOOLS` membership is the
+server-side gate — they are deliberately decoupled here.
 
 `call_tool` validates `arguments` against the inner tool's schema and raises `ValidationError`;
 the dispatcher catches it and returns the same `configuration_error` envelope shape a direct call
@@ -155,8 +163,10 @@ steps", `src/kdive/jobs/worker.py`). The agent polls that **one** job with `jobs
 three separate job handles and three waits with one job to learn and poll. This is the ceremony
 reduction #866 asks for, expressed in the existing async spine rather than against it.
 
-- **Input:** `run_id` (created, bound, not-yet-built). `expected_boot_failure` passthrough unchanged
-  — a matched expected crash is a success exactly as in `runs.boot`.
+- **Input:** `run_id` only (a created, bound, not-yet-built Run). `expected_boot_failure` is already
+  persisted on the Run at `runs.create` (registrar field, not a boot-time argument), so the composite
+  reads it from the Run — a matched expected crash is a success exactly as in `runs.boot`. No extra
+  parameter.
 - **Scope.** Post-`create`/`bind`. Capacity, System selection, and reuse are explicit agent
   decisions; the three same-shaped job steps over one bound Run are the ceremony #866 names. A full
   `request→boot` mega-composite is rejected (conflates capacity into the reproduce step).
@@ -248,7 +258,8 @@ skip.
 
 - **New tools:** `tools.search` (PUBLIC), `tools.invoke` (PUBLIC), `runs.build_install_boot`
   (OPERATOR) → +3 registered.
-- **Default `list_tools`:** 83 → ~10 (core set, then RBAC-scoped).
+- **`list_tools` when gateway on:** 83 → ~10 (core set, then RBAC-scoped). At merge the gateway is
+  off, so the default listing is unchanged (full RBAC-scoped catalog) until the follow-up flip.
 - **Demoted (gateway-reachable, not removed):** ~76 tools incl. `runs.build`/`install`/`boot`.
 - **Capability:** unchanged — every tool reachable via `tools.search` + `tools.invoke` at native
   validation fidelity.
@@ -299,9 +310,10 @@ are exercised even with the gateway off — only the *demotion* of the long tail
 ## Risks
 
 - **Annotation/consent collapse.** A per-tool-prompting client sees only `tools.invoke` and cannot
-  distinguish a read from a destructive teardown at prompt time. Mitigation: the server-side
-  destructive-op gate (ADR-0043) still fires on the inner call and remains the boundary;
-  `tools.invoke` is annotated conservatively (`mutating`). Documented, not eliminated.
+  distinguish a read from a destructive teardown at prompt time. Mitigation: `tools.invoke` is
+  annotated `destructive()` so a prompting client errs toward prompting, and the server-side
+  destructive-op gate (ADR-0043) still fires on the re-entered inner call and remains the real
+  boundary. Documented, not eliminated.
 - **Discovery-index quality.** A bad keyword map silently strips capability. Mitigations: curated
   keywords, the `namespace` browse mode as a floor, search-miss telemetry, and the TOC.
 - **Mis-sequencing.** Hiding the flat catalog hides implicit workflow order. Mitigations: the
