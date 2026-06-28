@@ -29,7 +29,7 @@ from kdive.mcp.tools.catalog import images as catalog_images
 from kdive.mcp.tools.catalog.artifacts import registrar as artifacts_tools
 from kdive.mcp.tools.debug import introspect
 from kdive.mcp.tools.debug import sessions as debug_tools
-from kdive.mcp.tools.identity import projects, search, session
+from kdive.mcp.tools.identity import projects, session
 from kdive.mcp.tools.lifecycle import control as control_tools
 from kdive.mcp.tools.lifecycle import investigations
 from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
@@ -235,7 +235,6 @@ PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _pool_only_plane_registrar(availability.register),
     _pool_only_plane_registrar(projects.register),
     _pool_only_plane_registrar(session.register),
-    _pool_only_plane_registrar(search.register),
     _pool_only_plane_registrar(shapes.register),
     _pool_only_plane_registrar(register_accounting_estimate),
     _pool_only_plane_registrar(register_accounting_usage),

@@ -48,17 +48,6 @@ Enqueue a kernel build for a run.
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `run_id` | string | yes | The Run to build. |
 
-## `runs.build_install_boot`
-
-`implemented`
-
-Build, install, and boot a bound Run in one call; return the terminal runs.get.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `run_id` | string | yes | A created, bound, not-yet-built Run to drive to boot. |
-| `timeout` | number (nullable) | no | Max seconds to block before returning the in-flight phase to reattach via runs.get. Capped server-side; omit for the maximum. |
-
 ## `runs.cancel`
 
 `implemented`
