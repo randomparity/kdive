@@ -46,8 +46,8 @@ set, derived from one registry and computed at list/call time.
    handler signature and the domain model stays static (decision 4), so this is a structural
    projection plus a membership guard rather than a single dynamically-built Pydantic model; both
    iterate the registry, so a new provider is covered without editing either helper. Boundary-only:
-   they feed the agent-facing schema and validation, never storage or the digest. Memoized on the
-   frozenset key.
+   they feed the agent-facing schema and validation, never storage or the digest. Recomputed per
+   list/call (a bounded deep-copy of the handful of narrowed tool schemas; cost is negligible).
 
 3. **Computed at list/call time, never frozen at registration.** Schema is projected in
    `ToolExposureMiddleware.on_list_tools` (and `tools.search`) from the live
@@ -61,7 +61,7 @@ set, derived from one registry and computed at list/call time.
    domain/storage layer (`ProvisioningProfile.parse`, digest, render, teardown) keeps the existing
    hand-written static `ProviderSection` over the full `ResourceKind` set — **unchanged**.
    Disabling a provider must not orphan existing Systems of that kind — a stored `remote-libvirt`
-   profile must still parse and tear down after remote is disabled, so narrowing lives strictly at
+   profile must still parse and remain in storage after remote is disabled, so narrowing lives strictly at
    the agent surface. Leaving the domain model untouched also keeps `profile_digest` (ADR-0038),
    the reprovision dedup key, byte-identical; routing the domain model through the factory was
    rejected for that digest-stability risk. The `resources.list` `kind` filter is a query over
@@ -97,8 +97,11 @@ set, derived from one registry and computed at list/call time.
 - Schema is now a function of runtime composition, not an import-time constant —
   `tools/list` and `tools.search` output varies per deployment. The projection fails open to the
   full schema on error (availability over tightness; the call-time gate is the real boundary).
-- The domain model stays permissive, so existing Systems of a disabled kind keep parsing and
-  tearing down; runtime ops on them still fail closed via `resolve()` (unchanged).
+- The domain model stays permissive, so existing Systems of a disabled kind keep parsing; runtime
+  ops on them (including teardown) still fail closed via `resolve()` (unchanged).
+- Allocation requests by id or pool (not by kind) bypass the call-time kind guard intentionally:
+  the allocation is bounded by quota, and downstream `resolve()` fails closed for a non-composed
+  resource. Only `ResourceByKind` names a kind directly and is gated.
 - No DB migration, no RBAC change, no storage/digest/render change.
 - Supersedes the parked single-issue approach (closed PR #883): fault-inject-hiding is no longer
   special-cased, the `test_only` marker and field-description band-aids are unnecessary and not
@@ -119,8 +122,8 @@ set, derived from one registry and computed at list/call time.
   building a second dynamic Pydantic model to "own" the boundary schema would duplicate the section
   models for no gain.
 - **Freeze the projection at tool registration.** Simpler, but a non-list-time snapshot would have
-  to be reworked when runtime hot-add lands; computing at list/call time costs a memoized build
-  and makes hot-add additive.
+  to be reworked when runtime hot-add lands; computing at list/call time costs a bounded deep-copy
+  of a handful of tool schemas per list call and makes hot-add additive.
 - **Full runtime hot-add now (recomposable resolver + `tools/list_changed` + concurrency).**
   Larger than #879 and arguably its own epic; deferred. This ADR builds only the seam so it stays
   additive (option (a)).

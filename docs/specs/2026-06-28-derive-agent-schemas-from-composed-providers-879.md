@@ -108,8 +108,8 @@ about membership (the anti-drift property):
 Both iterate the registry (§1), so they are registry-driven rather than per-kind hand-coding — a
 new provider is covered without editing either helper. Both are computed at list/call time from the
 *live* resolver (never frozen at registration), so a future hot-add that recomposes the resolver is
-reflected with no schema-layer change; the narrowed `$def` fragments are memoized on the frozenset
-key.
+reflected with no schema-layer change; the narrowed `$def` fragments are recomputed per list/call
+(a bounded deep-copy of the handful of narrowed tool schemas; cost is negligible).
 
 ### 3. Two membership views — boundary narrowed, domain permissive
 
@@ -123,8 +123,9 @@ This is the load-bearing correctness decision.
   feeds storage, the domain model, or the digest.
 
 Rationale: **disabling a provider must not orphan existing Systems of that kind.** A
-remote-libvirt System created while remote was enabled must still parse, digest, and tear down
-after remote is disabled; if the *domain* model narrowed, those stored profiles would become
+remote-libvirt System created while remote was enabled must still parse and digest after remote is
+disabled (runtime ops including teardown still fail closed via `resolve()`); if the *domain* model
+narrowed, those stored profiles would become
 unparseable. Narrowing therefore lives strictly at the agent surface.
 
 Leaving the domain model untouched also protects `profile_digest` (`provisioning.py:394-408`),
