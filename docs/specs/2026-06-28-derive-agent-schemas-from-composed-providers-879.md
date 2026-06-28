@@ -42,11 +42,14 @@ Issue #879 is therefore a special case of a general architectural gap.
    Read/query surfaces (the `resources.list` `kind` filter) stay permissive (§4).
 2. A request naming a non-composed kind is rejected at the agent boundary with
    `configuration_error`, not accepted-then-failed-late.
-3. The seam is **forward-looking for the cloud-provider milestone**: adding a provider touches
-   exactly three declared places — a `ResourceKind` member, a `PROVIDER_SECTIONS` registry entry,
-   and a composition opt-in — after which every agent-facing surface updates with no further edits.
-   (`ResourceKind` is a closed `StrEnum` and the registry-completeness guard binds member and
-   entry together, so the count cannot be lower.)
+3. The seam is **forward-looking for the cloud-provider milestone**: the agent-facing
+   discovery/schema/validation surfaces derive from the registry, so adding a provider needs **no
+   edits to them**. The provider's own definitions are still authored — a `ResourceKind` member,
+   its section model class, a typed field on the static domain `ProviderSection` (kept static for
+   digest stability, §3), a `PROVIDER_SECTIONS` registry entry, and a composition opt-in — but the
+   three narrowed surfaces (§4) and `profile_examples` then update automatically from the registry
+   with no per-surface edits. The registry removes the surface *re-listing*, not the provider
+   *definition*.
 4. Schema and validation are computed from the *current* `registered_kinds()` at **list-time /
    call-time**, so a future runtime hot-add (recomposable resolver + `tools/list_changed`) is an
    *additive* change, not a schema-layer rewrite.
@@ -79,11 +82,13 @@ PROVIDER_SECTIONS: Mapping[ResourceKind, ProviderSectionSpec]
 where `ProviderSectionSpec` carries the existing Pydantic section model (`LibvirtProfile`,
 `FaultInjectProfile`, `RemoteLibvirtProfile`), the `systems.toml` block / alias name, and the
 schema label. The section *models* are unchanged building blocks; the registry is the data the
-resolver, the schema projection, and discovery all iterate. Adding a provider = a `ResourceKind`
-member + one registry entry + its composition opt-in (three declared places; the enum member and
-the registry entry are bound by the guard below). A guard test asserts the registry's key set
-equals the `ResourceKind` members so a new kind cannot be added without a section spec, nor a
-section spec without an enum member.
+resolver, the schema projection, and discovery all iterate. The registry removes the
+*per-agent-surface* edits: discovery, schema projection, and call-time validation all derive from
+it. (The provider's own definitions — enum member, section model class, the typed field on the
+static domain `ProviderSection`, and the composition opt-in — are still authored; the registry is
+not a substitute for defining the provider, only for re-listing it on every agent surface.) A guard
+test asserts the registry's key set equals the `ResourceKind` members so a new kind cannot be added
+without a section spec, nor a section spec without an enum member.
 
 ### 2. Deployment-scoped projection, consumed at list/call time
 
@@ -207,10 +212,11 @@ schedulable.
 
 The next milestone adds cloud (and later bare-metal) providers, with multiple providers enabled
 at once (`remote-libvirt + cloud + bare-metal`). The set-based projection handles N providers
-with no change: a new provider is a `ResourceKind` member + one `PROVIDER_SECTIONS` entry + one
-composition opt-in, and it appears across all three narrowed surfaces automatically. Because
-schema/validation are computed at list/call time from the live set, the residual work for runtime
-hot-add is only the recomposable
+with no change: a new provider's agent-facing presence (the three narrowed surfaces +
+`profile_examples`) appears automatically from its `PROVIDER_SECTIONS` entry with no per-surface
+edits, once its provider definitions (enum member, section model, the static-`ProviderSection`
+field, composition opt-in) are authored. Because schema/validation are computed at list/call time
+from the live set, the residual work for runtime hot-add is only the recomposable
 resolver, the `tools/list_changed` notification, and mid-request concurrency safety — none of
 which touch this schema architecture.
 
@@ -242,9 +248,10 @@ which touch this schema architecture.
 - **Fault-inject derived behavior:** default deployment (no `KDIVE_FAULT_INJECT`) shows no
   `fault-inject` on any narrowed surface; with it set, `fault-inject` appears on all three.
 - **Forward-looking property:** a factory-level test over an *injected* registry carrying an extra
-  spec yields that kind across all three narrowed projections with no production-code edits; the
-  real "add a provider" cost (enum member + registry entry + composition opt-in) is documented, not
-  claimed as zero.
+  spec yields that kind across all three narrowed projections, proving the agent surfaces derive
+  from the registry with no per-surface edits; the documented "add a provider" cost (enum member +
+  section model + static-`ProviderSection` field + registry entry + composition opt-in) is asserted
+  in prose, not claimed as zero.
 - **Registry completeness guard:** `PROVIDER_SECTIONS` key set == `ResourceKind` members.
 
 ## Acceptance criteria (issue #879) → coverage

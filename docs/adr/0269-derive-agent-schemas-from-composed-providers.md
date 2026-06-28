@@ -84,9 +84,12 @@ set, derived from one registry and computed at list/call time.
 
 - A cold agent on any deployment is offered exactly the providers it can provision; a
   non-composed provider neither appears nor is accepted.
-- Adding a provider (cloud, bare-metal) touches three declared places — a `ResourceKind` member,
-  one `PROVIDER_SECTIONS` entry, and a composition opt-in (the completeness guard binds member and
-  entry); the three narrowed agent-facing surfaces then update with no further edits.
+- Adding a provider (cloud, bare-metal) still authors the provider's own definitions — a
+  `ResourceKind` member, its section model, a typed field on the static domain `ProviderSection`
+  (kept static for digest stability), a `PROVIDER_SECTIONS` entry, and a composition opt-in — but
+  the three narrowed agent-facing surfaces and `profile_examples` then update from the registry with
+  **no per-surface edits**. The registry removes the surface re-listing, not the provider
+  definition.
 - Schema is now a function of runtime composition, not an import-time constant —
   `tools/list` and `tools.search` output varies per deployment. The projection fails open to the
   full schema on error (availability over tightness; the call-time gate is the real boundary).
