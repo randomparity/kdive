@@ -21,6 +21,7 @@ from kdive.providers.core.resolver import (
     _KIND_FOR_SYSTEM,
     ProviderResolver,
 )
+from kdive.serialization import safe_error_details
 
 
 class _Runtime:
@@ -53,12 +54,31 @@ def test_resolve_unknown_kind_fails_closed_with_configuration_error() -> None:
         resolver.resolve(ResourceKind.FAULT_INJECT)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "fault-inject" in str(exc.value)
-    # The fail-closed error carries the offending kind and the set that *is* registered, so an
-    # operator can see which provider was missing from this deployment.
+    # The fail-closed error carries the offending kind and the set that *is* composed, under the
+    # allowlisted "available" key so safe_error_details preserves it (see the serialization test
+    # below). This mirrors assert_kind_composed (ADR-0269) so both fail-closed paths agree.
     assert exc.value.details == {
         "kind": "fault-inject",
-        "registered": ["local-libvirt"],
+        "available": ["local-libvirt"],
     }
+
+
+def test_resolve_failure_details_survive_safe_error_details() -> None:
+    """The composed-kinds list reaches the caller after redaction filtering (#885).
+
+    ``safe_error_details`` (the error-envelope redaction boundary) only preserves lists under
+    keys in ``_ENUMERATION_KEYS`` (``{"accepted_values", "available"}``). The fail-closed
+    ``resolve()`` path previously emitted the list under ``"registered"``, which is not
+    allowlisted, so the list was silently dropped and a runtime resolution failure returned an
+    envelope that did not enumerate the valid kinds. Emitting under ``"available"`` lets the
+    list survive, mirroring ``test_rejection_envelope_enumerates_composed_kinds``.
+    """
+    resolver, _ = _resolver(ResourceKind.LOCAL_LIBVIRT)
+    with pytest.raises(CategorizedError) as exc:
+        resolver.resolve(ResourceKind.FAULT_INJECT)
+    safe = safe_error_details(exc.value.details)
+    assert safe.get("available") == ["local-libvirt"]
+    assert safe.get("kind") == "fault-inject"
 
 
 def test_registered_kinds_reflects_the_map() -> None:

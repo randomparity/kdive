@@ -94,7 +94,10 @@ class ProviderResolver:
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={
                     "kind": kind.value,
-                    "registered": sorted(k.value for k in self._runtimes),
+                    # "available" is allowlisted in safe_error_details' _ENUMERATION_KEYS so the
+                    # composed-kinds list survives redaction into the delivered envelope; mirrors
+                    # assert_kind_composed (ADR-0269) so both fail-closed paths agree (#885).
+                    "available": sorted(k.value for k in self._runtimes),
                 },
             )
         return runtime
