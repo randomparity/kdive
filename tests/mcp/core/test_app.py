@@ -415,6 +415,47 @@ def test_exposure_map_covers_every_registered_tool() -> None:
     assert required_scopes("systems.define") == frozenset({ExposureScope.PROJECT_OPERATOR})
 
 
+def test_core_tools_subset_of_registry() -> None:
+    """Every CORE_TOOLS name is a live registered tool (ADR-0267 gateway guard).
+
+    A renamed/removed core tool would otherwise silently shrink the gateway's default surface
+    to a wrong set; this pins it to the registry so the rename fails loudly here.
+    """
+    from kdive.mcp.exposure import CORE_TOOLS
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+
+    async def _run() -> set[str]:
+        return {t.name for t in await app.list_tools()}
+
+    registered = asyncio.run(_run())
+    assert registered >= CORE_TOOLS, (
+        f"core tools absent from registry: {sorted(CORE_TOOLS - registered)}"
+    )
+
+
+def test_instructions_namespace_toc_covers_every_namespace() -> None:
+    """The server instructions carry the gateway pattern and a TOC over every live namespace.
+
+    A new namespace must be triaged into NAMESPACE_TOC (ADR-0267), else an agent cannot learn
+    the capability exists to search for it.
+    """
+    from kdive.mcp.tool_index import NAMESPACE_TOC
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+
+    async def _run() -> set[str]:
+        return {t.name for t in await app.list_tools()}
+
+    namespaces = {name.split(".", 1)[0] for name in asyncio.run(_run())}
+    missing = namespaces - set(NAMESPACE_TOC)
+    assert not missing, f"namespaces absent from NAMESPACE_TOC: {sorted(missing)}"
+    assert app.instructions
+    assert "tools.search" in app.instructions
+
+
 # --- Canonical lifecycle prompts (ADR-0202) ---------------------------------------------
 
 # Independent, human-reviewed expected maturity per referenced prompt step (the drift

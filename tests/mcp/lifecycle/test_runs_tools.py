@@ -44,6 +44,7 @@ from kdive.mcp.tools._runtime_resolution import with_runtime_for_run_target_kind
 from kdive.mcp.tools.lifecycle import vmcore
 from kdive.mcp.tools.lifecycle.runs import common as runs_common
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest, bind_run
+from kdive.mcp.tools.lifecycle.runs.build_install_boot import build_install_boot
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
 from kdive.mcp.tools.lifecycle.runs.create import (
     RunCreateRequest,
@@ -5684,5 +5685,193 @@ def test_get_succeeded_run_omits_build_provenance_key_when_absent(migrated_url: 
             )
             resp = await get_run(pool, _ctx(), run_id)
         assert "build_provenance" not in resp.data
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# runs.build_install_boot composite (ADR-0267, #866)
+# ---------------------------------------------------------------------------
+
+
+async def _advance_phase_job(pool: AsyncConnectionPool, run_id: str) -> str | None:
+    """Simulate the worker finishing the run's single in-flight job.
+
+    Marks the queued/running job succeeded and applies the run-state / run-step effect the
+    real worker would, so the next composite phase admits. Returns the job kind advanced.
+    """
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT id, kind FROM jobs WHERE dedup_key LIKE %s "
+            "AND state IN ('queued', 'running') LIMIT 1",
+            (f"{run_id}:%",),
+        )
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    job_id = row["id"]
+    kind = str(row["kind"])
+    async with pool.connection() as conn:
+        await JOBS.update_state(conn, job_id, JobState.RUNNING)
+        await JOBS.update_state(conn, job_id, JobState.SUCCEEDED)
+        if kind == "build":
+            await conn.execute("UPDATE runs SET state = 'succeeded' WHERE id = %s", (UUID(run_id),))
+            await _insert_step(pool, run_id, "build", "succeeded", {})
+        elif kind == "install":
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+        elif kind == "boot":
+            await _insert_step(pool, run_id, "boot", "succeeded", {"boot_outcome": "ready"})
+    return kind
+
+
+async def _fail_phase_job(pool: AsyncConnectionPool, run_id: str) -> None:
+    """Mark the run's single in-flight job FAILED (the worker hit a build failure)."""
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT id FROM jobs WHERE dedup_key LIKE %s AND state IN ('queued', 'running') "
+            "LIMIT 1",
+            (f"{run_id}:%",),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    # A failed job always carries an error_category (the worker guarantees it; from_job
+    # requires it for a failed status), so set it as the worker would.
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE jobs SET state = 'failed', error_category = 'build_failure' WHERE id = %s",
+            (row["id"],),
+        )
+
+
+def test_build_install_boot_happy_path_returns_terminal_get(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.CREATED)
+
+            async def _sleep(_s: float) -> None:
+                await _advance_phase_job(pool, run_id)
+
+            resp = await build_install_boot(
+                pool, provider_resolver(), _ctx(Role.CONTRIBUTOR), run_id, sleep=_sleep
+            )
+            # one job per phase, no double-enqueue
+            build_jobs = await _count(
+                pool,
+                "SELECT count(*) AS n FROM jobs WHERE kind='build' AND dedup_key=%s",
+                (f"{run_id}:build",),
+            )
+        assert resp.status != "error"
+        assert "failed_phase" not in resp.data
+        assert resp.object_id == run_id
+        assert build_jobs == 1
+
+    asyncio.run(_run())
+
+
+def test_build_install_boot_stops_on_first_phase_failure(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.CREATED)
+
+            async def _sleep(_s: float) -> None:
+                await _fail_phase_job(pool, run_id)
+
+            resp = await build_install_boot(
+                pool, provider_resolver(), _ctx(Role.CONTRIBUTOR), run_id, sleep=_sleep
+            )
+            install_jobs = await _count(
+                pool,
+                "SELECT count(*) AS n FROM jobs WHERE kind='install' AND dedup_key=%s",
+                (f"{run_id}:install",),
+            )
+        # a failed job surfaces the job envelope (status "failed" + its category), tagged.
+        assert resp.status == "failed"
+        assert resp.error_category == "build_failure"
+        assert resp.data["failed_phase"] == "build"
+        assert resp.data["run_id"] == run_id
+        # never advanced past the failed build
+        assert install_jobs == 0
+
+    asyncio.run(_run())
+
+
+def test_build_install_boot_timeout_returns_in_flight_envelope(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.CREATED)
+
+            async def _sleep(_s: float) -> None:  # pragma: no cover - never called at timeout 0
+                raise AssertionError("sleep should not run when the budget is already spent")
+
+            resp = await build_install_boot(
+                pool, provider_resolver(), _ctx(Role.CONTRIBUTOR), run_id, timeout=0.0, sleep=_sleep
+            )
+            # the build job keeps running; it is not cancelled
+            running = await _count(
+                pool,
+                "SELECT count(*) AS n FROM jobs WHERE dedup_key=%s "
+                "AND state IN ('queued','running')",
+                (f"{run_id}:build",),
+            )
+        assert resp.status != "error"
+        assert resp.data["in_flight_phase"] == "build"
+        assert resp.data["run_id"] == run_id
+        assert "runs.get" in resp.suggested_next_actions
+        assert running == 1
+
+    asyncio.run(_run())
+
+
+def test_build_install_boot_precondition_error_tags_phase(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            # A terminally-failed Run is not buildable (RUN_BUILD_TERMINAL) → build phase errors.
+            run_id = await _seed_run(
+                pool, state=RunState.FAILED, failure=ErrorCategory.BUILD_FAILURE
+            )
+            resp = await build_install_boot(
+                pool, provider_resolver(), _ctx(Role.CONTRIBUTOR), run_id, timeout=0.0
+            )
+        assert resp.status == "error"
+        assert resp.data["failed_phase"] == "build"
+
+    asyncio.run(_run())
+
+
+def test_build_install_boot_is_single_shot_on_recall(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.CREATED)
+
+            async def _sleep(_s: float) -> None:
+                await _advance_phase_job(pool, run_id)
+
+            first = await build_install_boot(
+                pool, provider_resolver(), _ctx(Role.CONTRIBUTOR), run_id, sleep=_sleep
+            )
+            second = await build_install_boot(
+                pool, provider_resolver(), _ctx(Role.CONTRIBUTOR), run_id, sleep=_sleep
+            )
+            build_jobs = await _count(
+                pool,
+                "SELECT count(*) AS n FROM jobs WHERE kind='build' AND dedup_key=%s",
+                (f"{run_id}:build",),
+            )
+        assert first.status != "error"
+        assert second.status != "error"
+        # the deterministic key re-attaches; no second build enqueued
+        assert build_jobs == 1
+
+    asyncio.run(_run())
+
+
+def test_build_install_boot_denies_viewer(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.CREATED)
+            with pytest.raises(AuthorizationError):
+                await build_install_boot(
+                    pool, provider_resolver(), _ctx(Role.VIEWER), run_id, timeout=0.0
+                )
 
     asyncio.run(_run())

@@ -7,6 +7,8 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from opentelemetry import metrics, trace
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.config as config
+from kdive.config.core_settings import MCP_TOOL_GATEWAY
 from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.auth import build_verifier
 from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
@@ -15,11 +17,20 @@ from kdive.mcp.middleware.exposure import ToolExposureMiddleware
 from kdive.mcp.middleware.telemetry import TelemetryMiddleware
 from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.schema_advertising import advertise_envelope_output_schema
+from kdive.mcp.tool_index import render_instructions
 from kdive.mcp.tool_registration import PLANE_REGISTRARS, AppAssembly
 from kdive.mcp.worker_registration import HANDLER_REGISTRARS, WorkerHandlerAssembly
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import build_object_store_assembly
+
+_GATEWAY_OFF = frozenset({"off", "0", "false", "no"})
+
+
+def _tool_gateway_enabled() -> bool:
+    """Whether the ADR-0267 tool gateway shrinks ``list_tools`` to the core set (default on)."""
+    raw = config.get(MCP_TOOL_GATEWAY) or "on"
+    return raw.strip().lower() not in _GATEWAY_OFF
 
 
 def build_app(
@@ -30,14 +41,18 @@ def build_app(
     secret_registry: SecretRegistry,
 ) -> FastMCP:
     """Construct the FastMCP app and register every plane's tools."""
-    app: FastMCP = FastMCP(name="kdive", auth=verifier or build_verifier())
+    app: FastMCP = FastMCP(
+        name="kdive",
+        auth=verifier or build_verifier(),
+        instructions=render_instructions(),
+    )
     app.add_middleware(
         TelemetryMiddleware(
             tracer=trace.get_tracer("kdive.mcp"), meter=metrics.get_meter("kdive.mcp")
         )
     )
     app.add_middleware(UsageTrackingMiddleware(pool))
-    app.add_middleware(ToolExposureMiddleware())
+    app.add_middleware(ToolExposureMiddleware(gateway_enabled=_tool_gateway_enabled()))
     app.add_middleware(DenialAuditMiddleware(pool))
     app.add_middleware(BindingErrorMiddleware())
 

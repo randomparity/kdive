@@ -16,6 +16,7 @@ from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run_target_kind
+from kdive.mcp.tools.lifecycle.runs import build_install_boot
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest as _RunBindRequest
 from kdive.mcp.tools.lifecycle.runs.bind import bind_run as _bind_run
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run as _cancel_run
@@ -35,6 +36,7 @@ from kdive.mcp.tools.lifecycle.runs.profile_examples import (
     build_host_profile_examples as _build_host_profile_examples,
 )
 from kdive.mcp.tools.lifecycle.runs.server_build import BuildRunHandlers as _BuildRunHandlers
+from kdive.mcp.tools.lifecycle.runs.server_build import build_handlers_for
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run as _boot_run
 from kdive.mcp.tools.lifecycle.runs.steps import install_run as _install_run
 from kdive.mcp.tools.lifecycle.runs.validate_profile import (
@@ -184,15 +186,13 @@ def register(
     _register_runs_complete_build(app, pool, resolver)
     _register_runs_install(app, pool)
     _register_runs_boot(app, pool)
+    build_install_boot.register(app, pool, resolver=resolver)
     _register_runs_profile_examples(app, pool)
     _register_runs_validate_profile(app, pool)
 
 
 def _build_handlers(runtime: ProviderRuntime) -> _BuildRunHandlers:
-    return _BuildRunHandlers(
-        runtime.component_sources,
-        config_validator=runtime.build_config_validator,
-    )
+    return build_handlers_for(runtime)
 
 
 def _complete_build_handlers() -> _CompleteBuildHandlers:
