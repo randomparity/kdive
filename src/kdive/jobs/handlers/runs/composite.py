@@ -31,10 +31,12 @@ class CompositePhaseError(CategorizedError):
             if isinstance(cause, CategorizedError)
             else ErrorCategory.INFRASTRUCTURE_FAILURE
         )
+        details = dict(cause.details) if isinstance(cause, CategorizedError) else {}
+        details["failed_phase"] = failed_phase
         super().__init__(
             f"{failed_phase} phase failed: {cause}",
             category=category,
-            details={"failed_phase": failed_phase},
+            details=details,
         )
         self.failed_phase = failed_phase
         self.__cause__ = cause

@@ -10,9 +10,12 @@ from uuid import uuid4
 import pytest
 
 from kdive.domain.capacity.state import JobState
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
+from kdive.jobs import worker
 from kdive.jobs.handlers.runs import composite
 from kdive.jobs.handlers.runs.ports import RunHandlerPorts
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 _RUN_ID = str(uuid4())
 _BUILD_HOST_ID = str(uuid4())
@@ -101,3 +104,25 @@ def test_failed_phase_is_in_failure_context(monkeypatch: pytest.MonkeyPatch) -> 
         asyncio.run(composite.composite_handler(_fake_conn(), _make_job(), ports=_fake_ports()))
 
     assert ei.value.details["failed_phase"] == "install"
+
+
+def test_categorized_phase_details_survive_failure_context() -> None:
+    """CompositePhaseError preserves safe structured details from the failed phase."""
+    cause = CategorizedError(
+        "kdump fragment symbols were dropped",
+        category=ErrorCategory.BUILD_FAILURE,
+        details={"dropped": "CONFIG_CRASH_DUMP", "failed_phase": "wrong"},
+    )
+
+    error = composite.CompositePhaseError("build", cause)
+
+    assert error.category == ErrorCategory.BUILD_FAILURE
+    assert error.details == {
+        "dropped": "CONFIG_CRASH_DUMP",
+        "failed_phase": "build",
+    }
+    assert worker._failure_context(error, SecretRegistry()) == {
+        "failure_message": "build phase failed: kdump fragment symbols were dropped",
+        "failure_detail_dropped": "CONFIG_CRASH_DUMP",
+        "failure_detail_failed_phase": "build",
+    }
