@@ -107,6 +107,7 @@
 | [`runs.bind`](runs.md#runsbind) | `implemented` |
 | [`runs.boot`](runs.md#runsboot) | `implemented` |
 | [`runs.build`](runs.md#runsbuild) | `implemented` |
+| [`runs.build_install_boot`](runs.md#runsbuild_install_boot) | `implemented` |
 | [`runs.cancel`](runs.md#runscancel) | `implemented` |
 | [`runs.complete_build`](runs.md#runscomplete_build) | `implemented` |
 | [`runs.create`](runs.md#runscreate) | `implemented` |
@@ -128,5 +129,7 @@
 | [`systems.provision_defined`](systems.md#systemsprovision_defined) | `implemented` |
 | [`systems.reprovision`](systems.md#systemsreprovision) | `implemented` |
 | [`systems.teardown`](systems.md#systemsteardown) | `implemented` |
+| [`tools.invoke`](tools.md#toolsinvoke) | `implemented` |
+| [`tools.search`](tools.md#toolssearch) | `implemented` |
 | [`vmcore.fetch`](vmcore.md#vmcorefetch) | `implemented` |
 | [`vmcore.list`](vmcore.md#vmcorelist) | `implemented` |

@@ -48,6 +48,22 @@ Enqueue a kernel build for a run.
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `run_id` | string | yes | The Run to build. |
 
+## `runs.build_install_boot`
+
+`implemented`
+
+Build, install, and boot a bound Run as a single pollable job (ADR-0268).
+
+Performs build-host admission (same as runs.build) then enqueues one
+BUILD_INSTALL_BOOT job. Requires operator role — the composite includes install
+and boot, whose gate is operator. Poll the returned job handle with jobs.wait.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `cmdline` | string (nullable) | no | Kernel debug args appended to the platform-required boot args (e.g. 'dhash_entries=1'). Bound at build time and applied through install and boot. Omit for no extra debug args. |
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
+| `run_id` | string | yes | A created, bound, not-yet-built Run to drive build->install->boot as a single pollable job (ADR-0268, #866). The Run must use a source='server' build profile. Poll the returned job with jobs.wait. |
+
 ## `runs.cancel`
 
 `implemented`
