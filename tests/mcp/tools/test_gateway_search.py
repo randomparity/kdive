@@ -59,6 +59,10 @@ def _call_result(result: Any) -> dict[str, Any]:
     return structured
 
 
+def _match_names(content: dict[str, Any]) -> list[str]:
+    return [m["name"] for m in content["data"]["matches"]]
+
+
 # ---------------------------------------------------------------------------
 # Test 1: keyword query surfaces the relevant tool
 # ---------------------------------------------------------------------------
@@ -81,6 +85,32 @@ def test_query_ranks_relevant_tool_first(monkeypatch: pytest.MonkeyPatch) -> Non
     assert content["status"] == "ok", f"expected ok, got {content}"
     names = [m["name"] for m in content["data"]["matches"]]
     assert "runs.boot" in names, f"runs.boot not in {names}"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "still running call again",
+        "suggested next actions queued running",
+    ],
+)
+def test_jobs_wait_discovered_from_followup_queries(
+    monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _viewer_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": query})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    assert "jobs.wait" in _match_names(content)
 
 
 # ---------------------------------------------------------------------------
