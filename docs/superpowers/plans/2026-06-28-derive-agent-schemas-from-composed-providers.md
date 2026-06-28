@@ -718,13 +718,22 @@ git commit -m "feat(mcp): narrow listed tool schemas to composed providers (ADR-
 ### Task 5: `tools.search` applies the same projection
 
 **Files:**
-- Modify: `src/kdive/mcp/tools/gateway.py:60-69` (`_describe`) + the `tools.search` registrar
+- Modify: `src/kdive/mcp/tools/gateway.py:60-69` (`_describe` → `describe_tool`) + `gateway.register` signature (gains `resolver`) + the `tools.search` registrar
+- Modify: `src/kdive/mcp/tool_registration.py:90-93` (`_register_gateway_tools` — un-underscore `_assembly`, pass `assembly.resolver` to `gateway.register`)
+- Modify: `tests/mcp/tools/test_gateway_invoke.py:137` (existing `gateway.register(app)` call site — breaks on the signature change)
 - Test: `tests/mcp/test_gateway_projection.py`
 
 **Interfaces:**
-- Consumes: `project_tool_schema`, `NARROWED_TOOLS` (Tasks 2/4); the `ProviderResolver` reaching the gateway registrar.
+- Consumes: `project_listed_tool` (Task 4), `project_tool_schema` (Task 2); the `ProviderResolver` reaching the gateway registrar.
 
-> The gateway registrar must receive the resolver. Trace how `tools.*` is registered in `tool_registration.py`; pass `assembly.resolver` to the gateway `register(...)` the same way the systems plane does.
+> **Gateway registrar threading.** `gateway.register(app)` (gateway.py:72) gains `resolver:
+> ProviderResolver`. It is dispatched by `_register_gateway_tools(app, _pool, _assembly)`
+> (tool_registration.py:90) which currently ignores `_assembly` — change it to use `assembly` and
+> call `gateway.register(app, resolver=assembly.resolver)`. The closure inside `tools.search`
+> captures that `resolver`. **Two existing `gateway.register(app)` call sites break** and must be
+> updated: tool_registration.py:93 (pass the resolver as above) and `tests/mcp/tools/
+> test_gateway_invoke.py:137` (pass `ProviderResolver({})`, or a full-set resolver if that test
+> asserts on schema content).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -734,18 +743,31 @@ from __future__ import annotations
 
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.mcp.tools.gateway import describe_tool  # renamed/exported _describe
+from kdive.mcp.tool_payloads import AllocationRequestPayload
 from kdive.profiles.provisioning import ProvisioningProfile
 
 
-class _FakeTool:
-    name = "systems.define"
+class _AllocTool:
+    name = "allocations.request"  # narrows via $defs.ResourceKind enum
+    description = "request an allocation"
+    parameters = AllocationRequestPayload.model_json_schema()
+
+
+class _SystemsTool:
+    name = "systems.define"  # narrows via $defs.ProviderSection.properties (no ResourceKind def)
     description = "define a system"
     parameters = ProvisioningProfile.model_json_schema()
 
 
-def test_describe_narrows_affected_tool_schema() -> None:
-    described = describe_tool(_FakeTool(), frozenset({ResourceKind.LOCAL_LIBVIRT}))
+def test_describe_narrows_allocation_kind_enum() -> None:
+    described = describe_tool(_AllocTool(), frozenset({ResourceKind.LOCAL_LIBVIRT}))
     assert described["input_schema"]["$defs"]["ResourceKind"]["enum"] == ["local-libvirt"]
+
+
+def test_describe_narrows_systems_section_props() -> None:
+    described = describe_tool(_SystemsTool(), frozenset({ResourceKind.LOCAL_LIBVIRT}))
+    props = set(described["input_schema"]["$defs"]["ProviderSection"]["properties"])
+    assert props == {"local-libvirt"}
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -782,16 +804,19 @@ Capture `resolver` in the `tools.search` closure and pass `resolver.registered_k
 
 Import `project_listed_tool` from `kdive.mcp.middleware.exposure` and `ResourceKind`.
 
-- [ ] **Step 4: Run to verify it passes**
+- [ ] **Step 4: Run to verify it passes (incl. the updated call site)**
 
-Run: `uv run pytest tests/mcp/test_gateway_projection.py -q` → PASS.
+```bash
+uv run pytest tests/mcp/test_gateway_projection.py tests/mcp/tools/test_gateway_invoke.py -q
+```
+Expected: PASS (the new projection tests, and `test_gateway_invoke.py` with its line-137 call site updated to the new `gateway.register` signature).
 
 - [ ] **Step 5: Guardrails + commit**
 
 ```bash
-just lint && just type && uv run pytest tests/mcp/test_gateway_projection.py -q
+just lint && just type && uv run pytest tests/mcp/test_gateway_projection.py tests/mcp/tools/test_gateway_invoke.py -q
 git add src/kdive/mcp/tools/gateway.py src/kdive/mcp/tool_registration.py \
-        tests/mcp/test_gateway_projection.py
+        tests/mcp/test_gateway_projection.py tests/mcp/tools/test_gateway_invoke.py
 git commit -m "feat(mcp): narrow tools.search schemas to composed providers (ADR-0269)"
 ```
 
@@ -918,8 +943,21 @@ def _register_allocations_request(
 ```
 
 `request_allocation` / `_request_allocation` are **unchanged**, so their existing callers keep
-compiling. In the allocations plane dispatcher in `tool_registration.py`, pass `assembly.resolver`
-to `_register_allocations_request` (it currently receives only `app, pool`).
+compiling. Thread the resolver down the plane: `allocations_tools.register(app, pool)` →
+`register(app, pool, *, resolver: ProviderResolver)` → `_register_allocations_request(app, pool,
+resolver)`. The allocations plane is currently dispatched as
+`_pool_only_plane_registrar(allocations_tools.register)` (tool_registration.py:255), which passes
+only `(app, pool)` and **cannot reach `assembly.resolver`**. Replace that tuple entry with a custom
+assembly-aware registrar mirroring `_register_systems_tools` (tool_registration.py:123):
+
+```python
+# src/kdive/mcp/tool_registration.py
+def _register_allocations_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:
+    allocations_tools.register(app, pool, resolver=assembly.resolver)
+
+# in PLANE_REGISTRARS, replace `_pool_only_plane_registrar(allocations_tools.register)` with:
+    _register_allocations_tools,
+```
 
 In `systems/registrar.py`, in each profile-accepting closure (`systems.define`, `systems.provision`, `systems.reprovision`), guard the parsed profile's kind before proceeding:
 
@@ -1008,6 +1046,14 @@ git commit -m "test(mcp): pin digest stability + resources.list permissive (ADR-
 
 ## Final verification (before push)
 
+- [ ] **Signature-change call-site sweep.** Every task that changes a function/constructor signature
+  must `rg` its call sites across `src/` and `tests/` and update them in the same task — the suite
+  goes red otherwise. The known breaking changes and their existing call sites:
+  - `ToolExposureMiddleware()` → `(resolver)`: `app.py` + 6 in `tests/mcp/middleware/test_exposure.py` + 4 in `tests/mcp/core/test_tool_exposure_middleware.py` (Task 4 Step 3b).
+  - `gateway.register(app)` → `(app, resolver=...)`: `tool_registration.py:93` + `tests/mcp/tools/test_gateway_invoke.py:137` (Task 5).
+  - allocations `register(app, pool)` → `(app, pool, *, resolver)`: dispatched via `_pool_only_plane_registrar` → switch to a custom registrar (Task 6). No test call sites.
+  - `build_profile_examples(doc)` → `(doc, kinds)`: registrar + 4 sites in `tests/mcp/lifecycle/test_systems_profile_examples.py` (Task 3 Step 4).
+  - `request_allocation`/`_request_allocation`: **unchanged** by design (Task 6 guards in the closure), so their ~26 callers are untouched.
 - [ ] Run the **full** suite: `just lint && just type && just test`.
 - [ ] Regenerate the agent-facing tool reference and confirm it is unchanged (the registry tool schema is the deployment-agnostic full schema; the projection happens only per-connection at list-time): `just docs && git diff --exit-code docs/guide/reference/`. If it changed, investigate — the static models should be untouched.
 - [ ] `just adr-status-check && just docs-links && just check-mermaid`.
