@@ -163,7 +163,13 @@ is deliberately **excluded** from narrowing and keeps the full `ResourceKind` en
 `ToolExposureMiddleware.on_list_tools` (`middleware/exposure.py:29-47`) is the existing list-time
 seam (it already RBAC-filters and core-set-filters the returned `Tool` sequence). It gains the
 resolver (constructor injection) and, for the affected tools, rewrites the returned `Tool`'s
-`inputSchema` to the projection for the current `registered_kinds()`. The same projection helper
+`inputSchema` for the current `registered_kinds()`. FastMCP generates each tool's schema from the
+handler signature, so the projection does not regenerate the whole tool schema — it substitutes the
+factory model's narrowed reusable `$defs` (the `ResourceKind` enum and the `ProviderSection`
+object) into the generated `parameters` (returning a `model_copy` of the `Tool`, leaving the
+registry object — and the deployment-agnostic generated tool reference — untouched). The section
+sub-models (`LibvirtProfile` etc.) are unchanged and already present in `$defs`, so the
+substitution drops members, never invents new definitions. The same projection helper
 is applied by `tools.search` (ADR-0268), which returns full input schemas for gateway dispatch —
 otherwise a searched schema would re-expose a non-composed kind the listed schema hid. The
 projection failing must **fail open** to the unprojected (full) schema, mirroring the middleware's
