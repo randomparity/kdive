@@ -480,11 +480,18 @@ git commit -m "feat(mcp): drive profile_examples from composed providers (ADR-02
 **Files:**
 - Modify: `src/kdive/mcp/middleware/exposure.py` (inject resolver, project affected tools)
 - Modify: `src/kdive/mcp/app.py:26-61` (build resolver before middleware; pass it in)
-- Test: `tests/mcp/middleware/test_exposure_projection.py`
+- Create: `tests/mcp/middleware/test_exposure_projection.py`
+- Modify (existing call sites — see Step 3b): `tests/mcp/middleware/test_exposure.py` (6 sites: lines 47, 64, 81, 102, 116, 134), `tests/mcp/core/test_tool_exposure_middleware.py` (4 sites: lines 66, 75, 86, 99)
 
 **Interfaces:**
 - Consumes: `project_tool_schema` (Task 2); `ProviderResolver`.
 - Produces: `NARROWED_TOOLS: frozenset[str]` and `ToolExposureMiddleware(resolver)` projecting the affected tools' `inputSchema`.
+
+> **Prerequisite — the constructor change is breaking.** `ToolExposureMiddleware()` is currently
+> constructed with no args at 11 sites (1 in `app.py`, 6 in `tests/mcp/middleware/test_exposure.py`,
+> 4 in `tests/mcp/core/test_tool_exposure_middleware.py`). Adding a required `resolver` param breaks
+> every one. Step 3 fixes `app.py`; **Step 3b** fixes all 10 test sites in the same task so the suite
+> stays green.
 
 > FastMCP `Tool` is a Pydantic model with a mutable `parameters` field; return `tool.model_copy(update={"parameters": projected})` so the shared registry object is left intact (precedent: `schema_advertising.py` mutates `tool.output_schema`).
 
@@ -665,17 +672,44 @@ Wire the resolver in `app.py` — build it **before** the middleware and reuse t
 
 > Move the `composition = ...` and `resolver = ...` lines above the `add_middleware` block. Keep `FastMCP(...)` construction first. Build the resolver **once**.
 
+- [ ] **Step 3b: Update the existing `ToolExposureMiddleware()` call sites**
+
+The constructor now requires a `resolver`. Update all 10 existing test constructions to pass an
+empty resolver — `ProviderResolver({})` has `registered_kinds() == frozenset()` (valid, ADR-0131),
+and these tests assert on filtered tool **names**, not schemas, so the projection (which fail-opens)
+does not affect their assertions:
+
+```python
+# add the import to each of the two test files
+from kdive.providers.core.resolver import ProviderResolver
+
+# replace every  ToolExposureMiddleware()  with:
+ToolExposureMiddleware(ProviderResolver({}))
+```
+
+Sites: `tests/mcp/middleware/test_exposure.py` lines 47, 64, 81, 102, 116, 134;
+`tests/mcp/core/test_tool_exposure_middleware.py` lines 66, 75, 86, 99. (If any of these tests
+*does* assert on a tool's schema, pass a resolver whose `registered_kinds()` returns the full set
+instead, so the schema is unchanged — but a name-only filter test takes the empty resolver.)
+
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `uv run pytest tests/mcp/middleware/test_exposure_projection.py -q` → PASS.
-Run: `uv run pytest tests/mcp/core/test_app.py -q` → confirm the app still builds (the middleware-construction guard).
+```bash
+uv run pytest tests/mcp/middleware/test_exposure_projection.py \
+              tests/mcp/middleware/test_exposure.py \
+              tests/mcp/core/test_tool_exposure_middleware.py \
+              tests/mcp/core/test_app.py -q
+```
+Expected: PASS (new projection tests green; the 10 updated call sites green; the app still builds).
 
 - [ ] **Step 5: Guardrails + commit**
 
 ```bash
-just lint && just type && uv run pytest tests/mcp/middleware/ tests/mcp/core/test_app.py -q
+just lint && just type && uv run pytest tests/mcp/middleware/ tests/mcp/core/test_tool_exposure_middleware.py tests/mcp/core/test_app.py -q
 git add src/kdive/mcp/middleware/exposure.py src/kdive/mcp/app.py \
-        tests/mcp/middleware/test_exposure_projection.py
+        tests/mcp/middleware/test_exposure_projection.py \
+        tests/mcp/middleware/test_exposure.py \
+        tests/mcp/core/test_tool_exposure_middleware.py
 git commit -m "feat(mcp): narrow listed tool schemas to composed providers (ADR-0269)"
 ```
 
