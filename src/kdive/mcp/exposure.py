@@ -216,6 +216,24 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "vmcore.fetch": _CONTRIBUTOR,
 }
 
+#: The default-listed core set when the gateway is on (ADR-0268). Everything else is reachable
+#: via tools.search + tools.invoke. CORE_TOOLS must be a subset of the live registry (guard test
+#: in tests/mcp/core/test_app.py).
+CORE_TOOLS: frozenset[str] = frozenset(
+    {
+        "tools.search",
+        "tools.invoke",
+        "session.whoami",
+        "runs.build_install_boot",
+        "runs.create",
+        "runs.get",
+        "runs.list",
+        "allocations.request",
+        "allocations.wait",
+        "systems.provision",
+    }
+)
+
 #: Reviewed intentionally-public tools (open reads / onboarding / catalog). Each is callable
 #: by any authenticated token (the handler enforces no role, filtering its own results), so
 #: hiding it would be wrong. ``CLASSIFIED_TOOLS | PUBLIC_TOOLS`` must equal the live registry.

@@ -122,6 +122,12 @@
 |----------|-----------|---------|----------|-------|
 | `KDIVE_LOG_LEVEL` | migrate, reconciler, server, worker | `INFO` | no | Structured-logging level (overridable by --log-level). |
 
+## mcp
+
+| Variable | Processes | Default | Required | Value |
+|----------|-----------|---------|----------|-------|
+| `KDIVE_MCP_TOOL_GATEWAY` | server | `off` | no | Enable the core-set tool gateway (ADR-0268): when set to on/1/true, list_tools returns only the CORE_TOOLS set (intersected with RBAC), so agents discover tools.search and tools.invoke first. Default off — full ADR-0148 RBAC catalog. |
+
 ## objectstore
 
 | Variable | Processes | Default | Required | Value |

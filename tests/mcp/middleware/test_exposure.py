@@ -6,6 +6,9 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
+from kdive.mcp.exposure import CORE_TOOLS
 from kdive.mcp.middleware import exposure as exposure_mod
 from kdive.mcp.middleware.exposure import ToolExposureMiddleware
 from kdive.security.authz.errors import AuthError
@@ -81,3 +84,53 @@ def test_unexpected_error_advertises_full_catalog_and_warns(monkeypatch) -> None
     (args, kwargs) = warnings[0]
     assert args == ("tool-exposure filter failed; advertising the full catalog",)
     assert kwargs["exc_info"] is True
+
+
+# ---------------------------------------------------------------------------
+# KDIVE_MCP_TOOL_GATEWAY flag tests
+# ---------------------------------------------------------------------------
+
+
+def test_gateway_off_returns_full_rbac_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the gateway flag is absent the full RBAC-scoped catalog is returned unchanged."""
+    # 25 synthetic tools — deliberately more than the 10-member CORE_TOOLS set
+    many_tools = _tools(*(f"tool_{i}" for i in range(25)))
+    monkeypatch.delenv("KDIVE_MCP_TOOL_GATEWAY", raising=False)
+    monkeypatch.setattr(exposure_mod, "request_context", lambda: object())
+    monkeypatch.setattr(exposure_mod, "visible_tool_names", lambda _ctx, names: set(names))
+
+    result, _, _ = _run(ToolExposureMiddleware(), many_tools)
+
+    assert len(result) > 20
+
+
+def test_gateway_on_returns_core_intersect_rbac(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the gateway is on, list_tools returns only RBAC-visible ∩ CORE_TOOLS."""
+    # RBAC passes everything; the gateway should clip to CORE_TOOLS
+    core_plus_extras = list(CORE_TOOLS) + ["admin.delete", "inventory.list", "ops.diagnostics"]
+    tools = _tools(*core_plus_extras)
+    monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "on")
+    monkeypatch.setattr(exposure_mod, "request_context", lambda: object())
+    monkeypatch.setattr(exposure_mod, "visible_tool_names", lambda _ctx, names: set(names))
+
+    result, _, _ = _run(ToolExposureMiddleware(), tools)
+    names = {t.name for t in result}
+
+    assert names <= CORE_TOOLS
+    assert {"tools.search", "tools.invoke", "runs.build_install_boot"} <= names
+
+
+def test_gateway_on_fails_open_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the gateway is on but the try-block raises, the full catalog is returned."""
+    all_tools = _tools("runs.create", "admin.teardown")
+    monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "on")
+    monkeypatch.setattr(exposure_mod, "request_context", lambda: object())
+
+    def _boom(_ctx: Any, _names: Any) -> set[str]:
+        raise RuntimeError("rbac exploded with gateway on")
+
+    monkeypatch.setattr(exposure_mod, "visible_tool_names", _boom)
+
+    result, _, _ = _run(ToolExposureMiddleware(), all_tools)
+
+    assert [t.name for t in result] == ["runs.create", "admin.teardown"]
