@@ -38,6 +38,18 @@ def _artifacts_item_schema(tool_name: str) -> dict[str, Any]:
     return cast(dict[str, Any], artifacts["items"])
 
 
+def _tool_description(tool_name: str) -> str:
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = FastMCP("upload-description-test")
+    artifacts_registrar.register(app, pool, resolver=cast(ProviderResolver, object()))
+
+    async def _description() -> str:
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        return tools[tool_name].description or ""
+
+    return asyncio.run(_description())
+
+
 def test_both_upload_tools_advertise_fielded_declaration_items() -> None:
     for tool_name in _UPLOAD_TOOLS:
         item = _artifacts_item_schema(tool_name)
@@ -66,6 +78,14 @@ def test_declaration_required_drift_guard() -> None:
     for tool_name in _UPLOAD_TOOLS:
         item = _artifacts_item_schema(tool_name)
         assert sorted(item["required"]) == sorted(_REQUIRED_DECLARATION_FIELDS)
+
+
+def test_create_run_upload_description_names_required_headers_and_replacement() -> None:
+    description = _tool_description("artifacts.create_run_upload").lower()
+
+    assert "required_headers" in description
+    assert "replace" in description
+    assert "manifest" in description
 
 
 def _artifacts_examples(tool_name: str) -> list[Any]:

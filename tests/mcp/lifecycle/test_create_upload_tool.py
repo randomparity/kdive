@@ -273,6 +273,12 @@ def test_create_upload_mints_presigned_puts_and_persists_manifest(migrated_url: 
             assert items[0].refs["upload_url"].startswith("https://store/")
             assert items[0].suggested_next_actions == ["runs.complete_build"]
             assert items[0].data["name"] == "kernel"
+            assert responses.data["manifest_mode"] == "replace"
+            assert responses.data["replaces_prior_manifest"] is True
+            assert items[0].data["required_headers"] == {
+                "x-amz-checksum-sha256": "aaa",
+            }
+            assert items[0].data["x-amz-checksum-sha256"] == "aaa"
             signed_keys = {c[0] for c in store.calls}
             assert signed_keys == {
                 f"local/runs/{run_id}/kernel",

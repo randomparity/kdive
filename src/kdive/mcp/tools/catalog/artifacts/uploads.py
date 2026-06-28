@@ -448,7 +448,11 @@ async def _create_upload(
         "upload_ready",
         items,
         suggested_next_actions=[spec.next_action],
-        data={"owner_kind": spec.owner_kind},
+        data={
+            "owner_kind": spec.owner_kind,
+            "manifest_mode": "replace",
+            "replaces_prior_manifest": True,
+        },
     )
 
 
@@ -463,6 +467,7 @@ def _upload_response(upload: _MaterializedUpload, *, next_action: str) -> ToolRe
             "artifact_name": upload.entry.name,
             "expires_in": _presign_ttl_seconds(),
             **({"part_number": upload.part_number} if upload.part_number is not None else {}),
+            "required_headers": dict(upload.presigned.required_headers),
             **upload.presigned.required_headers,
         },
     )

@@ -74,12 +74,15 @@ boot image first.
 1. `artifacts.expected_uploads` — confirm the accepted names for the `run` owner-kind.
 2. Build `kernel.tar.gz` with the recipe above (plus any optional artifacts).
 3. `artifacts.create_run_upload` — declare each artifact `{name, sha256 (base64), size_bytes}`
-   and receive a presigned PUT per artifact. Objects over the single-PUT limit can be declared
-   with `chunks`.
-4. PUT each object to its presigned URL.
+   and receive one upload item per artifact. Each item contains `refs.upload_url` and
+   `data.required_headers`; objects over the single-PUT limit can be declared with `chunks`.
+4. PUT each object to its presigned URL, sending every header from `data.required_headers`.
 5. `runs.complete_build` — finalize. The server validates every uploaded object (shape, magic,
    manifest `sha256`/`size_bytes`, and the `vmlinux` build-id) before the Run becomes
    installable.
+
+Each `artifacts.create_run_upload` call replaces the previous manifest for the Run. If you
+correct one artifact, redeclare every artifact that should remain part of the build.
 
 A mismatch between a declared `sha256`/`size_bytes` and the stored object is rejected
 (`uploaded artifact disagrees with its manifest`), so checksum the bytes you actually PUT.
