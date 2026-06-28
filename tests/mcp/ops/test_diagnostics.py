@@ -30,6 +30,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.mcp.tools.ops import diagnostics
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
+from kdive.version import VersionInfo
 from tests.mcp.json_data import data_str
 
 _CLI_CLIENT_ID = "kdivectl"
@@ -319,6 +320,33 @@ def test_verdict_projects_check_data(migrated_url: str) -> None:
             "branch": "main",
         }
         assert by_check["secret_ref"].data["data"] == {}
+
+    asyncio.run(_run())
+
+
+def test_verdict_projects_service_version(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        diagnostics.service_version,
+        "version_info",
+        lambda: VersionInfo("1.2.3", "abc1234", False),
+    )
+    monkeypatch.setattr(
+        diagnostics.service_version,
+        "full_version",
+        lambda: "1.2.3-dev+gabc1234",
+    )
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await diagnostics.run_diagnostics(pool, _factory(_HEALTHY), _OPERATOR)
+        assert resp.data["service_version"] == {
+            "version": "1.2.3",
+            "commit": "abc1234",
+            "is_release": False,
+            "full_version": "1.2.3-dev+gabc1234",
+        }
 
     asyncio.run(_run())
 

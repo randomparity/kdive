@@ -19,7 +19,7 @@ collection envelope. Do not add a new tool, audit event, or check item.
 - Modify: `tests/mcp/ops/test_diagnostics.py`
 - Modify: `src/kdive/mcp/tools/ops/diagnostics.py`
 
-- [ ] **Step 1: Add failing response-shape coverage**
+- [x] **Step 1: Add failing response-shape coverage**
 
 In `tests/mcp/ops/test_diagnostics.py`, import `VersionInfo` from `kdive.version` and add a
 test in the verdict-shape section:
@@ -48,7 +48,7 @@ def test_verdict_projects_service_version(
     asyncio.run(_run())
 ```
 
-- [ ] **Step 2: Run the new test and verify it fails**
+- [x] **Step 2: Run the new test and verify it fails**
 
 Run:
 
@@ -58,7 +58,7 @@ uv run python -m pytest tests/mcp/ops/test_diagnostics.py::test_verdict_projects
 
 Expected: fails because `service_version` is not present in diagnostics response data.
 
-- [ ] **Step 3: Add service-version projection**
+- [x] **Step 3: Add service-version projection**
 
 In `src/kdive/mcp/tools/ops/diagnostics.py`, import the version module:
 
@@ -85,7 +85,7 @@ Include it in `_verdict()` top-level data:
             "service_version": _service_version_data(),
 ```
 
-- [ ] **Step 4: Run focused diagnostics tests**
+- [x] **Step 4: Run focused diagnostics tests**
 
 Run:
 
@@ -95,7 +95,7 @@ uv run python -m pytest tests/mcp/ops/test_diagnostics.py -q
 
 Expected: diagnostics tests pass.
 
-- [ ] **Step 5: Run relevant quality gates**
+- [x] **Step 5: Run relevant quality gates**
 
 Run:
 

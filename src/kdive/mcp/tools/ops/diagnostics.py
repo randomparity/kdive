@@ -23,6 +23,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
+from kdive import version as service_version
 from kdive.diagnostics.checks import CheckResult, CheckStatus
 from kdive.diagnostics.service import DiagnosticsReport, DiagnosticsService
 from kdive.domain.errors import ErrorCategory
@@ -38,6 +39,7 @@ from kdive.mcp.tools._platform_auth import (
 )
 from kdive.security import audit
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
+from kdive.serialization import JsonValue
 
 if TYPE_CHECKING:
     from kdive.security.authz.context import RequestContext
@@ -224,16 +226,28 @@ def _item(result: CheckResult) -> ToolResponse:
     )
 
 
+def _service_version_data() -> dict[str, JsonValue]:
+    info = service_version.version_info()
+    return {
+        "version": info.version,
+        "commit": info.commit,
+        "is_release": info.is_release,
+        "full_version": service_version.full_version(),
+    }
+
+
 def _verdict(results: list[CheckResult], has_failure: bool, has_error: bool) -> ToolResponse:
+    data: dict[str, JsonValue] = {
+        "has_failure": has_failure,
+        "has_error": has_error,
+        "service_version": _service_version_data(),
+    }
     return ToolResponse.collection(
         _OBJECT_ID,
         "ok",
         [_item(r) for r in results],
         suggested_next_actions=[_TOOL],
-        data={
-            "has_failure": has_failure,
-            "has_error": has_error,
-        },
+        data=data,
     )
 
 
