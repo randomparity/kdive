@@ -6,17 +6,16 @@
 
 `implemented` · `destructive`
 
-Call any registered tool by name (gateway dispatch, ADR-0268).
+Call any registered tool by name (gateway dispatch).
 
 Re-enters the server's own dispatch path with ``run_middleware=True`` so the
 inner tool runs through the full middleware stack — RBAC, telemetry, binding
 validation, and denial audit — natively, exactly as a direct call would.
 
 ``AuthorizationError`` from the inner call is NOT caught here; the denial-audit
-middleware handles it and converts it to an ``authorization_denied`` envelope
-(ADR-0148). Only ``NotFoundError`` (unknown/disabled tool) and pydantic
-``ValidationError`` (invalid arguments) are caught and converted to
-``configuration_error`` envelopes.
+middleware handles it and converts it to an ``authorization_denied`` envelope.
+Only ``NotFoundError`` (unknown/disabled tool) and pydantic ``ValidationError``
+(invalid arguments) are caught and converted to ``configuration_error`` envelopes.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

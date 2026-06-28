@@ -383,7 +383,7 @@ def _register_runs_build_install_boot(
             Field(
                 description=(
                     "A created, bound, not-yet-built Run to drive build->install->boot "
-                    "as a single pollable job (ADR-0268, #866). The Run must use a "
+                    "as a single pollable job. The Run must use a "
                     "source='server' build profile. Poll the returned job with jobs.wait."
                 )
             ),
@@ -403,7 +403,7 @@ def _register_runs_build_install_boot(
             Field(description="Replay-safe key; a repeated key returns the prior envelope."),
         ] = None,
     ) -> ToolResponse:
-        """Build, install, and boot a bound Run as a single pollable job (ADR-0268).
+        """Build, install, and boot a bound Run as a single pollable job.
 
         Performs build-host admission (same as runs.build) then enqueues one
         BUILD_INSTALL_BOOT job. Requires operator role — the composite includes install
