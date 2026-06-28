@@ -83,9 +83,11 @@ blocks on a long provision" (`docs/design/top-level-design.md`, AGENTS.md) and `
 deliberately bounded (`wait_job`, clamped to `MAX_WAIT_S`, ADR-0138). So `runs.build_install_boot`
 is an OPERATOR tool that **enqueues one composite worker job** over an already-created, already-bound
 Run and returns that single job handle immediately. It adds a new `JobKind` (`build_install_boot`)
-whose handler runs build→install→boot sequentially via the service layer (`_build_run` /
-`_install_run` / `_boot_run`, reusing `_build_handlers`), committing each `run_steps` row as it
-completes (the existing 30-minute handler model). The agent polls that **one** job with `jobs.wait`,
+whose handler calls the existing per-phase job **executors** sequentially — `build_handler` →
+`install_handler` → `boot_handler` (`src/kdive/jobs/handlers/runs/`, sharing one `RunHandlerPorts`),
+the same functions bound for the `BUILD`/`INSTALL`/`BOOT` kinds — **not** the MCP admission/enqueue
+path (the composite is already in the worker; it does the work, it does not enqueue three sub-jobs).
+Each executor commits its own `run_steps` row (the existing 30-minute handler model). The agent polls that **one** job with `jobs.wait`,
 replacing three job handles and three waits with one. Progress is the job's own status (current
 phase, via `jobs.get`) — no MCP progress-token notification, which would re-introduce a
 client-capability dependency. On `succeeded` the job's terminal result carries the `runs.get`

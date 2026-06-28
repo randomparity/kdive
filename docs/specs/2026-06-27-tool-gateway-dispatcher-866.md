@@ -156,12 +156,17 @@ that contract.
 
 So `runs.build_install_boot` is an OPERATOR tool that **enqueues one composite worker job** over an
 **already-created, already-bound** Run and returns that single job handle immediately. It adds a new
-`JobKind` whose handler runs build→install→boot sequentially via the service layer (`_build_run` /
-`_install_run` / `_boot_run`, reusing `_build_handlers`), committing each `run_steps` row as it
-completes — the existing long-running handler model ("a handler runs 30+ minutes and commits its own
-steps", `src/kdive/jobs/worker.py`). The agent polls that **one** job with `jobs.wait` — replacing
-three separate job handles and three waits with one job to learn and poll. This is the ceremony
-reduction #866 asks for, expressed in the existing async spine rather than against it.
+`JobKind` (`build_install_boot`) whose handler calls the existing **per-phase job executors**
+sequentially — `build_handler` → `install_handler` → `boot_handler` in
+`src/kdive/jobs/handlers/runs/{build,install,boot}.py`, the same functions
+`runs.handlers.register_handlers` binds for the `BUILD`/`INSTALL`/`BOOT` job kinds, sharing one
+`RunHandlerPorts`. It must reuse those **executors**, not the MCP admission/enqueue path
+(`_build_handlers` in the tool registrar enqueues a job; the composite is already inside the worker
+and must do the work, not enqueue three more sub-jobs). Each executor commits its own `run_steps`
+row as it completes — the existing long-running model ("a handler runs 30+ minutes and commits its
+own steps", `src/kdive/jobs/worker.py`). The agent polls that **one** job with `jobs.wait` —
+replacing three separate job handles and three waits with one job to learn and poll. This is the
+ceremony reduction #866 asks for, expressed in the existing async spine rather than against it.
 
 - **Input:** `run_id` only (a created, bound, not-yet-built Run). `expected_boot_failure` is already
   persisted on the Run at `runs.create` (registrar field, not a boot-time argument), so the composite
