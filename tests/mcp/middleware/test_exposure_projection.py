@@ -156,6 +156,45 @@ def test_on_list_tools_projects_visible_tools(monkeypatch) -> None:  # type: ign
     assert projected.parameters["$defs"]["ResourceKind"]["enum"] == expected
 
 
+def test_resolver_failure_fails_open_and_counts(monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
+    """A resolver.registered_kinds() error fails open to the full catalog, incrementing the counter.
+
+    ADR-0269 §3/§5: registered_kinds() is inside the visibility-filter try block, so a resolver
+    error falls into the generic except, increments _PROJECTION_FAILURES, and returns the full
+    (unprojected) catalog — no listing is suppressed.
+    """
+    alloc_tool = _FakeTool("allocations.request", {"type": "object"})
+    tools = [alloc_tool]
+
+    class _ExplodingResolver:
+        def registered_kinds(self) -> frozenset:
+            raise RuntimeError("injected resolver failure")
+
+    monkeypatch.setattr(exposure_mod, "request_context", lambda: object())
+    monkeypatch.setattr(exposure_mod, "visible_tool_names", lambda _ctx, names: set(names))
+
+    counter_calls: list[int] = []
+    monkeypatch.setattr(
+        exposure_mod._PROJECTION_FAILURES, "add", lambda amount: counter_calls.append(amount)
+    )
+
+    mw = ToolExposureMiddleware(_ExplodingResolver())  # ty: ignore[invalid-argument-type]
+
+    async def call_next(_ctx: object) -> list:
+        return tools
+
+    with caplog.at_level(logging.WARNING, logger="kdive.mcp.middleware.exposure"):
+        result = asyncio.run(mw.on_list_tools(object(), call_next))
+
+    # Fail-open: full catalog returned unchanged.
+    assert len(result) == len(tools)
+    assert result[0] is alloc_tool
+
+    # Observability: counter incremented exactly once, warning logged.
+    assert counter_calls == [1]
+    assert "tool-exposure filter failed" in caplog.text
+
+
 def test_projection_failure_fails_open_and_counts(monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
     """A projection error advertises the original tool and fires the failure counter (ADR-0269 §5).
 

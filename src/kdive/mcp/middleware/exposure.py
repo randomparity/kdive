@@ -81,13 +81,14 @@ class ToolExposureMiddleware(Middleware):
             visible = visible_tool_names(ctx, (tool.name for tool in tools))
             if _gateway_enabled():
                 visible &= CORE_TOOLS
+            kinds = self._resolver.registered_kinds()
         except AuthError:
             _log.debug("no verified token in on_list_tools; advertising the full catalog")
             return tools
         except Exception:
+            _PROJECTION_FAILURES.add(1)
             _log.warning("tool-exposure filter failed; advertising the full catalog", exc_info=True)
             return tools
-        kinds = self._resolver.registered_kinds()
         result: list[Tool] = []
         for tool in tools:
             if tool.name not in visible:

@@ -17,11 +17,13 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.middleware.exposure import NARROWED_TOOLS
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload, ResourceByKind, ResourceByPool
 from kdive.mcp.tools import gateway
 from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_registrar
 from kdive.mcp.tools.lifecycle.allocations.request import _guard_resource_kind
+from kdive.mcp.tools.lifecycle.systems import registrar as systems_registrar
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.rbac import Role
 
@@ -154,6 +156,101 @@ def test_gateway_rejects_non_composed_kind_via_tools_invoke(
     resp = asyncio.run(_run())
     assert resp.error_category == "configuration_error"
     assert "fault-inject" in (resp.detail or "")
+
+
+# ---------------------------------------------------------------------------
+# NARROWED_TOOLS / call-time guard sync (FIX 1, ADR-0269 adversarial review)
+# ---------------------------------------------------------------------------
+
+# A fault-inject profile is non-composed on a local-libvirt-only resolver.
+# boot_method=direct-kernel + fault-inject: _pair_boot_method_with_provider passes
+# (only remote-libvirt requires disk-image).
+_FAULT_INJECT_PROFILE: dict = {
+    "schema_version": 1,
+    "arch": "x86_64",
+    "boot_method": "direct-kernel",
+    "kernel_source_ref": "linux-test",
+    "provider": {"fault-inject": {}},
+}
+
+# Arguments to drive each NARROWED_TOOLS member with a non-composed kind.
+# Keyed to tool name: a KeyError here when iterating NARROWED_TOOLS means a new
+# tool was added to the set without a corresponding entry — add one.
+_NON_COMPOSED_ARGS_BY_TOOL: dict[str, dict] = {
+    "allocations.request": _NON_COMPOSED_REQUEST_ARGS,
+    "systems.define": {
+        "allocation_id": "00000000-0000-0000-0000-000000000001",
+        "profile": _FAULT_INJECT_PROFILE,
+    },
+    "systems.provision": {
+        "allocation_id": "00000000-0000-0000-0000-000000000001",
+        "profile": _FAULT_INJECT_PROFILE,
+    },
+    "systems.reprovision": {
+        "system_id": "00000000-0000-0000-0000-000000000001",
+        "profile": _FAULT_INJECT_PROFILE,
+    },
+}
+
+
+def _build_full_test_app(resolver: ProviderResolver) -> FastMCP:
+    """Minimal FastMCP app with allocations, systems, and gateway tools."""
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = FastMCP(name="test-narrowed-guard")
+    allocations_registrar.register(app, pool, resolver=resolver)
+    systems_registrar.register(app, pool, resolver=resolver)
+    gateway.register(app, resolver=resolver)
+    return app
+
+
+def test_narrowed_tools_exact_membership() -> None:
+    """NARROWED_TOOLS must be exactly the four provisioning-choice surfaces (ADR-0269 §4).
+
+    Any addition to NARROWED_TOOLS is a deliberate, reviewed schema-narrowing decision;
+    pinning the exact set here makes that intent visible via a test failure.
+    """
+    assert (
+        frozenset(
+            {"allocations.request", "systems.define", "systems.provision", "systems.reprovision"}
+        )
+        == NARROWED_TOOLS
+    )
+
+
+def test_narrowed_tools_sync_with_call_time_guards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every tool in NARROWED_TOOLS rejects a non-composed kind with configuration_error.
+
+    Iterates NARROWED_TOOLS via ``_NON_COMPOSED_ARGS_BY_TOOL`` so that adding a tool to
+    the set without wiring its call-time guard makes this test fail — either via a
+    KeyError (missing entry in the args map) or via the tool not returning
+    ``configuration_error`` when driven with a non-composed provider kind.
+
+    The systems tools call ``current_context()`` before the guard; patching it in both
+    registrar modules is safe because the guard fires before any DB work and the
+    patched context is never exercised by a successful guard rejection.
+    """
+    resolver = _local_libvirt_only_resolver()
+    app = _build_full_test_app(resolver)
+    monkeypatch.setattr(allocations_registrar, "current_context", _ctx)
+    monkeypatch.setattr(systems_registrar, "current_context", _ctx)
+
+    for tool_name in sorted(NARROWED_TOOLS):
+        args = _NON_COMPOSED_ARGS_BY_TOOL[tool_name]  # KeyError → add missing entry
+
+        async def _run(name: str = tool_name, a: dict = args) -> ToolResponse:
+            result = await app.call_tool(name, a)
+            return ToolResponse.model_validate(result.structured_content)
+
+        resp = asyncio.run(_run())
+        assert resp.error_category == "configuration_error", (
+            f"{tool_name}: expected configuration_error for non-composed kind, "
+            f"got {resp.error_category!r}"
+        )
+        assert "fault-inject" in (resp.detail or ""), (
+            f"{tool_name}: expected 'fault-inject' in detail, got {resp.detail!r}"
+        )
 
 
 def test_rejection_envelope_enumerates_composed_kinds(
