@@ -94,11 +94,12 @@ async def tools_invoke(name: str, arguments: dict[str, Any] | None = None) -> To
 
 The dispatcher's static annotation cannot mirror the inner tool, which may be a read or a teardown.
 It is annotated `destructive()` so a consent-prompting client errs toward prompting (the safe
-direction). Crucially, `tools.invoke` is **not** added to `_docmeta.DESTRUCTIVE_TOOLS`: the kdive
-destructive-op gate (ADR-0043/0047) keys off that set, and it must fire on the **inner** re-entered
-call (so a destructive inner tool is gated and a read is not), not blanket-gate every gateway call.
-The `destructive()` annotation is the client-facing MCP hint; `DESTRUCTIVE_TOOLS` membership is the
-server-side gate — they are deliberately decoupled here.
+direction), and is therefore listed in `_docmeta.DESTRUCTIVE_TOOLS` (the reviewed set the guard test
+pins the `destructiveHint` annotations to). That membership is **hint-only** and does **not**
+blanket-gate dispatch: the server-side destructive-op gate keys off `DESTRUCTIVE_JOB_KINDS` /
+`assert_destructive_allowed`, not `DESTRUCTIVE_TOOLS` — so the gate still fires on the **inner**
+re-entered call (a destructive inner tool is gated, a read is not). The annotation is the
+client-facing hint; the job-kind gate is the server-side boundary, and they remain independent.
 
 `call_tool` validates `arguments` against the inner tool's schema and raises `ValidationError`;
 the dispatcher catches it and returns the same `configuration_error` envelope shape a direct call

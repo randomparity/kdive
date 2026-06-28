@@ -43,6 +43,7 @@ def test_destructive_tools_set_is_the_reviewed_set() -> None:
                 "images.delete",
                 "images.prune_expired",
                 "images.extend",
+                "tools.invoke",
             }
         )
         == _docmeta.DESTRUCTIVE_TOOLS

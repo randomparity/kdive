@@ -313,6 +313,9 @@ def test_job_kind_covers_the_async_tool_surface() -> None:
         # Server-internal (not agent-facing): ops.diagnostics enqueues it to run the
         # worker-vantage checks and bounded-waits for the inline result (ADR-0164).
         "diagnostics_worker_check",
+        # Composite: runs.build_install_boot enqueues one job whose handler runs the
+        # build -> install -> boot phases in sequence (ADR-0268, #866).
+        "build_install_boot",
     }
 
 
