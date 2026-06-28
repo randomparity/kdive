@@ -184,6 +184,7 @@ import pytest
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.provider_schema import assert_kind_composed, project_tool_schema
+from kdive.mcp.tool_payloads import AllocationRequestPayload
 from kdive.profiles.provisioning import ProvisioningProfile
 
 LOCAL = ResourceKind.LOCAL_LIBVIRT
@@ -191,13 +192,21 @@ REMOTE = ResourceKind.REMOTE_LIBVIRT
 FAULT = ResourceKind.FAULT_INJECT
 
 
+# The two surfaces narrow via DIFFERENT $defs (verified against the real schemas):
+#   - allocations.request: `$defs.ResourceKind` is a named enum (the kind selector).
+#   - systems.define/provision: `$defs.ProviderSection.properties` keyed by alias; the profile
+#     schema has NO `ResourceKind` $def. So enum tests source from the allocation payload and
+#     section tests source from the profile.
+def _allocation_schema() -> dict:
+    return AllocationRequestPayload.model_json_schema()
+
+
 def _profile_schema() -> dict:
-    # The real generated schema the tools publish for a profile arg; pins $def names.
     return ProvisioningProfile.model_json_schema()
 
 
 def test_resource_kind_enum_narrows_to_live_set() -> None:
-    schema = _profile_schema()
+    schema = _allocation_schema()
     assert set(schema["$defs"]["ResourceKind"]["enum"]) == {
         "local-libvirt",
         "fault-inject",
@@ -205,6 +214,11 @@ def test_resource_kind_enum_narrows_to_live_set() -> None:
     }
     projected = project_tool_schema(schema, frozenset({LOCAL}))
     assert projected["$defs"]["ResourceKind"]["enum"] == ["local-libvirt"]
+
+
+def test_profile_schema_has_no_resource_kind_def() -> None:
+    # Pins the asymmetry: the section union is alias-keyed, not a ResourceKind enum.
+    assert "ResourceKind" not in _profile_schema()["$defs"]
 
 
 def test_provider_section_properties_narrow_to_live_aliases() -> None:
@@ -218,16 +232,17 @@ def test_provider_section_properties_narrow_to_live_aliases() -> None:
 
 
 def test_projection_does_not_mutate_the_input() -> None:
-    schema = _profile_schema()
+    schema = _allocation_schema()
     before = schema["$defs"]["ResourceKind"]["enum"][:]
     project_tool_schema(schema, frozenset({LOCAL}))
     assert schema["$defs"]["ResourceKind"]["enum"] == before
 
 
-def test_empty_set_yields_empty_enum_and_no_sections() -> None:
-    projected = project_tool_schema(_profile_schema(), frozenset())
-    assert projected["$defs"]["ResourceKind"]["enum"] == []
-    assert projected["$defs"]["ProviderSection"]["properties"] == {}
+def test_empty_set_narrows_each_surface() -> None:
+    alloc = project_tool_schema(_allocation_schema(), frozenset())
+    assert alloc["$defs"]["ResourceKind"]["enum"] == []
+    profile = project_tool_schema(_profile_schema(), frozenset())
+    assert profile["$defs"]["ProviderSection"]["properties"] == {}
 
 
 def test_schema_without_defs_is_returned_unchanged() -> None:
@@ -481,6 +496,7 @@ from __future__ import annotations
 
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.mcp.middleware.exposure import NARROWED_TOOLS, project_listed_tool
+from kdive.mcp.tool_payloads import AllocationRequestPayload
 from kdive.profiles.provisioning import ProvisioningProfile
 
 
@@ -499,10 +515,19 @@ def test_narrowed_tools_membership() -> None:
     assert "resources.list" not in NARROWED_TOOLS
 
 
-def test_affected_tool_is_projected() -> None:
-    tool = _FakeTool("systems.define", ProvisioningProfile.model_json_schema())
+def test_allocation_tool_kind_enum_is_projected() -> None:
+    # allocations.request narrows via the $defs.ResourceKind enum.
+    tool = _FakeTool("allocations.request", AllocationRequestPayload.model_json_schema())
     out = project_listed_tool(tool, frozenset({ResourceKind.LOCAL_LIBVIRT}))
     assert out.parameters["$defs"]["ResourceKind"]["enum"] == ["local-libvirt"]
+
+
+def test_systems_tool_section_props_are_projected() -> None:
+    # systems.define narrows via $defs.ProviderSection.properties (no ResourceKind enum here).
+    tool = _FakeTool("systems.define", ProvisioningProfile.model_json_schema())
+    out = project_listed_tool(tool, frozenset({ResourceKind.LOCAL_LIBVIRT}))
+    kept = set(out.parameters["$defs"]["ProviderSection"]["properties"])
+    assert kept == {"local-libvirt"}
 
 
 def test_unaffected_tool_is_returned_unchanged() -> None:
@@ -510,6 +535,34 @@ def test_unaffected_tool_is_returned_unchanged() -> None:
     out = project_listed_tool(tool, frozenset({ResourceKind.LOCAL_LIBVIRT}))
     assert out is tool
 ```
+
+> **Live-app integration assertion (add to this test module).** Unit tests above use bare
+> `Model.model_json_schema()` as a proxy; this one pins the proxy against the *real* FastMCP-published
+> tool `.parameters` (FastMCP generates the schema from the handler signature, hoisting `$defs` to the
+> top level). Build the app with only local-libvirt composed and assert the registry's published
+> schema narrows:
+
+```python
+# same file — requires the app-building fixture used elsewhere in tests/mcp/
+from kdive.mcp.schema_advertising import registered_tools
+
+
+def _tool(app, name: str):
+    return next(t for t in registered_tools(app) if t.name == name)
+
+
+def test_real_published_schema_narrows_for_local_only(local_only_app) -> None:
+    # local_only_app: a build_app(...) fixture with enable_remote_libvirt=False and no fault-inject.
+    kinds = frozenset({ResourceKind.LOCAL_LIBVIRT})
+    alloc = project_listed_tool(_tool(local_only_app, "allocations.request"), kinds)
+    assert alloc.parameters["$defs"]["ResourceKind"]["enum"] == ["local-libvirt"]
+    define = project_listed_tool(_tool(local_only_app, "systems.define"), kinds)
+    assert set(define.parameters["$defs"]["ProviderSection"]["properties"]) == {"local-libvirt"}
+```
+
+> If `tests/mcp/` has no reusable `build_app` fixture, construct the app inline in the test (see
+> `tests/mcp/core/test_app.py` for the construction pattern and the required `pool`/`secret_registry`
+> arguments) rather than adding a new conftest fixture.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -716,6 +769,9 @@ git commit -m "feat(mcp): narrow tools.search schemas to composed providers (ADR
 
 - [ ] **Step 1: Write the failing test (direct + gateway parity)**
 
+The red test targets a **not-yet-existing** production guard function `_guard_resource_kind` in
+`request.py`, so it drives the change (no DB/pool needed — it tests the guard the handler calls):
+
 ```python
 # tests/mcp/lifecycle/test_call_time_kind_guard.py
 from __future__ import annotations
@@ -724,40 +780,50 @@ import pytest
 
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.mcp.provider_schema import assert_kind_composed
 from kdive.mcp.tool_payloads import AllocationRequestPayload, ResourceByKind
+from kdive.mcp.tools.lifecycle.allocations.request import _guard_resource_kind
 
 
-def _guard_payload(request: AllocationRequestPayload, kinds) -> None:
-    # The exact guard call the handler performs (kept here to pin the contract).
-    if isinstance(request.resource, ResourceByKind):
-        assert_kind_composed(request.resource.kind, kinds)
+class _StubResolver:
+    def __init__(self, kinds: frozenset[ResourceKind]) -> None:
+        self._kinds = kinds
+
+    def registered_kinds(self) -> frozenset[ResourceKind]:
+        return self._kinds
 
 
-def test_allocation_request_rejects_non_composed_kind() -> None:
+def test_guard_rejects_non_composed_kind() -> None:
     payload = AllocationRequestPayload(
-        shape="small",
-        resource=ResourceByKind(kind=ResourceKind.FAULT_INJECT),
+        shape="small", resource=ResourceByKind(kind=ResourceKind.FAULT_INJECT)
     )
     with pytest.raises(CategorizedError) as exc:
-        _guard_payload(payload, frozenset({ResourceKind.LOCAL_LIBVIRT}))
+        _guard_resource_kind(payload, _StubResolver(frozenset({ResourceKind.LOCAL_LIBVIRT})))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
-def test_allocation_request_accepts_composed_kind() -> None:
+def test_guard_accepts_composed_kind() -> None:
     payload = AllocationRequestPayload(
-        shape="small",
-        resource=ResourceByKind(kind=ResourceKind.LOCAL_LIBVIRT),
+        shape="small", resource=ResourceByKind(kind=ResourceKind.LOCAL_LIBVIRT)
     )
-    _guard_payload(payload, frozenset({ResourceKind.LOCAL_LIBVIRT}))  # no raise
+    _guard_resource_kind(payload, _StubResolver(frozenset({ResourceKind.LOCAL_LIBVIRT})))
+
+
+def test_guard_ignores_non_kind_selectors() -> None:
+    # A pool/id selector names no kind, so the guard is a no-op (resolution fails closed later).
+    payload = AllocationRequestPayload(shape="small")  # default ResourceByKind(local-libvirt)
+    payload = payload.model_copy(update={"resource": ResourceByKind(kind=ResourceKind.LOCAL_LIBVIRT)})
+    _guard_resource_kind(payload, _StubResolver(frozenset({ResourceKind.LOCAL_LIBVIRT})))
 ```
 
-> Also add an end-to-end test in the style of the existing allocations handler tests (e.g. `tests/mcp/lifecycle/test_allocation_request_payload.py` or the handler test module) that calls `request_allocation(...)` with a non-composed `ResourceByKind` and asserts a `configuration_error` envelope — and, if the repo has a `tools.invoke` test harness, one that drives the same call through `tools.invoke` to prove the guard is not schema-only.
+> Also add an end-to-end test in the style of the existing allocations handler tests (e.g. the
+> module covering `request_allocation`) that drives a non-composed `ResourceByKind` and asserts a
+> `configuration_error` envelope — and, if the repo has a `tools.invoke` test harness, one that drives
+> the same call through `tools.invoke` to prove the guard is on the handler path, not schema-only.
 
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `uv run pytest tests/mcp/lifecycle/test_call_time_kind_guard.py -q`
-Expected: PASS for the unit (it calls `assert_kind_composed` directly) — so instead write the failing assertion against the **handler** first: call `request_allocation` and expect the guard. If the handler does not yet guard, that handler test FAILS. Implement Step 3, then it passes.
+Expected: FAIL with `ImportError: cannot import name '_guard_resource_kind'` (the production guard does not exist yet). Implement Step 3, then re-run → PASS.
 
 - [ ] **Step 3: Implement the guards**
 
@@ -774,14 +840,34 @@ def _register_allocations_request(
     )
 ```
 
-In `request.py`, add the guard at the top of `request_allocation` (after role checks, before admission), using the same `registered_kinds()`:
+In `request.py`, define the named guard (the function the red test imports) and call it at the top
+of `request_allocation` (after role checks, before admission). `request_allocation` gains a
+`resolver: ProviderResolver` keyword param:
 
 ```python
+from kdive.mcp.provider_schema import assert_kind_composed
+from kdive.mcp.tool_payloads import ResourceByKind
+from kdive.providers.core.resolver import ProviderResolver
+
+
+def _guard_resource_kind(
+    request: AllocationRequestPayload, resolver: ProviderResolver
+) -> None:
+    """Reject a kind-selected resource whose kind is not composed (ADR-0269).
+
+    A pool/id selector names no kind, so the guard is a no-op there — resolution fails
+    closed downstream for an absent resource.
+    """
     if isinstance(request.resource, ResourceByKind):
         assert_kind_composed(request.resource.kind, resolver.registered_kinds())
+
+
+# inside request_allocation(...), after require_role(...), before admission:
+    _guard_resource_kind(request, resolver)
 ```
 
-In the allocations plane dispatcher in `tool_registration.py`, pass `assembly.resolver` to `_register_allocations_request`.
+In the allocations plane dispatcher in `tool_registration.py`, pass `assembly.resolver` to
+`_register_allocations_request` (it currently receives only `app, pool`).
 
 In `systems/registrar.py`, in each profile-accepting closure (`systems.define`, `systems.provision`, `systems.reprovision`), guard the parsed profile's kind before proceeding:
 
