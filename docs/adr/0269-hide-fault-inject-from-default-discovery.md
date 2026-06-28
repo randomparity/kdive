@@ -1,6 +1,6 @@
 # ADR-0269: hide the fault-inject fixture from default agent discovery (#879)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-06-28
 
 ## Context
