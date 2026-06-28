@@ -74,6 +74,20 @@ def test_kernel_source_ref_field_documents_baseline_and_disk_image_exception() -
     assert "baseline" in lowered
 
 
+def test_fault_inject_provider_section_is_marked_test_only_in_schema() -> None:
+    # #879 / ADR-0269 criterion 2: fault-inject stays a valid provider section (the provider is
+    # real in test/dev), but the systems.define/provision schema must mark it test-only so an
+    # operator agent inspecting the provider union does not read it as a production lane. The
+    # marking lives on the field description (the alias key alone carries no per-value text).
+    from kdive.profiles.provisioning import ProviderSection
+
+    description = ProviderSection.model_fields["fault_inject_section"].description
+    assert description is not None
+    lowered = description.lower()
+    assert "test" in lowered
+    assert "not a production" in lowered
+
+
 def test_valid_libvirt_profile_parses() -> None:
     profile = ProvisioningProfile.parse(_valid())
 

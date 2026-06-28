@@ -50,7 +50,7 @@ Use `systems.provision` instead when the profile needs no upload window. Operato
     - `debug` (`object`, optional) — Per-System debug provisioning flags (ADR-0049 Decision 3).  Bound at provision/boot; declare which capture methods the System is provisioned for. ``preserve_on_crash`` adds a pvpanic device + ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument.
       - `preserve_on_crash` (`boolean`, optional)
       - `gdbstub` (`boolean`, optional)
-  - `fault-inject` (`object (nullable)`, optional)
+  - `fault-inject` (`object (nullable)`, optional) — Test/mock fixture provider section (ADR-0072) for deterministic crash replay, not a production provisioning lane — set only in a test/dev environment that has registered a fault-inject resource.
     - `destructive_ops` (`array<string>`, optional)
     - `capture_method` (``console`, `host_dump`, `gdbstub`, `kdump``, optional)
   - `remote-libvirt` (`object (nullable)`, optional)
@@ -149,7 +149,7 @@ System. Operator only.
     - `debug` (`object`, optional) — Per-System debug provisioning flags (ADR-0049 Decision 3).  Bound at provision/boot; declare which capture methods the System is provisioned for. ``preserve_on_crash`` adds a pvpanic device + ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument.
       - `preserve_on_crash` (`boolean`, optional)
       - `gdbstub` (`boolean`, optional)
-  - `fault-inject` (`object (nullable)`, optional)
+  - `fault-inject` (`object (nullable)`, optional) — Test/mock fixture provider section (ADR-0072) for deterministic crash replay, not a production provisioning lane — set only in a test/dev environment that has registered a fault-inject resource.
     - `destructive_ops` (`array<string>`, optional)
     - `capture_method` (``console`, `host_dump`, `gdbstub`, `kdump``, optional)
   - `remote-libvirt` (`object (nullable)`, optional)
@@ -218,7 +218,7 @@ use `systems.provision` instead. Requires operator and opt-in.
     - `debug` (`object`, optional) — Per-System debug provisioning flags (ADR-0049 Decision 3).  Bound at provision/boot; declare which capture methods the System is provisioned for. ``preserve_on_crash`` adds a pvpanic device + ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument.
       - `preserve_on_crash` (`boolean`, optional)
       - `gdbstub` (`boolean`, optional)
-  - `fault-inject` (`object (nullable)`, optional)
+  - `fault-inject` (`object (nullable)`, optional) — Test/mock fixture provider section (ADR-0072) for deterministic crash replay, not a production provisioning lane — set only in a test/dev environment that has registered a fault-inject resource.
     - `destructive_ops` (`array<string>`, optional)
     - `capture_method` (``console`, `host_dump`, `gdbstub`, `kdump``, optional)
   - `remote-libvirt` (`object (nullable)`, optional)

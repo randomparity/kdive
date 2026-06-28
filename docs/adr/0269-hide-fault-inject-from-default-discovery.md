@@ -48,7 +48,10 @@ Two adjacent items in the issue's evidence are **not** fault-inject leaks: the `
    as a test/mock fixture — a `StrEnum` field serializes to a bare JSON-schema `enum` with no
    per-member text, so the field description is the only schema-visible place to mark the value
    test-only for an agent inspecting the tool. Runtime `available_kinds` already reports what is
-   actually registered.
+   actually registered. The `systems.define`/`systems.provision` profile schema keeps a
+   `fault-inject` provider section (operator-gated) for the same reason; its
+   `ProviderSection.fault_inject_section` field carries the same test-only description so the value
+   is marked everywhere it remains agent-facing.
 
 4. **A guard test pins the default.** `test_systems_profile_examples.py` asserts that
    `build_profile_examples(None)` and a doc with no `fault_inject` emit no `fault-inject` item, that

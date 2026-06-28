@@ -170,6 +170,11 @@ class ProviderSection(_ProfileBase):
         default=None,
         validation_alias=ResourceKind.FAULT_INJECT.value,
         serialization_alias=ResourceKind.FAULT_INJECT.value,
+        description=(
+            "Test/mock fixture provider section (ADR-0072) for deterministic crash replay, not a "
+            "production provisioning lane — set only in a test/dev environment that has registered "
+            "a fault-inject resource."
+        ),
     )
     remote_libvirt_section: RemoteLibvirtProfile | None = Field(
         default=None,
