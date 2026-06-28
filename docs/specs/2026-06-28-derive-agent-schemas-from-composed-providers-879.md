@@ -96,14 +96,14 @@ deployment_provider_models(kinds: frozenset[ResourceKind]) -> DeploymentProvider
 builds, from the registry filtered to `kinds`:
 
 - the narrowed `kind` constraint (a `Literal` over `kinds`' values) for the allocation selector
-  and the `resources.list` filter, and
+  (the `resources.list` filter is a read surface and stays permissive — §4), and
 - a `ProviderSection`-equivalent model whose fields are exactly those kinds' sections, with a
   generated "exactly one section" validator (the per-System single-provider invariant, which is
   orthogonal to deployment membership and is preserved).
 
-One model object yields **both** the JSON schema (`model_json_schema()`) and the validation
-(`model_validate()`) — a single source, so schema and accept/reject cannot disagree about
-membership. The factory is **memoized on the frozenset key**: built once per distinct composed
+One model object yields **both** the JSON schema (`model_json_schema()`, projected at list-time
+per §5) and the validation (`model_validate()`, invoked on the handler path per §6) — a single
+source, so schema and accept/reject cannot disagree about membership. The factory is **memoized on the frozenset key**: built once per distinct composed
 set, recomputed automatically if the set ever changes (the hot-add seam). It is called at
 list-time (to project schemas) and call-time (to validate) from the *live* resolver, never
 frozen at registration.
@@ -133,7 +133,7 @@ Testing). Routing the domain model through the factory was considered and reject
 this risk: the DRY gain does not justify putting digest stability in play. Runtime resolution for a
 disabled-kind System already fails closed via `resolve()` (ADR-0131) — unchanged and out of scope.
 
-### 4. The four surfaces
+### 4. The three narrowed surfaces (and the permissive read surface)
 
 | Surface | Mechanism |
 |---|---|
@@ -170,9 +170,13 @@ unobserved and the happy-path exclusion tests (§Testing) would not catch the re
 ### 6. Call-time validation
 
 A request naming a non-composed kind is rejected at the boundary with `configuration_error`
-(category parity with `resolve()`), via an explicit guard fed by `registered_kinds()`. **The guard
-runs on the shared service/handler path that both a direct tool call and the ADR-0268
-`tools.invoke` dispatcher traverse — never as an advertised-schema-only constraint.** The gateway
+(category parity with `resolve()`). Call-time validation is the **same factory-built deployment
+model as §2** — the handler validates raw `arguments` with
+`deployment_provider_models(registered_kinds()).model_validate(...)` on the shared service path,
+not FastMCP's statically-bound (permissive) tool param — so §2's "one model yields schema and
+validation" and this check are the *same* mechanism reading the *same* live set, not two guards
+that could drift. **It runs on the shared service/handler path that both a direct tool call and
+the ADR-0268 `tools.invoke` dispatcher traverse — never as an advertised-schema-only constraint.** The gateway
 dispatcher re-enters `app.call_tool(run_middleware=True)` with raw `arguments` and never reads the
 projected list schema (§5); a schema-only narrowing would let it drive a non-composed kind straight
 to the `resolve()`-fails-late dead-end this issue is about. Putting the guard on the handler path
