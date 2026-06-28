@@ -8,6 +8,12 @@ from typing import Any
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 
+# Tools whose per-call recording must be suppressed so inner-tool calls are
+# the sole authoritative record (ADR-0268, #866).  Each name here re-enters
+# the middleware chain via app.call_tool(run_middleware=True); without the
+# skip the outer chain would double-count every usage/telemetry/denial row.
+META_TOOLS: frozenset[str] = frozenset({"tools.invoke", "tools.search"})
+
 
 class ToolOutcome(StrEnum):
     """Normalized outcome labels used by middleware metrics and usage rows."""

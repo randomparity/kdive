@@ -9,7 +9,12 @@ from typing import Any
 from fastmcp.server.middleware import Middleware
 
 from kdive.domain.errors import ErrorCategory
-from kdive.mcp.middleware.shared import ToolOutcome, request_context, result_error_category
+from kdive.mcp.middleware.shared import (
+    META_TOOLS,
+    ToolOutcome,
+    request_context,
+    result_error_category,
+)
 from kdive.mcp.tools._platform_auth import actor_for
 from kdive.security.authz.rbac import AuthorizationError
 from kdive.security.usage import UsageEvent, record_usage
@@ -40,6 +45,8 @@ class UsageTrackingMiddleware(Middleware):
         call_next: Callable[[Any], Any],
     ) -> Any:
         """Dispatch one call, then record its outcome best-effort."""
+        if getattr(context.message, "name", "?") in META_TOOLS:
+            return await call_next(context)
         try:
             result = await call_next(context)
         except AuthorizationError:

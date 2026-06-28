@@ -10,7 +10,7 @@ from typing import Any
 from fastmcp.server.middleware import Middleware
 
 from kdive.domain.errors import ErrorCategory
-from kdive.mcp.middleware.shared import request_context
+from kdive.mcp.middleware.shared import META_TOOLS, request_context
 from kdive.mcp.responses import ToolResponse
 from kdive.security import audit
 from kdive.security.authz.errors import ProjectMembershipDenied
@@ -101,6 +101,8 @@ class DenialAuditMiddleware(Middleware):
     async def _record(
         self, tool: str, denial: RoleDenied, *, args: dict[str, object] | None = None
     ) -> None:
+        if tool in META_TOOLS:
+            return
         async with self._pool.connection() as conn, conn.transaction():
             await audit.record_denial(
                 conn,
