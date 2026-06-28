@@ -131,7 +131,10 @@ then call it directly (the 1a model).
      loops: call `wait_job(job_id, per_iter_s)` with `per_iter_s ≤ MAX_WAIT_S`, inspect the returned
      envelope's job state — terminal → advance to the next phase; still `queued`/`running` →
      re-issue — accumulating elapsed against the caller `timeout` budget. Inject `sleep`/clock for
-     deterministic tests. Emit an MCP progress notification per phase transition.
+     deterministic tests. (No mid-call MCP progress notification: the progress-delivery
+     verification below found no kdive `report_progress` tool pattern and unverified mid-call
+     flush, so per the spec's authorized fallback the bounded poll + timeout→in-flight envelope is
+     the visibility mechanism instead.)
   2. On the first phase whose job is not `succeeded`: return a terminal envelope with
      `data.failed_phase`, that phase `job_id`, the job error, and `run_id`. Stop.
   3. On total `timeout` budget exhaustion: return the in-flight phase's **running envelope** —

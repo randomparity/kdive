@@ -1,11 +1,11 @@
 # ADR-0267: tool gateway — progressive disclosure + build/install/boot composite (#866)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-06-27
 
 ## Context
 
-`build_app()` registers **83 tools across 18 namespaces** and `list_tools` returns the flat
+`build_app()` registers **83 tools across its namespaces** and `list_tools` returns the flat
 catalog, RBAC-scoped per ADR-0148 but still ~70+ for an operator. LLM tool-selection accuracy
 degrades with catalog size even at 128K context (LongFuncEval, cited in #506/ADR-0148). Separately,
 the common reproduce flow is a ~12-call chain whose three `jobs.wait` polls after `build`,
@@ -33,7 +33,9 @@ supplies the blocking: per phase it enqueues at the service layer (no MCP envelo
 polls that job to terminal with the same primitive `jobs.wait` uses, then enqueues the next phase,
 and reads the final Run with `get_run`. Each phase is enqueued with a deterministic per-phase
 `idempotency_key` (`run_id` + phase) so a retried blocking call re-attaches to in-flight jobs
-instead of double-enqueuing. It emits per-phase MCP progress notifications. On full success it
+instead of double-enqueuing. No mid-call MCP progress notification is emitted (no kdive pattern;
+mid-call delivery unverified) — the bounded poll plus the timeout→in-flight envelope is the
+visibility mechanism. On full success it
 returns the terminal `runs.get` projection (boot outcome + artifacts pointer) in one response. On
 the first non-`succeeded` phase it stops and returns `data.failed_phase` (`build`|`install`|`boot`)
 with that phase's `job_id`, error, and `run_id`; recovery uses the granular tools. On caller-
@@ -67,10 +69,10 @@ unlisted tool. A guard test pins `CORE_TOOLS ⊆` the live registry.
 
 ### 4. Server `instructions` table of contents
 
-`FastMCP(name="kdive", …)` (currently no `instructions`, `mcp/app.py:33`) gains `instructions`
+`FastMCP(name="kdive", …)` (previously no `instructions`) gains `instructions`
 carrying (a) the gateway pattern — not every tool is listed; `tools.search` by capability then call
-directly — and (b) a namespace table of contents (the 18 namespaces with one-liners). The TOC
-restores the ambient workflow map a flat catalog gave for free, at ~18 lines instead of 83 schemas,
+directly — and (b) a namespace table of contents (every tool namespace with a one-liner). The TOC
+restores the ambient workflow map a flat catalog gave for free, at a few dozen lines instead of 83 schemas,
 so the agent knows a capability exists and is worth searching for. A guard test asserts every live
 namespace appears.
 

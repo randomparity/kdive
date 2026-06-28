@@ -14,7 +14,7 @@ Two costs compound on the MCP surface, and #866 frames only the first:
    jobs.wait → runs.install → jobs.wait → runs.boot → jobs.wait → runs.get →
    artifacts.search_text`). Three of those four polls — after `build`, `install`, `boot` —
    bracket a single bound Run and are pure round-tripping.
-2. **Catalog size.** `build_app()` registers **83 tools across 18 namespaces** and
+2. **Catalog size.** `build_app()` registers **83 tools across its namespaces** and
    `list_tools` returns the whole flat catalog (RBAC-scoped per ADR-0148, but still ~70+ for an
    operator). LLM tool-selection accuracy degrades with catalog size even at 128K context (the
    LongFuncEval result cited in #506 / ADR-0148). A large flat catalog makes the model likelier
@@ -96,8 +96,10 @@ with `get_run`.
   decisions an agent should make explicitly; the three job-bearing same-shaped steps over one
   bound Run are the ceremony #866 names. A full `request→boot` mega-composite was rejected for
   conflating capacity decisions into the reproduce step.
-- **Progress.** Emits MCP progress notifications per phase (phase name + underlying job state) so a
-  multi-minute block is not blind.
+- **Progress.** No mid-call MCP progress notification is emitted: kdive has no such tool pattern and
+  the transport's mid-call delivery is unverified. The bounded per-phase poll plus the
+  timeout→in-flight envelope (below) is the agent's visibility mechanism — on a long build the call
+  returns the in-flight phase to reattach rather than blocking blind to a hard transport timeout.
 - **Success contract.** Returns the terminal `get_run` projection (same shape as `runs.get`) — boot
   outcome plus the artifacts pointer — in one response.
 - **Failure contract.** Stops at the first phase whose job does not reach `succeeded`, and returns a
@@ -187,9 +189,9 @@ carrying:
 
 1. **The gateway pattern**, stated plainly: not every tool appears in `list_tools`; use
    `tools.search` by capability to load any tool's schema, then call it directly by name.
-2. **A namespace table of contents** — the 18 namespaces with one-liners
+2. **A namespace table of contents** — every tool namespace with a one-liner
    (`debug.* — live kernel debugging`, `accounting.* — budgets/quotas/usage`, …). This restores the
-   ambient workflow map that a flat catalog gave for free, at ~18 cheap lines instead of 83 schemas,
+   ambient workflow map that a flat catalog gave for free, at a few dozen cheap lines instead of 83 schemas,
    so the agent knows a capability *exists* and is worth searching for.
 
 The TOC is a reviewed constant (`mcp/tool_index.py`) with a guard test asserting every live
