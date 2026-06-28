@@ -42,13 +42,23 @@ meta-tools that *are* listed; the inner tool is dispatched server-side, so `-326
 
 ## Goals
 
-1. The common reproduce flow over a bound Run is **one tool call**, not three job-bearing calls plus
-   three polls.
-2. The default `list_tools` catalog is a small **core set** (~10 tools), not the full 83.
+1. **Measurable — ceremony.** The common reproduce flow over a bound Run drops from 3 dispatch calls
+   + 3 separate `jobs.wait` polls (three job handles) to 1 dispatch + polls of one job handle. This
+   is countable and falsifiable.
+2. **Measurable — catalog size.** The default `list_tools` catalog (gateway on) is a small **core
+   set** (~10 tools), not the full 83. Countable.
 3. Every non-core tool stays **fully invocable** at native validation fidelity — no capability
    removed, only deferred behind discovery + dispatch that the client can actually drive.
 4. The mechanism reuses the ADR-0148 `on_list_tools` seam, intersects (never widens) the RBAC
    filter, and **fails open** to the full catalog on any error.
+
+**Not a goal of this change: a proven selection-accuracy improvement.** The catalog-size premise
+(smaller catalog → better LLM tool selection) is the *motivation*, but this change ships only the
+mechanism and the two countable wins above. Whether selection accuracy actually improves — net of
+the added search→invoke hops — is a **hypothesis to be measured after merge** from `tool_invocation`
+data (wrong-tool / not-found rates, calls-per-task) with the gateway off vs on, not a claim this
+change asserts or gates on. Shrinking the catalog is necessary for that experiment; it is not itself
+evidence the experiment will succeed.
 
 ## Non-goals
 
@@ -77,8 +87,17 @@ async def tools_invoke(name: str, arguments: dict[str, Any] | None = None) -> To
     try:
         return await app.call_tool(name, arguments or {}, run_middleware=True)
     except NotFoundError:
-        return _unknown_tool_response(name)   # configuration_error → "use tools.search"
+        return _unknown_tool_response(name)        # configuration_error → "use tools.search"
+    except ValidationError as exc:
+        return _bad_arguments_response(name, exc)  # configuration_error, inner field errors
 ```
+
+`call_tool` validates `arguments` against the inner tool's schema and raises `ValidationError`;
+the dispatcher catches it and returns the same `configuration_error` envelope shape a direct call
+produces (a pinned test asserts the two are equivalent), so a malformed gateway call is not an
+opaque transport error. An inner `AuthorizationError` is **not** caught — it propagates exactly as
+for a direct call (ADR-0148), reaching the client as a denial; the skip-set in §6 keeps the outer
+chain from re-auditing it.
 
 - **Re-entrancy is the crux.** FastMCP 3.4.2's `call_tool(..., run_middleware=True)` runs the inner
   tool through the full middleware chain. So inner-tool **input validation** (native
@@ -106,31 +125,55 @@ construct a `tools.invoke` call, not a name hint. Reuses the schema-serialisatio
   browse guarantees a floor.
 - **RBAC-filtered, all tiers.** Only tools the caller could invoke, spanning all tiers (search is
   the escape hatch out of the core set).
+- **Bounded payload.** Each call returns at most `limit` matches (default small, hard-capped), so
+  `tools.search` never re-emits the whole demoted catalog in one response. Namespace browse is
+  capped the same way; a namespace larger than the cap (`debug.*` is 12) paginates. This is what
+  keeps the catalog-reduction win from being undone by one broad search — the cost is paid per
+  capability actually needed, not for the whole plane.
 - **Ranking.** Deterministic lexical over `name + description + curated keywords`
-  (`mcp/tool_index.py`, the `_TOOL_SCOPES` idiom); `limit`-capped; defaults to tokenised
-  name+description when a tool has no keyword entry.
+  (`mcp/tool_index.py`, the `_TOOL_SCOPES` idiom); ranked by match strength, `limit`-capped;
+  defaults to tokenised name+description when a tool has no keyword entry.
 - **Search-miss telemetry.** Zero-result queries are logged structured (query + count) — the
   "agent reached for a capability it could not find" signal, the feedback loop for keyword curation.
 
-### 3. `runs.build_install_boot` — the composite
+### 3. `runs.build_install_boot` — the composite (a single worker job)
 
-OPERATOR tool orchestrating `build → install → boot → get` over an **already-created,
-already-bound** Run, blocking each phase to terminal internally. Calls the service layer
-(`_build_run` / `_install_run` / `_boot_run` / `_get_run`, reusing `_build_handlers`), not the MCP
-tools, so there is no envelope re-entry for the composite's own steps.
+The composite must **not** block the server to terminal. The server is the thin async core that
+"never blocks on a long provision" (`docs/design/top-level-design.md:81`, AGENTS.md:60), and
+`jobs.wait` is deliberately bounded (`wait_job`, `src/kdive/mcp/tools/jobs.py:154-188`: clamped to
+`MAX_WAIT_S`, holds no pool connection while sleeping, returns the non-terminal state as an
+"ask again" signal — the ADR-0138 retry contract). A composite that internally waited
+build→install→boot to terminal would hold one request for minutes, violating both the principle and
+that contract.
+
+So `runs.build_install_boot` is an OPERATOR tool that **enqueues one composite worker job** over an
+**already-created, already-bound** Run and returns that single job handle immediately. It adds a new
+`JobKind` whose handler runs build→install→boot sequentially via the service layer (`_build_run` /
+`_install_run` / `_boot_run`, reusing `_build_handlers`), committing each `run_steps` row as it
+completes — the existing long-running handler model ("a handler runs 30+ minutes and commits its own
+steps", `src/kdive/jobs/worker.py`). The agent polls that **one** job with `jobs.wait` — replacing
+three separate job handles and three waits with one job to learn and poll. This is the ceremony
+reduction #866 asks for, expressed in the existing async spine rather than against it.
 
 - **Input:** `run_id` (created, bound, not-yet-built). `expected_boot_failure` passthrough unchanged
   — a matched expected crash is a success exactly as in `runs.boot`.
 - **Scope.** Post-`create`/`bind`. Capacity, System selection, and reuse are explicit agent
   decisions; the three same-shaped job steps over one bound Run are the ceremony #866 names. A full
   `request→boot` mega-composite is rejected (conflates capacity into the reproduce step).
-- **Progress.** Per-phase MCP progress notifications (phase name + underlying job state) so a
-  multi-minute block is not blind.
-- **Success contract.** Returns the terminal `runs.get` projection (boot outcome + artifacts
-  pointer) in one response.
-- **Failure contract.** Stops at the first phase not reaching `succeeded`; returns a terminal
-  envelope with `data.failed_phase` (`build`|`install`|`boot`), that phase's `job_id` and error, and
-  `run_id`. Recovery uses the granular tools (discovered via `tools.search`). No retry, no resume.
+- **Progress.** The job's own status carries the current phase (`build`|`install`|`boot`), readable
+  via `jobs.get` / surfaced by `jobs.wait` — the standard async-spine polling pattern. No MCP
+  progress-token notification is required (that would re-introduce a client-capability dependency of
+  the kind that sank 1a).
+- **Success contract.** The job reaches `succeeded`; its terminal result carries the `runs.get`
+  projection (boot outcome + artifacts pointer), so the agent needs no extra `runs.get`.
+- **Failure contract.** The worker stops at the first phase not reaching `succeeded` and the job
+  ends in a terminal failed state carrying `data.failed_phase` (`build`|`install`|`boot`), that
+  phase's error, and `run_id`. Recovery uses the granular tools (discovered via `tools.search`). No
+  retry, no resume.
+- **Cancellation / disconnect.** It is an ordinary durable job: `jobs.cancel` cancels it, and a
+  client disconnect mid-run is not a recovery hole — the job continues server-side and the agent
+  re-attaches with `jobs.wait` / `jobs.get` on the returned handle. There is no minutes-long open
+  request to drop.
 
 Rejected name `runs.reproduce` (implies crash-only; the tool equally validates a clean boot).
 
@@ -156,8 +199,20 @@ visible = rbac_visible(ctx, names) ∩ CORE_TOOLS        # gateway on
 
 - **Fail-open.** On any tier-filter error, or `KDIVE_MCP_TOOL_GATEWAY=off`, `on_list_tools` returns
   the full RBAC-scoped catalog (ADR-0148 behaviour), never empty/broken.
+- **Default OFF at merge.** `KDIVE_MCP_TOOL_GATEWAY` ships **off** (full RBAC-scoped catalog,
+  ADR-0148 status quo). The tier filter activates only when the flag is set on. The default flips to
+  on in a **separate follow-up** once the cold-start E2E gate (see Verification) is recorded — the
+  prior attempt was reverted precisely for defaulting on before that path was proven. The ADR states
+  the same default.
 - **Completeness guard.** A test asserts `CORE_TOOLS ⊆` the live registry, alongside the existing
   `CLASSIFIED_TOOLS | PUBLIC_TOOLS` guard.
+- **Core set is reproduce-flow-centric (acknowledged).** This launch set optimises the
+  build→boot→inspect loop; debug/introspect-heavy sessions (`debug.*` is 12 tools, none core) reach
+  every tool through `tools.search` + `tools.invoke`, trading per-call overhead for catalog
+  reduction. That is a deliberate launch choice, not an oversight: the gateway is off by default, the
+  core set is a code constant tunable from `tool_invocation` data, and a `debug.*` composite or an
+  expanded core set is a follow-up once usage data shows the real per-class cost. The composite gives
+  the reproduce loop a one-call path; no equivalent relief ships for debug flows in this change.
 
 ### 5. Server `instructions` — table of contents
 
@@ -167,14 +222,27 @@ TOC (the 18 namespaces with one-liners), restoring the ambient workflow map at ~
 83 schemas. A reviewed constant (`mcp/tool_index.py`) with a guard test asserting every live
 namespace appears.
 
-### 6. Meta-tool skip-set (telemetry correctness)
+### 6. Meta-tool skip-set (recording correctness across the re-entered chain)
 
-Because `run_middleware=True` re-runs the chain, the outer `tools.invoke` / `tools.search` **and**
-the inner tool would each write a `tool_invocation` row. `UsageTrackingMiddleware._record` and
-`TelemetryMiddleware` skip when `context.message.name ∈ {tools.invoke, tools.search}`, so exactly
-one row per real call is written, keyed to the inner tool with correct project/outcome. `_call_project`
-already reads `arguments["project"]`, which on the re-entered inner call is the real argument dict —
-so project attribution is correct without further change.
+`run_middleware=True` re-runs the **whole** middleware chain for the inner call, nested inside the
+outer `tools.invoke` call's chain. Every middleware that records or audits **per call** therefore
+fires twice — once for the inner tool (correct) and once for the outer meta-tool (noise/corruption).
+The fix applies to all of them, not just telemetry:
+
+- `UsageTrackingMiddleware` — would write a second `tool_invocation` row for `tools.invoke`.
+- `TelemetryMiddleware` — would emit a duplicate span.
+- `DenialAuditMiddleware` — this is the subtle one. An inner `AuthorizationError` propagates (it is
+  not enveloped, per ADR-0148), so it unwinds through the **outer** chain too; without a skip the
+  outer `DenialAuditMiddleware` writes a **second, misattributed** `platform_audit_log` denial row
+  keyed to `tools.invoke`. That corrupts the audit trail, not just metrics.
+
+So every per-call recording/auditing middleware skips when
+`context.message.name ∈ {tools.invoke, tools.search}` — the inner call is the sole recorder. One
+row per real call, keyed to the inner tool with correct project/outcome (`_call_project` already
+reads `arguments["project"]`, which on the re-entered inner call is the real argument dict). A test
+asserts a gateway-denied call writes exactly one denial audit row, attributed to the inner tool.
+`BindingErrorMiddleware` and `ToolExposureMiddleware` record nothing per call, so they need no
+skip.
 
 ## Surface delta
 
@@ -184,7 +252,8 @@ so project attribution is correct without further change.
 - **Demoted (gateway-reachable, not removed):** ~76 tools incl. `runs.build`/`install`/`boot`.
 - **Capability:** unchanged — every tool reachable via `tools.search` + `tools.invoke` at native
   validation fidelity.
-- **Calls for the happy path over a bound Run:** 3 job calls + 3 polls → 1.
+- **Calls for the happy path over a bound Run:** 3 dispatch calls + 3 separate `jobs.wait` polls
+  (three job handles to track) → 1 dispatch + bounded re-polls of **one** job handle.
 
 ## Telemetry
 
@@ -197,22 +266,35 @@ schema column for search is out of scope (additive later).
 - `tools.search`, `tools.invoke`: PUBLIC — the inner call / returned schemas reflect the caller's
   real RBAC.
 - `runs.build_install_boot`: OPERATOR — the max role of its constituent steps.
-- No DB migration: `CORE_TOOLS`, curated keywords, and the TOC are code maps; search-miss is logged.
+- **One migration (0051), for the composite job kind only.** The composite is a new `JobKind`
+  (`build_install_boot`), and `jobs.kind` is CHECK-constrained (`jobs_kind_check`, with a SQL↔enum
+  tie tested in `test_migrate.py`). So migration `0051` widens that CHECK to admit the new kind,
+  exactly as `0040` did for `diagnostics_worker_check` (additive, forward-only per ADR-0015;
+  drop-and-recreate to keep the constraint name stable), and the `JobKind` enum gains the matching
+  member. The gateway pieces — `CORE_TOOLS`, curated keywords, the TOC — are code maps and need no
+  migration; search-miss is logged, not persisted.
 
 ## Verification (gate — the revert lesson)
 
-ADR-0267 merged without verifying the invocation path on the real client. This change is **not
-default-on until**:
+ADR-0267 merged with the gateway defaulting **on** without verifying the invocation path on the real
+client, and that is what dead-ended cold start and forced the revert. So this change ships with
+`KDIVE_MCP_TOOL_GATEWAY` **off by default** (status-quo full RBAC-scoped catalog). Merging it is
+safe regardless of client behaviour because nothing is hidden until an operator opts in. The default
+flips to on only in a **separate follow-up PR**, gated on:
 
-1. A unit/integration test proves `tools.invoke` re-entry preserves inner-tool validation, RBAC
-   denial, and single-row telemetry attribution (viewer-through-gateway denied identically to
-   direct).
-2. A **cold-start end-to-end** run against the Claude Code client: starting from the ~10-tool core
-   listing, discover the granular tools via `tools.search`, drive a full reproduce (mint → build →
-   install → boot, including at least one demoted tool via `tools.invoke`) to terminal state, with
-   the result recorded in the PR.
+1. A unit/integration test that `tools.invoke` re-entry preserves inner-tool validation
+   (`ValidationError` → same `configuration_error` envelope as a direct call), RBAC denial
+   (viewer-through-gateway denied identically to direct), and **single-row** recording — exactly one
+   `tool_invocation` row and exactly one denial-audit row per call, attributed to the inner tool.
+2. A worker-level test that the `build_install_boot` job runs the three phases over a bound Run,
+   commits each `run_steps` row, and on a failing phase ends terminal with `data.failed_phase` set.
+3. A **cold-start end-to-end** run against the Claude Code client *with the gateway on*: starting
+   from the ~10-tool core listing, discover granular tools via `tools.search`, drive a full reproduce
+   (mint → `runs.build_install_boot` → poll one job to terminal, plus at least one demoted tool via
+   `tools.invoke`) to terminal state, recorded in the follow-up PR.
 
-The gateway ships behind `KDIVE_MCP_TOOL_GATEWAY` so verification runs before the default flips.
+The composite, `tools.search`, and `tools.invoke` themselves are always listed (core set), so they
+are exercised even with the gateway off — only the *demotion* of the long tail waits on the flip.
 
 ## Risks
 
@@ -225,7 +307,11 @@ The gateway ships behind `KDIVE_MCP_TOOL_GATEWAY` so verification runs before th
 - **Mis-sequencing.** Hiding the flat catalog hides implicit workflow order. Mitigations: the
   composite encodes the dominant sequence; the TOC + `instructions` describe the phases.
 - **Opaque `arguments` at selection time** (the accepted 1b cost). Mitigation: `tools.search`
-  returns full schemas; a malformed call fails with the inner tool's native `ValidationError`.
+  returns full schemas; a malformed call returns the inner tool's `configuration_error` envelope
+  (the dispatcher catches `ValidationError`), the same shape a direct call gives.
+- **Per-class cost shift.** The reproduce-centric core set adds per-call overhead to debug/introspect
+  flows (see §4). Mitigation: gateway off by default; core set is a tunable code constant; a debug
+  composite / expanded core set is a data-driven follow-up.
 
 ## Alternatives rejected
 
