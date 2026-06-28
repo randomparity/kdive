@@ -9,14 +9,15 @@ from fastmcp import FastMCP
 from fastmcp.tools import Tool
 
 # A fielded, non-recursive output schema advertised for every tool (ADR-0170, revisiting
-# ADR-0113). Every tool returns the self-referential `ToolResponse` (`items: list[ToolResponse]` +
-# recursive `JsonValue` data), so FastMCP would auto-derive a recursive `$ref` schema that the
-# FastMCP 3.4.0 client cannot build a validator for. This schema documents every top-level
-# envelope field while collapsing recursive fields.
+# ADR-0113; the envelope shape itself is ADR-0019). Every tool returns the self-referential
+# `ToolResponse` (`items: list[ToolResponse]` + recursive `JsonValue` data), so FastMCP would
+# auto-derive a recursive `$ref` schema that the FastMCP 3.4.0 client cannot build a validator
+# for. This schema documents every top-level envelope field while collapsing recursive fields.
+# The `description` is agent-rendered, so it carries no ADR citation (ADR-0270).
 ENVELOPE_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "The uniform kdive ToolResponse envelope (ADR-0019). `data` and `items` are "
+        "The uniform kdive ToolResponse envelope. `data` and `items` are "
         "intentionally open; see resource://kdive/docs/guide/response-envelope.md."
     ),
     "properties": {

@@ -70,9 +70,10 @@ class RuntimeResourceRegistration(BaseModel):
     )
     vcpus: int = Field(
         gt=0,
+        # Provenance: ADR-0007 §2 (admission size ceiling).
         description=(
-            "The host's vCPU size ceiling. Admission rejects a selector larger than this "
-            "(ADR-0007 §2), so a host registered without it is un-grantable."
+            "The host's vCPU size ceiling. Admission rejects a selector larger than this, "
+            "so a host registered without it is un-grantable."
         ),
     )
     memory_mb: int = Field(

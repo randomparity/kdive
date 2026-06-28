@@ -52,7 +52,7 @@ Enqueue a kernel build for a run.
 
 `implemented`
 
-Build, install, and boot a bound Run as a single pollable job (ADR-0268).
+Build, install, and boot a bound Run as a single pollable job.
 
 Performs build-host admission (same as runs.build) then enqueues one
 BUILD_INSTALL_BOOT job. Requires operator role — the composite includes install
@@ -62,7 +62,7 @@ and boot, whose gate is operator. Poll the returned job handle with jobs.wait.
 |---|---|---|---|
 | `cmdline` | string (nullable) | no | Kernel debug args appended to the platform-required boot args (e.g. 'dhash_entries=1'). Bound at build time and applied through install and boot. Omit for no extra debug args. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
-| `run_id` | string | yes | A created, bound, not-yet-built Run to drive build->install->boot as a single pollable job (ADR-0268, #866). The Run must use a source='server' build profile. Poll the returned job with jobs.wait. |
+| `run_id` | string | yes | A created, bound, not-yet-built Run to drive build->install->boot as a single pollable job. The Run must use a source='server' build profile. Poll the returned job with jobs.wait. |
 
 ## `runs.cancel`
 
@@ -83,7 +83,7 @@ Complete an externally built run.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `build_id` | string (nullable) | no | GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff a vmlinux was uploaded. Case-insensitive. |
-| `cmdline` | string (nullable) | no | Kernel debug args appended to the platform-required boot args (e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot via runs.install/runs.boot (ADR-0061). |
+| `cmdline` | string (nullable) | no | Kernel debug args appended to the platform-required boot args (e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot via runs.install/runs.boot. |
 | `run_id` | string | yes | The external-build Run to finalize. |
 
 ## `runs.create`
@@ -99,7 +99,7 @@ Create a run, bound to a system or unbound against a target_kind.
 `request` fields:
 
 - `investigation_id` (`string`, required) — Investigation to attach the Run to.
-- `build_profile` (`object(source=external) \| object(source=server)`, required) — Build profile for the Run's kernel. The recommended default is source='external': ingest a prebuilt artifact (ADR-0234). After runs.create with source='external', call artifacts.expected_uploads to learn the exact bytes to produce, artifacts.create_run_upload to upload, then runs.complete_build. source='server' builds from a kernel tree (kernel_source_ref required) and is a single-host convenience: for a local build host a warm-tree kernel_source_ref is a provenance label only - it does not select the tree; the operator stages the actual source via KDIVE_KERNEL_SRC on the worker. That lane builds the worker's working-tree state, not HEAD: runs.get reports data.build_provenance.{label, resolved_commit (the HEAD the tree is based on, decorative when dirty), dirty (bool), tree_sha (content digest of tracked changes, only when dirty)} - tracked git state only. The optional 'config' is a catalog ComponentRef (e.g. {'kind':'catalog','provider':'system','name':'kdump'}); omit it to get the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named fragment. Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the cmdline parameter to runs.build for server builds, or to runs.complete_build for external builds. See resource://kdive/docs/operating/external-build-upload.md for shaping a source='external' upload, or resource://kdive/docs/operating/build-source-staging.md for staging a server-build source.
+- `build_profile` (`object(source=external) \| object(source=server)`, required) — Build profile for the Run's kernel. The recommended default is source='external': ingest a prebuilt artifact. After runs.create with source='external', call artifacts.expected_uploads to learn the exact bytes to produce, artifacts.create_run_upload to upload, then runs.complete_build. source='server' builds from a kernel tree (kernel_source_ref required) and is a single-host convenience: for a local build host a warm-tree kernel_source_ref is a provenance label only - it does not select the tree; the operator stages the actual source via KDIVE_KERNEL_SRC on the worker. That lane builds the worker's working-tree state, not HEAD: runs.get reports data.build_provenance.{label, resolved_commit (the HEAD the tree is based on, decorative when dirty), dirty (bool), tree_sha (content digest of tracked changes, only when dirty)} - tracked git state only. The optional 'config' is a catalog ComponentRef (e.g. {'kind':'catalog','provider':'system','name':'kdump'}); omit it to get the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named fragment. Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the cmdline parameter to runs.build for server builds, or to runs.complete_build for external builds. See resource://kdive/docs/operating/external-build-upload.md for shaping a source='external' upload, or resource://kdive/docs/operating/build-source-staging.md for staging a server-build source.
   - _variant object(source=external):_
     - `schema_version` (``=1``, required)
     - `source` (``=external``, required)

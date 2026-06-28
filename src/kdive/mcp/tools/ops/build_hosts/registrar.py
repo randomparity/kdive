@@ -127,7 +127,8 @@ def _register_build_envs_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def build_envs_list() -> ToolResponse:
-        """List build environments available for kernel builds (ADR-0242)."""
+        # ADR-0242: build-env discovery projection.
+        """List build environments available for kernel builds."""
         async with pool.connection() as conn:
             return await list_build_envs(conn, current_context())
 

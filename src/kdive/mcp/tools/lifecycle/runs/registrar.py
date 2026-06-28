@@ -61,7 +61,7 @@ class _RunsCreatePayload(ToolPayload):
     build_profile: ExternalBuildProfile | ServerBuildProfile = Field(
         description=(
             "Build profile for the Run's kernel. The recommended default is source='external': "
-            "ingest a prebuilt artifact (ADR-0234). After runs.create with source='external', "
+            "ingest a prebuilt artifact. After runs.create with source='external', "
             "call artifacts.expected_uploads to learn the exact bytes to produce, "
             "artifacts.create_run_upload to upload, then runs.complete_build. source='server' "
             "builds from a kernel tree (kernel_source_ref required) and is a single-host "
@@ -383,7 +383,7 @@ def _register_runs_build_install_boot(
             Field(
                 description=(
                     "A created, bound, not-yet-built Run to drive build->install->boot "
-                    "as a single pollable job (ADR-0268, #866). The Run must use a "
+                    "as a single pollable job. The Run must use a "
                     "source='server' build profile. Poll the returned job with jobs.wait."
                 )
             ),
@@ -403,7 +403,7 @@ def _register_runs_build_install_boot(
             Field(description="Replay-safe key; a repeated key returns the prior envelope."),
         ] = None,
     ) -> ToolResponse:
-        """Build, install, and boot a bound Run as a single pollable job (ADR-0268).
+        """Build, install, and boot a bound Run as a single pollable job.
 
         Performs build-host admission (same as runs.build) then enqueues one
         BUILD_INSTALL_BOOT job. Requires operator role — the composite includes install
@@ -441,7 +441,7 @@ def _register_runs_complete_build(
             Field(
                 description="Kernel debug args appended to the platform-required boot args "
                 "(e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot "
-                "via runs.install/runs.boot (ADR-0061)."
+                "via runs.install/runs.boot."
             ),
         ] = None,
         build_id: Annotated[

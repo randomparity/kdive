@@ -54,7 +54,8 @@ class ResourceByKind(ToolPayload):
 
 
 class ResourceByPool(ToolPayload):
-    """Select the first available resource carrying ``pool`` (ADR-0186, #561)."""
+    # Provenance: ADR-0186, #561 (pool selector).
+    """Select the first available resource carrying ``pool``."""
 
     mode: Literal["pool"] = "pool"
     pool: str = Field(min_length=1)
