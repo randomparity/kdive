@@ -27,6 +27,7 @@ class JobKind(StrEnum):
     CAPTURE_VMCORE = "capture_vmcore"
     IMAGE_BUILD = "image_build"
     DIAGNOSTICS_WORKER_CHECK = "diagnostics_worker_check"
+    BUILD_INSTALL_BOOT = "build_install_boot"
 
 
 DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
