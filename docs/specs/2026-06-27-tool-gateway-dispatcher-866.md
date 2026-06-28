@@ -175,10 +175,12 @@ ceremony reduction #866 asks for, expressed in the existing async spine rather t
 - **Scope.** Post-`create`/`bind`. Capacity, System selection, and reuse are explicit agent
   decisions; the three same-shaped job steps over one bound Run are the ceremony #866 names. A full
   `request→boot` mega-composite is rejected (conflates capacity into the reproduce step).
-- **Progress.** The job's own status carries the current phase (`build`|`install`|`boot`), readable
-  via `jobs.get` / surfaced by `jobs.wait` — the standard async-spine polling pattern. No MCP
-  progress-token notification is required (that would re-introduce a client-capability dependency of
-  the kind that sank 1a).
+- **Progress.** `jobs.wait` tracks the **single** composite job to terminal (the call-count win).
+  Intra-run phase progress is the `run_steps` ledger each executor already writes
+  (`build`/`install`/`boot` rows), read via `runs.get` — the standard async-spine pattern. The `Job`
+  row itself has no phase field, so phase is read from `runs.get`, not `jobs.get`; no new
+  phase-surfacing field and no MCP progress-token notification are required (the latter would
+  re-introduce a client-capability dependency of the kind that sank 1a).
 - **Success contract.** The job reaches `succeeded`; its terminal result carries the `runs.get`
   projection (boot outcome + artifacts pointer), so the agent needs no extra `runs.get`.
 - **Failure contract.** The worker stops at the first phase not reaching `succeeded` and the job

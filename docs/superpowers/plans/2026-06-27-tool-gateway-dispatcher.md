@@ -198,9 +198,6 @@ error propagates to the worker (which marks the job failed), tagged with `failed
 
 from __future__ import annotations
 
-from dataclasses import replace
-from uuid import UUID
-
 from psycopg import AsyncConnection
 
 from kdive.domain.operations.jobs import Job
@@ -208,7 +205,7 @@ from kdive.jobs.handlers.runs.boot import boot_handler
 from kdive.jobs.handlers.runs.build import build_handler
 from kdive.jobs.handlers.runs.install import install_handler
 from kdive.jobs.handlers.runs.shared import RunHandlerPorts
-from kdive.jobs.payloads import BuildInstallBootPayload, BuildPayload, RunPayload, dump_payload
+from kdive.jobs.payloads import BuildInstallBootPayload, BuildPayload, RunPayload
 
 
 class CompositePhaseError(RuntimeError):
@@ -221,8 +218,12 @@ class CompositePhaseError(RuntimeError):
 
 
 def _phase_job(job: Job, payload) -> Job:
-    """A copy of `job` carrying a phase-specific payload (executors are extra='forbid')."""
-    return replace(job, payload=dump_payload(payload))
+    """A copy of `job` carrying a phase-specific payload (executors are extra='forbid').
+
+    `Job` is a Pydantic `DomainModel` and `Job.payload` is a plain `dict`, so copy with
+    `model_copy(update=...)` and serialize the phase payload to a dict — not `dataclasses.replace`.
+    """
+    return job.model_copy(update={"payload": payload.model_dump(mode="json")})
 
 
 async def composite_handler(conn: AsyncConnection, job: Job, *, ports: RunHandlerPorts) -> str | None:
@@ -353,7 +354,20 @@ async def runs_build_install_boot(
 
 (`required_role=Role.OPERATOR` per ADR; `runs.build` uses `CONTRIBUTOR`, the composite raises the bar to the max of its phases — `boot`/`install` are operator-level. Verify against `_TOOL_SCOPES`/handler roles for install/boot and set the max.)
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [ ] **Step 4b: Classify the tool in the same task (keep the completeness guard green)**
+
+The guard `tests/mcp/core/test_app.py::test_exposure_map_covers_every_registered_tool` asserts
+`CLASSIFIED_TOOLS | PUBLIC_TOOLS == live registry`, so a newly registered tool **must** be classified
+in the same commit or that guard goes red. In `src/kdive/mcp/exposure.py` `_TOOL_SCOPES`, next to the
+other `runs.*` entries, add:
+
+```python
+    "runs.build_install_boot": _OPERATOR,
+```
+
+- [ ] **Step 5: Run the test (and the completeness guard) to verify they pass**
+
+Run: `uv run python -m pytest tests/mcp/tools/lifecycle/runs/test_composite_tool.py tests/mcp/core/test_app.py::test_exposure_map_covers_every_registered_tool -v`
 
 Run: `uv run python -m pytest tests/mcp/tools/lifecycle/runs/test_composite_tool.py -v`
 Expected: PASS.
@@ -457,6 +471,12 @@ def register(app: FastMCP) -> None:
 
 Adjust `configuration_error(...)`'s signature to the repo's actual helper (it may return a `ToolResponse`; ensure the return type is compatible with what FastMCP expects from a tool — check how other tools build error envelopes). Do **not** add `tools.invoke` to `_docmeta.DESTRUCTIVE_TOOLS`.
 
+- [ ] **Step 3b: Classify `tools.invoke` PUBLIC in the same task**
+
+Registering a tool without classifying trips `test_exposure_map_covers_every_registered_tool`. Add
+`"tools.invoke"` to `PUBLIC_TOOLS` in `src/kdive/mcp/exposure.py` (the inner call enforces the inner
+tool's RBAC, so the dispatcher itself is public — see ADR §1). Run the guard with this task's tests.
+
 - [ ] **Step 4: Register the gateway plane**
 
 In `src/kdive/mcp/tool_registration.py`, import `from kdive.mcp.tools import gateway` and add `_pool_only_plane_registrar`-style entry. `gateway.register` needs only `app` (no pool); add a thin adapter matching the registrar signature (look at how `session.register` — also pool-only — is wrapped, and mirror it; if `gateway.register(app)` takes no pool, wrap with a lambda dropping the extra args).
@@ -555,6 +575,11 @@ async def tools_search(
 ```
 
 `_SEARCH_LIMIT_MAX` is the hard cap (e.g. 25). `_describe` serializes name + description + the same input schema `list_tools` emits. Ranking is deterministic lexical over name + description + `TOOL_KEYWORDS`.
+
+- [ ] **Step 4b: Classify `tools.search` PUBLIC in the same task**
+
+Add `"tools.search"` to `PUBLIC_TOOLS` in `src/kdive/mcp/exposure.py` (it returns only RBAC-permitted
+schemas), keeping `test_exposure_map_covers_every_registered_tool` green.
 
 - [ ] **Step 5: Run to verify pass**
 
@@ -782,35 +807,38 @@ git commit -m "feat(mcp): server instructions with gateway pattern + namespace T
 
 ---
 
-## Task 9: Classify the three new tools (completeness guard)
+## Task 9: `CORE_TOOLS ⊆ registry` guard (classification already folded in)
+
+The three new tools are classified in the same tasks that register them (T3 Step 4b, T4 Step 3b,
+T5 Step 4b), so `test_exposure_map_covers_every_registered_tool` stays green throughout. This task
+adds the remaining guard the spec requires: `CORE_TOOLS` is a subset of the live registry.
 
 **Files:**
-- Modify: `src/kdive/mcp/exposure.py` (`PUBLIC_TOOLS` / `_TOOL_SCOPES`)
-- Test: `tests/mcp/core/test_app.py` (the existing completeness guard must pass)
+- Test: `tests/mcp/core/test_app.py` (add the subset guard if absent)
 
-**Interfaces:**
-- Consumes: the completeness guard asserting `CLASSIFIED_TOOLS | PUBLIC_TOOLS == live registry` and `CORE_TOOLS ⊆ live registry`.
+- [ ] **Step 1: Add the subset guard test**
 
-- [ ] **Step 1: Run the completeness guard to see it fail**
+```python
+def test_core_tools_subset_of_registry() -> None:
+    from kdive.mcp.exposure import CORE_TOOLS
+    app = build_app(_pool(), verifier=_verifier(), secret_registry=SecretRegistry())
+    registered = {t.name for t in envelope_module.registered_tools(app)}
+    assert CORE_TOOLS <= registered, f"core not registered: {sorted(CORE_TOOLS - registered)}"
+```
+
+(Match the file's existing app-build/fixture idiom — copy from `test_exposure_map_covers_every_registered_tool`.)
+
+- [ ] **Step 2: Run it**
 
 Run: `uv run python -m pytest tests/mcp/core/test_app.py -v`
-Expected: FAIL — `tools.invoke`, `tools.search`, `runs.build_install_boot` are unclassified.
+Expected: PASS (T7 already added every `CORE_TOOLS` entry as a registered tool).
 
-- [ ] **Step 2: Classify**
-
-In `exposure.py`: add `"tools.invoke"` and `"tools.search"` to `PUBLIC_TOOLS`; add `"runs.build_install_boot": _OPERATOR` to `_TOOL_SCOPES`.
-
-- [ ] **Step 3: Run the guard + the CORE_TOOLS subset guard**
-
-Run: `uv run python -m pytest tests/mcp/core/test_app.py -v`
-Expected: PASS. If `tests/mcp/core/test_app.py` lacks a `CORE_TOOLS ⊆ registry` assertion, add one.
-
-- [ ] **Step 4: Guardrails + commit**
+- [ ] **Step 3: Guardrails + commit**
 
 ```bash
 just lint && just type && uv run python -m pytest tests/mcp/core/test_app.py -q
-git add src/kdive/mcp/exposure.py tests/mcp/core/test_app.py
-git commit -m "feat(mcp): classify gateway tools + composite for exposure guard (#866)"
+git add tests/mcp/core/test_app.py
+git commit -m "test(mcp): guard CORE_TOOLS is a subset of the live registry (#866)"
 ```
 
 ---
@@ -840,7 +868,7 @@ git commit -m "docs(mcp): regenerate RBAC tool matrix for gateway tools (#866)"
 
 ## Self-Review
 
-**Spec coverage:** `tools.invoke` (T4), `tools.search` + bounded payload + namespace browse + search-miss (T5), composite as one worker job over per-phase executors (T2) + admission tool (T3) + migration (T1), skip-set incl. denial-audit (T6), core filter default-off + fail-open (T7), instructions TOC (T8), classification/completeness (T9), full-suite + generated docs (T10). The `ValidationError`/`NotFoundError` envelope-equivalence and the inner-`AuthorizationError`-propagation are covered by T4 tests; single-row denial attribution by T6.
+**Spec coverage:** `tools.invoke` (T4), `tools.search` + bounded payload + namespace browse + search-miss (T5), composite as one worker job over per-phase executors (T2) + admission tool (T3) + migration (T1), skip-set incl. denial-audit (T6), core filter default-off + fail-open (T7), instructions TOC (T8), `CORE_TOOLS` subset guard (T9), full-suite + generated docs (T10). Classification of each new tool is **folded into the task that registers it** (T3/T4/T5) so the `CLASSIFIED_TOOLS | PUBLIC_TOOLS == registry` completeness guard stays green at every commit — it is not a trailing task. The `ValidationError`/`NotFoundError` envelope-equivalence and the inner-`AuthorizationError`-propagation are covered by T4 tests; single-row denial attribution by T6. Phase progress is the `run_steps` ledger via `runs.get` (the `Job` row has no phase field), not `jobs.get`.
 
 **Deferred to the follow-up PR (per spec Verification):** flipping `KDIVE_MCP_TOOL_GATEWAY` to default-on and the cold-start end-to-end run against the real Claude Code client. This PR ships the machinery off by default.
 

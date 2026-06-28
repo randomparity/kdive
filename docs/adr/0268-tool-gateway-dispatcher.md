@@ -88,9 +88,9 @@ whose handler calls the existing per-phase job **executors** sequentially — `b
 the same functions bound for the `BUILD`/`INSTALL`/`BOOT` kinds — **not** the MCP admission/enqueue
 path (the composite is already in the worker; it does the work, it does not enqueue three sub-jobs).
 Each executor commits its own `run_steps` row (the existing 30-minute handler model). The agent polls that **one** job with `jobs.wait`,
-replacing three job handles and three waits with one. Progress is the job's own status (current
-phase, via `jobs.get`) — no MCP progress-token notification, which would re-introduce a
-client-capability dependency. On `succeeded` the job's terminal result carries the `runs.get`
+replacing three job handles and three waits with one. Intra-run phase progress is the `run_steps`
+ledger each executor writes (read via `runs.get`; the `Job` row has no phase field) — no MCP
+progress-token notification, which would re-introduce a client-capability dependency. On `succeeded` the job's terminal result carries the `runs.get`
 projection; on the first non-`succeeded` phase the job ends terminal-failed with `data.failed_phase`
 (`build`|`install`|`boot`), that phase's error, and `run_id` (recovery via the granular tools, no
 retry/resume). A client disconnect is not a recovery hole — the durable job continues and the agent
