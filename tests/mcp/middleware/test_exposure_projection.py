@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
@@ -122,3 +123,57 @@ def test_on_list_tools_projects_visible_tools(monkeypatch) -> None:  # type: ign
     kinds = resolver.registered_kinds()
     expected = [k.value for k in ResourceKind if k in kinds]
     assert projected.parameters["$defs"]["ResourceKind"]["enum"] == expected
+
+
+def test_projection_failure_fails_open_and_counts(monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
+    """A projection error advertises the original tool and fires the failure counter (ADR-0269 §5).
+
+    The middleware must never drop a tool from the catalog due to a projection bug.
+    Instead it must revert to the full schema, increment the OTLP counter, and log a
+    warning so the silent revert is observable.
+    """
+    alloc_tool = _FakeTool("allocations.request", {"type": "object"})
+    other_tool = _FakeTool("resources.list", {"type": "object"})
+    tools = [alloc_tool, other_tool]
+
+    composition = ProviderComposition(secret_registry=SecretRegistry())
+    resolver = composition.build_provider_resolver()
+
+    # RBAC: pass everything through.
+    monkeypatch.setattr(exposure_mod, "request_context", lambda: object())
+    monkeypatch.setattr(exposure_mod, "visible_tool_names", lambda _ctx, names: set(names))
+
+    # Inject a projection failure only for the narrowed tool.
+    def _failing_project(tool: object, kinds: object) -> object:
+        if getattr(tool, "name", None) == "allocations.request":
+            raise RuntimeError("injected projection failure")
+        return tool
+
+    monkeypatch.setattr(exposure_mod, "project_listed_tool", _failing_project)
+
+    # Capture counter increments.
+    counter_calls: list[int] = []
+    monkeypatch.setattr(
+        exposure_mod._PROJECTION_FAILURES, "add", lambda amount: counter_calls.append(amount)
+    )
+
+    mw = ToolExposureMiddleware(resolver)
+
+    async def call_next(_ctx: object) -> list:
+        return tools
+
+    with caplog.at_level(logging.WARNING, logger="kdive.mcp.middleware.exposure"):
+        result = asyncio.run(mw.on_list_tools(object(), call_next))
+
+    # Fail-open: narrowed tool is still in the catalog as the original unprojected object.
+    result_names = {t.name for t in result}
+    assert "allocations.request" in result_names
+    alloc_in_result = next(t for t in result if t.name == "allocations.request")
+    assert alloc_in_result is alloc_tool  # original, not a projected copy
+
+    # Catalog not blanked: unaffected tool is also present.
+    assert "resources.list" in result_names
+
+    # Observability: counter incremented exactly once, warning logged.
+    assert counter_calls == [1]
+    assert "provider-schema projection failed" in caplog.text
