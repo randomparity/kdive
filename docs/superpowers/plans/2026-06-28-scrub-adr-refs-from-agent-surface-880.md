@@ -22,8 +22,12 @@ doc-resource snapshots.
   comments), never in a string FastMCP renders.
 - Prose-style guard (ADRs/specs/comments): no "critical/crucial/essential/significant/
   comprehensive/robust/elegant"; "Milestone" never "Sprint".
-- Guardrails before each commit: `just lint`, `just type`, and the focused test(s). Before
-  push: full `just test`, `just docs-check`, `just resources-docs-check`.
+- Guardrails before each commit: `just lint`, `just type`, and the focused test(s). Any
+  commit that changes a rendered description also regenerates and stages the affected
+  `docs/guide/reference/*.md` (`just docs`) and, if a served snapshot changed,
+  `just resources-docs` — so every commit is independently green against the hard
+  `just docs-check` / `just resources-docs-check` gates and stays bisectable. Before push:
+  full `just test`, `just docs-check`, `just resources-docs-check`.
 - `ADR-\d+` is the leak pattern (case-sensitive, matches the issue's `"ADR-"`).
 
 ---
@@ -58,13 +62,15 @@ doc-resource snapshots.
 **Files:**
 - Modify: `src/kdive/mcp/schema_advertising.py` (`ENVELOPE_OUTPUT_SCHEMA["description"]`).
 
-- [ ] **Step 1.** Drop `(ADR-0019)` from the description string; keep the ADR provenance in
-  the existing module-level `#` comment (already cites ADR-0170/0113/0019). Resulting string:
+- [ ] **Step 1.** Drop `(ADR-0019)` from the description string. The module-level `#` comment
+  cites ADR-0170/0113 but not 0019 — add ADR-0019 to that non-rendered comment so the
+  provenance survives off the wire. Resulting string:
   `"The uniform kdive ToolResponse envelope. \`data\` and \`items\` are intentionally open;
   see resource://kdive/docs/guide/response-envelope.md."`
 - [ ] **Step 2.** Re-run the guard: `test_no_adr_refs_in_tool_surface` failure count drops by
   the per-tool `outputSchema` hits (the bulk).
-- [ ] **Step 3.** `just lint` + `just type`; commit `refactor(mcp): drop ADR ref from envelope output-schema description`.
+- [ ] **Step 3.** `just lint` + `just type`; regenerate + stage `docs/guide/reference/*.md`
+  (`just docs`); commit `refactor(mcp): drop ADR ref from envelope output-schema description`.
 
 ### Task 3: Scrub tool descriptions
 
@@ -77,7 +83,8 @@ doc-resource snapshots.
   grammar so the sentence still reads. Where a docstring was the only provenance, add a `#`
   comment or keep the ADR in the module docstring.
 - [ ] **Step 2.** Re-run the guard; these three tool-description hits clear.
-- [ ] **Step 3.** `just lint` + `just type`; commit `refactor(mcp): drop ADR refs from tool descriptions`.
+- [ ] **Step 3.** `just lint` + `just type`; regenerate + stage `docs/guide/reference/*.md`
+  (`just docs`); commit `refactor(mcp): drop ADR refs from tool descriptions`.
 
 ### Task 4: Scrub field / schema descriptions
 
@@ -97,7 +104,8 @@ doc-resource snapshots.
 - [ ] **Step 2.** Re-run the guard until `test_no_adr_refs_in_tool_surface` passes; run
   `uv run python -m pytest tests/mcp/core/test_tool_docs.py -q` to confirm no content guard
   regressed.
-- [ ] **Step 3.** `just lint` + `just type`; commit `refactor(mcp): drop ADR refs from schema field descriptions`.
+- [ ] **Step 3.** `just lint` + `just type`; regenerate + stage `docs/guide/reference/*.md`
+  (`just docs`); commit `refactor(mcp): drop ADR refs from schema field descriptions`.
 
 ### Task 5: Remove the adr-0080 resource and scrub resource descriptions
 
@@ -110,15 +118,18 @@ doc-resource snapshots.
 - [ ] **Step 1.** Remove the entry, scrub the two descriptions, delete the snapshot.
 - [ ] **Step 2.** Re-run the guard (`test_no_adr_refs_in_registered_resources` passes) plus
   `uv run python -m pytest tests/mcp/resources/test_doc_resources.py tests/scripts/test_gen_doc_resources.py tests/mcp/core/test_app.py -q`.
-- [ ] **Step 3.** `just lint` + `just type`; commit `refactor(mcp): stop serving ADR-0080 as a resource; scrub resource descriptions`.
+- [ ] **Step 3.** `just lint` + `just type`; regenerate + stage `docs/guide/reference/*.md`
+  (`just docs`) — `tools.md`/`resources.md` rows reference the resource set; commit
+  `refactor(mcp): stop serving ADR-0080 as a resource; scrub resource descriptions`.
 
 ### Task 6: Regenerate generated artifacts, full guardrails, ship
 
 **Files:**
 - Modify (generated): `docs/guide/reference/*.md`.
 
-- [ ] **Step 1.** `just docs` (regenerate tool reference) and `just resources-docs` (refresh
-  snapshots). Review the diff: only ADR refs sourced from scrubbed descriptions vanish.
+- [ ] **Step 1.** Final consistency check: `just docs` and `just resources-docs` (idempotent
+  if Tasks 2-5 regenerated per-commit — expect no diff). Review the cumulative reference diff:
+  only ADR refs sourced from scrubbed descriptions vanish.
 - [ ] **Step 2.** Full guardrails: `just lint`, `just type`, `just test`, `just docs-check`,
   `just resources-docs-check`. All green; the new guard included.
 - [ ] **Step 3.** Commit `docs: regenerate tool reference after ADR-ref scrub`.
