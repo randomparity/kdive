@@ -48,12 +48,14 @@ curated **operator documentation** (`external-build-upload`, `build-source-stagi
 strings and are scrubbed of ADR refs too. No `resource://kdive/adr/*` is served.
 
 **3. Add a CI-gated guard.** A new pytest guard (`tests/mcp/core/test_no_adr_leak.py`)
-builds the app and fails if `ADR-\d+` appears in any agent-rendered string: server
-`instructions`; each tool's `description` and every `description`/`title` string reachable
-in its `inputSchema` and `outputSchema`; and each registered resource's `name`/`title`/
-`description`. A vacuity canary asserts the same matcher flags a known-bad string, so a
-broken walk cannot pass silently. The guard runs in `just test`, which CI gates
-individually.
+builds the app and fails if `ADR-\d+` appears in any agent-rendered string. It walks **every
+string leaf** of the surface (via a recursive `_strings` helper, not a key allowlist):
+server `instructions`; each tool's `description` and every string in its `inputSchema` and
+`outputSchema` (so a ref hiding in `examples`/`const`/an enum value is caught, not only
+`description`/`title`); each registered resource's `name`/`title`/`description`; and each
+prompt's `description` and argument descriptions. A vacuity canary asserts the matcher flags
+a known-bad string and that `_strings` descends nested structures, so a broken walk cannot
+pass silently. The guard runs in `just test`, which CI gates individually.
 
 The guard governs the **rendered contract metadata** — the strings the MCP client displays
 as the tool/resource API — not the bodies of the deliberately-published operator reference

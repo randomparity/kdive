@@ -20,14 +20,18 @@ ADR refs in:
 - registered-resource descriptions (`external-build-upload`, `response-envelope`) and the
   `adr-0080` resource served wholesale.
 
-The server `instructions` and prompts are already clean (confirmed by introspection).
+The server `instructions` and prompts are already clean (confirmed by introspection) but
+are guarded anyway, so a future edit cannot silently reintroduce a ref.
 
 ## Success criteria (falsifiable)
 
-1. **No ADR ref in the rendered contract.** Building the app and walking every
-   agent-rendered string — server `instructions`; each tool's `description` and every
-   `description`/`title` in its `inputSchema`/`outputSchema`; each registered resource's
-   `name`/`title`/`description` — yields zero `ADR-\d+` matches.
+1. **No ADR ref in the rendered contract.** Building the app and walking **every string
+   leaf** of the agent-rendered surface — server `instructions`; each tool's `description`
+   and every string anywhere in its `inputSchema`/`outputSchema` (not just `description`/
+   `title`: `examples`, `const`, enum values, and any other string a future schema carries
+   are all agent-visible and in scope); each registered resource's `name`/`title`/
+   `description`; and each prompt's `description` and argument descriptions — yields zero
+   `ADR-\d+` matches.
 2. **No ADR served as a resource.** `ListMcpResources` returns no `resource://kdive/adr/*`;
    `adr-0080` and its packaged snapshot are gone.
 3. **The guard is real and CI-gated.** A pytest guard enforces (1), runs under `just test`
@@ -63,14 +67,19 @@ comment (non-rendered), per repo convention.
 `tests/mcp/core/test_no_adr_leak.py`: build the app with a null pool + local-keypair
 verifier (the existing service-test harness), then:
 
-- `test_no_adr_refs_in_tool_surface` — for each tool, collect `description` plus every
-  `description`/`title` string anywhere in `to_mcp_tool()`'s `inputSchema`/`outputSchema`;
-  assert none match `ADR-\d+`, reporting `tool.name` + JSON path on failure.
+- A shared `_strings(obj)` helper recursively yields **every** string leaf of a value
+  (dict values, list items, bare strings), so the walk depends on no key allowlist.
+- `test_no_adr_refs_in_tool_surface` — for each tool, scan `description` plus every string
+  leaf of `to_mcp_tool()`'s `inputSchema`/`outputSchema`; assert none match `ADR-\d+`,
+  reporting `tool.name` + JSON path on failure.
 - `test_no_adr_refs_in_server_instructions` — assert `app.instructions` is clean.
 - `test_no_adr_refs_in_registered_resources` — assert each resource's `name`/`title`/
   `description` is clean and no served URI is under `resource://kdive/adr/`.
-- `test_adr_matcher_is_not_vacuous` — assert the shared matcher flags `"see ADR-0019"`, so a
-  broken walk cannot pass by matching nothing.
+- `test_no_adr_refs_in_prompts` — for each prompt, scan `to_mcp_prompt()`'s `description`
+  and every argument description.
+- `test_adr_matcher_is_not_vacuous` — assert the shared matcher flags `"see ADR-0019"` and
+  that `_strings` actually descends a nested dict/list, so a broken walk cannot pass by
+  matching nothing.
 
 ## Out of scope
 
