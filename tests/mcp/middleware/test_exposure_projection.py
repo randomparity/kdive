@@ -96,6 +96,27 @@ def test_real_published_schema_narrows_for_local_only() -> None:
     assert set(define.parameters["$defs"]["ProviderSection"]["properties"]) == {"local-libvirt"}
 
 
+def test_resources_list_schema_permissive_on_local_only() -> None:
+    """resources.list is NOT in NARROWED_TOOLS; its kind enum must stay full on any deployment.
+
+    ADR-0269 narrows agent-facing provider enumeration only for write/request surfaces.
+    The read/query surface (resources.list) enumerates every ResourceKind regardless of
+    which providers are composed, so a local-only deployment can still filter by
+    'remote-libvirt' without a schema error. Pin that the full enum is preserved after
+    projection with local-only kinds.
+    """
+    app = _build_app()
+    rl_tool = _tool(app, "resources.list")
+    kinds = frozenset({ResourceKind.LOCAL_LIBVIRT})
+    projected = project_listed_tool(rl_tool, kinds)
+    # resources.list is not narrowed — projection must return the same object unchanged.
+    assert projected is rl_tool
+    # And the published schema still carries the full three-value ResourceKind enum.
+    all_kind_values = sorted(k.value for k in ResourceKind)
+    published_enum = sorted(rl_tool.parameters["$defs"]["ResourceKind"]["enum"])
+    assert published_enum == all_kind_values
+
+
 def test_on_list_tools_projects_visible_tools(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """The middleware's on_list_tools applies projection to narrowed tools in a live app."""
     app = _build_app()
