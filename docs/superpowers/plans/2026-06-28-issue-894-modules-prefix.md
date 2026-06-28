@@ -24,14 +24,17 @@ normalized name into the modules-only archive.
 Add this test after `test_repack_modules_subtree_skips_path_traversal_members`:
 
 ```python
-def test_repack_modules_subtree_normalizes_dot_prefixed_members(tmp_path: Path) -> None:
+@pytest.mark.parametrize("prefix", ("./", "/"))
+def test_repack_modules_subtree_normalizes_prefixed_members(
+    tmp_path: Path, prefix: str
+) -> None:
     version = "7.0.0-dirty"
     combined = tmp_path / "kernel.tar.gz"
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        _tar_add(tar, "./boot/vmlinuz", b"bz")
-        _tar_add(tar, f"./lib/modules/{version}/modules.dep", b"")
-        _tar_add(tar, f"./lib/modules/{version}/kernel/ok.ko", b"mod")
+        _tar_add(tar, f"{prefix}boot/vmlinuz", b"bz")
+        _tar_add(tar, f"{prefix}lib/modules/{version}/modules.dep", b"")
+        _tar_add(tar, f"{prefix}lib/modules/{version}/kernel/ok.ko", b"mod")
     combined.write_bytes(buf.getvalue())
 
     out = tmp_path / "modules.tar.gz"
@@ -51,10 +54,11 @@ def test_repack_modules_subtree_normalizes_dot_prefixed_members(tmp_path: Path) 
 Run:
 
 ```bash
-uv run python -m pytest tests/providers/local_libvirt/test_install.py::test_repack_modules_subtree_normalizes_dot_prefixed_members -q
+uv run python -m pytest tests/providers/local_libvirt/test_install.py::test_repack_modules_subtree_normalizes_prefixed_members -q
 ```
 
-Expected: fail because the repacked archive still contains `./lib/modules/...`.
+Expected: fail because the repacked archive still contains prefixed `lib/modules/...`
+names.
 
 - [ ] **Step 3: Implement normalized repack names**
 

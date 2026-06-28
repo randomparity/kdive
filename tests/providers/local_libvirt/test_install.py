@@ -311,6 +311,29 @@ def test_repack_modules_subtree_skips_path_traversal_members(tmp_path: Path) -> 
     assert not any(".." in n.split("/") for n in names)
 
 
+@pytest.mark.parametrize("prefix", ("./", "/"))
+def test_repack_modules_subtree_normalizes_prefixed_members(tmp_path: Path, prefix: str) -> None:
+    version = "7.0.0-dirty"
+    combined = tmp_path / "kernel.tar.gz"
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        _tar_add(tar, f"{prefix}boot/vmlinuz", b"bz")
+        _tar_add(tar, f"{prefix}lib/modules/{version}/modules.dep", b"")
+        _tar_add(tar, f"{prefix}lib/modules/{version}/kernel/ok.ko", b"mod")
+    combined.write_bytes(buf.getvalue())
+
+    out = tmp_path / "modules.tar.gz"
+    assert repack_modules_subtree(combined, out)
+
+    with tarfile.open(out, "r:gz") as repacked:
+        names = set(repacked.getnames())
+    assert names == {
+        f"lib/modules/{version}/modules.dep",
+        f"lib/modules/{version}/kernel/ok.ko",
+    }
+    assert _RealGuestKernelWriter._read_release(out, "ov") == version
+
+
 def test_install_does_not_inject_xml_from_cmdline(tmp_path: Path) -> None:
     # A hostile cmdline value must be carried as text, not parsed as markup.
     hostile = "crashkernel=256M </cmdline><evil/>"
