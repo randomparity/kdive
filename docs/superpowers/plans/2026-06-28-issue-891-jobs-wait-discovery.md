@@ -20,7 +20,7 @@ keywords to the existing `TOOL_KEYWORDS` map and cover the real `tools.search` b
 - Modify: `tests/mcp/tools/test_gateway_search.py`
 - Modify: `src/kdive/mcp/tool_index.py`
 
-- [ ] **Step 1: Add failing gateway-search coverage**
+- [x] **Step 1: Add failing gateway-search coverage**
 
 In `tests/mcp/tools/test_gateway_search.py`, add a helper:
 
@@ -35,9 +35,8 @@ Add a test that uses viewer context and checks several follow-up phrases:
 @pytest.mark.parametrize(
     "query",
     [
-        "wait for job",
-        "poll running job",
-        "suggested next action jobs.wait",
+        "still running call again",
+        "suggested next actions queued running",
     ],
 )
 def test_jobs_wait_discovered_from_followup_queries(
@@ -59,7 +58,7 @@ def test_jobs_wait_discovered_from_followup_queries(
     assert "jobs.wait" in _match_names(content)
 ```
 
-- [ ] **Step 2: Run the new test and verify it fails**
+- [x] **Step 2: Run the new test and verify it fails**
 
 Run:
 
@@ -67,10 +66,10 @@ Run:
 uv run python -m pytest tests/mcp/tools/test_gateway_search.py::test_jobs_wait_discovered_from_followup_queries -q
 ```
 
-Expected: at least one query fails to include `jobs.wait` because jobs-plane curated
-keywords are missing.
+Expected: both queries fail to include `jobs.wait` because jobs-plane curated keywords are
+missing.
 
-- [ ] **Step 3: Add jobs-plane curated keywords**
+- [x] **Step 3: Add jobs-plane curated keywords**
 
 In `src/kdive/mcp/tool_index.py`, add a jobs section:
 
@@ -79,12 +78,28 @@ In `src/kdive/mcp/tool_index.py`, add a jobs section:
     "jobs.get": frozenset({"job", "status", "get", "fetch", "lookup", "result"}),
     "jobs.list": frozenset({"jobs", "list", "filter", "background", "running"}),
     "jobs.wait": frozenset(
-        {"job", "wait", "poll", "running", "retry", "complete", "terminal", "next", "action"}
+        {
+            "job",
+            "wait",
+            "poll",
+            "running",
+            "queued",
+            "retry",
+            "complete",
+            "terminal",
+            "still",
+            "call",
+            "again",
+            "suggested",
+            "next",
+            "action",
+            "actions",
+        }
     ),
     "jobs.cancel": frozenset({"job", "cancel", "stop", "abort", "running"}),
 ```
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 Run:
 
@@ -94,7 +109,7 @@ uv run python -m pytest tests/mcp/tools/test_gateway_search.py tests/mcp/test_to
 
 Expected: gateway search and keyword completeness tests pass.
 
-- [ ] **Step 5: Run relevant quality gates**
+- [x] **Step 5: Run relevant quality gates**
 
 Run:
 

@@ -86,6 +86,29 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "runs.complete_build": frozenset({"complete", "finish", "external", "build", "upload"}),
     "runs.validate_profile": frozenset({"validate", "profile", "build", "check", "dry-run"}),
     "runs.profile_examples": frozenset({"profile", "examples", "build", "template", "sample"}),
+    # jobs
+    "jobs.get": frozenset({"job", "status", "get", "fetch", "lookup", "result"}),
+    "jobs.list": frozenset({"jobs", "list", "filter", "background", "running"}),
+    "jobs.wait": frozenset(
+        {
+            "job",
+            "wait",
+            "poll",
+            "running",
+            "queued",
+            "retry",
+            "complete",
+            "terminal",
+            "still",
+            "call",
+            "again",
+            "suggested",
+            "next",
+            "action",
+            "actions",
+        }
+    ),
+    "jobs.cancel": frozenset({"job", "cancel", "stop", "abort", "running"}),
     # control plane
     "control.force_crash": frozenset({"crash", "force", "panic", "nmi", "kernel", "kdump"}),
     "control.power": frozenset({"power", "on", "off", "reset", "reboot"}),
