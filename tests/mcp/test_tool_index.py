@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 
+from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier, RSAKeyPair
 from psycopg_pool import AsyncConnectionPool
 
@@ -23,10 +24,21 @@ def _verifier() -> JWTVerifier:
     return JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
 
 
-def _registered_tool_names() -> set[str]:
+def _built_app() -> FastMCP:
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    return build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
 
+
+def _registered_tool_names() -> set[str]:
+    app = _built_app()
+
+    async def _run() -> set[str]:
+        return {t.name for t in await app.list_tools()}
+
+    return asyncio.run(_run())
+
+
+def _registered_tool_names_from(app: FastMCP) -> set[str]:
     async def _run() -> set[str]:
         return {t.name for t in await app.list_tools()}
 
@@ -41,3 +53,17 @@ def test_tool_keywords_keys_are_live_tool_names() -> None:
         f"TOOL_KEYWORDS has stale entries (not in live registry): {stale}\n"
         "Remove or rename them so the index stays in sync with the registered tools."
     )
+
+
+def test_instructions_cover_every_live_namespace() -> None:
+    """build_instructions() mentions every live namespace and the gateway tools."""
+    app = _built_app()
+    text = app.instructions or ""
+    live_ns = {name.split(".")[0] for name in _registered_tool_names_from(app)}
+    for ns in live_ns:
+        assert ns in text, (
+            f"Namespace {ns!r} is missing from server instructions.\n"
+            "Add it to NAMESPACE_TOC in src/kdive/mcp/tool_index.py."
+        )
+    assert "tools.search" in text, "instructions must mention tools.search"
+    assert "tools.invoke" in text, "instructions must mention tools.invoke"

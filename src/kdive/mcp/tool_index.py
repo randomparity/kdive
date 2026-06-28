@@ -1,4 +1,4 @@
-"""Curated keyword index for ``tools.search`` (ADR-0268, #866).
+"""Curated keyword index for ``tools.search`` and server instructions (ADR-0268, #866).
 
 ``TOOL_KEYWORDS`` maps a registered tool name to extra terms that improve lexical
 ranking when the tool's name or description alone matches poorly.  Ranking tokenises
@@ -7,11 +7,68 @@ name + description + these keywords and counts matches against the caller's quer
 Every key **must** be a live registered tool name — the completeness guard in
 ``tests/mcp/test_tool_index.py`` asserts this so stale entries trip CI.
 
-The namespace TOC (``build_instructions()``) and extra facilities come in a later task.
-Only add ``TOOL_KEYWORDS`` here.
+``NAMESPACE_TOC`` maps each live tool namespace (the prefix before the first ``.``)
+to a one-line description.  ``build_instructions()`` renders these into the server
+``instructions`` string that an agent receives at session start.
 """
 
 from __future__ import annotations
+
+# One-line description for every live tool namespace.  The completeness guard in
+# ``tests/mcp/test_tool_index.py`` (test_instructions_cover_every_live_namespace)
+# asserts that every namespace present in the live registry appears here.
+NAMESPACE_TOC: dict[str, str] = {
+    "accounting": "Budget, quota, usage estimates, and cost reporting",
+    "allocations": "System capacity reservation, leasing, and release",
+    "artifacts": "Run artifact access, uploads, and raw binary retrieval",
+    "audit": "Audit log queries across operations",
+    "build_envs": "Available kernel build environment listing",
+    "build_hosts": "Build host registration, listing, and removal",
+    "buildconfig": "Kernel build configuration management",
+    "control": "In-guest power cycling and crash injection (NMI / panic)",
+    "debug": "Live GDB-based kernel debugging sessions (breakpoints, registers, memory)",
+    "fixtures": "Test fixture profile listing and validation",
+    "images": "Kernel and rootfs image lifecycle (build, publish, expire)",
+    "introspect": "drgn kernel introspection — live attach and vmcore offline analysis",
+    "inventory": "Resource inventory listing and override management",
+    "investigations": "Investigation lifecycle tracking (open, link, close)",
+    "jobs": "Background job status polling and cancellation",
+    "ops": "Platform operator tools (reconciliation, diagnostics, cost classes)",
+    "postmortem": "Crash analysis and triage from vmcore or console evidence",
+    "projects": "Project listing",
+    "reports": "Generated usage and accounting report retrieval",
+    "resources": "Physical resource registration, availability, and cordon/drain",
+    "runs": "Kernel test run lifecycle (build, install, boot, cancel, bind)",
+    "secrets": "Secret listing",  # pragma: allowlist secret
+    "session": "Session identity (whoami)",
+    "shapes": "System shape and cost-class configuration",
+    "systems": "Target system provisioning, reprovision, teardown, and profiling",
+    "tools": "Tool discovery gateway — search capabilities and invoke any registered tool",
+    "vmcore": "Crash dump listing and download",
+}
+
+
+def build_instructions() -> str:
+    """Return the server instructions string shown to agents at session start.
+
+    The string has two parts:
+    1. A gateway usage pattern paragraph explaining that only ``tools.search`` and
+       ``tools.invoke`` are exposed by default and how to use them.
+    2. A namespace table of contents so agents can orient themselves without calling
+       ``tools.search`` for every operation.
+    """
+    toc_lines = "\n".join(f"  {ns}: {desc}" for ns, desc in sorted(NAMESPACE_TOC.items()))
+    return f"""\
+This server uses a tool gateway. Only a small set of core tools are listed directly
+(tools.search and tools.invoke plus a few essentials). All other capabilities are
+discoverable via tools.search — pass a short description of what you want to do and
+it returns the best matching tool names and descriptions. Once you have a name, call
+tools.invoke(name, arguments) to execute it.
+
+Namespace table of contents (prefix before the first dot):
+{toc_lines}
+"""
+
 
 TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     # runs plane — verbs that describe what each step does
