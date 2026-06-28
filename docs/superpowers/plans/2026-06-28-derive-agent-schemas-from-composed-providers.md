@@ -747,25 +747,27 @@ from kdive.mcp.tool_payloads import AllocationRequestPayload
 from kdive.profiles.provisioning import ProvisioningProfile
 
 
-class _AllocTool:
-    name = "allocations.request"  # narrows via $defs.ResourceKind enum
-    description = "request an allocation"
-    parameters = AllocationRequestPayload.model_json_schema()
+class _FakeTool:
+    # project_listed_tool() calls tool.model_copy(update=...) for NARROWED_TOOLS, so the stub
+    # must support it (mirrors the _FakeTool in tests/mcp/middleware/test_exposure_projection.py).
+    def __init__(self, name: str, parameters: dict) -> None:
+        self.name = name
+        self.description = name
+        self.parameters = parameters
 
-
-class _SystemsTool:
-    name = "systems.define"  # narrows via $defs.ProviderSection.properties (no ResourceKind def)
-    description = "define a system"
-    parameters = ProvisioningProfile.model_json_schema()
+    def model_copy(self, *, update: dict) -> "_FakeTool":
+        return _FakeTool(self.name, update["parameters"])
 
 
 def test_describe_narrows_allocation_kind_enum() -> None:
-    described = describe_tool(_AllocTool(), frozenset({ResourceKind.LOCAL_LIBVIRT}))
+    tool = _FakeTool("allocations.request", AllocationRequestPayload.model_json_schema())
+    described = describe_tool(tool, frozenset({ResourceKind.LOCAL_LIBVIRT}))
     assert described["input_schema"]["$defs"]["ResourceKind"]["enum"] == ["local-libvirt"]
 
 
 def test_describe_narrows_systems_section_props() -> None:
-    described = describe_tool(_SystemsTool(), frozenset({ResourceKind.LOCAL_LIBVIRT}))
+    tool = _FakeTool("systems.define", ProvisioningProfile.model_json_schema())
+    described = describe_tool(tool, frozenset({ResourceKind.LOCAL_LIBVIRT}))
     props = set(described["input_schema"]["$defs"]["ProviderSection"]["properties"])
     assert props == {"local-libvirt"}
 ```
