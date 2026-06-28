@@ -50,11 +50,12 @@ type NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_l
 SUPPORTED_DOMAIN_XML_PARAMS = frozenset({"machine"})
 
 
+# Provenance: ADR-0024 decision 2a, ADR-0080; disk-image lane ADR-0078.
 class BootMethod(StrEnum):
-    """The provider-agnostic boot methods (ADR-0024 decision 2a, ADR-0080).
+    """The provider-agnostic boot methods.
 
     ``disk-image`` boots an operator-staged base-OS image and iterates kernels by
-    in-guest install + reboot (the remote-libvirt model, ADR-0078); ``direct-kernel``
+    in-guest install + reboot (the remote-libvirt model); ``direct-kernel``
     stays the local-libvirt/fault-inject method.
     """
 
@@ -81,8 +82,9 @@ type RootfsSource = Annotated[
 """A discriminated rootfs source (ADR-0065); ``upload`` remains System-owned."""
 
 
+# Provenance: ADR-0049 Decision 3.
 class LibvirtDebugOptions(_ProfileBase):
-    """Per-System debug provisioning flags (ADR-0049 Decision 3).
+    """Per-System debug provisioning flags.
 
     Bound at provision/boot; declare which capture methods the System is
     provisioned for. ``preserve_on_crash`` adds a pvpanic device +
@@ -93,11 +95,13 @@ class LibvirtDebugOptions(_ProfileBase):
     gdbstub: bool = False
 
 
+# Provenance: ADR-0024 decisions 1/2b/2c; rootfs ADR-0048 §3; destructive opt-in ADR-0028 §2;
+# ssh_credential_ref ADR-0039 §2; debug ADR-0049 Decision 3.
 class LibvirtProfile(_ProfileBase):
-    """The ``local-libvirt`` provider section (ADR-0024 decisions 1, 2b, 2c).
+    """The ``local-libvirt`` provider section.
 
     ``domain_xml_params`` is an optionally-empty map whose values are non-empty;
-    ``rootfs`` is the discriminated rootfs source (ADR-0048 §3) keyed by ``kind`` —
+    ``rootfs`` is the discriminated rootfs source keyed by ``kind`` —
     ``local`` (an allowlisted provider-local file), ``artifact`` (parsed for the shared
     component contract but currently rejected by local-libvirt materialization),
     ``catalog`` (a curated image by name), or ``upload`` (a System-owned uploaded
@@ -108,11 +112,11 @@ class LibvirtProfile(_ProfileBase):
     ``destructive_ops`` is the optionally-empty list of destructive op kinds this profile
     opts in (e.g. ``["force_crash"]``); the control plane's gate resolves the opt-in
     factor from it (deny-by-default — an absent or empty list refuses every destructive
-    op, ADR-0028 §2). ``ssh_credential_ref`` is the optional opaque **reference** (never
+    op). ``ssh_credential_ref`` is the optional opaque **reference** (never
     the value) into the file-ref secret backend that the live ssh transport resolves a
-    guest credential through (ADR-0039 §2); a profile that does not opt into live ssh
+    guest credential through; a profile that does not opt into live ssh
     introspection leaves it ``None``. ``debug`` declares which crash-capture methods the
-    System is provisioned for (ADR-0049 Decision 3); defaults to all flags disabled.
+    System is provisioned for; defaults to all flags disabled.
     """
 
     domain_xml_params: dict[NonEmptyStr, NonEmptyStr] = Field(default_factory=dict)
@@ -123,8 +127,9 @@ class LibvirtProfile(_ProfileBase):
     debug: LibvirtDebugOptions = Field(default_factory=LibvirtDebugOptions)
 
 
+# Provenance: ADR-0072.
 class FaultInjectProfile(_ProfileBase):
-    """The ``fault-inject`` provider section (ADR-0072).
+    """The ``fault-inject`` provider section.
 
     The mock provider owns no rootfs/domain XML materialization; its section carries only
     the knobs shared by generic control/retrieve gates.
@@ -134,19 +139,21 @@ class FaultInjectProfile(_ProfileBase):
     capture_method: CaptureMethod = CaptureMethod.CONSOLE
 
 
+# Provenance: ADR-0080; image-content obligations ADR-0078/0079; destructive opt-in ADR-0028 §2;
+# gdbstub port ADR-0079/0080.
 class RemoteLibvirtProfile(_ProfileBase):
-    """The ``remote-libvirt`` provider section (ADR-0080).
+    """The ``remote-libvirt`` provider section.
 
     ``base_image_volume`` names the **operator-staged** qcow2 volume on the remote
     host's storage pool carrying the base OS (with qemu-guest-agent enabled, drgn,
-    and matching vmlinux/debuginfo — image-content obligations the operator owns,
-    ADR-0078/0079); provisioning verifies the volume exists, not its contents.
+    and matching vmlinux/debuginfo — image-content obligations the operator owns);
+    provisioning verifies the volume exists, not its contents.
     ``crashkernel`` mirrors the local section (the kdump prerequisite token; the
     booted kernel is the arbiter of its grammar). ``destructive_ops`` is the
-    deny-by-default destructive-op opt-in factor (ADR-0028 §2). There is no rootfs,
+    deny-by-default destructive-op opt-in factor. There is no rootfs,
     SSH credential, or gdbstub flag: the base image is the rootfs, in-guest access
     rides the guest-agent seam, and the gdbstub is unconditionally enabled with a
-    per-System port the provisioning plane allocates (ADR-0079/0080).
+    per-System port the provisioning plane allocates.
     """
 
     base_image_volume: NonEmptyStr
@@ -154,8 +161,9 @@ class RemoteLibvirtProfile(_ProfileBase):
     destructive_ops: list[NonEmptyStr] = Field(default_factory=list)
 
 
+# Provenance: ADR-0024 decision 1.
 class ProviderSection(_ProfileBase):
-    """The provider-specific section, keyed by provider name (ADR-0024 decision 1).
+    """The provider-specific section, keyed by provider name.
 
     Exactly one concrete provider section is required. The public properties return the
     concrete section for callers that have already selected a provider-specific path.
@@ -252,13 +260,14 @@ class ProvisioningProfile(_ProfileBase):
     boot_method: BootMethod
     kernel_source_ref: NonEmptyStr | None = Field(
         default=None,
+        # Provenance: ADR-0078/0080, #472.
         description=(
             "Label for the baseline kernel this System is provisioned against. Required for "
             "boot_method 'direct-kernel': the System must reach 'ready' on a baseline kernel "
             "before its Runs iterate kernels, so the direct-kernel lane needs one named here. A "
             "bare warm-tree label (e.g. 'linux-6.9'), not a URL — runs.create takes the structured "
             "git source. Omit it for boot_method 'disk-image': that lane boots the operator-staged "
-            "base image's own kernel and never reads this field (ADR-0078/0080, #472)."
+            "base image's own kernel and never reads this field."
         ),
     )
     provider: ProviderSection

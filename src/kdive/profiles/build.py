@@ -97,10 +97,11 @@ def _match_uri_scheme(value: str) -> str | None:
 
 
 class ServerBuildProfile(_BuildProfileBase):
+    # Provenance: ADR-0096 (default kdump config fragment at the build boundary).
     """Server-build lane: names a source tree, an optional config, and an optional patch.
 
-    An omitted ``config`` resolves to the seeded ``kdump`` catalog fragment at the build boundary
-    (ADR-0096); a profile that names a config overrides that default.
+    An omitted ``config`` resolves to the seeded ``kdump`` catalog fragment at the build boundary;
+    a profile that names a config overrides that default.
 
     ``kernel_source_ref`` accepts either a bare string (warm-tree / URI provenance) or a
     ``{"git": {"remote": ..., "ref": ...}}`` object (git-clone provenance). Use

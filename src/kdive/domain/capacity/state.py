@@ -34,14 +34,15 @@ class ResourceStatus(StrEnum):
     OFFLINE = "offline"
 
 
+# Provenance: granted→releasing ADR-0023; expiry sweep ADR-0036/0040; queued cancel ADR-0069.
 class AllocationState(StrEnum):
     """Capacity- and budget-checked allocation lifecycle.
 
     ``granted → releasing`` lets an admitted-but-unprovisioned allocation be released
-    without first reaching ``active`` (which provisioning produces); see ADR-0023.
+    without first reaching ``active`` (which provisioning produces).
     ``granted/active → expired`` is the reconciler sweep reclaiming a lease past its
-    window (ADR-0036, ADR-0040); ``expired`` is terminal and distinct from ``failed``.
-    ``requested → released`` is the cancellation edge for a queued request (ADR-0069): a
+    window; ``expired`` is terminal and distinct from ``failed``.
+    ``requested → released`` is the cancellation edge for a queued request: a
     queued row was never reserved, so it releases directly to ``released`` without the
     ``releasing`` hop and writes no ledger credit.
     """
@@ -55,10 +56,11 @@ class AllocationState(StrEnum):
     FAILED = "failed"
 
 
+# Provenance: reprovision-in-place ADR-0038.
 class SystemState(StrEnum):
     """A provisioned target's lifecycle.
 
-    Reprovision-in-place (ADR-0038) cycles a ready System through
+    Reprovision-in-place cycles a ready System through
     ``ready → reprovisioning → ready`` on the same row; an interrupted reprovision fails to
     ``reprovisioning → failed``. ``defined → torn_down`` lets an abandoned
     create-without-provision System be torn down without first advancing to
@@ -83,12 +85,13 @@ class InvestigationState(StrEnum):
     ABANDONED = "abandoned"
 
 
+# Provenance: install/boot progress in run_steps ledger ADR-0179.
 class RunState(StrEnum):
     """Build-phase lifecycle of a Run; one build per Run, a failed step is terminal.
 
     ``succeeded`` means the **build** step succeeded — not that the kernel is installed or
     booted. Install and boot progress live in the ``run_steps`` ledger and are surfaced by
-    ``runs.get`` as ``data.steps`` (ADR-0179). A failed install/boot step fails the Run to
+    ``runs.get`` as ``data.steps``. A failed install/boot step fails the Run to
     ``failed``.
     """
 

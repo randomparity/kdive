@@ -61,7 +61,7 @@ class _RunsCreatePayload(ToolPayload):
     build_profile: ExternalBuildProfile | ServerBuildProfile = Field(
         description=(
             "Build profile for the Run's kernel. The recommended default is source='external': "
-            "ingest a prebuilt artifact (ADR-0234). After runs.create with source='external', "
+            "ingest a prebuilt artifact. After runs.create with source='external', "
             "call artifacts.expected_uploads to learn the exact bytes to produce, "
             "artifacts.create_run_upload to upload, then runs.complete_build. source='server' "
             "builds from a kernel tree (kernel_source_ref required) and is a single-host "
@@ -441,7 +441,7 @@ def _register_runs_complete_build(
             Field(
                 description="Kernel debug args appended to the platform-required boot args "
                 "(e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot "
-                "via runs.install/runs.boot (ADR-0061)."
+                "via runs.install/runs.boot."
             ),
         ] = None,
         build_id: Annotated[
