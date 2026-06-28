@@ -65,7 +65,8 @@ def repack_modules_subtree(combined_tar: Path, dest: Path) -> bool:
                 if ".." in normalized.split("/"):
                     continue
                 if normalized.startswith(_MODULES_MEMBER_PREFIX):
-                    out.addfile(member, src.extractfile(member) if member.isfile() else None)
+                    safe_member = member.replace(name=normalized)
+                    out.addfile(safe_member, src.extractfile(member) if member.isfile() else None)
                     found = True
         if found:
             tmp.replace(dest)
