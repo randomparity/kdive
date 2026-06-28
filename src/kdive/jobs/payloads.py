@@ -79,6 +79,15 @@ class BuildPayload(RunPayload):
         return value
 
 
+class BuildInstallBootPayload(BuildPayload):
+    """Payload for the composite build->install->boot job (ADR-0268, #866).
+
+    Carries the build admission result (`build_host_id`, selected + leased at the
+    `runs.build_install_boot` boundary) so the handler can synthesize a `BuildPayload` for the
+    build phase; install/boot need only `run_id`.
+    """
+
+
 class PowerPayload(SystemPayload):
     action: PowerAction
 
@@ -137,6 +146,7 @@ _PayloadModel = (
     | type[CaptureVmcorePayload]
     | type[ImageBuildPayload]
     | type[DiagnosticsWorkerCheckPayload]
+    | type[BuildInstallBootPayload]
 )
 PayloadModel = (
     SystemPayload
@@ -146,6 +156,7 @@ PayloadModel = (
     | CaptureVmcorePayload
     | ImageBuildPayload
     | DiagnosticsWorkerCheckPayload
+    | BuildInstallBootPayload
 )
 
 _PAYLOAD_MODELS: dict[JobKind, _PayloadModel] = {
@@ -160,12 +171,14 @@ _PAYLOAD_MODELS: dict[JobKind, _PayloadModel] = {
     JobKind.CAPTURE_VMCORE: CaptureVmcorePayload,
     JobKind.IMAGE_BUILD: ImageBuildPayload,
     JobKind.DIAGNOSTICS_WORKER_CHECK: DiagnosticsWorkerCheckPayload,
+    JobKind.BUILD_INSTALL_BOOT: BuildInstallBootPayload,
 }
 _RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.BUILD: BuildPayload,
     JobKind.INSTALL: RunPayload,
     JobKind.BOOT: RunPayload,
     JobKind.CAPTURE_VMCORE: CaptureVmcorePayload,
+    JobKind.BUILD_INSTALL_BOOT: BuildInstallBootPayload,
 }
 
 
