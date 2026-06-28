@@ -197,7 +197,6 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "runs.complete_build": _CONTRIBUTOR,
     "runs.install": _CONTRIBUTOR,
     "runs.boot": _CONTRIBUTOR,
-    "runs.build_install_boot": _CONTRIBUTOR,
     # secrets (platform operator)
     "secrets.list": _PLAT_OP,
     # shapes
@@ -237,31 +236,11 @@ PUBLIC_TOOLS: frozenset[str] = frozenset(
         "session.whoami",
         "shapes.list",
         "systems.profile_examples",
-        "tools.search",
     }
 )
 
 #: Union of every gated tool, for the completeness guard.
 CLASSIFIED_TOOLS: frozenset[str] = frozenset(_TOOL_SCOPES)
-
-#: The default ``list_tools`` surface when the gateway is on (ADR-0267, #866): discovery entry
-#: points, the build→install→boot composite, and the reads in nearly every flow. Everything else
-#: is registered, RBAC-scoped, and reachable via ``tools.search`` — demoted, not removed. A guard
-#: pins this to the live registry so a renamed/removed core tool fails loudly. The tier filter
-#: intersects (never widens) the RBAC filter inside the same ``on_list_tools`` seam.
-CORE_TOOLS: frozenset[str] = frozenset(
-    {
-        "tools.search",
-        "session.whoami",
-        "runs.build_install_boot",
-        "runs.create",
-        "runs.get",
-        "runs.list",
-        "allocations.request",
-        "allocations.wait",
-        "systems.provision",
-    }
-)
 
 
 def required_scopes(tool_name: str) -> frozenset[ExposureScope]:
@@ -306,15 +285,6 @@ def tool_visible(tool_name: str, ctx: RequestContext) -> bool:
 def visible_tool_names(ctx: RequestContext, names: Iterable[str]) -> set[str]:
     """The subset of ``names`` visible to ``ctx``."""
     return {name for name in names if tool_visible(name, ctx)}
-
-
-def core_visible_tool_names(ctx: RequestContext, names: Iterable[str]) -> set[str]:
-    """The RBAC-visible subset of ``names`` further intersected with :data:`CORE_TOOLS`.
-
-    The gateway default surface (ADR-0267): a tool is shown only if ``ctx`` could invoke it
-    *and* it is in the core set. Intersects (never widens) :func:`visible_tool_names`.
-    """
-    return visible_tool_names(ctx, names) & CORE_TOOLS
 
 
 def _project_scope_satisfied(scope: ExposureScope, ctx: RequestContext, project: str) -> bool:

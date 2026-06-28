@@ -31,7 +31,6 @@ from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._idempotency import keyed_mutation
 from kdive.mcp.tools.lifecycle.runs.common import RUN_BUILD_TERMINAL, run_job_envelope
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
-from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
@@ -189,15 +188,4 @@ def _build_dedup_key(run: Run) -> str:
     return f"{run.id}:build"
 
 
-def build_handlers_for(runtime: ProviderRuntime) -> BuildRunHandlers:
-    """Construct ``BuildRunHandlers`` from a resolved runtime — the single wiring site.
-
-    Both ``runs.build`` and the ``runs.build_install_boot`` composite build through this, so the
-    component-source / config-validator wiring cannot drift between them (ADR-0267).
-    """
-    return BuildRunHandlers(
-        runtime.component_sources, config_validator=runtime.build_config_validator
-    )
-
-
-__all__ = ["BuildRunHandlers", "ConfigValidator", "build_handlers_for"]
+__all__ = ["BuildRunHandlers", "ConfigValidator"]
