@@ -37,13 +37,17 @@ set, derived from one registry and computed at list/call time.
    building blocks; the registry is the single source the resolver, schema projection, and
    discovery iterate. A guard test pins its key set == `ResourceKind` members.
 
-2. **Deployment-scoped projection.** A pure factory `deployment_provider_models(kinds)` builds,
-   from the registry filtered to `kinds`, the narrowed `kind` `Literal` and a `ProviderSection`
-   model containing exactly those sections (with a generated "exactly one section" validator —
-   the per-System single-provider invariant, orthogonal to deployment membership). One model
-   yields **both** JSON schema and validation, so they cannot disagree about membership. Memoized
-   on the frozenset key. The factory is **boundary-only** — it feeds the agent-facing schema and
-   validation, never storage or the digest.
+2. **Registry-driven projection.** Two pure helpers keyed to the single `registered_kinds()` set
+   (the anti-drift property): `project_tool_schema(parameters, kinds)` structurally narrows a
+   tool's FastMCP-generated schema — filtering the `ResourceKind` enum `$def` and the
+   `ProviderSection` object's properties to the live set (section sub-models unchanged and already
+   present, so it only drops members) — and `assert_kind_composed(kind, kinds)` raises
+   `configuration_error` for a non-composed kind. FastMCP generates the published schema from the
+   handler signature and the domain model stays static (decision 4), so this is a structural
+   projection plus a membership guard rather than a single dynamically-built Pydantic model; both
+   iterate the registry, so a new provider is covered without editing either helper. Boundary-only:
+   they feed the agent-facing schema and validation, never storage or the digest. Memoized on the
+   frozenset key.
 
 3. **Computed at list/call time, never frozen at registration.** Schema is projected in
    `ToolExposureMiddleware.on_list_tools` (and `tools.search`) from the live
@@ -72,9 +76,9 @@ set, derived from one registry and computed at list/call time.
    same live set.
 
 6. **Empty composed set fail-closed.** A zero-provider deployment projects `enum: []` (matches
-   nothing) and rejects any kind with `configuration_error` "no providers configured"; the factory
-   short-circuits the systems provider-union on an empty registry to the same error before the
-   generated "exactly one section" validator can raise a generic, misattributed failure.
+   nothing) and no `ProviderSection` properties; `assert_kind_composed` checks the empty set first
+   and rejects any kind with `configuration_error` "no providers configured", before the static
+   model's "exactly one section" validator could raise a generic, misattributed failure.
 
 7. **Fault-inject is a derived consequence.** It is absent from every agent-facing surface iff it
    is not composed — the stock case under its default-off opt-in. No per-provider special-casing,
@@ -105,10 +109,15 @@ set, derived from one registry and computed at list/call time.
 - **Prose / `test_only` marker on a still-advertised fault-inject (parked PR #883).** Marks the
   symptom in one provider's text; leaves `remote-libvirt` mis-advertised and the schema still
   enumerating non-composed kinds. Treats #879 as a special case rather than the general defect.
-- **Static superset model + JSON-schema narrowing + a separate validator.** Keeps the hardcoded
-  three-section model; the schema transform and the validator are two places that can drift, and
-  adding cloud/bare-metal still means editing a superset. Rejected for the same two-sources-of-
-  truth smell this ADR removes.
+- **Hand-maintained kind list + an independent validator.** The variant this ADR rejects is one
+  where the schema transform and the validator each carry their *own* enumeration of kinds (two
+  sources that can drift) and the kind set is hand-coded per surface. The chosen mechanism
+  (decision 2) is distinct: the schema projection and `assert_kind_composed` both read the *single*
+  `registered_kinds()` set and both iterate `PROVIDER_SECTIONS`, so there is one membership source
+  and no per-surface hand-coding. Structural schema narrowing is the right tool *because* the
+  domain model stays static (decision 4) and FastMCP generates the schema from the signature;
+  building a second dynamic Pydantic model to "own" the boundary schema would duplicate the section
+  models for no gain.
 - **Freeze the projection at tool registration.** Simpler, but a non-list-time snapshot would have
   to be reworked when runtime hot-add lands; computing at list/call time costs a memoized build
   and makes hot-add additive.

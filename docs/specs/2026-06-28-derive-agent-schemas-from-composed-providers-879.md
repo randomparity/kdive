@@ -90,28 +90,26 @@ not a substitute for defining the provider, only for re-listing it on every agen
 test asserts the registry's key set equals the `ResourceKind` members so a new kind cannot be added
 without a section spec, nor a section spec without an enum member.
 
-### 2. Deployment-scoped projection, consumed at list/call time
+### 2. Registry-driven projection, consumed at list/call time
 
-A pure, memoized factory:
+Two pure helpers, both keyed to the **single** `registered_kinds()` set so they cannot disagree
+about membership (the anti-drift property):
 
-```
-deployment_provider_models(kinds: frozenset[ResourceKind]) -> DeploymentProviderModels
-```
+- **Schema projection** `project_tool_schema(parameters, kinds)` — narrows a tool's generated input
+  schema to the live set. FastMCP generates the published schema from the handler signature and the
+  domain model stays static (§3), so the projection is a *structural narrowing* of the schema's
+  reusable `$defs`: it filters the `ResourceKind` enum to `kinds`' values and the `ProviderSection`
+  object's properties to `kinds`' aliases. The section sub-models (`LibvirtProfile` etc.) are
+  unchanged and already present in `$defs`, so it only drops members, never invents definitions.
+  Applied only to the narrowed surfaces (§4); the `resources.list` read filter is untouched.
+- **Call-time guard** `assert_kind_composed(kind, kinds)` — raises `configuration_error` when the
+  parsed request's kind (`ResourceByKind.kind` / `ProviderSection.kind`) is not in `kinds`.
 
-builds, from the registry filtered to `kinds`:
-
-- the narrowed `kind` constraint (a `Literal` over `kinds`' values) for the allocation selector
-  (the `resources.list` filter is a read surface and stays permissive — §4), and
-- a `ProviderSection`-equivalent model whose fields are exactly those kinds' sections, with a
-  generated "exactly one section" validator (the per-System single-provider invariant, which is
-  orthogonal to deployment membership and is preserved).
-
-One model object yields **both** the JSON schema (`model_json_schema()`, projected at list-time
-per §5) and the validation (`model_validate()`, invoked on the handler path per §6) — a single
-source, so schema and accept/reject cannot disagree about membership. The factory is **memoized on the frozenset key**: built once per distinct composed
-set, recomputed automatically if the set ever changes (the hot-add seam). It is called at
-list-time (to project schemas) and call-time (to validate) from the *live* resolver, never
-frozen at registration.
+Both iterate the registry (§1), so they are registry-driven rather than per-kind hand-coding — a
+new provider is covered without editing either helper. Both are computed at list/call time from the
+*live* resolver (never frozen at registration), so a future hot-add that recomposes the resolver is
+reflected with no schema-layer change; the narrowed `$def` fragments are memoized on the frozenset
+key.
 
 ### 3. Two membership views — boundary narrowed, domain permissive
 
@@ -181,29 +179,25 @@ unobserved and the happy-path exclusion tests (§Testing) would not catch the re
 ### 6. Call-time validation
 
 A request naming a non-composed kind is rejected at the boundary with `configuration_error`
-(category parity with `resolve()`). Call-time validation is the **same factory-built deployment
-model as §2** — the handler validates raw `arguments` with
-`deployment_provider_models(registered_kinds()).model_validate(...)` on the shared service path,
-not FastMCP's statically-bound (permissive) tool param — so §2's "one model yields schema and
-validation" and this check are the *same* mechanism reading the *same* live set, not two guards
-that could drift. **It runs on the shared service/handler path that both a direct tool call and
-the ADR-0268 `tools.invoke` dispatcher traverse — never as an advertised-schema-only constraint.** The gateway
-dispatcher re-enters `app.call_tool(run_middleware=True)` with raw `arguments` and never reads the
-projected list schema (§5); a schema-only narrowing would let it drive a non-composed kind straight
-to the `resolve()`-fails-late dead-end this issue is about. Putting the guard on the handler path
-closes that. This is enforcement; §5 is presentation. Both read the same live set, so a kind hidden
-from the schema is also rejected by validation.
+(category parity with `resolve()`) by the §2 call-time guard `assert_kind_composed`, reading the
+same live `registered_kinds()` the schema projection uses (the anti-drift property). **It runs on
+the shared service/handler path that both a direct tool call and the ADR-0268 `tools.invoke`
+dispatcher traverse — never as an advertised-schema-only constraint.** The gateway dispatcher
+re-enters `app.call_tool(run_middleware=True)`; FastMCP first parses the raw arguments into the
+static (permissive) model, then the handler runs the guard on the parsed kind
+(`ResourceByKind.kind` / `ProviderSection.kind`) — so the dispatch path cannot bypass it and reach
+the `resolve()`-fails-late dead-end this issue is about. This is enforcement; §5 is presentation.
+Both read the same live set, so a kind hidden from the schema is also rejected here.
 
 ### 7. Empty-resolver fail-closed
 
-A zero-provider deployment (ADR-0131) is valid but degenerate. The projection over an empty set
-yields a `kind` constraint that admits nothing: the published JSON schema shows `enum: []`
-(honest — matches nothing) and any value fails validation with a `configuration_error` naming
-"no providers configured". For the systems provider-union path, the generated "exactly one section"
-validator over *zero* sections would otherwise raise a generic, misattributed "exactly one provider
-section" error; the factory therefore **short-circuits on an empty registry to the same
-`configuration_error` ("no providers configured") before that validator runs**, so both boundary
-shapes give the same clear message. The resolver already warns at construction; no new crash path.
+A zero-provider deployment (ADR-0131) is valid but degenerate. The schema projection over an empty
+set narrows the `ResourceKind` enum to `enum: []` (honest — matches nothing) and the
+`ProviderSection` object to no section properties; the call-time guard `assert_kind_composed`
+rejects every kind with a `configuration_error` naming **"no providers configured"** (the guard
+checks the empty set first, so it fires before the static model's "exactly one section" validator
+could raise a generic, misattributed error). Both boundary shapes give the same clear message. The
+resolver already warns at construction; no new crash path.
 
 ### 8. Fault-inject as a derived consequence
 
@@ -236,9 +230,11 @@ which touch this schema architecture.
 
 ## Testing
 
-- **Factory unit:** 0 / 1 / 2 / N kinds → correct `Literal` members + union sections + generated
-  "exactly one" validator; empty registry → both boundary shapes (the `kind` constraint and the
-  provider union) fail closed with the same `configuration_error` ("no providers configured").
+- **Projection + guard unit:** `project_tool_schema` over 0 / 1 / 2 / N kinds narrows the
+  `ResourceKind` enum and `ProviderSection` properties to exactly the live set (and leaves the
+  section sub-models intact); `assert_kind_composed` accepts a composed kind and rejects a
+  non-composed one with `configuration_error`; the empty set → `enum: []` / no sections and the
+  guard rejects every kind with "no providers configured".
 - **Boundary projection:** with only local-libvirt composed, the projected `inputSchema` for each
   narrowed surface excludes `remote-libvirt` and `fault-inject`; `tools.search` returns the same
   narrowed schema as `tools/list`.
