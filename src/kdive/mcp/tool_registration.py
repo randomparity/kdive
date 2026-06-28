@@ -88,9 +88,9 @@ def _pool_only_plane_registrar(
 
 
 def _register_gateway_tools(
-    app: FastMCP, _pool: AsyncConnectionPool, _assembly: AppAssembly
+    app: FastMCP, _pool: AsyncConnectionPool, assembly: AppAssembly
 ) -> None:
-    gateway.register(app)
+    gateway.register(app, resolver=assembly.resolver)
 
 
 def _register_reconcile_tools(

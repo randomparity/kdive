@@ -10,13 +10,16 @@ from fastmcp.exceptions import NotFoundError
 from fastmcp.tools.base import Tool, ToolResult
 from pydantic import Field, ValidationError
 
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.auth import current_context
 from kdive.mcp.exposure import tool_visible
+from kdive.mcp.middleware.exposure import project_listed_tool
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.schema_advertising import registered_tools
 from kdive.mcp.tool_index import TOOL_KEYWORDS
 from kdive.mcp.tools import _docmeta
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.serialization import JsonValue
 
 _log = logging.getLogger(__name__)
@@ -57,20 +60,26 @@ def _rank(candidates: list[Tool], *, query: str | None, namespace: str | None) -
     return sorted(candidates, key=lambda t: t.name)
 
 
-def _describe(tool: Tool) -> dict[str, JsonValue]:
-    """Serialise a Tool into the ``{name, description, input_schema}`` match shape."""
+def describe_tool(tool: Tool, kinds: frozenset[ResourceKind]) -> dict[str, JsonValue]:
+    """Serialise a Tool into the ``{name, description, input_schema}`` match shape,
+    narrowing the input schema to the composed ``kinds`` (ADR-0269)."""
     return cast(
         "dict[str, JsonValue]",
         {
             "name": tool.name,
             "description": tool.description or "",
-            "input_schema": tool.parameters,
+            "input_schema": project_listed_tool(tool, kinds).parameters,
         },
     )
 
 
-def register(app: FastMCP) -> None:
-    """Register the gateway tools (``tools.invoke``, ``tools.search``) on ``app``."""
+def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
+    """Register the gateway tools (``tools.invoke``, ``tools.search``) on ``app``.
+
+    Args:
+        app: The FastMCP application to register tools on.
+        resolver: Provider resolver used to narrow tool schemas in search results.
+    """
 
     @app.tool(
         name="tools.invoke",
@@ -163,11 +172,12 @@ def register(app: FastMCP) -> None:
                 "tool_search_miss",
                 extra={"query": query, "count": 0},
             )
+        kinds = resolver.registered_kinds()
         return ToolResponse.success(
             "tools.search",
             "ok",
             data={
-                "matches": cast("JsonValue", [_describe(t) for t in matches]),
+                "matches": cast("JsonValue", [describe_tool(t, kinds) for t in matches]),
                 "truncated": len(ranked) > limit,
             },
         )

@@ -23,6 +23,7 @@ from kdive.mcp.app import build_app
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.tools import gateway
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
@@ -134,7 +135,7 @@ def test_inner_authorization_error_propagates() -> None:
     async def _auth_gate() -> ToolResponse:
         raise fmcp_exc.AuthorizationError("not authorized")
 
-    gateway.register(app)
+    gateway.register(app, resolver=ProviderResolver({}))
     advertise_envelope_output_schema(app)
 
     async def _run() -> Any:
