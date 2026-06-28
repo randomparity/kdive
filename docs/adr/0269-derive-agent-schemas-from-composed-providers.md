@@ -1,0 +1,105 @@
+# ADR-0269: derive agent-facing provider schemas from the composed deployment (#879)
+
+- Status: Accepted
+- Date: 2026-06-28
+
+## Context
+
+The agent-facing MCP surface advertises every `ResourceKind` regardless of which providers the
+running deployment composed. A local-libvirt-only server still shows `remote-libvirt` and
+`fault-inject` in `allocations.request`'s `kind` selector, the `systems.define`/`provision`
+provider-section union, the `resources.list` kind filter, and `systems.profile_examples`. The
+runtime already gates correctly — `build_provider_resolver()` composes only enabled providers and
+`resolve()` fails closed for an unregistered kind (`configuration_error`, ADR-0131) — but the
+**presentation layer ignores it**: the static Pydantic models generate their JSON schemas at
+import time from the full enum, blind to per-deployment composition. The agent is sold a provider
+the server cannot serve (`BLACK_BOX_REVIEW.md` P2: an agent tried to allocate the unschedulable
+`fault-inject` mock).
+
+`fault-inject` (ADR-0072, default-off test fixture) is the loudest instance; `remote-libvirt`
+exhibits the same defect on a local-only server. Issue #879 is a special case of a general gap.
+
+The resolution layer is already *set-based* — the resolver holds a `dict[ResourceKind,
+ProviderRuntime]` and `registered_kinds()` returns a `frozenset` — and the enablement predicates
+are independent, so multiple providers can be composed at once. The presentation layer regressed
+to an enumerated triple (`ProviderSection`'s three hardcoded fields). The next milestone adds
+cloud and bare-metal providers with several enabled simultaneously, so the fix must be N-provider
+native and make adding a provider a registration concern, not a model edit.
+
+## Decision
+
+Make the agent-facing provider enumeration a per-deployment **subset projection** of the composed
+set, derived from one registry and computed at list/call time.
+
+1. **One registry.** A first-class `PROVIDER_SECTIONS: Mapping[ResourceKind,
+   ProviderSectionSpec]` (section model + alias + label) replaces the knowledge split across
+   `provisioning.py`'s hardcoded fields and `_KIND_BY_BLOCK`. The section models are unchanged
+   building blocks; the registry is the single source the resolver, schema projection, and
+   discovery iterate. A guard test pins its key set == `ResourceKind` members.
+
+2. **Deployment-scoped projection.** A pure factory `deployment_provider_models(kinds)` builds,
+   from the registry filtered to `kinds`, the narrowed `kind` `Literal` and a `ProviderSection`
+   model containing exactly those sections (with a generated "exactly one section" validator —
+   the per-System single-provider invariant, orthogonal to deployment membership). One model
+   yields **both** JSON schema and validation, so they cannot disagree about membership. Memoized
+   on the frozenset key.
+
+3. **Computed at list/call time, never frozen at registration.** Schema is projected in
+   `ToolExposureMiddleware.on_list_tools` (and `tools.search`) from the live
+   `registered_kinds()`; validation runs against the same projection at call time. This is option
+   (a): restart-to-add now, but a future runtime hot-add (recomposable resolver +
+   `tools/list_changed`) is additive — the schema architecture already tracks the live set.
+
+4. **Two membership views.** The agent boundary projects over `registered_kinds()`; the
+   domain/storage layer (`ProvisioningProfile.parse`, digest, render, teardown) stays permissive
+   over the full `ResourceKind` set. Disabling a provider must not orphan existing Systems of that
+   kind — a stored `remote-libvirt` profile must still parse and tear down after remote is
+   disabled, so narrowing lives strictly at the agent surface.
+
+5. **Call-time rejection.** A request naming a non-composed kind is rejected with
+   `configuration_error` (parity with `resolve()`), enumerating the composed kinds. Presentation
+   (§3) and enforcement read the same live set.
+
+6. **Empty composed set fail-closed.** A zero-provider deployment projects `enum: []` (matches
+   nothing) and rejects any kind with `configuration_error` "no providers configured".
+
+7. **Fault-inject is a derived consequence.** It is absent from every agent-facing surface iff it
+   is not composed — the stock case under its default-off opt-in. No per-provider special-casing,
+   `test_only` marker, or prose band-aid; #879's acceptance criteria fall out of the general rule.
+
+## Consequences
+
+- A cold agent on any deployment is offered exactly the providers it can provision; a
+  non-composed provider neither appears nor is accepted.
+- Adding a provider (cloud, bare-metal) touches the composition opt-in table and one
+  `PROVIDER_SECTIONS` entry; all four agent-facing surfaces update with no further edits.
+- Schema is now a function of runtime composition, not an import-time constant —
+  `tools/list` and `tools.search` output varies per deployment. The projection fails open to the
+  full schema on error (availability over tightness; the call-time gate is the real boundary).
+- The domain model stays permissive, so existing Systems of a disabled kind keep parsing and
+  tearing down; runtime ops on them still fail closed via `resolve()` (unchanged).
+- No DB migration, no RBAC change, no storage/digest/render change.
+- Supersedes the parked single-issue approach (closed PR #883): fault-inject-hiding is no longer
+  special-cased, the `test_only` marker and field-description band-aids are unnecessary and not
+  introduced.
+
+## Considered & rejected
+
+- **Prose / `test_only` marker on a still-advertised fault-inject (parked PR #883).** Marks the
+  symptom in one provider's text; leaves `remote-libvirt` mis-advertised and the schema still
+  enumerating non-composed kinds. Treats #879 as a special case rather than the general defect.
+- **Static superset model + JSON-schema narrowing + a separate validator.** Keeps the hardcoded
+  three-section model; the schema transform and the validator are two places that can drift, and
+  adding cloud/bare-metal still means editing a superset. Rejected for the same two-sources-of-
+  truth smell this ADR removes.
+- **Freeze the projection at tool registration.** Simpler, but a non-list-time snapshot would have
+  to be reworked when runtime hot-add lands; computing at list/call time costs a memoized build
+  and makes hot-add additive.
+- **Full runtime hot-add now (recomposable resolver + `tools/list_changed` + concurrency).**
+  Larger than #879 and arguably its own epic; deferred. This ADR builds only the seam so it stays
+  additive (option (a)).
+- **Removing `fault-inject` / non-composed kinds from the `ResourceKind` enum.** The enum is the
+  universe of kinds and the providers are real when composed; removal would break the providers and
+  their tests. Narrowing is a per-deployment subset, never a deletion.
+- **Narrowing the domain model too.** Would orphan stored Systems of a later-disabled provider
+  (unparseable profiles); the permissive domain model is required for teardown.
