@@ -19,6 +19,7 @@ structured per-item `required_headers` and collection-level replacement mode fie
 - Modify: `tests/mcp/catalog/test_upload_declaration_schema.py`
 - Modify: `src/kdive/mcp/tools/catalog/artifacts/uploads.py`
 - Modify: `src/kdive/mcp/tools/catalog/artifacts/registrar.py`
+- Modify: `docs/guide/reference/artifacts.md`
 - Modify: `docs/operating/external-build-upload.md`
 - Modify: `src/kdive/mcp/resources/_content/external-build-upload.md`
 
@@ -96,7 +97,9 @@ In `_upload_response()`, add structured headers before the flattened fields:
 - [ ] **Step 5: Update tool and runbook docs**
 
 Change `artifacts_create_run_upload` docstring to mention that each upload item returns
-`required_headers` for the PUT and that each call replaces the Run upload manifest.
+`required_headers` for the PUT and that each call replaces the Run upload manifest. Run
+`just docs` so the generated tool reference in `docs/guide/reference/artifacts.md` stays
+in sync.
 
 In both runbook copies, update step 3/4 and the mismatch paragraph so they say:
 
@@ -120,6 +123,7 @@ Expected: focused upload tests pass.
 Run:
 
 ```bash
+just docs-check
 just lint
 just type
 ```
