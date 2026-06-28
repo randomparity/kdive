@@ -26,6 +26,7 @@ import pytest
 
 import kdive.config as config
 from kdive.config.core_settings import SYSTEMS_TOML
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.inventory.loader import load_inventory_optional
 from kdive.inventory.model import InventoryDoc
 from kdive.mcp.tools.lifecycle.systems.profile_examples import build_profile_examples
@@ -36,6 +37,10 @@ from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePoli
 from kdive.services.systems.validation import validate_profile_for_provider
 
 _SENSITIVE_TOKENS = ("uri", "gdb_addr", "gdbstub_range", "cert_ref")
+
+_LOCAL = ResourceKind.LOCAL_LIBVIRT
+_REMOTE = ResourceKind.REMOTE_LIBVIRT
+_FAULT = ResourceKind.FAULT_INJECT
 
 _FULL_INVENTORY = """
 schema_version = 2
@@ -105,9 +110,17 @@ def _write_inventory(tmp_path: Path, body: str) -> Path:
     return path
 
 
-def _examples(doc: InventoryDoc | None) -> dict[str, dict[str, Any]]:
-    resp = build_profile_examples(doc)
+def _examples(
+    doc: InventoryDoc | None,
+    kinds: frozenset[ResourceKind] = frozenset(ResourceKind),
+) -> dict[str, dict[str, Any]]:
+    resp = build_profile_examples(doc, kinds)
     return {item.object_id: cast(dict[str, Any], item.data) for item in resp.items}
+
+
+def _providers(resp) -> set[str]:  # type: ignore[type-arg]
+    """Provider aliases from a build_profile_examples response."""
+    return {cast(dict[str, Any], item.data)["provider"] for item in resp.items}
 
 
 def _profile_of(item_data: dict[str, Any]) -> dict[str, Any]:
@@ -128,7 +141,7 @@ def _validate(provider: str, profile: dict[str, Any]) -> None:
 
 def test_one_example_per_configured_provider(tmp_path: Path) -> None:
     doc = InventoryDoc.parse({"schema_version": 2, "local_libvirt": [], "remote_libvirt": []})
-    # A doc with no instances configures no provider → default placeholder set (all three kinds).
+    # kinds drives provider selection; passing all three yields one example per provider.
     examples = _examples(doc)
     assert set(examples) == {"local-libvirt", "remote-libvirt", "fault-inject"}
 
@@ -244,7 +257,7 @@ def test_examples_never_leak_sensitive_inventory_fields(
 def test_collection_chains_full_discovery_lifecycle(tmp_path: Path) -> None:
     # #474: the entry breadcrumb must walk a cold agent through discovery → provision so an agent
     # that follows suggested_next_actions reaches a granted allocation on the first valid attempt.
-    resp = build_profile_examples(None)
+    resp = build_profile_examples(None, frozenset(ResourceKind))
     actions = resp.suggested_next_actions
     # The discovery tools that build a valid request appear, in order, before allocations.request.
     discovery = ("resources.list", "shapes.list", "accounting.estimate")
@@ -301,14 +314,14 @@ def test_examples_carry_sizing_note_and_concrete_size() -> None:
 
 def test_collection_and_item_status_are_ok() -> None:
     # The collection and each item report the literal "ok" status (a read-only discovery success).
-    resp = build_profile_examples(None)
+    resp = build_profile_examples(None, frozenset(ResourceKind))
     assert resp.status == "ok"
     assert resp.object_id == "profile-examples"
     assert [item.status for item in resp.items] == ["ok", "ok", "ok"]
 
 
 def test_each_item_carries_the_exact_data_keys_and_object_id() -> None:
-    resp = build_profile_examples(None)
+    resp = build_profile_examples(None, frozenset(ResourceKind))
     for item in resp.items:
         # The item object_id is the provider name, and its data carries exactly these keys.
         assert item.object_id in {"local-libvirt", "remote-libvirt", "fault-inject"}
@@ -368,8 +381,7 @@ host_uri = "qemu:///system"
 
 
 def test_only_configured_providers_get_examples(tmp_path: Path) -> None:
-    # A doc that configures ONLY local-libvirt emits exactly one example for it — the builder must
-    # project the supplied doc, not fall back to the full default set.
+    # The caller supplies the composed kinds; build_profile_examples emits exactly those.
     doc = InventoryDoc.parse(
         {
             "schema_version": 2,
@@ -378,7 +390,7 @@ def test_only_configured_providers_get_examples(tmp_path: Path) -> None:
             ],
         }
     )
-    examples = _examples(doc)
+    examples = _examples(doc, frozenset({_LOCAL}))
     assert set(examples) == {"local-libvirt"}
 
 
@@ -520,3 +532,23 @@ def test_remote_base_volume_requires_staged_source_kind(tmp_path: Path) -> None:
     assert remote["uses_real_reference"] is False
     volume = _profile_of(remote)["provider"]["remote-libvirt"]["base_image_volume"]
     assert volume == "REPLACE_ME-base-image-volume"
+
+
+# --- ADR-0269: provider set driven by composed kinds ---
+
+
+def test_examples_cover_exactly_the_composed_kinds() -> None:
+    resp = build_profile_examples(None, frozenset({_LOCAL}))
+    assert _providers(resp) == {"local-libvirt"}
+
+
+def test_fault_inject_absent_unless_composed() -> None:
+    without = build_profile_examples(None, frozenset({_LOCAL, _REMOTE}))
+    assert "fault-inject" not in _providers(without)
+    with_fault = build_profile_examples(None, frozenset({_LOCAL, _FAULT}))
+    assert "fault-inject" in _providers(with_fault)
+
+
+def test_empty_composed_set_yields_no_examples() -> None:
+    resp = build_profile_examples(None, frozenset())
+    assert resp.items == []

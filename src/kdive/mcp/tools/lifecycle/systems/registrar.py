@@ -94,7 +94,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_systems_provision_defined(app, pool, resolver)
     _register_systems_get(app, pool)
     _register_systems_list(app, pool)
-    _register_systems_profile_examples(app)
+    _register_systems_profile_examples(app, resolver)
     _register_systems_teardown(app, pool)
     _register_systems_reprovision(app, pool, resolver)
 
@@ -292,7 +292,7 @@ def _register_systems_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         )
 
 
-def _register_systems_profile_examples(app: FastMCP) -> None:
+def _register_systems_profile_examples(app: FastMCP, resolver: ProviderResolver) -> None:
     @app.tool(
         name="systems.profile_examples",
         annotations=_docmeta.read_only(),
@@ -304,7 +304,7 @@ def _register_systems_profile_examples(app: FastMCP) -> None:
         # defence-in-depth. No platform/project gate, no audit — the projection is non-sensitive
         # inventory identifiers only (ADR-0124).
         current_context()
-        return _build_profile_examples(_load_inventory_for_examples())
+        return _build_profile_examples(_load_inventory_for_examples(), resolver.registered_kinds())
 
 
 def _register_systems_teardown(app: FastMCP, pool: AsyncConnectionPool) -> None:
