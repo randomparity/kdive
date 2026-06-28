@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.references import ComponentKind
@@ -285,5 +286,38 @@ def test_build_install_boot_malformed_uuid_is_config_error(migrated_url: str) ->
         async with _pool(migrated_url) as pool:
             resp = await _COMPOSITE_HANDLERS.build_install_boot(pool, _ctx(), "not-a-uuid")
         assert resp.status == "error" and resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
+def test_build_install_boot_rejected_when_build_job_live(migrated_url: str) -> None:
+    """A live 'build' job for the run → composite returns configuration_error, not a raw DB error.
+
+    Regression for I2: before this fix, runs.build_install_boot would fall through to
+    resolve_and_admit → try_acquire_lease → UniqueViolation on the build_host_leases PK.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            # Run is already RUNNING because runs.build flipped it.
+            run_id = await _seed_bound_run(pool, state=RunState.RUNNING)
+            # Seed a live standalone build job — simulates a prior runs.build call.
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO jobs (id, kind, payload, state, attempt, max_attempts, "
+                    "    authorizing, dedup_key) "
+                    "VALUES (%s, 'build', %s, 'queued', 1, 3, %s, %s)",
+                    (
+                        uuid4(),
+                        Jsonb({"run_id": run_id}),
+                        Jsonb({"principal": "user-1", "agent_session": None, "project": "proj"}),
+                        f"build:{run_id}",
+                    ),
+                )
+            resp = await _COMPOSITE_HANDLERS.build_install_boot(pool, _ctx(), run_id)
+
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data.get("reason") == "build_already_in_progress"
 
     asyncio.run(_run())

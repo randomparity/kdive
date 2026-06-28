@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
@@ -29,7 +30,7 @@ from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
-from kdive.domain.operations.jobs import Job, JobKind
+from kdive.domain.operations.jobs import BUILD_BEARING_JOB_KINDS, Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import BuildInstallBootPayload
 from kdive.log import bind_context
@@ -152,6 +153,15 @@ async def _composite_locked(
                 existing = await queue.get_by_dedup_key(conn, _dedup_key(run))
                 if existing is not None:
                     return run_job_envelope(existing, run.id)
+            # Reject if a standalone runs.build (or a prior composite) is already live.
+            # resolve_and_admit would surface this as a raw UniqueViolation on the
+            # build_host_leases PK; catch it here as a typed configuration_error instead.
+            if await _live_build_job_exists(conn, run.id):
+                raise CategorizedError(
+                    "a build job is already in progress for this run",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                    details={"reason": "build_already_in_progress"},
+                )
             host = await resolve_and_admit(conn, parsed_profile, run.id)
             if state is RunState.CREATED:
                 await conn.execute(
@@ -181,6 +191,22 @@ async def _composite_locked(
             str(run.id), exc, suggested_next_actions=next_actions
         )
     return run_job_envelope(job, run.id)
+
+
+async def _live_build_job_exists(conn: AsyncConnection, run_id: UUID) -> bool:
+    """Whether a queued/running build-bearing job already holds the slot for ``run_id``.
+
+    Matches both ``build`` and ``build_install_boot``.  The composite's own dedup check
+    above returns early when a prior ``build_install_boot`` job is live, so in practice
+    this guard fires only when a standalone ``runs.build`` job is in progress.
+    """
+    cur = await conn.execute(
+        "SELECT 1 FROM jobs WHERE kind = ANY(%s::text[]) "
+        "AND (payload->>'run_id')::uuid = %s "
+        "AND state IN ('queued', 'running') LIMIT 1",
+        (list(BUILD_BEARING_JOB_KINDS), run_id),
+    )
+    return (await cur.fetchone()) is not None
 
 
 async def _locked_run_state(conn: AsyncConnection, run: Run) -> RunState:

@@ -35,6 +35,14 @@ DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
 )
 """Job kinds that require destructive-operation admission checks (ADR-0130)."""
 
+BUILD_BEARING_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT})
+"""Job kinds that acquire a build-host lease and (on ephemeral hosts) a build VM.
+
+Both ``build`` and ``build_install_boot`` hold the ``build_host_leases`` slot and the
+ephemeral build-VM domain for the duration of their build phase. Reconciler liveness guards
+and composite-admission conflict checks must treat both as live build holders (ADR-0268).
+"""
+
 
 class PowerAction(StrEnum):
     """Power operations accepted by the durable control-plane job contract."""

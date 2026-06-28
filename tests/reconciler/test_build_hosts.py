@@ -48,19 +48,22 @@ async def _seed_lease(conn: psycopg.AsyncConnection, run_id: UUID, build_host_id
     )
 
 
-async def _seed_build_job(conn: psycopg.AsyncConnection, run_id: UUID, *, state: str) -> UUID:
-    """Insert a build job for run_id with the given state; return its id."""
+async def _seed_build_job(
+    conn: psycopg.AsyncConnection, run_id: UUID, *, state: str, kind: str = "build"
+) -> UUID:
+    """Insert a build-bearing job for run_id with the given state; return its id."""
     job_id = uuid4()
     await conn.execute(
         "INSERT INTO jobs (id, kind, payload, state, attempt, max_attempts, "
         "    authorizing, dedup_key) "
-        "VALUES (%s, 'build', %s, %s, 1, 3, %s, %s)",
+        "VALUES (%s, %s, %s, %s, 1, 3, %s, %s)",
         (
             job_id,
+            kind,
             Jsonb({"run_id": str(run_id)}),
             state,
             Jsonb({"principal": "test", "agent_session": None, "project": "p"}),
-            f"build:{run_id}",
+            f"{kind}:{run_id}",
         ),
     )
     return job_id
@@ -106,6 +109,48 @@ def test_running_job_lease_not_reclaimed(migrated_url: str) -> None:
             system_id = await seed_system(seed)
             run_id = await seed_run(seed, system_id)
             await _seed_build_job(seed, run_id, state="running")
+            await _seed_lease(seed, run_id, host_id)
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, reclaim_orphan_build_host_leases)
+
+        assert count == 0
+        async with await connect(migrated_url) as check:
+            assert await _lease_exists(check, run_id)
+
+    asyncio.run(_run())
+
+
+def test_composite_queued_job_lease_not_reclaimed(migrated_url: str) -> None:
+    """A lease held by a queued build_install_boot job must NOT be reclaimed (C1 regression)."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            host_id = await _seed_ssh_build_host(seed)
+            system_id = await seed_system(seed)
+            run_id = await seed_run(seed, system_id)
+            await _seed_build_job(seed, run_id, state="queued", kind="build_install_boot")
+            await _seed_lease(seed, run_id, host_id)
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, reclaim_orphan_build_host_leases)
+
+        assert count == 0
+        async with await connect(migrated_url) as check:
+            assert await _lease_exists(check, run_id)
+
+    asyncio.run(_run())
+
+
+def test_composite_running_job_lease_not_reclaimed(migrated_url: str) -> None:
+    """A lease held by a running build_install_boot job must NOT be reclaimed (C1 regression)."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            host_id = await _seed_ssh_build_host(seed)
+            system_id = await seed_system(seed)
+            run_id = await seed_run(seed, system_id)
+            await _seed_build_job(seed, run_id, state="running", kind="build_install_boot")
             await _seed_lease(seed, run_id, host_id)
 
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
@@ -302,6 +347,25 @@ def test_build_vm_not_reaped_when_build_job_live(migrated_url: str) -> None:
             system_id = await seed_system(seed)
             run_id = await seed_run(seed, system_id)
             await _seed_build_job(seed, run_id, state="running")
+        reaper = _FakeBuildVmReaper([_build_vm(run_id)])
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda conn: reap_orphan_build_vms(conn, reaper))
+
+        assert count == 0
+        assert reaper.deleted == []
+
+    asyncio.run(_run())
+
+
+def test_build_vm_not_reaped_when_composite_job_live(migrated_url: str) -> None:
+    """A build VM whose build_install_boot job is running is NOT reaped (C1 regression)."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed)
+            run_id = await seed_run(seed, system_id)
+            await _seed_build_job(seed, run_id, state="running", kind="build_install_boot")
         reaper = _FakeBuildVmReaper([_build_vm(run_id)])
 
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
