@@ -28,7 +28,7 @@ _PROJECTION_FAILURES = metrics.get_meter("kdive.mcp").create_counter(
 
 #: Tools whose published ``inputSchema`` is narrowed to the composed ``ResourceKind`` set.
 NARROWED_TOOLS: frozenset[str] = frozenset(
-    {"allocations.request", "systems.define", "systems.provision"}
+    {"allocations.request", "systems.define", "systems.provision", "systems.reprovision"}
 )
 
 

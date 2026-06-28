@@ -40,6 +40,8 @@ class _FakeTool:
 
 def test_narrowed_tools_membership() -> None:
     assert "systems.define" in NARROWED_TOOLS
+    assert "systems.provision" in NARROWED_TOOLS
+    assert "systems.reprovision" in NARROWED_TOOLS
     assert "allocations.request" in NARROWED_TOOLS
     assert "resources.list" not in NARROWED_TOOLS
 
@@ -59,6 +61,14 @@ def test_allocation_tool_kind_enum_is_projected() -> None:
 def test_systems_tool_section_props_are_projected() -> None:
     # systems.define narrows via $defs.ProviderSection.properties (no ResourceKind enum here).
     tool = _FakeTool("systems.define", ProvisioningProfile.model_json_schema())
+    out = project_listed_tool(tool, frozenset({ResourceKind.LOCAL_LIBVIRT}))  # ty: ignore[invalid-argument-type]
+    kept = set(out.parameters["$defs"]["ProviderSection"]["properties"])
+    assert kept == {"local-libvirt"}
+
+
+def test_systems_reprovision_section_props_are_projected() -> None:
+    # systems.reprovision accepts a ProvisioningProfile and narrows the same ProviderSection union.
+    tool = _FakeTool("systems.reprovision", ProvisioningProfile.model_json_schema())
     out = project_listed_tool(tool, frozenset({ResourceKind.LOCAL_LIBVIRT}))  # ty: ignore[invalid-argument-type]
     kept = set(out.parameters["$defs"]["ProviderSection"]["properties"])
     assert kept == {"local-libvirt"}

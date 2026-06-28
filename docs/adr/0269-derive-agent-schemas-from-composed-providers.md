@@ -7,7 +7,7 @@
 
 The agent-facing MCP surface advertises every `ResourceKind` regardless of which providers the
 running deployment composed. A local-libvirt-only server still shows `remote-libvirt` and
-`fault-inject` in `allocations.request`'s `kind` selector, the `systems.define`/`provision`
+`fault-inject` in `allocations.request`'s `kind` selector, the `systems.define`/`provision`/`reprovision`
 provider-section union, the `resources.list` kind filter, and `systems.profile_examples`. The
 runtime already gates correctly — `build_provider_resolver()` composes only enabled providers and
 `resolve()` fails closed for an unregistered kind (`configuration_error`, ADR-0131) — but the

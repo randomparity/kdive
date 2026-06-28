@@ -14,8 +14,8 @@ providers the running deployment actually composed. A local-libvirt-only server 
 
 - `allocations.request` — the `kind` selector (`ResourceByKind.kind`, an open `ResourceKind`
   enum; `tool_payloads.py:51-53`).
-- `systems.define` / `systems.provision` — the provider section union, which carries a
-  hardcoded section for all three providers (`profiles/provisioning.py:157-189`).
+- `systems.define` / `systems.provision` / `systems.reprovision` — the provider section union,
+  which carries a hardcoded section for all three providers (`profiles/provisioning.py:157-189`).
 - `systems.profile_examples` — the discovery tool that emits example profiles per provider.
 
 (The `resources.list` `kind` filter shows the same static enum, but it is a *query predicate over
@@ -141,7 +141,7 @@ disabled-kind System already fails closed via `resolve()` (ADR-0131) — unchang
 | Surface | Mechanism |
 |---|---|
 | `allocations.request` `kind` (`ResourceByKind`) | narrowed `Literal` from the projection |
-| `systems.define` / `provision` provider union | projected `ProviderSection` model |
+| `systems.define` / `provision` / `reprovision` provider union | projected `ProviderSection` model |
 | `systems.profile_examples` | iterate `registered_kinds()` (replaces #883's special-case) |
 
 These are *provisioning-choice / discovery* surfaces — what the agent is told it can provision.
