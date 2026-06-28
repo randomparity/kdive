@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import pytest
 
 from kdive.mcp.middleware.exposure import ToolExposureMiddleware
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.errors import AuthError
 from kdive.security.authz.rbac import PlatformRole, Role
@@ -63,7 +64,7 @@ def test_viewer_catalog_is_reduced(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "kdive.mcp.middleware.shared.current_context", lambda: _ctx(roles={"a": Role.VIEWER})
     )
-    names = _run_filter(ToolExposureMiddleware())
+    names = _run_filter(ToolExposureMiddleware(ProviderResolver({})))
     assert names == {"projects.list", "jobs.get"}
     assert names < {t.name for t in _ALL}
 
@@ -72,7 +73,7 @@ def test_operator_sees_operator_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "kdive.mcp.middleware.shared.current_context", lambda: _ctx(roles={"a": Role.OPERATOR})
     )
-    names = _run_filter(ToolExposureMiddleware())
+    names = _run_filter(ToolExposureMiddleware(ProviderResolver({})))
     assert {"projects.list", "jobs.get", "allocations.request"} <= names
     assert "control.force_crash" not in names  # admin-only
     assert "ops.reconcile_now" not in names  # platform
@@ -83,7 +84,7 @@ def test_platform_operator_sees_platform_tool(monkeypatch: pytest.MonkeyPatch) -
         "kdive.mcp.middleware.shared.current_context",
         lambda: _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR})),
     )
-    names = _run_filter(ToolExposureMiddleware())
+    names = _run_filter(ToolExposureMiddleware(ProviderResolver({})))
     assert "ops.reconcile_now" in names
     assert "jobs.get" not in names  # no project grant
 
@@ -96,5 +97,5 @@ def test_fail_open_when_context_missing(
 
     monkeypatch.setattr("kdive.mcp.middleware.shared.current_context", _raise)
     with caplog.at_level(logging.WARNING):
-        names = _run_filter(ToolExposureMiddleware())
+        names = _run_filter(ToolExposureMiddleware(ProviderResolver({})))
     assert names == {t.name for t in _ALL}  # unfiltered — discovery never breaks

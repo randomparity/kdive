@@ -41,14 +41,15 @@ def build_app(
             tracer=trace.get_tracer("kdive.mcp"), meter=metrics.get_meter("kdive.mcp")
         )
     )
+    composition = provider_composition or ProviderComposition(secret_registry=secret_registry)
+    resolver = composition.build_provider_resolver()
     app.add_middleware(UsageTrackingMiddleware(pool))
-    app.add_middleware(ToolExposureMiddleware())
+    app.add_middleware(ToolExposureMiddleware(resolver))
     app.add_middleware(DenialAuditMiddleware(pool))
     app.add_middleware(BindingErrorMiddleware())
 
-    composition = provider_composition or ProviderComposition(secret_registry=secret_registry)
     assembly = AppAssembly(
-        resolver=composition.build_provider_resolver(),
+        resolver=resolver,
         secret_registry=composition.secret_registry,
         reaper=composition.build_reconciler_reaper(),
         dump_volume_reaper=composition.build_reconciler_dump_volume_reaper(),
