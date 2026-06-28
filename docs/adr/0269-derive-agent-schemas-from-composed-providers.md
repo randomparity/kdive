@@ -42,26 +42,39 @@ set, derived from one registry and computed at list/call time.
    model containing exactly those sections (with a generated "exactly one section" validator —
    the per-System single-provider invariant, orthogonal to deployment membership). One model
    yields **both** JSON schema and validation, so they cannot disagree about membership. Memoized
-   on the frozenset key.
+   on the frozenset key. The factory is **boundary-only** — it feeds the agent-facing schema and
+   validation, never storage or the digest.
 
 3. **Computed at list/call time, never frozen at registration.** Schema is projected in
    `ToolExposureMiddleware.on_list_tools` (and `tools.search`) from the live
    `registered_kinds()`; validation runs against the same projection at call time. This is option
    (a): restart-to-add now, but a future runtime hot-add (recomposable resolver +
-   `tools/list_changed`) is additive — the schema architecture already tracks the live set.
+   `tools/list_changed`) is additive — the schema architecture already tracks the live set. The
+   projection fails open to the full schema on error, and that branch emits a structured warning +
+   counter so a silent revert is observable.
 
 4. **Two membership views.** The agent boundary projects over `registered_kinds()`; the
-   domain/storage layer (`ProvisioningProfile.parse`, digest, render, teardown) stays permissive
-   over the full `ResourceKind` set. Disabling a provider must not orphan existing Systems of that
-   kind — a stored `remote-libvirt` profile must still parse and tear down after remote is
-   disabled, so narrowing lives strictly at the agent surface.
+   domain/storage layer (`ProvisioningProfile.parse`, digest, render, teardown) keeps the existing
+   hand-written static `ProviderSection` over the full `ResourceKind` set — **unchanged**.
+   Disabling a provider must not orphan existing Systems of that kind — a stored `remote-libvirt`
+   profile must still parse and tear down after remote is disabled, so narrowing lives strictly at
+   the agent surface. Leaving the domain model untouched also keeps `profile_digest` (ADR-0038),
+   the reprovision dedup key, byte-identical; routing the domain model through the factory was
+   rejected for that digest-stability risk. The `resources.list` `kind` filter is a query over
+   existing data (which may include non-composed kinds), not a provisioning choice, so it too
+   stays permissive — only the three provisioning-choice surfaces narrow.
 
 5. **Call-time rejection.** A request naming a non-composed kind is rejected with
-   `configuration_error` (parity with `resolve()`), enumerating the composed kinds. Presentation
-   (§3) and enforcement read the same live set.
+   `configuration_error` (parity with `resolve()`), enumerating the composed kinds. The guard runs
+   on the shared service/handler path that both a direct call and the ADR-0268 `tools.invoke`
+   dispatcher traverse — not as a schema-only constraint — so the gateway (raw `arguments`, never
+   reading the projected list schema) cannot bypass it. Presentation (§3) and enforcement read the
+   same live set.
 
 6. **Empty composed set fail-closed.** A zero-provider deployment projects `enum: []` (matches
-   nothing) and rejects any kind with `configuration_error` "no providers configured".
+   nothing) and rejects any kind with `configuration_error` "no providers configured"; the factory
+   short-circuits the systems provider-union on an empty registry to the same error before the
+   generated "exactly one section" validator can raise a generic, misattributed failure.
 
 7. **Fault-inject is a derived consequence.** It is absent from every agent-facing surface iff it
    is not composed — the stock case under its default-off opt-in. No per-provider special-casing,
@@ -71,8 +84,9 @@ set, derived from one registry and computed at list/call time.
 
 - A cold agent on any deployment is offered exactly the providers it can provision; a
   non-composed provider neither appears nor is accepted.
-- Adding a provider (cloud, bare-metal) touches the composition opt-in table and one
-  `PROVIDER_SECTIONS` entry; all four agent-facing surfaces update with no further edits.
+- Adding a provider (cloud, bare-metal) touches three declared places — a `ResourceKind` member,
+  one `PROVIDER_SECTIONS` entry, and a composition opt-in (the completeness guard binds member and
+  entry); the three narrowed agent-facing surfaces then update with no further edits.
 - Schema is now a function of runtime composition, not an import-time constant —
   `tools/list` and `tools.search` output varies per deployment. The projection fails open to the
   full schema on error (availability over tightness; the call-time gate is the real boundary).

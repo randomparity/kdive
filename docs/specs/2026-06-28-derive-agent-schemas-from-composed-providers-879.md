@@ -16,8 +16,10 @@ providers the running deployment actually composed. A local-libvirt-only server 
   enum; `tool_payloads.py:51-53`).
 - `systems.define` / `systems.provision` — the provider section union, which carries a
   hardcoded section for all three providers (`profiles/provisioning.py:157-189`).
-- `resources.list` — the kind filter.
 - `systems.profile_examples` — the discovery tool that emits example profiles per provider.
+
+(The `resources.list` `kind` filter shows the same static enum, but it is a *query predicate over
+existing data*, not a provisioning choice, and is deliberately left permissive — see §4.)
 
 The runtime already gates correctly: `ProviderComposition.build_provider_resolver()`
 (`composition.py:329-351`) composes only the *enabled* providers, and
@@ -34,14 +36,17 @@ Issue #879 is therefore a special case of a general architectural gap.
 
 ## Goals
 
-1. Every agent-facing provider enumeration — schema enum, profile union, discovery output,
-   and the kind filter — presents exactly the providers in the deployment's composed set
-   (`ProviderResolver.registered_kinds()`).
+1. Every agent-facing *provisioning-choice* enumeration — the allocation `kind` selector, the
+   `systems` provider-section union, and the `profile_examples` discovery output — presents
+   exactly the providers in the deployment's composed set (`ProviderResolver.registered_kinds()`).
+   Read/query surfaces (the `resources.list` `kind` filter) stay permissive (§4).
 2. A request naming a non-composed kind is rejected at the agent boundary with
    `configuration_error`, not accepted-then-failed-late.
 3. The seam is **forward-looking for the cloud-provider milestone**: adding a provider touches
-   only the composition opt-in table and a provider-section registry; every agent-facing
-   surface updates with no further edits.
+   exactly three declared places — a `ResourceKind` member, a `PROVIDER_SECTIONS` registry entry,
+   and a composition opt-in — after which every agent-facing surface updates with no further edits.
+   (`ResourceKind` is a closed `StrEnum` and the registry-completeness guard binds member and
+   entry together, so the count cannot be lower.)
 4. Schema and validation are computed from the *current* `registered_kinds()` at **list-time /
    call-time**, so a future runtime hot-add (recomposable resolver + `tools/list_changed`) is an
    *additive* change, not a schema-layer rewrite.
@@ -74,9 +79,11 @@ PROVIDER_SECTIONS: Mapping[ResourceKind, ProviderSectionSpec]
 where `ProviderSectionSpec` carries the existing Pydantic section model (`LibvirtProfile`,
 `FaultInjectProfile`, `RemoteLibvirtProfile`), the `systems.toml` block / alias name, and the
 schema label. The section *models* are unchanged building blocks; the registry is the data the
-resolver, the schema projection, and discovery all iterate. Adding a provider = one registry
-entry (plus its composition opt-in). A guard test asserts the registry's key set equals the
-`ResourceKind` members so a new kind cannot be added without a section spec.
+resolver, the schema projection, and discovery all iterate. Adding a provider = a `ResourceKind`
+member + one registry entry + its composition opt-in (three declared places; the enum member and
+the registry entry are bound by the guard below). A guard test asserts the registry's key set
+equals the `ResourceKind` members so a new kind cannot be added without a section spec, nor a
+section spec without an enum member.
 
 ### 2. Deployment-scoped projection, consumed at list/call time
 
@@ -108,26 +115,43 @@ This is the load-bearing correctness decision.
 - **Agent boundary** (MCP tool schemas + create-time validation): factory called with
   `resolver.registered_kinds()`. Only composed providers appear and are accepted.
 - **Domain / storage** (`ProvisioningProfile.parse`, `profile_digest`, libvirt render, teardown):
-  factory called with the **full** `ResourceKind` set — stays permissive.
+  keeps the existing hand-written static `ProviderSection` (`provisioning.py:157-189`) over the
+  full `ResourceKind` set — **unchanged**. The factory/projection is **boundary-only**; it never
+  feeds storage, the domain model, or the digest.
 
 Rationale: **disabling a provider must not orphan existing Systems of that kind.** A
 remote-libvirt System created while remote was enabled must still parse, digest, and tear down
 after remote is disabled; if the *domain* model narrowed, those stored profiles would become
-unparseable. Narrowing therefore lives strictly at the agent surface. Runtime resolution for such
-a System already fails closed via `resolve()` (ADR-0131) — unchanged and out of scope.
+unparseable. Narrowing therefore lives strictly at the agent surface.
+
+Leaving the domain model untouched also protects `profile_digest` (`provisioning.py:394-408`),
+the reprovision dedup key (ADR-0038): it hashes `model_dump(by_alias=True, exclude_none=True)`, so
+*any* change to the stored/serialized `ProviderSection` would silently re-key every stored
+profile's digest and break reprovision dedup. Because the boundary projection is a separate model
+that never touches storage, digests are provably unchanged — pinned by a regression test (see
+Testing). Routing the domain model through the factory was considered and rejected for exactly
+this risk: the DRY gain does not justify putting digest stability in play. Runtime resolution for a
+disabled-kind System already fails closed via `resolve()` (ADR-0131) — unchanged and out of scope.
 
 ### 4. The four surfaces
 
 | Surface | Mechanism |
 |---|---|
 | `allocations.request` `kind` (`ResourceByKind`) | narrowed `Literal` from the projection |
-| `resources.list` kind filter | narrowed `Literal` from the projection |
 | `systems.define` / `provision` provider union | projected `ProviderSection` model |
 | `systems.profile_examples` | iterate `registered_kinds()` (replaces #883's special-case) |
 
-`profile_examples` is already a tool *call*, so it reads the live set naturally. The first three
-are static schemas today; their published `inputSchema` is projected at list-time (§5) and their
-input validated at call-time (§6).
+These are *provisioning-choice / discovery* surfaces — what the agent is told it can provision.
+`profile_examples` is already a tool *call*, so it reads the live set naturally; the first two are
+static schemas today, their published `inputSchema` projected at list-time (§5) and their input
+validated at call-time (§6).
+
+**Read/query surfaces stay permissive.** The `resources.list` `kind` filter is a query predicate
+over *existing data*, not a provisioning choice. Because the domain stays permissive (§3), the
+catalog can legitimately hold rows of a now-disabled kind (a `remote-libvirt` resource registered
+before remote was disabled); narrowing the filter would make those rows unfilterable while the
+unfiltered listing still returns them — an observable inconsistency. So the `resources.list` filter
+is deliberately **excluded** from narrowing and keeps the full `ResourceKind` enum.
 
 ### 5. List-time schema projection seam
 
@@ -139,22 +163,32 @@ is applied by `tools.search` (ADR-0268), which returns full input schemas for ga
 otherwise a searched schema would re-expose a non-composed kind the listed schema hid. The
 projection failing must **fail open** to the unprojected (full) schema, mirroring the middleware's
 existing fail-open on filter error (availability over tightness; the call-time gate in §6 is the
-real boundary).
+real boundary). The fail-open branch **must emit a structured warning and increment a counter** so
+a silent revert to the full schema is detectable in production — without it, Goal 1 would degrade
+unobserved and the happy-path exclusion tests (§Testing) would not catch the regression.
 
 ### 6. Call-time validation
 
 A request naming a non-composed kind is rejected at the boundary with `configuration_error`
-(category parity with `resolve()`), reusing `ProvisioningProfile.parse`'s existing
-`ValidationError → CONFIGURATION_ERROR` mapping for the systems path and an explicit guard fed by
-`registered_kinds()` for the allocation path. This is enforcement; §5 is presentation. Both read
-the same live set, so a kind hidden from the schema is also rejected by validation.
+(category parity with `resolve()`), via an explicit guard fed by `registered_kinds()`. **The guard
+runs on the shared service/handler path that both a direct tool call and the ADR-0268
+`tools.invoke` dispatcher traverse — never as an advertised-schema-only constraint.** The gateway
+dispatcher re-enters `app.call_tool(run_middleware=True)` with raw `arguments` and never reads the
+projected list schema (§5); a schema-only narrowing would let it drive a non-composed kind straight
+to the `resolve()`-fails-late dead-end this issue is about. Putting the guard on the handler path
+closes that. This is enforcement; §5 is presentation. Both read the same live set, so a kind hidden
+from the schema is also rejected by validation.
 
 ### 7. Empty-resolver fail-closed
 
 A zero-provider deployment (ADR-0131) is valid but degenerate. The projection over an empty set
 yields a `kind` constraint that admits nothing: the published JSON schema shows `enum: []`
 (honest — matches nothing) and any value fails validation with a `configuration_error` naming
-"no providers configured". The resolver already warns at construction; no new crash path.
+"no providers configured". For the systems provider-union path, the generated "exactly one section"
+validator over *zero* sections would otherwise raise a generic, misattributed "exactly one provider
+section" error; the factory therefore **short-circuits on an empty registry to the same
+`configuration_error` ("no providers configured") before that validator runs**, so both boundary
+shapes give the same clear message. The resolver already warns at construction; no new crash path.
 
 ### 8. Fault-inject as a derived consequence
 
@@ -169,9 +203,10 @@ schedulable.
 
 The next milestone adds cloud (and later bare-metal) providers, with multiple providers enabled
 at once (`remote-libvirt + cloud + bare-metal`). The set-based projection handles N providers
-with no change: a new provider is one `PROVIDER_SECTIONS` entry + one composition opt-in, and it
-appears across all four surfaces automatically. Because schema/validation are computed at
-list/call time from the live set, the residual work for runtime hot-add is only the recomposable
+with no change: a new provider is a `ResourceKind` member + one `PROVIDER_SECTIONS` entry + one
+composition opt-in, and it appears across all three narrowed surfaces automatically. Because
+schema/validation are computed at list/call time from the live set, the residual work for runtime
+hot-add is only the recomposable
 resolver, the `tools/list_changed` notification, and mid-request concurrency safety — none of
 which touch this schema architecture.
 
@@ -186,18 +221,26 @@ which touch this schema architecture.
 ## Testing
 
 - **Factory unit:** 0 / 1 / 2 / N kinds → correct `Literal` members + union sections + generated
-  "exactly one" validator; empty → fail-closed `configuration_error`.
+  "exactly one" validator; empty registry → both boundary shapes (the `kind` constraint and the
+  provider union) fail closed with the same `configuration_error` ("no providers configured").
 - **Boundary projection:** with only local-libvirt composed, the projected `inputSchema` for each
-  of the four surfaces excludes `remote-libvirt` and `fault-inject`; `tools.search` returns the
-  same narrowed schema as `tools/list`.
-- **Call-time rejection:** an `allocations.request` / `systems.define` naming a non-composed kind
-  returns `configuration_error` enumerating the composed kinds.
-- **Domain-permissive regression:** a stored `remote-libvirt` profile still `parse`s, digests, and
-  serializes when remote-libvirt is *not* composed.
+  narrowed surface excludes `remote-libvirt` and `fault-inject`; `tools.search` returns the same
+  narrowed schema as `tools/list`.
+- **Read surface stays permissive:** the `resources.list` `kind` filter still accepts every
+  `ResourceKind`, and a listing returns a stored non-composed-kind row.
+- **Call-time rejection (incl. gateway):** an `allocations.request` / `systems.define` naming a
+  non-composed kind returns `configuration_error` enumerating the composed kinds — asserted both on
+  a direct call **and** through the ADR-0268 `tools.invoke` dispatcher (proves the guard is not
+  schema-only).
+- **Digest stability:** a stored `remote-libvirt` profile's `profile_digest` is byte-identical
+  before and after this change, and `parse`/`dump_profile` still round-trip it when remote-libvirt
+  is *not* composed (proves the boundary projection never touches storage/digest, ADR-0038).
 - **Fault-inject derived behavior:** default deployment (no `KDIVE_FAULT_INJECT`) shows no
-  `fault-inject` on any surface; with it set, `fault-inject` appears on all four.
-- **Forward-looking property:** registering a synthetic kind in `PROVIDER_SECTIONS` + composition
-  makes it appear across all four surfaces with no other edits (proves goal 3).
+  `fault-inject` on any narrowed surface; with it set, `fault-inject` appears on all three.
+- **Forward-looking property:** a factory-level test over an *injected* registry carrying an extra
+  spec yields that kind across all three narrowed projections with no production-code edits; the
+  real "add a provider" cost (enum member + registry entry + composition opt-in) is documented, not
+  claimed as zero.
 - **Registry completeness guard:** `PROVIDER_SECTIONS` key set == `ResourceKind` members.
 
 ## Acceptance criteria (issue #879) → coverage
