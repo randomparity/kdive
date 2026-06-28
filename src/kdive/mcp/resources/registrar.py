@@ -1,10 +1,11 @@
-"""Register operator docs and cited ADRs as MCP resources (ADR-0151).
+"""Register operator docs as MCP resources (ADR-0151).
 
 `build_app()` registers tools only, so `ListMcpResourcesTool` returns nothing even though
-the tool surface cites operator docs (``docs/operating/build-source-staging.md``) and ADRs
-(ADR-0080) in schema/error strings. This module registers those cited docs as
+the tool surface cites operator docs (``docs/operating/build-source-staging.md``) in
+schema/error strings. This module registers those cited docs as
 ``TextResource``s over a **fixed, code-defined allowlist** — no request-supplied path, no
-parameterized template — so a doc named in an error string is reachable over MCP.
+parameterized template — so a doc named in an error string is reachable over MCP. Internal
+ADRs are deliberately not served (ADR-0270).
 
 The served bytes are packaged snapshots under ``_content/`` (generated from the canonical
 ``docs/`` tree by ``scripts/gen_doc_resources.py`` and drift-guarded). They live inside the
@@ -57,7 +58,7 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
         name="external-build-upload",
         title="Preparing artifacts for the external-build lane",
         description=(
-            "The default build lane (ADR-0234): build the kernel locally and upload it, no "
+            "The default build lane: build the kernel locally and upload it, no "
             "operator-staged source tree or build host needed. How to shape the upload "
             "artifacts: the combined kernel+modules gzip tar (boot/vmlinuz bzImage + "
             "lib/modules/<release>/), the exact tar recipe, and the optional "
@@ -78,17 +79,6 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
         ),
     ),
     DocResource(
-        uri="resource://kdive/adr/0080",
-        source="docs/adr/0080-remote-provisioning-disk-image-profile.md",
-        content_file="0080-remote-provisioning-disk-image-profile.md",
-        name="adr-0080",
-        title="ADR-0080 — Remote provisioning disk-image profile",
-        description=(
-            "The remote-libvirt disk-image provisioning profile (base_image_volume staging). "
-            "Cited by systems.profile_examples and remote provisioning errors."
-        ),
-    ),
-    DocResource(
         uri="resource://kdive/docs/guide/response-envelope.md",
         source="docs/guide/response-envelope.md",
         content_file="response-envelope.md",
@@ -97,7 +87,7 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
         description=(
             "How to read any kdive tool result: the uniform ToolResponse envelope fields and how "
             "to interpret the intentionally-open data, items, and refs. Referenced by the "
-            "advertised tool outputSchema (ADR-0170)."
+            "advertised tool outputSchema."
         ),
     ),
 )
