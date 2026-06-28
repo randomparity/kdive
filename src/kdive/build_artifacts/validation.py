@@ -461,11 +461,13 @@ def _find_build_id_note(
         sh_type = struct.unpack_from("<I", sht, off + 4)[0]
         if sh_type != _SHT_NOTE:
             continue
-        name = shstr[sh_name : shstr.index(b"\x00", sh_name)]
-        if name == b".note.gnu.build-id":
-            notes = _read_section(store, key, sht, e_shentsize, i, max_size=max_size)
+        _section_name_end = shstr.index(b"\x00", sh_name)
+        notes = _read_section(store, key, sht, e_shentsize, i, max_size=max_size)
+        try:
             return parse_gnu_build_id(notes)
-    raise _build_failure("vmlinux carries no .note.gnu.build-id section")
+        except CategorizedError:
+            continue
+    raise _build_failure("vmlinux carries no GNU build-id note")
 
 
 def _read_section(

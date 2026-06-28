@@ -56,8 +56,10 @@ class _FakeStore:
         return self._blobs[key][start : start + length]
 
 
-def _elf_with_build_id(build_id: bytes) -> bytes:
-    """Minimal ELF64-LE blob carrying a .note.gnu.build-id section.
+def _elf_with_build_id(
+    build_id: bytes, *, note_section_name: bytes = b".note.gnu.build-id"
+) -> bytes:
+    """Minimal ELF64-LE blob carrying a GNU build-id SHT_NOTE section.
 
     Layout (offsets chosen so extract_build_id_ranged round-trips):
       [0:64]   ELF64 header
@@ -65,9 +67,9 @@ def _elf_with_build_id(build_id: bytes) -> bytes:
     """
     note = struct.pack("<III", 4, len(build_id), 3) + b"GNU\x00" + build_id
     # section-name string table: index 0 = "", then the two section names.
-    shstrtab = b"\x00.shstrtab\x00.note.gnu.build-id\x00"
+    shstrtab = b"\x00.shstrtab\x00" + note_section_name + b"\x00"
     name_shstrtab = shstrtab.index(b".shstrtab")
-    name_note = shstrtab.index(b".note.gnu.build-id")
+    name_note = shstrtab.index(note_section_name)
 
     header = bytearray(64)
     header[0:4] = b"\x7fELF"
@@ -434,6 +436,14 @@ def test_note_sh_name_past_shstrtab_is_build_failure() -> None:
     with pytest.raises(CategorizedError) as e:
         _validate_vmlinux_blob(bytes(blob))
     assert e.value.category is ErrorCategory.BUILD_FAILURE
+
+
+def test_extract_build_id_accepts_nonstandard_note_section_name() -> None:
+    build_id = bytes.fromhex("0123456789abcdef")
+    blob = _elf_with_build_id(build_id, note_section_name=b".notes")
+    store = _FakeStore({"v": blob}, {})
+
+    assert extract_build_id_ranged(store, "v", max_size=len(blob)) == build_id.hex()
 
 
 def test_extract_build_id_ranged_truncated_header_is_build_failure() -> None:

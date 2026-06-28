@@ -839,4 +839,4 @@ def test_read_section_exact_boundary_at_object_size_is_allowed() -> None:
     store = _FakeStore({"vmlinux": blob}, {})
     with pytest.raises(CategorizedError) as exc:
         extract_build_id_ranged(store, "vmlinux", max_size=250)  # 200 + 50 == 250
-    assert str(exc.value) == "vmlinux carries no .note.gnu.build-id section"
+    assert str(exc.value) == "vmlinux carries no GNU build-id note"
