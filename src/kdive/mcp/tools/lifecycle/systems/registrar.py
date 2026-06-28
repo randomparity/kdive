@@ -9,7 +9,9 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.domain.capacity.state import SystemState
+from kdive.domain.errors import CategorizedError
 from kdive.mcp.auth import current_context
+from kdive.mcp.provider_schema import assert_kind_composed
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
@@ -94,7 +96,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_systems_provision_defined(app, pool, resolver)
     _register_systems_get(app, pool)
     _register_systems_list(app, pool)
-    _register_systems_profile_examples(app)
+    _register_systems_profile_examples(app, resolver)
     _register_systems_teardown(app, pool)
     _register_systems_reprovision(app, pool, resolver)
 
@@ -150,6 +152,10 @@ def _register_systems_define(
         Use `systems.provision` instead when the profile needs no upload window. Operator only.
         """
         ctx = current_context()
+        try:
+            assert_kind_composed(profile.provider.kind, resolver.registered_kinds())
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(allocation_id, exc)
         return await with_runtime_for_allocation(
             pool,
             resolver,
@@ -200,6 +206,10 @@ def _register_systems_provision(
         System. Operator only.
         """
         ctx = current_context()
+        try:
+            assert_kind_composed(profile.provider.kind, resolver.registered_kinds())
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(allocation_id, exc)
         return await with_runtime_for_allocation(
             pool,
             resolver,
@@ -292,7 +302,7 @@ def _register_systems_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         )
 
 
-def _register_systems_profile_examples(app: FastMCP) -> None:
+def _register_systems_profile_examples(app: FastMCP, resolver: ProviderResolver) -> None:
     @app.tool(
         name="systems.profile_examples",
         annotations=_docmeta.read_only(),
@@ -304,7 +314,7 @@ def _register_systems_profile_examples(app: FastMCP) -> None:
         # defence-in-depth. No platform/project gate, no audit — the projection is non-sensitive
         # inventory identifiers only (ADR-0124).
         current_context()
-        return _build_profile_examples(_load_inventory_for_examples())
+        return _build_profile_examples(_load_inventory_for_examples(), resolver.registered_kinds())
 
 
 def _register_systems_teardown(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -349,6 +359,10 @@ def _register_systems_reprovision(
         use `systems.provision` instead. Requires operator and opt-in.
         """
         ctx = current_context()
+        try:
+            assert_kind_composed(profile.provider.kind, resolver.registered_kinds())
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(system_id, exc)
         return await with_runtime_for_system(
             pool,
             resolver,

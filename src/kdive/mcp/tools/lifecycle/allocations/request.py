@@ -13,11 +13,18 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Allocation
 from kdive.log import bind_context
 from kdive.mcp.exposure import visible_next_actions
+from kdive.mcp.provider_schema import assert_kind_composed
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import AllocationRequestPayload, ResourceById, ResourceByPool
+from kdive.mcp.tool_payloads import (
+    AllocationRequestPayload,
+    ResourceById,
+    ResourceByKind,
+    ResourceByPool,
+)
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools.lifecycle.allocations.common import allocation_next_actions
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext, require_project
 from kdive.security.authz.rbac import Role, projects_with_role, require_role
 from kdive.services.allocation.admission.core import (
@@ -61,6 +68,23 @@ def _outcome_for_metrics(result: RequestAdmissionResult) -> AdmissionOutcome | N
         category = result.category or ErrorCategory.CONFIGURATION_ERROR
         return AdmissionOutcome(granted=False, allocation=None, category=category)
     return None
+
+
+def _guard_resource_kind(request: AllocationRequestPayload, resolver: ProviderResolver) -> None:
+    """Reject a kind-selected resource whose kind is not composed (ADR-0269).
+
+    A pool/id selector names no kind, so the guard is a no-op there — resolution fails
+    closed downstream for an absent resource.
+
+    Args:
+        request: The incoming allocation request payload.
+        resolver: The provider resolver carrying the live composed kind set.
+
+    Raises:
+        CategorizedError: With ``CONFIGURATION_ERROR`` when the kind is not composed.
+    """
+    if isinstance(request.resource, ResourceByKind):
+        assert_kind_composed(request.resource.kind, resolver.registered_kinds())
 
 
 def _spec_from_payload(payload: AllocationRequestPayload) -> AdmissionRequestSpec | ToolResponse:

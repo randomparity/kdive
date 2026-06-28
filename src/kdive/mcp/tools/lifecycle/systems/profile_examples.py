@@ -19,8 +19,10 @@ the caller's host.
 from __future__ import annotations
 
 from kdive.domain.catalog.images import ImageVisibility
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.inventory.model import ImageEntry, InventoryDoc, StagedSource
 from kdive.mcp.responses import ToolResponse
+from kdive.profiles.provider_sections import PROVIDER_SECTIONS
 from kdive.serialization import JsonValue
 
 _OBJECT_ID = "profile-examples"
@@ -93,20 +95,22 @@ _CORE: dict[str, JsonValue] = {
 }
 
 
-def build_profile_examples(doc: InventoryDoc | None) -> ToolResponse:
-    """Build the example-profiles collection from an inventory document (or ``None``).
+def build_profile_examples(
+    doc: InventoryDoc | None, kinds: frozenset[ResourceKind]
+) -> ToolResponse:
+    """Build the example-profiles collection for the deployment's composed providers.
 
     Args:
-        doc: The parsed ``systems.toml`` inventory, or ``None`` when no file is present (the
-            gitignored pre-config state). With ``None``, or a doc that configures no provider
-            instance, the default placeholder set (one example per provider kind) is returned.
+        doc: The parsed ``systems.toml`` inventory, or ``None`` when no file is present.
+        kinds: The providers composed in this deployment (``resolver.registered_kinds()``);
+            one example is emitted per composed kind, ordered by ``ResourceKind``.
 
     Returns:
-        A :class:`ToolResponse` collection with one item per configured provider; each item's
+        A :class:`ToolResponse` collection with one item per kind in ``kinds``; each item's
         ``data`` carries ``provider``, the ready-to-edit ``profile`` dict, and (when a placeholder
         is used) a ``note``.
     """
-    providers = _configured_providers(doc)
+    providers = [PROVIDER_SECTIONS[kind].alias for kind in ResourceKind if kind in kinds]
     items = [_example_item(provider, doc) for provider in providers]
     return ToolResponse.collection(
         _OBJECT_ID,
@@ -114,20 +118,6 @@ def build_profile_examples(doc: InventoryDoc | None) -> ToolResponse:
         items,
         suggested_next_actions=list(_NEXT_ACTIONS),
     )
-
-
-def _configured_providers(doc: InventoryDoc | None) -> list[str]:
-    """The providers to emit an example for: those with a declared instance, else all three."""
-    if doc is None:
-        return [_LOCAL, _REMOTE, _FAULT]
-    configured = []
-    if doc.local_libvirt:
-        configured.append(_LOCAL)
-    if doc.remote_libvirt:
-        configured.append(_REMOTE)
-    if doc.fault_inject:
-        configured.append(_FAULT)
-    return configured or [_LOCAL, _REMOTE, _FAULT]
 
 
 def _example_item(provider: str, doc: InventoryDoc | None) -> ToolResponse:

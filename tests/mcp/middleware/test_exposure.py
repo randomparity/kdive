@@ -11,6 +11,7 @@ import pytest
 from kdive.mcp.exposure import CORE_TOOLS
 from kdive.mcp.middleware import exposure as exposure_mod
 from kdive.mcp.middleware.exposure import ToolExposureMiddleware
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.errors import AuthError
 
 
@@ -44,7 +45,7 @@ def test_filters_to_visible_tool_names_threading_both_contexts(monkeypatch) -> N
 
     monkeypatch.setattr(exposure_mod, "visible_tool_names", _visible)
 
-    result, list_context, received = _run(ToolExposureMiddleware(), tools)
+    result, list_context, received = _run(ToolExposureMiddleware(ProviderResolver({})), tools)
 
     assert [t.name for t in result] == ["runs.create", "runs.get"]
     assert received == [list_context]  # call_next got the list context, not None
@@ -61,7 +62,7 @@ def test_auth_error_advertises_full_catalog_and_debug_logs(monkeypatch) -> None:
     debugs: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     monkeypatch.setattr(exposure_mod._log, "debug", lambda *a, **k: debugs.append((a, k)))
 
-    result, _ctx, _received = _run(ToolExposureMiddleware(), tools)
+    result, _ctx, _received = _run(ToolExposureMiddleware(ProviderResolver({})), tools)
 
     assert [t.name for t in result] == ["runs.create", "admin.teardown"]
     assert debugs[0][0] == ("no verified token in on_list_tools; advertising the full catalog",)
@@ -78,7 +79,7 @@ def test_unexpected_error_advertises_full_catalog_and_warns(monkeypatch) -> None
     warnings: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     monkeypatch.setattr(exposure_mod._log, "warning", lambda *a, **k: warnings.append((a, k)))
 
-    result, _ctx, _received = _run(ToolExposureMiddleware(), tools)
+    result, _ctx, _received = _run(ToolExposureMiddleware(ProviderResolver({})), tools)
 
     assert [t.name for t in result] == ["runs.create", "admin.teardown"]
     (args, kwargs) = warnings[0]
@@ -99,7 +100,7 @@ def test_gateway_off_returns_full_rbac_catalog(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(exposure_mod, "request_context", lambda: object())
     monkeypatch.setattr(exposure_mod, "visible_tool_names", lambda _ctx, names: set(names))
 
-    result, _, _ = _run(ToolExposureMiddleware(), many_tools)
+    result, _, _ = _run(ToolExposureMiddleware(ProviderResolver({})), many_tools)
 
     assert len(result) > 20
 
@@ -113,7 +114,7 @@ def test_gateway_on_returns_core_intersect_rbac(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(exposure_mod, "request_context", lambda: object())
     monkeypatch.setattr(exposure_mod, "visible_tool_names", lambda _ctx, names: set(names))
 
-    result, _, _ = _run(ToolExposureMiddleware(), tools)
+    result, _, _ = _run(ToolExposureMiddleware(ProviderResolver({})), tools)
     names = {t.name for t in result}
 
     assert names <= CORE_TOOLS
@@ -131,6 +132,6 @@ def test_gateway_on_fails_open_on_error(monkeypatch: pytest.MonkeyPatch) -> None
 
     monkeypatch.setattr(exposure_mod, "visible_tool_names", _boom)
 
-    result, _, _ = _run(ToolExposureMiddleware(), all_tools)
+    result, _, _ = _run(ToolExposureMiddleware(ProviderResolver({})), all_tools)
 
     assert [t.name for t in result] == ["runs.create", "admin.teardown"]
