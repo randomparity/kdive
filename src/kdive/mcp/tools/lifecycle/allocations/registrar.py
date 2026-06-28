@@ -10,6 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.domain.capacity.state import AllocationState
+from kdive.domain.errors import CategorizedError
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload, ToolPayload
@@ -20,11 +21,15 @@ from kdive.mcp.tools.lifecycle.allocations.lifecycle import (
 )
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import renew_allocation as _renew_allocation
 from kdive.mcp.tools.lifecycle.allocations.request import (
+    _guard_resource_kind,
+)
+from kdive.mcp.tools.lifecycle.allocations.request import (
     request_allocation as _request_allocation,
 )
 from kdive.mcp.tools.lifecycle.allocations.view import get_allocation as _get_allocation
 from kdive.mcp.tools.lifecycle.allocations.view import list_allocations as _list_allocations
 from kdive.mcp.tools.lifecycle.allocations.view import wait_allocation as _wait_allocation
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.services.allocation.admission.metrics import AdmissionMetrics
 
 
@@ -43,9 +48,15 @@ class _AllocationsListPayload(ToolPayload):
     )
 
 
-def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
-    """Register the `allocations.*` tools on ``app``, bound to ``pool``."""
-    _register_allocations_request(app, pool)
+def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:
+    """Register the `allocations.*` tools on ``app``, bound to ``pool``.
+
+    Args:
+        app: The FastMCP application to register tools on.
+        pool: Async database connection pool.
+        resolver: Provider resolver used for call-time kind guard (ADR-0269).
+    """
+    _register_allocations_request(app, pool, resolver)
     _register_allocations_get(app, pool)
     _register_allocations_release(app, pool)
     _register_allocations_renew(app, pool)
@@ -53,7 +64,9 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     _register_allocations_wait(app, pool)
 
 
-def _register_allocations_request(app: FastMCP, pool: AsyncConnectionPool) -> None:
+def _register_allocations_request(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     # Constructed at build time off the proxy meter (ADR-0190 D), like TelemetryMiddleware: the
     # proxy binds to the real MeterProvider once init_telemetry installs it, so this needs no
     # process-global lazy singleton and no boot-order dependency from the handler.
@@ -76,6 +89,10 @@ def _register_allocations_request(app: FastMCP, pool: AsyncConnectionPool) -> No
         ] = None,
     ) -> ToolResponse:
         """Request capacity and create an allocation grant."""
+        try:
+            _guard_resource_kind(request, resolver)  # ADR-0269: on the shared handler path
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error("allocations.request", exc)
         return await _request_allocation(
             pool,
             current_context(),

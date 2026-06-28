@@ -9,7 +9,9 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.domain.capacity.state import SystemState
+from kdive.domain.errors import CategorizedError
 from kdive.mcp.auth import current_context
+from kdive.mcp.provider_schema import assert_kind_composed
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
@@ -150,6 +152,10 @@ def _register_systems_define(
         Use `systems.provision` instead when the profile needs no upload window. Operator only.
         """
         ctx = current_context()
+        try:
+            assert_kind_composed(profile.provider.kind, resolver.registered_kinds())
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(allocation_id, exc)
         return await with_runtime_for_allocation(
             pool,
             resolver,
@@ -200,6 +206,10 @@ def _register_systems_provision(
         System. Operator only.
         """
         ctx = current_context()
+        try:
+            assert_kind_composed(profile.provider.kind, resolver.registered_kinds())
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(allocation_id, exc)
         return await with_runtime_for_allocation(
             pool,
             resolver,
@@ -349,6 +359,10 @@ def _register_systems_reprovision(
         use `systems.provision` instead. Requires operator and opt-in.
         """
         ctx = current_context()
+        try:
+            assert_kind_composed(profile.provider.kind, resolver.registered_kinds())
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(system_id, exc)
         return await with_runtime_for_system(
             pool,
             resolver,
