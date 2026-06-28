@@ -536,14 +536,15 @@ def test_unaffected_tool_is_returned_unchanged() -> None:
     assert out is tool
 ```
 
-> **Live-app integration assertion (add to this test module).** Unit tests above use bare
+> **Live-app integration assertion (add to this test module).** The unit tests above use bare
 > `Model.model_json_schema()` as a proxy; this one pins the proxy against the *real* FastMCP-published
-> tool `.parameters` (FastMCP generates the schema from the handler signature, hoisting `$defs` to the
-> top level). Build the app with only local-libvirt composed and assert the registry's published
-> schema narrows:
+> tool `.parameters`. FastMCP generates the schema from the handler signature and **hoists nested
+> model `$defs` to the top level** — verified: the real `allocations.request` parameters carry
+> `$defs.ResourceKind` and `systems.define` carries `$defs.ProviderSection`, exactly the keys the
+> helper targets. The test builds the app and projects the registry's published schema:
 
 ```python
-# same file — requires the app-building fixture used elsewhere in tests/mcp/
+# same file — builds the app like tests/mcp/core/test_app.py does (pool + secret_registry args)
 from kdive.mcp.schema_advertising import registered_tools
 
 
@@ -551,18 +552,24 @@ def _tool(app, name: str):
     return next(t for t in registered_tools(app) if t.name == name)
 
 
-def test_real_published_schema_narrows_for_local_only(local_only_app) -> None:
-    # local_only_app: a build_app(...) fixture with enable_remote_libvirt=False and no fault-inject.
+def test_real_published_schema_narrows_for_local_only(app) -> None:
+    # `app` is built like tests/mcp/core/test_app.py. The DEFAULT composition is already
+    # local-only: no remote-libvirt config is present and KDIVE_FAULT_INJECT is unset, so
+    # registered_kinds() == {local-libvirt}. `build_app` has no enable_* flag — the resolver
+    # opt-ins live on ProviderComposition.build_provider_resolver. Pass the app's own resolver
+    # set rather than hard-coding, to track whatever the build composed.
     kinds = frozenset({ResourceKind.LOCAL_LIBVIRT})
-    alloc = project_listed_tool(_tool(local_only_app, "allocations.request"), kinds)
+    alloc = project_listed_tool(_tool(app, "allocations.request"), kinds)
     assert alloc.parameters["$defs"]["ResourceKind"]["enum"] == ["local-libvirt"]
-    define = project_listed_tool(_tool(local_only_app, "systems.define"), kinds)
+    define = project_listed_tool(_tool(app, "systems.define"), kinds)
     assert set(define.parameters["$defs"]["ProviderSection"]["properties"]) == {"local-libvirt"}
 ```
 
-> If `tests/mcp/` has no reusable `build_app` fixture, construct the app inline in the test (see
-> `tests/mcp/core/test_app.py` for the construction pattern and the required `pool`/`secret_registry`
-> arguments) rather than adding a new conftest fixture.
+> Construct `app` inline in the test (see `tests/mcp/core/test_app.py` for the `build_app(pool, ...,
+> secret_registry=...)` construction pattern); do not add a new conftest fixture. To force a specific
+> composed set explicitly, pass a `ProviderComposition` and build the resolver with
+> `build_provider_resolver(enable_remote_libvirt=False, enable_fault_inject=False)` — but the default
+> build is already local-only, so the assertions above hold without any flag.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -780,7 +787,7 @@ import pytest
 
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.mcp.tool_payloads import AllocationRequestPayload, ResourceByKind
+from kdive.mcp.tool_payloads import AllocationRequestPayload, ResourceByKind, ResourceByPool
 from kdive.mcp.tools.lifecycle.allocations.request import _guard_resource_kind
 
 
@@ -809,10 +816,10 @@ def test_guard_accepts_composed_kind() -> None:
 
 
 def test_guard_ignores_non_kind_selectors() -> None:
-    # A pool/id selector names no kind, so the guard is a no-op (resolution fails closed later).
-    payload = AllocationRequestPayload(shape="small")  # default ResourceByKind(local-libvirt)
-    payload = payload.model_copy(update={"resource": ResourceByKind(kind=ResourceKind.LOCAL_LIBVIRT)})
-    _guard_resource_kind(payload, _StubResolver(frozenset({ResourceKind.LOCAL_LIBVIRT})))
+    # A pool/id selector names no kind, so the guard is a no-op even with NO providers composed
+    # (resolution fails closed downstream for an absent resource).
+    payload = AllocationRequestPayload(shape="small", resource=ResourceByPool(pool="p"))
+    _guard_resource_kind(payload, _StubResolver(frozenset()))  # no raise
 ```
 
 > Also add an end-to-end test in the style of the existing allocations handler tests (e.g. the
