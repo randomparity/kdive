@@ -10,7 +10,7 @@ from fastmcp.server.middleware import Middleware
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.mcp.middleware.shared import ToolOutcome, result_error_category
+from kdive.mcp.middleware.shared import META_TOOLS, ToolOutcome, result_error_category
 
 _DURATION_BUCKETS = (0.005, 0.025, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0)
 
@@ -47,6 +47,8 @@ class TelemetryMiddleware(Middleware):
     ) -> Any:
         """Time and trace one tool call; record RED metrics; re-raise on failure."""
         tool = context.message.name
+        if tool in META_TOOLS:
+            return await call_next(context)
         started = time.perf_counter()
         with self._tracer.start_as_current_span(
             f"mcp.tool/{tool}", kind=SpanKind.SERVER, attributes={"tool": tool}

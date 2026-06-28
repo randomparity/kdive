@@ -13,7 +13,7 @@ from kdive.diagnostics.service import DiagnosticsService, default_service_factor
 from kdive.mcp.prompts import registrar as lifecycle_prompts
 from kdive.mcp.resources import registrar as doc_resources
 from kdive.mcp.schema_advertising import registered_tools
-from kdive.mcp.tools import jobs
+from kdive.mcp.tools import gateway, jobs
 from kdive.mcp.tools.accounting.admin import register as register_accounting_admin
 from kdive.mcp.tools.accounting.estimate import register as register_accounting_estimate
 from kdive.mcp.tools.accounting.reports import register as register_accounting_reports
@@ -85,6 +85,12 @@ def _pool_only_plane_registrar(
         register(app, pool)
 
     return _register
+
+
+def _register_gateway_tools(
+    app: FastMCP, _pool: AsyncConnectionPool, _assembly: AppAssembly
+) -> None:
+    gateway.register(app)
 
 
 def _register_reconcile_tools(
@@ -230,6 +236,7 @@ def _register_lifecycle_prompts(
 
 
 PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
+    _register_gateway_tools,
     _pool_only_plane_registrar(jobs.register),
     _register_catalog_resources,
     _pool_only_plane_registrar(availability.register),

@@ -147,6 +147,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "runs.bind": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.boot": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.build": ("tests/mcp/lifecycle/test_runs_tools.py",),
+    "runs.build_install_boot": ("tests/mcp/tools/lifecycle/runs/test_composite_tool.py",),
     "runs.cancel": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.complete_build": ("tests/mcp/lifecycle/test_complete_build_tool.py",),
     "runs.create": ("tests/mcp/lifecycle/test_runs_tools.py",),
@@ -167,6 +168,8 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "systems.provision_defined": ("tests/mcp/lifecycle/test_systems_tools.py",),
     "systems.reprovision": ("tests/mcp/lifecycle/test_systems_tools.py",),
     "systems.teardown": ("tests/mcp/lifecycle/test_systems_tools.py",),
+    "tools.invoke": ("tests/mcp/tools/test_gateway_invoke.py",),
+    "tools.search": ("tests/mcp/tools/test_gateway_search.py",),
     "vmcore.fetch": ("tests/mcp/lifecycle/test_vmcore_tools.py",),
     "vmcore.list": ("tests/mcp/lifecycle/test_vmcore_tools.py",),
 }

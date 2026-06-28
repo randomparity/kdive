@@ -611,6 +611,19 @@ HEALTH_BIND_ADDR = Setting(
     suggest="a host:port, e.g. 127.0.0.1:9464 (loopback) or 0.0.0.0:9464 (pod-local)",
 )
 
+MCP_TOOL_GATEWAY = Setting(
+    name="KDIVE_MCP_TOOL_GATEWAY",
+    parse=_str,
+    default="off",
+    group="mcp",
+    processes=_SERVER,
+    help=(
+        "Enable the core-set tool gateway (ADR-0268): when set to on/1/true, list_tools "
+        "returns only the CORE_TOOLS set (intersected with RBAC), so agents discover "
+        "tools.search and tools.invoke first. Default off — full ADR-0148 RBAC catalog."
+    ),
+)
+
 SETTINGS = [
     DATABASE_URL,
     HTTP_HOST,
@@ -662,4 +675,5 @@ SETTINGS = [
     OTEL_TRACES_SAMPLER_RATIO,
     OTEL_SERVICE_NAMESPACE,
     HEALTH_BIND_ADDR,
+    MCP_TOOL_GATEWAY,
 ]

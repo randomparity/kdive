@@ -178,12 +178,17 @@ def test_register_handlers_binds_each_run_kind_to_its_handler(
         "boot_handler",
         lambda conn, job, **kw: _fake("boot", conn, job, **kw),
     )
+    monkeypatch.setattr(
+        runs_registrar,
+        "composite_handler",
+        lambda conn, job, *, ports: _fake("composite", conn, job),
+    )
 
     registry = HandlerRegistry()
     ports = _ports()
     runs.register_handlers(registry, ports=ports)
 
-    claimed = {JobKind.BUILD, JobKind.INSTALL, JobKind.BOOT}
+    claimed = {JobKind.BUILD, JobKind.INSTALL, JobKind.BOOT, JobKind.BUILD_INSTALL_BOOT}
     for kind in claimed:
         assert registry.get(kind) is not None
     # Every other JobKind must remain unclaimed by this facade — a mutant that
@@ -203,6 +208,7 @@ def test_register_handlers_binds_each_run_kind_to_its_handler(
     assert _dispatch(JobKind.BUILD) == "build"
     assert _dispatch(JobKind.INSTALL) == "install"
     assert _dispatch(JobKind.BOOT) == "boot"
+    assert _dispatch(JobKind.BUILD_INSTALL_BOOT) == "composite"
 
     # Each lambda threads the shared conn/job plus the ports the leaf handler needs.
     assert calls["build"][0] is conn and calls["build"][1] is job

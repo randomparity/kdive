@@ -15,6 +15,7 @@ from kdive.mcp.middleware.exposure import ToolExposureMiddleware
 from kdive.mcp.middleware.telemetry import TelemetryMiddleware
 from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.schema_advertising import advertise_envelope_output_schema
+from kdive.mcp.tool_index import build_instructions
 from kdive.mcp.tool_registration import PLANE_REGISTRARS, AppAssembly
 from kdive.mcp.worker_registration import HANDLER_REGISTRARS, WorkerHandlerAssembly
 from kdive.providers.assembly.composition import ProviderComposition
@@ -30,7 +31,11 @@ def build_app(
     secret_registry: SecretRegistry,
 ) -> FastMCP:
     """Construct the FastMCP app and register every plane's tools."""
-    app: FastMCP = FastMCP(name="kdive", auth=verifier or build_verifier())
+    app: FastMCP = FastMCP(
+        name="kdive",
+        auth=verifier or build_verifier(),
+        instructions=build_instructions(),
+    )
     app.add_middleware(
         TelemetryMiddleware(
             tracer=trace.get_tracer("kdive.mcp"), meter=metrics.get_meter("kdive.mcp")

@@ -380,6 +380,20 @@ def test_image_build_handler_preserves_store_config_error(
     asyncio.run(_run())
 
 
+def test_core_tools_subset_of_registry() -> None:
+    """Every CORE_TOOLS entry is a registered tool name (ADR-0268).
+
+    A misspelled or stale entry would silently drop it from the default gateway listing.
+    CORE_TOOLS must be a strict subset of the live registry; any missing name fails here.
+    """
+    from kdive.mcp.exposure import CORE_TOOLS
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    registered = {t.name for t in envelope_module.registered_tools(app)}
+    assert registered >= CORE_TOOLS, f"core not registered: {sorted(CORE_TOOLS - registered)}"
+
+
 def test_exposure_map_covers_every_registered_tool() -> None:
     """Every registered tool is consciously triaged: gated (CLASSIFIED_TOOLS) or PUBLIC.
 

@@ -9,11 +9,18 @@ from typing import Any
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import Tool
 
-from kdive.mcp.exposure import visible_tool_names
+import kdive.config as config
+from kdive.config.core_settings import MCP_TOOL_GATEWAY
+from kdive.mcp.exposure import CORE_TOOLS, visible_tool_names
 from kdive.mcp.middleware.shared import request_context
 from kdive.security.authz.errors import AuthError
 
 _log = logging.getLogger(__name__)
+
+
+def _gateway_enabled() -> bool:
+    """Return True when KDIVE_MCP_TOOL_GATEWAY is set to on/1/true (default off)."""
+    return (config.get(MCP_TOOL_GATEWAY) or "").strip().lower() in {"on", "1", "true"}
 
 
 class ToolExposureMiddleware(Middleware):
@@ -29,6 +36,8 @@ class ToolExposureMiddleware(Middleware):
         try:
             ctx = request_context()
             visible = visible_tool_names(ctx, (tool.name for tool in tools))
+            if _gateway_enabled():
+                visible &= CORE_TOOLS
         except AuthError:
             _log.debug("no verified token in on_list_tools; advertising the full catalog")
             return tools
