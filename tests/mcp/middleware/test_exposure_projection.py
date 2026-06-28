@@ -157,25 +157,35 @@ def test_on_list_tools_projects_visible_tools(monkeypatch) -> None:  # type: ign
 
 
 def test_resolver_failure_fails_open_and_counts(monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
-    """A resolver.registered_kinds() error fails open to the full catalog, incrementing the counter.
+    """A resolver.registered_kinds() error returns RBAC-visible tools unprojected (ADR-0269).
 
-    ADR-0269 §3/§5: registered_kinds() is inside the visibility-filter try block, so a resolver
-    error falls into the generic except, increments _PROJECTION_FAILURES, and returns the full
-    (unprojected) catalog — no listing is suppressed.
+    Stage 2 is isolated from Stage 1: a registered_kinds() failure increments
+    _PROJECTION_FAILURES (not _EXPOSURE_FAILOPEN), returns the RBAC-filtered visible
+    tools unprojected, and still excludes non-visible tools (RBAC is preserved).
     """
     alloc_tool = _FakeTool("allocations.request", {"type": "object"})
-    tools = [alloc_tool]
+    hidden_tool = _FakeTool("admin.secret", {"type": "object"})
+    tools = [alloc_tool, hidden_tool]
 
     class _ExplodingResolver:
         def registered_kinds(self) -> frozenset:
             raise RuntimeError("injected resolver failure")
 
     monkeypatch.setattr(exposure_mod, "request_context", lambda: object())
-    monkeypatch.setattr(exposure_mod, "visible_tool_names", lambda _ctx, names: set(names))
+    # admin.secret is not visible to this connection — RBAC must hold even on resolver failure.
+    monkeypatch.setattr(
+        exposure_mod,
+        "visible_tool_names",
+        lambda _ctx, names: {n for n in names if n != "admin.secret"},
+    )
 
     counter_calls: list[int] = []
     monkeypatch.setattr(
         exposure_mod._PROJECTION_FAILURES, "add", lambda amount: counter_calls.append(amount)
+    )
+    exposure_counter_calls: list[int] = []
+    monkeypatch.setattr(
+        exposure_mod._EXPOSURE_FAILOPEN, "add", lambda amount: exposure_counter_calls.append(amount)
     )
 
     mw = ToolExposureMiddleware(_ExplodingResolver())  # ty: ignore[invalid-argument-type]
@@ -186,12 +196,69 @@ def test_resolver_failure_fails_open_and_counts(monkeypatch, caplog) -> None:  #
     with caplog.at_level(logging.WARNING, logger="kdive.mcp.middleware.exposure"):
         result = asyncio.run(mw.on_list_tools(object(), call_next))
 
-    # Fail-open: full catalog returned unchanged.
-    assert len(result) == len(tools)
-    assert result[0] is alloc_tool
+    result_names = {t.name for t in result}
 
-    # Observability: counter incremented exactly once, warning logged.
+    # RBAC preserved: hidden tool excluded even though resolver failed.
+    assert "admin.secret" not in result_names
+
+    # Visible tool returned unprojected (resolver failure → kinds=None sentinel).
+    assert "allocations.request" in result_names
+    alloc_in_result = next(t for t in result if t.name == "allocations.request")
+    assert alloc_in_result is alloc_tool  # original, not a projected copy
+
+    # _PROJECTION_FAILURES fired once; _EXPOSURE_FAILOPEN not fired.
     assert counter_calls == [1]
+    assert exposure_counter_calls == []
+    assert "registered_kinds() failed" in caplog.text
+
+
+def test_exposure_failopen_increments_exposure_counter(monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
+    """A stage-1 (RBAC/context) failure fires _EXPOSURE_FAILOPEN and returns the full catalog.
+
+    ADR-0269 Stage 1: a non-AuthError from visible_tool_names (or request_context) fires
+    _EXPOSURE_FAILOPEN — not _PROJECTION_FAILURES — and returns the full unfiltered catalog.
+    The two counters are distinct so operators can distinguish auth plumbing breaks from
+    schema-projection failures.
+    """
+    alloc_tool = _FakeTool("allocations.request", {"type": "object"})
+    hidden_tool = _FakeTool("admin.secret", {"type": "object"})
+    tools = [alloc_tool, hidden_tool]
+
+    composition = ProviderComposition(secret_registry=SecretRegistry())
+    resolver = composition.build_provider_resolver()
+
+    # Stage-1 failure: visible_tool_names raises, simulating RBAC/context plumbing break.
+    def _raise_visible(_ctx: object, _names: object) -> set:
+        raise RuntimeError("injected RBAC failure")
+
+    monkeypatch.setattr(exposure_mod, "request_context", lambda: object())
+    monkeypatch.setattr(exposure_mod, "visible_tool_names", _raise_visible)
+
+    exposure_counter_calls: list[int] = []
+    monkeypatch.setattr(
+        exposure_mod._EXPOSURE_FAILOPEN, "add", lambda amount: exposure_counter_calls.append(amount)
+    )
+    projection_counter_calls: list[int] = []
+    monkeypatch.setattr(
+        exposure_mod._PROJECTION_FAILURES,
+        "add",
+        lambda amount: projection_counter_calls.append(amount),
+    )
+
+    mw = ToolExposureMiddleware(resolver)
+
+    async def call_next(_ctx: object) -> list:
+        return tools
+
+    with caplog.at_level(logging.WARNING, logger="kdive.mcp.middleware.exposure"):
+        result = asyncio.run(mw.on_list_tools(object(), call_next))
+
+    # Full catalog returned (fail-open; RBAC filter could not run).
+    assert len(result) == len(tools)
+
+    # _EXPOSURE_FAILOPEN fired once; _PROJECTION_FAILURES not fired.
+    assert exposure_counter_calls == [1]
+    assert projection_counter_calls == []
     assert "tool-exposure filter failed" in caplog.text
 
 

@@ -25,6 +25,10 @@ _PROJECTION_FAILURES = metrics.get_meter("kdive.mcp").create_counter(
     "kdive_mcp_provider_schema_projection_failures",
     description="provider-schema projection fell open to the full schema (ADR-0269)",
 )
+_EXPOSURE_FAILOPEN = metrics.get_meter("kdive.mcp").create_counter(
+    "kdive_mcp_tool_exposure_fail_open",
+    description="tool-exposure filter fell open to the full catalog (ADR-0269)",
+)
 
 #: Tools whose published ``inputSchema`` is narrowed to the composed ``ResourceKind`` set.
 NARROWED_TOOLS: frozenset[str] = frozenset(
@@ -54,6 +58,30 @@ def _gateway_enabled() -> bool:
     return (config.get(MCP_TOOL_GATEWAY) or "").strip().lower() in {"on", "1", "true"}
 
 
+def _narrow_or_passthrough(tool: Tool, kinds: frozenset[ResourceKind] | None) -> Tool:
+    """Project ``tool``'s schema to ``kinds``, or return it unprojected on any failure.
+
+    Args:
+        tool: The tool to project.
+        kinds: Composed provider kinds, or ``None`` when the resolver failed.
+
+    Returns:
+        A projected copy of ``tool``, or the original on failure or missing kinds.
+    """
+    if kinds is None:
+        return tool
+    try:
+        return project_listed_tool(tool, kinds)
+    except Exception:
+        _PROJECTION_FAILURES.add(1)
+        _log.warning(
+            "provider-schema projection failed for %s; advertising full schema",
+            tool.name,
+            exc_info=True,
+        )
+        return tool
+
+
 class ToolExposureMiddleware(Middleware):
     """Filter ``list_tools`` to tools the connection's grants could invoke.
 
@@ -76,31 +104,26 @@ class ToolExposureMiddleware(Middleware):
         the RBAC filter has reduced the catalog to the visible set.
         """
         tools: Sequence[Tool] = await call_next(context)
+        # Stage 1: context / RBAC / gateway-filter → compute visible set.
         try:
             ctx = request_context()
             visible = visible_tool_names(ctx, (tool.name for tool in tools))
             if _gateway_enabled():
                 visible &= CORE_TOOLS
-            kinds = self._resolver.registered_kinds()
         except AuthError:
             _log.debug("no verified token in on_list_tools; advertising the full catalog")
             return tools
         except Exception:
-            _PROJECTION_FAILURES.add(1)
+            _EXPOSURE_FAILOPEN.add(1)
             _log.warning("tool-exposure filter failed; advertising the full catalog", exc_info=True)
             return tools
-        result: list[Tool] = []
-        for tool in tools:
-            if tool.name not in visible:
-                continue
-            try:
-                result.append(project_listed_tool(tool, kinds))
-            except Exception:
-                _PROJECTION_FAILURES.add(1)
-                _log.warning(
-                    "provider-schema projection failed for %s; advertising full schema",
-                    tool.name,
-                    exc_info=True,
-                )
-                result.append(tool)
-        return result
+        # Stage 2: provider-schema narrowing → compute composed kinds.
+        kinds: frozenset[ResourceKind] | None = None
+        try:
+            kinds = self._resolver.registered_kinds()
+        except Exception:
+            _PROJECTION_FAILURES.add(1)
+            _log.warning(
+                "registered_kinds() failed; advertising visible tools unprojected", exc_info=True
+            )
+        return [_narrow_or_passthrough(tool, kinds) for tool in tools if tool.name in visible]

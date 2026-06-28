@@ -280,3 +280,77 @@ def test_rejection_envelope_enumerates_composed_kinds(
     available = data.get("available")
     assert isinstance(available, list), f"expected 'available' list in envelope data, got: {data!r}"
     assert "local-libvirt" in available
+
+
+# ---------------------------------------------------------------------------
+# FIX B — reverse drift guard: guarded ⟹ narrowed (ADR-0269 adversarial review)
+# ---------------------------------------------------------------------------
+
+
+def test_guarded_tools_are_subset_of_narrowed_tools() -> None:
+    """Every tool whose handler calls the kind guard must appear in NARROWED_TOOLS (ADR-0269).
+
+    Parses the allocations and systems registrar files with ``ast`` to find every
+    ``@app.tool(name="X")``-decorated function that transitively calls
+    ``assert_kind_composed`` or ``_guard_resource_kind``. Asserts the collected names
+    are a subset of ``NARROWED_TOOLS`` so a guarded-but-unnarrowed tool causes this
+    test to fail — the reverse of the existing forward test (narrowed ⟹ guarded).
+
+    Only tools with a literal string ``name=`` keyword argument are statically
+    resolvable. All tool names in both registrar files are currently literals, so the
+    collected set is complete. If a non-literal name were added, this test would miss
+    that tool — document it here and add a manual assertion.
+    """
+    import ast
+    from pathlib import Path
+
+    _GUARD_NAMES = {"assert_kind_composed", "_guard_resource_kind"}
+    _REPO_ROOT = Path(__file__).parents[3]
+    _REGISTRAR_PATHS = [
+        _REPO_ROOT / "src/kdive/mcp/tools/lifecycle/allocations/registrar.py",
+        _REPO_ROOT / "src/kdive/mcp/tools/lifecycle/systems/registrar.py",
+    ]
+
+    guarded_names: set[str] = set()
+    for path in _REGISTRAR_PATHS:
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            # Find @app.tool(name="<literal>") decorator.
+            tool_name: str | None = None
+            for deco in node.decorator_list:
+                if not isinstance(deco, ast.Call):
+                    continue
+                if not (isinstance(deco.func, ast.Attribute) and deco.func.attr == "tool"):
+                    continue
+                for kw in deco.keywords:
+                    if kw.arg == "name" and isinstance(kw.value, ast.Constant):
+                        tool_name = str(kw.value.value)
+                        break
+                if tool_name is not None:
+                    break
+            if tool_name is None:
+                continue
+            # Check if the function body transitively calls a guard function.
+            for child in ast.walk(node):
+                if not isinstance(child, ast.Call):
+                    continue
+                func = child.func
+                call_name = (
+                    func.id
+                    if isinstance(func, ast.Name)
+                    else func.attr
+                    if isinstance(func, ast.Attribute)
+                    else None
+                )
+                if call_name in _GUARD_NAMES:
+                    guarded_names.add(tool_name)
+                    break
+
+    assert guarded_names, "AST found no guarded tools; check decorator patterns in registrar files"
+    extra = guarded_names - NARROWED_TOOLS
+    assert not extra, (
+        f"Tool(s) call the kind guard but are missing from NARROWED_TOOLS: {sorted(extra)}. "
+        "Add them to NARROWED_TOOLS in src/kdive/mcp/middleware/exposure.py."
+    )
