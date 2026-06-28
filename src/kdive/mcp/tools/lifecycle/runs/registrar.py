@@ -22,6 +22,7 @@ from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run as _cancel_run
 from kdive.mcp.tools.lifecycle.runs.complete_build import (
     CompleteBuildHandlers as _CompleteBuildHandlers,
 )
+from kdive.mcp.tools.lifecycle.runs.composite import CompositeRunHandlers as _CompositeRunHandlers
 from kdive.mcp.tools.lifecycle.runs.create import (
     RunCreateRequest as _RunCreateRequest,
 )
@@ -181,6 +182,7 @@ def register(
     _register_runs_bind(app, pool)
     _register_runs_cancel(app, pool)
     _register_runs_build(app, pool, resolver)
+    _register_runs_build_install_boot(app, pool, resolver)
     _register_runs_complete_build(app, pool, resolver)
     _register_runs_install(app, pool)
     _register_runs_boot(app, pool)
@@ -190,6 +192,13 @@ def register(
 
 def _build_handlers(runtime: ProviderRuntime) -> _BuildRunHandlers:
     return _BuildRunHandlers(
+        runtime.component_sources,
+        config_validator=runtime.build_config_validator,
+    )
+
+
+def _composite_handlers(runtime: ProviderRuntime) -> _CompositeRunHandlers:
+    return _CompositeRunHandlers(
         runtime.component_sources,
         config_validator=runtime.build_config_validator,
     )
@@ -357,6 +366,63 @@ def _register_runs_build(
                 idempotency_key=idempotency_key,
             ),
             required_role=Role.CONTRIBUTOR,
+        )
+
+
+def _register_runs_build_install_boot(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
+    @app.tool(
+        name="runs.build_install_boot",
+        annotations=_docmeta.mutating(),
+        meta=_docmeta.maturity_meta("implemented"),
+    )
+    async def runs_build_install_boot(
+        run_id: Annotated[
+            str,
+            Field(
+                description=(
+                    "A created, bound, not-yet-built Run to drive build->install->boot "
+                    "as a single pollable job (ADR-0268, #866). The Run must use a "
+                    "source='server' build profile. Poll the returned job with jobs.wait."
+                )
+            ),
+        ],
+        cmdline: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Kernel debug args appended to the platform-required boot args "
+                    "(e.g. 'dhash_entries=1'). Bound at build time and applied through "
+                    "install and boot. Omit for no extra debug args."
+                )
+            ),
+        ] = None,
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
+    ) -> ToolResponse:
+        """Build, install, and boot a bound Run as a single pollable job (ADR-0268).
+
+        Performs build-host admission (same as runs.build) then enqueues one
+        BUILD_INSTALL_BOOT job. Requires operator role — the composite includes install
+        and boot, whose gate is operator. Poll the returned job handle with jobs.wait.
+        """
+        ctx = current_context()
+        return await with_runtime_for_run_target_kind(
+            pool,
+            resolver,
+            ctx,
+            run_id,
+            lambda runtime: _composite_handlers(runtime).build_install_boot(
+                pool,
+                ctx,
+                run_id,
+                cmdline=cmdline,
+                idempotency_key=idempotency_key,
+            ),
+            required_role=Role.OPERATOR,
         )
 
 
