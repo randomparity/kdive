@@ -6,7 +6,11 @@
 
 `implemented`
 
-Mint presigned PUTs for an external Run's build artifacts. Requires operator.
+Mint presigned PUTs for an external Run's build artifacts.
+
+Each upload item returns `refs.upload_url` plus `data.required_headers`; the client
+must send every required header on the PUT. Each call replaces the Run upload manifest,
+so corrections must redeclare every artifact that should remain part of the build.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
