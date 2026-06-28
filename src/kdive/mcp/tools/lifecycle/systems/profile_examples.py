@@ -99,7 +99,9 @@ def build_profile_examples(doc: InventoryDoc | None) -> ToolResponse:
     Args:
         doc: The parsed ``systems.toml`` inventory, or ``None`` when no file is present (the
             gitignored pre-config state). With ``None``, or a doc that configures no provider
-            instance, the default placeholder set (one example per provider kind) is returned.
+            instance, the default placeholder set (one example per *production* provider kind:
+            local-libvirt and remote-libvirt) is returned. The ``fault-inject`` test fixture is
+            emitted only when the inventory declares a ``[[fault_inject]]`` instance (#879).
 
     Returns:
         A :class:`ToolResponse` collection with one item per configured provider; each item's
@@ -117,9 +119,15 @@ def build_profile_examples(doc: InventoryDoc | None) -> ToolResponse:
 
 
 def _configured_providers(doc: InventoryDoc | None) -> list[str]:
-    """The providers to emit an example for: those with a declared instance, else all three."""
+    """The providers to emit an example for: those with a declared instance, else the defaults.
+
+    ``fault-inject`` is the ADR-0072 test/mock provider, not a production lane, so it is **never**
+    in the default/fallback set (#879, ADR-0269): a server that has not declared a
+    ``[[fault_inject]]`` instance does not advertise it to agents. It is emitted only when the
+    inventory actually configures one — a deliberate test/dev environment.
+    """
     if doc is None:
-        return [_LOCAL, _REMOTE, _FAULT]
+        return [_LOCAL, _REMOTE]
     configured = []
     if doc.local_libvirt:
         configured.append(_LOCAL)
@@ -127,7 +135,7 @@ def _configured_providers(doc: InventoryDoc | None) -> list[str]:
         configured.append(_REMOTE)
     if doc.fault_inject:
         configured.append(_FAULT)
-    return configured or [_LOCAL, _REMOTE, _FAULT]
+    return configured or [_LOCAL, _REMOTE]
 
 
 def _example_item(provider: str, doc: InventoryDoc | None) -> ToolResponse:
@@ -140,7 +148,9 @@ def _example_item(provider: str, doc: InventoryDoc | None) -> ToolResponse:
     It also carries a ``sizing_note`` (#461) telling the caller the example's concrete
     ``vcpu``/``memory_mb``/``disk_gb`` must be omitted or matched when provisioning onto a
     shape-sized allocation. ``uses_real_reference`` reports whether the provider rootfs/base-image
-    was a real inventory ref.
+    was a real inventory ref. ``test_only`` is a uniform marker, ``True`` only for the
+    ``fault-inject`` fixture (ADR-0072), so any surfaced fixture example self-identifies as
+    non-production (#879).
     """
     profile, placeholder = _example_profile(provider, doc)
     data: dict[str, JsonValue] = {
@@ -149,6 +159,10 @@ def _example_item(provider: str, doc: InventoryDoc | None) -> ToolResponse:
         "note": _REPLACE_NOTE,
         "sizing_note": _SIZING_NOTE,
         "uses_real_reference": not placeholder,
+        # A uniform marker so any surfaced fault-inject example self-identifies as the ADR-0072
+        # test/mock fixture, never a production lane (#879, ADR-0269). Only ``fault-inject`` is
+        # configured (it is not in the default set), so this is True only there.
+        "test_only": provider == _FAULT,
     }
     return ToolResponse.success(provider, "ok", data=data)
 

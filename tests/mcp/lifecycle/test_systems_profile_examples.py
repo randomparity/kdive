@@ -128,9 +128,10 @@ def _validate(provider: str, profile: dict[str, Any]) -> None:
 
 def test_one_example_per_configured_provider(tmp_path: Path) -> None:
     doc = InventoryDoc.parse({"schema_version": 2, "local_libvirt": [], "remote_libvirt": []})
-    # A doc with no instances configures no provider → default placeholder set (all three kinds).
+    # A doc with no instances configures no provider → the production placeholder set. fault-inject
+    # is a test fixture (ADR-0072/0269) and is never in the default set (#879).
     examples = _examples(doc)
-    assert set(examples) == {"local-libvirt", "remote-libvirt", "fault-inject"}
+    assert set(examples) == {"local-libvirt", "remote-libvirt"}
 
 
 def test_full_inventory_examples_are_valid_and_use_real_refs(
@@ -217,11 +218,56 @@ host_uri = "qemu:///system"
 
 
 def test_no_inventory_file_yields_default_placeholder_set() -> None:
+    # No file → the two production providers only; the fault-inject fixture is unadvertised (#879).
     examples = _examples(None)
-    assert set(examples) == {"local-libvirt", "remote-libvirt", "fault-inject"}
+    assert set(examples) == {"local-libvirt", "remote-libvirt"}
     for provider, data in examples.items():
         _validate(provider, _profile_of(data))
         assert data["note"]
+
+
+def _fault_configured_doc() -> InventoryDoc:
+    """A doc that declares a ``[[fault_inject]]`` instance (a deliberate test/dev environment)."""
+    return InventoryDoc.parse(
+        {
+            "schema_version": 2,
+            "fault_inject": [
+                {"name": "fi-host", "cost_class": "fault", "vcpus": 2, "memory_mb": 2048}
+            ],
+        }
+    )
+
+
+def test_fault_inject_absent_when_no_fault_instance_configured(tmp_path: Path) -> None:
+    # #879: the fault-inject test fixture (ADR-0072) must not be advertised as a provider option
+    # unless the environment actually declares a [[fault_inject]] instance. Neither the no-file
+    # default nor a doc configuring only production providers may surface it.
+    assert "fault-inject" not in _examples(None)
+    local_only = InventoryDoc.parse(
+        {
+            "schema_version": 2,
+            "local_libvirt": [
+                {"name": "local-host", "cost_class": "local", "host_uri": "qemu:///system"}
+            ],
+        }
+    )
+    assert "fault-inject" not in _examples(local_only)
+
+
+def test_fault_inject_present_and_marked_test_only_when_configured() -> None:
+    # When an operator deliberately declares a [[fault_inject]] instance, the example IS emitted,
+    # and it self-identifies as a test fixture via data["test_only"] (#879, criterion 2).
+    examples = _examples(_fault_configured_doc())
+    assert "fault-inject" in examples
+    assert examples["fault-inject"]["test_only"] is True
+    _validate("fault-inject", _profile_of(examples["fault-inject"]))
+
+
+def test_production_examples_are_not_marked_test_only() -> None:
+    # The production providers carry the uniform test_only key set to False — the marker is a
+    # uniform field, not a fault-inject-only key, so an agent reads it on every item.
+    for provider, data in _examples(None).items():
+        assert data["test_only"] is False, provider
 
 
 def test_examples_never_leak_sensitive_inventory_fields(
@@ -265,7 +311,9 @@ def test_direct_kernel_placeholder_is_a_non_uri_warm_tree_label() -> None:
     # never on a string scheme), so advertising one teaches the misleading shape the
     # build-source-staging doc warns about. Mirror the sibling runs.profile_examples placeholder
     # (`REPLACE_ME-warm-tree-source`), which is already a non-URI label.
-    examples = _examples(None)
+    # fault-inject is only emitted when configured (#879), so source it from a configured doc; the
+    # local-libvirt direct-kernel example comes from the default set.
+    examples = {**_examples(None), **_examples(_fault_configured_doc())}
     for provider in ("local-libvirt", "fault-inject"):
         ref = _profile_of(examples[provider])["kernel_source_ref"]
         assert isinstance(ref, str)
@@ -278,7 +326,7 @@ def test_direct_kernel_placeholder_is_a_non_uri_warm_tree_label() -> None:
 def test_disk_image_example_emits_no_kernel_source_ref(tmp_path: Path) -> None:
     # #472: the remote-libvirt (disk-image) example must not instruct the agent to invent a kernel
     # source for a VM-only provision.
-    examples = _examples(None)
+    examples = {**_examples(None), **_examples(_fault_configured_doc())}
     remote = _profile_of(examples["remote-libvirt"])
     assert "kernel_source_ref" not in remote
     # The direct-kernel examples still carry the learnable build source.
@@ -304,12 +352,18 @@ def test_collection_and_item_status_are_ok() -> None:
     resp = build_profile_examples(None)
     assert resp.status == "ok"
     assert resp.object_id == "profile-examples"
-    assert [item.status for item in resp.items] == ["ok", "ok", "ok"]
+    # Two production items by default (fault-inject is not advertised, #879).
+    assert [item.status for item in resp.items] == ["ok", "ok"]
 
 
 def test_each_item_carries_the_exact_data_keys_and_object_id() -> None:
-    resp = build_profile_examples(None)
-    for item in resp.items:
+    # Cover all three providers: the two production defaults plus the configured fault-inject item.
+    resp_items = [
+        *build_profile_examples(None).items,
+        *build_profile_examples(_fault_configured_doc()).items,
+    ]
+    seen = set()
+    for item in resp_items:
         # The item object_id is the provider name, and its data carries exactly these keys.
         assert item.object_id in {"local-libvirt", "remote-libvirt", "fault-inject"}
         assert set(cast(dict[str, Any], item.data)) == {
@@ -318,19 +372,23 @@ def test_each_item_carries_the_exact_data_keys_and_object_id() -> None:
             "note",
             "sizing_note",
             "uses_real_reference",
+            "test_only",
         }
         assert cast(dict[str, Any], item.data)["provider"] == item.object_id
+        seen.add(item.object_id)
+    assert seen == {"local-libvirt", "remote-libvirt", "fault-inject"}
 
 
 def test_uses_real_reference_reflects_placeholder_use_with_no_inventory() -> None:
     # With no inventory the local + remote examples fall back to placeholders (uses_real_reference
-    # False), while fault-inject owns no rootfs/base image to resolve, so it is never a placeholder
-    # (uses_real_reference True). Guards the flag, its `not placeholder` derivation, and the
-    # fault-inject placeholder=False constant against inversion.
+    # False). fault-inject is not advertised by default (#879), so it is sourced from a configured
+    # doc: it owns no rootfs/base image to resolve, so it is never a placeholder (True). Guards the
+    # flag, its `not placeholder` derivation, and the fault-inject placeholder=False constant.
     examples = _examples(None)
     assert examples["local-libvirt"]["uses_real_reference"] is False
     assert examples["remote-libvirt"]["uses_real_reference"] is False
-    assert examples["fault-inject"]["uses_real_reference"] is True
+    fault = _examples(_fault_configured_doc())["fault-inject"]
+    assert fault["uses_real_reference"] is True
 
 
 def test_uses_real_reference_tracks_real_vs_placeholder_refs(
