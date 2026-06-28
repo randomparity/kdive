@@ -79,7 +79,7 @@ Request capacity and create an allocation grant.
     - `resource_id` (`string`, required)
   - _variant object(mode=kind):_
     - `mode` (``=kind``, optional)
-    - `kind` (``local-libvirt`, `fault-inject`, `remote-libvirt``, optional) — The provider resource kinds.
+    - `kind` (``local-libvirt`, `fault-inject`, `remote-libvirt``, optional) — Provider kind to allocate. 'fault-inject' is a test/mock fixture (ADR-0072) for deterministic crash replay, not a production provisioning lane — use it only in a test/dev environment that has registered a fault-inject resource.
   - _variant object(mode=pool):_
     - `mode` (``=pool``, optional)
     - `pool` (`string`, required)

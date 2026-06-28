@@ -50,7 +50,14 @@ class ResourceById(ToolPayload):
 
 class ResourceByKind(ToolPayload):
     mode: Literal["kind"] = "kind"
-    kind: ResourceKind = ResourceKind.LOCAL_LIBVIRT
+    kind: ResourceKind = Field(
+        default=ResourceKind.LOCAL_LIBVIRT,
+        description=(
+            "Provider kind to allocate. 'fault-inject' is a test/mock fixture (ADR-0072) for "
+            "deterministic crash replay, not a production provisioning lane — use it only in a "
+            "test/dev environment that has registered a fault-inject resource."
+        ),
+    )
 
 
 class ResourceByPool(ToolPayload):

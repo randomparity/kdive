@@ -15,10 +15,16 @@ from kdive.domain.catalog.resource_capabilities import ResourceCapabilities
 
 
 class ResourceKind(StrEnum):
-    """The provider resource kinds."""
+    """The provider resource kinds.
+
+    ``LOCAL_LIBVIRT`` and ``REMOTE_LIBVIRT`` are production provisioning lanes. ``FAULT_INJECT`` is
+    the ADR-0072 test/mock fixture (deterministic crash replay), registerable only in a deliberate
+    test/dev environment — it is not advertised in default agent discovery (#879, ADR-0269) and is
+    marked test-only where it remains in an agent-facing schema.
+    """
 
     LOCAL_LIBVIRT = "local-libvirt"
-    FAULT_INJECT = "fault-inject"
+    FAULT_INJECT = "fault-inject"  # test/mock fixture (ADR-0072); not a production provider
     REMOTE_LIBVIRT = "remote-libvirt"
 
 

@@ -31,6 +31,17 @@ def test_published_schema_shape_description_names_shapes_list_and_xor_rule() -> 
     assert "mutually exclusive" in description
 
 
+def test_by_kind_schema_marks_fault_inject_test_only() -> None:
+    # #879 / ADR-0269 criterion 2: fault-inject stays a valid `kind` (the provider is real in
+    # test/dev), but a StrEnum member carries no per-value text in the JSON schema, so the `kind`
+    # field description is the only place an agent inspecting allocations.request can learn the
+    # value is a test fixture. The description must name fault-inject and mark it test-only.
+    schema = ResourceByKind.model_json_schema()
+    description = schema["properties"]["kind"]["description"]
+    assert "fault-inject" in description
+    assert "test" in description.lower()
+
+
 def test_shape_only_is_valid() -> None:
     payload = AllocationRequestPayload.model_validate({"shape": "medium"})
     assert payload.shape == "medium"
