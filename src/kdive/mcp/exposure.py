@@ -237,6 +237,7 @@ PUBLIC_TOOLS: frozenset[str] = frozenset(
         "session.whoami",
         "shapes.list",
         "systems.profile_examples",
+        "tools.invoke",
     }
 )
 
