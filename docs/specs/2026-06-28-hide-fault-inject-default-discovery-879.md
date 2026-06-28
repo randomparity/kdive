@@ -26,8 +26,9 @@ test-only; a guard test prevents it reappearing in the default set.
   provider and is left unchanged.
 - The `platform_admin`-only `resources.register_fault_inject` tool and the `_KIND_BY_BLOCK` map —
   operator surface, not general agent discovery; unchanged.
-- Removing `fault-inject` from the `ResourceKind` enum or `allocations.request` schema — the provider
-  is real and registerable in test/dev; only its *default discovery* advertising is removed.
+- Removing `fault-inject` from the `ResourceKind` enum — the provider is real and registerable in
+  test/dev, so the kind stays a valid value. (`allocations.request` keeps accepting it; the kind is
+  *marked* test-only in its schema rather than removed — see change 4.)
 
 ## Current behavior (`src/kdive/mcp/tools/lifecycle/systems/profile_examples.py`)
 
@@ -51,6 +52,13 @@ branch (when an instance *is* configured) is correct and stays.
 3. `src/kdive/domain/catalog/resources.py`: comment `ResourceKind.FAULT_INJECT` as the ADR-0072
    test fixture kind, distinct from the production provider kinds.
 
+4. `src/kdive/mcp/tool_payloads.py`: give `ResourceByKind.kind` a `Field(description=...)` that
+   names `fault-inject` as a test/mock fixture (ADR-0072), not a production lane. A `StrEnum` field
+   serializes to a bare JSON-schema `enum` with no per-member text, so the field description is the
+   only schema-visible place to mark the value test-only for an agent inspecting `allocations.request`
+   (criterion 2). The kind value itself is unchanged; runtime `available_kinds` already reports what
+   is actually registered.
+
 ## Acceptance criteria → verification
 
 - **Not advertised by default** — `build_profile_examples(None)` and a doc configuring no
@@ -60,6 +68,9 @@ branch (when an instance *is* configured) is correct and stays.
   item whose `data["test_only"]` is `True`; production items carry `False`. New test asserts this.
 - **Guard against regression** — the default-set test fails if `fault-inject` is re-added to the
   default/fallback lists.
+- **Marked test-only where it remains in a schema** — `allocations.request`'s `kind` field
+  description names `fault-inject` as a test fixture; a test asserts the description carries that
+  marking so it cannot silently drop.
 
 ## Edge cases
 

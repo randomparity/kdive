@@ -41,9 +41,14 @@ Two adjacent items in the issue's evidence are **not** fault-inject leaks: the `
    environment), the agent reads an explicit machine-readable marker that it is a test fixture, not
    a production lane.
 
-3. **Mark the enum member test-only at the source.** `ResourceKind.FAULT_INJECT` gains a comment
-   documenting it as the ADR-0072 test fixture, distinct from the production provider kinds, so the
-   vocabulary itself records the distinction the discovery surface now honors.
+3. **Mark the enum member test-only at the source and in the one agent-facing schema that keeps it.**
+   `ResourceKind.FAULT_INJECT` gains a comment documenting it as the ADR-0072 test fixture, distinct
+   from the production provider kinds. `allocations.request` still accepts the kind (the provider is
+   real in test/dev), so `ResourceByKind.kind` gains a `Field(description=...)` naming `fault-inject`
+   as a test/mock fixture — a `StrEnum` field serializes to a bare JSON-schema `enum` with no
+   per-member text, so the field description is the only schema-visible place to mark the value
+   test-only for an agent inspecting the tool. Runtime `available_kinds` already reports what is
+   actually registered.
 
 4. **A guard test pins the default.** `test_systems_profile_examples.py` asserts that
    `build_profile_examples(None)` and a doc with no `fault_inject` emit no `fault-inject` item, that
@@ -75,8 +80,8 @@ an existing read-only tool emits and adds one boolean field to its open `data` o
   mismatch this fixes. Rejected as redundant config surface.
 - **Drop fault-inject from the `ResourceKind` enum / `allocations.request` schema entirely.** The
   provider is real and registerable in test/dev; removing the kind would break the fault-inject
-  provider and its tests. The enum stays; it is marked test-only and the *discovery* surface stops
-  defaulting to it.
+  provider and its tests. The enum stays; the kind is marked test-only in the `allocations.request`
+  schema (field description) and the *discovery* surface stops defaulting to it.
 - **Rename or remove the `fixtures` namespace from the TOC.** It is the rootfs baseline catalog
   (ADR-0089), not the fault-inject provider — no fault-inject string appears there. Renaming a
   correct, unrelated namespace would be out-of-scope churn.
