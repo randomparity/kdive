@@ -800,7 +800,8 @@ git commit -m "feat(mcp): narrow tools.search schemas to composed providers (ADR
 ### Task 6: call-time guard on allocation + systems handlers
 
 **Files:**
-- Modify: `src/kdive/mcp/tools/lifecycle/allocations/registrar.py:56-87` + `request.py:93-125` (thread resolver, guard)
+- Modify: `src/kdive/mcp/tools/lifecycle/allocations/request.py` (add the `_guard_resource_kind` helper only — **no signature change** to `request_allocation`/`_request_allocation`, which have ~26 existing callers)
+- Modify: `src/kdive/mcp/tools/lifecycle/allocations/registrar.py:56-87` (thread `resolver` in; call the guard in the closure)
 - Modify: `src/kdive/mcp/tool_registration.py` (pass `assembly.resolver` to the allocations registrar)
 - Modify: `src/kdive/mcp/tools/lifecycle/systems/registrar.py` (guard in define/provision/reprovision closures)
 - Test: `tests/mcp/lifecycle/test_call_time_kind_guard.py`
@@ -856,10 +857,13 @@ def test_guard_ignores_non_kind_selectors() -> None:
     _guard_resource_kind(payload, _StubResolver(frozenset()))  # no raise
 ```
 
-> Also add an end-to-end test in the style of the existing allocations handler tests (e.g. the
-> module covering `request_allocation`) that drives a non-composed `ResourceByKind` and asserts a
-> `configuration_error` envelope — and, if the repo has a `tools.invoke` test harness, one that drives
-> the same call through `tools.invoke` to prove the guard is on the handler path, not schema-only.
+> Also add an end-to-end test that exercises the guard where it actually lives — the **registered
+> tool**, not `request_allocation` directly (which is intentionally unchanged and does not guard).
+> Invoke `allocations.request` through the app (`app.call_tool("allocations.request", {...})`, the
+> pattern in the existing `tests/mcp/lifecycle/test_allocations_tools.py`) with a non-composed
+> `ResourceByKind` and assert a `configuration_error` envelope; if the repo has a `tools.invoke`
+> harness, drive the same call through it to prove the guard is on the shared dispatch path, not
+> schema-only.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -868,24 +872,16 @@ Expected: FAIL with `ImportError: cannot import name '_guard_resource_kind'` (th
 
 - [ ] **Step 3: Implement the guards**
 
-Thread the resolver into the allocations registrar (mirror the systems plane):
+Define the named guard in `request.py` (so the red test's import resolves and it is unit-testable),
+but **do not change `request_allocation`'s signature** — it has ~26 existing callers
+(`tests/integration/test_m1_allocation_accounting.py`, `tests/mcp/lifecycle/test_allocations_tools.py`,
+`test_allocations_pcie.py`) that a new required param would break. Instead, the guard runs in the
+allocations **registrar closure**, which already captures `resolver`. The closure is the registered
+tool function `app.call_tool` invokes, so it is on the shared handler path for both a direct call
+and the ADR-0268 `tools.invoke` dispatcher:
 
 ```python
-def _register_allocations_request(
-    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
-) -> None:
-    ...
-    return await _request_allocation(
-        pool, current_context(), resolver=resolver, project=project,
-        request=request, idempotency_key=idempotency_key, admission_metrics=admission_metrics,
-    )
-```
-
-In `request.py`, define the named guard (the function the red test imports) and call it at the top
-of `request_allocation` (after role checks, before admission). `request_allocation` gains a
-`resolver: ProviderResolver` keyword param:
-
-```python
+# src/kdive/mcp/tools/lifecycle/allocations/request.py  (new helper, no signature change elsewhere)
 from kdive.mcp.provider_schema import assert_kind_composed
 from kdive.mcp.tool_payloads import ResourceByKind
 from kdive.providers.core.resolver import ProviderResolver
@@ -901,14 +897,29 @@ def _guard_resource_kind(
     """
     if isinstance(request.resource, ResourceByKind):
         assert_kind_composed(request.resource.kind, resolver.registered_kinds())
-
-
-# inside request_allocation(...), after require_role(...), before admission:
-    _guard_resource_kind(request, resolver)
 ```
 
-In the allocations plane dispatcher in `tool_registration.py`, pass `assembly.resolver` to
-`_register_allocations_request` (it currently receives only `app, pool`).
+Thread `resolver` into the allocations registrar and call the guard in the closure, before
+`_request_allocation(...)`:
+
+```python
+# src/kdive/mcp/tools/lifecycle/allocations/registrar.py
+def _register_allocations_request(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
+    ...
+    @app.tool(name="allocations.request", ...)  # keep existing decorator args
+    async def allocations_request(project, request, idempotency_key=None) -> ToolResponse:
+        _guard_resource_kind(request, resolver)   # ADR-0269 — on the shared handler path
+        return await _request_allocation(
+            pool, current_context(), project=project, request=request,
+            idempotency_key=idempotency_key, admission_metrics=admission_metrics,
+        )
+```
+
+`request_allocation` / `_request_allocation` are **unchanged**, so their existing callers keep
+compiling. In the allocations plane dispatcher in `tool_registration.py`, pass `assembly.resolver`
+to `_register_allocations_request` (it currently receives only `app, pool`).
 
 In `systems/registrar.py`, in each profile-accepting closure (`systems.define`, `systems.provision`, `systems.reprovision`), guard the parsed profile's kind before proceeding:
 
