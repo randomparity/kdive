@@ -38,11 +38,12 @@ Expose the live console as **append-only, redacted, ~64 KiB System-owned console
 read through the existing `artifacts.{list,get,search_text}` surface. **No new MCP tool.**
 
 1. **Part artifacts.** Each sealed part is a System-owned (`owner_kind='systems'`) `REDACTED`
-   `artifacts` row whose object key is `…/console-part-<index>` with a zero-padded index so the
-   object store and `artifacts.list` order them lexically. A sealed part is immutable; the in-flight
-   tail (bytes below the rotation threshold, not yet sealed) is not a row. `artifacts.list(system_id)`
-   returns the ordered part series alongside the per-Run evidence, so an agent reads the tail by
-   taking the highest-index part and paging it with `artifacts.get`, and searches history with
+   `artifacts` row whose object key is `…/console-part-<gen>-<start>` (boot generation; zero-padded
+   plaintext start offset — an offset-derived key, not a counter). A sealed part is immutable; the
+   in-flight tail (bytes below the rotation threshold, not yet sealed) is not a row.
+   `artifacts.list(system_id)` returns the parts alongside the per-Run evidence ordered `created_at
+   DESC` (it does not order by key), so an agent reads the tail by selecting the maximum `(gen, start)`
+   among the returned `refs.object` keys, pages it with `artifacts.get`, and searches history with
    `artifacts.search_text`. Append-only means each console byte is uploaded once — a 12-hour workload
    does not re-upload its backlog on every observation.
 
@@ -54,20 +55,22 @@ read through the existing `artifacts.{list,get,search_text}` surface. **No new M
      the `finalize()` raw concatenation into the per-Run evidence are left byte-for-byte unchanged —
      compressing the internal parts in place would make `finalize()` concatenate gzip streams and
      corrupt the immutable `console-<run>` evidence, so it is explicitly not done.
-   - **Local-libvirt:** the reconciler's periodic sweep discovers running local-libvirt Systems and
-     dispatches a per-System `console_rotate` **worker job** (the reconciler owns periodic discovery and
-     dedups to ≤1 in-flight per System; the worker owns the host console file it alone can read,
-     ADR-0223). The job reads only the plaintext bytes **past a tracked plaintext offset**, redacts that
-     delta once with a held-back seam overlap (mirroring the collector), seals ~64 KiB parts from the
-     redacted delta, and registers each. The offset, next index, and a **boot generation** are persisted
-     in an object-store sidecar (not a DB column). A file shorter than the tracked offset is a
-     power-cycle truncation (ADR-0258): the offset resets to 0 and the boot generation increments,
-     starting a fresh part series. The resume offset is **never** the sum of redacted part sizes — the
-     redactor (`[REDACTED]`) is not length-preserving, so a redacted-byte count is not a valid
-     plaintext-file offset and a sealed part is derived once and never re-redacted. The job holds the
-     per-System advisory lock for the read-sidecar → seal-parts → write-sidecar section (single-flight),
-     registers parts idempotently by `(gen, index)` key, and advances the offset only after the delta's
-     part rows commit — so a crash between sealing parts and writing the sidecar re-runs the delta as a
+   - **Local-libvirt:** the reconciler's periodic sweep discovers **live** local-libvirt Systems
+     (booted/`ready`, not torn down — keyed on **System** liveness, not on a non-terminal Run, so the
+     #892 case of a `succeeded` Run with a still-running workload keeps capturing) and dispatches a
+     per-System `console_rotate` **worker job** (the reconciler owns periodic discovery and dedups to ≤1
+     in-flight per System; the worker owns the host console file it alone can read, ADR-0223). The job
+     reads the plaintext bytes from a tracked offset (re-reading a fixed `SEAM_OVERLAP` window before it
+     for redaction context, emitting only bytes ≥ offset so a secret split across a job boundary is
+     never stored raw), redacts that delta once, and seals ~64 KiB parts. Each part's key is
+     `console-part-<gen>-<start>` where `<start>` is its plaintext start offset — an **offset-derived
+     key**, not a free-running counter. The offset and **boot generation** live in an object-store
+     sidecar (not a DB column). A file shorter than the tracked offset is a power-cycle truncation
+     (ADR-0258): the offset resets to 0 and the boot generation increments, starting a fresh part series.
+     The resume offset is **never** the sum of redacted part sizes — the redactor (`[REDACTED]`) is not
+     length-preserving. The job holds the per-System advisory lock (single-flight) and advances the
+     offset only after the delta's part rows commit; because the key is offset-derived and registration
+     is insert-if-absent, a crash between committing parts and writing the sidecar re-runs the delta as a
      no-op on retry rather than duplicating console bytes.
 
 3. **Compression: decompress-on-read, metadata-driven.** Sealed parts are gzip-compressed and tagged

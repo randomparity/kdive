@@ -52,21 +52,29 @@ parts model rather than a new tool.
 ## Requirements
 
 R1. **Part artifacts.** A sealed console part is a System-owned (`owner_kind='systems'`) `REDACTED`
-`artifacts` row whose object key is `…/console-part-<gen>-<index>` (boot generation, R6b; zero-padded
-index within the generation). The zero-padded index orders an object-store listing numerically, but it
-is **not** what `artifacts.list` orders by (that is `created_at DESC`, R8) — an agent identifies the
-live tail by the maximum `(gen, index)` among the returned object keys (`refs.object`), not by list
-position. A sealed part is immutable. The in-flight tail (bytes below the rotation threshold, not yet
-sealed) is not a row.
+`artifacts` row whose object key is `…/console-part-<gen>-<start>`, where `<gen>` is the boot generation
+(R6b) and `<start>` is the **zero-padded plaintext start offset** of the bytes the part covers — a
+deterministic function of position, not a free-running counter (so re-sealing the same delta yields the
+same key, R6c). The padded `(gen, start)` orders an object-store listing numerically, but it is **not**
+what `artifacts.list` orders by (that is `created_at DESC`, R8) — an agent identifies the live tail by
+the maximum `(gen, start)` among the returned object keys (`refs.object`), not by list position. A
+sealed part is immutable. The in-flight tail (bytes below the rotation threshold, not yet sealed) is not
+a row.
 
 R2. **Bounded part size.** A part holds at most the rotation threshold of redacted bytes
 (`DEFAULT_ROTATION_THRESHOLD = 64 KiB`, the existing collector constant), so each part is one
 `artifacts.get` inline window after inflation.
 
-R3. **Redaction before storage.** The console bytes are untrusted guest output. Redaction runs on the
-plaintext before the part is stored, so every part object is `REDACTED`. A secret straddling a
-rotation boundary is held back and redacted with the next part (the collector's existing seam-overlap
-rule, ADR-0095), so it is never stored raw on either side of the seam.
+R3. **Redaction before storage, durable seam.** The console bytes are untrusted guest output. Redaction
+runs on the plaintext before the part is stored, so every part object is `REDACTED`. A secret straddling
+a part boundary **within one job** is held back and redacted with the next part (the collector's
+seam-overlap rule, ADR-0095). The local rotation job is stateless across invocations (its only persisted
+state is the sidecar offset), so the in-memory carry the remote collector relies on does not survive
+across jobs; to protect a secret split **across a job boundary**, each local job re-reads a fixed
+overlap window of already-consumed plaintext before its start offset (`read [offset - SEAM_OVERLAP,
+file_size]`, with `SEAM_OVERLAP` ≥ the collector's seam window) and redacts the combined window, but
+**only seals/advances for bytes ≥ offset** — the overlap is re-read for redaction context and never
+re-emitted. A secret is therefore never stored raw on either side of a part or a job seam.
 
 R4. **Compression: decompress-on-read, metadata-driven.** A sealed part is gzip-compressed in the
 object store and tagged with a `content_encoding=gzip` **user-metadata** entry at write time (alongside
@@ -86,8 +94,12 @@ a parallel compressed, registered copy per sealed part. (Compressing the interna
 make `finalize()` concatenate gzip streams and corrupt the immutable `console-<run>` evidence — that is
 explicitly not done, R9.)
 
-R6. **Local-libvirt capture.** The reconciler's periodic sweep discovers running local-libvirt Systems
-and dispatches a per-System console-rotation **worker job** (the reconciler owns periodic discovery;
+R6. **Local-libvirt capture.** The reconciler's periodic sweep discovers **live** local-libvirt Systems
+— a System that is booted/`ready` and not torn down — and dispatches a per-System console-rotation
+**worker job**. Liveness is keyed on **System** state, not on a Run being non-terminal: the #892 repro
+had the System `ready` with the most recent Run already `succeeded` while the in-guest workload kept
+emitting console, so a succeeded (or otherwise terminal) Run must **not** stop rotation. Rotation stops
+only when the System is torn down. (The reconciler owns periodic discovery;
 the worker owns the host console file it alone can read, ADR-0223). The job reads only the plaintext
 bytes **past a tracked plaintext offset**, redacts that delta with a held-back seam overlap (mirroring
 the collector, ADR-0095, so a secret straddling a read boundary is never stored raw), seals full
@@ -106,13 +118,14 @@ mismatch, R6.)
 R6c. **Single-flight and idempotent retry.** A `console_rotate` job holds the **per-System advisory
 lock** (the platform's per-System serialization, CLAUDE.md) for the whole read-sidecar → seal-parts →
 write-sidecar critical section, so two rotations for one System never overlap even if the reconciler
-dedup races a dispatch. The sidecar (object store) and the part rows (Postgres) are different stores
-with no shared transaction, so the offset advances **only after** the delta's part rows commit, and
-part registration is **idempotent by object key** (`console-part-<gen>-<index>`, insert-if-absent /
-upsert like the per-Run evidence path's `_existing_console_row`). A crash between sealing parts and
-writing the sidecar therefore re-runs the same delta on retry as a no-op (the parts already exist for
-that `(gen, index)`; `next_index` is re-derived from the existing rows for the current generation),
-never duplicating console content or colliding on a key.
+dedup races a dispatch. The sidecar (object store) and the part rows (Postgres) are different stores with
+no shared transaction, so the offset advances **only after** the delta's part rows commit. Idempotency
+is guaranteed by the **offset-derived key**: a part's key is `console-part-<gen>-<start>` where `<start>`
+is the plaintext start offset it covers (R1). On a crash between committing the part rows and writing the
+sidecar, the retry re-reads the same un-advanced delta and produces parts with the **same** `(gen,
+start)` keys; registration is insert-if-absent (like the per-Run evidence path's `_existing_console_row`),
+so the re-seal is a true no-op — no duplicated content and no key collision. The key must **not** be a
+free-running counter, which would assign new keys to the re-sealed bytes and duplicate them.
 
 R6b. **Power-cycle truncation.** The local console file holds only the current boot: libvirt renders
 `<log append='off'>` and truncates it on every domain power-cycle (ADR-0258). When a rotation job
@@ -191,9 +204,10 @@ indices with a prior leader's parts.
 
 ### Local-libvirt (reconciler-dispatched worker rotation job)
 
-The reconciler's periodic sweep — which already enumerates Systems for drift repair — selects
-local-libvirt Systems that are running (`ready` with an active Run) and dispatches a per-System
-console-rotation **worker job** (`JobKind.CONSOLE_ROTATE`). To avoid piling up jobs over a long-lived
+The reconciler's periodic sweep — which already enumerates Systems for drift repair — selects **live**
+local-libvirt Systems (booted/`ready`, not torn down; **independent of whether their most recent Run is
+terminal** — see R6) and dispatches a per-System console-rotation **worker job**
+(`JobKind.CONSOLE_ROTATE`). To avoid piling up jobs over a long-lived
 System, the reconciler skips dispatch when a `console_rotate` job for that System is already
 pending/running, so at most one is in flight per System. The reconciler decides *when* and *for which
 System*; the worker does the host-file I/O it alone can read (ADR-0223). The job:
@@ -224,9 +238,9 @@ artifact-row registration reuses `register_artifact_row` (the per-Run evidence p
 ## Acceptance criteria
 
 - A sealed console part is a System-owned `REDACTED` `artifacts` row keyed
-  `console-part-<gen>-<index>`; `artifacts.list(system_id)` returns it ordered by `created_at DESC`, and
-  the tail is the maximum `(gen, index)` among the returned `refs.object` keys (not the list position).
-  (R1, R8)
+  `console-part-<gen>-<start>` (`<start>` = zero-padded plaintext start offset, deterministic from
+  position); `artifacts.list(system_id)` returns it ordered by `created_at DESC`, and the tail is the
+  maximum `(gen, start)` among the returned `refs.object` keys (not the list position). (R1, R8)
 - A part holds at most 64 KiB of redacted bytes. (R2)
 - Part bytes are redacted before storage; a secret straddling a rotation boundary is stored redacted on
   both sides (seam-overlap). (R3)
@@ -238,8 +252,14 @@ artifact-row registration reuses `register_artifact_row` (the per-Run evidence p
   the collector's internal `console-parts-<n>` objects and the `finalize()` assembly are byte-identical,
   so `console-<run>` evidence is unchanged. (R5, R9)
 - Two concurrent rotation attempts for one System cannot both seal parts (per-System advisory lock); a
-  job retried after a crash between sealing parts and writing the sidecar re-seals nothing (idempotent
-  by `(gen, index)` key, offset advanced only after parts commit). (R6c)
+  job retried after a crash between committing part rows and writing the sidecar re-seals nothing — the
+  re-read delta produces the same `(gen, start)` keys and registration is insert-if-absent (offset
+  advanced only after parts commit). A free-running counter key would fail this test. (R6c)
+- A secret value split across a rotation-**job** boundary is stored redacted on both sides: the local
+  job re-reads a `SEAM_OVERLAP` window of already-consumed plaintext before its offset for redaction
+  context, emitting only bytes ≥ offset. (R3)
+- Rotation continues for a live System whose most recent Run is `succeeded` (the #892 case): a workload
+  still emitting console after Run success keeps producing new parts until the System is torn down. (R6)
 - Local-libvirt produces sealed part rows for a running System as its console grows, reading only the
   plaintext delta past the sidecar `plaintext_offset` and redacting that delta once; a second sweep with
   no new console growth produces no new parts, and no sealed part is ever recomputed/re-redacted. (R6,
