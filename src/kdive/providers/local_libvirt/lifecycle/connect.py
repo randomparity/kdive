@@ -183,6 +183,20 @@ class LocalLibvirtConnect:
         """Validate the handle, then no-op for these connectionless transports."""
         TransportHandleData.decode(handle)
 
+    def recorded_ssh_endpoint(self, system: SystemHandle) -> tuple[str, int] | None:
+        """Return the recorded loopback SSH ``(host, port)``, or ``None`` if unprovisioned.
+
+        Reuses the drgn-live SSH endpoint resolver; a `CONFIGURATION_ERROR` (no domain, or no
+        recorded SSH forward) maps to ``None`` — the System was not provisioned for SSH. Any
+        other libvirt/parse fault (`INFRASTRUCTURE_FAILURE`) propagates (ADR-0271).
+        """
+        try:
+            return self._resolve_ssh_endpoint(system)
+        except CategorizedError as exc:
+            if exc.category is ErrorCategory.CONFIGURATION_ERROR:
+                return None
+            raise
+
 
 def _default_connect() -> _Conn:  # pragma: no cover - live_vm
     """Open the host libvirt connection the resolver reads the domain XML through.

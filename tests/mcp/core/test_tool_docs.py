@@ -162,6 +162,8 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "shapes.set": ("tests/mcp/catalog/test_shapes_tools.py",),
     "systems.define": ("tests/mcp/lifecycle/test_systems_tools.py",),
     "systems.get": ("tests/mcp/lifecycle/test_systems_tools.py",),
+    "systems.authorize_ssh_key": ("tests/mcp/lifecycle/test_systems_ssh_access.py",),
+    "systems.ssh_info": ("tests/mcp/lifecycle/test_systems_ssh_access.py",),
     "systems.list": ("tests/mcp/lifecycle/test_systems_list.py",),
     "systems.profile_examples": ("tests/mcp/lifecycle/test_systems_profile_examples.py",),
     "systems.provision": ("tests/mcp/lifecycle/test_systems_tools.py",),

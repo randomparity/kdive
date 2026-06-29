@@ -32,6 +32,12 @@ from kdive.mcp.tools.lifecycle.systems.profile_examples import (
 from kdive.mcp.tools.lifecycle.systems.provision import (
     SystemProvisionHandlers as _SystemProvisionHandlers,
 )
+from kdive.mcp.tools.lifecycle.systems.ssh_access import (
+    authorize_ssh_key as _authorize_ssh_key,
+)
+from kdive.mcp.tools.lifecycle.systems.ssh_access import (
+    ssh_info as _ssh_info,
+)
 from kdive.mcp.tools.lifecycle.systems.view import (
     SystemsListRequest as _SystemsListRequest,
 )
@@ -99,6 +105,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_systems_profile_examples(app, resolver)
     _register_systems_teardown(app, pool)
     _register_systems_reprovision(app, pool, resolver)
+    _register_systems_ssh_info(app, pool, resolver)
+    _register_systems_authorize_ssh_key(app, pool, resolver)
 
 
 def _rootfs_validator(runtime: ProviderRuntime):
@@ -276,6 +284,44 @@ def _register_systems_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         """Return a System the caller can view."""
         return await _get_system(pool, current_context(), system_id)
+
+
+def _register_systems_ssh_info(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
+    @app.tool(
+        name="systems.ssh_info",
+        annotations=_docmeta.read_only(),
+        meta=_docmeta.maturity_meta("implemented"),
+    )
+    async def systems_ssh_info(
+        system_id: Annotated[
+            str, Field(description="The ready System to return SSH coordinates for.")
+        ],
+    ) -> ToolResponse:
+        """Return SSH connection coordinates (user, host, port, jump_host) for a ready System."""
+        return await _ssh_info(pool, current_context(), system_id, resolver=resolver)
+
+
+def _register_systems_authorize_ssh_key(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
+    @app.tool(
+        name="systems.authorize_ssh_key",
+        annotations=_docmeta.mutating(),
+        meta=_docmeta.maturity_meta("implemented"),
+    )
+    async def systems_authorize_ssh_key(
+        system_id: Annotated[str, Field(description="The ready System to authorize the key on.")],
+        public_key: Annotated[
+            str,
+            Field(description="The agent SSH public key to authorize in the guest root account."),
+        ],
+    ) -> ToolResponse:
+        """Authorize an agent SSH public key in a ready System's guest root account."""
+        return await _authorize_ssh_key(
+            pool, current_context(), system_id, public_key, resolver=resolver
+        )
 
 
 def _register_systems_list(app: FastMCP, pool: AsyncConnectionPool) -> None:

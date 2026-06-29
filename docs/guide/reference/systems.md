@@ -2,6 +2,17 @@
 
 # `systems` tools
 
+## `systems.authorize_ssh_key`
+
+`implemented`
+
+Authorize an agent SSH public key in a ready System's guest root account.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `public_key` | string | yes | The agent SSH public key to authorize in the guest root account. |
+| `system_id` | string | yes | The ready System to authorize the key on. |
+
 ## `systems.define`
 
 `implemented`
@@ -225,6 +236,16 @@ use `systems.provision` instead. Requires operator and opt-in.
     - `base_image_volume` (`string`, required)
     - `crashkernel` (`string (nullable)`, optional)
     - `destructive_ops` (`array<string>`, optional)
+
+## `systems.ssh_info`
+
+`implemented` · `read-only`
+
+Return SSH connection coordinates (user, host, port, jump_host) for a ready System.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `system_id` | string | yes | The ready System to return SSH coordinates for. |
 
 ## `systems.teardown`
 

@@ -21,6 +21,7 @@ from kdive.domain.lifecycle.records import System
 from kdive.domain.lifecycle.rules import TERMINAL_SYSTEM_STATES
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
+from kdive.jobs.handlers.ssh_authorize import authorize_ssh_key_handler
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReprovisionPayload, SystemPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
@@ -325,7 +326,7 @@ def register_handlers(
     resolver: ProviderResolver,
     artifact_store: ObjectStore | None = None,
 ) -> None:
-    """Bind the `provision`/`teardown`/`reprovision` job handlers."""
+    """Bind the `provision`/`teardown`/`reprovision`/`authorize_ssh_key` job handlers."""
     registry.register(
         JobKind.PROVISION,
         lambda conn, job: provision_handler(
@@ -339,4 +340,8 @@ def register_handlers(
     registry.register(
         JobKind.REPROVISION,
         lambda conn, job: reprovision_handler(conn, job, resolver=resolver),
+    )
+    registry.register(
+        JobKind.AUTHORIZE_SSH_KEY,
+        lambda conn, job: authorize_ssh_key_handler(conn, job, resolver=resolver),
     )

@@ -38,3 +38,7 @@ class FaultInjectConnect:
 
     def close_transport(self, handle: TransportHandle) -> None:
         TransportHandleData.decode(handle)
+
+    def recorded_ssh_endpoint(self, system: SystemHandle) -> tuple[str, int] | None:
+        """Fault-inject discloses no SSH endpoint (ADR-0271)."""
+        return None

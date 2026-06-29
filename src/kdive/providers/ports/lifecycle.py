@@ -172,6 +172,17 @@ class Connector(Protocol):
         """
         ...
 
+    def recorded_ssh_endpoint(self, system: SystemHandle) -> tuple[str, int] | None:
+        """Return the recorded SSH ``(host, port)`` for ``system``, or ``None`` (ADR-0271).
+
+        ``None`` means the System was not provisioned with an SSH forward, so no agent SSH is
+        available. Providers without a local SSH endpoint to disclose return ``None``.
+
+        Raises:
+            CategorizedError: ``INFRASTRUCTURE_FAILURE`` on an unexpected provider read error.
+        """
+        ...
+
 
 class Controller(Protocol):
     """Control port keyed on provider domain name."""
