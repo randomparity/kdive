@@ -292,12 +292,7 @@ def _register_systems_ssh_info(
     @app.tool(
         name="systems.ssh_info",
         annotations=_docmeta.read_only(),
-        meta=_docmeta.maturity_meta(
-            "partial",
-            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
-            detail="SSH reachability needs a booted guest; CI proves only the fake-seam contract.",
-            promotion="A live_vm end-to-end SSH proof on a KVM host.",
-        ),
+        meta=_docmeta.maturity_meta("implemented"),
     )
     async def systems_ssh_info(
         system_id: Annotated[
@@ -314,12 +309,7 @@ def _register_systems_authorize_ssh_key(
     @app.tool(
         name="systems.authorize_ssh_key",
         annotations=_docmeta.mutating(),
-        meta=_docmeta.maturity_meta(
-            "partial",
-            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
-            detail="Authorizing a key needs a booted guest sshd; CI proves the fake-seam contract.",
-            promotion="A live_vm end-to-end authorize-then-SSH proof on a KVM host.",
-        ),
+        meta=_docmeta.maturity_meta("implemented"),
     )
     async def systems_authorize_ssh_key(
         system_id: Annotated[str, Field(description="The ready System to authorize the key on.")],

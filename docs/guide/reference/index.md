@@ -121,7 +121,7 @@
 | [`shapes.delete`](shapes.md#shapesdelete) | `implemented` |
 | [`shapes.list`](shapes.md#shapeslist) | `implemented` |
 | [`shapes.set`](shapes.md#shapesset) | `implemented` |
-| [`systems.authorize_ssh_key`](systems.md#systemsauthorize_ssh_key) | `partial` |
+| [`systems.authorize_ssh_key`](systems.md#systemsauthorize_ssh_key) | `implemented` |
 | [`systems.define`](systems.md#systemsdefine) | `implemented` |
 | [`systems.get`](systems.md#systemsget) | `implemented` |
 | [`systems.list`](systems.md#systemslist) | `implemented` |
@@ -129,7 +129,7 @@
 | [`systems.provision`](systems.md#systemsprovision) | `implemented` |
 | [`systems.provision_defined`](systems.md#systemsprovision_defined) | `implemented` |
 | [`systems.reprovision`](systems.md#systemsreprovision) | `implemented` |
-| [`systems.ssh_info`](systems.md#systemsssh_info) | `partial` |
+| [`systems.ssh_info`](systems.md#systemsssh_info) | `implemented` |
 | [`systems.teardown`](systems.md#systemsteardown) | `implemented` |
 | [`tools.invoke`](tools.md#toolsinvoke) | `implemented` |
 | [`tools.search`](tools.md#toolssearch) | `implemented` |

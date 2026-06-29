@@ -4,11 +4,7 @@
 
 ## `systems.authorize_ssh_key`
 
-`partial`
-
-**Maturity:** live_dependency — Authorizing a key needs a booted guest sshd; CI proves the fake-seam contract.
-
-**Promotion:** A live_vm end-to-end authorize-then-SSH proof on a KVM host.
+`implemented`
 
 Authorize an agent SSH public key in a ready System's guest root account.
 
@@ -243,11 +239,7 @@ use `systems.provision` instead. Requires operator and opt-in.
 
 ## `systems.ssh_info`
 
-`partial` · `read-only`
-
-**Maturity:** live_dependency — SSH reachability needs a booted guest; CI proves only the fake-seam contract.
-
-**Promotion:** A live_vm end-to-end SSH proof on a KVM host.
+`implemented` · `read-only`
 
 Return SSH connection coordinates (user, host, port, jump_host) for a ready System.
 
