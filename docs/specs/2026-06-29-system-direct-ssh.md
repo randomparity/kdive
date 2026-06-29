@@ -79,8 +79,12 @@ Handler (in the systems plane) follows the `systems.get` shape: `current_context
   reprovision with `ssh_credential_ref` set."
 - Success: `ToolResponse.success(object_id=system_id, data={"ssh": {"user": "root",
   "host": "127.0.0.1", "port": <int>, "jump_host": None, "host_scope":
-  "worker_loopback"}}, suggested_next_actions=["systems.authorize_ssh_key",
-  "systems.get"])`. `port` is a native JSON int (ADR-0263).
+  "worker_loopback"}}, suggested_next_actions=visible_next_actions(
+  ["systems.authorize_ssh_key", "systems.get"], ctx, system.project))`. `port` is a native
+  JSON int (ADR-0263).
+  The next-actions are built through the ADR-0261 `visible_next_actions` role filter, so a
+  VIEWER caller (who cannot invoke the OPERATOR-only `systems.authorize_ssh_key`) is not
+  pointed at it — only the actions its role can actually call survive.
 
 `host_scope` is the **locality signal** the descriptor carries so a caller can tell whether
 the coordinates are usable from where it runs. `worker_loopback` means `host` is the worker
@@ -134,7 +138,7 @@ XML, and duplicating it would risk drift. `jump_host` is hard `None` for local-l
   SSH-exec), so the worker handler is unit-tested with a fake that records argv and
   simulates present/absent key, success/failure — no `live_vm` needed for the unit path.
 
-### 4. Registration, exposure, no migration
+### 4. Registration, exposure, migration 0052
 
 - `tool_registration.py`: append the two systems tools to the systems registrar (they need
   only `pool` + the runtime/connect seam already injected into that plane).
@@ -159,7 +163,9 @@ XML, and duplicating it would risk drift. `jump_host` is hard `None` for local-l
 - `systems.ssh_info`: not-ready → `READINESS_FAILURE`; no recorded port →
   `CONFIGURATION_ERROR` (`reason=ssh_not_provisioned`); ready + port → success with
   `data.ssh == {user: root, host: 127.0.0.1, port: <int>, jump_host: null, host_scope:
-  worker_loopback}` and a native int port.
+  worker_loopback}` and a native int port. An OPERATOR caller's success
+  `suggested_next_actions` includes `systems.authorize_ssh_key`; a VIEWER caller's omits it
+  (ADR-0261 `visible_next_actions` role filter).
 - `systems.authorize_ssh_key` tool: VIEWER caller denied (RBAC); non-ready →
   `READINESS_FAILURE`; malformed key → synchronous `CONFIGURATION_ERROR`; happy path →
   `from_job` running envelope and the enqueued job carries the normalized key.
