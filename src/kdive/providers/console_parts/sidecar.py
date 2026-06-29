@@ -19,7 +19,6 @@ pass).
 from __future__ import annotations
 
 import base64
-import binascii
 import json
 from typing import Protocol
 from uuid import UUID
@@ -107,7 +106,9 @@ def read_sidecar(store: _StorePort, tenant: str, system_id: UUID) -> RotationSta
     try:
         fetched = store.get_artifact(key, None)
         return _deserialize(fetched.data)
-    except CategorizedError, json.JSONDecodeError, KeyError, binascii.Error:
+    except CategorizedError, KeyError, ValueError, TypeError:
+        # ValueError covers json.JSONDecodeError and binascii.Error; TypeError covers a
+        # wrong-typed field (e.g. a null where an int is expected) from a truncated write.
         return ZERO
 
 

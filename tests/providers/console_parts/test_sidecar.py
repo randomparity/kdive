@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
+
 from kdive.providers.console_parts.rotation import RotationState
 from kdive.providers.console_parts.sidecar import (
     ZERO,
@@ -127,3 +129,43 @@ def test_write_overwrites_prior_state(minio_store: ObjectStore, key_ns: str) -> 
     write_sidecar(minio_store, key_ns, system_id, state_b)
     recovered = read_sidecar(minio_store, key_ns, system_id)
     assert recovered == state_b
+
+
+@pytest.mark.parametrize("bad_offset", [None, "abc"])
+def test_wrong_typed_field_returns_zero(
+    minio_store: ObjectStore, key_ns: str, bad_offset: object
+) -> None:
+    """Structurally-valid JSON with a wrong-typed field returns ZERO without raising.
+
+    A truncated or partial write can produce well-formed JSON whose ``plaintext_offset`` is
+    ``null`` (``int(None)`` raises ``TypeError``) or a non-numeric string (``int("abc")`` raises
+    ``ValueError``); neither must escape ``read_sidecar``.
+    """
+    import json
+
+    from kdive.artifacts.storage import ArtifactWriteRequest
+    from kdive.domain.catalog.artifacts import Sensitivity
+
+    system_id = uuid4()
+    body = json.dumps(
+        {
+            "plaintext_offset": bad_offset,
+            "carry": "",
+            "next_index": 0,
+            "boot_gen": 0,
+            "boot_id": None,
+        }
+    ).encode("utf-8")
+    minio_store.put_artifact(
+        ArtifactWriteRequest(
+            tenant=key_ns,
+            owner_kind="systems",
+            owner_id=str(system_id),
+            name=sidecar_object_name(),
+            data=body,
+            sensitivity=Sensitivity.REDACTED,
+            retention_class="console",
+        )
+    )
+    result = read_sidecar(minio_store, key_ns, system_id)
+    assert result == ZERO
