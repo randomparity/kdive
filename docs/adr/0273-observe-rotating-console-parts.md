@@ -95,7 +95,11 @@ read through the existing `artifacts.{list,get,search_text}` surface. **No new M
    authz path, no new public surface.
 
 6. **Retention.** Console parts are System-owned artifacts reclaimed at **teardown** (the teardown
-   handler deletes the System's console-part rows + objects and the rotation sidecar). The #768
+   handler deletes the System's console-part rows + objects and the rotation sidecar). Teardown and
+   the `console_rotate` handler both run under the per-System advisory lock, and the handler seals
+   only while the System is in a live state (`ready`/`crashed`, the sweep's predicate): a rotation
+   job swept while the System was live but executed after teardown sees the terminal state under the
+   lock and seals nothing, so it cannot orphan a fresh part series past reclaim. The #768
    artifact-expiry sweeps do **not** cover them — those sweeps pin `owner_kind='runs'` and deliberately
    exclude system-owned `console`/`vmcore` evidence (`reconciler/cleanup/gc.py`) — so there is no
    in-life expiry: a long-lived, chatty System accumulates parts until teardown. A hard per-System

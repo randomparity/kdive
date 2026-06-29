@@ -26,6 +26,7 @@ from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact, artifact_key
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS
+from kdive.domain.capacity.state import SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError
 from kdive.domain.operations.jobs import Job, JobKind
@@ -53,9 +54,19 @@ _OWNER_KIND = "systems"
 # console parts are bounded by teardown reclaim, not an expiry sweep.
 _RETENTION_CLASS = "console"
 
+# Seal parts only while the System is live (the sweep's predicate, console_rotation.py). A
+# console_rotate job swept while the System was ``ready`` can run AFTER teardown has reclaimed the
+# parts/sidecar and set the System terminal; without this guard it would re-seal gen-0 parts from
+# the still-present console log (absent sidecar -> ZERO state) and orphan them past teardown. The
+# guard and teardown both run under the per-System advisory lock, so the lock serializes the
+# state-set against this state-read: whichever runs second sees the other's committed effect.
+_LIVE_STATES: frozenset[SystemState] = frozenset({SystemState.READY, SystemState.CRASHED})
+
 _PART_ROW_SQL: LiteralString = (
     "SELECT id FROM artifacts WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"
 )
+
+_SYSTEM_STATE_SQL: LiteralString = "SELECT state FROM systems WHERE id = %s"
 
 
 def _make_redactor(secret_registry: SecretRegistry) -> Callable[[bytes], bytes]:
@@ -70,6 +81,18 @@ def _make_redactor(secret_registry: SecretRegistry) -> Callable[[bytes], bytes]:
         return redactor.redact_text(buffer.decode("utf-8", "replace")).encode("utf-8")
 
     return _redact
+
+
+async def _system_is_live(conn: AsyncConnection, system_id: UUID) -> bool:
+    """True when the System is in a live state the sweep targets (``ready``/``crashed``).
+
+    A missing row (the System was deleted) is not live. Read under the per-System advisory lock so
+    it serializes against teardown's terminal-state write.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(_SYSTEM_STATE_SQL, (system_id,))
+        row = await cur.fetchone()
+    return row is not None and SystemState(row[0]) in _LIVE_STATES
 
 
 async def _existing_part_row(conn: AsyncConnection, system_id: UUID, object_key: str) -> bool:
@@ -117,10 +140,17 @@ async def _rotate_under_lock(
 ) -> RotationResult | None:
     """Read the cursor, seal new parts, and return the advanced state — all under the lock.
 
-    Returns ``None`` (sealing nothing) when the console log cannot be read (ADR-0223): the
-    permission wall is a host-config problem, not a job failure, so the handler degrades.
+    Returns ``None`` (sealing nothing) when the System is no longer live (teardown reclaimed it,
+    the race guard above) or the console log cannot be read (ADR-0223): the permission wall is a
+    host-config problem, not a job failure, so the handler degrades.
     """
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        if not await _system_is_live(conn, system_id):
+            _log.info(
+                "system %s is no longer live; sealing no console parts (teardown race guard)",
+                system_id,
+            )
+            return None
         try:
             file_bytes = await asyncio.to_thread(read_console_log, console_log_path(system_id))
         except CategorizedError:

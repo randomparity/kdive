@@ -101,6 +101,22 @@ def _write_console(tmp_path: Path, system_id: UUID, data: bytes) -> Path:
     return log
 
 
+async def _seed_system(pool: AsyncConnectionPool, system_id: UUID, state: str) -> None:
+    """Insert an allocation + System row so the handler's live-state guard has a row to read."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "INSERT INTO allocations (state, principal, project) "
+            "VALUES ('requested', 'tester', 'local') RETURNING id"
+        )
+        row = await cur.fetchone()
+        assert row is not None
+        await cur.execute(
+            "INSERT INTO systems (id, allocation_id, state, provisioning_profile, "
+            "principal, project) VALUES (%s, %s, %s, '{}'::jsonb, 'tester', 'local')",
+            (system_id, row[0], state),
+        )
+
+
 async def _run_handler(pool: AsyncConnectionPool, store: _FakeStore, job: Job) -> str | None:
     async with pool.connection() as conn:
         return await console_rotate.console_rotate_handler(
@@ -141,6 +157,7 @@ def test_growing_console_seals_redacted_gzip_parts_and_advances_sidecar(
     async def _run() -> tuple[_FakeStore, list[str], RotationState]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
             await pool.open()
+            await _seed_system(pool, system_id, "ready")
             store = _FakeStore()
             await _run_handler(pool, store, _job(system_id, "boot-A"))
             keys = await _row_keys(pool, system_id)
@@ -176,6 +193,7 @@ def test_idempotent_retry_after_crash_before_sidecar_write(
     async def _run() -> tuple[list[str], list[str], list[str]]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
             await pool.open()
+            await _seed_system(pool, system_id, "ready")
             store = _FakeStore()
             await _run_handler(pool, store, _job(system_id, "boot-A"))
             first_parts = list(store.part_puts())
@@ -214,6 +232,7 @@ def test_best_effort_when_console_unreadable_registers_no_parts(
     async def _run() -> tuple[str | None, list[str], list[str]]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
             await pool.open()
+            await _seed_system(pool, system_id, "ready")
             store = _FakeStore()
             result = await _run_handler(pool, store, _job(system_id, "boot-A"))
             rows = await _row_keys(pool, system_id)
@@ -236,6 +255,7 @@ def test_boot_id_change_starts_new_part_generation(
     async def _run() -> list[str]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
             await pool.open()
+            await _seed_system(pool, system_id, "ready")
             store = _FakeStore()
             await _run_handler(pool, store, _job(system_id, "boot-A"))
             await _run_handler(pool, store, _job(system_id, "boot-B"))
@@ -245,3 +265,33 @@ def test_boot_id_change_starts_new_part_generation(
 
     assert any("console-part-0-" in key for key in rows), "first boot seals generation 0"
     assert any("console-part-1-" in key for key in rows), "boot-id change seals generation 1"
+
+
+def test_terminal_system_seals_no_parts_after_teardown(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A console_rotate job that runs after teardown must seal nothing (teardown-race guard).
+
+    Teardown reclaims the parts/sidecar and sets the System ``torn_down`` under the per-System
+    advisory lock; a console_rotate job swept while the System was ``ready`` can still run after
+    that. Without the live-state guard it would re-seal gen-0 parts from the still-present console
+    log (the sidecar is gone, so it resumes from ZERO) and orphan them past teardown.
+    """
+    system_id = uuid4()
+    log = _write_console(tmp_path, system_id, _CONSOLE)
+    monkeypatch.setattr(console_rotate, "console_log_path", lambda _sid: log)
+
+    async def _run() -> tuple[str | None, list[str], list[str]]:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            await _seed_system(pool, system_id, "torn_down")
+            store = _FakeStore()
+            result = await _run_handler(pool, store, _job(system_id, "boot-A"))
+            rows = await _row_keys(pool, system_id)
+        return result, rows, store.part_puts()
+
+    result, rows, part_puts = asyncio.run(_run())
+
+    assert result is None
+    assert rows == [], "no console-part rows for a torn-down System"
+    assert part_puts == [], "no part objects stored for a torn-down System"
