@@ -48,9 +48,12 @@ read through the existing `artifacts.{list,get,search_text}` surface. **No new M
 
 2. **Capture driver differs by provider (locality).**
    - **Remote-libvirt:** the reconciler-resident collector already rotates 64 KiB redacted parts on a
-     size threshold with seam-overlap redaction (ADR-0095). Register each part as an `artifacts` row
-     when it is sealed (the reconciler holds the DB connection). This promotes the existing
-     collector-internal parts to first-class rows; assembly into the per-Run evidence is unchanged.
+     size threshold with seam-overlap redaction (ADR-0095). When it seals a part it additionally writes
+     a **separate** compressed `console-part-<gen>-<index>` object and registers its `artifacts` row
+     (the reconciler holds the DB connection). The collector's internal `console-parts-<n>` objects and
+     the `finalize()` raw concatenation into the per-Run evidence are left byte-for-byte unchanged —
+     compressing the internal parts in place would make `finalize()` concatenate gzip streams and
+     corrupt the immutable `console-<run>` evidence, so it is explicitly not done.
    - **Local-libvirt:** the reconciler's periodic sweep discovers running local-libvirt Systems and
      dispatches a per-System `console_rotate` **worker job** (the reconciler owns periodic discovery and
      dedups to ≤1 in-flight per System; the worker owns the host console file it alone can read,
@@ -61,13 +64,20 @@ read through the existing `artifacts.{list,get,search_text}` surface. **No new M
      power-cycle truncation (ADR-0258): the offset resets to 0 and the boot generation increments,
      starting a fresh part series. The resume offset is **never** the sum of redacted part sizes — the
      redactor (`[REDACTED]`) is not length-preserving, so a redacted-byte count is not a valid
-     plaintext-file offset and a sealed part is derived once and never re-redacted.
+     plaintext-file offset and a sealed part is derived once and never re-redacted. The job holds the
+     per-System advisory lock for the read-sidecar → seal-parts → write-sidecar section (single-flight),
+     registers parts idempotently by `(gen, index)` key, and advances the offset only after the delta's
+     part rows commit — so a crash between sealing parts and writing the sidecar re-runs the delta as a
+     no-op on retry rather than duplicating console bytes.
 
-3. **Compression: decompress-on-read.** Sealed parts are gzip-compressed in the object store;
-   `artifacts.get` inflates a part transparently before windowing. Redaction runs on the **plaintext**
-   before compression, so the stored object is always redacted and the `artifacts.get`
-   `sensitivity == REDACTED` gate still holds. Every part stays inline-windowable with uniform
-   semantics — the agent never sees a hot/cold read distinction.
+3. **Compression: decompress-on-read, metadata-driven.** Sealed parts are gzip-compressed and tagged
+   with a `content_encoding=gzip` object **user-metadata** entry (alongside the existing
+   `sensitivity`/`retention_class` metadata the store records). `artifacts.get` inflates strictly when
+   the object `head` reports that encoding — it never parses the object key, so the generic reader stays
+   kind-agnostic and a non-`gzip` artifact is byte-for-byte unchanged. Redaction runs on the
+   **plaintext** before compression, so the stored object is always redacted and the
+   `sensitivity == REDACTED` gate still holds against the inflated bytes. Every part stays
+   inline-windowable with uniform semantics — no hot/cold read distinction.
 
 4. **Per-Run evidence is untouched.** `console-<run>` (ADR-0235) stays the frozen boot-window
    assembly. The live parts are a separate System-owned series; both the per-Run evidence and each

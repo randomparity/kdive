@@ -52,9 +52,12 @@ parts model rather than a new tool.
 ## Requirements
 
 R1. **Part artifacts.** A sealed console part is a System-owned (`owner_kind='systems'`) `REDACTED`
-`artifacts` row whose object key is `…/console-part-<index>` with a zero-padded index, so the object
-store and `artifacts.list` order parts lexically. A sealed part is immutable. The in-flight tail
-(bytes below the rotation threshold, not yet sealed) is not a row.
+`artifacts` row whose object key is `…/console-part-<gen>-<index>` (boot generation, R6b; zero-padded
+index within the generation). The zero-padded index orders an object-store listing numerically, but it
+is **not** what `artifacts.list` orders by (that is `created_at DESC`, R8) — an agent identifies the
+live tail by the maximum `(gen, index)` among the returned object keys (`refs.object`), not by list
+position. A sealed part is immutable. The in-flight tail (bytes below the rotation threshold, not yet
+sealed) is not a row.
 
 R2. **Bounded part size.** A part holds at most the rotation threshold of redacted bytes
 (`DEFAULT_ROTATION_THRESHOLD = 64 KiB`, the existing collector constant), so each part is one
@@ -65,14 +68,23 @@ plaintext before the part is stored, so every part object is `REDACTED`. A secre
 rotation boundary is held back and redacted with the next part (the collector's existing seam-overlap
 rule, ADR-0095), so it is never stored raw on either side of the seam.
 
-R4. **Compression: decompress-on-read.** A sealed part is gzip-compressed in the object store.
-`artifacts.get` inflates a console-part object transparently before windowing; the windowed-read,
-`next_offset` paging, `download_uri`, and `sensitivity == REDACTED` gate semantics are preserved
-against the inflated bytes. A non-console artifact is unaffected.
+R4. **Compression: decompress-on-read, metadata-driven.** A sealed part is gzip-compressed in the
+object store and tagged with a `content_encoding=gzip` **user-metadata** entry at write time (alongside
+the existing `sensitivity`/`retention_class` metadata the store already records). `artifacts.get`
+inflates strictly when `head` reports `content_encoding=gzip` — it never parses the object key, so the
+generic reader stays kind-agnostic and a non-`gzip` artifact takes the existing raw path byte-for-byte.
+After inflation the windowed-read, `next_offset` paging, `download_uri`, and `sensitivity == REDACTED`
+gate semantics are preserved against the inflated plaintext. (`content_encoding` is object user-metadata,
+not a DB column — no migration.)
 
-R5. **Remote-libvirt capture.** The reconciler-resident collector registers each part as an
-`artifacts` row when it seals the part (it holds the DB connection). The existing rotation, redaction,
-seam-overlap, and per-Run assembly are unchanged; this adds a row write per sealed part.
+R5. **Remote-libvirt capture.** When the reconciler-resident collector seals a part, it additionally
+writes a **separate** compressed part artifact (a new `console-part-<gen>-<index>` object + `artifacts`
+row) — distinct from the collector's internal `console-parts-<n>` object that `finalize()` concatenates
+raw into the per-Run evidence (`collector.py` `finalize` reads `read_part` and concatenates). The
+internal parts and the finalize assembly are therefore **byte-for-byte unchanged**; this work only adds
+a parallel compressed, registered copy per sealed part. (Compressing the internal parts in place would
+make `finalize()` concatenate gzip streams and corrupt the immutable `console-<run>` evidence — that is
+explicitly not done, R9.)
 
 R6. **Local-libvirt capture.** The reconciler's periodic sweep discovers running local-libvirt Systems
 and dispatches a per-System console-rotation **worker job** (the reconciler owns periodic discovery;
@@ -87,8 +99,20 @@ derived once from its redacted delta and never recomputed.
 
 R6a. **Rotation state.** The plaintext offset, the next part index, and a boot-generation marker are
 persisted per System in a small internal object-store **sidecar** object (not a DB row), so there is no
-migration. The worker reads the sidecar at the start of a rotation job and writes it back after sealing
-parts. (Deriving the offset from the part rows is rejected — units mismatch, R6.)
+DB migration for the offset. The worker reads the sidecar at the start of a rotation job and writes it
+back after the delta's parts commit. (Deriving the offset from the part rows is rejected — units
+mismatch, R6.)
+
+R6c. **Single-flight and idempotent retry.** A `console_rotate` job holds the **per-System advisory
+lock** (the platform's per-System serialization, CLAUDE.md) for the whole read-sidecar → seal-parts →
+write-sidecar critical section, so two rotations for one System never overlap even if the reconciler
+dedup races a dispatch. The sidecar (object store) and the part rows (Postgres) are different stores
+with no shared transaction, so the offset advances **only after** the delta's part rows commit, and
+part registration is **idempotent by object key** (`console-part-<gen>-<index>`, insert-if-absent /
+upsert like the per-Run evidence path's `_existing_console_row`). A crash between sealing parts and
+writing the sidecar therefore re-runs the same delta on retry as a no-op (the parts already exist for
+that `(gen, index)`; `next_index` is re-derived from the existing rows for the current generation),
+never duplicating console content or colliding on a key.
 
 R6b. **Power-cycle truncation.** The local console file holds only the current boot: libvirt renders
 `<log append='off'>` and truncates it on every domain power-cycle (ADR-0258). When a rotation job
@@ -144,18 +168,26 @@ orders by.
 
 ### Compression in `artifacts.get` (`mcp/tools/catalog/artifacts/reads.py`)
 
-`_artifact_content` gzip-inflates a console-part object after the `REDACTED`-sensitivity head check and
-before windowing. The inflate is keyed off the part object (key prefix or a stored content-encoding),
-so non-console artifacts take the existing raw path unchanged. The `download_uri` is still minted (it
-serves the compressed object; the agent inflates, or a future enhancement sets `Content-Encoding`).
-The windowed inline `content`, `content_truncated`, and `next_offset` are computed on the inflated
-plaintext, so paging semantics are unchanged.
+`_artifact_content` reads the object `head` (which already carries `sensitivity`); when the head's
+user-metadata reports `content_encoding=gzip`, it inflates the fetched bytes after the
+`REDACTED`-sensitivity gate and before windowing. Detection is **metadata-driven, not key-driven**, so
+the generic reader never special-cases the console-part key and a non-`gzip` artifact is byte-for-byte
+unchanged. The `download_uri` is still minted (it serves the compressed object; the agent inflates, or a
+future enhancement sets the HTTP `Content-Encoding` header — noted in Risks). The windowed inline
+`content`, `content_truncated`, and `next_offset` are computed on the inflated plaintext, so paging
+semantics are unchanged. This requires the object-store `head` to surface user-metadata
+`content_encoding` (an additive read of metadata the put already supports), not a new DB column.
 
 ### Remote-libvirt (`providers/remote_libvirt/console/collector.py`, reconciler wiring)
 
-On `put_part`, also register the part `artifacts` row (gzip-compressed object) on the reconciler's DB
-connection. The redacted bytes are already produced; compress before upload. Assembly into the per-Run
-`console-<run>` evidence at finalize is unchanged.
+On `put_part`, the collector continues to write its internal `console-parts-<n>` object **unchanged**
+(this is what `finalize()` reads and concatenates raw into `console-<run>`), and **additionally** writes
+a separate gzip-compressed `console-part-<gen>-<index>` object and registers its `artifacts` row on the
+reconciler's DB connection. The redacted bytes already exist; they are compressed only for the new
+registered copy. Because the internal parts and `finalize()`'s assembly are untouched, the per-Run
+evidence stays byte-identical (R5/R9). The boot generation for remote derives from the collector's
+restart/resume point so a leader-failover cold-start opens a new generation rather than colliding
+indices with a prior leader's parts.
 
 ### Local-libvirt (reconciler-dispatched worker rotation job)
 
@@ -191,15 +223,23 @@ artifact-row registration reuses `register_artifact_row` (the per-Run evidence p
 
 ## Acceptance criteria
 
-- A sealed console part is a System-owned `REDACTED` `artifacts` row with a zero-padded
-  `console-part-<index>` key; `artifacts.list(system_id)` returns the parts in index order. (R1)
+- A sealed console part is a System-owned `REDACTED` `artifacts` row keyed
+  `console-part-<gen>-<index>`; `artifacts.list(system_id)` returns it ordered by `created_at DESC`, and
+  the tail is the maximum `(gen, index)` among the returned `refs.object` keys (not the list position).
+  (R1, R8)
 - A part holds at most 64 KiB of redacted bytes. (R2)
 - Part bytes are redacted before storage; a secret straddling a rotation boundary is stored redacted on
   both sides (seam-overlap). (R3)
-- `artifacts.get` on a console part returns the inflated, windowed, redacted content with correct
-  `next_offset` paging and the `REDACTED` gate intact; a gzip-stored part is never returned as raw gzip
-  bytes inline. A non-console artifact read is byte-identical to before. (R4)
-- Remote-libvirt registers a part row per sealed part; per-Run assembly is unchanged. (R5)
+- `artifacts.get` on a part whose `head` metadata is `content_encoding=gzip` returns the inflated,
+  windowed, redacted content with correct `next_offset` paging and the `REDACTED` gate intact; a
+  gzip-stored part is never returned as raw gzip bytes inline. An artifact without that metadata is read
+  byte-identical to before (detection is metadata-driven, not key-driven). (R4)
+- Remote-libvirt registers a separate compressed `console-part-<gen>-<index>` artifact per sealed part;
+  the collector's internal `console-parts-<n>` objects and the `finalize()` assembly are byte-identical,
+  so `console-<run>` evidence is unchanged. (R5, R9)
+- Two concurrent rotation attempts for one System cannot both seal parts (per-System advisory lock); a
+  job retried after a crash between sealing parts and writing the sidecar re-seals nothing (idempotent
+  by `(gen, index)` key, offset advanced only after parts commit). (R6c)
 - Local-libvirt produces sealed part rows for a running System as its console grows, reading only the
   plaintext delta past the sidecar `plaintext_offset` and redacting that delta once; a second sweep with
   no new console growth produces no new parts, and no sealed part is ever recomputed/re-redacted. (R6,
@@ -243,5 +283,8 @@ artifact-row registration reuses `register_artifact_row` (the per-Run evidence p
   directly gets gzip bytes. Inline `artifacts.get` content is always inflated; the download path is for
   whole-object retrieval where the agent (or a `Content-Encoding` follow-up) handles inflation. Noted
   so the download contract is explicit.
-- **Wrong tail identification.** An agent must read the highest-index part for the live tail, not the
-  per-Run evidence. Mitigated by the distinct `console-part-<index>` key prefix and ordered listing.
+- **Wrong tail identification.** `artifacts.list` orders by `created_at DESC`, and parts sealed in one
+  rotation run can share a `created_at`, so list position is not a reliable strict order within a batch.
+  The agent therefore selects the tail by the maximum `(gen, index)` among the returned
+  `console-part-<gen>-<index>` keys (exposed as `refs.object`), distinguishing parts from the per-Run
+  `console-<run>` evidence by key prefix. This is the deterministic tail rule, not "the first listed row".
