@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import time
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -33,8 +34,10 @@ import libvirt
 import pytest
 
 from kdive.mcp.responses import ToolResponse
-from kdive.providers.remote_libvirt.guest.agent import GuestAgentExec, qemu_agent_command
+from kdive.prereqs.managed_ssh_key import managed_private_key_path
+from kdive.providers.shared.libvirt_xml import recorded_ssh_port
 from kdive.providers.shared.runtime_paths import domain_name_for
+from kdive.security.secrets.secrets import secrets_root_from_env
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.harness import LiveStackClient, OidcIssuer
 from tests.integration.live_stack.spine import (
@@ -60,7 +63,12 @@ _AGENT_SESSION = "console-parts-sess"
 
 # Shell used by the in-guest workload.
 _SHELL = "/bin/sh"
-# Lines emitted to the serial console: ~70 bytes × 5 000 = ~350 KiB, > 4 × 64 KiB threshold.
+# SSH user the rootfs --ssh-injects the managed key to (ADR-0052/0218 §1).
+_SSH_USER = "root"
+# Credential ref that opts the loopback SSH transport in (renders hostfwd + NIC). Its file content
+# does not authenticate SSH — the kdive-managed key does — but its presence gates the transport.
+_SSH_CREDENTIAL_REF = "drgn-ssh"
+# Lines emitted to the kernel console: ~60 bytes × 5 000 = ~300 KiB, > 4 × 64 KiB threshold.
 _PROOF_LINES = 5_000
 # Timeout waiting for the reconciler's console_rotate sweep + worker drain.
 _PARTS_POLL_DEADLINE_S = 300.0
@@ -85,6 +93,12 @@ def _preflight() -> tuple[OidcIssuer, str, str]:
     db_url = os.environ.get(_DATABASE_URL_ENV)
     if not db_url:
         pytest.skip(f"{_DATABASE_URL_ENV} unset; bring up the stack (see the live-stack runbook)")
+    secret = secrets_root_from_env() / _SSH_CREDENTIAL_REF
+    if not secret.is_file():
+        pytest.skip(
+            f"SSH credential ref {_SSH_CREDENTIAL_REF!r} not seeded at {secret}; seed any file "
+            "there so the loopback SSH transport (the in-guest workload path) resolves"
+        )
     issuer = require_issuer()
     base_url = require_stack()
     return issuer, base_url, db_url
@@ -106,6 +120,11 @@ def _provision_profile() -> dict[str, object]:
         "provider": {
             "local-libvirt": {
                 "rootfs": {"kind": "local", "path": os.environ[_GUEST_IMAGE_ENV]},
+                # Opt the loopback SSH transport in: this renders the SSH hostfwd + virtio NIC
+                # (ADR-0218/0240) so the test can SSH-exec the post-readiness workload in-guest.
+                # Local-libvirt domains carry no qemu guest-agent channel, so SSH is the in-guest
+                # exec path (the same one drgn-live uses).
+                "ssh_credential_ref": _SSH_CREDENTIAL_REF,
             }
         },
     }
@@ -120,35 +139,68 @@ def _build_profile() -> dict[str, object]:
 
 
 def _emit_proof_lines(domain: libvirt.virDomain, proof_marker: str) -> None:
-    """Write post-readiness proof lines to the guest serial console via the qemu guest agent.
+    """Write post-readiness proof lines to the guest kernel console over loopback SSH.
 
-    Runs a shell loop that writes ``_PROOF_LINES`` lines to ``/dev/ttyS0`` (the serial console
-    device configured by the kdive domain XML ``console=ttyS0`` kernel cmdline). Output flows
-    through virtlogd to the host console log file where the ``console_rotate`` handler reads it.
+    Local-libvirt domains carry no qemu guest-agent channel, so the in-guest workload is driven
+    over the same loopback SSH transport drgn-live uses: the SSH ``hostfwd`` port recorded in the
+    live domain XML (ADR-0218) plus the kdive-managed private key. The guest shell loop writes
+    ``_PROOF_LINES`` records to ``/dev/kmsg`` — the kernel printk path, which reaches the
+    ``console=ttyS0`` serial console with proper UART flow control (a direct userspace write to
+    ``/dev/ttyS0`` races the kernel console + getty on the same pty and overflows its buffer, so
+    most bytes are dropped). Output flows through virtlogd to the host console log file the
+    ``console_rotate`` handler reads. ``printk_devkmsg=on`` disables the per-writer kmsg rate limit
+    so every record reaches the console.
 
     Args:
         domain: The libvirt domain handle for the booted System.
         proof_marker: A unique string embedded in every emitted line, used to assert presence
             in the console-part artifact and absence from the frozen boot-window evidence.
     """
-    exec_obj = GuestAgentExec(
-        agent_command=qemu_agent_command,
-        allowed_programs=frozenset({_SHELL}),
-        timeout_s=120.0,
-    )
+    port = recorded_ssh_port(domain.XMLDesc(0))
+    if port is None:
+        raise AssertionError(
+            "no SSH hostfwd port in the domain XML; the provision profile must set "
+            "provider.local-libvirt.ssh_credential_ref to render the SSH transport"
+        )
+    key_path = managed_private_key_path()
+    if not key_path.is_file():
+        raise AssertionError(f"kdive-managed SSH private key absent at {key_path}")
     # POSIX sh loop: $i is a shell variable, {proof_marker} and {_PROOF_LINES} are
-    # Python f-string substitutions (safe: only hex + hyphens / a literal integer).
+    # Python f-string substitutions (safe: only hex + hyphens / a literal integer). One open of
+    # /dev/kmsg for the whole loop; each echo is a single write() = one kernel log record.
     script = (
+        "echo on > /proc/sys/kernel/printk_devkmsg 2>/dev/null; "
+        "{ "
         f'i=0; while [ "$i" -lt {_PROOF_LINES} ]; do '
         f'echo "{proof_marker} line-$i"; '
         f"i=$((i+1)); "
-        f"done > /dev/ttyS0"
+        "done; } > /dev/kmsg"
     )
-    result = exec_obj.run(domain, [_SHELL, "-c", script])
-    if result.exit_status != 0:
+    argv = [
+        "ssh",
+        "-i",
+        str(key_path),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=10",
+        "-p",
+        str(port),
+        f"{_SSH_USER}@127.0.0.1",
+        "--",
+        _SHELL,
+        "-c",
+        script,
+    ]
+    result = subprocess.run(argv, capture_output=True, timeout=180.0, check=False)  # noqa: S603
+    if result.returncode != 0:
         raise AssertionError(
-            f"post-readiness proof workload failed "
-            f"(exit={result.exit_status}): {result.stderr.decode()!r}"
+            f"post-readiness proof workload failed (exit={result.returncode}): "
+            f"{result.stderr.decode(errors='replace')!r}"
         )
 
 
@@ -237,7 +289,7 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
     """Post-readiness console-part artifacts exist and contain lines absent from frozen evidence.
 
     Provisions a local-libvirt System, boots a Run to ``succeeded``, emits unique
-    post-readiness console lines via the qemu guest agent, waits for the reconciler's
+    post-readiness console lines over loopback SSH, waits for the reconciler's
     ``console_rotate`` sweep to seal new ``console-part-*`` artifacts, then asserts:
 
     1. New ``console-part-*`` artifacts appeared after the Run became terminal — proving
@@ -304,9 +356,11 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                     await scalar(
                         op,
                         "runs.create",
-                        investigation_id=investigation_id,
-                        system_id=system_id,
-                        build_profile=_build_profile(),
+                        request={
+                            "investigation_id": investigation_id,
+                            "system_id": system_id,
+                            "build_profile": _build_profile(),
+                        },
                     ),
                     "create-run",
                 )
@@ -327,9 +381,9 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                 )
                 initial_part_ids = set(_console_part_ids(initial_listing))
 
-            # Emit the post-readiness workload via the qemu guest agent. The Run is
-            # already `succeeded` (terminal) yet the in-guest process keeps writing to
-            # the serial console — the exact #892 repro scenario.
+            # Emit the post-readiness workload over loopback SSH. The Run is already
+            # `succeeded` (terminal) yet the in-guest process keeps writing to the serial
+            # console — the exact #892 repro scenario.
             async with phase("emit-proof-lines"):
                 libvirt_conn = libvirt.open("qemu:///system")
                 try:
