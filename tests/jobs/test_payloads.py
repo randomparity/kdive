@@ -297,3 +297,15 @@ def test_diagnostics_worker_check_payload_roundtrips() -> None:
         dedup_key="diagnostics:remote-libvirt:x",
     )
     assert load_payload(job, DiagnosticsWorkerCheckPayload).provider == "remote-libvirt"
+
+
+def test_authorize_ssh_key_payload_roundtrips() -> None:
+    from kdive.jobs.payloads import _PAYLOAD_MODELS, AuthorizeSshKeyPayload
+
+    payload = AuthorizeSshKeyPayload(
+        system_id="11111111-2222-3333-4444-555555555555",
+        public_key="ssh-ed25519 AAAAC3Nz agent@host",
+    )
+    assert payload.system_id == "11111111-2222-3333-4444-555555555555"
+    assert payload.public_key == "ssh-ed25519 AAAAC3Nz agent@host"
+    assert _PAYLOAD_MODELS[JobKind.AUTHORIZE_SSH_KEY] is AuthorizeSshKeyPayload

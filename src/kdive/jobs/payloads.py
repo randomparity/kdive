@@ -48,6 +48,12 @@ class ReprovisionPayload(SystemPayload):
     profile_digest: str
 
 
+class AuthorizeSshKeyPayload(SystemPayload):
+    """A request to authorize an agent SSH public key in a System's guest (ADR-0271)."""
+
+    public_key: str
+
+
 class RunPayload(_PayloadBase):
     run_id: str
 
@@ -172,6 +178,7 @@ _PAYLOAD_MODELS: dict[JobKind, _PayloadModel] = {
     JobKind.IMAGE_BUILD: ImageBuildPayload,
     JobKind.DIAGNOSTICS_WORKER_CHECK: DiagnosticsWorkerCheckPayload,
     JobKind.BUILD_INSTALL_BOOT: BuildInstallBootPayload,
+    JobKind.AUTHORIZE_SSH_KEY: AuthorizeSshKeyPayload,
 }
 _RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.BUILD: BuildPayload,

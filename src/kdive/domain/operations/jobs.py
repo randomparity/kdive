@@ -28,6 +28,7 @@ class JobKind(StrEnum):
     IMAGE_BUILD = "image_build"
     DIAGNOSTICS_WORKER_CHECK = "diagnostics_worker_check"
     BUILD_INSTALL_BOOT = "build_install_boot"
+    AUTHORIZE_SSH_KEY = "authorize_ssh_key"
 
 
 DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
