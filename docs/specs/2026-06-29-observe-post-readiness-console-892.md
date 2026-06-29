@@ -74,36 +74,73 @@ R5. **Remote-libvirt capture.** The reconciler-resident collector registers each
 `artifacts` row when it seals the part (it holds the DB connection). The existing rotation, redaction,
 seam-overlap, and per-Run assembly are unchanged; this adds a row write per sealed part.
 
-R6. **Local-libvirt capture.** A worker-driven periodic rotation, for each running local-libvirt
-System, reads the growing worker-host console file, redacts it, slices the redacted bytes at the
-rotation threshold, and registers each newly sealed slice as a part row. The worker owns the file
-(server/reconciler co-location is not assumed, ADR-0223). The resume offset for the next sweep is the
-sum of the System's existing console-part rows' sizes — derived, not stored, so no migration.
+R6. **Local-libvirt capture.** The reconciler's periodic sweep discovers running local-libvirt Systems
+and dispatches a per-System console-rotation **worker job** (the reconciler owns periodic discovery;
+the worker owns the host console file it alone can read, ADR-0223). The job reads only the plaintext
+bytes **past a tracked plaintext offset**, redacts that delta with a held-back seam overlap (mirroring
+the collector, ADR-0095, so a secret straddling a read boundary is never stored raw), seals full
+~64 KiB parts from the **redacted delta**, registers each as a part row, and advances the offset.
+Re-redacting already-sealed bytes is forbidden: the redactor replaces a secret with the fixed string
+`[REDACTED]` and so is **not length-preserving** — a resume offset can never be the sum of redacted
+part sizes (that conflates redacted-output length with plaintext-file length), and a sealed part is
+derived once from its redacted delta and never recomputed.
 
-R7. **Best-effort capture.** Part capture (both providers) never fails the workload, the boot, or any
-tool call. A store outage, a permission wall (ADR-0223), or an absent console degrades to no new parts,
-not an error surfaced to the agent; the existing per-Run evidence path is unaffected.
+R6a. **Rotation state.** The plaintext offset, the next part index, and a boot-generation marker are
+persisted per System in a small internal object-store **sidecar** object (not a DB row), so there is no
+migration. The worker reads the sidecar at the start of a rotation job and writes it back after sealing
+parts. (Deriving the offset from the part rows is rejected — units mismatch, R6.)
 
-R8. **Observation surface (no new tool).** `artifacts.list(system_id)` returns the ordered console-part
-series alongside the per-Run evidence; an agent reads the tail by taking the highest-index part and
-paging it with `artifacts.get`, and searches history with `artifacts.search_text`. No new MCP tool, no
-new public field beyond the additional `artifacts.list` rows.
+R6b. **Power-cycle truncation.** The local console file holds only the current boot: libvirt renders
+`<log append='off'>` and truncates it on every domain power-cycle (ADR-0258). When a rotation job
+observes the file **shorter than** the tracked plaintext offset, it treats this as a power-cycle —
+resets the plaintext offset to 0 and increments the boot generation, starting a fresh part series for
+the new boot. A reboot during a long-running workload (an in-guest reboot, `runs.power`, or
+`force_crash` to trigger the bug) therefore neither strands the new boot's console nor corrupts the
+index.
+
+R7. **Best-effort capture.** Part capture (both providers) never fails the workload, the boot, the
+rotation job, or any tool call. A store outage or an absent console produces no new parts. A permission
+wall is the `CONFIGURATION_ERROR` that `read_console_log` **raises** under ADR-0223; the rotation job
+catches it, logs once (not per sweep), and produces no parts. The existing per-Run evidence path is
+unaffected in every case.
+
+R8. **Observation surface (no new tool).** `artifacts.list(system_id)` returns the System's redacted
+artifacts ordered by `created_at DESC`, so the newest console part is first; an agent reads the live
+tail from the leading part(s) with `artifacts.get` and searches history with `artifacts.search_text`.
+No new MCP tool, no new public field beyond the additional `artifacts.list` rows. Note: `artifacts.list`
+orders by `created_at`, **not** by object key — the zero-padded index orders the object store and
+disambiguates a part from the per-Run `console-<run>` evidence by key prefix, but it does not drive the
+`artifacts.list` order.
+
+R8a. **Bounded retention, disclosed.** Live console parts are ordinary artifacts and age out through the
+existing artifact-expiry reconciler (#768), which time-bounds the series. This work does **not** add
+`artifacts.list` pagination (`data.truncated` stays `False`), so within a retention window a chatty
+multi-hour run can make `artifacts.list` return many part rows; the agent's non-enumerating path for
+"find the problem" is `artifacts.search_text`, and the newest-first order makes the recent tail cheap.
+A hard per-System live-part cap is named as possible future work, not built here.
 
 R9. **Per-Run evidence immutability.** `console-<run>` (ADR-0235) is neither mutated nor re-snapshotted;
 the live parts are a separate System-owned series. Both stay immutable.
 
-R10. **No schema, migration, RBAC, tool-surface, or config-setting change** beyond the rotation
-threshold reuse. Console parts are ordinary `artifacts` rows; the resume offset is derived (R6).
+R10. **One additive migration; no RBAC, tool-surface, or config-setting change.** Console parts are
+ordinary `artifacts` rows and the local rotation state lives in an object-store sidecar (R6a), not a DB
+column. The only schema change is migration **0053**, which widens the additive `jobs_kind_check`
+CHECK constraint to admit the new internal `console_rotate` `JobKind` (forward-only, ADR-0015, exactly
+as 0051/0052 did for prior job kinds). The rotation job is internal (reconciler-dispatched), not an
+agent-facing tool, so it adds no MCP surface and no RBAC role; it is **not** a destructive job kind.
 
 ## Approach
 
 ### Part object keying and ordering
 
-A console part's object key is `…/console-part-<index>` where `<index>` is zero-padded (e.g. 6 digits)
-so lexical order is numeric order. The part row is `owner_kind='systems'`, `owner_id=<system_id>`,
-`sensitivity=REDACTED`, mirroring the per-Run evidence row's owner shape. `artifacts.list(system_id)`
-already filters to `REDACTED` System-owned rows, so the parts appear with the evidence; the agent
-distinguishes the live tail (highest index) from the frozen evidence by key prefix.
+A console part's object key is `…/console-part-<gen>-<index>` where `<gen>` is the boot generation
+(R6b) and `<index>` is zero-padded (e.g. 6 digits) so object-store listings are numerically ordered.
+The part row is `owner_kind='systems'`, `owner_id=<system_id>`, `sensitivity=REDACTED`, mirroring the
+per-Run evidence row's owner shape. `artifacts.list(system_id)` filters to `REDACTED` System-owned rows
+and orders them `created_at DESC` (`services/artifacts/listing.py`), so the newest part is first and a
+part is distinguished from the frozen `console-<run>` evidence by its key prefix. The zero-padded index
+is the object-store order and the within-generation sequence; it is **not** what `artifacts.list`
+orders by.
 
 ### Compression in `artifacts.get` (`mcp/tools/catalog/artifacts/reads.py`)
 
@@ -120,15 +157,31 @@ On `put_part`, also register the part `artifacts` row (gzip-compressed object) o
 connection. The redacted bytes are already produced; compress before upload. Assembly into the per-Run
 `console-<run>` evidence at finalize is unchanged.
 
-### Local-libvirt (worker-driven rotation)
+### Local-libvirt (reconciler-dispatched worker rotation job)
 
-A worker periodic task, for each running local-libvirt System, reads `console_log_path(system_id)`,
-redacts the whole current file, and slices it at the rotation threshold into sealed parts. It registers
-only parts beyond the already-registered series: the resume offset is the sum of the existing
-console-part rows' sizes (R6), so a sweep produces only the newly-grown sealed slices. The trailing
-sub-threshold remainder is the unsealed tail and is left for the next sweep (so a slow workload's tail
-appears once it crosses the threshold or the System tears down). A permission wall reading the file is
-the ADR-0223 `CONFIGURATION_ERROR` path; capture degrades best-effort (R7).
+The reconciler's periodic sweep — which already enumerates Systems for drift repair — selects
+local-libvirt Systems that are running (`ready` with an active Run) and dispatches a per-System
+console-rotation **worker job** (`JobKind.CONSOLE_ROTATE`). To avoid piling up jobs over a long-lived
+System, the reconciler skips dispatch when a `console_rotate` job for that System is already
+pending/running, so at most one is in flight per System. The reconciler decides *when* and *for which
+System*; the worker does the host-file I/O it alone can read (ADR-0223). The job:
+
+1. reads the rotation sidecar (`plaintext_offset`, `next_index`, `boot_gen`; absent → all zero), then
+   `os.stat`s `console_log_path(system_id)`;
+2. if `file_size < plaintext_offset`, treats it as a power-cycle (ADR-0258): resets `plaintext_offset`
+   to 0 and `next_index` to 0, increments `boot_gen` (R6b);
+3. reads the plaintext **delta** `[plaintext_offset : file_size]`, prepends any held-back seam-overlap
+   bytes from the prior delta, and redacts the combined delta once (R3/R6);
+4. seals full ~64 KiB parts from the redacted delta, registering each as a `console-part-<gen>-<index>`
+   row (gzip-compressed object); the trailing sub-threshold remainder stays the unsealed tail (held
+   back, surfaced when it next crosses the threshold or at teardown);
+5. advances `plaintext_offset` by the plaintext bytes consumed (not the redacted size) and writes the
+   sidecar back.
+
+`read_console_log`'s `CONFIGURATION_ERROR` raise on a permission wall is caught and logged once; the
+job produces no parts and does not fail (R7). The job never re-reads or re-redacts bytes below
+`plaintext_offset`, so a non-length-preserving redactor (`[REDACTED]`,
+`security/secrets/redaction.py`) cannot shift a sealed part's content.
 
 ### Reuse, not reinvention
 
@@ -147,31 +200,45 @@ artifact-row registration reuses `register_artifact_row` (the per-Run evidence p
   `next_offset` paging and the `REDACTED` gate intact; a gzip-stored part is never returned as raw gzip
   bytes inline. A non-console artifact read is byte-identical to before. (R4)
 - Remote-libvirt registers a part row per sealed part; per-Run assembly is unchanged. (R5)
-- Local-libvirt produces sealed part rows for a running System as its console grows; the resume offset
-  is the sum of existing part sizes (a second sweep with no new console growth produces no new parts).
-  (R6)
-- A store outage / permission wall / absent console produces no new parts and surfaces no error to the
-  agent; the per-Run evidence path is unaffected. (R7)
-- An agent observes a post-readiness workload via `artifacts.list` → newest part → `artifacts.get`
-  paging, and finds a later console line that the frozen per-Run evidence does not contain. (R8)
+- Local-libvirt produces sealed part rows for a running System as its console grows, reading only the
+  plaintext delta past the sidecar `plaintext_offset` and redacting that delta once; a second sweep with
+  no new console growth produces no new parts, and no sealed part is ever recomputed/re-redacted. (R6,
+  R6a)
+- A rotation job that observes the console file shorter than the tracked `plaintext_offset` resets the
+  offset and increments the boot generation, starting a fresh `console-part-<gen+1>-…` series; the new
+  boot's console is captured and the prior generation's parts are untouched. (R6b)
+- A store outage / absent console / permission-wall `CONFIGURATION_ERROR` (caught from
+  `read_console_log`) produces no new parts and surfaces no error to the agent or as a job failure; the
+  per-Run evidence path is unaffected. (R7)
+- An agent observes a post-readiness workload via `artifacts.list` (newest-first by `created_at`) →
+  newest part → `artifacts.get` paging, and finds a later console line that the frozen per-Run evidence
+  does not contain. (R8)
 - `console-<run>` evidence is byte-identical before and after live parts exist for the same System;
   `refs.console` on `runs.get` is unchanged. (R9)
-- No migration file is added; no RBAC/tool-surface/config change. (R10)
+- One additive migration (0053, widening `jobs_kind_check` for `console_rotate`); no other schema
+  change, no RBAC/tool-surface/config change; `console_rotate` is not a destructive job kind. (R10)
 - Live (`live_vm`, operator-run): a local-libvirt System with a long-running post-readiness workload
   surfaces new console parts via `artifacts.list`/`artifacts.get` that show workload progress past the
   `kdive-ready` marker.
 
 ## Risks
 
-- **Part-row explosion on a chatty 12-hour run.** Many ~64 KiB parts produce many `artifacts.list`
-  rows. Mitigated by newest-first reads (the tail is one part) and `artifacts.search_text` for history;
-  `artifacts.list` already carries a `truncated` field for a future pagination need. Not blocking for
-  the #892 repro, which is a single workload, but noted as the append-only cost (vs. the rejected
-  single-mutable-artifact's O(size) re-upload).
-- **Local worker-driven rotation cadence.** Too slow and the tail lags; too fast and it re-reads the
-  file often. The file read is bounded (one file per running System per sweep) and best-effort; the
-  cadence is a tuned interval, not a per-byte stream. A sub-threshold tail is not visible until it
-  seals or the System tears down — an inherent latency of size-threshold rotation, shared with remote.
+- **Part-row count on a chatty 12-hour run.** Many ~64 KiB parts produce many `artifacts.list` rows,
+  and `artifacts.list` is **not paginated** (`data.truncated` is always `False`, no `LIMIT` in
+  `_LIST_REDACTED_SYSTEM_SQL`). Bounded only by artifact expiry (#768) over time and by the
+  newest-first order making the recent tail cheap; the non-enumerating history path is
+  `artifacts.search_text`. Disclosed in R8a as an accepted limitation — a per-System live-part cap or
+  real `artifacts.list` pagination is future work, not built here. This is the append-only cost vs. the
+  rejected single-mutable-artifact's O(size) re-upload.
+- **Local rotation cadence vs. tail latency.** The rotation job runs only when the reconciler sweep
+  dispatches it; the live tail lags by up to one sweep interval plus the time for a sub-threshold tail
+  to cross 64 KiB. This is the inherent latency of size-threshold rotation, shared with remote; the
+  sub-threshold tail is surfaced at the next crossing or at teardown.
+- **Incremental redaction correctness.** The local job redacts only the plaintext delta and never
+  re-reads sealed bytes (R6), so the non-length-preserving `[REDACTED]` substitution cannot shift a
+  sealed part. A secret straddling a read boundary is caught by the held-back seam overlap (R3). A bug
+  that advanced `plaintext_offset` by the **redacted** size instead of the plaintext size would silently
+  drop or duplicate console bytes — called out as the load-bearing invariant the unit tests must pin.
 - **Compression vs. `download_uri`.** The minted URL serves the compressed object; an agent fetching it
   directly gets gzip bytes. Inline `artifacts.get` content is always inflated; the download path is for
   whole-object retrieval where the agent (or a `Content-Encoding` follow-up) handles inflation. Noted

@@ -51,11 +51,17 @@ read through the existing `artifacts.{list,get,search_text}` surface. **No new M
      size threshold with seam-overlap redaction (ADR-0095). Register each part as an `artifacts` row
      when it is sealed (the reconciler holds the DB connection). This promotes the existing
      collector-internal parts to first-class rows; assembly into the per-Run evidence is unchanged.
-   - **Local-libvirt:** a worker-driven periodic rotation reads the growing worker-host console file,
-     redacts it, slices the redacted bytes at the rotation threshold, and registers each sealed slice
-     as a part row. The worker owns the file; the server/reconciler cannot assume co-location
-     (ADR-0223). The next slice's start offset is the sum of the existing parts' sizes (read from the
-     part rows), so no new persisted offset column is needed.
+   - **Local-libvirt:** the reconciler's periodic sweep discovers running local-libvirt Systems and
+     dispatches a per-System `console_rotate` **worker job** (the reconciler owns periodic discovery and
+     dedups to ≤1 in-flight per System; the worker owns the host console file it alone can read,
+     ADR-0223). The job reads only the plaintext bytes **past a tracked plaintext offset**, redacts that
+     delta once with a held-back seam overlap (mirroring the collector), seals ~64 KiB parts from the
+     redacted delta, and registers each. The offset, next index, and a **boot generation** are persisted
+     in an object-store sidecar (not a DB column). A file shorter than the tracked offset is a
+     power-cycle truncation (ADR-0258): the offset resets to 0 and the boot generation increments,
+     starting a fresh part series. The resume offset is **never** the sum of redacted part sizes — the
+     redactor (`[REDACTED]`) is not length-preserving, so a redacted-byte count is not a valid
+     plaintext-file offset and a sealed part is derived once and never re-redacted.
 
 3. **Compression: decompress-on-read.** Sealed parts are gzip-compressed in the object store;
    `artifacts.get` inflates a part transparently before windowing. Redaction runs on the **plaintext**
@@ -76,8 +82,10 @@ read through the existing `artifacts.{list,get,search_text}` surface. **No new M
 
 Scope: the public observation surface (`artifacts.{list,get,search_text}` over System-owned console
 parts) is identical for both providers. Capture is implemented local-libvirt first (the #892 repro
-path); remote part-registration follows on the same surface. A migration is not required (parts are
-ordinary `artifacts` rows; the next-offset is derived, not stored).
+path); remote part-registration follows on the same surface. The only schema change is the additive
+migration **0053** widening `jobs_kind_check` for the internal `console_rotate` job kind (forward-only,
+ADR-0015, as 0051/0052 did); parts are ordinary `artifacts` rows and the local rotation offset lives in
+an object-store sidecar, not a DB column.
 
 ## Consequences
 
@@ -121,7 +129,13 @@ ordinary `artifacts` rows; the next-offset is derived, not stored).
 - **Reconciler-driven local capture (symmetry with remote).** Have the reconciler read the local
   console file on a sweep. Rejected: the local console file is a worker-host path the reconciler cannot
   assume to read (ADR-0223); the worker owns the file, so local rotation is worker-driven.
-- **A persisted per-System rotation offset column (migration).** Store the last-rotated byte offset to
-  resume local rotation. Rejected as unnecessary state: the resume offset is the sum of the existing
-  part rows' sizes, derivable on each sweep, mirroring the remote collector's lazy
-  `list_part_indices` resume — so no schema/migration change.
+- **Deriving the local resume offset from the existing part rows' sizes (no stored offset).** Tempting
+  as "no extra state," but wrong: the part rows store **redacted** bytes and the redactor (`[REDACTED]`)
+  is not length-preserving, so a summed redacted size is not a valid offset into the **plaintext** file;
+  and the local file is truncated per power-cycle (ADR-0258), so a lifetime sum exceeds the current
+  file. Rejected for correctness — the plaintext offset and boot generation are tracked explicitly in an
+  object-store sidecar instead.
+- **A persisted per-System rotation offset in a DB column (migration).** Store the offset in a new
+  `systems` column. Rejected: the offset is internal capture bookkeeping with no query/authz need, so an
+  object-store sidecar co-located with the parts is lighter than a schema column. (The one migration
+  this work does take, 0053, is only the additive `jobs_kind_check` widening for the job kind.)
