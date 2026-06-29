@@ -260,6 +260,7 @@ git commit -m "feat(905): add fail-closed baseline-kernel selection + extractor"
 **Files:**
 - Modify: `src/kdive/providers/local_libvirt/lifecycle/xml.py:33-101`
 - Test: `tests/providers/local_libvirt/test_provisioning.py` (update `_render` helper + the no-kernel test + direct callers)
+- Test (same commit — every `render_domain_xml` caller, so no commit leaves the full suite red): `tests/adversarial/test_provider_xml.py`, `tests/providers/local_libvirt/test_live_preserve_attach.py`, `tests/mcp/debug/test_debug_live_attach.py`
 
 **Interfaces:**
 - Consumes: nothing new.
@@ -363,15 +364,24 @@ def _append_direct_kernel(
 ```
 Update the `render_domain_xml` docstring to note it now renders the baseline direct-kernel `<os>` and raises `CONFIGURATION_ERROR` without a kernel path.
 
-- [ ] **Step 4: Run to verify pass**
+- [ ] **Step 4: Fix every other `render_domain_xml` caller in the same change**
 
-Run: `uv run python -m pytest tests/providers/local_libvirt/test_provisioning.py -q`
+Run `rg -n "render_domain_xml" tests/ src/`. For each local-libvirt caller that omits `kernel_path`
+(`tests/adversarial/test_provider_xml.py:110,125`, and any in `test_live_preserve_attach.py` /
+`test_debug_live_attach.py`), add `kernel_path=Path("/var/lib/kdive/rootfs/<sys>-baseline/kernel")`
+using that file's existing system-id constant. The adversarial XML-injection test must still pass
+`kernel_path` and keep asserting no markup injection from the profile/disk path. Do **not** touch the
+remote-libvirt renderer (separate function, unchanged).
+
+- [ ] **Step 5: Run to verify pass (all callers, one commit keeps the suite green)**
+
+Run: `uv run python -m pytest tests/providers/local_libvirt/test_provisioning.py tests/adversarial/test_provider_xml.py tests/providers/local_libvirt/test_live_preserve_attach.py tests/mcp/debug/test_debug_live_attach.py -q`
 Expected: PASS. Then `just lint && just type`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/kdive/providers/local_libvirt/lifecycle/xml.py tests/providers/local_libvirt/test_provisioning.py
+git add src/kdive/providers/local_libvirt/lifecycle/xml.py tests/providers/local_libvirt/test_provisioning.py tests/adversarial/test_provider_xml.py tests/providers/local_libvirt/test_live_preserve_attach.py tests/mcp/debug/test_debug_live_attach.py
 git commit -m "feat(905): render fail-closed baseline direct-kernel <os> at provision"
 ```
 
@@ -384,12 +394,12 @@ git commit -m "feat(905): render fail-closed baseline direct-kernel <os> at prov
 - Test: `tests/providers/local_libvirt/test_provisioning.py` (storage-level tests near the existing overlay tests)
 
 **Interfaces:**
-- Produces: `baseline_dir(system_id: UUID | str) -> str` returning `f"{ROOTFS_DIR}/{system_id}-baseline"`; `ProvisioningFiles.remove_baseline: RemoveBaseline` seam (default `_real_remove_baseline`) + `ProvisioningFiles.remove_baseline_for_domain(domain_name: str) -> None`.
+- Produces: `baseline_dir(system_id: UUID | str) -> str` returning `f"{ROOTFS_DIR}/{system_id}-baseline"`; `ProvisioningFiles.remove_baseline: RemoveBaseline` seam (default `_real_remove_baseline`) + `ProvisioningFiles.remove_baseline_for_domain(domain_name: str) -> None`; `ProvisioningFiles.baseline_exists: OverlayExists` seam (default `_real_overlay_exists`, reused — both are a path-presence predicate) so the provisioning plane's reuse check is injectable like `overlay_exists`.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
-def test_remove_baseline_for_domain_strips_prefix_and_rmtrees(tmp_path: Path) -> None:
+def test_remove_baseline_for_domain_strips_prefix_and_rmtrees() -> None:
     seen: list[str] = []
     files = storage_module.ProvisioningFiles(remove_baseline=seen.append)
     files.remove_baseline_for_domain("kdive-" + str(_SYS))
@@ -398,6 +408,11 @@ def test_remove_baseline_for_domain_strips_prefix_and_rmtrees(tmp_path: Path) ->
 
 def test_baseline_dir_is_per_system_under_rootfs() -> None:
     assert storage_module.baseline_dir(_SYS) == f"{storage_module.ROOTFS_DIR}/{_SYS}-baseline"
+
+
+def test_baseline_exists_seam_is_injectable() -> None:
+    files = storage_module.ProvisioningFiles(baseline_exists=lambda path: True)
+    assert files.baseline_exists(storage_module.baseline_dir(_SYS)) is True
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -431,9 +446,11 @@ Add the seam type next to the others:
 ```python
 type RemoveBaseline = Callable[[str], None]
 ```
-Add the field + method to `ProvisioningFiles` (frozen dataclass):
+Add the fields + method to `ProvisioningFiles` (frozen dataclass). `baseline_exists` reuses the
+existing `OverlayExists` type and `_real_overlay_exists` default (both are a path-presence predicate):
 ```python
     remove_baseline: RemoveBaseline = _real_remove_baseline
+    baseline_exists: OverlayExists = _real_overlay_exists
 ...
     def remove_baseline_for_domain(self, domain_name: str) -> None:
         self.remove_baseline(baseline_dir(domain_name.removeprefix("kdive-")))
@@ -463,39 +480,83 @@ git commit -m "feat(905): per-System baseline-kernel directory + removal seam"
 - Consumes: `BaselineKernel`, `ExtractBaselineKernel`, `_real_extract_baseline_kernel` (Task 1); `baseline_dir` (Task 3); `render_domain_xml(..., kernel_path=, initrd_path=)` (Task 2).
 - Produces: `LocalLibvirtProvisioning(__init__)` gains `extract_baseline_kernel: ExtractBaselineKernel | None = None`; private `_prepare_baseline_kernel(system_id, base) -> BaselineKernel`.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing tests** against the suite's real fakes
 
-The existing suite drives `provision` with a fake connection + fake `materialize_rootfs`. Add a fake extractor and assert wiring. Reuse the file's existing provisioning fixtures/builders (inspect the file for the existing `LocalLibvirtProvisioning(...)` construction helper and pass `extract_baseline_kernel=`). Add:
+The suite already defines `_ProvConn` (a fake `connect()` target whose `recorded_xml: list[str]`
+captures every `defineXML` payload) and `_ProvDomain`, and constructs the plane inline as
+`LocalLibvirtProvisioning(connect=lambda: conn, files=<ProvisioningFiles>, materialize_rootfs=lambda
+rootfs, _sid, _arch: <path>, free_port=..., catalog_fetch=...)`. Add a baseline-extract fake +
+`baseline_exists` control. Add these tests (matching the file's existing construction style):
 ```python
-def test_provision_extracts_baseline_and_renders_kernel(...) -> None:
+def test_provision_extracts_baseline_and_renders_kernel() -> None:
+    conn = _ProvConn()
     calls: list[tuple[Path, Path]] = []
 
     def fake_extract(base: Path, dest: Path) -> BaselineKernel:
         calls.append((base, dest))
         return BaselineKernel(kernel=dest / "kernel", initrd=dest / "initrd")
 
-    prov = _provisioning(extract_baseline_kernel=fake_extract, ...)  # existing builder + new kwarg
+    prov = LocalLibvirtProvisioning(
+        connect=lambda: conn,
+        files=storage_module.ProvisioningFiles(
+            make_overlay=lambda base, overlay: None,
+            overlay_exists=lambda overlay: False,
+            baseline_exists=lambda path: False,
+            prepare_console_log=lambda path: None,
+        ),
+        materialize_rootfs=lambda rootfs, _sid, _arch: "/var/lib/kdive/rootfs/base.qcow2",
+        free_port=lambda: 40000,
+        extract_baseline_kernel=fake_extract,
+    )
     prov.provision(_SYS, _profile())
-    assert calls and calls[0][1] == Path(storage_module.baseline_dir(_SYS))
-    xml = _last_defined_xml(...)  # the fake conn records defineXML's argument
-    root = _safe_fromstring(xml)
-    assert root.findtext("os/kernel").endswith(f"{_SYS}-baseline/kernel")
+
+    assert calls == [(Path("/var/lib/kdive/rootfs/base.qcow2"), Path(storage_module.baseline_dir(_SYS)))]
+    root = _safe_fromstring(conn.recorded_xml[-1])
+    assert root.findtext("os/kernel") == f"{storage_module.baseline_dir(_SYS)}/kernel"
+    assert root.findtext("os/cmdline") == "root=/dev/vda console=ttyS0 rw"
 
 
-def test_provision_reuses_present_baseline_dir(tmp_path, monkeypatch) -> None:
-    # When baseline_dir exists, the extractor seam is not invoked.
-    ...
-    assert calls == []
+def test_provision_reuses_present_baseline_dir() -> None:
+    conn = _ProvConn()
+
+    def fake_extract(base: Path, dest: Path) -> BaselineKernel:
+        raise AssertionError("must reuse the present baseline dir, not re-extract")
+
+    prov = LocalLibvirtProvisioning(
+        connect=lambda: conn,
+        files=storage_module.ProvisioningFiles(
+            make_overlay=lambda base, overlay: None,
+            overlay_exists=lambda overlay: True,
+            baseline_exists=lambda path: True,
+            prepare_console_log=lambda path: None,
+        ),
+        materialize_rootfs=lambda rootfs, _sid, _arch: "/var/lib/kdive/rootfs/base.qcow2",
+        free_port=lambda: 40000,
+        extract_baseline_kernel=fake_extract,
+    )
+    prov.provision(_SYS, _profile())
+    root = _safe_fromstring(conn.recorded_xml[-1])
+    assert root.findtext("os/kernel") == f"{storage_module.baseline_dir(_SYS)}/kernel"
 
 
-def test_teardown_removes_baseline_dir(...) -> None:
+def test_teardown_removes_baseline_dir() -> None:
+    conn = _ProvConn(defined={domain_name_for(_SYS): _ProvDomain(domain_name_for(_SYS))})
     removed: list[str] = []
-    files = storage_module.ProvisioningFiles(remove_overlay=..., remove_baseline=removed.append)
-    prov = _provisioning(files=files, ...)
-    prov.teardown("kdive-" + str(_SYS))
+    prov = LocalLibvirtProvisioning(
+        connect=lambda: conn,
+        files=storage_module.ProvisioningFiles(
+            remove_overlay=lambda overlay: None,
+            remove_baseline=removed.append,
+        ),
+    )
+    prov.teardown(domain_name_for(_SYS))
     assert removed == [storage_module.baseline_dir(_SYS)]
 ```
-(Use the file's existing fakes for `connect`/`materialize_rootfs`/`files`; the precise builder name is whatever the existing tests already use — match it. The `defineXML` fake already records its XML argument in this suite; assert on it.)
+(If `_ProvConn`/`_ProvDomain`/the kwargs differ slightly from the above when you read the file,
+match the real names/fields — but they are `recorded_xml`, `defined`, and the keyword args shown in
+the existing `test_provision_*` tests. In `test_provision_extracts_*` the default
+`extract_baseline_kernel` is overridden by passing `extract_baseline_kernel=fake_extract` — add that
+kwarg to that constructor; it is shown on the reuse test and applies identically here.)
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -547,12 +608,15 @@ Add the helper:
 
         Mirrors the overlay's create-only-when-absent contract (ADR-0060/0272): a present
         baseline directory (the atomic all-or-nothing marker) is reused so a provision retry never
-        re-mounts the base.
+        re-mounts the base. Presence is checked through the injected ``baseline_exists`` seam (like
+        ``overlay_exists``), so the reuse path is unit-testable without touching the real filesystem.
         """
         dest = Path(baseline_dir(system_id))
-        if dest.exists():
+        if self._files.baseline_exists(str(dest)):
             initrd = dest / "initrd"
-            return BaselineKernel(kernel=dest / "kernel", initrd=initrd if initrd.exists() else None)
+            return BaselineKernel(
+                kernel=dest / "kernel", initrd=initrd if self._files.baseline_exists(str(initrd)) else None
+            )
         return self._extract_baseline_kernel(Path(base), dest)
 ```
 In `teardown()`, after `self._files.remove_overlay_for_domain(domain_name)`:
@@ -575,43 +639,33 @@ git commit -m "feat(905): extract baseline kernel at provision, reclaim at teard
 
 ---
 
-### Task 5: Fix the adversarial XML suite + verify doc accuracy
+### Task 5: Correct the walkthrough + `kernel_source_ref` doc wording
+
+(All `render_domain_xml` caller fixes already landed in Task 2 so the suite never goes red.)
 
 **Files:**
-- Modify: `tests/adversarial/test_provider_xml.py` (the local `render_domain_xml` calls now need `kernel_path`)
-- Modify: `docs/operating/providers/local-libvirt-walkthrough.md` (lines ~247, ~443-444) if wording overclaims/underclaims given the fix
+- Modify: `docs/operating/providers/local-libvirt-walkthrough.md` (lines ~247, ~443-444) where wording overclaims/underclaims given the fix
 - Modify: `src/kdive/profiles/provisioning.py` `kernel_source_ref` docstring only if it now contradicts behavior
-- Check: `tests/providers/local_libvirt/test_live_preserve_attach.py`, `tests/mcp/debug/test_debug_live_attach.py` (other `render_domain_xml` callers)
 
 **Interfaces:**
-- Consumes: Task 2's renderer signature.
+- Consumes: nothing (doc-only).
 
-- [ ] **Step 1: Find every `render_domain_xml` caller missing a kernel path**
+- [ ] **Step 1: Verify the docs now read true**
 
-Run: `rg -n "render_domain_xml" tests/ src/`
-For each local-libvirt caller that omits `kernel_path`, add `kernel_path=Path("/var/lib/kdive/rootfs/<sys>-baseline/kernel")` (or the suite's existing kernel-path constant). The adversarial XML-injection test (`test_render_domain_xml_never_lets_a_profile_value_inject_markup`) must still pass `kernel_path` and continue to assert no injection from the profile/disk path.
-
-- [ ] **Step 2: Run to verify failure, then fix**
-
-Run: `uv run python -m pytest tests/adversarial/test_provider_xml.py -q`
-Expected: FAIL → add `kernel_path` → PASS.
-
-- [ ] **Step 3: Verify the docs now read true**
-
-Read `docs/operating/providers/local-libvirt-walkthrough.md` lines ~240-250 and ~440-445. The claims "Provisioning the inventory above is enough to provision and boot" and "provision boots the rootfs's own kernel from disk" are now **accurate** (provision renders a direct-kernel `<os>`), except the phrase "from disk" is wrong (it boots via direct-kernel, not disk boot). Correct only factual inaccuracies:
+Read `docs/operating/providers/local-libvirt-walkthrough.md` lines ~240-250 and ~440-445. The claims "Provisioning the inventory above is enough to provision and boot" and "provision boots the rootfs's own kernel from disk" are now **accurate** in spirit (provision renders a direct-kernel `<os>`), except the phrase "from disk" is wrong — it boots via direct-kernel, not disk boot. Correct only factual inaccuracies:
 - change "boots the rootfs's own kernel from disk" → "boots the rootfs's own baseline kernel via direct-kernel boot".
-- Leave claims that are now satisfied. Run `just docs-links && just check-mermaid`.
+- Leave claims that are now satisfied. If the `kernel_source_ref` docstring states provision reaches `ready` on a baseline kernel, it is now accurate — adjust only if it still says provision does not boot.
 
-- [ ] **Step 4: Run the full touched-area tests**
+- [ ] **Step 2: Run the doc guardrails**
 
-Run: `uv run python -m pytest tests/providers/local_libvirt tests/adversarial/test_provider_xml.py tests/mcp/debug/test_debug_live_attach.py -q`
-Expected: PASS. Then `just lint && just type`.
+Run: `just docs-links && just check-mermaid`
+Expected: both pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-git add tests/adversarial/test_provider_xml.py docs/operating/providers/local-libvirt-walkthrough.md src/kdive/profiles/provisioning.py tests/providers/local_libvirt/test_live_preserve_attach.py tests/mcp/debug/test_debug_live_attach.py
-git commit -m "fix(905): pass baseline kernel to render_domain_xml callers; correct walkthrough"
+git add docs/operating/providers/local-libvirt-walkthrough.md src/kdive/profiles/provisioning.py
+git commit -m "docs(905): correct walkthrough wording now that provision boots the baseline kernel"
 ```
 
 ---
