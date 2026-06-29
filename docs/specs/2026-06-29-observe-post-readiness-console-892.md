@@ -127,13 +127,20 @@ start)` keys; registration is insert-if-absent (like the per-Run evidence path's
 so the re-seal is a true no-op — no duplicated content and no key collision. The key must **not** be a
 free-running counter, which would assign new keys to the re-sealed bytes and duplicate them.
 
-R6b. **Power-cycle truncation.** The local console file holds only the current boot: libvirt renders
-`<log append='off'>` and truncates it on every domain power-cycle (ADR-0258). When a rotation job
-observes the file **shorter than** the tracked plaintext offset, it treats this as a power-cycle —
-resets the plaintext offset to 0 and increments the boot generation, starting a fresh part series for
-the new boot. A reboot during a long-running workload (an in-guest reboot, `runs.power`, or
-`force_crash` to trigger the bug) therefore neither strands the new boot's console nor corrupts the
-index.
+R6b. **Power-cycle detection.** The local console file holds only the current boot: libvirt renders
+`<log append='off'>` and truncates it on every domain power-cycle (ADR-0258). A rotation job detects a
+new boot by a **boot-identity signal independent of current file size** — recorded as `boot_id` in the
+sidecar — not by size alone. Size comparison (`file_size < plaintext_offset`) alone is racy: a
+truncate-then-regrow that crosses the old offset between two sweeps would never be observed as a shrink,
+so the new boot's early console (its `kdive-ready` marker, an early panic) would be skipped and the rest
+mislabeled. The `boot_id` is a stable per-boot signal (e.g. the libvirt domain's boot/start identity or
+timestamp, the file inode/identity, or a hash of the file's first N bytes — the boot banner changes per
+boot); the precise source is chosen in the plan, but it MUST flip on every power-cycle regardless of
+whether the new file has already grown past the old offset. On a `boot_id` change **or** a size shrink,
+the job resets the plaintext offset to 0, increments the boot generation, and records the new `boot_id`,
+starting a fresh `console-part-<gen+1>-…` series. A reboot during a long-running workload (an in-guest
+reboot, `runs.power`, or `force_crash` to trigger the bug) therefore neither strands the new boot's
+console nor corrupts the offset mapping.
 
 R7. **Best-effort capture.** Part capture (both providers) never fails the workload, the boot, the
 rotation job, or any tool call. A store outage or an absent console produces no new parts. A permission
@@ -195,12 +202,14 @@ semantics are unchanged. This requires the object-store `head` to surface user-m
 
 On `put_part`, the collector continues to write its internal `console-parts-<n>` object **unchanged**
 (this is what `finalize()` reads and concatenates raw into `console-<run>`), and **additionally** writes
-a separate gzip-compressed `console-part-<gen>-<index>` object and registers its `artifacts` row on the
-reconciler's DB connection. The redacted bytes already exist; they are compressed only for the new
-registered copy. Because the internal parts and `finalize()`'s assembly are untouched, the per-Run
-evidence stays byte-identical (R5/R9). The boot generation for remote derives from the collector's
-restart/resume point so a leader-failover cold-start opens a new generation rather than colliding
-indices with a prior leader's parts.
+a separate gzip-compressed registered part object and registers its `artifacts` row on the reconciler's
+DB connection. The redacted bytes already exist; they are compressed only for the new registered copy.
+Because the internal parts and `finalize()`'s assembly are untouched, the per-Run evidence stays
+byte-identical (R5/R9). Remote shares the one key grammar `console-part-<gen>-<start>`: remote has no
+per-power-cycle truncation, so `<gen>` is fixed at `0`, and `<start>` is the registered part's byte
+offset in the assembled stream (the collector's resume already keeps part offsets monotonic per System,
+so failover does not collide keys). The local-only generation counter (R6b) is what makes `<gen>` vary;
+remote never increments it.
 
 ### Local-libvirt (reconciler-dispatched worker rotation job)
 
@@ -212,28 +221,36 @@ System, the reconciler skips dispatch when a `console_rotate` job for that Syste
 pending/running, so at most one is in flight per System. The reconciler decides *when* and *for which
 System*; the worker does the host-file I/O it alone can read (ADR-0223). The job:
 
-1. reads the rotation sidecar (`plaintext_offset`, `next_index`, `boot_gen`; absent → all zero), then
-   `os.stat`s `console_log_path(system_id)`;
-2. if `file_size < plaintext_offset`, treats it as a power-cycle (ADR-0258): resets `plaintext_offset`
-   to 0 and `next_index` to 0, increments `boot_gen` (R6b);
-3. reads the plaintext **delta** `[plaintext_offset : file_size]`, prepends any held-back seam-overlap
-   bytes from the prior delta, and redacts the combined delta once (R3/R6);
-4. seals full ~64 KiB parts from the redacted delta, registering each as a `console-part-<gen>-<index>`
-   row (gzip-compressed object); the trailing sub-threshold remainder stays the unsealed tail (held
-   back, surfaced when it next crosses the threshold or at teardown);
-5. advances `plaintext_offset` by the plaintext bytes consumed (not the redacted size) and writes the
-   sidecar back.
+1. reads the rotation sidecar (`plaintext_offset`, `boot_gen`, `boot_id`; absent → offset 0, gen 0, no
+   id), then `os.stat`s `console_log_path(system_id)` for the size and reads a boot-identity signal
+   (R6b);
+2. if the boot identity differs from the sidecar's `boot_id` **or** `file_size < plaintext_offset`,
+   treats it as a power-cycle (ADR-0258): resets `plaintext_offset` to 0, increments `boot_gen`, and
+   records the new `boot_id` (R6b);
+3. reads a redaction window `[max(0, plaintext_offset - SEAM_OVERLAP) : file_size]`, redacts the whole
+   window once (R3/R6), then **discards the overlap prefix** so only redacted bytes corresponding to
+   plaintext ≥ `plaintext_offset` are eligible to seal — the overlap is re-read for redaction context
+   across the job seam and never re-emitted;
+4. seals full ~64 KiB parts from the eligible redacted bytes, keying each
+   `console-part-<gen>-<start>` where `<start>` is the part's **plaintext start offset** (R1, R6c —
+   offset-derived, not a counter); registration is insert-if-absent (gzip-compressed object,
+   `content_encoding=gzip` metadata). The trailing sub-threshold remainder stays the unsealed tail,
+   surfaced when it next crosses the threshold or at teardown;
+5. advances `plaintext_offset` by the plaintext bytes consumed (**not** the redacted size) and writes
+   the sidecar back, only after the sealed parts' rows commit (R6c).
 
-`read_console_log`'s `CONFIGURATION_ERROR` raise on a permission wall is caught and logged once; the
-job produces no parts and does not fail (R7). The job never re-reads or re-redacts bytes below
-`plaintext_offset`, so a non-length-preserving redactor (`[REDACTED]`,
-`security/secrets/redaction.py`) cannot shift a sealed part's content.
+The whole job runs under the per-System advisory lock (R6c). `read_console_log`'s `CONFIGURATION_ERROR`
+raise on a permission wall is caught and logged once; the job produces no parts and does not fail (R7).
+The job never *emits* bytes below `plaintext_offset` and keys parts by plaintext offset, so a
+non-length-preserving redactor (`[REDACTED]`, `security/secrets/redaction.py`) cannot shift or duplicate
+a sealed part's content.
 
 ### Reuse, not reinvention
 
-The 64 KiB threshold, the seam-overlap redaction, and the part-index resume are the remote collector's
-existing mechanisms (ADR-0095). The local rotation reuses the same threshold and redaction; the
-artifact-row registration reuses `register_artifact_row` (the per-Run evidence path's helper).
+The 64 KiB threshold and the seam-overlap redaction are the remote collector's existing mechanisms
+(ADR-0095). The local rotation reuses the same threshold and redaction (re-reading the overlap window
+across job seams instead of carrying it in memory, R3); the artifact-row registration reuses
+`register_artifact_row` (the per-Run evidence path's helper).
 
 ## Acceptance criteria
 
@@ -248,7 +265,7 @@ artifact-row registration reuses `register_artifact_row` (the per-Run evidence p
   windowed, redacted content with correct `next_offset` paging and the `REDACTED` gate intact; a
   gzip-stored part is never returned as raw gzip bytes inline. An artifact without that metadata is read
   byte-identical to before (detection is metadata-driven, not key-driven). (R4)
-- Remote-libvirt registers a separate compressed `console-part-<gen>-<index>` artifact per sealed part;
+- Remote-libvirt registers a separate compressed `console-part-0-<start>` artifact per sealed part;
   the collector's internal `console-parts-<n>` objects and the `finalize()` assembly are byte-identical,
   so `console-<run>` evidence is unchanged. (R5, R9)
 - Two concurrent rotation attempts for one System cannot both seal parts (per-System advisory lock); a
@@ -264,9 +281,11 @@ artifact-row registration reuses `register_artifact_row` (the per-Run evidence p
   plaintext delta past the sidecar `plaintext_offset` and redacting that delta once; a second sweep with
   no new console growth produces no new parts, and no sealed part is ever recomputed/re-redacted. (R6,
   R6a)
-- A rotation job that observes the console file shorter than the tracked `plaintext_offset` resets the
-  offset and increments the boot generation, starting a fresh `console-part-<gen+1>-…` series; the new
-  boot's console is captured and the prior generation's parts are untouched. (R6b)
+- A rotation job detects a power-cycle by a `boot_id` change (a boot-identity signal independent of
+  file size) **or** a size shrink, then resets the offset and increments the boot generation, starting a
+  fresh `console-part-<gen+1>-…` series; a truncate-then-regrow that already crossed the old offset is
+  still detected (via `boot_id`), the new boot's early console is captured, and the prior generation's
+  parts are untouched. (R6b)
 - A store outage / absent console / permission-wall `CONFIGURATION_ERROR` (caught from
   `read_console_log`) produces no new parts and surfaces no error to the agent or as a job failure; the
   per-Run evidence path is unaffected. (R7)

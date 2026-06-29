@@ -50,7 +50,8 @@ read through the existing `artifacts.{list,get,search_text}` surface. **No new M
 2. **Capture driver differs by provider (locality).**
    - **Remote-libvirt:** the reconciler-resident collector already rotates 64 KiB redacted parts on a
      size threshold with seam-overlap redaction (ADR-0095). When it seals a part it additionally writes
-     a **separate** compressed `console-part-<gen>-<index>` object and registers its `artifacts` row
+     a **separate** compressed `console-part-0-<start>` object (the shared key grammar; remote has no
+     power-cycle truncation so its generation is fixed `0`) and registers its `artifacts` row
      (the reconciler holds the DB connection). The collector's internal `console-parts-<n>` objects and
      the `finalize()` raw concatenation into the per-Run evidence are left byte-for-byte unchanged —
      compressing the internal parts in place would make `finalize()` concatenate gzip streams and
