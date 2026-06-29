@@ -92,15 +92,18 @@ class ObjectStore:
                 (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
         """
         key = request.key()
+        metadata: dict[str, str] = {
+            "sensitivity": request.sensitivity.value,
+            "retention-class": request.retention_class,
+        }
+        if request.content_encoding is not None:
+            metadata["content-encoding"] = request.content_encoding
         try:
             resp = self._client.put_object(
                 Bucket=self._bucket,
                 Key=key,
                 Body=request.data,
-                Metadata={
-                    "sensitivity": request.sensitivity.value,
-                    "retention-class": request.retention_class,
-                },
+                Metadata=metadata,
             )
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("put_object", key, err) from err
@@ -239,8 +242,9 @@ class ObjectStore:
             raise _infrastructure_error("head_object", key, err) from err
         except BotoCoreError as err:
             raise _infrastructure_error("head_object", key, err) from err
+        metadata = resp.get("Metadata", {})
         try:
-            sensitivity = Sensitivity(resp["Metadata"]["sensitivity"])
+            sensitivity = Sensitivity(metadata["sensitivity"])
         except (KeyError, ValueError) as _exc:
             sensitivity = None
         return artifact_types.HeadResult(
@@ -248,6 +252,7 @@ class ObjectStore:
             checksum_sha256=resp.get("ChecksumSHA256"),
             etag=_normalize_etag(resp["ETag"]),
             sensitivity=sensitivity,
+            content_encoding=metadata.get("content-encoding"),
         )
 
     def get_range(self, key: str, *, start: int, length: int) -> bytes:
