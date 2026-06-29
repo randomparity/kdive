@@ -39,9 +39,9 @@ class FakeObjectStore:
         self.objects.pop(key, None)
 
 
-def test_parts_roundtrip_and_index_listing() -> None:
+def test_parts_roundtrip_and_index_listing(migrated_url: str) -> None:
     store = FakeObjectStore()
-    part_store = RemoteConsolePartStore(store, "unused")
+    part_store = RemoteConsolePartStore(store, migrated_url)
     sid = uuid4()
     part_store.put_part(sid, 0, b"zero")
     part_store.put_part(sid, 1, b"one")
@@ -52,9 +52,9 @@ def test_parts_roundtrip_and_index_listing() -> None:
     assert part_store.list_part_indices(sid) == [0, 10]
 
 
-def test_assemble_concatenates_all_parts_by_default() -> None:
+def test_assemble_concatenates_all_parts_by_default(migrated_url: str) -> None:
     store = FakeObjectStore()
-    part_store = RemoteConsolePartStore(store, "unused")
+    part_store = RemoteConsolePartStore(store, migrated_url)
     sid = uuid4()
     part_store.put_part(sid, 0, b"a")
     part_store.put_part(sid, 1, b"b")
@@ -62,10 +62,10 @@ def test_assemble_concatenates_all_parts_by_default() -> None:
     assert part_store.assemble(sid) == b"abc"
 
 
-def test_assemble_start_index_slices_to_boot_window() -> None:
+def test_assemble_start_index_slices_to_boot_window(migrated_url: str) -> None:
     # Parts 0..1 are a prior boot; this boot's window starts at part index 2.
     store = FakeObjectStore()
-    part_store = RemoteConsolePartStore(store, "unused")
+    part_store = RemoteConsolePartStore(store, migrated_url)
     sid = uuid4()
     part_store.put_part(sid, 0, b"prior ")
     part_store.put_part(sid, 1, b"boot ")
@@ -74,18 +74,18 @@ def test_assemble_start_index_slices_to_boot_window() -> None:
     assert part_store.assemble(sid, start_index=2) == b"this boot"
 
 
-def test_assemble_start_index_past_all_parts_is_empty() -> None:
+def test_assemble_start_index_past_all_parts_is_empty(migrated_url: str) -> None:
     store = FakeObjectStore()
-    part_store = RemoteConsolePartStore(store, "unused")
+    part_store = RemoteConsolePartStore(store, migrated_url)
     sid = uuid4()
     part_store.put_part(sid, 0, b"prior")
     assert part_store.assemble(sid, start_index=1) == b""
 
 
-def test_parts_do_not_shadow_the_console_artifact_prefix() -> None:
+def test_parts_do_not_shadow_the_console_artifact_prefix(migrated_url: str) -> None:
     # The single console artifact key must not be picked up as a numbered part.
     store = FakeObjectStore()
-    part_store = RemoteConsolePartStore(store, "unused")
+    part_store = RemoteConsolePartStore(store, migrated_url)
     sid = uuid4()
     store.objects[f"remote-libvirt/systems/{sid}/console"] = b"assembled"
     part_store.put_part(sid, 0, b"part0")

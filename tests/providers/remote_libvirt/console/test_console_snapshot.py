@@ -20,8 +20,8 @@ from kdive.providers.remote_libvirt.console.wiring import RemoteConsolePartStore
 from tests.providers.remote_libvirt.console.test_console_wiring import FakeObjectStore
 
 
-def _seed_parts(store: FakeObjectStore, system_id: UUID, parts: list[bytes]) -> None:
-    part_store = RemoteConsolePartStore(store, "unused")
+def _seed_parts(store: FakeObjectStore, system_id: UUID, parts: list[bytes], conninfo: str) -> None:
+    part_store = RemoteConsolePartStore(store, conninfo)
     for index, data in enumerate(parts):
         part_store.put_part(system_id, index, data)
 
@@ -52,11 +52,13 @@ async def _run_snapshot_sliced(migrated_url: str, system_id: UUID, run_id: UUID,
         )
 
 
-def test_mark_boot_window_is_next_part_index(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mark_boot_window_is_next_part_index(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store = FakeObjectStore()
     monkeypatch.setattr(snapshot_mod, "object_store_from_env", lambda: store)
     system_id = uuid4()
-    _seed_parts(store, system_id, [b"a", b"b"])  # parts 0, 1
+    _seed_parts(store, system_id, [b"a", b"b"], migrated_url)  # parts 0, 1
     assert asyncio.run(_run_mark(system_id)) == 2
 
 
@@ -71,10 +73,12 @@ def test_snapshot_slices_to_boot_window(migrated_url: str, monkeypatch: pytest.M
     store = FakeObjectStore()
     monkeypatch.setattr(snapshot_mod, "object_store_from_env", lambda: store)
     system_id, run_id = uuid4(), uuid4()
-    _seed_parts(store, system_id, [b"prior ", b"Kernel panic\n"])  # parts 0, 1
+    _seed_parts(store, system_id, [b"prior ", b"Kernel panic\n"], migrated_url)  # parts 0, 1
 
     mark = asyncio.run(_run_mark(system_id))  # == 2
-    _seed_parts(store, system_id, [b"prior ", b"Kernel panic\n", b"this boot READY\n"])  # +part 2
+    _seed_parts(
+        store, system_id, [b"prior ", b"Kernel panic\n", b"this boot READY\n"], migrated_url
+    )  # +part 2
 
     snap = asyncio.run(_run_snapshot_sliced(migrated_url, system_id, run_id, mark))
 
@@ -90,7 +94,7 @@ def test_snapshot_empty_window_returns_none(
     store = FakeObjectStore()
     monkeypatch.setattr(snapshot_mod, "object_store_from_env", lambda: store)
     system_id, run_id = uuid4(), uuid4()
-    _seed_parts(store, system_id, [b"prior boot"])  # part 0
+    _seed_parts(store, system_id, [b"prior boot"], migrated_url)  # part 0
     mark = asyncio.run(_run_mark(system_id))  # == 1, nothing at/after it
 
     snap = asyncio.run(_run_snapshot_sliced(migrated_url, system_id, run_id, mark))
@@ -106,7 +110,7 @@ def test_snapshot_assembles_parts_into_per_run_artifact(
     store = FakeObjectStore()
     monkeypatch.setattr(snapshot_mod, "object_store_from_env", lambda: store)
     system_id, run_id = uuid4(), uuid4()
-    _seed_parts(store, system_id, [b"boot ...\n", b"Kernel panic\n"])
+    _seed_parts(store, system_id, [b"boot ...\n", b"Kernel panic\n"], migrated_url)
 
     snap = asyncio.run(_run_snapshot(migrated_url, system_id, run_id))
 
@@ -124,11 +128,11 @@ def test_snapshot_keys_distinct_runs_to_distinct_rows(
     store = FakeObjectStore()
     monkeypatch.setattr(snapshot_mod, "object_store_from_env", lambda: store)
     system_id, run_a, run_b = uuid4(), uuid4(), uuid4()
-    _seed_parts(store, system_id, [b"first boot crash"])
+    _seed_parts(store, system_id, [b"first boot crash"], migrated_url)
     snap_a = asyncio.run(_run_snapshot(migrated_url, system_id, run_a))
 
     # A later boot of the same System rotates more parts; the snapshot keys to its own Run.
-    _seed_parts(store, system_id, [b"first boot crash", b" + second boot"])
+    _seed_parts(store, system_id, [b"first boot crash", b" + second boot"], migrated_url)
     snap_b = asyncio.run(_run_snapshot(migrated_url, system_id, run_b))
 
     assert snap_a is not None and snap_b is not None
@@ -144,7 +148,7 @@ def test_snapshot_resnapshot_same_run_refreshes_in_place(
     store = FakeObjectStore()
     monkeypatch.setattr(snapshot_mod, "object_store_from_env", lambda: store)
     system_id, run_id = uuid4(), uuid4()
-    _seed_parts(store, system_id, [b"crash"])
+    _seed_parts(store, system_id, [b"crash"], migrated_url)
     snap_one = asyncio.run(_run_snapshot(migrated_url, system_id, run_id))
     snap_two = asyncio.run(_run_snapshot(migrated_url, system_id, run_id))
 
