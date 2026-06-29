@@ -127,3 +127,27 @@ def test_put_part_is_idempotent_no_duplicate_row(migrated_url: str) -> None:
     part_store.put_part(sid, 0, redacted)  # replay after a crash-before-sidecar advance
 
     assert _count_rows(migrated_url, sid, _observable_key(sid, 0)) == 1
+
+
+class _FailingObservableStore(RecordingObjectStore):
+    """Records the internal part write but fails the gzip observable dual-write."""
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        if request.content_encoding == "gzip":
+            raise RuntimeError("object store unavailable for the observable part")
+        return super().put_artifact(request)
+
+
+def test_observable_dual_write_failure_does_not_disrupt_evidence() -> None:
+    # R7 best-effort: a failing observable dual-write must not raise out of put_part, and the
+    # internal console-parts-<index> evidence object must still be written. No DB needed: the
+    # observable object write fails before any row registration, so conninfo is never used.
+    store = _FailingObservableStore()
+    part_store = RemoteConsolePartStore(store, "unused")
+    sid = uuid4()
+    redacted = b"boot ... crash\n"
+
+    part_store.put_part(sid, 0, redacted)  # must not raise
+
+    assert store.objects[_internal_key(sid, 0)] == redacted
+    assert _observable_key(sid, 0) not in store.objects

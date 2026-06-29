@@ -100,7 +100,16 @@ class RemoteConsolePartStore:
                 retention_class=_RETENTION,
             )
         )
-        self._register_observable_part(system_id, index, data)
+        try:
+            self._register_observable_part(system_id, index, data)
+        except Exception:  # noqa: BLE001 - observability dual-write must never disrupt evidence (R7)
+            _log.warning(
+                "registering observable console part %d for system %s failed; "
+                "the per-Run evidence is unaffected",
+                index,
+                system_id,
+                exc_info=True,
+            )
 
     def _register_observable_part(self, system_id: UUID, index: int, data: bytes) -> None:
         """Store the gzip-compressed observable part copy and insert its row if absent.
@@ -108,7 +117,9 @@ class RemoteConsolePartStore:
         ``data`` is the already-redacted part bytes; the object is REDACTED-class with
         ``content_encoding="gzip"`` so ``artifacts.get`` inflates it on read. Write-before-commit
         (ADR-0005): the object is stored first, then the row is inserted only if no row already
-        keys the same object — a re-sealed (replayed) part does not duplicate the row.
+        keys the same object — a re-sealed (replayed) part does not duplicate the row. The caller
+        treats any failure here as best-effort (R7): the observable copy is for live observation,
+        never the evidence path, so a store/DB outage must not stall the evidence pump.
         """
         stored = self._store.put_artifact(
             ArtifactWriteRequest(
