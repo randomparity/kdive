@@ -21,6 +21,7 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle import provisioning as provisioning_module
 from kdive.providers.local_libvirt.lifecycle import storage as storage_module
 from kdive.providers.local_libvirt.lifecycle import xml as xml_module
+from kdive.providers.local_libvirt.lifecycle.baseline_kernel import BaselineKernel
 from kdive.providers.local_libvirt.lifecycle.materialize import (
     RootfsMaterializationContext,
 )
@@ -45,6 +46,7 @@ from tests.providers.local_libvirt.fakes import libvirt_error
 
 _SYS = UUID("11111111-1111-1111-1111-111111111111")
 _DISK = "/var/lib/kdive/rootfs/fedora-40.qcow2"
+_KERNEL = Path("/var/lib/kdive/rootfs/11111111-1111-1111-1111-111111111111-baseline/kernel")
 
 _VALID: dict[str, Any] = {
     "schema_version": 1,
@@ -78,8 +80,11 @@ def _render(
     profile: ProvisioningProfile | None = None,
     *,
     disk_path: str = _DISK,
+    kernel_path: Path | None = _KERNEL,
 ) -> str:
-    return render_domain_xml(system_id, profile or _profile(), disk_path=disk_path)
+    return render_domain_xml(
+        system_id, profile or _profile(), disk_path=disk_path, kernel_path=kernel_path
+    )
 
 
 def test_domain_name_is_kdive_prefixed() -> None:
@@ -101,8 +106,8 @@ def test_import_does_not_register_elementtree_namespace(
 
     assert calls == []
 
-    reloaded.render_domain_xml(_SYS, _profile(), disk_path=_DISK)
-    reloaded.render_domain_xml(_SYS, _profile(), disk_path=_DISK)
+    reloaded.render_domain_xml(_SYS, _profile(), disk_path=_DISK, kernel_path=_KERNEL)
+    reloaded.render_domain_xml(_SYS, _profile(), disk_path=_DISK, kernel_path=_KERNEL)
 
     # Rendering registers both the kdive metadata prefix and the qemu passthrough prefix
     # (the latter is needed for the gdbstub <qemu:commandline>), each once.
@@ -216,15 +221,35 @@ def test_render_uses_disk_path_override_when_given() -> None:
     assert source is not None and source.get("file") == "/var/lib/kdive/rootfs/ov.qcow2"
 
 
-def test_render_has_no_kernel_or_cmdline() -> None:
-    # The kdump crashkernel reservation is the install/boot plane's job (#17), not provision's.
+def test_render_has_baseline_kernel_and_cmdline() -> None:
+    # Provision boots the rootfs's own baseline kernel via direct-kernel (#905, ADR-0272).
     root = _safe_fromstring(_render())
-    assert root.find("os/kernel") is None
-    assert root.find("os/cmdline") is None
+    assert root.findtext("os/kernel") == str(_KERNEL)
+    assert root.findtext("os/cmdline") == "root=/dev/vda console=ttyS0 rw"
+
+
+def test_render_requires_a_kernel_path() -> None:
+    # A local-libvirt domain must never disk-boot the bootloader-less rootfs: fail closed.
+    with pytest.raises(CategorizedError) as exc:
+        _render(kernel_path=None)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_render_omits_initrd_when_absent_and_emits_it_when_present() -> None:
+    assert _safe_fromstring(_render()).find("os/initrd") is None
+    initrd = Path("/var/lib/kdive/rootfs/x-baseline/initrd")
+    root = _safe_fromstring(
+        render_domain_xml(
+            _SYS, _profile(), disk_path=_DISK, kernel_path=_KERNEL, initrd_path=initrd
+        )
+    )
+    assert root.findtext("os/initrd") == str(initrd)
 
 
 def test_xml_module_render_domain_xml_exposes_kdive_metadata() -> None:
-    root = _safe_fromstring(xml_module.render_domain_xml(_SYS, _profile(), disk_path=_DISK))
+    root = _safe_fromstring(
+        xml_module.render_domain_xml(_SYS, _profile(), disk_path=_DISK, kernel_path=_KERNEL)
+    )
     tag = root.find(f"metadata/{{{KDIVE_METADATA_NS}}}system")
 
     assert tag is not None
@@ -261,7 +286,9 @@ def test_render_defaults_machine_when_absent() -> None:
 
 
 def test_render_emits_loopback_gdbstub_when_flag_set() -> None:
-    xml = render_domain_xml(_SYS, _profile(debug={"gdbstub": True}), disk_path=_DISK, gdb_port=4444)
+    xml = render_domain_xml(
+        _SYS, _profile(debug={"gdbstub": True}), disk_path=_DISK, gdb_port=4444, kernel_path=_KERNEL
+    )
     # The recorded port round-trips through the shared parser, on loopback.
     assert recorded_gdb_port(xml) == 4444
     root = _safe_fromstring(xml)
@@ -280,7 +307,7 @@ def test_render_omits_gdbstub_when_flag_unset() -> None:
 
 def test_render_ignores_gdb_port_when_flag_unset() -> None:
     # A stray port with the flag off renders nothing — the flag is the gate, not the port.
-    xml = render_domain_xml(_SYS, _profile(), disk_path=_DISK, gdb_port=4444)
+    xml = render_domain_xml(_SYS, _profile(), disk_path=_DISK, gdb_port=4444, kernel_path=_KERNEL)
     assert recorded_gdb_port(xml) is None
 
 
@@ -299,13 +326,23 @@ def test_render_omits_pvpanic_and_on_crash_when_preserve_unset() -> None:
 
 def test_render_rejects_gdbstub_flag_without_a_port() -> None:
     with pytest.raises(CategorizedError) as caught:
-        render_domain_xml(_SYS, _profile(debug={"gdbstub": True}), disk_path=_DISK, gdb_port=None)
+        render_domain_xml(
+            _SYS,
+            _profile(debug={"gdbstub": True}),
+            disk_path=_DISK,
+            gdb_port=None,
+            kernel_path=_KERNEL,
+        )
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
 def test_render_emits_loopback_ssh_forward_when_credential_ref_set() -> None:
     xml = render_domain_xml(
-        _SYS, _profile(ssh_credential_ref="guest_key.pem"), disk_path=_DISK, ssh_port=40022
+        _SYS,
+        _profile(ssh_credential_ref="guest_key.pem"),
+        disk_path=_DISK,
+        ssh_port=40022,
+        kernel_path=_KERNEL,
     )
     # The forwarded loopback port round-trips through the shared parser.
     assert recorded_ssh_port(xml) == 40022
@@ -330,14 +367,18 @@ def test_render_omits_ssh_forward_when_no_credential_ref() -> None:
 
 def test_render_ignores_ssh_port_when_no_credential_ref() -> None:
     # A stray port with no credential ref renders nothing — the ref is the gate, not the port.
-    xml = render_domain_xml(_SYS, _profile(), disk_path=_DISK, ssh_port=40022)
+    xml = render_domain_xml(_SYS, _profile(), disk_path=_DISK, ssh_port=40022, kernel_path=_KERNEL)
     assert recorded_ssh_port(xml) is None
 
 
 def test_render_rejects_credential_ref_without_an_ssh_port() -> None:
     with pytest.raises(CategorizedError) as caught:
         render_domain_xml(
-            _SYS, _profile(ssh_credential_ref="guest_key.pem"), disk_path=_DISK, ssh_port=None
+            _SYS,
+            _profile(ssh_credential_ref="guest_key.pem"),
+            disk_path=_DISK,
+            ssh_port=None,
+            kernel_path=_KERNEL,
         )
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
@@ -351,6 +392,7 @@ def test_render_gdbstub_and_ssh_share_one_commandline_element() -> None:
         disk_path=_DISK,
         gdb_port=4444,
         ssh_port=40022,
+        kernel_path=_KERNEL,
     )
     assert recorded_gdb_port(xml) == 4444
     assert recorded_ssh_port(xml) == 40022
@@ -437,27 +479,39 @@ class _ProvConn:
         return 0
 
 
+def _fake_extract(_base: Path, dest: Path) -> BaselineKernel:
+    """A no-op baseline extractor for unit tests — never touches libguestfs or the host FS."""
+    return BaselineKernel(kernel=dest / "kernel", initrd=None)
+
+
 def _prov(
     conn: _ProvConn,
     *,
     make_overlay: Callable[[str, str], None] = lambda _base, _overlay: None,
     remove_overlay: Callable[[str], None] = lambda _overlay: None,
     overlay_exists: Callable[[str], bool] = lambda _overlay: False,
+    remove_baseline: Callable[[str], None] = lambda _baseline: None,
+    baseline_exists: Callable[[str], bool] = lambda _path: False,
+    extract_baseline_kernel: Callable[[Path, Path], BaselineKernel] = _fake_extract,
 ) -> LocalLibvirtProvisioning:
     # The overlay seams default to no-ops so the libvirt-only tests never spawn qemu-img; the
     # console-log seam is also a no-op so they never depend on host /var/lib/kdive permissions.
-    # The default "overlay absent" makes provision create one, matching a fresh provision.
+    # The default "overlay absent" makes provision create one, matching a fresh provision. The
+    # baseline extractor is the no-op fake so provision never touches libguestfs (ADR-0272).
     return LocalLibvirtProvisioning(
         connect=lambda: conn,
         files=ProvisioningFiles(
             make_overlay=make_overlay,
             remove_overlay=remove_overlay,
+            remove_baseline=remove_baseline,
             overlay_exists=overlay_exists,
+            baseline_exists=baseline_exists,
             prepare_console_log=lambda _path: None,
         ),
         materialize_rootfs=lambda rootfs, _system_id, _arch: (
             rootfs.path if rootfs.kind == "local" else "/var/lib/kdive/rootfs/upload.qcow2"
         ),
+        extract_baseline_kernel=extract_baseline_kernel,
     )
 
 
@@ -492,9 +546,11 @@ def test_provision_catalog_rootfs_threads_arch_to_fetch() -> None:
             make_overlay=lambda _base, _overlay: None,
             remove_overlay=lambda _overlay: None,
             overlay_exists=lambda _overlay: False,
+            baseline_exists=lambda _path: False,
             prepare_console_log=lambda _path: None,
         ),
         catalog_fetch=_fetch,
+        extract_baseline_kernel=_fake_extract,
     )
     prov.provision(
         _SYS, _profile(rootfs={"kind": "catalog", "provider": "local-libvirt", "name": "base"})
@@ -508,6 +564,71 @@ def test_provision_defines_and_starts_returns_name() -> None:
     assert name == "kdive-11111111-1111-1111-1111-111111111111"
     assert conn.defined[name].created is True
     assert conn.closed == 1  # the connection is closed after use (no leak)
+
+
+def test_provision_extracts_baseline_and_renders_kernel() -> None:
+    # provision extracts the rootfs's baseline kernel from the materialized base and renders it as
+    # the direct-kernel <kernel>/<cmdline> (#905, ADR-0272).
+    conn = _ProvConn()
+    calls: list[tuple[Path, Path]] = []
+
+    def fake_extract(base: Path, dest: Path) -> BaselineKernel:
+        calls.append((base, dest))
+        return BaselineKernel(kernel=dest / "kernel", initrd=dest / "initrd")
+
+    _prov(conn, extract_baseline_kernel=fake_extract).provision(_SYS, _profile())
+
+    assert calls == [
+        (Path("/var/lib/kdive/rootfs/fedora-40.qcow2"), Path(storage_module.baseline_dir(_SYS)))
+    ]
+    root = _safe_fromstring(conn.recorded_xml[-1])
+    assert root.findtext("os/kernel") == f"{storage_module.baseline_dir(_SYS)}/kernel"
+    assert root.findtext("os/initrd") == f"{storage_module.baseline_dir(_SYS)}/initrd"
+    assert root.findtext("os/cmdline") == "root=/dev/vda console=ttyS0 rw"
+
+
+def test_provision_reuses_present_baseline_dir_without_re_extracting() -> None:
+    # An idempotent retry with the baseline dir already present must not re-mount the base.
+    conn = _ProvConn()
+
+    def fail_extract(_base: Path, _dest: Path) -> BaselineKernel:
+        raise AssertionError("must reuse the present baseline dir, not re-extract")
+
+    prov = _prov(
+        conn,
+        overlay_exists=lambda _overlay: True,
+        baseline_exists=lambda _path: True,
+        extract_baseline_kernel=fail_extract,
+    )
+    prov.provision(_SYS, _profile())
+
+    root = _safe_fromstring(conn.recorded_xml[-1])
+    assert root.findtext("os/kernel") == f"{storage_module.baseline_dir(_SYS)}/kernel"
+    assert root.findtext("os/initrd") == f"{storage_module.baseline_dir(_SYS)}/initrd"
+
+
+def test_provision_omits_initrd_when_baseline_dir_has_no_initrd() -> None:
+    # A present baseline dir whose initrd is absent (embedded-initramfs kernel) renders kernel-only.
+    conn = _ProvConn()
+    prov = _prov(
+        conn,
+        baseline_exists=lambda path: path.endswith("-baseline"),  # dir present, initrd absent
+        extract_baseline_kernel=lambda _b, _d: (_ for _ in ()).throw(
+            AssertionError("dir present: must not extract")
+        ),
+    )
+    prov.provision(_SYS, _profile())
+    root = _safe_fromstring(conn.recorded_xml[-1])
+    assert root.findtext("os/kernel") == f"{storage_module.baseline_dir(_SYS)}/kernel"
+    assert root.find("os/initrd") is None
+
+
+def test_teardown_removes_baseline_dir() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name)})
+    removed: list[str] = []
+    _prov(conn, remove_baseline=removed.append).teardown(name)
+    assert removed == [storage_module.baseline_dir(_SYS)]
 
 
 def test_provision_define_error_is_provisioning_failure() -> None:
@@ -562,10 +683,12 @@ def _prov_with_port(conn: _ProvConn, *, free_port: Callable[[], int]) -> LocalLi
             make_overlay=lambda _base, _overlay: None,
             remove_overlay=lambda _overlay: None,
             overlay_exists=lambda _overlay: False,
+            baseline_exists=lambda _path: False,
             prepare_console_log=lambda _path: None,
         ),
         materialize_rootfs=lambda rootfs, _system_id, _arch: rootfs.path,
         free_port=free_port,
+        extract_baseline_kernel=_fake_extract,
     )
 
 
@@ -578,7 +701,9 @@ def test_provision_gdbstub_allocates_a_fresh_port_when_no_prior_domain() -> None
 
 def test_provision_gdbstub_reuses_the_recorded_port_on_retry() -> None:
     name = domain_name_for(_SYS)
-    recorded = render_domain_xml(_SYS, _gdb_profile(), disk_path=_DISK, gdb_port=6666)
+    recorded = render_domain_xml(
+        _SYS, _gdb_profile(), disk_path=_DISK, gdb_port=6666, kernel_path=_KERNEL
+    )
     conn = _ProvConn(defined={name: _ProvDomain(name, xml_desc=recorded)})
 
     def fail_free_port() -> int:
@@ -634,7 +759,9 @@ def test_provision_ssh_allocates_a_fresh_port_when_no_prior_domain() -> None:
 
 def test_provision_ssh_reuses_the_recorded_port_on_retry() -> None:
     name = domain_name_for(_SYS)
-    recorded = render_domain_xml(_SYS, _ssh_profile(), disk_path=_DISK, ssh_port=40023)
+    recorded = render_domain_xml(
+        _SYS, _ssh_profile(), disk_path=_DISK, ssh_port=40023, kernel_path=_KERNEL
+    )
     conn = _ProvConn(defined={name: _ProvDomain(name, xml_desc=recorded)})
 
     def fail_free_port() -> int:
@@ -713,9 +840,11 @@ def test_provision_prepares_console_log_before_define() -> None:
         files=ProvisioningFiles(
             make_overlay=lambda _base, _overlay: None,
             overlay_exists=lambda _overlay: False,
+            baseline_exists=lambda _path: False,
             prepare_console_log=prepare,
         ),
         materialize_rootfs=lambda _rootfs, _system_id, _arch: "/var/lib/kdive/rootfs/base.qcow2",
+        extract_baseline_kernel=_fake_extract,
     ).provision(_SYS, _profile())
 
     assert calls == [("prepare", f"{_SYS}.log"), ("define", "xml")]
@@ -756,6 +885,22 @@ def test_cleanup_overlay_if_created_removes_only_created_overlay() -> None:
     files.cleanup_overlay_if_created(storage_module.PreparedOverlay("/existing.qcow2", False))
 
     assert removed == [overlay_path(_SYS)]
+
+
+def test_baseline_dir_is_per_system_under_rootfs() -> None:
+    assert storage_module.baseline_dir(_SYS) == f"{storage_module.ROOTFS_DIR}/{_SYS}-baseline"
+
+
+def test_remove_baseline_for_domain_strips_prefix_and_rmtrees() -> None:
+    seen: list[str] = []
+    files = ProvisioningFiles(remove_baseline=seen.append)
+    files.remove_baseline_for_domain("kdive-" + str(_SYS))
+    assert seen == [storage_module.baseline_dir(_SYS)]
+
+
+def test_baseline_exists_seam_is_injectable() -> None:
+    files = ProvisioningFiles(baseline_exists=lambda path: True)
+    assert files.baseline_exists(storage_module.baseline_dir(_SYS)) is True
 
 
 def test_real_make_overlay_timeout_is_provisioning_failure(
@@ -1010,11 +1155,13 @@ def test_provision_console_log_failure_removes_the_overlay() -> None:
                 make_overlay=lambda _base, _overlay: None,
                 remove_overlay=removed.append,
                 overlay_exists=lambda _overlay: False,
+                baseline_exists=lambda _path: False,
                 prepare_console_log=fail_prepare,
             ),
             materialize_rootfs=lambda _rootfs, _system_id, _arch: (
                 "/var/lib/kdive/rootfs/base.qcow2"
             ),
+            extract_baseline_kernel=_fake_extract,
         ).provision(_SYS, _profile())
 
     assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
@@ -1145,11 +1292,13 @@ def test_provision_passes_real_system_id_to_materialize_and_define() -> None:
             make_overlay=lambda _base, _overlay: None,
             remove_overlay=lambda _overlay: None,
             overlay_exists=lambda _overlay: False,
+            baseline_exists=lambda _path: False,
             prepare_console_log=lambda _path: None,
         ),
         materialize_rootfs=lambda rootfs, system_id, _arch: (
             seen.append(system_id) or rootfs.path  # type: ignore[func-returns-value]
         ),
+        extract_baseline_kernel=_fake_extract,
     )
 
     with pytest.raises(CategorizedError) as caught:

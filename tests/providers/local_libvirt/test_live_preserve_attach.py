@@ -45,7 +45,13 @@ def test_live_vm_preserve_crash_stub_is_reachable(tmp_path: Path) -> None:  # pr
     console.write_text("")
 
     profile = ProvisioningProfile.parse(_profile_data(garbage_disk))
-    base_xml = render_domain_xml(uuid4(), profile, disk_path=str(garbage_disk), gdb_port=_GDB_PORT)
+    base_xml = render_domain_xml(
+        uuid4(),
+        profile,
+        disk_path=str(garbage_disk),
+        gdb_port=_GDB_PORT,
+        kernel_path=Path(bzimage),
+    )
     final_xml = _with_direct_kernel(base_xml, bzimage=bzimage, console=console)
 
     conn = libvirt.open(uri)

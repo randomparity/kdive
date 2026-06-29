@@ -107,13 +107,18 @@ _hostile = st.sampled_from(
 @given(rootfs=_hostile)
 def test_render_domain_xml_never_lets_a_profile_value_inject_markup(rootfs: str) -> None:
     rootfs_path = f"/var/lib/kdive/{rootfs}"
-    xml = render_domain_xml(_SYS, _profile(), disk_path=rootfs_path)
+    # Drive the hostile value through both the disk attr and the new baseline <kernel> text path.
+    xml = render_domain_xml(_SYS, _profile(), disk_path=rootfs_path, kernel_path=Path(rootfs_path))
     root = ET.fromstring(xml)  # noqa: S314 - self-rendered, asserting structure
     # Exactly one disk source, and its file attr equals the hostile value verbatim — the
     # value crossed as an attribute, creating no new elements.
     sources = root.findall("./devices/disk/source")
     assert len(sources) == 1
     assert sources[0].get("file") == rootfs_path
+    # The hostile value also crossed as <kernel> text (Path-normalized), spawning no new elements.
+    kernels = root.findall("./os/kernel")
+    assert len(kernels) == 1
+    assert kernels[0].text == str(Path(rootfs_path))
     assert root.find("evil") is None and root.tag == "domain"
 
 
@@ -122,7 +127,12 @@ def test_console_log_element_does_not_enable_append() -> None:
     # truncated per create(). QEMU/libvirt default logappend=off; the rendered <log> must
     # not set append='on', or a stale prior-boot marker could survive into the next boot.
     domain = ET.fromstring(  # noqa: S314 - self-rendered
-        render_domain_xml(_SYS, _profile(), disk_path="/var/lib/kdive/rootfs/base.qcow2")
+        render_domain_xml(
+            _SYS,
+            _profile(),
+            disk_path="/var/lib/kdive/rootfs/base.qcow2",
+            kernel_path=Path("/var/lib/kdive/rootfs/k/kernel"),
+        )
     )
     logs = domain.findall("./devices/serial/log")
     assert logs, "the always-on serial console <log> tee must be present (ADR-0049 §4)"

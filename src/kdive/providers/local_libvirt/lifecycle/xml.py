@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from uuid import UUID
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -20,6 +21,10 @@ _DEFAULT_MACHINE = "q35"
 # loopback-only: local transports never listen off-host (ADR-0210/0218).
 _LOOPBACK_HOST = "127.0.0.1"
 _PROFILE_POLICY = LocalLibvirtProfilePolicy()
+# The bare-fs rootfs roots on the lone virtio disk (`/dev/vda`); `console=ttyS0` makes the readiness
+# tail and SSH/drgn path observable. kdump's `crashkernel` is the install/boot lane's job, sized
+# against the kernel-under-test — never added to the baseline boot (ADR-0272).
+_BASELINE_CMDLINE = "root=/dev/vda console=ttyS0 rw"
 
 
 def _ensure_namespaces_registered() -> None:
@@ -37,8 +42,16 @@ def render_domain_xml(
     disk_path: str,
     gdb_port: int | None = None,
     ssh_port: int | None = None,
+    kernel_path: Path | None = None,
+    initrd_path: Path | None = None,
 ) -> str:
-    """Render the tagged libvirt domain XML for a System (ADR-0025 §3).
+    """Render the tagged libvirt domain XML for a System (ADR-0025 §3, ADR-0272).
+
+    A local-libvirt domain is always direct-kernel (the profile validator pairs ``disk-image`` with
+    remote-libvirt only), so the ``<os>`` always carries a ``<kernel>`` pointing at the rootfs's own
+    baseline kernel (``kernel_path``), an optional ``<initrd>`` (``initrd_path``), and a fixed
+    ``<cmdline>`` of ``root=/dev/vda console=ttyS0 rw``. ``kernel_path`` is required: a ``None`` is
+    a ``CONFIGURATION_ERROR``, not a silently disk-booting (and so non-booting) domain.
 
     When ``profile.provider.local_libvirt.debug.gdbstub`` is set, a loopback QEMU gdbstub is
     rendered on ``gdb_port`` via the ``<qemu:commandline>`` passthrough (ADR-0210 §1); ``gdb_port``
@@ -67,6 +80,7 @@ def render_domain_xml(
     ET.SubElement(domain, "vcpu").text = str(profile.vcpu)
     os_el = ET.SubElement(domain, "os")
     ET.SubElement(os_el, "type", arch=profile.arch, machine=machine).text = "hvm"
+    _append_direct_kernel(os_el, kernel_path, initrd_path)
     features = ET.SubElement(domain, "features")
     # On x86 the guest's qemu_fw_cfg driver locates the fw_cfg device only via ACPI, so the
     # VMCOREINFO note below is written only when ACPI is present; mirror remote (issue #708,
@@ -99,6 +113,28 @@ def render_domain_xml(
         _append_ssh_forward(domain, ssh_port)
 
     return ET.tostring(domain, encoding="unicode")
+
+
+def _append_direct_kernel(
+    os_el: ET.Element, kernel_path: Path | None, initrd_path: Path | None
+) -> None:
+    """Render the direct-kernel `<os>` body (ADR-0272); a local domain always boots a kernel.
+
+    Built with ElementTree (no string interpolation), so no path can inject XML.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when no kernel path is supplied — a local-libvirt
+            domain must never disk-boot the bootloader-less rootfs.
+    """
+    if kernel_path is None:
+        raise CategorizedError(
+            "a local-libvirt direct-kernel domain requires a baseline <kernel> path",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    ET.SubElement(os_el, "kernel").text = str(kernel_path)
+    if initrd_path is not None:
+        ET.SubElement(os_el, "initrd").text = str(initrd_path)
+    ET.SubElement(os_el, "cmdline").text = _BASELINE_CMDLINE
 
 
 def _append_preserve_on_crash(domain: ET.Element, devices: ET.Element) -> None:

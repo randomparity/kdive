@@ -81,6 +81,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 # exactly these four C-extension wrapper files; every other rule stays strict here. This keeps
 # `just type` consistent whether or not the extensions are installed — no `SKIP=ty` ritual.
 include = [
+  "src/kdive/providers/local_libvirt/lifecycle/baseline_kernel.py",
   "src/kdive/providers/local_libvirt/lifecycle/guest_kernel_writer.py",
   "src/kdive/providers/local_libvirt/lifecycle/install.py",
   "src/kdive/providers/local_libvirt/retrieve.py",

@@ -441,8 +441,9 @@ you built and labeled in [Build and install the rootfs image(s)](#build-and-inst
 above (or any prebuilt bootable qcow2 staged at a world-readable, `virt_image_t`-labeled path under
 `/var/lib/kdive/rootfs/local/`). The `staged-path` `[[image]]` you reconciled (Step 5) points at
 exactly that file, so once it exists the catalog row resolves it. Local-libvirt provisioning uses `boot_method: direct-kernel`
-(`kernel_source_ref` is required by the schema but only used by a later build Run; provision boots
-the rootfs's own kernel from disk). `disk_gb` must equal the allocation's (ADR-0205).
+(`kernel_source_ref` is required by the schema but only used by a later build Run; provision
+extracts and boots the rootfs's own baseline kernel via direct-kernel boot). `disk_gb` must equal
+the allocation's (ADR-0205).
 
 **Recommended — provision by `catalog` reference** (what a host-shell-free agent does: discover the
 name via `fixtures.list` / `systems.profile_examples`, then paste it):

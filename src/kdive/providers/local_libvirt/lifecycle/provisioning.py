@@ -35,6 +35,11 @@ from kdive.profiles.provisioning import (
     _UploadRootfs,
     validate_rootfs_reference,
 )
+from kdive.providers.local_libvirt.lifecycle.baseline_kernel import (
+    BaselineKernel,
+    ExtractBaselineKernel,
+    _real_extract_baseline_kernel,
+)
 from kdive.providers.local_libvirt.lifecycle.materialize import (
     CatalogFetch,
     MaterializableRootfsRef,
@@ -48,6 +53,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs_catalog_fetch import (
 from kdive.providers.local_libvirt.lifecycle.storage import (
     ROOTFS_DIR,
     ProvisioningFiles,
+    baseline_dir,
     overlay_path,
 )
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
@@ -155,6 +161,7 @@ class LocalLibvirtProvisioning:
         materialize_rootfs: MaterializeRootfs | None = None,
         catalog_fetch: CatalogFetch | None = None,
         free_port: FreePort | None = None,
+        extract_baseline_kernel: ExtractBaselineKernel | None = None,
     ) -> None:
         self._connect = connect
         self._files = files or ProvisioningFiles()
@@ -162,6 +169,7 @@ class LocalLibvirtProvisioning:
         self._catalog_fetch = catalog_fetch
         self._materialize_rootfs = materialize_rootfs or self._materialize_rootfs_base
         self._free_port = free_port or _bind_probe_free_port
+        self._extract_baseline_kernel = extract_baseline_kernel or _real_extract_baseline_kernel
 
     @classmethod
     def from_env(cls) -> LocalLibvirtProvisioning:
@@ -198,11 +206,18 @@ class LocalLibvirtProvisioning:
         """
         section = profile.provider.local_libvirt
         base = self._materialize_rootfs(section.rootfs, system_id, profile.arch)
+        baseline = self._prepare_baseline_kernel(system_id, base)
         overlay = self._files.prepare_overlay(system_id, base=base)
         gdb_port = self._gdb_port_for(system_id) if section.debug.gdbstub else None
         ssh_port = self._ssh_port_for(system_id) if section.ssh_credential_ref is not None else None
         xml = render_domain_xml(  # validates the profile
-            system_id, profile, disk_path=overlay.path, gdb_port=gdb_port, ssh_port=ssh_port
+            system_id,
+            profile,
+            disk_path=overlay.path,
+            gdb_port=gdb_port,
+            ssh_port=ssh_port,
+            kernel_path=baseline.kernel,
+            initrd_path=baseline.initrd,
         )
         try:
             self._files.prepare_console(system_id)
@@ -211,6 +226,21 @@ class LocalLibvirtProvisioning:
             self._files.cleanup_overlay_if_created(overlay)
             raise
         return domain_name_for(system_id)
+
+    def _prepare_baseline_kernel(self, system_id: UUID, base: str) -> BaselineKernel:
+        """Extract the rootfs's baseline kernel once; reuse an already-extracted directory.
+
+        Mirrors the overlay's create-only-when-absent contract (ADR-0060/0272): a present baseline
+        directory (the atomic all-or-nothing marker) is reused so a provision retry never re-mounts
+        the base. Presence is checked through the injected ``baseline_exists`` seam (like
+        ``overlay_exists``), so the reuse path is unit-testable without touching the real FS.
+        """
+        dest = Path(baseline_dir(system_id))
+        if self._files.baseline_exists(str(dest)):
+            initrd = dest / "initrd"
+            present_initrd = initrd if self._files.baseline_exists(str(initrd)) else None
+            return BaselineKernel(kernel=dest / "kernel", initrd=present_initrd)
+        return self._extract_baseline_kernel(Path(base), dest)
 
     def _gdb_port_for(self, system_id: UUID) -> int:
         """Reuse the System's recorded gdbstub port if its domain already records one; else a
@@ -341,11 +371,11 @@ class LocalLibvirtProvisioning:
         return self.provision(system_id, profile)
 
     def teardown(self, domain_name: str) -> None:
-        """Destroy+undefine the domain and reclaim its per-System overlay; idempotent.
+        """Destroy+undefine the domain and reclaim its overlay + baseline kernel dir; idempotent.
 
-        The overlay is removed after the libvirt teardown — including the already-absent-domain
-        path — so a torn-down System leaves no orphaned disk (ADR-0060). An absent overlay is a
-        no-op (``unlink(missing_ok)``).
+        The overlay and the per-System baseline-kernel directory (ADR-0272) are removed after the
+        libvirt teardown — including the already-absent-domain path — so a torn-down System leaves
+        no orphaned disk or kernel files (ADR-0060). An absent overlay/directory is a no-op.
 
         Raises:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` on any libvirt error other than the
@@ -353,6 +383,7 @@ class LocalLibvirtProvisioning:
         """
         self._teardown_domain(domain_name)
         self._files.remove_overlay_for_domain(domain_name)
+        self._files.remove_baseline_for_domain(domain_name)
 
     def _materialize_rootfs_base(
         self, rootfs: RootfsSource, system_id: UUID, arch: str = "x86_64"

@@ -26,6 +26,25 @@ def overlay_path(system_id: UUID | str) -> str:
     return f"{ROOTFS_DIR}/{system_id}-overlay.qcow2"
 
 
+def baseline_dir(system_id: UUID | str) -> str:
+    """The per-System directory holding the extracted baseline kernel/initrd (ADR-0272)."""
+    return f"{ROOTFS_DIR}/{system_id}-baseline"
+
+
+def _real_remove_baseline(baseline: str) -> None:
+    """Remove a System's baseline directory; an absent directory is the achieved post-state."""
+    try:
+        shutil.rmtree(baseline)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise CategorizedError(
+            "failed to remove the per-System baseline kernel directory",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"op": "remove_baseline", "baseline": Path(baseline).name},
+        ) from exc
+
+
 def _real_make_overlay(base: str, overlay: str) -> None:
     """Create the per-System qcow2 overlay backed by ``base`` with ``qemu-img``."""
     qemu_img = shutil.which(_QEMU_IMG)
@@ -104,6 +123,7 @@ def _real_overlay_exists(overlay: str) -> bool:
 
 type MakeOverlay = Callable[[str, str], None]
 type RemoveOverlay = Callable[[str], None]
+type RemoveBaseline = Callable[[str], None]
 type OverlayExists = Callable[[str], bool]
 type PrepareConsoleLog = Callable[[Path], None]
 
@@ -131,7 +151,10 @@ class PreparedOverlay:
 class ProvisioningFiles:
     make_overlay: MakeOverlay = _real_make_overlay
     remove_overlay: RemoveOverlay = _real_remove_overlay
+    remove_baseline: RemoveBaseline = _real_remove_baseline
     overlay_exists: OverlayExists = _real_overlay_exists
+    # The baseline directory presence check reuses the overlay path-presence predicate.
+    baseline_exists: OverlayExists = _real_overlay_exists
     prepare_console_log: PrepareConsoleLog = _prepare_console_log
 
     def prepare_overlay(self, system_id: UUID, *, base: str) -> PreparedOverlay:
@@ -154,3 +177,6 @@ class ProvisioningFiles:
 
     def remove_overlay_for_domain(self, domain_name: str) -> None:
         self.remove_overlay(overlay_path(domain_name.removeprefix("kdive-")))
+
+    def remove_baseline_for_domain(self, domain_name: str) -> None:
+        self.remove_baseline(baseline_dir(domain_name.removeprefix("kdive-")))

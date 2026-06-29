@@ -119,7 +119,9 @@ def _render_panicking_domain(*, bzimage: str, disk: Path, console: Path) -> str:
     section["debug"] = {"gdbstub": True, "preserve_on_crash": True}
     section.pop("crashkernel", None)
     profile = ProvisioningProfile.parse(data)
-    base = render_domain_xml(uuid4(), profile, disk_path=str(disk), gdb_port=51299)
+    base = render_domain_xml(
+        uuid4(), profile, disk_path=str(disk), gdb_port=51299, kernel_path=Path(bzimage)
+    )
     root = ET.fromstring(base)  # noqa: S314 - kdive-rendered, trusted
     name_el = root.find("name")
     assert name_el is not None
