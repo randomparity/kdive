@@ -21,6 +21,7 @@ from kdive.jobs.payloads import AuthorizeSshKeyPayload, load_payload
 from kdive.prereqs.managed_ssh_key import managed_private_key_path
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.handles import SystemHandle
+from kdive.providers.shared.runtime_paths import domain_name_for
 
 type SshExec = Callable[[list[str], str], None]
 
@@ -112,7 +113,9 @@ async def authorize_ssh_key_handler(
     payload = load_payload(job, AuthorizeSshKeyPayload)
     system_id = UUID(payload.system_id)
     binding = await resolver.binding_for_system(conn, system_id)
-    endpoint = binding.runtime.connector.recorded_ssh_endpoint(SystemHandle(str(system_id)))
+    endpoint = binding.runtime.connector.recorded_ssh_endpoint(
+        SystemHandle(domain_name_for(system_id))
+    )
     if endpoint is None:
         raise CategorizedError(
             "System was not provisioned for SSH; reprovision with ssh_credential_ref set",

@@ -26,17 +26,25 @@ _GOOD_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 agent@host"
 class _FakeConnector:
     def __init__(self, endpoint: tuple[str, int] | None) -> None:
         self._endpoint = endpoint
+        self.seen_handles: list[str] = []
 
     def recorded_ssh_endpoint(self, system: object) -> tuple[str, int] | None:
+        # Capture the handle: the connector resolves the libvirt domain by name, so the caller
+        # must pass the System's `kdive-<id>` domain name, not the bare id (regression for the
+        # live-proof bug where the bare id raised VIR_ERR_NO_DOMAIN -> spurious unprovisioned).
+        self.seen_handles.append(str(system))
         return self._endpoint
 
 
-async def _seed_system(pool, alloc_id: str, state: SystemState) -> str:
+async def _seed_system(
+    pool, alloc_id: str, state: SystemState, *, domain_name: str | None = None
+) -> str:
+    sid = uuid4()
     async with pool.connection() as conn:
         system = await SYSTEMS.insert(
             conn,
             System(
-                id=uuid4(),
+                id=sid,
                 created_at=_DT,
                 updated_at=_DT,
                 principal="user-1",
@@ -44,6 +52,7 @@ async def _seed_system(pool, alloc_id: str, state: SystemState) -> str:
                 allocation_id=UUID(alloc_id),
                 state=state,
                 provisioning_profile=_profile(),
+                domain_name=domain_name if domain_name is not None else f"kdive-{sid}",
             ),
         )
     return str(system.id)
@@ -68,6 +77,24 @@ def test_ssh_info_ready_returns_descriptor(migrated_url: str) -> None:
         assert isinstance(ssh, dict)
         assert isinstance(ssh["port"], int)  # native JSON int, not float (ADR-0263)
         assert "systems.authorize_ssh_key" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+def test_ssh_info_resolves_endpoint_by_domain_name(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(
+                pool, alloc_id, SystemState.READY, domain_name="kdive-vm-xyz"
+            )
+            connector = _FakeConnector(("127.0.0.1", 22022))
+            resolver = _provider_resolver(connector=connector)
+            resp = await ssh_info(pool, _ctx(), sys_id, resolver=resolver)
+        assert resp.status == "ok"
+        # The connector looks up the live libvirt domain by name, so it must receive the System's
+        # domain name (`kdive-…`), not the bare system_id.
+        assert connector.seen_handles == ["kdive-vm-xyz"]
 
     asyncio.run(_run())
 

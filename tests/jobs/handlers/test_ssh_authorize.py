@@ -79,6 +79,35 @@ def test_handler_authorizes_via_managed_key_ssh_and_pipes_key_on_stdin() -> None
     assert key == _KEY  # delivered on stdin
 
 
+def test_handler_resolves_endpoint_by_domain_name() -> None:
+    # The connector resolves the live libvirt domain by name, so the handler must pass the
+    # System's `kdive-<id>` domain name, not the bare id (regression for the live-proof bug where
+    # the bare id raised VIR_ERR_NO_DOMAIN -> spurious ssh_not_provisioned).
+    sys_id = uuid4()
+    job = Job(
+        id=uuid4(),
+        created_at=_NOW,
+        updated_at=_NOW,
+        kind=JobKind.AUTHORIZE_SSH_KEY,
+        payload={"system_id": str(sys_id), "public_key": _KEY},
+        state=JobState.RUNNING,
+        max_attempts=3,
+        authorizing={"principal": "user", "agent_session": None, "project": "proj"},
+        dedup_key="test",
+    )
+    resolver = _resolver(("127.0.0.1", 22022))
+    connector = resolver.binding_for_system.return_value.runtime.connector
+
+    asyncio.run(
+        authorize_ssh_key_handler(
+            MagicMock(), job, resolver=resolver, ssh_exec=lambda _argv, _key: None
+        )
+    )
+
+    handle = connector.recorded_ssh_endpoint.call_args.args[0]
+    assert str(handle) == f"kdive-{sys_id}"
+
+
 def test_handler_unprovisioned_is_configuration_error() -> None:
     resolver = _resolver(None)
     with pytest.raises(CategorizedError) as excinfo:

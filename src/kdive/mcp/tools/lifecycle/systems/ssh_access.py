@@ -61,7 +61,9 @@ async def ssh_info(
                 )
             try:
                 binding = await resolver.binding_for_system(conn, uid)
-                recorded = binding.runtime.connector.recorded_ssh_endpoint(SystemHandle(system_id))
+                recorded = binding.runtime.connector.recorded_ssh_endpoint(
+                    SystemHandle(system.domain_name or str(system.id))
+                )
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(system_id, exc)
     if recorded is None:
@@ -115,7 +117,9 @@ async def authorize_ssh_key(
                 )
             try:
                 binding = await resolver.binding_for_system(conn, uid)
-                recorded = binding.runtime.connector.recorded_ssh_endpoint(SystemHandle(system_id))
+                recorded = binding.runtime.connector.recorded_ssh_endpoint(
+                    SystemHandle(system.domain_name or str(system.id))
+                )
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(system_id, exc)
             if recorded is None:
