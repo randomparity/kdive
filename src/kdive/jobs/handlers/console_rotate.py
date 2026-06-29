@@ -1,4 +1,4 @@
-"""Worker handler for the internal ``console_rotate`` job (local rotation, #892).
+"""Worker handler for the internal ``console_rotate`` job (local rotation, #892, ADR-0273).
 
 Reads a running System's growing console log, rotates the new bytes into redacted
 gzip-compressed part artifacts via the pure :func:`~kdive.providers.console_parts.rotation.rotate`

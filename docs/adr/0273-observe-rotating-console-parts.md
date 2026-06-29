@@ -1,6 +1,6 @@
 # ADR-0273: Post-readiness console observation via rotating System-owned part artifacts
 
-- Status: Proposed
+- Status: Accepted
 - Issue: #892
 - Spec: [observe-post-readiness-console-892](../specs/2026-06-29-observe-post-readiness-console-892.md)
 - Supersedes nothing; extends ADR-0235 (per-Run console evidence), ADR-0095 (remote console

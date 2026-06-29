@@ -1,4 +1,4 @@
-"""Pure console-part rotation core (issue #892, ADR-0095 carry mechanism).
+"""Pure console-part rotation core (issue #892, ADR-0273; ADR-0095 carry mechanism).
 
 Slices a System's growing console into redacted, threshold-sized parts. The seam
 geometry is the hold-back-overlap carry proven in the remote-libvirt console
