@@ -1,0 +1,162 @@
+"""Tests for systems.ssh_info / systems.authorize_ssh_key (ADR-0271, #782)."""
+
+from __future__ import annotations
+
+import asyncio
+from uuid import UUID, uuid4
+
+import pytest
+
+from kdive.db.repositories import SYSTEMS
+from kdive.domain.capacity.state import SystemState
+from kdive.domain.errors import ErrorCategory
+from kdive.domain.lifecycle.records import System
+from kdive.mcp.tools.lifecycle.systems.ssh_access import authorize_ssh_key, ssh_info
+from kdive.security.authz.rbac import AuthorizationError, Role
+from tests.mcp.systems_support import TEST_DT as _DT
+from tests.mcp.systems_support import ctx as _ctx
+from tests.mcp.systems_support import granted_allocation as _granted_allocation
+from tests.mcp.systems_support import pool as _pool
+from tests.mcp.systems_support import provider_resolver as _provider_resolver
+from tests.mcp.systems_support import provisioning_profile as _profile
+
+_GOOD_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 agent@host"
+
+
+class _FakeConnector:
+    def __init__(self, endpoint: tuple[str, int] | None) -> None:
+        self._endpoint = endpoint
+
+    def recorded_ssh_endpoint(self, system: object) -> tuple[str, int] | None:
+        return self._endpoint
+
+
+async def _seed_system(pool, alloc_id: str, state: SystemState) -> str:
+    async with pool.connection() as conn:
+        system = await SYSTEMS.insert(
+            conn,
+            System(
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                principal="user-1",
+                project="proj",
+                allocation_id=UUID(alloc_id),
+                state=state,
+                provisioning_profile=_profile(),
+            ),
+        )
+    return str(system.id)
+
+
+def test_ssh_info_ready_returns_descriptor(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(("127.0.0.1", 22022)))
+            resp = await ssh_info(pool, _ctx(), sys_id, resolver=resolver)
+        assert resp.status == "ok"
+        ssh = resp.data["ssh"]
+        assert ssh == {
+            "user": "root",
+            "host": "127.0.0.1",
+            "port": 22022,
+            "jump_host": None,
+            "host_scope": "worker_loopback",
+        }
+        assert isinstance(ssh, dict)
+        assert isinstance(ssh["port"], int)  # native JSON int, not float (ADR-0263)
+        assert "systems.authorize_ssh_key" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+def test_ssh_info_viewer_omits_operator_next_action(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(("127.0.0.1", 22022)))
+            resp = await ssh_info(pool, _ctx(role=Role.VIEWER), sys_id, resolver=resolver)
+        assert "systems.authorize_ssh_key" not in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+def test_ssh_info_not_ready_is_readiness_failure(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
+            resolver = _provider_resolver(connector=_FakeConnector(("127.0.0.1", 22022)))
+            resp = await ssh_info(pool, _ctx(), sys_id, resolver=resolver)
+        assert resp.error_category == ErrorCategory.READINESS_FAILURE.value
+
+    asyncio.run(_run())
+
+
+def test_ssh_info_unprovisioned_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(None))
+            resp = await ssh_info(pool, _ctx(), sys_id, resolver=resolver)
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert resp.data["reason"] == "ssh_not_provisioned"
+
+    asyncio.run(_run())
+
+
+def test_authorize_ssh_key_malformed_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(("127.0.0.1", 22022)))
+            resp = await authorize_ssh_key(pool, _ctx(), sys_id, "not-a-key", resolver=resolver)
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+
+    asyncio.run(_run())
+
+
+def test_authorize_ssh_key_not_ready_is_readiness_failure(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
+            resolver = _provider_resolver(connector=_FakeConnector(("127.0.0.1", 22022)))
+            resp = await authorize_ssh_key(pool, _ctx(), sys_id, _GOOD_KEY, resolver=resolver)
+        assert resp.error_category == ErrorCategory.READINESS_FAILURE.value
+
+    asyncio.run(_run())
+
+
+def test_authorize_ssh_key_viewer_denied(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(("127.0.0.1", 22022)))
+            with pytest.raises(AuthorizationError):
+                await authorize_ssh_key(
+                    pool, _ctx(role=Role.VIEWER), sys_id, _GOOD_KEY, resolver=resolver
+                )
+
+    asyncio.run(_run())
+
+
+def test_authorize_ssh_key_happy_path_enqueues_job(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(("127.0.0.1", 22022)))
+            resp = await authorize_ssh_key(
+                pool, _ctx(), sys_id, f"  {_GOOD_KEY}\n", resolver=resolver
+            )
+        assert resp.status == "queued"
+        assert resp.data["kind"] == "authorize_ssh_key"
+
+    asyncio.run(_run())

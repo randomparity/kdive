@@ -211,6 +211,8 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "systems.provision_defined": _OPERATOR,
     "systems.reprovision": _OPERATOR,
     "systems.teardown": _ADMIN,
+    "systems.ssh_info": _VIEWER,
+    "systems.authorize_ssh_key": _OPERATOR,
     # vmcore
     "vmcore.list": _VIEWER,
     "vmcore.fetch": _CONTRIBUTOR,
