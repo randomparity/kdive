@@ -420,7 +420,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.payloads import AuthorizeSshKeyPayload, load_payload
 from kdive.prereqs.managed_ssh_key import managed_private_key_path
-from kdive.providers.assembly.composition import ProviderResolver
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.lifecycle import SystemHandle
 
 type SshExec = Callable[[list[str]], None]
@@ -620,16 +620,15 @@ from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.repositories import SYSTEMS  # systems/view.py:13
 from kdive.domain.capacity.state import SystemState
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.exposure import visible_next_actions
 from kdive.mcp.responses import ToolResponse
-from kdive.providers.assembly.composition import ProviderResolver
+from kdive.providers.core.resolver import ProviderResolver  # resolver.py:64
 from kdive.providers.ports.lifecycle import SystemHandle
+from kdive.security.authz.context import RequestContext  # systems/view.py:32
 from kdive.security.authz.rbac import Role, require_role
-# import the System repository + RequestContext type the systems plane already uses
-from kdive.db.repositories import SYSTEMS  # match the symbol systems/view.py imports
-from kdive.security.context import RequestContext  # match systems/view.py's import
 
 
 async def ssh_info(
@@ -651,7 +650,12 @@ async def ssh_info(
                 detail="System is not ready; SSH is available only on a ready System.",
             )
         binding = await resolver.binding_for_system(conn, uid)
-        endpoint = binding.runtime.connector.recorded_ssh_endpoint(SystemHandle(system_id))
+        try:
+            endpoint = binding.runtime.connector.recorded_ssh_endpoint(SystemHandle(system_id))
+        except CategorizedError as exc:
+            # recorded_ssh_endpoint raises INFRASTRUCTURE_FAILURE on an unexpected provider
+            # read error; tools must return an envelope, not raise (mirrors view.py:228).
+            return ToolResponse.failure_from_error(system_id, exc)
     if endpoint is None:
         return ToolResponse.failure(
             system_id,
@@ -698,18 +702,29 @@ def _register_systems_ssh_info(app: FastMCP, pool: AsyncConnectionPool, resolver
 ```
 Add `_register_systems_ssh_info(app, pool, resolver)` to the `register(...)` body. (Use `maturity: "partial"` — the live SSH path is not CI-proven, mirroring `debug.*`.)
 
-- [ ] **Step 5: Run tests**
+- [ ] **Step 5: Classify the tool in the same commit (keep the completeness guard green)**
 
-Run: `uv run python -m pytest tests/mcp/tools/lifecycle/systems/test_ssh_info.py -q` → PASS.
+Registering a tool without classifying it makes `tests/mcp/core/test_app.py` fail
+(`CLASSIFIED_TOOLS | PUBLIC_TOOLS` must equal the live registry), so the classification must
+land in this commit, not a later one. In `src/kdive/mcp/exposure.py` `_TOOL_SCOPES`, in the
+`# systems` block, add:
+```python
+    "systems.ssh_info": _VIEWER,
+```
 
-- [ ] **Step 6: Lint, type, commit**
+- [ ] **Step 6: Run tests (tool + completeness guard)**
+
+Run: `uv run python -m pytest tests/mcp/tools/lifecycle/systems/test_ssh_info.py tests/mcp/core/test_app.py tests/mcp/core/test_no_adr_leak.py -q` → PASS (completeness guard green because the tool is now classified; no ADR refs in the new descriptions).
+
+- [ ] **Step 7: Lint, type, commit**
 
 ```bash
 just lint && just type
 git add src/kdive/mcp/tools/lifecycle/systems/ssh_access.py \
         src/kdive/mcp/tools/lifecycle/systems/registrar.py \
+        src/kdive/mcp/exposure.py \
         tests/mcp/tools/lifecycle/systems/test_ssh_info.py
-git commit -m "feat(systems): systems.ssh_info connection descriptor tool
+git commit -m "feat(systems): systems.ssh_info connection descriptor tool (viewer)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -777,62 +792,136 @@ Expected: FAIL — function not found.
 
 - [ ] **Step 3: Implement the handler**
 
-Add to `ssh_access.py`. Order of checks: role → state ready → SSH-provisioned (reuse the `recorded_ssh_endpoint` read, same not-ready/unprovisioned envelopes as `ssh_info`) → validate key (synchronous `CONFIGURATION_ERROR` on failure) → enqueue. Use the same enqueue helper `systems.provision` uses (copy its `queue.enqueue(conn, JobKind.AUTHORIZE_SSH_KEY, AuthorizeSshKeyPayload(system_id=system_id, public_key=normalized), job_authorizing(ctx, project), f"{system_id}:authorize_ssh_key")` shape and its `job_authorizing` import). Return `ToolResponse.from_job(job)`. Wrap `validate_authorized_public_key` so its `CategorizedError` becomes `ToolResponse.failure_from_error(system_id, exc)`.
+Add to `ssh_access.py`. Note `authorize` does **not** go through the admission service that
+`systems.provision` uses (no capacity to admit) — it enqueues directly via `queue.enqueue`.
+Add these imports: `from kdive.domain.operations.jobs import JobKind`,
+`from kdive.jobs import queue` (match the module path `admission.py:queue.enqueue` resolves
+to), `from kdive.jobs.context import authorizing as job_authorizing` (admission.py:37),
+`from kdive.jobs.payloads import AuthorizeSshKeyPayload`,
+`from kdive.security.ssh_authorized_key import validate_authorized_public_key`.
+
+```python
+async def authorize_ssh_key(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    system_id: str,
+    public_key: str,
+    *,
+    resolver: ProviderResolver,
+) -> ToolResponse:
+    """Authorize an agent public key in a ready System's guest (mutating, OPERATOR job)."""
+    uid = UUID(system_id)
+    async with pool.connection() as conn:
+        system = await SYSTEMS.get(conn, uid)
+        require_role(ctx, system.project, Role.OPERATOR)
+        if system.state is not SystemState.READY:
+            return ToolResponse.failure(
+                system_id,
+                ErrorCategory.READINESS_FAILURE,
+                detail="System is not ready; SSH is available only on a ready System.",
+            )
+        binding = await resolver.binding_for_system(conn, uid)
+        try:
+            endpoint = binding.runtime.connector.recorded_ssh_endpoint(SystemHandle(system_id))
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(system_id, exc)
+        if endpoint is None:
+            return ToolResponse.failure(
+                system_id,
+                ErrorCategory.CONFIGURATION_ERROR,
+                detail="System was not provisioned for SSH; reprovision with ssh_credential_ref set.",
+                data={"reason": "ssh_not_provisioned"},
+            )
+        try:
+            normalized = validate_authorized_public_key(public_key)
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(system_id, exc)
+        job = await queue.enqueue(
+            conn,
+            JobKind.AUTHORIZE_SSH_KEY,
+            AuthorizeSshKeyPayload(system_id=system_id, public_key=normalized),
+            job_authorizing(ctx, system.project),
+            f"{system_id}:authorize_ssh_key",
+        )
+    return ToolResponse.from_job(job)
+```
+(Confirm `queue.enqueue`'s exact import path by copying the line `admission.py` uses; the
+call signature is `enqueue(conn, kind, payload, authorizing, dedup_key)`.)
 
 - [ ] **Step 4: Register the tool**
 
-In `registrar.py`, add `_register_systems_authorize_ssh_key(app, pool, resolver)` mirroring the `systems.provision` registration (mutating annotation `_docmeta.mutating()` — match what provision uses; `meta={"maturity": "partial"}`), with the `public_key` param `Annotated[str, Field(description="The agent SSH public key to authorize in the guest root account.")]`. Call it from `register(...)`.
+In `registrar.py`, add `_register_systems_authorize_ssh_key(app, pool, resolver)` mirroring the
+mutating-tool registration (use the same mutating annotation `systems.provision` uses — copy
+`_docmeta.mutating()` / its exact annotations; `meta={"maturity": "partial"}`):
+```python
+def _register_systems_authorize_ssh_key(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
+    @app.tool(
+        name="systems.authorize_ssh_key",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "partial"},
+    )
+    async def systems_authorize_ssh_key(
+        system_id: Annotated[str, Field(description="The ready System to authorize the key on.")],
+        public_key: Annotated[
+            str, Field(description="The agent SSH public key to authorize in the guest root account.")
+        ],
+    ) -> ToolResponse:
+        """Authorize an agent SSH public key in a ready System's guest root account."""
+        return await authorize_ssh_key(
+            pool, current_context(), system_id, public_key, resolver=resolver
+        )
+```
+Call `_register_systems_authorize_ssh_key(app, pool, resolver)` from `register(...)`.
 
-- [ ] **Step 5: Run tests**
+- [ ] **Step 5: Classify the tool in the same commit (keep the completeness guard green)**
 
-Run: `uv run python -m pytest tests/mcp/tools/lifecycle/systems/test_authorize_ssh_key.py -q` → PASS.
+In `src/kdive/mcp/exposure.py` `_TOOL_SCOPES`, in the `# systems` block, add:
+```python
+    "systems.authorize_ssh_key": _OPERATOR,
+```
 
-- [ ] **Step 6: Lint, type, commit**
+- [ ] **Step 6: Run tests (tool + completeness guard)**
+
+Run: `uv run python -m pytest tests/mcp/tools/lifecycle/systems/test_authorize_ssh_key.py tests/mcp/core/test_app.py tests/mcp/core/test_no_adr_leak.py -q` → PASS.
+
+- [ ] **Step 7: Lint, type, commit**
 
 ```bash
 just lint && just type
 git add src/kdive/mcp/tools/lifecycle/systems/ssh_access.py \
         src/kdive/mcp/tools/lifecycle/systems/registrar.py \
+        src/kdive/mcp/exposure.py \
         tests/mcp/tools/lifecycle/systems/test_authorize_ssh_key.py
-git commit -m "feat(systems): systems.authorize_ssh_key tool enqueues the authorize job
+git commit -m "feat(systems): systems.authorize_ssh_key tool enqueues the authorize job (operator)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 7: Exposure scopes, completeness guard, doc regen
+### Task 7: Regenerate the committed tool reference + full-suite gate
+
+Exposure classification already landed with each tool (Tasks 5/6), so this task only
+regenerates the generated docs and runs the whole suite as the pre-push gate.
 
 **Files:**
-- Modify: `src/kdive/mcp/exposure.py` (`_TOOL_SCOPES`)
 - Modify: committed tool reference (regenerated by `just docs`)
-- Test: the existing completeness guard `tests/mcp/core/test_app.py` (must stay green)
 
-- [ ] **Step 1: Classify the two tools**
+- [ ] **Step 1: Regenerate the committed tool reference**
 
-In `src/kdive/mcp/exposure.py` `_TOOL_SCOPES`, in the `# systems` block:
-```python
-    "systems.ssh_info": _VIEWER,
-    "systems.authorize_ssh_key": _OPERATOR,
-```
+Run: `just docs` then `just docs-check` → confirms the generated reference matches the two new tools.
 
-- [ ] **Step 2: Run the completeness + exposure guards**
+- [ ] **Step 2: Full local gate**
 
-Run: `uv run python -m pytest tests/mcp/core/test_app.py -q`
-Expected: PASS — `CLASSIFIED_TOOLS | PUBLIC_TOOLS` equals the live registry (both new tools now classified).
-Run: `uv run python -m pytest tests/mcp/core/test_no_adr_leak.py -q` → PASS (no ADR refs in the new tool/field descriptions — keep descriptions ADR-free, ADR-0270).
+Run: `just lint && just type && just test` — the whole suite (architecture, registry, and doc-generation guards live outside the dirs touched). Expected: all green; `tests/mcp/core/test_app.py` and `tests/mcp/core/test_no_adr_leak.py` green.
 
-- [ ] **Step 3: Regenerate the committed tool reference**
-
-Run: `just docs`
-Then `just docs-check` (or whatever the repo's verify recipe is) → confirms the generated reference matches.
-
-- [ ] **Step 4: Lint, type, full test, commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-just lint && just type && just test
-git add src/kdive/mcp/exposure.py docs/   # include the regenerated tool reference
-git commit -m "feat(mcp): expose systems.ssh_info (viewer) + authorize_ssh_key (operator)
+git add docs/   # the regenerated tool reference
+git commit -m "docs: regenerate tool reference for the direct-SSH tools
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
