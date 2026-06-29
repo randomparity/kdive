@@ -168,8 +168,12 @@ def _emit_proof_lines(domain: libvirt.virDomain, proof_marker: str) -> None:
     # POSIX sh loop: $i is a shell variable, {proof_marker} and {_PROOF_LINES} are
     # Python f-string substitutions (safe: only hex + hyphens / a literal integer). One open of
     # /dev/kmsg for the whole loop; each echo is a single write() = one kernel log record.
+    # Disabling the kmsg rate limit is load-bearing (under the default 'ratelimit' policy the
+    # kernel drops all but a burst of records, so the marker would never reach a sealed part);
+    # a checked write fails fast with a clear cause instead of a downstream 'marker absent'.
     script = (
-        "echo on > /proc/sys/kernel/printk_devkmsg 2>/dev/null; "
+        "echo on > /proc/sys/kernel/printk_devkmsg "
+        "|| { echo 'cannot disable /dev/kmsg rate limit (printk_devkmsg)' >&2; exit 3; }; "
         "{ "
         f'i=0; while [ "$i" -lt {_PROOF_LINES} ]; do '
         f'echo "{proof_marker} line-$i"; '

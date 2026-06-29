@@ -349,6 +349,9 @@ async def teardown_handler(
         domain_name = system.domain_name or domain_name_for(system_id)
         if system.state is not SystemState.TORN_DOWN:
             old = system.state
+            # The console_rotate teardown-race guard (console_rotate.py) relies on this terminal
+            # state write happening under the SYSTEM lock: once it commits, a rotation job that
+            # acquires the lock sees torn_down and seals nothing. Keep the state-set under the lock.
             await SYSTEMS.update_state(conn, system_id, SystemState.TORN_DOWN)
             await audit_transition(
                 conn,
