@@ -154,7 +154,7 @@ def test_growing_console_seals_redacted_gzip_parts_and_advances_sidecar(
         assert key in store.objects, f"missing part object {name}"
         data, sensitivity, retention, encoding = store.objects[key]
         assert sensitivity is Sensitivity.REDACTED
-        assert retention == "evidence"
+        assert retention == "console"
         assert encoding == "gzip"
         head = store.head(key)
         assert head is not None and head.content_encoding == "gzip"

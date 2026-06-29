@@ -157,10 +157,14 @@ orders by `created_at`, **not** by object key — the zero-padded index orders t
 disambiguates a part from the per-Run `console-<run>` evidence by key prefix, but it does not drive the
 `artifacts.list` order.
 
-R8a. **Bounded retention and search ergonomics, disclosed.** Live console parts are ordinary artifacts
-and age out through the existing artifact-expiry reconciler (#768), which time-bounds the series. This
-work does **not** add `artifacts.list` pagination (`data.truncated` stays `False`), so within a
-retention window a chatty multi-hour run can make `artifacts.list` return many part rows. `artifacts.get`
+R8a. **Bounded retention and search ergonomics, disclosed.** Console parts are owned by the System
+(`owner_kind='systems'`) and are reclaimed at **teardown** (the teardown handler deletes the
+System's console-part rows + objects and the sidecar). There is **no in-life expiry sweep**: the
+existing artifact-expiry reconciler (#768) pins `owner_kind='runs'` and deliberately excludes
+system-owned `console`/`vmcore` evidence (`reconciler/cleanup/gc.py`), so console parts grow for the
+System's lifetime and are bounded only by teardown — a long-lived, chatty System accumulates parts
+until it is torn down. This work does **not** add `artifacts.list` pagination (`data.truncated` stays
+`False`), so a chatty multi-hour run can make `artifacts.list` return many part rows. `artifacts.get`
 on the newest part (cheap, newest-first) covers the live-tail case. For finding an older event across
 the run, note that `artifacts.search_text` is **per-artifact** (keyed by one `artifact_id`,
 `reads.py`) — it does **not** span a System's parts — so cross-run search means listing the parts and
@@ -303,10 +307,11 @@ registration reuses `register_artifact_row` (the per-Run evidence path's helper)
 
 ## Risks
 
-- **Part-row count on a chatty 12-hour run.** Many ~64 KiB parts produce many `artifacts.list` rows,
-  and `artifacts.list` is **not paginated** (`data.truncated` is always `False`, no `LIMIT` in
-  `_LIST_REDACTED_SYSTEM_SQL`). Bounded only by artifact expiry (#768) over time and by the
-  newest-first order making the recent tail cheap; the non-enumerating history path is
+- **Part-row count on a chatty long-lived System.** Many ~64 KiB parts produce many `artifacts.list`
+  rows, and `artifacts.list` is **not paginated** (`data.truncated` is always `False`, no `LIMIT` in
+  `_LIST_REDACTED_SYSTEM_SQL`). There is **no in-life expiry** (the #768 sweeps are run-owned and
+  exclude system-owned console evidence, R8a), so the series is bounded only by **teardown** reclaim and
+  by the newest-first order making the recent tail cheap; the non-enumerating history path is
   `artifacts.search_text`. Disclosed in R8a as an accepted limitation — a per-System live-part cap or
   real `artifacts.list` pagination is future work, not built here. This is the append-only cost vs. the
   rejected single-mutable-artifact's O(size) re-upload.

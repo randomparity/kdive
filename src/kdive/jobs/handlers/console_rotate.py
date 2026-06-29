@@ -48,7 +48,10 @@ _log = logging.getLogger(__name__)
 # (boot_evidence.py), so ``artifacts.get`` serves them from the same owner prefix.
 _TENANT = "local"
 _OWNER_KIND = "systems"
-_RETENTION_CLASS = "evidence"
+# Same retention class on both providers (remote sets it in console/wiring.py). No retention sweep
+# reclaims system-owned console evidence (gc.py excludes console/vmcore, pins owner_kind='runs'), so
+# console parts are bounded by teardown reclaim, not an expiry sweep.
+_RETENTION_CLASS = "console"
 
 _PART_ROW_SQL: LiteralString = (
     "SELECT id FROM artifacts WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"

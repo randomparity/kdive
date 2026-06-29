@@ -94,8 +94,13 @@ read through the existing `artifacts.{list,get,search_text}` surface. **No new M
    project-scoped authorization and the same redactor as every other System-owned artifact. No new
    authz path, no new public surface.
 
-6. **Retention.** Console parts are ordinary artifacts and expire through the existing artifact-expiry
-   reconciler (#768). No new per-System cap is introduced.
+6. **Retention.** Console parts are System-owned artifacts reclaimed at **teardown** (the teardown
+   handler deletes the System's console-part rows + objects and the rotation sidecar). The #768
+   artifact-expiry sweeps do **not** cover them — those sweeps pin `owner_kind='runs'` and deliberately
+   exclude system-owned `console`/`vmcore` evidence (`reconciler/cleanup/gc.py`) — so there is no
+   in-life expiry: a long-lived, chatty System accumulates parts until teardown. A hard per-System
+   live-part cap (or an `artifacts.list` page) is named future work, not built here; both providers use
+   one retention class (`console`).
 
 Scope: the public observation surface (`artifacts.{list,get,search_text}` over System-owned console
 parts) is identical for both providers. Capture is implemented local-libvirt first (the #892 repro
