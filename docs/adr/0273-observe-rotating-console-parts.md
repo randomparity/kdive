@@ -38,11 +38,12 @@ Expose the live console as **append-only, redacted, ~64 KiB System-owned console
 read through the existing `artifacts.{list,get,search_text}` surface. **No new MCP tool.**
 
 1. **Part artifacts.** Each sealed part is a System-owned (`owner_kind='systems'`) `REDACTED`
-   `artifacts` row whose object key is `…/console-part-<gen>-<start>` (boot generation; zero-padded
-   plaintext start offset — an offset-derived key, not a counter). A sealed part is immutable; the
+   `artifacts` row whose object key is `…/console-part-<gen>-<index>` (boot generation; zero-padded
+   monotonic per-gen index carried in the rotation sidecar, advanced only after the part's row commits).
+   A sealed part is immutable; the
    in-flight tail (bytes below the rotation threshold, not yet sealed) is not a row.
    `artifacts.list(system_id)` returns the parts alongside the per-Run evidence ordered `created_at
-   DESC` (it does not order by key), so an agent reads the tail by selecting the maximum `(gen, start)`
+   DESC` (it does not order by key), so an agent reads the tail by selecting the maximum `(gen, index)`
    among the returned `refs.object` keys, pages it with `artifacts.get`, and searches history with
    `artifacts.search_text`. Append-only means each console byte is uploaded once — a 12-hour workload
    does not re-upload its backlog on every observation.
@@ -50,8 +51,9 @@ read through the existing `artifacts.{list,get,search_text}` surface. **No new M
 2. **Capture driver differs by provider (locality).**
    - **Remote-libvirt:** the reconciler-resident collector already rotates 64 KiB redacted parts on a
      size threshold with seam-overlap redaction (ADR-0095). When it seals a part it additionally writes
-     a **separate** compressed `console-part-0-<start>` object (the shared key grammar; remote has no
-     power-cycle truncation so its generation is fixed `0`) and registers its `artifacts` row
+     a **separate** compressed `console-part-0-<index>` object (the shared key grammar, `<index>` =
+     the collector's existing monotonic part index; remote has no power-cycle truncation so its
+     generation is fixed `0`) and registers its `artifacts` row
      (the reconciler holds the DB connection). The collector's internal `console-parts-<n>` objects and
      the `finalize()` raw concatenation into the per-Run evidence are left byte-for-byte unchanged —
      compressing the internal parts in place would make `finalize()` concatenate gzip streams and
@@ -61,18 +63,19 @@ read through the existing `artifacts.{list,get,search_text}` surface. **No new M
      #892 case of a `succeeded` Run with a still-running workload keeps capturing) and dispatches a
      per-System `console_rotate` **worker job** (the reconciler owns periodic discovery and dedups to ≤1
      in-flight per System; the worker owns the host console file it alone can read, ADR-0223). The job
-     reads the plaintext bytes from a tracked offset (re-reading a fixed `SEAM_OVERLAP` window before it
-     for redaction context, emitting only bytes ≥ offset so a secret split across a job boundary is
-     never stored raw), redacts that delta once, and seals ~64 KiB parts. Each part's key is
-     `console-part-<gen>-<start>` where `<start>` is its plaintext start offset — an **offset-derived
-     key**, not a free-running counter. The offset and **boot generation** live in an object-store
-     sidecar (not a DB column). A file shorter than the tracked offset is a power-cycle truncation
-     (ADR-0258): the offset resets to 0 and the boot generation increments, starting a fresh part series.
-     The resume offset is **never** the sum of redacted part sizes — the redactor (`[REDACTED]`) is not
-     length-preserving. The job holds the per-System advisory lock (single-flight) and advances the
-     offset only after the delta's part rows commit; because the key is offset-derived and registration
-     is insert-if-absent, a crash between committing parts and writing the sidecar re-runs the delta as a
-     no-op on retry rather than duplicating console bytes.
+     feeds `carry + file_bytes[plaintext_offset:]` through the **shared seam-carry primitive** extracted
+     from the collector (`_rotate`, ADR-0095): each part holds back its trailing `SEAM_OVERLAP` raw bytes
+     and emits them (redacted) with the next part, so a secret straddling any boundary is redacted
+     contiguously and never stored raw. The `plaintext_offset`, the held-back raw `carry`, a monotonic
+     per-gen `next_index`, and the **boot generation** live in an object-store sidecar (not a DB column).
+     A new `boot_id` (a per-boot signal independent of file size) **or** a file shorter than the offset
+     is a power-cycle (ADR-0258): the state resets and the generation increments, starting a fresh part
+     series. Part keys are the monotonic `<index>` carried in the sidecar — not a byte offset, since the
+     redactor (`[REDACTED]`) is not length-preserving. The job holds the per-System advisory lock
+     (single-flight) and advances the sidecar only after the part rows commit; because `next_index` is
+     carried in the sidecar (not re-derived from rows) and registration is insert-if-absent, a crash
+     between committing parts and writing the sidecar re-runs the delta as a no-op on retry rather than
+     duplicating console bytes.
 
 3. **Compression: decompress-on-read, metadata-driven.** Sealed parts are gzip-compressed and tagged
    with a `content_encoding=gzip` object **user-metadata** entry (alongside the existing

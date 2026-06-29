@@ -52,29 +52,29 @@ parts model rather than a new tool.
 ## Requirements
 
 R1. **Part artifacts.** A sealed console part is a System-owned (`owner_kind='systems'`) `REDACTED`
-`artifacts` row whose object key is `…/console-part-<gen>-<start>`, where `<gen>` is the boot generation
-(R6b) and `<start>` is the **zero-padded plaintext start offset** of the bytes the part covers — a
-deterministic function of position, not a free-running counter (so re-sealing the same delta yields the
-same key, R6c). The padded `(gen, start)` orders an object-store listing numerically, but it is **not**
+`artifacts` row whose object key is `…/console-part-<gen>-<index>`, where `<gen>` is the boot generation
+(R6b) and `<index>` is a **zero-padded, monotonic per-generation part index** carried in the rotation
+sidecar (R6a) and advanced only after a part's row commits, so a crash-retry reuses the same index
+(R6c). The padded `(gen, index)` orders an object-store listing numerically, but it is **not**
 what `artifacts.list` orders by (that is `created_at DESC`, R8) — an agent identifies the live tail by
-the maximum `(gen, start)` among the returned object keys (`refs.object`), not by list position. A
-sealed part is immutable. The in-flight tail (bytes below the rotation threshold, not yet sealed) is not
+the maximum `(gen, index)` among the returned object keys (`refs.object`), not by list position. A
+sealed part is immutable. The in-flight tail (the held-back seam carry plus any sub-threshold remainder, not yet sealed) is not
 a row.
 
-R2. **Bounded part size.** A part holds at most the rotation threshold of redacted bytes
-(`DEFAULT_ROTATION_THRESHOLD = 64 KiB`, the existing collector constant), so each part is one
-`artifacts.get` inline window after inflation.
+R2. **Bounded part size.** A part covers at most one rotation threshold of **plaintext**
+(`DEFAULT_ROTATION_THRESHOLD = 64 KiB`, the existing collector constant); its stored redacted size may
+differ (redaction is not length-preserving) but stays close to one `artifacts.get` inline window after
+inflation.
 
 R3. **Redaction before storage, durable seam.** The console bytes are untrusted guest output. Redaction
-runs on the plaintext before the part is stored, so every part object is `REDACTED`. A secret straddling
-a part boundary **within one job** is held back and redacted with the next part (the collector's
-seam-overlap rule, ADR-0095). The local rotation job is stateless across invocations (its only persisted
-state is the sidecar offset), so the in-memory carry the remote collector relies on does not survive
-across jobs; to protect a secret split **across a job boundary**, each local job re-reads a fixed
-overlap window of already-consumed plaintext before its start offset (`read [offset - SEAM_OVERLAP,
-file_size]`, with `SEAM_OVERLAP` ≥ the collector's seam window) and redacts the combined window, but
-**only seals/advances for bytes ≥ offset** — the overlap is re-read for redaction context and never
-re-emitted. A secret is therefore never stored raw on either side of a part or a job seam.
+runs on the plaintext before the part is stored, so every part object is `REDACTED`. Seam safety reuses
+the remote collector's proven carry mechanism (`collector._rotate`, ADR-0095): the last `SEAM_OVERLAP`
+**raw** bytes of each part are held back and emitted — redacted — prepended to the **next** part, so a
+secret straddling any boundary (internal or job) is redacted contiguously and the overlap is emitted
+exactly once, never raw. Because the local rotation job is stateless across invocations, this held-back
+raw `carry` is persisted in the sidecar (R6a) so the next job reproduces the collector's in-memory
+behavior. There is **no** "redact a prefix and drop its length" subtraction (that misaligns precisely
+when a secret straddles the boundary).
 
 R4. **Compression: decompress-on-read, metadata-driven.** A sealed part is gzip-compressed in the
 object store and tagged with a `content_encoding=gzip` **user-metadata** entry at write time (alongside
@@ -100,32 +100,32 @@ R6. **Local-libvirt capture.** The reconciler's periodic sweep discovers **live*
 had the System `ready` with the most recent Run already `succeeded` while the in-guest workload kept
 emitting console, so a succeeded (or otherwise terminal) Run must **not** stop rotation. Rotation stops
 only when the System is torn down. (The reconciler owns periodic discovery;
-the worker owns the host console file it alone can read, ADR-0223). The job reads only the plaintext
-bytes **past a tracked plaintext offset**, redacts that delta with a held-back seam overlap (mirroring
-the collector, ADR-0095, so a secret straddling a read boundary is never stored raw), seals full
-~64 KiB parts from the **redacted delta**, registers each as a part row, and advances the offset.
-Re-redacting already-sealed bytes is forbidden: the redactor replaces a secret with the fixed string
-`[REDACTED]` and so is **not length-preserving** — a resume offset can never be the sum of redacted
-part sizes (that conflates redacted-output length with plaintext-file length), and a sealed part is
-derived once from its redacted delta and never recomputed.
+the worker owns the host console file it alone can read, ADR-0223). The job reads the plaintext bytes
+**past a tracked plaintext offset**, prepends the held-back raw `carry` from the sidecar, and feeds the
+result through the shared seam-carry primitive (R3) to seal full parts and produce a new `carry`. The
+sidecar advances by the plaintext consumed. Re-redacting already-emitted bytes is never needed: the
+held-back `carry` is the only re-considered region, and it is emitted (redacted) exactly once with the
+part that follows it. The redactor is not length-preserving (it replaces a secret with the fixed string
+`[REDACTED]`), so part keys are a monotonic index (R1), never a byte-length offset.
 
-R6a. **Rotation state.** The plaintext offset, the next part index, and a boot-generation marker are
-persisted per System in a small internal object-store **sidecar** object (not a DB row), so there is no
-DB migration for the offset. The worker reads the sidecar at the start of a rotation job and writes it
-back after the delta's parts commit. (Deriving the offset from the part rows is rejected — units
-mismatch, R6.)
+R6a. **Rotation state.** The sidecar (a small internal object-store object, not a DB row, so no DB
+migration) holds `{plaintext_offset, carry (the held-back raw seam bytes, base64), next_index,
+boot_gen, boot_id}`. The worker reads it at the start of a rotation job and writes it back after the
+delta's parts commit. The `carry` may contain a partial unredacted secret, so the sidecar object is
+internal — never registered as an `artifacts` row and never returned by `artifacts.get`/`list` — and is
+removed at teardown (R9-adjacent, see the plan's teardown task).
 
 R6c. **Single-flight and idempotent retry.** A `console_rotate` job holds the **per-System advisory
 lock** (the platform's per-System serialization, CLAUDE.md) for the whole read-sidecar → seal-parts →
 write-sidecar critical section, so two rotations for one System never overlap even if the reconciler
 dedup races a dispatch. The sidecar (object store) and the part rows (Postgres) are different stores with
-no shared transaction, so the offset advances **only after** the delta's part rows commit. Idempotency
-is guaranteed by the **offset-derived key**: a part's key is `console-part-<gen>-<start>` where `<start>`
-is the plaintext start offset it covers (R1). On a crash between committing the part rows and writing the
-sidecar, the retry re-reads the same un-advanced delta and produces parts with the **same** `(gen,
-start)` keys; registration is insert-if-absent (like the per-Run evidence path's `_existing_console_row`),
-so the re-seal is a true no-op — no duplicated content and no key collision. The key must **not** be a
-free-running counter, which would assign new keys to the re-sealed bytes and duplicate them.
+no shared transaction, so the sidecar (carrying `next_index`) advances **only after** the delta's part
+rows commit. On a crash between committing the part rows and writing the sidecar, the retry reads the
+**unchanged** sidecar (same `plaintext_offset`/`carry`/`next_index`), reproduces the identical parts, and
+re-registers the **same** `(gen, index)` keys insert-if-absent (like the per-Run evidence path's
+`_existing_console_row`) — a true no-op. The `next_index` is carried in the sidecar and advanced only on
+commit; it is **not** re-derived from the existing part rows (that anti-pattern would assign new indices
+to the re-sealed bytes and duplicate them).
 
 R6b. **Power-cycle detection.** The local console file holds only the current boot: libvirt renders
 `<log append='off'>` and truncates it on every domain power-cycle (ADR-0258). A rotation job detects a
@@ -210,11 +210,12 @@ On `put_part`, the collector continues to write its internal `console-parts-<n>`
 a separate gzip-compressed registered part object and registers its `artifacts` row on the reconciler's
 DB connection. The redacted bytes already exist; they are compressed only for the new registered copy.
 Because the internal parts and `finalize()`'s assembly are untouched, the per-Run evidence stays
-byte-identical (R5/R9). Remote shares the one key grammar `console-part-<gen>-<start>`: remote has no
-per-power-cycle truncation, so `<gen>` is fixed at `0`, and `<start>` is the registered part's byte
-offset in the assembled stream (the collector's resume already keeps part offsets monotonic per System,
-so failover does not collide keys). The local-only generation counter (R6b) is what makes `<gen>` vary;
-remote never increments it.
+byte-identical (R5/R9). Remote shares the one key grammar `console-part-<gen>-<index>`: remote has no
+per-power-cycle truncation, so `<gen>` is fixed at `0`, and `<index>` is the collector's existing
+monotonic part index (`_take_index`, which already resumes past the highest part on failover, so
+failover does not collide keys). The local-only generation counter (R6b) is what makes `<gen>` vary;
+remote never increments it. The collector's `_rotate` carry logic is the shared seam primitive both
+providers call (R3).
 
 ### Local-libvirt (reconciler-dispatched worker rotation job)
 
@@ -226,64 +227,59 @@ System, the reconciler skips dispatch when a `console_rotate` job for that Syste
 pending/running, so at most one is in flight per System. The reconciler decides *when* and *for which
 System*; the worker does the host-file I/O it alone can read (ADR-0223). The job:
 
-1. reads the rotation sidecar (`plaintext_offset`, `boot_gen`, `boot_id`; absent → offset 0, gen 0, no
-   id), then `os.stat`s `console_log_path(system_id)` for the size and reads a boot-identity signal
+1. reads the rotation sidecar (`plaintext_offset`, `carry`, `next_index`, `boot_gen`, `boot_id`; absent
+   → zero state), then `os.stat`s `console_log_path(system_id)` for the size and reads `boot_id` from
+   the job payload (R6b);
+2. if the payload `boot_id` differs from the sidecar's **or** `file_size < plaintext_offset`, treats it
+   as a power-cycle (ADR-0258): resets `plaintext_offset`/`next_index`/`carry`, increments `boot_gen`
    (R6b);
-2. if the boot identity differs from the sidecar's `boot_id` **or** `file_size < plaintext_offset`,
-   treats it as a power-cycle (ADR-0258): resets `plaintext_offset` to 0, increments `boot_gen`, and
-   records the new `boot_id` (R6b);
-3. reads a redaction window `[max(0, plaintext_offset - SEAM_OVERLAP) : file_size]`, redacts the whole
-   window once (R3/R6), then **discards the overlap prefix** so only redacted bytes corresponding to
-   plaintext ≥ `plaintext_offset` are eligible to seal — the overlap is re-read for redaction context
-   across the job seam and never re-emitted;
-4. seals full ~64 KiB parts from the eligible redacted bytes, keying each
-   `console-part-<gen>-<start>` where `<start>` is the part's **plaintext start offset** (R1, R6c —
-   offset-derived, not a counter); registration is insert-if-absent (gzip-compressed object,
-   `content_encoding=gzip` metadata). The trailing sub-threshold remainder stays the unsealed tail,
-   surfaced when it next crosses the threshold or at teardown;
-5. advances `plaintext_offset` by the plaintext bytes consumed (**not** the redacted size) and writes
-   the sidecar back, only after the sealed parts' rows commit (R6c).
+3. forms `pending = carry + file_bytes[plaintext_offset:]` and feeds it through the shared seam-carry
+   primitive (R3): it seals full parts as `redact(carry_i + chunk_i)` while holding back each part's
+   trailing `SEAM_OVERLAP` raw bytes to prepend (redacted) to the next part, and returns the leftover
+   raw tail as the new `carry`;
+4. registers each sealed part keyed `console-part-<gen>-<index>` (R1, R6c — monotonic `next_index`,
+   incremented per part), insert-if-absent (gzip-compressed object, `content_encoding=gzip` metadata);
+5. advances `plaintext_offset` to the file end and stores the new `carry`/`next_index`, writing the
+   sidecar back only after the sealed parts' rows commit (R6c).
 
 The whole job runs under the per-System advisory lock (R6c). `read_console_log`'s `CONFIGURATION_ERROR`
 raise on a permission wall is caught and logged once; the job produces no parts and does not fail (R7).
-The job never *emits* bytes below `plaintext_offset` and keys parts by plaintext offset, so a
-non-length-preserving redactor (`[REDACTED]`, `security/secrets/redaction.py`) cannot shift or duplicate
-a sealed part's content.
 
 ### Reuse, not reinvention
 
-The 64 KiB threshold and the seam-overlap redaction are the remote collector's existing mechanisms
-(ADR-0095). The local rotation reuses the same threshold and redaction (re-reading the overlap window
-across job seams instead of carrying it in memory, R3); the artifact-row registration reuses
-`register_artifact_row` (the per-Run evidence path's helper).
+The 64 KiB threshold and the seam-overlap **carry** are the remote collector's existing mechanism
+(`collector._rotate`, ADR-0095) — Task 4 extracts that logic into a shared primitive both the local job
+and the collector call, so the seam guarantee has one implementation, not two. The artifact-row
+registration reuses `register_artifact_row` (the per-Run evidence path's helper).
 
 ## Acceptance criteria
 
 - A sealed console part is a System-owned `REDACTED` `artifacts` row keyed
-  `console-part-<gen>-<start>` (`<start>` = zero-padded plaintext start offset, deterministic from
-  position); `artifacts.list(system_id)` returns it ordered by `created_at DESC`, and the tail is the
-  maximum `(gen, start)` among the returned `refs.object` keys (not the list position). (R1, R8)
-- A part holds at most 64 KiB of redacted bytes. (R2)
-- Part bytes are redacted before storage; a secret straddling a rotation boundary is stored redacted on
-  both sides (seam-overlap). (R3)
+  `console-part-<gen>-<index>` (`<index>` = zero-padded monotonic per-gen index from the sidecar);
+  `artifacts.list(system_id)` returns it ordered by `created_at DESC`, and the tail is the
+  maximum `(gen, index)` among the returned `refs.object` keys (not the list position). (R1, R8)
+- A part covers at most one rotation threshold (64 KiB) of plaintext; its redacted size may differ. (R2)
+- Part bytes are redacted before storage; a secret straddling a part boundary — internal or job — is
+  stored redacted on both sides (the collector's carry mechanism, R3). (R3)
 - `artifacts.get` on a part whose `head` metadata is `content_encoding=gzip` returns the inflated,
   windowed, redacted content with correct `next_offset` paging and the `REDACTED` gate intact; a
   gzip-stored part is never returned as raw gzip bytes inline. An artifact without that metadata is read
   byte-identical to before (detection is metadata-driven, not key-driven). (R4)
-- Remote-libvirt registers a separate compressed `console-part-0-<start>` artifact per sealed part;
+- Remote-libvirt registers a separate compressed `console-part-0-<index>` artifact per sealed part;
   the collector's internal `console-parts-<n>` objects and the `finalize()` assembly are byte-identical,
   so `console-<run>` evidence is unchanged. (R5, R9)
 - Two concurrent rotation attempts for one System cannot both seal parts (per-System advisory lock); a
-  job retried after a crash between committing part rows and writing the sidecar re-seals nothing — the
-  re-read delta produces the same `(gen, start)` keys and registration is insert-if-absent (offset
-  advanced only after parts commit). A free-running counter key would fail this test. (R6c)
-- A secret value split across a rotation-**job** boundary is stored redacted on both sides: the local
-  job re-reads a `SEAM_OVERLAP` window of already-consumed plaintext before its offset for redaction
-  context, emitting only bytes ≥ offset. (R3)
+  job retried after a crash between committing part rows and writing the sidecar re-seals nothing — it
+  reads the unchanged sidecar (`plaintext_offset`/`carry`/`next_index`), reproduces the same `(gen,
+  index)` keys, and registers insert-if-absent. Re-deriving `next_index` from existing rows would fail
+  this test. (R6c)
+- A secret value split across a rotation-**job** boundary is stored redacted on both sides: the held-back
+  raw `carry` from the prior job is persisted in the sidecar and emitted (redacted) with the next part
+  (R3). (R3)
 - Rotation continues for a live System whose most recent Run is `succeeded` (the #892 case): a workload
   still emitting console after Run success keeps producing new parts until the System is torn down. (R6)
-- Local-libvirt produces sealed part rows for a running System as its console grows, reading only the
-  plaintext delta past the sidecar `plaintext_offset` and redacting that delta once; a second sweep with
+- Local-libvirt produces sealed part rows for a running System as its console grows, feeding
+  `carry + file_bytes[plaintext_offset:]` through the shared carry primitive; a second sweep with
   no new console growth produces no new parts, and no sealed part is ever recomputed/re-redacted. (R6,
   R6a)
 - A rotation job detects a power-cycle by a `boot_id` change (a boot-identity signal independent of
@@ -318,11 +314,12 @@ across job seams instead of carrying it in memory, R3); the artifact-row registr
   dispatches it; the live tail lags by up to one sweep interval plus the time for a sub-threshold tail
   to cross 64 KiB. This is the inherent latency of size-threshold rotation, shared with remote; the
   sub-threshold tail is surfaced at the next crossing or at teardown.
-- **Incremental redaction correctness.** The local job redacts only the plaintext delta and never
-  re-reads sealed bytes (R6), so the non-length-preserving `[REDACTED]` substitution cannot shift a
-  sealed part. A secret straddling a read boundary is caught by the held-back seam overlap (R3). A bug
-  that advanced `plaintext_offset` by the **redacted** size instead of the plaintext size would silently
-  drop or duplicate console bytes — called out as the load-bearing invariant the unit tests must pin.
+- **Seam-carry correctness.** The seam guarantee comes from the collector's proven carry mechanism
+  reused via one shared primitive (R3), not a re-derived byte arithmetic. The load-bearing invariant the
+  unit tests pin: a secret straddling any part boundary (internal or job) is redacted contiguously and
+  never stored raw — including the persisted `carry` across stateless job invocations. A bug that
+  dropped a redacted prefix by length (rather than carrying raw bytes forward) would misalign on a
+  straddling secret and leak it; the internal- and job-boundary seam tests guard against this.
 - **Compression vs. `download_uri`.** The minted URL serves the compressed object; an agent fetching it
   directly gets gzip bytes. Inline `artifacts.get` content is always inflated; the download path is for
   whole-object retrieval where the agent (or a `Content-Encoding` follow-up) handles inflation. Noted
