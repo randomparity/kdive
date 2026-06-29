@@ -150,18 +150,23 @@ unaffected in every case.
 
 R8. **Observation surface (no new tool).** `artifacts.list(system_id)` returns the System's redacted
 artifacts ordered by `created_at DESC`, so the newest console part is first; an agent reads the live
-tail from the leading part(s) with `artifacts.get` and searches history with `artifacts.search_text`.
+tail from the leading part(s) with `artifacts.get` and searches history with `artifacts.search_text`
+per part (it is per-artifact, R8a).
 No new MCP tool, no new public field beyond the additional `artifacts.list` rows. Note: `artifacts.list`
 orders by `created_at`, **not** by object key — the zero-padded index orders the object store and
 disambiguates a part from the per-Run `console-<run>` evidence by key prefix, but it does not drive the
 `artifacts.list` order.
 
-R8a. **Bounded retention, disclosed.** Live console parts are ordinary artifacts and age out through the
-existing artifact-expiry reconciler (#768), which time-bounds the series. This work does **not** add
-`artifacts.list` pagination (`data.truncated` stays `False`), so within a retention window a chatty
-multi-hour run can make `artifacts.list` return many part rows; the agent's non-enumerating path for
-"find the problem" is `artifacts.search_text`, and the newest-first order makes the recent tail cheap.
-A hard per-System live-part cap is named as possible future work, not built here.
+R8a. **Bounded retention and search ergonomics, disclosed.** Live console parts are ordinary artifacts
+and age out through the existing artifact-expiry reconciler (#768), which time-bounds the series. This
+work does **not** add `artifacts.list` pagination (`data.truncated` stays `False`), so within a
+retention window a chatty multi-hour run can make `artifacts.list` return many part rows. `artifacts.get`
+on the newest part (cheap, newest-first) covers the live-tail case. For finding an older event across
+the run, note that `artifacts.search_text` is **per-artifact** (keyed by one `artifact_id`,
+`reads.py`) — it does **not** span a System's parts — so cross-run search means listing the parts and
+searching (or downloading via `download_uri`) each, newest-first. A System-spanning console search and a
+hard per-System live-part cap are named as possible future work, not built here; this spec does not
+claim either exists.
 
 R9. **Per-Run evidence immutability.** `console-<run>` (ADR-0235) is neither mutated nor re-snapshotted;
 the live parts are a separate System-owned series. Both stay immutable.
