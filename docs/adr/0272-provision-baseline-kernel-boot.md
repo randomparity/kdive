@@ -30,20 +30,31 @@ the baseline kernel as documented.
 
 1. **Extract from the base, read-only, to a stable per-System path.** A new injected seam
    `extract_baseline_kernel(base, dest_dir) -> BaselineKernel` mounts the materialized rootfs **base**
-   read-only via libguestfs, picks the newest `/boot/vmlinuz-<ver>` and its matching initramfs
-   (`initramfs-<ver>.img` rhel/fedora, `initrd.img-<ver>` debian), and downloads them temp-then-rename
-   to `ROOTFS_DIR/{system_id}-baseline-kernel` and `-baseline-initrd`. The selection is a pure,
-   unit-tested helper (`select_kernel_and_initrd`); only the libguestfs read is `live_vm`/no-cover,
-   mirroring `_RealGuestKernelWriter`. Reading the base (not the live overlay) avoids a rw mount of a
-   disk QEMU may hold open, and the base is safe for concurrent read-only mounts.
+   read-only via libguestfs, selects the System's `/boot/vmlinuz-<ver>` and its matching initramfs
+   (`initramfs-<ver>.img` rhel/fedora, `initrd.img-<ver>` debian), and downloads both into a temp dir
+   that is atomically renamed to the per-System baseline directory `ROOTFS_DIR/{system_id}-baseline/`
+   (holding `kernel` + optional `initrd`) — so the destination is all-or-nothing and a retry after a
+   crash mid-extraction re-completes the pair rather than skipping a kernel-only half-state (the kernel
+   and its initramfs are a unit; a modular kernel cannot boot without its initramfs). The binding being
+   absent raises `missing_dependency` (mirroring `_RealGuestKernelWriter`). Selection is a pure,
+   unit-tested
+   helper (`select_kernel_and_initrd`) that **fails closed**: it excludes the `*-rescue-*` pair and
+   raises `configuration_error` on zero or more-than-one non-rescue kernel rather than guessing a
+   version order — a silent wrong pick boots a dead guest that still reports `ready` (the #905 symptom
+   itself). The kdive-ready build emits exactly one kernel, so the lone-candidate path is the norm.
+   Only the libguestfs read is `live_vm`/no-cover, mirroring `_RealGuestKernelWriter`. Reading the base
+   (not the live overlay) avoids a rw mount of a disk QEMU may hold open, and the base is safe for
+   concurrent read-only mounts.
 
 2. **`render_domain_xml` is fail-closed.** It gains `kernel_path`/`initrd_path` params and always
    emits a direct-kernel `<os>` for a local-libvirt domain (the profile validator pairs `disk-image`
    with remote-libvirt only, so a local domain is always direct-kernel). A `None` `kernel_path` raises
    `CONFIGURATION_ERROR` — the renderer can no longer silently emit a non-booting domain. `<cmdline>`
-   is `root=/dev/vda console=ttyS0 rw`, plus `crashkernel=<token>` when `local_libvirt.crashkernel` is
-   set so a kdump-provisioned System reserves the crash region on the baseline boot. All `<os>` text is
-   built with `ElementTree`, so no path/profile value can inject XML.
+   is exactly `root=/dev/vda console=ttyS0 rw` (the verified working repro). `crashkernel` is **not**
+   added to the baseline cmdline: the baseline boot exists for SSH/drgn reach, kdump's `crashkernel`
+   (sized against the kernel-under-test) is the install/boot lane's job, and a speculative reservation
+   on a different baseline kernel could fail or shrink RAM with no readiness check to catch it. All
+   `<os>` text is built with `ElementTree`, so no path/profile value can inject XML.
 
 3. **Fail fast on an un-bootable image.** An image with no `/boot/vmlinuz-*` raises
    `CONFIGURATION_ERROR` naming the image — provision does not start a domain that cannot boot.
@@ -63,6 +74,11 @@ gdbstub and SSH-forward passthroughs (ADR-0210/0218) are orthogonal and still co
   `kernel_source_ref` claims become accurate.
 - Provision gains a read-only libguestfs mount of the base (seconds), skipped on retry. It runs in the
   worker's `asyncio.to_thread` provision offload, alongside the existing `qemu-img` overlay create.
+- New host prerequisite: the provision path now requires the libguestfs `guestfs` binding, which a
+  catalog-only provision did not previously need (only `qemu-img` + libvirt). A local-libvirt host that
+  provisions also builds/installs (both already require libguestfs), so no new host is introduced; an
+  operator running a provision-only worker must install the binding, and its absence is a clean
+  `missing_dependency`, not a raw import error.
 - A subsequent build → install still redefines the domain with the build kernel: the install lane
   removes and re-adds `<kernel>`/`<initrd>`/`<cmdline>`, so the baseline `<os>` is cleanly replaced.
 - `render_domain_xml`'s contract is stricter (a kernel path is mandatory); its only production caller
