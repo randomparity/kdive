@@ -62,13 +62,17 @@ provider-agnostic connection descriptor for a `ready` System, derived from the r
 domain XML (no guest contact):
 
 ```json
-{ "user": "root", "host": "127.0.0.1", "port": 22022, "jump_host": null }
+{ "user": "root", "host": "127.0.0.1", "port": 22022,
+  "jump_host": null, "host_scope": "worker_loopback" }
 ```
 
+`host_scope` is a locality signal: `worker_loopback` tells the caller the coordinates are
+the worker host's loopback (ADR-0210), reachable only co-located with the worker or via a
+populated `jump_host` — so a remote agent does not silently dial its own `127.0.0.1`.
 `jump_host` is modelled now and emitted `null` for local-libvirt (the agent is co-located
-with the worker on the single-host deployment). The field exists so the cloud milestone
-populates it with a bastion (`{host, port, user}`) and the agent connects with
-`ssh -J <bastion> ...` without a contract change. ADR-0210 is preserved: the guest stays
+with the worker on the single-host deployment). Both fields exist so the cloud milestone
+emits `host_scope: "routable"` with a populated `jump_host` (`{host, port, user}`) and the
+agent connects with `ssh -J <bastion> ...` without a contract change. ADR-0210 is preserved: the guest stays
 loopback-only; remote reach is a future ProxyJump *through* the worker/bastion, never an
 off-host guest listener.
 
@@ -86,11 +90,14 @@ off-host guest listener.
   tools are classified in `_TOOL_SCOPES` (`ssh_info` VIEWER, `authorize_ssh_key`
   OPERATOR).
 
-**4. Scope: local-libvirt only; no schema migration.** The connection descriptor is
-derived from the live domain XML and the append is an in-guest mutation, so nothing is
-persisted — no migration. Remote-libvirt (authorize via the guest agent) and cloud
-(routable host + populated `jump_host`) are follow-ups that fill the same two-tool
-contract.
+**4. Scope: local-libvirt only; one additive migration.** The connection descriptor is
+derived from the live domain XML (not persisted — ADR-0218 settled live-XML over a stored
+port) and the authorized key is an in-guest mutation (no key ledger). The *only* schema
+change is **migration 0052**, which widens the `jobs_kind_check` CHECK to admit the new
+`authorize_ssh_key` `JobKind` (drop-and-recreate, name stable), exactly as migration 0051
+did for `build_install_boot` — a job cannot be enqueued otherwise. No new table or column.
+Remote-libvirt (authorize via the guest agent) and cloud (routable host + populated
+`jump_host`) are follow-ups that fill the same two-tool contract.
 
 ## Consequences
 
@@ -143,8 +150,10 @@ contract.
 - **Inject the key via cloud-init / fw_cfg / a metadata channel / image rebuild.** The
   worker already has managed-key root SSH into the booted guest, so a runtime append is
   strictly simpler and needs no boot-path or image change. Rejected the heavier channels.
-- **Persist authorized keys in a new column (migration).** The in-guest `authorized_keys`
-  is the record; a throwaway debug VM needs no durable key ledger. Rejected; no migration.
+- **Persist authorized keys in a new column.** The in-guest `authorized_keys` is the
+  record; a throwaway debug VM needs no durable key ledger. Rejected. (The one migration,
+  0052, only widens the `jobs_kind_check` CHECK for the new `JobKind`; it persists no key
+  and adds no column.)
 - **Add a new `ErrorCategory` for "SSH not available".** `READINESS_FAILURE` /
   `CONFIGURATION_ERROR` / `TRANSPORT_FAILURE` already model the failure modes. Rejected per
   the stable-taxonomy invariant.

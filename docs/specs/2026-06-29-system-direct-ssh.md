@@ -78,14 +78,27 @@ Handler (in the systems plane) follows the `systems.get` shape: `current_context
   reason="ssh_not_provisioned")` with detail "System was not provisioned for SSH;
   reprovision with `ssh_credential_ref` set."
 - Success: `ToolResponse.success(object_id=system_id, data={"ssh": {"user": "root",
-  "host": "127.0.0.1", "port": <int>, "jump_host": None}}, suggested_next_actions=
-  ["systems.authorize_ssh_key", "systems.get"])`. `port` is a native JSON int (ADR-0263).
+  "host": "127.0.0.1", "port": <int>, "jump_host": None, "host_scope":
+  "worker_loopback"}}, suggested_next_actions=["systems.authorize_ssh_key",
+  "systems.get"])`. `port` is a native JSON int (ADR-0263).
 
-Reading the recorded port needs the live domain. Expose it through the existing local
-connect/runtime port (a small `recorded_ssh_endpoint(system) -> (host, port) | None` seam
-mirroring `_resolve_ssh_endpoint_via`) so the handler is unit-tested with a fake and the
-libvirt `open`/`XMLDesc` is the only `live_vm` dependency. `jump_host` is hard `None` for
-local-libvirt.
+`host_scope` is the **locality signal** the descriptor carries so a caller can tell whether
+the coordinates are usable from where it runs. `worker_loopback` means `host` is the worker
+host's loopback (ADR-0210) — reachable only by a process co-located with the worker, or via
+a `jump_host` once populated. A remote agent that reads `worker_loopback` with `jump_host:
+null` knows it must run on the worker host (today's single-host deployment) or wait for the
+bastion (cloud milestone), rather than silently dialing its own `127.0.0.1`. The cloud
+milestone emits `host_scope: "routable"` with a populated `jump_host`.
+
+Reading the recorded port needs the live domain. This is **synchronous and server-side** —
+the established pattern: `debug.start_session` is itself synchronous (no `JobKind`,
+`sessions_lifecycle.py`) and resolves its transport endpoint by reading the domain XML
+through the local connect seam (`_resolve_ssh_endpoint_via(_default_connect)`). `ssh_info`
+reuses that exact seam (a small `recorded_ssh_endpoint(system) -> (host, port) | None`
+mirroring `_resolve_ssh_endpoint_via`), so the handler is unit-tested with a fake and the
+libvirt `open`/`XMLDesc` is the only `live_vm` dependency. The port is **not** persisted to
+the DB — ADR-0218 settled the live-domain-XML-vs-stored-port choice in favour of the domain
+XML, and duplicating it would risk drift. `jump_host` is hard `None` for local-libvirt.
 
 ### 3. `systems.authorize_ssh_key(system_id, public_key)` — mutating, worker job, OPERATOR
 
@@ -97,15 +110,26 @@ local-libvirt.
   normalized key; return `ToolResponse.from_job(...)` (`{job_id, status: running}`).
 - Worker handler (registered in `worker_registration.py`): resolve the recorded SSH
   endpoint, open an SSH connection as `root@127.0.0.1:<port>` with
-  `managed_private_key_path()`, and run a fixed-argv idempotent append:
+  `managed_private_key_path()`, and run a fixed-argv **flock-atomic** idempotent append:
   `ssh ... root@host -- /bin/sh -c '<append-if-absent>'`. The append uses a here-doc-free
-  fixed command: create `~/.ssh` `0700` if absent, then append the key to
-  `authorized_keys` `0600` only if an exact-line match is not already present (idempotent
-  re-authorize is a no-op). The key is passed as a fixed argv element, never interpolated
-  into a shell string.
+  fixed command: create `~/.ssh` `0700` if absent, then **under `flock /root/.ssh/.kdive-authz.lock`**
+  append the key to `authorized_keys` `0600` only if an exact-line match (`grep -qxF`) is
+  not already present. The `flock` serializes concurrent authorize jobs on the same guest so
+  the read-modify-write of `authorized_keys` cannot interleave; a re-authorize of the same
+  key is a no-op. The key is passed as a fixed argv element, never interpolated into a shell
+  string.
+- **Readiness / timeout.** A System can report `ready` (serial marker on
+  `multi-user.target`) before the SSH-NIC has finished DHCP and sshd is reachable — #697
+  flagged guest-side SSH-NIC DHCP as a live-confirm obligation, not a proven invariant. The
+  job therefore opens the connection with a bounded SSH connect timeout (a fixed module
+  constant, e.g. `ConnectTimeout=10`) and maps an unreachable/timed-out sshd to
+  `TRANSPORT_FAILURE`, which the envelope marks **retryable** (`_RETRYABLE_BY_CATEGORY`), so
+  the agent re-issues `authorize_ssh_key` after the guest finishes coming up. The job does
+  no internal retry loop (the queue/agent owns retry); it fails fast within the timeout.
 - Job result → envelope: success `data={"authorized": true, "system_id": ...}`,
-  `suggested_next_actions=["systems.ssh_info"]`. SSH failure → `TRANSPORT_FAILURE`; a
-  guest that rejects the managed identity or a missing endpoint → `CONFIGURATION_ERROR`.
+  `suggested_next_actions=["systems.ssh_info"]`. Unreachable/timed-out/refused sshd →
+  `TRANSPORT_FAILURE` (retryable); a missing recorded endpoint or a guest that rejects the
+  managed identity → `CONFIGURATION_ERROR` (not retryable — a reprovision/config fault).
 - The append command and the SSH-exec are an injected seam (default = the real managed-key
   SSH-exec), so the worker handler is unit-tested with a fake that records argv and
   simulates present/absent key, success/failure — no `live_vm` needed for the unit path.
@@ -118,12 +142,12 @@ local-libvirt.
 - `exposure.py` `_TOOL_SCOPES`: `"systems.ssh_info": VIEWER`, `"systems.authorize_ssh_key":
   OPERATOR`. The completeness guard (`CLASSIFIED_TOOLS | PUBLIC_TOOLS` == live registry)
   forces both to be classified.
-- `JobKind` gains `authorize_ssh_key`. **No DB migration** — nothing is persisted; the job
-  payload is transient and the authorized key lives only in the guest. (If the project's
-  `JobKind` is a DB-checked enum requiring a migration, add the minimal additive migration;
-  confirm during implementation. Current reading: `JobKind` is an in-code enum and the
-  jobs table `kind` check was last widened by migration 0051 for the composite — verify
-  whether a new kind needs a `jobs_kind_check` widening and, if so, add migration 0052.)
+- `JobKind` gains `authorize_ssh_key`. **Migration 0052** (additive, forward-only) widens
+  the `jobs_kind_check` CHECK to admit `'authorize_ssh_key'`, drop-and-recreating the
+  constraint to keep its name stable for the SQL↔enum tie — exactly as migration 0051 did
+  for `build_install_boot`. This is the *only* schema change: no new table or column. The
+  authorized key lives only in the guest (no key ledger) and the job payload is transient,
+  but the `JobKind` enum value must be admitted by the DB CHECK or the insert fails.
 - Regenerate the committed tool reference (`just docs`).
 
 ### 5. Acceptance
@@ -134,16 +158,24 @@ local-libvirt.
   over-length inputs.
 - `systems.ssh_info`: not-ready → `READINESS_FAILURE`; no recorded port →
   `CONFIGURATION_ERROR` (`reason=ssh_not_provisioned`); ready + port → success with
-  `data.ssh == {user: root, host: 127.0.0.1, port: <int>, jump_host: null}` and a native
-  int port.
+  `data.ssh == {user: root, host: 127.0.0.1, port: <int>, jump_host: null, host_scope:
+  worker_loopback}` and a native int port.
 - `systems.authorize_ssh_key` tool: VIEWER caller denied (RBAC); non-ready →
   `READINESS_FAILURE`; malformed key → synchronous `CONFIGURATION_ERROR`; happy path →
   `from_job` running envelope and the enqueued job carries the normalized key.
 - `authorize_ssh_key` worker handler (fake SSH-exec): builds `root@127.0.0.1:<port>` with
-  the managed identity; append is idempotent (key already present → no second append);
-  SSH failure → `TRANSPORT_FAILURE`; missing endpoint → `CONFIGURATION_ERROR`. The key is
-  a fixed argv element (asserted), never shell-interpolated.
+  the managed identity and a bounded `ConnectTimeout`; the append command is `flock`-guarded
+  and idempotent (key already present → no second append); unreachable/timed-out sshd →
+  `TRANSPORT_FAILURE` (retryable in the envelope); missing endpoint → `CONFIGURATION_ERROR`
+  (not retryable). The key is a fixed argv element (asserted), never shell-interpolated.
+- Migration 0052 applies forward and admits a `kind='authorize_ssh_key'` jobs insert; the
+  schema test suite (which replays migrations) stays green.
 - Exposure: both tools classified; completeness guard green. `just docs` regenerated.
+
+**Prerequisite (live):** the live acceptance inherits #697's open guest-DHCP risk — it
+passes only once the SSH-NIC reliably DHCPs and sshd is reachable on the booted guest. If
+that is not yet confirmed on this host, the CI (fake-seam) acceptance still holds and the
+live proof is gated on that confirmation.
 
 **Live (`live_vm`, this KVM host):** provision a System with `ssh_credential_ref` set;
 `systems.authorize_ssh_key` with a freshly generated test pubkey; `systems.ssh_info`
