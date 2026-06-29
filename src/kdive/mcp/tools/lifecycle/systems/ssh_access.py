@@ -8,6 +8,8 @@ private key.
 
 from __future__ import annotations
 
+import hashlib
+
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import SYSTEMS
@@ -127,11 +129,15 @@ async def authorize_ssh_key(
                 normalized = validate_authorized_public_key(public_key)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(system_id, exc)
+            # The dedup_key includes the key fingerprint so re-authorizing the *same* key is
+            # idempotent, but a *distinct* key gets its own job — a System-only key would collapse
+            # every key after the first into the first job (dedup_key is a permanent UNIQUE column).
+            fingerprint = hashlib.sha256(normalized.encode()).hexdigest()[:16]
             job = await queue.enqueue(
                 conn,
                 JobKind.AUTHORIZE_SSH_KEY,
                 AuthorizeSshKeyPayload(system_id=system_id, public_key=normalized),
                 job_authorizing(ctx, system.project),
-                f"{system_id}:authorize_ssh_key",
+                f"{system_id}:authorize_ssh_key:{fingerprint}",
             )
     return ToolResponse.from_job(job)

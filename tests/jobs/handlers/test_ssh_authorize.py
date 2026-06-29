@@ -44,29 +44,39 @@ def _resolver(endpoint: tuple[str, int] | None) -> MagicMock:
     return resolver
 
 
-def test_argv_is_fixed_and_carries_key_as_a_single_element() -> None:
-    argv = build_authorize_argv(22022, _KEY)
+def test_argv_is_fixed_and_excludes_the_key() -> None:
+    argv = build_authorize_argv(22022)
     assert argv[0] == "ssh"
     assert "root@127.0.0.1" in argv
     assert "22022" in argv
-    # the key travels as exactly one argv element, never interpolated into a shell string
-    assert _KEY in argv
-    joined = " ".join(argv)
-    assert "flock" in joined and "grep -qxF" in joined
+    # The key is NEVER in the argv/command string — ssh would space-join post-host args into one
+    # remotely-reparsed string. It travels on stdin instead. The post-host script is a single arg.
+    assert _KEY not in argv
+    assert argv.count(argv[-1]) == 1
+    script = argv[-1]
+    assert "flock" in script and "grep -qxF" in script
+    assert "key=$(cat)" in script
 
 
-def test_handler_authorizes_via_managed_key_ssh() -> None:
-    recorded: list[list[str]] = []
+def test_handler_authorizes_via_managed_key_ssh_and_pipes_key_on_stdin() -> None:
+    recorded: list[tuple[list[str], str]] = []
     resolver = _resolver(("127.0.0.1", 22022))
 
     result = asyncio.run(
-        authorize_ssh_key_handler(MagicMock(), _job(), resolver=resolver, ssh_exec=recorded.append)
+        authorize_ssh_key_handler(
+            MagicMock(),
+            _job(),
+            resolver=resolver,
+            ssh_exec=lambda argv, key: recorded.append((argv, key)),
+        )
     )
 
     assert result is None
     assert len(recorded) == 1
-    argv = recorded[0]
-    assert "root@127.0.0.1" in argv and "22022" in argv and _KEY in argv
+    argv, key = recorded[0]
+    assert "root@127.0.0.1" in argv and "22022" in argv
+    assert _KEY not in argv  # not in the command
+    assert key == _KEY  # delivered on stdin
 
 
 def test_handler_unprovisioned_is_configuration_error() -> None:
@@ -74,7 +84,7 @@ def test_handler_unprovisioned_is_configuration_error() -> None:
     with pytest.raises(CategorizedError) as excinfo:
         asyncio.run(
             authorize_ssh_key_handler(
-                MagicMock(), _job(), resolver=resolver, ssh_exec=lambda _argv: None
+                MagicMock(), _job(), resolver=resolver, ssh_exec=lambda _argv, _key: None
             )
         )
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
@@ -84,7 +94,7 @@ def test_handler_unprovisioned_is_configuration_error() -> None:
 def test_handler_ssh_failure_propagates_transport_failure() -> None:
     resolver = _resolver(("127.0.0.1", 22022))
 
-    def _boom(_argv: list[str]) -> None:
+    def _boom(_argv: list[str], _key: str) -> None:
         raise CategorizedError("ssh down", category=ErrorCategory.TRANSPORT_FAILURE)
 
     with pytest.raises(CategorizedError) as excinfo:

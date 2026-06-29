@@ -22,7 +22,7 @@ from kdive.prereqs.managed_ssh_key import managed_private_key_path
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.handles import SystemHandle
 
-type SshExec = Callable[[list[str]], None]
+type SshExec = Callable[[list[str], str], None]
 
 _LOOPBACK_HOST = "127.0.0.1"
 _SSH_USER = "root"
@@ -30,21 +30,28 @@ _SSH_CONNECT_TIMEOUT_S = 10
 _SSH_RUN_TIMEOUT_S = 30
 _LOCK = "/root/.ssh/.kdive-authz.lock"
 
-# Idempotent, flock-serialized append (ADR-0271). The outer sh creates ~/.ssh 0700, then under the
-# lock the inner sh ensures authorized_keys 0600 and appends the key only if an exact line match is
-# absent. The key is "$1" — an argv element, never interpolated into the shell string, so it cannot
-# break out of the data position even with shell metacharacters.
-_REMOTE_CMD = (
-    "mkdir -p /root/.ssh && chmod 700 /root/.ssh && "
-    f"flock {_LOCK} sh -c '"
-    "touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && "
-    'grep -qxF "$1" /root/.ssh/authorized_keys || printf "%s\\n" "$1" '
-    '>> /root/.ssh/authorized_keys\' _ "$1"'
+# The remote append script (ADR-0271). The key is **never** in this string: `ssh host CMD` joins
+# any post-host argv into one string the remote login shell re-parses, so an argv-positioned key
+# would not be isolated. Instead the worker pipes the validated key on the SSH session's stdin and
+# the script reads it with `key=$(cat)` — there is no command-string position for the key to break
+# out of. `umask 077` makes ~/.ssh 0700 and a freshly created authorized_keys 0600; `flock` on a
+# dedicated FD serializes concurrent authorize jobs so the read-modify-write cannot interleave;
+# `grep -qxF` keeps the append idempotent (re-authorizing the same key is a no-op).
+_REMOTE_SCRIPT = (
+    "set -e\n"
+    "umask 077\n"
+    "mkdir -p /root/.ssh\n"
+    "key=$(cat)\n"
+    f"exec 9>{_LOCK}\n"
+    "flock -w 5 9\n"
+    "touch /root/.ssh/authorized_keys\n"
+    'grep -qxF "$key" /root/.ssh/authorized_keys '
+    "|| printf '%s\\n' \"$key\" >> /root/.ssh/authorized_keys\n"
 )
 
 
-def build_authorize_argv(port: int, public_key: str) -> list[str]:
-    """Build the fixed loopback SSH argv that authorizes ``public_key`` in guest root."""
+def build_authorize_argv(port: int) -> list[str]:
+    """Build the fixed loopback SSH argv that runs the append script (key arrives on stdin)."""
     return [
         "ssh",
         "-i",
@@ -60,19 +67,21 @@ def build_authorize_argv(port: int, public_key: str) -> list[str]:
         "-p",
         str(port),
         f"{_SSH_USER}@{_LOOPBACK_HOST}",
-        "--",
-        "/bin/sh",
-        "-c",
-        _REMOTE_CMD,
-        "kdive-authz",
-        public_key,
+        # Exactly one post-host argument: ssh sends it verbatim; the remote login shell runs it as a
+        # single `-c` script. Adding more argv here would be space-joined and re-parsed remotely.
+        _REMOTE_SCRIPT,
     ]
 
 
-def _real_ssh_exec(argv: list[str]) -> None:  # pragma: no cover - live_vm
+def _real_ssh_exec(argv: list[str], key: str) -> None:  # pragma: no cover - live_vm
     try:
-        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; key is a data element
-            argv, timeout=_SSH_RUN_TIMEOUT_S, check=False, capture_output=True
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; key is piped on stdin
+            argv,
+            input=key,
+            text=True,
+            timeout=_SSH_RUN_TIMEOUT_S,
+            check=False,
+            capture_output=True,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         raise CategorizedError(
@@ -111,5 +120,5 @@ async def authorize_ssh_key_handler(
             details={"reason": "ssh_not_provisioned"},
         )
     _host, port = endpoint
-    ssh_exec(build_authorize_argv(port, payload.public_key))
+    ssh_exec(build_authorize_argv(port), payload.public_key)
     return None

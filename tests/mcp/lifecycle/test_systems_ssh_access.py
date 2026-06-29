@@ -160,3 +160,21 @@ def test_authorize_ssh_key_happy_path_enqueues_job(migrated_url: str) -> None:
         assert resp.data["kind"] == "authorize_ssh_key"
 
     asyncio.run(_run())
+
+
+def test_authorize_ssh_key_distinct_keys_enqueue_distinct_jobs(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(("127.0.0.1", 22022)))
+            key_a = "ssh-ed25519 AAAAaaaa agent-a@host"
+            key_b = "ssh-ed25519 AAAAbbbb agent-b@host"
+            first = await authorize_ssh_key(pool, _ctx(), sys_id, key_a, resolver=resolver)
+            second = await authorize_ssh_key(pool, _ctx(), sys_id, key_b, resolver=resolver)
+            # re-authorizing key_a is idempotent: same dedup_key returns the first job
+            replay = await authorize_ssh_key(pool, _ctx(), sys_id, key_a, resolver=resolver)
+        assert first.object_id != second.object_id  # distinct keys -> distinct jobs
+        assert replay.object_id == first.object_id  # same key -> same job (idempotent)
+
+    asyncio.run(_run())

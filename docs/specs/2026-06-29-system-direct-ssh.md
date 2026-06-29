@@ -111,17 +111,24 @@ XML, and duplicating it would risk drift. `jump_host` is hard `None` for local-l
   enqueueing — fail fast without spending a job; then validate the public key (§1) at the
   tool boundary so a malformed key is a synchronous `CONFIGURATION_ERROR`, never a job that
   fails later. Enqueue a new `JobKind` (`authorize_ssh_key`) carrying `system_id` +
-  normalized key; return `ToolResponse.from_job(...)` (`{job_id, status: running}`).
+  normalized key; return `ToolResponse.from_job(...)`. The job `dedup_key` is
+  `{system_id}:authorize_ssh_key:{sha256(normalized_key)[:16]}` — it **includes the key
+  fingerprint** so re-authorizing the *same* key is idempotent (the `dedup_key` UNIQUE column
+  returns the prior job) while a *distinct* key gets its own job; a System-only dedup_key
+  would silently collapse every key after the first into the first job.
 - Worker handler (registered in `worker_registration.py`): resolve the recorded SSH
   endpoint, open an SSH connection as `root@127.0.0.1:<port>` with
-  `managed_private_key_path()`, and run a fixed-argv **flock-atomic** idempotent append:
-  `ssh ... root@host -- /bin/sh -c '<append-if-absent>'`. The append uses a here-doc-free
-  fixed command: create `~/.ssh` `0700` if absent, then **under `flock /root/.ssh/.kdive-authz.lock`**
-  append the key to `authorized_keys` `0600` only if an exact-line match (`grep -qxF`) is
-  not already present. The `flock` serializes concurrent authorize jobs on the same guest so
-  the read-modify-write of `authorized_keys` cannot interleave; a re-authorize of the same
-  key is a no-op. The key is passed as a fixed argv element, never interpolated into a shell
-  string.
+  `managed_private_key_path()`, and run a fixed remote append script. The **key is delivered
+  on the SSH session's stdin**, never in the command string: `ssh host CMD` space-joins any
+  post-host argv into one string the remote login shell re-parses, so an argv-positioned key
+  would not be isolated and the remote shell would interpret comment-field metacharacters.
+  The worker therefore passes exactly **one** post-host argument (the script) and pipes the
+  validated key via `subprocess.run(input=key)`; the script reads it with `key=$(cat)`. The
+  script `umask 077`s (so `~/.ssh` is `0700` and a new `authorized_keys` is `0600`), takes a
+  `flock -w 5` on a dedicated lock FD so concurrent authorize jobs cannot interleave the
+  read-modify-write, and appends the key only if an exact-line match (`grep -qxF "$key"`) is
+  absent (re-authorizing the same key is a no-op). There is no command-string position for
+  the key to break out of.
 - **Readiness / timeout.** A System can report `ready` (serial marker on
   `multi-user.target`) before the SSH-NIC has finished DHCP and sshd is reachable — #697
   flagged guest-side SSH-NIC DHCP as a live-confirm obligation, not a proven invariant. The
@@ -173,7 +180,9 @@ XML, and duplicating it would risk drift. `jump_host` is hard `None` for local-l
   the managed identity and a bounded `ConnectTimeout`; the append command is `flock`-guarded
   and idempotent (key already present → no second append); unreachable/timed-out sshd →
   `TRANSPORT_FAILURE` (retryable in the envelope); missing endpoint → `CONFIGURATION_ERROR`
-  (not retryable). The key is a fixed argv element (asserted), never shell-interpolated.
+  (not retryable). The key is **absent from the argv** (asserted) and delivered on stdin, and
+  two distinct keys on one System enqueue two distinct jobs while the same key re-authorizes
+  to the same job (dedup_key fingerprint).
 - Migration 0052 applies forward and admits a `kind='authorize_ssh_key'` jobs insert; the
   schema test suite (which replays migrations) stays green.
 - Exposure: both tools classified; completeness guard green. `just docs` regenerated.
