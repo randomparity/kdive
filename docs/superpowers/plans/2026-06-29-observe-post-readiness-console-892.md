@@ -14,6 +14,7 @@
 - Ruff line length 100; lint set `E,F,I,UP,B,SIM`. `ty` strict, **whole-tree** (`just type` covers `src` + `tests`).
 - Absolute imports only (no relative). Google-style docstrings on non-trivial public APIs. Functions ≤100 lines, cyclomatic ≤8, ≤5 positional params.
 - Per-commit guardrails (the CI-individual gates): `just lint`, `just type`, then the focused tests; before the first push run the full `just ci`.
+- **Backend prerequisite (do this before Task 1):** the DB/store tests need disposable Postgres + MinIO. Bring them up with `just compose-up` and run those tests with `KDIVE_REQUIRE_DOCKER=1` so a missing backend **fails loudly** instead of skipping (a vacuous skip would let a broken store path merge green). Tasks 1, 3, 5, 6, 7, 8 contain such tests.
 - Doc-style: plain factual prose; never "critical"/"robust"/"comprehensive"/"elegant"; "Milestone" not "Sprint".
 - Commit trailer: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
 - Redaction runs on plaintext before storage (`security/secrets/redaction.py`, `Redactor(registry=...).redact_text`). Never store raw guest console bytes.
@@ -160,7 +161,9 @@ This task holds the correctness the adversarial review hardened. Implement it as
   class SealedPart:
       gen: int
       start: int            # plaintext start offset (key component)
-      redacted: bytes       # <= ROTATION_THRESHOLD
+      plaintext_len: int    # plaintext bytes this part covers; == ROTATION_THRESHOLD for a full part
+      redacted: bytes       # redaction of this part's plaintext slice; size may differ from
+                            # plaintext_len (redaction is not length-preserving and may expand)
 
   @dataclass(frozen=True, slots=True)
   class RotationResult:
@@ -184,10 +187,20 @@ def _ident(s): return s  # redaction stub for non-secret tests
 def test_seals_full_threshold_parts_keyed_by_plaintext_offset():
     data = b"A" * (ROTATION_THRESHOLD * 2 + 10)
     r = rotate(RotationState(0, 0, "id1"), data, "id1", _ident)
-    assert [(p.gen, p.start, len(p.redacted)) for p in r.parts] == [
+    # the bound is on PLAINTEXT consumed per part; redacted size may differ under real redaction
+    assert [(p.gen, p.start, p.plaintext_len) for p in r.parts] == [
         (0, 0, ROTATION_THRESHOLD), (0, ROTATION_THRESHOLD, ROTATION_THRESHOLD)]
     assert r.next_state.plaintext_offset == ROTATION_THRESHOLD * 2  # 10-byte tail unsealed
     assert part_object_name(0, ROTATION_THRESHOLD) == f"console-part-0-{ROTATION_THRESHOLD:012d}"
+
+def test_secret_split_across_internal_part_boundary_is_redacted():
+    # a secret straddling the boundary BETWEEN two threshold parts within one rotate() call
+    sensitive = "ZZ-INTERNAL-BOUNDARY-MARKER-ZZ"
+    data = b"a" * (ROTATION_THRESHOLD - 7) + sensitive.encode() + b"b" * (ROTATION_THRESHOLD)
+    redact = lambda s: s.replace(sensitive, "[REDACTED]")
+    r = rotate(RotationState(0, 0, "id1"), data, "id1", redact)
+    joined = b"".join(p.redacted for p in r.parts)
+    assert sensitive.encode() not in joined  # internal boundary seam, not just job boundary
 
 def test_no_new_bytes_yields_no_parts_and_same_offset():
     data = b"B" * ROTATION_THRESHOLD
@@ -239,14 +252,32 @@ def test_advance_is_plaintext_not_redacted_size():
 
 - [ ] **Step 2: Run to verify they fail** — `uv run python -m pytest tests/providers/console_parts/test_rotation.py -q` → FAIL (module missing).
 
-- [ ] **Step 3: Implement `rotation.py`.** Algorithm (pure, no I/O):
-  1. If `boot_id != state.boot_id` **or** `len(file_bytes) < state.plaintext_offset`: new generation — `gen = state.boot_gen + 1` (or `state.boot_gen` when `state.boot_id is None`, the first-ever run keeps gen 0), reset `offset = 0`.
-  2. Read window: `win_start = max(0, offset - SEAM_OVERLAP)`; `window = file_bytes[win_start:]`. Redact `window.decode("utf-8","replace")` → encode back. Map the redacted bytes that correspond to plaintext `>= offset` by redacting the prefix `file_bytes[win_start:offset]` separately to compute how many redacted bytes to drop (the overlap is redaction context only). **Simpler, exact approach:** redact `file_bytes[win_start:]` and `file_bytes[win_start:offset]` separately; the emitted bytes are `redact(window)` with the `len(redact(prefix))`-byte prefix removed. (This keeps the seam join intact while never re-emitting consumed bytes.)
-  3. Slice the eligible redacted bytes into `ROTATION_THRESHOLD`-sized parts; the final sub-threshold remainder is **not** sealed (tail). Each sealed part's `start` is its plaintext start offset (track plaintext consumed alongside emitted redacted bytes — seal a part each time `THRESHOLD` *plaintext* bytes are consumed, redacting that plaintext slice; this makes `start` exact and `advance` plaintext-based, satisfying `test_advance_is_plaintext_not_redacted_size`). Prefer this plaintext-sliced formulation over redacted-byte slicing.
-  4. `next_state = RotationState(offset + plaintext_sealed, gen, boot_id)`.
-  Keep `rotate` ≤100 lines / complexity ≤8 by extracting `_detect_new_boot` and `_seal_plaintext_slices` helpers.
+- [ ] **Step 3: Implement `rotation.py`.** ONE algorithm (pure, no I/O). Parts are sliced on
+  **plaintext** boundaries (so `start`/offset math is exact and independent of redaction length), and
+  the seam-overlap carry is applied at **every** part boundary — internal and job — mirroring the
+  remote collector, so a secret straddling any boundary is redacted as one contiguous run:
+  1. **Detect new boot** (`_detect_new_boot`): if `boot_id != state.boot_id` **or**
+     `len(file_bytes) < state.plaintext_offset` → `gen = state.boot_gen + 1`, `offset = 0`. Else
+     `gen = state.boot_gen`, `offset = state.plaintext_offset`. (First-ever run: `state.boot_id is
+     None` → `gen = state.boot_gen` (0), `offset = 0`.)
+  2. **Seal full plaintext slices** (`_seal_plaintext_slices`): `pos = offset`; while
+     `len(file_bytes) - pos >= ROTATION_THRESHOLD`:
+       - `ovl = max(0, pos - SEAM_OVERLAP)`  (seam context before this slice — covers both the job
+         boundary, when `pos == offset`, and every internal boundary, when `pos > offset`);
+       - `redacted_with_ctx = redact(file_bytes[ovl : pos + ROTATION_THRESHOLD].decode("utf-8","replace")).encode("utf-8")`;
+       - `ctx_prefix = redact(file_bytes[ovl : pos].decode("utf-8","replace")).encode("utf-8")`;
+       - the part's bytes are `redacted_with_ctx[len(ctx_prefix):]` (the overlap is redaction context
+         only, never re-emitted);
+       - append `SealedPart(gen=gen, start=pos, plaintext_len=ROTATION_THRESHOLD, redacted=<that>)`;
+       - `pos += ROTATION_THRESHOLD`.
+  3. The trailing `[pos : len(file_bytes)]` (< threshold) is the unsealed tail — not a part.
+  4. `next_state = RotationState(plaintext_offset=pos, boot_gen=gen, boot_id=boot_id)`.
+  Slicing on plaintext keeps `start` exact and `advance` plaintext-based (satisfying
+  `test_advance_is_plaintext_not_redacted_size`); the per-boundary overlap satisfies both
+  `test_secret_split_across_internal_part_boundary_is_redacted` and the job-boundary seam test. Keep
+  `rotate` ≤100 lines / complexity ≤8 via the two extracted helpers.
 
-- [ ] **Step 4: Run to verify they pass** — same command → PASS (all 7).
+- [ ] **Step 4: Run to verify they pass** — same command → PASS (all 9).
 
 - [ ] **Step 5: Commit**
 
@@ -299,7 +330,7 @@ git commit -m "feat(892): object-store rotation-state sidecar"
 
 **Interfaces:**
 - Consumes: Task 4 `rotate`, Task 5 sidecar, `read_console_log`/`console_log_path` (`providers/shared/runtime_paths.py`), `Redactor(registry=...)`, `register_artifact_row`, `advisory_xact_lock` (`db/locks.py`), Task 1 `content_encoding`.
-- Produces: an async handler `async def handle_console_rotate(job, *, pool, secret_registry, artifact_store) -> None` registered in the worker registry.
+- Produces: an async handler `async def handle_console_rotate(job, *, pool, secret_registry, artifact_store) -> None` registered in the worker registry. **Job-payload contract (defined here, populated by Task 7):** `job.payload["system_id"]: str` and `job.payload["boot_id"]: str` — the handler reads `boot_id` from the payload (it does not compute it; the reconciler stamps the boot-identity signal so the worker need not introspect libvirt). A missing/empty `boot_id` is treated as `""` (forces a generation reset on first sight, safe).
 
 - [ ] **Step 1: Write the failing tests** (drive the handler directly with injected deps, the project's boundary):
   - Growing console file → after the job, the System has new `console-part-0-<start>` REDACTED artifact rows with `content_encoding=gzip` objects whose inflated bytes equal the redacted plaintext slices; the sidecar offset advanced.
@@ -312,7 +343,7 @@ git commit -m "feat(892): object-store rotation-state sidecar"
 - [ ] **Step 3: Implement.** The handler, holding the per-System advisory lock via `advisory_xact_lock(conn, scope="system", key=system_id)`:
   1. `state = read_sidecar(store, tenant, system_id)`.
   2. Read `file_bytes` via `asyncio.to_thread(read_console_log, console_log_path(system_id))` inside `try/except CategorizedError` → on raise: log once, return.
-  3. Compute `boot_id` (Task 7 supplies the source; for the unit test inject it). `result = rotate(state, file_bytes, boot_id, Redactor(registry=secret_registry).redact_text)`.
+  3. Read `boot_id = job.payload.get("boot_id", "")` (the reconciler stamped it, per the payload contract above). `result = rotate(state, file_bytes, boot_id, Redactor(registry=secret_registry).redact_text)`.
   4. For each `SealedPart`: `gzip.compress(part.redacted)` → `put_artifact(ArtifactWriteRequest(..., name=part_object_name(gen,start), sensitivity=REDACTED, retention_class="evidence", content_encoding="gzip"))`; then **insert-if-absent** the `register_artifact_row(stored, owner_kind="systems", owner_id=system_id)` row (skip when a row already exists for the object key — reuse the `_existing_console_row` pattern from `boot_evidence.py`). Commit the rows.
   5. After the rows commit, `write_sidecar(store, tenant, system_id, result.next_state)`.
   Register in `worker_registration.py` next to the other run/system handlers, passing `secret_registry` + `optional_upload_store`.
@@ -337,7 +368,9 @@ git commit -m "feat(892): console_rotate worker handler (local rotation)"
 
 **Interfaces:**
 - Consumes: the reconciler conn; the `systems`/`jobs` repositories.
-- Produces: `async def sweep_console_rotation(report, conn, _guard) -> int` matching the repair-catalog callable shape; enqueues one `console_rotate` job per **live local-libvirt** System (`ready`/booted, not torn down, provider local-libvirt) that has **no** pending/running `console_rotate` job (dedup ≤1 in flight). Defines the `boot_id` source (e.g. the libvirt domain's start identity / a stat of the console file's inode+mtime) and stamps it into the job payload.
+- Produces: `async def sweep_console_rotation(report, conn, _guard) -> int` matching the repair-catalog callable shape; enqueues one `console_rotate` job per **live local-libvirt** System (`ready`/booted, not torn down, provider local-libvirt) that has **no** pending/running `console_rotate` job (best-effort dedup — see note). Stamps `job.payload = {"system_id": ..., "boot_id": ...}` per Task 6's contract. The `boot_id` source is a per-boot signal independent of console size — use the console file's `os.stat` identity `f"{st_dev}:{st_ino}:{int(st_mtime)}"` (changes when libvirt truncates/recreates the log on power-cycle); a libvirt domain start-time is an acceptable alternative if exposed.
+
+**Dedup is best-effort, not a guarantee.** Two concurrent reconciler passes can both observe no in-flight job and both enqueue. That is safe — Task 6's per-System advisory lock serializes execution and the offset-derived idempotent keys make a duplicate job a no-op — so correctness rests on Task 6, not on this dedup. The anti-join only reduces wasted duplicate jobs.
 
 - [ ] **Step 1: Write the failing tests:**
   - Two live local Systems with no in-flight rotation → two `console_rotate` jobs enqueued.
@@ -390,7 +423,36 @@ git commit -m "feat(892): remote collector registers separate compressed part ar
 
 ---
 
-### Task 9: `live_vm` end-to-end proof (gated, operator-run)
+### Task 9: Teardown/reprovision cleanup of console parts and the sidecar
+
+**Files:**
+- Modify: the local-libvirt teardown path that reclaims a System's host/object-store artifacts (locate via `rg -n "teardown" src/kdive/jobs/handlers/systems src/kdive/providers/local_libvirt` and the existing per-Run console/overlay reclaim) — extend it to delete the System's `console-part-*` objects+rows and the `console-rotation-state.json` sidecar.
+- Test: `tests/jobs/handlers/test_console_rotate_teardown.py`
+
+**Interfaces:**
+- Consumes: Task 5 `sidecar_object_name`, Task 4 `part_object_name`, the System teardown handler.
+- Produces: teardown removes all `console-part-<gen>-<start>` artifacts (objects + rows) and the sidecar for the System.
+
+- [ ] **Step 1: Write the failing tests:**
+  - After teardown of a System that had console parts, `artifacts.list(system_id)` returns no `console-part-*` rows and the sidecar object is absent.
+  - **Reprovision starts fresh:** reusing the same `system_id`, the first rotation after reprovision begins a new series — verified by the `boot_id` change resetting offset/gen (a stale sidecar must not carry an old offset into the new boot). If teardown already removed the sidecar, this is automatic; assert no stale parts/sidecar survive a teardown→provision cycle.
+
+- [ ] **Step 2: Run to verify they fail** — `uv run python -m pytest tests/jobs/handlers/test_console_rotate_teardown.py -q` → FAIL.
+
+- [ ] **Step 3: Implement** — in the System teardown reclaim, enumerate and delete the System's `console-part-*` objects + artifact rows and the sidecar object. If the codebase already bulk-reclaims System-owned artifacts at teardown, confirm console parts are covered and add only the sidecar-object deletion; otherwise add the part reclaim. Keep it best-effort (a missing object is not an error).
+
+- [ ] **Step 4: Run to verify they pass**; then `uv run python -m pytest tests/jobs -q`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/kdive/jobs/handlers/systems tests/jobs/handlers/test_console_rotate_teardown.py
+git commit -m "feat(892): reclaim console parts + sidecar on teardown"
+```
+
+---
+
+### Task 10: `live_vm` end-to-end proof (gated, operator-run)
 
 **Files:**
 - Create: `tests/integration/test_console_parts_live.py` (marked `live_vm`)
@@ -410,7 +472,7 @@ git commit -m "test(892): live_vm proof for post-readiness console parts"
 
 ---
 
-### Task 10: Flip ADR-0273 to Accepted (citation/ratification commit)
+### Task 11: Flip ADR-0273 to Accepted (citation/ratification commit)
 
 **Files:**
 - Modify: `docs/adr/0273-observe-rotating-console-parts.md` (Status: Accepted)
@@ -435,10 +497,10 @@ git commit -m "docs(892): ratify ADR-0273 (Accepted)"
 
 ## Self-Review
 
-**Spec coverage:** R1 (offset-derived key) → Task 4; R2 (64 KiB) → Task 4; R3 (redaction + seam re-read) → Task 4/6; R4 (decompress-on-read metadata) → Task 1/2; R5 (remote separate compressed artifact) → Task 8; R6/R6a/R6c (delta read, sidecar, lock+idempotency) → Task 4/5/6; R6b (boot-id power-cycle) → Task 4/7; R7 (best-effort catch) → Task 6; R8/R8a (observation surface, per-artifact search caveat) → existing tools (no code) + verified in Task 9; R9 (per-Run evidence untouched) → Task 8 regression test; R10 (migration 0053) → Task 3. All requirements map to a task.
+**Spec coverage:** R1 (offset-derived key) → Task 4; R2 (per-part plaintext bound; redacted size may differ) → Task 4; R3 (redaction + seam overlap at every boundary) → Task 4/6; R4 (decompress-on-read metadata) → Task 1/2; R5 (remote separate compressed artifact) → Task 8; R6/R6a/R6c (delta read, sidecar, lock+idempotency) → Task 4/5/6; R6b (boot-id power-cycle) → Task 4/7; R7 (best-effort catch) → Task 6; R8/R8a (observation surface, per-artifact search caveat) → existing tools (no code) + verified in Task 10; R9 (per-Run evidence untouched) → Task 8 regression test; R10 (migration 0053) → Task 3; teardown/reprovision cleanup (R8a retention + no leak) → Task 9. All requirements map to a task.
 
-**Placeholder scan:** the only deliberately deferred detail is the concrete `boot_id` source, which Task 7 must choose (libvirt domain start identity or console-file inode+mtime) and Task 4 consumes as an opaque string — flagged, not a silent TODO. No "handle edge cases"/"TBD" steps.
+**Placeholder scan:** `boot_id`'s concrete source is fixed in Task 7 (console-file `os.stat` identity) and carried in `job.payload["boot_id"]` per Task 6's contract; Task 4 consumes it as an opaque string. No "handle edge cases"/"TBD" steps.
 
-**Type consistency:** `RotationState`/`SealedPart`/`RotationResult`/`part_object_name`/`rotate` (Task 4) are consumed unchanged by Tasks 5/6/8; `content_encoding` (Task 1) is consumed by Tasks 2/6/8; `JobKind.CONSOLE_ROTATE` (Task 3) by Tasks 6/7.
+**Type consistency:** `RotationState`/`SealedPart`(`gen,start,plaintext_len,redacted`)/`RotationResult`/`part_object_name`/`rotate` (Task 4) are consumed unchanged by Tasks 5/6/8/9; `content_encoding` (Task 1) is consumed by Tasks 2/6/8; `JobKind.CONSOLE_ROTATE` (Task 3) by Tasks 6/7; `job.payload["boot_id"]` is defined in Task 6 and populated in Task 7.
 
-**Ordering:** Tasks 1→2 (metadata before reader), 3 before 6/7 (job kind before handler/dispatch), 4/5 before 6 (core before handler), 6 before 7 (handler before dispatch), 8 independent of 6/7 (remote), 9 after 6/7, 10 last (ratify after citations land). Each task is independently testable and commits green.
+**Ordering:** Tasks 1→2 (metadata before reader), 3 before 6/7 (job kind before handler/dispatch), 4/5 before 6 (core before handler), 6 before 7 (handler contract before dispatch populates it), 8 independent of 6/7 (remote), 9 after 6 (teardown reclaims what 6 creates), 10 after 6/7, 11 last (ratify after citations land). Each task is independently testable and commits green.
