@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import LiteralString
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -27,12 +28,30 @@ from kdive.jobs.payloads import ReprovisionPayload, SystemPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.profiles.provider_policy import ProfilePolicy, rootfs_upload_window_allowed
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
+from kdive.providers.console_parts.sidecar import sidecar_object_name
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.store.objectstore import ObjectStore, artifact_key
 
 _log = logging.getLogger(__name__)
+
+# The local-libvirt console-rotation parts and sidecar (#892) live under this tenant, matching the
+# rotation handler (``console_rotate.py`` ``_TENANT``) so teardown reclaims the same owner prefix.
+_CONSOLE_TENANT = "local"
+
+# Matches local console part objects ``console-part-<gen>-<index>`` only; the remote collector's
+# ``console-parts-<n>`` keys lack the trailing hyphen after ``part`` and are intentionally excluded.
+_CONSOLE_PART_LIKE: LiteralString = "%console-part-%"
+
+_DELETE_PART_ROWS_SQL: LiteralString = (
+    "DELETE FROM artifacts WHERE owner_kind = 'systems' AND owner_id = %s AND object_key LIKE %s"
+)
+
+_SELECT_PART_KEYS_SQL: LiteralString = (
+    "SELECT object_key FROM artifacts WHERE owner_kind = 'systems' "
+    "AND owner_id = %s AND object_key LIKE %s"
+)
 
 
 async def audit_transition(
@@ -289,13 +308,39 @@ async def reprovision_handler(
     return str(system_id)
 
 
+async def _console_part_keys(conn: AsyncConnection, system_id: UUID) -> list[str]:
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(_SELECT_PART_KEYS_SQL, (system_id, _CONSOLE_PART_LIKE))
+        return [row["object_key"] for row in await cur.fetchall()]
+
+
+async def _reclaim_console_artifacts(
+    conn: AsyncConnection, store: ObjectStore, system_id: UUID
+) -> None:
+    """Delete the System's console-rotation part objects + rows and the sidecar object (#892).
+
+    Part objects are deleted before their ``artifacts`` rows so a mid-cleanup store failure leaves
+    the rows for the artifact-expiry reconciler (#768) to reclaim. The rotation-state sidecar has no
+    ``artifacts`` row, so #768 never reaps it; deleting it here is the only thing that reclaims it.
+    """
+    part_keys = await _console_part_keys(conn, system_id)
+    for key in part_keys:
+        await asyncio.to_thread(store.delete, key)
+    if part_keys:
+        async with conn.transaction():
+            await conn.execute(_DELETE_PART_ROWS_SQL, (system_id, _CONSOLE_PART_LIKE))
+    sidecar_key = artifact_key(_CONSOLE_TENANT, "systems", str(system_id), sidecar_object_name())
+    await asyncio.to_thread(store.delete, sidecar_key)
+
+
 async def teardown_handler(
     conn: AsyncConnection,
     job: Job,
     *,
     resolver: ProviderResolver,
+    artifact_store: ObjectStore | None = None,
 ) -> str | None:
-    """Destroy+undefine the domain and drive the System ``-> torn_down``."""
+    """Destroy the domain, reclaim console artifacts, and drive the System ``-> torn_down``."""
     system_id = UUID(load_payload(job, SystemPayload).system_id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
@@ -317,6 +362,15 @@ async def teardown_handler(
     set_provider_kind(binding.kind.value)
     provisioner = binding.runtime.provisioner
     await asyncio.to_thread(provisioner.teardown, domain_name)
+    if artifact_store is not None:
+        try:
+            await _reclaim_console_artifacts(conn, artifact_store, system_id)
+        except Exception:  # noqa: BLE001 - reclaim is best-effort; teardown must still succeed
+            _log.warning(
+                "best-effort console-artifact reclaim for system %s failed",
+                system_id,
+                exc_info=True,
+            )
     return str(system_id)
 
 
@@ -335,7 +389,9 @@ def register_handlers(
     )
     registry.register(
         JobKind.TEARDOWN,
-        lambda conn, job: teardown_handler(conn, job, resolver=resolver),
+        lambda conn, job: teardown_handler(
+            conn, job, resolver=resolver, artifact_store=artifact_store
+        ),
     )
     registry.register(
         JobKind.REPROVISION,
