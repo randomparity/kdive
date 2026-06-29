@@ -208,9 +208,11 @@ def test_seals_full_threshold_parts_indexed_monotonically():
     assert part_object_name(0, 1) == "console-part-0-000001"
 
 def test_secret_split_across_internal_part_boundary_is_redacted():
-    # a secret straddling the boundary BETWEEN two threshold parts within one rotate() call
+    # place the secret straddling the EMIT split (ROTATION_THRESHOLD - SEAM_OVERLAP) so the test
+    # proves the carry geometry, not just a threshold-aligned boundary
     sensitive = b"ZZ-INTERNAL-BOUNDARY-MARKER-ZZ"
-    data = b"a" * (ROTATION_THRESHOLD - 7) + sensitive + b"b" * ROTATION_THRESHOLD
+    split = ROTATION_THRESHOLD - SEAM_OVERLAP
+    data = b"a" * (split - len(sensitive) // 2) + sensitive + b"b" * (ROTATION_THRESHOLD * 2)
     redact = lambda b: b.replace(sensitive, b"[REDACTED]")
     r = rotate(S0, data, "id1", redact)
     joined = b"".join(p.redacted for p in r.parts)
@@ -261,23 +263,34 @@ def test_secret_split_across_job_boundary_is_redacted():
      `len(file_bytes) < state.plaintext_offset` → fresh generation: `gen = (state.boot_gen + 1) if
      state.boot_id is not None else state.boot_gen`, `offset = 0`, `carry = b""`, `index = 0`. Else
      carry forward `gen`/`offset`/`carry`/`index` from `state`.
-  2. **Process the unconsumed delta with the carry primitive:** `pending = state.carry +
-     file_bytes[offset:]` (raw). Repeatedly, while `len(pending) >= ROTATION_THRESHOLD`: take
-     `chunk = pending[:ROTATION_THRESHOLD]`; mirror the collector — keep the last `SEAM_OVERLAP` raw
-     bytes as the next carry and emit the rest: `split = ROTATION_THRESHOLD - SEAM_OVERLAP`;
-     `SealedPart(gen, index, redacted=redact(chunk[:split]))`; the carried-forward `chunk[split:]` is
-     prepended to the remaining `pending[ROTATION_THRESHOLD:]` for the next iteration; `index += 1`.
-     (The held-back `SEAM_OVERLAP` raw bytes are emitted, redacted, with the NEXT part — exactly the
-     collector's `_carry` behavior — so a secret straddling any boundary is redacted contiguously and
-     never emitted raw. No prefix is dropped.)
-  3. The final `pending` remainder (`< ROTATION_THRESHOLD`, includes the last carry) is **not** sealed;
-     it becomes `next_state.carry` (re-read/re-derived from the file next job — persisting it in the
-     sidecar lets the stateless job reproduce the in-memory carry the collector keeps).
-  4. `next_state = RotationState(plaintext_offset=len(file_bytes), carry=<remainder>, next_index=index,
+  2. **Process the unconsumed delta with the EXTRACTED collector primitive.** Lift the collector's
+     `_rotate`/`_flush_tail`/`_carry` logic **verbatim** into a small stateful `SeamRotator` in this
+     shared module (do **not** re-derive the byte arithmetic — the geometry is subtle and already proven
+     in `collector.py:213-241`):
+     ```python
+     class SeamRotator:
+         def __init__(self, redact, threshold, seam_overlap, carry=b""): ...
+         def feed(self, data: bytes) -> None: ...          # append to buffer
+         def drain_parts(self) -> list[bytes]:             # emit redact(data[:split]) per the
+             # collector's _rotate: while len(carry+buffer) crosses threshold, data = carry+buffer,
+             # split = len(data) - seam_overlap, emit redact(data[:split]), carry = data[split:].
+             ...
+         @property
+         def carry(self) -> bytes: ...                     # the held-back raw overlap
+     ```
+     `rotate()` then: `r = SeamRotator(redact, ROTATION_THRESHOLD, SEAM_OVERLAP, carry=state.carry)`;
+     `r.feed(file_bytes[offset:])`; `for blob in r.drain_parts(): parts.append(SealedPart(gen, index,
+     blob)); index += 1`. The held-back `r.carry` is the only un-emitted region; it is emitted (redacted)
+     with the next part, exactly as the collector does, so a secret straddling any boundary — including
+     one landing exactly on the emit split — is redacted contiguously and never stored raw. No prefix is
+     dropped.
+  3. The remaining `r.carry` is **not** sealed; it becomes `next_state.carry` (persisted in the sidecar
+     so the stateless job reproduces the collector's in-memory carry).
+  4. `next_state = RotationState(plaintext_offset=len(file_bytes), carry=r.carry, next_index=index,
      boot_gen=gen, boot_id=boot_id)`. `plaintext_offset` advances to the file end; the unemitted tail
-     lives in `carry`, so nothing is double-read and the work per job is bounded by the new delta.
-  Keep `rotate` ≤100 lines / complexity ≤8 via `_detect_new_boot` and a `_seal_with_carry` helper that
-  is the lifted collector logic.
+     lives in `carry`, so nothing is double-read and per-job work is bounded by the new delta.
+  Task 8 makes the collector call this same `SeamRotator`, so the seam geometry has one implementation.
+  Keep `rotate` ≤100 lines / complexity ≤8 via `_detect_new_boot` and the `SeamRotator` class.
 
 - [ ] **Step 4: Run to verify they pass** — same command → PASS (all 7).
 
@@ -285,7 +298,7 @@ def test_secret_split_across_job_boundary_is_redacted():
 
 ```bash
 git add src/kdive/providers/console_parts/rotation.py tests/providers/console_parts/test_rotation.py
-git commit -m "feat(892): pure console-rotation core (offset keys, seam, boot-id)"
+git commit -m "feat(892): console-rotation core via extracted SeamRotator + boot-id"
 ```
 
 ---
