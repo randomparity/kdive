@@ -295,6 +295,12 @@ async def _artifact_content(
     against the stored (compressed) object and serves it as-is. A corrupt compressed
     body degrades to ``content_unavailable="decode_error"`` rather than raising.
     Detection is strictly metadata-driven: the object key is never inspected.
+
+    Inflation allocates the full inflated body in memory; this is bounded by
+    construction (the only producer of ``content_encoding=gzip`` objects is the
+    console-part path at <= 64 KiB plaintext per part, and writing arbitrary gzip to a
+    REDACTED key needs object-store write access agents lack), so a decompression bomb
+    is out of the threat model. A hard inflated-size cap is possible future hardening.
     """
     try:
         store = store_factory()

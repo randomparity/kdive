@@ -176,6 +176,9 @@ def test_artifacts_get_corrupt_gzip_degrades(migrated_url: str) -> None:
         assert resp.status == "available"
         assert "content" not in resp.data
         assert data_str(resp, "content_unavailable") == "decode_error"
+        # Best-effort contract: the presign happens before the inflate attempt, so the
+        # download URI is still present alongside the decode failure.
+        assert resp.refs["download_uri"].endswith("?token=stub")
 
     asyncio.run(_run())
 
