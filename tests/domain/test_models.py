@@ -316,6 +316,9 @@ def test_job_kind_covers_the_async_tool_surface() -> None:
         # Composite: runs.build_install_boot enqueues one job whose handler runs the
         # build -> install -> boot phases in sequence (ADR-0268, #866).
         "build_install_boot",
+        # systems.authorize_ssh_key enqueues this to append an agent public key to the
+        # guest root authorized_keys over the managed-key SSH (ADR-0271, #782).
+        "authorize_ssh_key",
     }
 
 
