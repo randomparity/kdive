@@ -10,7 +10,7 @@ from psycopg import AsyncConnection
 
 from kdive.domain.errors import CategorizedError
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.handlers import control, image_build, systems, vmcore
+from kdive.jobs.handlers import console_rotate, control, image_build, systems, vmcore
 from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
 from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.models import HandlerRegistry, JobHandler
@@ -59,6 +59,17 @@ def _register_run_handlers(
             artifact_store=assembly.object_stores.optional_upload_store,
             build_phase_recorder=BuildPhaseRecorder(meter=metrics.get_meter("kdive.worker")),
         ),
+    )
+
+
+def _register_console_rotate_handler(
+    registry: HandlerRegistry,
+    assembly: WorkerHandlerAssembly,
+) -> None:
+    console_rotate.register_handlers(
+        registry,
+        secret_registry=assembly.secret_registry,
+        artifact_store=assembly.object_stores.optional_upload_store,
     )
 
 
@@ -119,6 +130,7 @@ def _unconfigured_image_build_handler(
 HANDLER_REGISTRARS: tuple[HandlerRegistrar, ...] = (
     _register_system_handlers,
     _register_run_handlers,
+    _register_console_rotate_handler,
     _register_control_handlers,
     _register_vmcore_handlers,
     _register_image_build_handler,
