@@ -727,3 +727,35 @@ def test_open_transport_accepts_drgn_live_kind_and_emits_ssh_scheme_handle() -> 
     assert TransportHandleData.decode(str(handle)) == TransportHandleData(
         kind="ssh", host="127.0.0.1", port=22
     )
+
+
+def _recorded_endpoint_connector(resolve_ssh_endpoint):
+    return LocalLibvirtConnect(
+        resolve_endpoint=lambda _s: ("127.0.0.1", 1),
+        probe=lambda _h, _p: True,
+        resolve_ssh_endpoint=resolve_ssh_endpoint,
+        ssh_connect=lambda _h, _p: True,
+    )
+
+
+def test_recorded_ssh_endpoint_returns_host_port() -> None:
+    connector = _recorded_endpoint_connector(lambda _s: ("127.0.0.1", 22022))
+    assert connector.recorded_ssh_endpoint(SystemHandle("sys-1")) == ("127.0.0.1", 22022)
+
+
+def test_recorded_ssh_endpoint_none_when_not_provisioned() -> None:
+    def _raise(_s):
+        raise CategorizedError("no ssh", category=ErrorCategory.CONFIGURATION_ERROR)
+
+    connector = _recorded_endpoint_connector(_raise)
+    assert connector.recorded_ssh_endpoint(SystemHandle("sys-1")) is None
+
+
+def test_recorded_ssh_endpoint_reraises_infrastructure_failure() -> None:
+    def _raise(_s):
+        raise CategorizedError("libvirt down", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    connector = _recorded_endpoint_connector(_raise)
+    with pytest.raises(CategorizedError) as excinfo:
+        connector.recorded_ssh_endpoint(SystemHandle("sys-1"))
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE

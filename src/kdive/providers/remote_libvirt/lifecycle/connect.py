@@ -105,6 +105,10 @@ class RemoteLibvirtConnect:
         if "://" in str(handle):
             TransportHandleData.decode(handle)
 
+    def recorded_ssh_endpoint(self, system: SystemHandle) -> tuple[str, int] | None:
+        """Remote-libvirt discloses no local SSH endpoint (ADR-0271); agent SSH is a follow-up."""
+        return None
+
 
 def _real_resolve_port(system: SystemHandle) -> int:  # pragma: no cover - live_vm
     raise CategorizedError(

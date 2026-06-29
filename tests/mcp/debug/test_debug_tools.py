@@ -104,6 +104,9 @@ class _FakeConnector:
     def close_transport(self, handle: TransportHandle) -> None:
         self.closed.append(str(handle))
 
+    def recorded_ssh_endpoint(self, system: SystemHandle) -> tuple[str, int] | None:
+        return None
+
 
 class _RaisingCloseConnector(_FakeConnector):
     """A connector whose close_transport raises — the detach must still complete."""

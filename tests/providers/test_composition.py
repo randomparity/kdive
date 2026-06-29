@@ -161,6 +161,9 @@ class _ConnectorProvider:
     def close_transport(self, handle: TransportHandle) -> None:
         self.closed = handle
 
+    def recorded_ssh_endpoint(self, system: SystemHandle) -> tuple[str, int] | None:
+        return None
+
 
 class _ControllerProvider:
     def power(self, domain_name: str, action: object) -> None:
