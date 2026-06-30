@@ -1027,3 +1027,123 @@ def test_artifacts_search_text_quarantined_is_not_found(migrated_url: str) -> No
         assert store.got is False  # excluded by SQL before any object fetch
 
     asyncio.run(_run())
+
+
+def test_get_find_forward_returns_match_window(migrated_url: str) -> None:
+    body = b"boot ok\nBUG: KASAN slab-out-of-bounds\nCall Trace:\n func+0x1\n"
+    store = _SearchStore(body)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="BUG: KASAN"
+            )
+            assert resp.status == "available"
+            assert data_bool(resp, "match_found") is True
+            assert data_int(resp, "match_line") == 2
+            assert "BUG: KASAN" in data_str(resp, "content")
+            assert data_int(resp, "match_offset") == body.index(b"BUG: KASAN")
+
+    asyncio.run(_run())
+
+
+def test_get_find_no_match(migrated_url: str) -> None:
+    store = _SearchStore(b"clean boot\nno crash here\n")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="BUG:"
+            )
+            assert resp.status == "available"
+            assert data_bool(resp, "match_found") is False
+            assert "content" not in resp.data
+
+    asyncio.run(_run())
+
+
+def test_get_find_backward_from_end(migrated_url: str) -> None:
+    body = b"BUG: first\nmid\nBUG: second\nend\n"
+    store = _SearchStore(body)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool,
+                _ctx(),
+                artifact_id=red_id,
+                store_factory=lambda: store,
+                find="BUG:",
+                direction="backward",
+            )
+            assert data_int(resp, "match_offset") == body.rindex(b"BUG:")
+
+    asyncio.run(_run())
+
+
+def test_get_find_oversized_rejects(migrated_url: str) -> None:
+    store = _SearchStore(b"", size=_MAX_WINDOWED_FETCH_BYTES + 1)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="BUG:"
+            )
+            assert resp.status == "error"
+            assert resp.data["reason"] == "artifact_too_large"
+
+    asyncio.run(_run())
+
+
+def test_get_find_malformed_rejects(migrated_url: str) -> None:
+    store = _SearchStore(b"anything")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="a||b"
+            )
+            assert resp.status == "error"
+            assert resp.data["reason"] == "bad_search_input"
+
+    asyncio.run(_run())
+
+
+def test_get_backward_no_find_is_tail(migrated_url: str) -> None:
+    body = b"".join(b"line %d\n" % i for i in range(10000))  # larger than one window
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool,
+                _ctx(),
+                artifact_id=red_id,
+                store_factory=lambda: _SearchStore(body),
+                direction="backward",
+            )
+            assert data_str(resp, "content").endswith("line 9999\n")
+            assert data_int(resp, "next_offset") > 0
+
+    asyncio.run(_run())
+
+
+def test_get_find_quarantined_is_not_found(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id, _, _ = await _seed_system_with_artifacts(pool)
+            quar_id = await _seed_quarantined_artifact(pool, sys_id)
+            store = _SearchStore(b"BUG: panic")
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=quar_id, store_factory=lambda: store, find="BUG:"
+            )
+            assert resp.status == "error"
+            assert resp.error_category == "not_found"
+            assert store.got is False  # excluded before any object fetch
+
+    asyncio.run(_run())
