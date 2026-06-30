@@ -8,7 +8,9 @@ from threading import Lock
 from kdive.providers.ports.debug import (
     GdbBacktrace,
     GdbBreakpointRef,
+    GdbDisassembly,
     GdbFrame,
+    GdbInstruction,
     GdbMiAttachment,
     GdbStopRecord,
 )
@@ -110,4 +112,28 @@ class FaultInjectDebugEngine:
         del attachment
         return GdbFrame(
             level=level, func="panic", addr="0xffffffff81000000", file="kernel/panic.c", line=1
+        )
+
+    def disassemble(
+        self,
+        attachment: GdbMiAttachment,
+        *,
+        symbol: str | None = None,
+        address: int | None = None,
+        instruction_count: int = 64,
+    ) -> GdbDisassembly:
+        del attachment, symbol, address, instruction_count
+        return GdbDisassembly(
+            instructions=[
+                GdbInstruction(
+                    address="0xffffffff81000000", inst="push %rbp", func_name="panic", offset=0
+                ),
+                GdbInstruction(
+                    address="0xffffffff81000001",
+                    inst="mov %rsp,%rbp",
+                    func_name="panic",
+                    offset=1,
+                ),
+            ],
+            truncated=False,
         )

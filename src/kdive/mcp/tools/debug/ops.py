@@ -1,6 +1,6 @@
 """The Debug-plane gdb-MI tools — `debug.set_breakpoint/.clear/.list`, `.read_memory`,
-`.read_registers`, `.resolve_symbol`, `.continue`, `.interrupt`, `.backtrace`, `.read_frame`
-(ADR-0034, ADR-0248, ADR-0275).
+`.read_registers`, `.resolve_symbol`, `.continue`, `.interrupt`, `.backtrace`, `.read_frame`,
+`.disassemble` (ADR-0034, ADR-0248, ADR-0275, ADR-0276).
 
 These extend the `debug.*` session lifecycle tools registered by ``sessions.py``. A `live`
 `DebugSession` records an open single-attach gdbstub transport; the first Debug-plane op for
@@ -62,11 +62,12 @@ def _gdbmi_maturity() -> dict[str, object]:
 
     The seven original ops act over a live gdbstub-backed DebugSession whose full round-trip
     (set_breakpoint -> continue -> read_registers) was proven live on real KVM (M2.8 B6 #680),
-    so they are ``implemented``. ``resolve_symbol`` (ADR-0248), ``backtrace`` and ``read_frame``
-    (ADR-0275) ride that same proven attach transport and are unit-tested against the scripted
-    controller here; their specific ``-data-evaluate-expression`` / ``-stack-list-frames``
-    commands were not separately re-proven live, so they are omitted from
-    ``_LOCAL_PROVEN_DEBUG_TOOLS`` until a live exercise lands.
+    so they are ``implemented``. ``backtrace`` and ``read_frame`` (ADR-0275, PR#929) and
+    ``disassemble`` (ADR-0276, PR#932) ride that same transport and were each re-proven live
+    against a stopped ``schedule``, so they are in ``_LOCAL_PROVEN_DEBUG_TOOLS`` too.
+    ``resolve_symbol`` (ADR-0248) is unit-tested against the scripted controller only — its
+    ``-data-evaluate-expression`` form was not separately re-proven live — so it stays out of the
+    proven set until a live exercise lands.
     """
     return _docmeta.maturity_meta("implemented")
 
@@ -380,6 +381,30 @@ def _read_frame_op(session_id: str, level: int) -> _EngineOp:
     return op
 
 
+def _disassemble_op(
+    session_id: str, symbol: str | None, address: int | None, instruction_count: int
+) -> _EngineOp:
+    def op(engine: GdbMiEngine, attachment: GdbMiAttachment) -> ToolResponse:
+        result = engine.disassemble(
+            attachment, symbol=symbol, address=address, instruction_count=instruction_count
+        )
+        instructions: list[JsonValue] = [
+            insn.model_dump(mode="json", exclude_none=True) for insn in result.instructions
+        ]
+        return ToolResponse.success(
+            session_id,
+            "disassembled",
+            suggested_next_actions=["debug.read_memory", "debug.read_registers"],
+            data={
+                "instruction_count": len(instructions),
+                "truncated": result.truncated,
+                "instructions": instructions,
+            },
+        )
+
+    return op
+
+
 def _stop_data(reason: str | None, timed_out: bool) -> dict[str, JsonValue]:
     data: dict[str, JsonValue] = {"timed_out": timed_out}
     if reason is not None:
@@ -390,7 +415,7 @@ def _stop_data(reason: str | None, timed_out: bool) -> dict[str, JsonValue]:
 def _register_debug_ops(
     app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
 ) -> None:
-    """Register the ten gdb-MI `debug.*` tools on ``app``, sharing ``runtime`` (ADR-0034 §5)."""
+    """Register the eleven gdb-MI `debug.*` tools on ``app``, sharing ``runtime`` (ADR-0034 §5)."""
     _register_debug_set_breakpoint(app, pool, runtime)
     _register_debug_clear_breakpoint(app, pool, runtime)
     _register_debug_list_breakpoints(app, pool, runtime)
@@ -401,6 +426,7 @@ def _register_debug_ops(
     _register_debug_interrupt(app, pool, runtime)
     _register_debug_backtrace(app, pool, runtime)
     _register_debug_read_frame(app, pool, runtime)
+    _register_debug_disassemble(app, pool, runtime)
 
 
 def _register_debug_set_breakpoint(
@@ -653,4 +679,42 @@ def _register_debug_read_frame(
             session_id,
             runtime,
             _read_frame_op(session_id, level),
+        )
+
+
+def _register_debug_disassemble(
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+) -> None:
+    @app.tool(
+        name="debug.disassemble",
+        annotations=_docmeta.read_only(),
+        meta=_gdbmi_maturity(),
+    )
+    async def debug_disassemble(
+        session_id: Annotated[str, Field(description="The live DebugSession to disassemble on.")],
+        symbol: Annotated[
+            str | None,
+            Field(
+                description="Bare C function/symbol name to disassemble around (or use address)."
+            ),
+        ] = None,
+        address: Annotated[
+            int | None,
+            Field(description="Start address (integer) to disassemble from (or use symbol)."),
+        ] = None,
+        instruction_count: Annotated[
+            int,
+            Field(description="Instructions to return (1-256); the window is truncated past it."),
+        ] = 64,
+    ) -> ToolResponse:
+        """Disassemble a bounded window around a symbol/address on a live DebugSession.
+
+        Requires contributor.
+        """
+        return await run_engine_op(
+            pool,
+            current_context(),
+            session_id,
+            runtime,
+            _disassemble_op(session_id, symbol, address, instruction_count),
         )

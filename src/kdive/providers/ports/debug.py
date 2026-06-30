@@ -36,6 +36,22 @@ class GdbBacktrace(ProviderModel):
     truncated: bool = False
 
 
+class GdbInstruction(ProviderModel):
+    """One disassembled instruction from a gdb/MI ``-data-disassemble`` result."""
+
+    address: str | None = None
+    inst: str | None = None
+    func_name: str | None = None
+    offset: int | None = None
+
+
+class GdbDisassembly(ProviderModel):
+    """A bounded, parsed gdb/MI disassembly window."""
+
+    instructions: list[GdbInstruction]
+    truncated: bool = False
+
+
 class GdbBreakpointRef(ProviderModel):
     """One gdb/MI breakpoint reference."""
 
@@ -214,6 +230,31 @@ class GdbMiEngine(Protocol):
                 ``inferior_running`` when the target is running, ``no_frame_at_level`` when no
                 frame exists at ``level``, or for other gdb/MI command failures;
                 ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+
+    def disassemble(
+        self,
+        attachment: GdbMiAttachment,
+        *,
+        symbol: str | None,
+        address: int | None,
+        instruction_count: int,
+    ) -> GdbDisassembly:
+        """Disassemble a bounded forward instruction window around a symbol or address.
+
+        Exactly one of ``symbol`` / ``address`` must be given. Bounds the response to
+        ``instruction_count`` (slicing an oversized range), with ``truncated`` when more
+        instructions follow.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_instruction_count`` for an
+                out-of-range count, ``bad_target`` when not exactly one of symbol/address is
+                given, ``bad_address`` for an out-of-range address, ``bad_symbol_name`` (via
+                ``resolve_symbol``) for a non-identifier name (all raised before the disassemble
+                command); ``DEBUG_ATTACH_FAILURE`` / ``no_instructions`` when gdb returns no
+                usable instruction data or the address is unreadable; ``INFRASTRUCTURE_FAILURE``
+                for command timeouts.
         """
         ...
 

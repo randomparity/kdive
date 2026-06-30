@@ -40,6 +40,7 @@
 | [`debug.backtrace`](debug.md#debugbacktrace) | `implemented` |
 | [`debug.clear_breakpoint`](debug.md#debugclear_breakpoint) | `implemented` |
 | [`debug.continue`](debug.md#debugcontinue) | `implemented` |
+| [`debug.disassemble`](debug.md#debugdisassemble) | `implemented` |
 | [`debug.end_session`](debug.md#debugend_session) | `implemented` |
 | [`debug.get_session`](debug.md#debugget_session) | `implemented` |
 | [`debug.interrupt`](debug.md#debuginterrupt) | `implemented` |

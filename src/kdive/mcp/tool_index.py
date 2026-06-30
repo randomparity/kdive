@@ -121,6 +121,9 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "debug.resolve_symbol": frozenset({"symbol", "resolve", "address", "lookup", "debug"}),
     "debug.backtrace": frozenset({"backtrace", "stack", "frames", "call", "trace", "unwind"}),
     "debug.read_frame": frozenset({"frame", "stack", "inspect", "select", "backtrace", "debug"}),
+    "debug.disassemble": frozenset(
+        {"disassemble", "disasm", "instructions", "asm", "opcodes", "code"}
+    ),
     "debug.start_session": frozenset({"session", "start", "gdb", "debug", "attach"}),
     "debug.end_session": frozenset({"session", "end", "stop", "gdb", "debug"}),
     "debug.continue": frozenset({"continue", "resume", "run", "debug"}),

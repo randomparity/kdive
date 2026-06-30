@@ -76,6 +76,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "debug.clear_breakpoint": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.backtrace": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.continue": ("tests/mcp/debug/test_debug_ops.py",),
+    "debug.disassemble": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.end_session": (
         "tests/mcp/debug/test_debug_tools.py",
         "tests/mcp/debug/test_debug_ops.py",
@@ -539,7 +540,11 @@ _LOCAL_PLANNED_PROVIDER_TOOLS: frozenset[str] = frozenset()
 # invariant 5): start_session opened a live gdbstub session, set_breakpoint("schedule") →
 # continue → stopped(reason="breakpoint-hit") → read_registers(rip) == the schedule address,
 # then end_session detached cleanly. The whole gdb-MI set shares that one attached session, so
-# all nine are now `implemented`.
+# those nine are `implemented`. The later stack/disassembly ops were each re-proven live over the
+# same transport: `backtrace`/`read_frame` against a stopped `schedule` (PR#929, #920/ADR-0275),
+# and `disassemble` (symbol + address paths, plus the categorized bad-bounds/bad-target/unknown
+# failures) against a stopped `schedule` (PR#932, #921/ADR-0276). `resolve_symbol` (ADR-0248) is
+# unit-tested only and stays out until its `-data-evaluate-expression` form is re-proven live.
 _LOCAL_PROVEN_DEBUG_TOOLS = frozenset(
     {
         "debug.set_breakpoint",
@@ -551,6 +556,9 @@ _LOCAL_PROVEN_DEBUG_TOOLS = frozenset(
         "debug.interrupt",
         "debug.start_session",
         "debug.end_session",
+        "debug.backtrace",
+        "debug.read_frame",
+        "debug.disassemble",
     }
 )
 

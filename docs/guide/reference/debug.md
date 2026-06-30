@@ -35,6 +35,21 @@ Resume a live DebugSession and wait for a stop event. Requires contributor.
 | `session_id` | string | yes | The live DebugSession to continue execution on. |
 | `timeout_sec` | number | no | Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap. |
 
+## `debug.disassemble`
+
+`implemented` · `read-only`
+
+Disassemble a bounded window around a symbol/address on a live DebugSession.
+
+Requires contributor.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `address` | integer (nullable) | no | Start address (integer) to disassemble from (or use symbol). |
+| `instruction_count` | integer | no | Instructions to return (1-256); the window is truncated past it. |
+| `session_id` | string | yes | The live DebugSession to disassemble on. |
+| `symbol` | string (nullable) | no | Bare C function/symbol name to disassemble around (or use address). |
+
 ## `debug.end_session`
 
 `implemented`

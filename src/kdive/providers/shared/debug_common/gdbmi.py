@@ -35,7 +35,9 @@ from kdive.providers.ports.debug import (
     GdbBacktrace,
     GdbBreakpointRef,
     GdbController,
+    GdbDisassembly,
     GdbFrame,
+    GdbInstruction,
     GdbMiAttachment,
     GdbStopRecord,
 )
@@ -50,6 +52,7 @@ from kdive.providers.shared.debug_common.mi_controller import PygdbmiController
 from kdive.providers.shared.debug_common.mi_protocol import (
     MiRecord,
     breakpoint_rows,
+    disassembly_rows,
     evaluate_value,
     memory_segments,
     mi_int,
@@ -81,6 +84,11 @@ MAX_MEMORY_READ_BYTES = 4096
 # Caps the backtrace *response* (not the gdb command): a free-running kernel stack is bounded,
 # but the response stays bounded and a deeper stack is flagged via GdbBacktrace.truncated.
 MAX_BACKTRACE_FRAMES = 64
+# Caps the disassembly *response*: bound the window in Python, not the gdb command (ADR-0276).
+MAX_DISASSEMBLE_INSTRUCTIONS = 256
+# x86-64's maximum instruction length is 15 bytes; round up to 16 so an N*16-byte window spans
+# at least N instructions, and reuse it as the shrink-retry floor (one maximal instruction).
+MAX_INSTRUCTION_BYTES = 16
 _INTERRUPT_STOP_TIMEOUT_SEC = mi_execution.INTERRUPT_STOP_TIMEOUT_SEC
 _STOP_POLL_SLICE_SEC = mi_execution.STOP_POLL_SLICE_SEC
 _timeout_error = mi_controller.timeout_error
@@ -121,6 +129,10 @@ _RUNNING_RE = re.compile(r"running", re.IGNORECASE)
 # `^error,"-stack-list-frames: Not enough frames in stack."` (not an empty `^done,stack=[]` and
 # not the CLI's "No frame at level N."), so the missing-frame codes must catch that phrasing too.
 _NO_STACK_RE = re.compile(r"no (stack|frame)|not enough frames", re.IGNORECASE)
+# gdb's ^error for an unreadable address from the `-data-disassemble` range form. The range form
+# resolves no function, so the only failure phrasing is the memory-access one (never the `-a`
+# form's "No function contains").
+_NO_MEMORY_RE = re.compile(r"cannot access memory", re.IGNORECASE)
 
 
 def _config_error(
@@ -497,6 +509,118 @@ class GdbMiEngine:
 
     def _redact_frame(self, frame: GdbFrame) -> GdbFrame:
         return GdbFrame.model_validate(self._redactor().redact_value(frame.model_dump(mode="json")))
+
+    # --- disassembly (ADR-0276) -----------------------------------------------------------
+
+    def disassemble(
+        self,
+        attachment: GdbMiAttachment,
+        *,
+        symbol: str | None = None,
+        address: int | None = None,
+        instruction_count: int = 64,
+    ) -> GdbDisassembly:
+        """Disassemble a bounded forward window around ``symbol`` or ``address`` (ADR-0276).
+
+        Validates the count and target before any disassemble command, then issues
+        ``-data-disassemble -s START -e START+count*16 -- 0`` and slices the result to
+        ``instruction_count`` (``truncated`` when more follow). A memory-access ``^error`` from
+        an oversized window drives a shrink-retry down to a one-instruction floor.
+        """
+        if (
+            not isinstance(instruction_count, int)
+            or instruction_count < 1
+            or instruction_count > MAX_DISASSEMBLE_INSTRUCTIONS
+        ):
+            raise _config_error(
+                f"instruction_count must be between 1 and {MAX_DISASSEMBLE_INSTRUCTIONS}",
+                code="bad_instruction_count",
+                details={"instruction_count": instruction_count},
+            )
+        start = self._disassemble_start(attachment, symbol=symbol, address=address)
+        no_instructions = CategorizedError(
+            "gdb/MI returned no instructions",
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            details={"code": "no_instructions"},
+        )
+        rows = disassembly_rows(
+            self._disassemble_command(attachment, start, instruction_count, missing=no_instructions)
+        )
+        if not rows:
+            raise no_instructions
+        parsed = [self._instruction_from(row) for row in rows]
+        truncated = len(parsed) > instruction_count
+        instructions = [self._redact_instruction(insn) for insn in parsed[:instruction_count]]
+        return GdbDisassembly(instructions=instructions, truncated=truncated)
+
+    def _disassemble_start(
+        self, attachment: GdbMiAttachment, *, symbol: str | None, address: int | None
+    ) -> int:
+        has_symbol = symbol is not None
+        has_address = address is not None
+        if has_symbol == has_address:
+            raise _config_error(
+                "exactly one of symbol or address is required",
+                code="bad_target",
+                details={"symbol": symbol, "address": address},
+            )
+        if symbol is not None:
+            return self.resolve_symbol(attachment, symbol)
+        if not isinstance(address, int) or address < 0 or address > 0xFFFFFFFFFFFFFFFF:
+            raise _config_error(
+                "address out of range", code="bad_address", details={"address": address}
+            )
+        return address
+
+    def _disassemble_command(
+        self,
+        attachment: GdbMiAttachment,
+        start: int,
+        instruction_count: int,
+        *,
+        missing: CategorizedError,
+    ) -> list[MiRecord]:
+        """Issue the range disassemble, shrinking the window on a memory-access ``^error``.
+
+        gdb errors on the whole range when the tail is unmapped, so a valid START near the top
+        of the loaded image is salvaged by halving the byte span down to one maximal instruction;
+        only an unreadable floor window raises ``missing`` (``no_instructions``).
+        """
+        span = instruction_count * MAX_INSTRUCTION_BYTES
+        last_exc: CategorizedError | None = None
+        while True:
+            command = f"-data-disassemble -s 0x{start:x} -e 0x{start + span:x} -- 0"
+            try:
+                return self.execute_mi_command(attachment, command)
+            except CategorizedError as exc:
+                if not self._is_unreadable_memory(exc):
+                    raise
+                last_exc = exc
+                if span <= MAX_INSTRUCTION_BYTES:
+                    raise missing from last_exc
+                span = max(span // 2, MAX_INSTRUCTION_BYTES)
+
+    def _is_unreadable_memory(self, exc: CategorizedError) -> bool:
+        if exc.category is not ErrorCategory.DEBUG_ATTACH_FAILURE:
+            return False
+        payload = exc.details.get("payload")
+        msg = payload.get("msg") if isinstance(payload, dict) else None
+        return isinstance(msg, str) and bool(_NO_MEMORY_RE.search(msg))
+
+    def _instruction_from(self, payload: dict[str, Any]) -> GdbInstruction:
+        return GdbInstruction(
+            address=payload.get("address") if isinstance(payload.get("address"), str) else None,
+            inst=payload.get("inst") if isinstance(payload.get("inst"), str) else None,
+            func_name=(
+                payload.get("func-name") if isinstance(payload.get("func-name"), str) else None
+            ),
+            offset=mi_int(payload.get("offset")),
+        )
+
+    def _redact_instruction(self, instruction: GdbInstruction) -> GdbInstruction:
+        return GdbInstruction.model_validate(
+            self._redactor().redact_value(instruction.model_dump(mode="json"))
+        )
 
     # --- interactive execution ------------------------------------------------------------
 

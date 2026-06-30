@@ -89,6 +89,15 @@ def stack_frames(records: list[MiRecord]) -> list[dict[str, Any]]:
     return rows
 
 
+def disassembly_rows(records: list[MiRecord]) -> list[dict[str, Any]]:
+    """The instruction dicts from a ``-data-disassemble`` result.
+
+    gdb/MI mode 0 emits a flat ``asm_insns=[{address,func-name,offset,inst},...]`` list. A
+    missing / non-list ``asm_insns`` (malformed output) yields an empty list.
+    """
+    return _dict_rows(result_payload_dict(records).get("asm_insns"))
+
+
 def register_names(records: list[MiRecord]) -> list[str]:
     names = result_payload_dict(records).get("register-names")
     return [name for name in _payload_list(names) if isinstance(name, str)]
