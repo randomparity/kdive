@@ -9,9 +9,23 @@ import pytest
 from fastmcp import FastMCP
 
 from kdive.mcp.resources import registrar
-from kdive.mcp.resources.registrar import DOC_RESOURCES, register
+from kdive.mcp.resources.registrar import DOC_RESOURCES, audience_by_uri, register
 
 _ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_doc_resources_default_to_all_audience_and_no_kind() -> None:
+    for entry in DOC_RESOURCES:
+        assert entry.audience in {"all", "operator"}
+        if entry.name in {"external-build-upload", "build-source-staging", "response-envelope"}:
+            assert entry.audience == "all"
+            assert entry.required_kind is None
+
+
+def test_audience_by_uri_covers_every_entry() -> None:
+    mapping = audience_by_uri()
+    assert set(mapping) == {entry.uri for entry in DOC_RESOURCES}
+    assert all(v in {"all", "operator"} for v in mapping.values())
 
 
 def test_register_returns_count_and_lists_every_uri_verbatim() -> None:

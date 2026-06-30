@@ -17,10 +17,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from fastmcp import FastMCP
 from fastmcp.resources import TextResource
 from pydantic import AnyUrl
+
+from kdive.domain.catalog.resources import ResourceKind
 
 _CONTENT_DIR = Path(__file__).parent / "_content"
 _MARKDOWN = "text/markdown"
@@ -39,6 +42,12 @@ class DocResource:
         title: Human title shown in the listing.
         description: Human description shown in the listing.
         mime_type: The content mime type.
+        required_kind: Provider gate. When set, the doc is registered only if the
+            resolver's composed kinds include it (a provider-specific doc is absent on a
+            deployment that did not register that provider). ``None`` means always register.
+        audience: Role gate consulted by ``DocExposureMiddleware``. ``"operator"`` docs are
+            listed and read only by callers holding a platform role; ``"all"`` docs are
+            unrestricted.
     """
 
     uri: str
@@ -48,6 +57,8 @@ class DocResource:
     title: str
     description: str
     mime_type: str = _MARKDOWN
+    required_kind: ResourceKind | None = None
+    audience: Literal["all", "operator"] = "all"
 
 
 DOC_RESOURCES: tuple[DocResource, ...] = (
@@ -91,6 +102,14 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
         ),
     ),
 )
+
+
+def audience_by_uri() -> dict[str, str]:
+    """Return each allowlisted doc's URI mapped to its ``audience`` marker.
+
+    ``DocExposureMiddleware`` consults this so a doc's audience has a single source.
+    """
+    return {entry.uri: entry.audience for entry in DOC_RESOURCES}
 
 
 def register(app: FastMCP) -> int:
