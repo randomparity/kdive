@@ -31,7 +31,11 @@ from kdive.providers.shared.debug_common.gdbmi import (
     PygdbmiController,
     parse_mi_records,
 )
-from kdive.providers.shared.debug_common.mi_protocol import evaluate_value, stack_frames
+from kdive.providers.shared.debug_common.mi_protocol import (
+    disassembly_rows,
+    evaluate_value,
+    stack_frames,
+)
 from kdive.providers.shared.debug_common.transcript import append_transcript
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -988,6 +992,39 @@ def test_stack_frames_empty_for_missing_or_non_list_stack() -> None:
     assert stack_frames([MiRecord(type="result", message="done", payload={})]) == []
     assert stack_frames([MiRecord(type="result", message="done", payload={"stack": "oops"})]) == []
     assert stack_frames([MiRecord(type="result", message="done", payload={"stack": []})]) == []
+
+
+# --- disassembly_rows helper (ADR-0276) ----------------------------------------------------
+
+
+def test_disassembly_rows_extracts_instruction_rows() -> None:
+    records = [
+        MiRecord(
+            type="result",
+            message="done",
+            payload={
+                "asm_insns": [
+                    {
+                        "address": "0xffffffff81000000",
+                        "func-name": "panic",
+                        "offset": "0",
+                        "inst": "push %rbp",
+                    },
+                    {"address": "0xffffffff81000001", "inst": "mov %rsp,%rbp"},
+                ]
+            },
+        )
+    ]
+    rows = disassembly_rows(records)
+    assert [r.get("inst") for r in rows] == ["push %rbp", "mov %rsp,%rbp"]
+
+
+def test_disassembly_rows_empty_for_missing_or_non_list_asm_insns() -> None:
+    assert disassembly_rows([MiRecord(type="result", message="done", payload={})]) == []
+    assert (
+        disassembly_rows([MiRecord(type="result", message="done", payload={"asm_insns": "oops"})])
+        == []
+    )
 
 
 # --- symbol resolution ---------------------------------------------------------------------

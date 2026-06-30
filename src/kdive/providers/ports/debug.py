@@ -36,6 +36,22 @@ class GdbBacktrace(ProviderModel):
     truncated: bool = False
 
 
+class GdbInstruction(ProviderModel):
+    """One disassembled instruction from a gdb/MI ``-data-disassemble`` result."""
+
+    address: str | None = None
+    inst: str | None = None
+    func_name: str | None = None
+    offset: int | None = None
+
+
+class GdbDisassembly(ProviderModel):
+    """A bounded, parsed gdb/MI disassembly window."""
+
+    instructions: list[GdbInstruction]
+    truncated: bool = False
+
+
 class GdbBreakpointRef(ProviderModel):
     """One gdb/MI breakpoint reference."""
 
