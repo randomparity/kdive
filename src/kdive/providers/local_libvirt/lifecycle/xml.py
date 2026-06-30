@@ -55,17 +55,20 @@ def render_domain_xml(
 
     When ``profile.provider.local_libvirt.debug.gdbstub`` is set, a loopback QEMU gdbstub is
     rendered on ``gdb_port`` via the ``<qemu:commandline>`` passthrough (ADR-0210 §1); ``gdb_port``
-    is required in that case (the provisioner allocates it) and ignored otherwise. When
-    ``profile.provider.local_libvirt.ssh_credential_ref`` is set, a loopback QEMU user-mode SSH
-    port-forward (``-netdev user,...hostfwd=tcp:127.0.0.1:<ssh_port>-:22`` + a ``virtio-net`` NIC)
-    is rendered on ``ssh_port`` for the drgn-live transport (ADR-0218 §2); ``ssh_port`` is required
-    in that case and ignored otherwise. Both passthroughs share **one** ``<qemu:commandline>``
-    element so a System provisioned for both transports renders a single, schema-valid element.
+    is required in that case (the provisioner allocates it) and ignored otherwise. The loopback QEMU
+    user-mode SSH port-forward (``-netdev user,...hostfwd=tcp:127.0.0.1:<ssh_port>-:22`` + a
+    ``virtio-net`` NIC) is rendered on **every** domain (ADR-0281, #937): the forward is plumbing,
+    not a credential, so every ready System is reachable by ``systems.ssh_info`` /
+    ``authorize_ssh_key`` without a destructive reprovision. ``ssh_port`` is therefore **required**
+    (the provisioner always allocates it), exactly like ``kernel_path``; a ``None`` is a
+    ``CONFIGURATION_ERROR``. ``ssh_credential_ref`` now gates only the drgn-live introspection
+    credential, never whether the forward exists. Both passthroughs share **one**
+    ``<qemu:commandline>`` element so a System provisioned for both transports renders a single,
+    schema-valid element.
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` for an invalid profile, a gdbstub-flagged
-            profile rendered without ``gdb_port``, or a ``ssh_credential_ref``-set profile rendered
-            without ``ssh_port``.
+            profile rendered without ``gdb_port``, or any domain rendered without ``ssh_port``.
     """
     _ensure_namespaces_registered()
     _PROFILE_POLICY.validate_profile(profile)
@@ -109,8 +112,11 @@ def render_domain_xml(
         _append_preserve_on_crash(domain, devices)
     if section.debug.gdbstub:
         _append_gdbstub(domain, gdb_port)
-    if section.ssh_credential_ref is not None:
-        _append_ssh_forward(domain, ssh_port)
+    # The SSH forward is always rendered (ADR-0281, #937): it is loopback plumbing, not a
+    # credential, so every ready System is reachable by `systems.ssh_info`/`authorize_ssh_key`
+    # without a destructive reprovision. `ssh_credential_ref` now gates only the drgn-live
+    # introspection credential, not whether the forward exists.
+    _append_ssh_forward(domain, ssh_port)
 
     return ET.tostring(domain, encoding="unicode")
 
@@ -185,7 +191,8 @@ def _append_ssh_forward(domain: ET.Element, ssh_port: int | None) -> None:
     """
     if ssh_port is None:
         raise CategorizedError(
-            "a drgn-live System (ssh_credential_ref set) requires an allocated SSH port",
+            "a local-libvirt domain always renders the SSH forward and requires an allocated "
+            "SSH port",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     commandline = _qemu_commandline(domain)

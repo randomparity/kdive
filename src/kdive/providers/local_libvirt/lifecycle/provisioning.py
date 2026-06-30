@@ -209,7 +209,10 @@ class LocalLibvirtProvisioning:
         baseline = self._prepare_baseline_kernel(system_id, base)
         overlay = self._files.prepare_overlay(system_id, base=base)
         gdb_port = self._gdb_port_for(system_id) if section.debug.gdbstub else None
-        ssh_port = self._ssh_port_for(system_id) if section.ssh_credential_ref is not None else None
+        # The SSH forward is rendered on every domain (ADR-0281, #937), so the port is always
+        # allocated — no longer gated on ssh_credential_ref, which now controls only the
+        # drgn-live introspection credential. Reuse-on-retry (_ssh_port_for) is unchanged.
+        ssh_port = self._ssh_port_for(system_id)
         xml = render_domain_xml(  # validates the profile
             system_id,
             profile,

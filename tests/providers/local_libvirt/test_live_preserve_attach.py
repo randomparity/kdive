@@ -26,6 +26,9 @@ from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.shared.debug_common.rsp import rsp_reachable
 
 _GDB_PORT = 51234
+# The SSH forward is rendered on every domain now (ADR-0281); this panic-boot test never reaches
+# sshd, but render requires the port. Pinned distinct from the gdbstub port.
+_SSH_PORT = 51235
 
 
 @pytest.mark.live_vm
@@ -50,6 +53,7 @@ def test_live_vm_preserve_crash_stub_is_reachable(tmp_path: Path) -> None:  # pr
         profile,
         disk_path=str(garbage_disk),
         gdb_port=_GDB_PORT,
+        ssh_port=_SSH_PORT,
         kernel_path=Path(bzimage),
     )
     final_xml = _with_direct_kernel(base_xml, bzimage=bzimage, console=console)

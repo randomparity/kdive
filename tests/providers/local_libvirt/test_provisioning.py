@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+import itertools
 import subprocess
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -81,9 +82,17 @@ def _render(
     *,
     disk_path: str = _DISK,
     kernel_path: Path | None = _KERNEL,
+    ssh_port: int | None = 40022,
 ) -> str:
+    # ssh_port defaults to a valid port: the SSH forward is now rendered on every domain
+    # (ADR-0281), so a render without one raises. Tests that care about the forward pass an
+    # explicit value; the rest accept this default.
     return render_domain_xml(
-        system_id, profile or _profile(), disk_path=disk_path, kernel_path=kernel_path
+        system_id,
+        profile or _profile(),
+        disk_path=disk_path,
+        kernel_path=kernel_path,
+        ssh_port=ssh_port,
     )
 
 
@@ -106,11 +115,11 @@ def test_import_does_not_register_elementtree_namespace(
 
     assert calls == []
 
-    reloaded.render_domain_xml(_SYS, _profile(), disk_path=_DISK, kernel_path=_KERNEL)
-    reloaded.render_domain_xml(_SYS, _profile(), disk_path=_DISK, kernel_path=_KERNEL)
+    reloaded.render_domain_xml(_SYS, _profile(), disk_path=_DISK, kernel_path=_KERNEL, ssh_port=22)
+    reloaded.render_domain_xml(_SYS, _profile(), disk_path=_DISK, kernel_path=_KERNEL, ssh_port=22)
 
     # Rendering registers both the kdive metadata prefix and the qemu passthrough prefix
-    # (the latter is needed for the gdbstub <qemu:commandline>), each once.
+    # (the latter is needed for the always-rendered SSH forward's <qemu:commandline>), each once.
     assert calls == [("kdive", KDIVE_METADATA_NS), ("qemu", QEMU_NS)]
 
 
@@ -240,7 +249,7 @@ def test_render_omits_initrd_when_absent_and_emits_it_when_present() -> None:
     initrd = Path("/var/lib/kdive/rootfs/x-baseline/initrd")
     root = _safe_fromstring(
         render_domain_xml(
-            _SYS, _profile(), disk_path=_DISK, kernel_path=_KERNEL, initrd_path=initrd
+            _SYS, _profile(), disk_path=_DISK, kernel_path=_KERNEL, initrd_path=initrd, ssh_port=22
         )
     )
     assert root.findtext("os/initrd") == str(initrd)
@@ -248,7 +257,9 @@ def test_render_omits_initrd_when_absent_and_emits_it_when_present() -> None:
 
 def test_xml_module_render_domain_xml_exposes_kdive_metadata() -> None:
     root = _safe_fromstring(
-        xml_module.render_domain_xml(_SYS, _profile(), disk_path=_DISK, kernel_path=_KERNEL)
+        xml_module.render_domain_xml(
+            _SYS, _profile(), disk_path=_DISK, kernel_path=_KERNEL, ssh_port=22
+        )
     )
     tag = root.find(f"metadata/{{{KDIVE_METADATA_NS}}}system")
 
@@ -287,27 +298,47 @@ def test_render_defaults_machine_when_absent() -> None:
 
 def test_render_emits_loopback_gdbstub_when_flag_set() -> None:
     xml = render_domain_xml(
-        _SYS, _profile(debug={"gdbstub": True}), disk_path=_DISK, gdb_port=4444, kernel_path=_KERNEL
+        _SYS,
+        _profile(debug={"gdbstub": True}),
+        disk_path=_DISK,
+        gdb_port=4444,
+        ssh_port=40022,
+        kernel_path=_KERNEL,
     )
-    # The recorded port round-trips through the shared parser, on loopback.
+    # The recorded port round-trips through the shared parser, on loopback. The gdbstub args lead
+    # the shared <qemu:commandline>; the always-rendered SSH forward (ADR-0281) follows.
     assert recorded_gdb_port(xml) == 4444
     root = _safe_fromstring(xml)
     args = [
         arg.get("value") for arg in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
     ]
-    assert args == ["-gdb", "tcp:127.0.0.1:4444"]
+    assert args == [
+        "-gdb",
+        "tcp:127.0.0.1:4444",
+        "-netdev",
+        "user,id=kdivessh,restrict=on,hostfwd=tcp:127.0.0.1:40022-:22",
+        "-device",
+        "virtio-net-pci,netdev=kdivessh,addr=0x10",
+    ]
 
 
 def test_render_omits_gdbstub_when_flag_unset() -> None:
-    xml = _render()  # default profile has debug.gdbstub False
+    # The default profile leaves debug.gdbstub False. The <qemu:commandline> still exists (the SSH
+    # forward owns it now, ADR-0281), so assert specifically that no -gdb arg is recorded.
+    xml = _render()
     assert recorded_gdb_port(xml) is None
     root = _safe_fromstring(xml)
-    assert root.find(f"./{{{QEMU_NS}}}commandline") is None
+    args = [
+        arg.get("value") for arg in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
+    ]
+    assert "-gdb" not in args
 
 
 def test_render_ignores_gdb_port_when_flag_unset() -> None:
-    # A stray port with the flag off renders nothing — the flag is the gate, not the port.
-    xml = render_domain_xml(_SYS, _profile(), disk_path=_DISK, gdb_port=4444, kernel_path=_KERNEL)
+    # A stray gdb port with the flag off records no gdbstub — the flag is the gate, not the port.
+    xml = render_domain_xml(
+        _SYS, _profile(), disk_path=_DISK, gdb_port=4444, ssh_port=40022, kernel_path=_KERNEL
+    )
     assert recorded_gdb_port(xml) is None
 
 
@@ -358,28 +389,28 @@ def test_render_emits_loopback_ssh_forward_when_credential_ref_set() -> None:
     ]
 
 
-def test_render_omits_ssh_forward_when_no_credential_ref() -> None:
-    xml = _render()  # default profile has no ssh_credential_ref
-    assert recorded_ssh_port(xml) is None
-    root = _safe_fromstring(xml)
-    assert root.find(f"./{{{QEMU_NS}}}commandline") is None
-
-
-def test_render_ignores_ssh_port_when_no_credential_ref() -> None:
-    # A stray port with no credential ref renders nothing — the ref is the gate, not the port.
+def test_render_emits_ssh_forward_without_credential_ref() -> None:
+    # The forward is plumbing, not a credential: a default profile (no ssh_credential_ref) still
+    # renders the loopback SSH forward so any ready System is reachable (ADR-0281, #937).
     xml = render_domain_xml(_SYS, _profile(), disk_path=_DISK, ssh_port=40022, kernel_path=_KERNEL)
-    assert recorded_ssh_port(xml) is None
+    assert recorded_ssh_port(xml) == 40022
+    root = _safe_fromstring(xml)
+    args = [
+        arg.get("value") for arg in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
+    ]
+    assert args == [
+        "-netdev",
+        "user,id=kdivessh,restrict=on,hostfwd=tcp:127.0.0.1:40022-:22",
+        "-device",
+        "virtio-net-pci,netdev=kdivessh,addr=0x10",
+    ]
 
 
-def test_render_rejects_credential_ref_without_an_ssh_port() -> None:
+def test_render_rejects_missing_ssh_port() -> None:
+    # ssh_port is now required (the forward is unconditional), independent of the credential ref —
+    # a None is a CONFIGURATION_ERROR, mirroring kernel_path (ADR-0281).
     with pytest.raises(CategorizedError) as caught:
-        render_domain_xml(
-            _SYS,
-            _profile(ssh_credential_ref="guest_key.pem"),
-            disk_path=_DISK,
-            ssh_port=None,
-            kernel_path=_KERNEL,
-        )
+        render_domain_xml(_SYS, _profile(), disk_path=_DISK, ssh_port=None, kernel_path=_KERNEL)
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
@@ -484,6 +515,12 @@ def _fake_extract(_base: Path, dest: Path) -> BaselineKernel:
     return BaselineKernel(kernel=dest / "kernel", initrd=None)
 
 
+# Hermetic SSH/gdb port source: every provision now allocates an SSH port (ADR-0281), so the
+# default _prov() must not fall through to the real socket-binding _bind_probe_free_port. Distinct
+# ascending values also keep a gdb+ssh provision from colliding both forwards on one port.
+_FREE_PORTS = itertools.count(22000)
+
+
 def _prov(
     conn: _ProvConn,
     *,
@@ -493,6 +530,7 @@ def _prov(
     remove_baseline: Callable[[str], None] = lambda _baseline: None,
     baseline_exists: Callable[[str], bool] = lambda _path: False,
     extract_baseline_kernel: Callable[[Path, Path], BaselineKernel] = _fake_extract,
+    free_port: Callable[[], int] = lambda: next(_FREE_PORTS),
 ) -> LocalLibvirtProvisioning:
     # The overlay seams default to no-ops so the libvirt-only tests never spawn qemu-img; the
     # console-log seam is also a no-op so they never depend on host /var/lib/kdive permissions.
@@ -511,6 +549,7 @@ def _prov(
         materialize_rootfs=lambda rootfs, _system_id, _arch: (
             rootfs.path if rootfs.kind == "local" else "/var/lib/kdive/rootfs/upload.qcow2"
         ),
+        free_port=free_port,
         extract_baseline_kernel=extract_baseline_kernel,
     )
 
@@ -563,7 +602,9 @@ def test_provision_defines_and_starts_returns_name() -> None:
     name = _prov(conn).provision(_SYS, _profile())
     assert name == "kdive-11111111-1111-1111-1111-111111111111"
     assert conn.defined[name].created is True
-    assert conn.closed == 1  # the connection is closed after use (no leak)
+    # Two connections, both closed (no leak): the always-on SSH-port reuse lookup (ADR-0281)
+    # opens one, define/start opens the other.
+    assert conn.closed == 2
 
 
 def test_provision_extracts_baseline_and_renders_kernel() -> None:
@@ -656,7 +697,8 @@ def test_provision_real_create_failure_undefines_domain() -> None:
         _prov(conn).provision(_SYS, _profile())
     assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
     assert dom.undefined is True  # the defined-but-unstarted domain was cleaned up
-    assert conn.closed == 1
+    # SSH-port reuse lookup + define/start, both closed (ADR-0281).
+    assert conn.closed == 2
 
 
 def test_provision_already_running_domain_does_not_undefine() -> None:
@@ -694,33 +736,37 @@ def _prov_with_port(conn: _ProvConn, *, free_port: Callable[[], int]) -> LocalLi
 
 def test_provision_gdbstub_allocates_a_fresh_port_when_no_prior_domain() -> None:
     conn = _ProvConn()  # lookupByName raises NO_DOMAIN (empty `defined`)
-    _prov_with_port(conn, free_port=lambda: 5555).provision(_SYS, _gdb_profile())
-    # The fresh port was recorded into the defined domain XML on loopback.
+    # gdbstub allocates first, then the always-rendered SSH forward (ADR-0281): two distinct
+    # loopback ports, never one shared value (which would collide -gdb and the hostfwd).
+    ports = iter([5555, 40022])
+    _prov_with_port(conn, free_port=lambda: next(ports)).provision(_SYS, _gdb_profile())
     assert recorded_gdb_port(conn.recorded_xml[-1]) == 5555
+    assert recorded_ssh_port(conn.recorded_xml[-1]) == 40022
 
 
 def test_provision_gdbstub_reuses_the_recorded_port_on_retry() -> None:
     name = domain_name_for(_SYS)
     recorded = render_domain_xml(
-        _SYS, _gdb_profile(), disk_path=_DISK, gdb_port=6666, kernel_path=_KERNEL
+        _SYS, _gdb_profile(), disk_path=_DISK, gdb_port=6666, ssh_port=40023, kernel_path=_KERNEL
     )
     conn = _ProvConn(defined={name: _ProvDomain(name, xml_desc=recorded)})
 
     def fail_free_port() -> int:
-        raise AssertionError("must reuse the recorded port, not allocate a fresh one")
+        raise AssertionError("must reuse the recorded ports, not allocate fresh ones")
 
     _prov_with_port(conn, free_port=fail_free_port).provision(_SYS, _gdb_profile())
     assert recorded_gdb_port(conn.recorded_xml[-1]) == 6666
+    assert recorded_ssh_port(conn.recorded_xml[-1]) == 40023
 
 
-def test_provision_non_gdbstub_does_not_allocate_a_port() -> None:
+def test_provision_non_gdbstub_records_no_gdb_port_but_records_an_ssh_port() -> None:
+    # gdbstub stays gated on the flag; the SSH forward is always rendered (ADR-0281), so a
+    # non-gdbstub provision records no -gdb port yet still allocates and records an SSH port.
     conn = _ProvConn()
-
-    def fail_free_port() -> int:
-        raise AssertionError("a non-gdbstub provision must not allocate a port")
-
-    _prov_with_port(conn, free_port=fail_free_port).provision(_SYS, _profile())
+    ports = iter([40022])
+    _prov_with_port(conn, free_port=lambda: next(ports)).provision(_SYS, _profile())
     assert recorded_gdb_port(conn.recorded_xml[-1]) is None
+    assert recorded_ssh_port(conn.recorded_xml[-1]) == 40022
 
 
 def test_provision_gdbstub_port_lookup_infra_error_is_infrastructure_failure() -> None:
@@ -740,7 +786,8 @@ def test_provision_already_running_domain_is_idempotent() -> None:
         defined={name: _ProvDomain(name, create_error=libvirt.VIR_ERR_OPERATION_INVALID)}
     )
     assert _prov(conn).provision(_SYS, _profile()) == name  # no raise
-    assert conn.closed == 1
+    # SSH-port reuse lookup + define/start, both closed (ADR-0281).
+    assert conn.closed == 2
 
 
 # --- drgn-live SSH port allocation (ADR-0218 §3) -------------------------------------------
@@ -771,14 +818,13 @@ def test_provision_ssh_reuses_the_recorded_port_on_retry() -> None:
     assert recorded_ssh_port(conn.recorded_xml[-1]) == 40023
 
 
-def test_provision_non_ssh_does_not_allocate_an_ssh_port() -> None:
+def test_provision_always_allocates_an_ssh_port_without_credential_ref() -> None:
+    # The SSH forward is plumbing now (ADR-0281, #937): a default profile with no
+    # ssh_credential_ref still allocates and records a forwarded SSH port.
     conn = _ProvConn()
-
-    def fail_free_port() -> int:
-        raise AssertionError("a provision with no ssh_credential_ref must not allocate an SSH port")
-
-    _prov_with_port(conn, free_port=fail_free_port).provision(_SYS, _profile())
-    assert recorded_ssh_port(conn.recorded_xml[-1]) is None
+    ports = iter([40022])
+    _prov_with_port(conn, free_port=lambda: next(ports)).provision(_SYS, _profile())
+    assert recorded_ssh_port(conn.recorded_xml[-1]) == 40022
 
 
 def test_provision_ssh_port_lookup_infra_error_is_infrastructure_failure() -> None:
@@ -1187,7 +1233,8 @@ def test_provision_failure_still_closes_connection() -> None:
     conn = _ProvConn(define_error=libvirt.VIR_ERR_INTERNAL_ERROR)
     with pytest.raises(CategorizedError):
         _prov(conn).provision(_SYS, _profile())
-    assert conn.closed == 1  # closed even on a libvirt failure
+    # SSH-port reuse lookup + the failed define, both closed even on a libvirt failure (ADR-0281).
+    assert conn.closed == 2
 
 
 def test_teardown_absent_domain_closes_connection() -> None:
