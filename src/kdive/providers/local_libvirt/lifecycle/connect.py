@@ -184,11 +184,13 @@ class LocalLibvirtConnect:
         TransportHandleData.decode(handle)
 
     def recorded_ssh_endpoint(self, system: SystemHandle) -> tuple[str, int] | None:
-        """Return the recorded loopback SSH ``(host, port)``, or ``None`` if unprovisioned.
+        """Return the recorded loopback SSH ``(host, port)``, or ``None`` if there is no forward.
 
         Reuses the drgn-live SSH endpoint resolver; a `CONFIGURATION_ERROR` (no domain, or no
-        recorded SSH forward) maps to ``None`` — the System was not provisioned for SSH. Any
-        other libvirt/parse fault (`INFRASTRUCTURE_FAILURE`) propagates (ADR-0271).
+        recorded SSH forward) maps to ``None``. Local-libvirt now renders the forward on every
+        domain (ADR-0281), so a ready local System resolves an endpoint; ``None`` means the
+        provider exposes no loopback SSH forward (a domain defined before that change). Any other
+        libvirt/parse fault (`INFRASTRUCTURE_FAILURE`) propagates (ADR-0271).
         """
         try:
             return self._resolve_ssh_endpoint(system)

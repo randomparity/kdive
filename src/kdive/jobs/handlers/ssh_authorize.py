@@ -117,8 +117,12 @@ async def authorize_ssh_key_handler(
         SystemHandle(domain_name_for(system_id))
     )
     if endpoint is None:
+        # The local-libvirt forward is always rendered now (ADR-0281, #937); a None endpoint means
+        # the System's provider exposes no loopback SSH forward (a defensive guard for
+        # remote/fault-inject — the server tool already rejects before enqueue).
         raise CategorizedError(
-            "System was not provisioned for SSH; reprovision with ssh_credential_ref set",
+            "This System's provider exposes no loopback SSH forward; direct SSH to a System is a "
+            "local-libvirt capability",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "ssh_not_provisioned"},
         )

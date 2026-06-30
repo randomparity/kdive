@@ -132,6 +132,12 @@ def test_ssh_info_unprovisioned_is_config_error(migrated_url: str) -> None:
             resp = await ssh_info(pool, _ctx(), sys_id, resolver=resolver)
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
         assert resp.data["reason"] == "ssh_not_provisioned"
+        # The detail describes the provider-capability gap (local-libvirt only), not a reprovision:
+        # the local forward is always rendered now (ADR-0281), so a None endpoint means the
+        # provider exposes no loopback SSH forward, not a missing ssh_credential_ref.
+        assert resp.detail is not None
+        assert "local-libvirt" in resp.detail
+        assert "reprovision" not in resp.detail.lower()
 
     asyncio.run(_run())
 
