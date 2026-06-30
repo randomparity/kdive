@@ -16,6 +16,7 @@ from kdive.mcp.tools.lifecycle.runs.common import envelope_for_run
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.artifacts.listing import list_run_console_artifacts
 from kdive.services.runs.steps import existing_build_result as _existing_build_result
 from kdive.services.runs.steps import failed_boot_attempt as _failed_boot_attempt
 from kdive.services.runs.steps import install_method_for as _install_method_for
@@ -61,6 +62,13 @@ async def get_run(
                 if progress is not None and progress.boot != "succeeded"
                 else None
             )
+            # The Run-scoped console manifest (ADR-0279). Queried inside the open connection (it
+            # closes before envelope_for_run); skipped for a failed Run, whose envelope omits it.
+            console_manifest = (
+                await list_run_console_artifacts(conn, run.id)
+                if run.state is not RunState.FAILED
+                else None
+            )
         required = (
             system_required_cmdline(
                 _install_method_for(system, runtime.profile_policy), runtime.platform_root_cmdline
@@ -76,4 +84,5 @@ async def get_run(
             step_progress=progress,
             boot_readiness=boot_attempt,
             build_provenance=build_result.build_provenance if build_result is not None else None,
+            console_manifest=console_manifest,
         )

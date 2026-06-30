@@ -14,6 +14,7 @@ from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools.lifecycle._recovery import build_profile_summary
 from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
+from kdive.services.artifacts.listing import ConsoleManifest
 from kdive.services.runs import states as run_states
 from kdive.services.runs.steps import (
     READY_BOOT_OUTCOME,
@@ -228,6 +229,26 @@ def _console_access_data(console_ref: str | None) -> dict[str, JsonValue]:
     return {"console_access": cast(JsonValue, dict(_CONSOLE_ACCESS_HINT))}
 
 
+def _console_manifest_data(console_manifest: ConsoleManifest | None) -> dict[str, JsonValue]:
+    """The Run-scoped console manifest (ADR-0279): the correlated console artifacts for this Run.
+
+    ``console_artifacts`` is the newest-first list of ``{artifact_id, object_key, created_at}`` (the
+    boot-evidence snapshot plus every attributed rotating part). When more correlated console
+    artifacts exist than the bound, ``console_artifacts_total`` carries the full count and
+    ``console_artifacts_truncated`` is ``True`` (the dropped entries are the oldest; the boot
+    console stays reachable via ``refs.console``). Omitted entirely when the Run has none.
+    """
+    if console_manifest is None or not console_manifest.entries:
+        return {}
+    data: dict[str, JsonValue] = {
+        "console_artifacts": cast(JsonValue, list(console_manifest.entries))
+    }
+    if console_manifest.total > len(console_manifest.entries):
+        data["console_artifacts_total"] = console_manifest.total
+        data["console_artifacts_truncated"] = True
+    return data
+
+
 def envelope_for_run(
     run: Run,
     *,
@@ -237,6 +258,7 @@ def envelope_for_run(
     step_progress: StepProgress | None = None,
     boot_readiness: BootAttempt | None = None,
     build_provenance: dict[str, str | bool] | None = None,
+    console_manifest: ConsoleManifest | None = None,
 ) -> ToolResponse:
     """Render a Run; `failed` becomes a failure envelope carrying its `failure_category`.
 
@@ -283,6 +305,7 @@ def envelope_for_run(
         **_build_provenance_data(build_provenance),
         **_run_recovery(run),
         **_console_access_data(console_ref),
+        **_console_manifest_data(console_manifest),
     }
     return ToolResponse.success(
         str(run.id),

@@ -56,6 +56,7 @@ from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.artifacts.listing import CONSOLE_MANIFEST_MAX, ConsoleManifest
 from kdive.services.runs import steps as run_steps
 from kdive.services.runs.admission import RunCreateResult
 from kdive.services.runs.steps import StepProgress, ready_boot_outcome, step_progress
@@ -677,6 +678,50 @@ def test_envelope_for_run_surfaces_console_access_hint() -> None:
     assert console_access == _CONSOLE_ACCESS_EXPECTED
     # fetch_raw cannot serve the console artifact and is contributor-gated; never named here.
     assert "artifacts.fetch_raw" not in console_access.values()
+
+
+def _manifest_entry(name: str) -> dict[str, str]:
+    return {"artifact_id": str(uuid4()), "object_key": name, "created_at": "2026-01-01T00:00:00+00"}
+
+
+def test_envelope_for_run_renders_console_manifest() -> None:
+    # ADR-0279: runs.get carries data.console_artifacts (the Run-scoped manifest); a non-truncated
+    # manifest omits the total/truncated disclosure keys.
+    entries = [_manifest_entry("console-part-0-000001"), _manifest_entry("console-part-0-000000")]
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        console_manifest=ConsoleManifest(entries=entries, total=2),
+    )
+
+    assert resp.data["console_artifacts"] == entries
+    assert "console_artifacts_total" not in resp.data
+    assert "console_artifacts_truncated" not in resp.data
+
+
+def test_envelope_for_run_console_manifest_truncation_disclosed() -> None:
+    entries = [_manifest_entry(f"console-part-0-{i:06d}") for i in range(CONSOLE_MANIFEST_MAX)]
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        console_manifest=ConsoleManifest(entries=entries, total=CONSOLE_MANIFEST_MAX + 5),
+    )
+
+    listed = resp.data["console_artifacts"]
+    assert isinstance(listed, list)
+    assert len(listed) == CONSOLE_MANIFEST_MAX
+    assert resp.data["console_artifacts_total"] == CONSOLE_MANIFEST_MAX + 5
+    assert resp.data["console_artifacts_truncated"] is True
+
+
+def test_envelope_for_run_omits_empty_console_manifest() -> None:
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        console_manifest=ConsoleManifest(entries=[], total=0),
+    )
+    assert "console_artifacts" not in resp.data
+    # And None (the failed/no-query path) likewise omits it.
+    assert (
+        "console_artifacts" not in runs_common.envelope_for_run(_run_model(RunState.RUNNING)).data
+    )
 
 
 def test_envelope_for_run_console_access_hint_for_expected_crash() -> None:
