@@ -108,9 +108,10 @@ Each maps to an acceptance-criteria checkbox on #922 and to a test.
    `CONFIGURATION_ERROR` / `code="bad_symbol_name"` (via `resolve_symbol`), raised before any
    watch command; the constructed expression is purely numeric, so no caller text reaches gdb.
 5. **Set-time unsupported target reported** — when gdb answers `-break-watch` with an `^error`
-   whose redacted msg names a watchpoint (e.g. "Target does not support hardware watchpoints."),
-   the engine raises `DEBUG_ATTACH_FAILURE` / `code="watchpoint_unsupported"`; an unrelated gdb
-   error passes through unchanged. This covers only the set-time refusal — an accept-but-never-trap
+   whose redacted msg matches the anchored support-refusal phrasing (e.g. "Target does not support
+   hardware watchpoints.", "Cannot set hardware watchpoint…"), the engine raises
+   `DEBUG_ATTACH_FAILURE` / `code="watchpoint_unsupported"`; a running-target error is classified
+   `inferior_running` first, and an unrelated gdb error passes through unchanged. This covers only the set-time refusal — an accept-but-never-trap
    stub or insert-time debug-register exhaustion surfaces as a `debug.continue` timeout, not a
    `set`-time error (see "Failure modes / limitations").
 6. **List** — `list_watchpoints` issues `-break-list` and returns only the rows whose `type`
