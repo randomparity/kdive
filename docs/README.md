@@ -12,6 +12,8 @@ tool returns.
 |---|---|
 | [Agent guide](guide/index.md) | How an agent drives the tool surface end to end |
 | [Agent onboarding](guide/agents/index.md) | Connecting an MCP client and the example configs |
+| [Agent workflow index](guide/agent-index.md) | Served over MCP; maps the session to toolsets |
+| [Toolset guides](guide/toolsets/runs.md) | Served over MCP; per-tool purpose for each toolset |
 | [Tool reference](guide/reference/index.md) | Per-namespace parameter reference |
 
 ## Run KDIVE — operators
