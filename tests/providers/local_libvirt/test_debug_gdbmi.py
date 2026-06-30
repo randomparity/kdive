@@ -1089,6 +1089,181 @@ def test_resolve_symbol_rejects_unparseable_value_and_redacts_it(tmp_path: Path)
     assert secret not in str(exc.value.details["value"])  # echoed value is redacted
 
 
+# --- stack walking: backtrace / read_frame -------------------------------------------------
+
+
+def _stack_controller(
+    frames: list[dict[str, object]], command: str = "-stack-list-frames"
+) -> _FakeMiController:
+    return _FakeMiController(
+        responses={
+            command: [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {"stack": [{"frame": frame} for frame in frames]},
+                }
+            ]
+        }
+    )
+
+
+def test_backtrace_returns_structured_frames(tmp_path: Path) -> None:
+    controller = _stack_controller(
+        [
+            {
+                "level": "0",
+                "func": "panic",
+                "addr": "0xffffffff81000000",
+                "file": "kernel/panic.c",
+                "line": "42",
+            },
+            {"level": "1", "func": "do_exit", "addr": "0xffffffff81001000"},
+        ]
+    )
+    bt = _engine().backtrace(_attachment(controller, tmp_path), max_frames=64)
+    assert bt.truncated is False
+    assert [frame.level for frame in bt.frames] == [0, 1]
+    assert bt.frames[0].func == "panic"
+    assert bt.frames[0].file == "kernel/panic.c"
+    assert bt.frames[0].line == 42
+    assert "-stack-list-frames" in controller.written
+
+
+def test_backtrace_truncates_to_max_frames(tmp_path: Path) -> None:
+    frames: list[dict[str, object]] = [{"level": str(i), "func": f"f{i}"} for i in range(5)]
+    bt = _engine().backtrace(_attachment(_stack_controller(frames), tmp_path), max_frames=3)
+    assert bt.truncated is True
+    assert [frame.level for frame in bt.frames] == [0, 1, 2]
+
+
+@pytest.mark.parametrize("bad", [0, gdbmi.MAX_BACKTRACE_FRAMES + 1])
+def test_backtrace_rejects_bad_max_frames_before_command(bad: int, tmp_path: Path) -> None:
+    controller = _FakeMiController()
+    with pytest.raises(CategorizedError) as exc:
+        _engine().backtrace(_attachment(controller, tmp_path), max_frames=bad)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["code"] == "bad_frame_count"
+    assert controller.written == []
+
+
+def test_backtrace_raises_no_frames_on_empty_stack(tmp_path: Path) -> None:
+    with pytest.raises(CategorizedError) as exc:
+        _engine().backtrace(_attachment(_stack_controller([]), tmp_path), max_frames=64)
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "no_frames"
+
+
+def test_backtrace_raises_no_frames_on_malformed_stack(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-stack-list-frames": [
+                {"type": "result", "message": "done", "payload": {"stack": "garbage"}}
+            ]
+        }
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _engine().backtrace(_attachment(controller, tmp_path), max_frames=64)
+    assert exc.value.details["code"] == "no_frames"
+
+
+def test_backtrace_classifies_running_inferior(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-stack-list-frames": [
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": "Cannot execute this command while the target is running."},
+                }
+            ]
+        }
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _engine().backtrace(_attachment(controller, tmp_path), max_frames=64)
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "inferior_running"
+
+
+def test_backtrace_passes_through_other_gdb_errors(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-stack-list-frames": [
+                {"type": "result", "message": "error", "payload": {"msg": "No stack."}}
+            ]
+        }
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _engine().backtrace(_attachment(controller, tmp_path), max_frames=64)
+    # A non-running gdb error keeps the generic command-failure shape, not the running code.
+    assert exc.value.details["command"] == "-stack-list-frames"
+    assert exc.value.details.get("code") != "inferior_running"
+
+
+def test_backtrace_redacts_registered_secret_in_func(tmp_path: Path) -> None:
+    secret = "topsecretfunc"  # pragma: allowlist secret - fake test value
+    controller = _stack_controller([{"level": "0", "func": secret}])
+    engine = _engine(Redactor(secret_values=[secret], registry=SecretRegistry()))
+    bt = engine.backtrace(_attachment(controller, tmp_path), max_frames=64)
+    assert bt.frames[0].func is not None
+    assert secret not in bt.frames[0].func
+
+
+def test_read_frame_returns_single_frame(tmp_path: Path) -> None:
+    controller = _stack_controller(
+        [{"level": "2", "func": "schedule", "addr": "0xffffffff8100a000"}],
+        command="-stack-list-frames 2 2",
+    )
+    frame = _engine().read_frame(_attachment(controller, tmp_path), level=2)
+    assert frame.level == 2
+    assert frame.func == "schedule"
+    assert "-stack-list-frames 2 2" in controller.written
+
+
+def test_read_frame_reaches_past_backtrace_cap(tmp_path: Path) -> None:
+    controller = _stack_controller(
+        [{"level": "70", "func": "deep"}], command="-stack-list-frames 70 70"
+    )
+    frame = _engine().read_frame(_attachment(controller, tmp_path), level=70)
+    assert frame.level == 70
+    assert "-stack-list-frames 70 70" in controller.written
+
+
+def test_read_frame_rejects_negative_level_before_command(tmp_path: Path) -> None:
+    controller = _FakeMiController()
+    with pytest.raises(CategorizedError) as exc:
+        _engine().read_frame(_attachment(controller, tmp_path), level=-1)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["code"] == "bad_frame_level"
+    assert controller.written == []
+
+
+def test_read_frame_raises_no_frame_at_level(tmp_path: Path) -> None:
+    controller = _stack_controller([], command="-stack-list-frames 9 9")
+    with pytest.raises(CategorizedError) as exc:
+        _engine().read_frame(_attachment(controller, tmp_path), level=9)
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "no_frame_at_level"
+    assert exc.value.details["level"] == 9
+
+
+def test_read_frame_classifies_running_inferior(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-stack-list-frames 0 0": [
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": "Selected thread is running."},
+                }
+            ]
+        }
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _engine().read_frame(_attachment(controller, tmp_path), level=0)
+    assert exc.value.details["code"] == "inferior_running"
+
+
 # --- error mapping ------------------------------------------------------------------------
 
 

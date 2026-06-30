@@ -32,6 +32,7 @@ from typing import Any
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import (
+    GdbBacktrace,
     GdbBreakpointRef,
     GdbController,
     GdbFrame,
@@ -56,6 +57,7 @@ from kdive.providers.shared.debug_common.mi_protocol import (
     payload_dict,
     register_values_by_number,
     result_payload_dict,
+    stack_frames,
 )
 from kdive.providers.shared.debug_common.mi_protocol import (
     register_names as parsed_register_names,
@@ -76,6 +78,9 @@ __all__ = [
 ]
 
 MAX_MEMORY_READ_BYTES = 4096
+# Caps the backtrace *response* (not the gdb command): a free-running kernel stack is bounded,
+# but the response stays bounded and a deeper stack is flagged via GdbBacktrace.truncated.
+MAX_BACKTRACE_FRAMES = 64
 _INTERRUPT_STOP_TIMEOUT_SEC = mi_execution.INTERRUPT_STOP_TIMEOUT_SEC
 _STOP_POLL_SLICE_SEC = mi_execution.STOP_POLL_SLICE_SEC
 _timeout_error = mi_controller.timeout_error
@@ -107,6 +112,10 @@ _BREAK_LOCATION_RE = _SYMBOL_NAME_RE
 _BREAK_ID_RE = re.compile(r"^[0-9]+$")
 # gdb stop reasons meaning the inferior is gone (not a debuggable HALT).
 _TERMINAL_STOP_REASONS = frozenset({"exited", "exited-normally", "exited-signalled"})
+# gdb's ^error message for a stack command issued against a running target carries this token
+# ("...while the target is running.", "Selected thread is running."); used to reclassify the
+# generic command failure to the precise `inferior_running` code.
+_RUNNING_RE = re.compile(r"running", re.IGNORECASE)
 
 
 def _config_error(
@@ -394,6 +403,77 @@ class GdbMiEngine:
                 },
             )
         return int(match.group(0), 16)
+
+    # --- stack walking (ADR-0275) ---------------------------------------------------------
+
+    def backtrace(
+        self, attachment: GdbMiAttachment, *, max_frames: int = MAX_BACKTRACE_FRAMES
+    ) -> GdbBacktrace:
+        """Walk the stopped inferior's stack, bounded to ``max_frames`` (ADR-0275).
+
+        Issues ``-stack-list-frames`` unbounded (gdb returns the whole stack) and bounds the
+        *response*: ``truncated`` is measured against the full depth before slicing to
+        ``max_frames``. A running target's gdb ``^error`` is reclassified to ``inferior_running``;
+        empty/missing/malformed ``stack`` data is ``no_frames``.
+        """
+        if not isinstance(max_frames, int) or max_frames < 1 or max_frames > MAX_BACKTRACE_FRAMES:
+            raise _config_error(
+                f"max_frames must be between 1 and {MAX_BACKTRACE_FRAMES}",
+                code="bad_frame_count",
+                details={"max_frames": max_frames},
+            )
+        rows = stack_frames(self._stack_command(attachment, "-stack-list-frames"))
+        if not rows:
+            raise CategorizedError(
+                "gdb/MI returned no stack frames",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={"code": "no_frames"},
+            )
+        parsed = [self._frame_from(row) for row in rows]
+        truncated = len(parsed) > max_frames
+        frames = [self._redact_frame(frame) for frame in parsed[:max_frames]]
+        return GdbBacktrace(frames=frames, truncated=truncated)
+
+    def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
+        """Inspect one selected stack frame by ``level`` (ADR-0275).
+
+        ``level`` is gated only to a non-negative int; an out-of-range level is answered by gdb as
+        ``no_frame_at_level`` (not a config error), so ``read_frame`` can reach a frame past the
+        ``backtrace`` response cap on a deep kernel stack.
+        """
+        if not isinstance(level, int) or level < 0:
+            raise _config_error(
+                f"frame level must be a non-negative integer, got {level!r}",
+                code="bad_frame_level",
+                details={"level": level},
+            )
+        rows = stack_frames(self._stack_command(attachment, f"-stack-list-frames {level} {level}"))
+        if not rows:
+            raise CategorizedError(
+                "gdb/MI returned no frame at the requested level",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={"code": "no_frame_at_level", "level": level},
+            )
+        return self._redact_frame(self._frame_from(rows[0]))
+
+    def _stack_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]:
+        """Run a stack MI command; reclassify a running-target gdb error to ``inferior_running``."""
+        try:
+            return self.execute_mi_command(attachment, command)
+        except CategorizedError as exc:
+            if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE:
+                payload = exc.details.get("payload")
+                msg = payload.get("msg") if isinstance(payload, dict) else None
+                if isinstance(msg, str) and _RUNNING_RE.search(msg):
+                    raise CategorizedError(
+                        "gdb/MI cannot walk the stack while the inferior is running",
+                        category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                        details={"code": "inferior_running", "command": command},
+                    ) from exc
+            raise
+
+    def _redact_frame(self, frame: GdbFrame) -> GdbFrame:
+        return GdbFrame.model_validate(self._redactor().redact_value(frame.model_dump(mode="json")))
 
     # --- interactive execution ------------------------------------------------------------
 
