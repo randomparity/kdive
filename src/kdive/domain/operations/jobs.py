@@ -29,6 +29,7 @@ class JobKind(StrEnum):
     DIAGNOSTICS_WORKER_CHECK = "diagnostics_worker_check"
     BUILD_INSTALL_BOOT = "build_install_boot"
     AUTHORIZE_SSH_KEY = "authorize_ssh_key"
+    CONSOLE_ROTATE = "console_rotate"
 
 
 DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(

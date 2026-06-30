@@ -11,6 +11,7 @@ the live remote spine — the injected-seam unit tests cover the collector logic
 
 from __future__ import annotations
 
+import gzip
 import logging
 from typing import Protocol
 from uuid import UUID
@@ -26,6 +27,7 @@ from kdive.artifacts.storage import (
     owner_prefix,
 )
 from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.providers.console_parts.rotation import part_object_name
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.connection.transport import remote_connection
 from kdive.providers.remote_libvirt.console.collector import ConsoleStream
@@ -41,6 +43,10 @@ _RETENTION = "console"
 # Numbered parts are named …/console-parts-<n> (one key component — `artifact_key` forbids a
 # `/` in the name) so they never collide with the single …/console artifact the assembly writes.
 _PARTS_PREFIX = "console-parts-"
+# The remote console stream is never truncated mid-collection (no power-cycle re-truncation like
+# the local `<log append=off>` path), so every observable part artifact lives in generation 0;
+# `part_object_name(0, index)` keys the same `console-part-0-<index>` shape `artifacts.get` reads.
+_OBSERVABLE_PART_GEN = 0
 
 
 class _StorePort(Protocol):
@@ -74,6 +80,15 @@ class RemoteConsolePartStore:
         return owner_prefix(_TENANT, _OWNER_KIND, str(system_id)) + _PARTS_PREFIX
 
     def put_part(self, system_id: UUID, index: int, data: bytes) -> None:
+        """Seal one redacted part: the internal assembly object plus the observable copy.
+
+        The internal ``…/console-parts-<index>`` object is written unchanged — ``finalize()``
+        concatenates those raw redacted bytes into the immutable per-Run ``…/console`` evidence
+        (ADR-0235). Additionally, a separate gzip-compressed ``console-part-0-<index>`` artifact is
+        registered so an agent observes the live console through the same ``artifacts`` read surface
+        the local rotation path exposes; ``data`` is already redacted by the collector. Registration
+        is insert-if-absent, so a replayed seal does not duplicate the part's row.
+        """
         self._store.put_artifact(
             ArtifactWriteRequest(
                 tenant=_TENANT,
@@ -85,6 +100,63 @@ class RemoteConsolePartStore:
                 retention_class=_RETENTION,
             )
         )
+        try:
+            self._register_observable_part(system_id, index, data)
+        except Exception:  # noqa: BLE001 - observability dual-write must never disrupt evidence (R7)
+            _log.warning(
+                "registering observable console part %d for system %s failed; "
+                "the per-Run evidence is unaffected",
+                index,
+                system_id,
+                exc_info=True,
+            )
+
+    def _register_observable_part(self, system_id: UUID, index: int, data: bytes) -> None:
+        """Store the gzip-compressed observable part copy and insert its row if absent.
+
+        ``data`` is the already-redacted part bytes; the object is REDACTED-class with
+        ``content_encoding="gzip"`` so ``artifacts.get`` inflates it on read. Write-before-commit
+        (ADR-0005): the object is stored first, then the row is inserted only if no row already
+        keys the same object — a re-sealed (replayed) part does not duplicate the row. The caller
+        treats any failure here as best-effort (R7): the observable copy is for live observation,
+        never the evidence path, so a store/DB outage must not stall the evidence pump.
+        """
+        stored = self._store.put_artifact(
+            ArtifactWriteRequest(
+                tenant=_TENANT,
+                owner_kind=_OWNER_KIND,
+                owner_id=str(system_id),
+                name=part_object_name(_OBSERVABLE_PART_GEN, index),
+                data=gzip.compress(data),
+                sensitivity=Sensitivity.REDACTED,
+                retention_class=_RETENTION,
+                content_encoding="gzip",
+            )
+        )
+        self._insert_part_row_if_absent(system_id, stored)
+
+    def _insert_part_row_if_absent(self, system_id: UUID, stored: StoredArtifact) -> None:
+        with psycopg.connect(self._conninfo) as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM artifacts "
+                "WHERE owner_kind = %s AND owner_id = %s AND object_key = %s",
+                (_OWNER_KIND, system_id, stored.key),
+            )
+            if cur.fetchone() is not None:
+                return
+            cur.execute(
+                "INSERT INTO artifacts "
+                "(owner_kind, owner_id, object_key, etag, sensitivity, retention_class) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (
+                    _OWNER_KIND,
+                    system_id,
+                    stored.key,
+                    stored.etag,
+                    Sensitivity.REDACTED.value,
+                    _RETENTION,
+                ),
+            )
 
     def list_part_indices(self, system_id: UUID) -> list[int]:
         prefix = self._parts_prefix(system_id)

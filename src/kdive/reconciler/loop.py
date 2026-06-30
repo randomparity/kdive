@@ -68,6 +68,7 @@ from kdive.reconciler.inventory import InventoryReconcilePass
 from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
 from kdive.reconciler.repairs import allocations as allocation_repairs
 from kdive.reconciler.repairs import build_hosts as build_host_repairs
+from kdive.reconciler.repairs import console_rotation as console_rotation_repairs
 from kdive.reconciler.repairs import debug_sessions as debug_session_repairs
 from kdive.reconciler.repairs import jobs as job_repairs
 from kdive.reconciler.repairs import systems as system_repairs
@@ -109,6 +110,7 @@ _repair_abandoned_jobs = job_repairs.repair_abandoned_jobs
 _repair_dead_sessions = debug_session_repairs.repair_dead_sessions
 _repair_orphaned_systems = system_repairs.repair_orphaned_systems
 _sweep_expired_allocations = allocation_repairs.sweep_expired_allocations
+_sweep_console_rotation = console_rotation_repairs.sweep_console_rotation
 
 __all__ = [
     "ReconcileConfig",
@@ -129,6 +131,7 @@ __all__ = [
     "_repair_abandoned_jobs",
     "_repair_dead_sessions",
     "_repair_orphaned_systems",
+    "_sweep_console_rotation",
     "_sweep_expired_allocations",
     "reconcile_once",
 ]
@@ -401,6 +404,7 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     ),
     _RepairCatalogEntry("orphaned_systems", lambda _r, _c, _g: _repair_orphaned_systems),
     _RepairCatalogEntry("abandoned_jobs", lambda _r, _c, _g: _repair_abandoned_jobs),
+    _RepairCatalogEntry("console_rotations_enqueued", lambda _r, _c, _g: _sweep_console_rotation),
     _RepairCatalogEntry(
         "reaped_runtime_resources",
         lambda _r, c, _g: lambda conn: _reap_expired_runtime_resources(conn, c.resource_probe),

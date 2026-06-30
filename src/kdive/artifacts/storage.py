@@ -95,6 +95,7 @@ class ArtifactWriteRequest:
     data: bytes
     sensitivity: Sensitivity
     retention_class: str
+    content_encoding: str | None = None
 
     def key(self) -> str:
         return artifact_key(self.tenant, self.owner_kind, self.owner_id, self.name)
@@ -141,12 +142,16 @@ class HeadResult(NamedTuple):
     is absent or uninterpretable). It lets a caller gate on the object's own sensitivity
     without fetching the body — the redaction gate for the presigned-download path
     (ADR-0140), parallel to :class:`FetchedArtifact`'s post-fetch ``sensitivity``.
+    ``content_encoding`` is the value of the ``content-encoding`` user-metadata key
+    (``None`` when absent), written by :meth:`~ObjectStore.put_artifact` when the caller
+    sets :attr:`ArtifactWriteRequest.content_encoding`.
     """
 
     size_bytes: int
     checksum_sha256: str | None
     etag: str
     sensitivity: Sensitivity | None = None
+    content_encoding: str | None = None
 
 
 class ObjectListing(NamedTuple):

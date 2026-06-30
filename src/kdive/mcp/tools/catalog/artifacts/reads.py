@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import logging
+import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, LiteralString, NamedTuple, Protocol
@@ -286,6 +288,19 @@ async def _artifact_content(
     ``configuration_error`` redaction drift — the same redaction gate
     `artifacts_search_text` applies). ``byte_offset``/``max_bytes`` are clamped here
     (ADR-0247), never rejected.
+
+    When ``head().content_encoding == "gzip"`` the fetched bytes are inflated with
+    ``gzip.decompress`` before windowing, so ``data["content"]``, ``size_bytes``, and
+    paging offsets all describe the plaintext. The ``refs["download_uri"]`` is presigned
+    against the stored (compressed) object and serves it as-is. A corrupt compressed
+    body degrades to ``content_unavailable="decode_error"`` rather than raising.
+    Detection is strictly metadata-driven: the object key is never inspected.
+
+    Inflation allocates the full inflated body in memory; this is bounded by
+    construction (the only producer of ``content_encoding=gzip`` objects is the
+    console-part path at <= 64 KiB plaintext per part, and writing arbitrary gzip to a
+    REDACTED key needs object-store write access agents lack), so a decompression bomb
+    is out of the threat model. A hard inflated-size cap is possible future hardening.
     """
     try:
         store = store_factory()
@@ -312,14 +327,22 @@ async def _artifact_content(
         return {"content_unavailable": "store_error"}
     if fetched.sensitivity is not Sensitivity.REDACTED:
         return None
-    window = fetched.data[byte_offset : byte_offset + effective_max]
+    if head.content_encoding == "gzip":
+        try:
+            body = gzip.decompress(fetched.data)
+        except gzip.BadGzipFile, EOFError, zlib.error:
+            return {"content_unavailable": "decode_error"}
+    else:
+        body = fetched.data
+    size_bytes = len(body)
+    window = body[byte_offset : byte_offset + effective_max]
     next_offset = byte_offset + len(window)
     # Truncation requires forward progress: an empty window (offset past the end, or a
     # degenerate inline cap <= 0) advertises no `next_offset`, so a paging caller never
     # loops on a non-advancing cursor.
-    truncated = len(window) > 0 and next_offset < head.size_bytes
+    truncated = len(window) > 0 and next_offset < size_bytes
     data: dict[str, JsonValue] = {
-        "size_bytes": head.size_bytes,
+        "size_bytes": size_bytes,
         "content": window.decode("utf-8", errors="replace"),
         "content_truncated": truncated,
     }

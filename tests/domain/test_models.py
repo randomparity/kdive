@@ -319,6 +319,9 @@ def test_job_kind_covers_the_async_tool_surface() -> None:
         # systems.authorize_ssh_key enqueues this to append an agent public key to the
         # guest root authorized_keys over the managed-key SSH (ADR-0271, #782).
         "authorize_ssh_key",
+        # Server-internal (not agent-facing): the reconciler dispatches this per live
+        # local-libvirt System to rotate its growing console into redacted part artifacts (#892).
+        "console_rotate",
     }
 
 

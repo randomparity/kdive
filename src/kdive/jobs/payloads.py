@@ -54,6 +54,19 @@ class AuthorizeSshKeyPayload(SystemPayload):
     public_key: str
 
 
+class ConsoleRotatePayload(SystemPayload):
+    """A request to rotate a live System's growing console into redacted parts (#892).
+
+    ``boot_id`` is a per-boot identity (the console log's ``os.stat`` ``dev:ino:mtime``) the
+    worker handler uses to detect a power-cycle even when the new boot has already grown past the
+    prior cursor offset (the local serial ``<log>`` truncates per power-cycle, ADR-0258). An empty
+    string is a reset-forcing identity: the reconciler that enqueues this may not be co-located
+    with the worker that owns the console file, so a stat it cannot take degrades to ``""``.
+    """
+
+    boot_id: str = ""
+
+
 class RunPayload(_PayloadBase):
     run_id: str
 
@@ -153,6 +166,7 @@ _PayloadModel = (
     | type[ImageBuildPayload]
     | type[DiagnosticsWorkerCheckPayload]
     | type[BuildInstallBootPayload]
+    | type[ConsoleRotatePayload]
 )
 PayloadModel = (
     SystemPayload
@@ -163,6 +177,7 @@ PayloadModel = (
     | ImageBuildPayload
     | DiagnosticsWorkerCheckPayload
     | BuildInstallBootPayload
+    | ConsoleRotatePayload
 )
 
 _PAYLOAD_MODELS: dict[JobKind, _PayloadModel] = {
@@ -179,6 +194,7 @@ _PAYLOAD_MODELS: dict[JobKind, _PayloadModel] = {
     JobKind.DIAGNOSTICS_WORKER_CHECK: DiagnosticsWorkerCheckPayload,
     JobKind.BUILD_INSTALL_BOOT: BuildInstallBootPayload,
     JobKind.AUTHORIZE_SSH_KEY: AuthorizeSshKeyPayload,
+    JobKind.CONSOLE_ROTATE: ConsoleRotatePayload,
 }
 _RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.BUILD: BuildPayload,
