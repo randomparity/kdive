@@ -37,7 +37,7 @@ new composite tools or worker jobs.
   workflow is split into two gated index docs. `docs/guide/agent-index.md`
   (`audience="all"`) is the investigation entry point named in server `instructions`; it
   links only investigation toolset docs and names no operator URI.
-  `docs/guide/agent-index-operator.md` (`audience="operator"`) is the operator entry point,
+  the planned `agent-index-operator.md` (`audience="operator"`) is the operator entry point,
   listed and readable only for platform-operator callers, so it can name operator docs.
 - **Per-toolset purpose docs** (`docs/guide/toolsets/<ns>.md`): one per agent-facing
   namespace, explaining each tool by purpose — how it helps an investigation and when to

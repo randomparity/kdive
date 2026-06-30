@@ -76,7 +76,8 @@ two index docs, each gated like the toolset docs it links:
 - **`docs/guide/agent-index.md`** (`audience="all"`) — the investigation entry point,
   named in server `instructions`. It links only `audience="all"` toolset docs. It does not
   name any operator doc or operator URI.
-- **`docs/guide/agent-index-operator.md`** (`audience="operator"`, role-gated) — the
+- **`agent-index-operator.md`** (under `docs/guide/`, `audience="operator"`, role-gated,
+  planned for the operator phase) — the
   operator/admin entry point. Listed and readable only for platform-operator callers, so
   it can safely name the operator toolset docs.
 

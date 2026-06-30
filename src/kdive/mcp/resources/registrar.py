@@ -102,6 +102,55 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
             "advertised tool outputSchema."
         ),
     ),
+    DocResource(
+        uri="resource://kdive/docs/guide/agent-index.md",
+        source="docs/guide/agent-index.md",
+        content_file="agent-index.md",
+        name="agent-index",
+        title="Driving a kdive investigation",
+        description=(
+            "Entry point for an agent: the typical investigation session mapped to toolsets, "
+            "with a per-toolset guide link. Named in the server instructions."
+        ),
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/runs.md",
+        source="docs/guide/toolsets/runs.md",
+        content_file="toolsets-runs.md",
+        name="toolset-runs",
+        title="runs toolset",
+        description=(
+            "How each runs.* tool helps an investigation: the build, install, and boot lifecycle."
+        ),
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/artifacts.md",
+        source="docs/guide/toolsets/artifacts.md",
+        content_file="toolsets-artifacts.md",
+        name="toolset-artifacts",
+        title="artifacts toolset",
+        description="How each artifacts.* tool helps: reading run evidence and uploading builds.",
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/debug.md",
+        source="docs/guide/toolsets/debug.md",
+        content_file="toolsets-debug.md",
+        name="toolset-debug",
+        title="debug toolset",
+        description=(
+            "How each debug.* tool helps: live GDB kernel debugging — breakpoints, memory, stacks."
+        ),
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/systems.md",
+        source="docs/guide/toolsets/systems.md",
+        content_file="toolsets-systems.md",
+        name="toolset-systems",
+        title="systems toolset",
+        description=(
+            "How each systems.* tool helps: provision, reprovision, and reach the target over SSH."
+        ),
+    ),
 )
 
 
