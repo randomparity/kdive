@@ -83,8 +83,12 @@ Each maps to an acceptance-criteria checkbox on #921 and to a test.
    (readable region ended within the window), `truncated=false`.
 8. **Partial-window readability** — when the oversized window's tail is unmapped (START near the
    top of the loaded image), gdb errors on the whole range; the engine shrinks the window
-   (halving from `N*16` to a floor) and returns the readable prefix with `truncated=false`. Only
-   an unreadable START yields `no_instructions`.
+   (halving from `N*16` down to a floor of `MAX_INSTRUCTION_BYTES` = 16, one maximal
+   instruction) and returns whatever the first readable window yields, with `truncated` computed
+   exactly as in criterion 7 (`returned_count > instruction_count` — so a shrunk-but-still-large
+   window that returns more than `instruction_count` is still `truncated=true`). Because the
+   floor is one maximal instruction, a readable START always returns at least one instruction;
+   only a START unreadable even for 16 bytes yields `no_instructions`.
 9. **Redaction** — a registered secret appearing in an `inst`/`func_name` field is masked before
    the instruction is returned.
 
@@ -118,7 +122,9 @@ No schema, migration, RBAC, persistence, config, or destructive-op gate change.
   command shape, address-path, truncation, `bad_instruction_count` (parametrized 0 and cap+1)
   with no command written, `bad_target` (both/neither), `bad_address`, `no_instructions` on
   empty/malformed `asm_insns`, `no_instructions` on the unmapped-range `^error`, the shrink-retry
-  returning a readable prefix when the first oversized window errors but a smaller one succeeds,
+  returning a readable prefix when the first oversized window errors but a smaller one succeeds
+  (including the case where the shrunk window still returns more than `instruction_count` →
+  `truncated=true`), `no_instructions` only when even the 16-byte floor window errors,
   pass-through of an unrelated gdb error, and secret redaction in an instruction field. Plus a
   `disassembly_rows` parser test for the flat and malformed shapes.
 - **Tool** (`tests/mcp/debug/test_debug_ops.py`): happy path returns `status="disassembled"`

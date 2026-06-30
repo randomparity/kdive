@@ -64,9 +64,12 @@ gain it) plus one MCP tool. No new gdb expression surface; no session state.
    that reachable when the target sits near the top of the loaded image (the window overruns
    past the last mapped section). To avoid failing a request whose START is valid code, the
    engine retries the disassemble with a shrinking byte span (halving from `N*16` down to a
-   floor) on a memory-access error, returning the readable instruction prefix it does get
-   (`truncated=false`, since that prefix is the genuine end of the readable region). Only when
-   even the minimal window fails — START itself is unreadable — is `no_instructions` raised.
+   floor of `MAX_INSTRUCTION_BYTES` = 16, one maximal instruction) on a memory-access error,
+   returning whatever the first readable window yields. `truncated` is still computed as
+   `returned_count > instruction_count` against that window — a shrunk-but-still-large window
+   that returns more than `instruction_count` is `truncated=true`, not false. Because the floor
+   is one maximal instruction, a readable START always returns at least one instruction; only a
+   START unreadable even for 16 bytes raises `no_instructions`.
 
 2. **Forward window.** "Around" is implemented as a forward window starting at the
    symbol/address, not a centered one. Reliable *backward* disassembly of variable-length x86
