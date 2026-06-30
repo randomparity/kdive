@@ -131,6 +131,13 @@ def test_build_boot_debug_leads_with_external_upload_loop() -> None:
     assert "secondary single-host" in lowered
 
 
+def test_build_boot_debug_names_the_composite() -> None:
+    # #940: the composite must be signposted so an agent following the canonical recipe
+    # learns the ceremony-reducing tool exists.
+    spec = next(s for s in CANONICAL_PROMPTS if s.name == "build_boot_debug")
+    assert "runs.build_install_boot" in spec.summary
+
+
 def test_render_numbers_steps_sequentially_from_one_on_their_own_lines() -> None:
     spec = PromptSpec(
         name="probe",
