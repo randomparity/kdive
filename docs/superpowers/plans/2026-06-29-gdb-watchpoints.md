@@ -17,6 +17,7 @@
 - Doc prose: no "critical/robust/comprehensive/elegant"; "Milestone" not "Sprint".
 - Guardrails before every commit (these CI-hard-gate individually): `just lint`, `just type`, `just test` (or focused `uv run python -m pytest <path> -q`). Generated-doc gates: `just docs-check`, `just rbac-matrix` (regenerate), `just config-docs-check`.
 - New tools marked `implemented` via the shared `_gdbmi_maturity()`; **not** added to `_LOCAL_PROVEN_DEBUG_TOOLS` (unit-tested only, like `resolve_symbol`).
+- **Commit grouping (type-coupling constraint).** The `ty` pre-commit hook runs `just type` **whole-tree** (`pass_filenames: false`), and `FaultInjectDebugEngine` is structurally typed against the `GdbMiEngine` Protocol at `providers/fault_inject/composition.py:117`. So the moment the Protocol gains the three methods (Task 1), the tree does not type-check until **every** concrete implementor has them. The only concrete implementors are the shared `GdbMiEngine` (used by both local- and remote-libvirt) and `FaultInjectDebugEngine` — no separate local/remote engine class implements the Protocol (verify with `rg -n "def set_breakpoint" src/kdive/providers` before starting; expect only the shared engine + fault-inject). Therefore **Tasks 1+2+3 are one commit-group**: stage them and run the `ty` gate / commit only at the end of Task 3, when the tree is green again. Tasks 4 and 5 are separate commits (they only add references and never break Protocol conformance).
 - Commit trailer: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
 
 ## File Structure
@@ -105,7 +106,7 @@ class GdbWatchpointRef(ProviderModel):
         ...
 ```
 
-- [ ] **Step 3: Run type check** — `just type` → PASS (Protocol additions only; engine impl lands in Task 2). If `ty` flags the local-libvirt/fault-inject engines as not satisfying the Protocol, that is expected until Tasks 2–3 land; commit this task together with Task 2 if needed. Practically: defer the commit of Task 1 into Task 2's commit so the tree is never red.
+- [ ] **Step 3: Do not commit or run the `ty` gate yet.** Extending the Protocol makes `ty` red tree-wide until the shared engine (Task 2) and `FaultInjectDebugEngine` (Task 3) both implement the methods — and the `ty` pre-commit hook is whole-tree, so a partial commit is blocked. Leave these changes staged/unstaged and proceed to Task 2; the single green commit lands at the end of Task 3 (see "Commit grouping" in Global Constraints). You may run `just lint` (ruff is file-scoped and stays green) but **not** `just type` until Task 3.
 
 ---
 
@@ -491,12 +492,7 @@ def _is_watchpoint_row(entry: dict[str, Any]) -> bool:
 
 - [ ] **Step 7: Run the watchpoint + disassemble tests** — `uv run python -m pytest tests/providers/local_libvirt/test_debug_gdbmi.py -k "watchpoint or disassemble" -q`. Expected: PASS.
 
-- [ ] **Step 8: Guardrails + commit** — `just lint && just type`, then:
-
-```bash
-git add src/kdive/providers/ports/debug.py src/kdive/providers/shared/debug_common/gdbmi.py tests/providers/local_libvirt/test_debug_gdbmi.py
-git commit -m "feat(922): shared GdbMiEngine watchpoint set/list/clear"
-```
+- [ ] **Step 8: Lint only; do NOT commit yet.** Run `just lint` (ruff, file-scoped → green). Do **not** run `just type` or commit: `FaultInjectDebugEngine` does not yet implement the Protocol, so the whole-tree `ty` gate is red until Task 3. Leave Task 1 + Task 2 changes staged. The commit lands at the end of Task 3.
 
 ---
 
@@ -570,11 +566,15 @@ def test_debug_engine_watchpoints_round_trip(tmp_path: Path) -> None:
 
 - [ ] **Step 4: Run to verify it passes** — same pytest command. Expected: PASS.
 
-- [ ] **Step 5: Guardrails + commit** — `just lint && just type`, then:
+- [ ] **Step 5: Guardrails + the single green commit for Tasks 1–3.** Now that the Protocol and **both** implementors are complete, the tree type-checks. Run `just lint && just type` (whole-tree) → PASS, then run the engine + fault-inject tests once more (`uv run python -m pytest tests/providers/local_libvirt/test_debug_gdbmi.py tests/providers/fault_inject/test_provider.py -q`) → PASS, then commit all of Tasks 1–3 together:
 
 ```bash
-git add src/kdive/providers/fault_inject/debug/gdb.py tests/providers/fault_inject/test_provider.py
-git commit -m "feat(922): fault-inject synthetic watchpoint engine"
+git add src/kdive/providers/ports/debug.py \
+  src/kdive/providers/shared/debug_common/gdbmi.py \
+  src/kdive/providers/fault_inject/debug/gdb.py \
+  tests/providers/local_libvirt/test_debug_gdbmi.py \
+  tests/providers/fault_inject/test_provider.py
+git commit -m "feat(922): shared + fault-inject GdbMiEngine watchpoints"
 ```
 
 ---
