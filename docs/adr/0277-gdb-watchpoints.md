@@ -114,6 +114,16 @@ additive.
 - The new tools are covered by the `exposure.py` completeness guard, the
   `_BEHAVIOR_TESTS_BY_TOOL` coverage guard, the `tool_index` completeness guard, and the
   `just docs` generated-reference gate.
+- A kernel watchpoint is necessarily a **hardware** (debug-register) watchpoint — a software
+  watchpoint single-steps the inferior, infeasible for a running kernel. So `watchpoint_unsupported`
+  detects only gdb's **set-time** refusal. The same QEMU-gdbstub hardware-trap limitation that
+  made `set_breakpoint` use a software breakpoint (#711) means a watchpoint can be accepted
+  (`^done,wpt=…`) yet never trap, and debug-register exhaustion (4 registers on x86-64) is reported
+  at **insert** time on the next `continue`, not at `set`. Both silent cases surface as a
+  `debug.continue` returning `timed_out=True`; the `set_watchpoint` docstring names that signal and
+  `list_watchpoints` lets an agent see how many watchpoints are already armed. These tools are
+  therefore **not** added to the live-proof set until a live exercise lands (the ADR-0248/0276
+  precedent).
 
 ## Considered & rejected
 

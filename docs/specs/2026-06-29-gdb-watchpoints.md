@@ -51,6 +51,34 @@ clear — without exposing arbitrary gdb expression execution.
   gdb as given; gdb sets the hardware watchpoint it can. Alignment is the caller's responsibility
   (use an address from a symbol/frame).
 
+## Failure modes / limitations
+
+A kernel data watchpoint over the gdbstub is necessarily a **hardware** (debug-register)
+watchpoint: a software watchpoint single-steps the inferior, which is infeasible for a running
+kernel. That constraint has three consequences the engine cannot fully detect at `set` time, so
+these tools are **not** added to the live-proof set until a live exercise lands (matching the
+ADR-0248/0276 precedent), and the `set` result is best-effort:
+
+- **The stub may accept the watchpoint but never trap.** QEMU's gdbstub does not reliably trap on
+  hardware debug-register events — the documented reason `set_breakpoint` uses a *software*
+  breakpoint and avoids `-break-insert -h` (#711, see the `set_breakpoint` comment in
+  `gdbmi.py`). The same risk applies to watchpoints. When a watchpoint is set but never traps, the
+  failure is **silent at `set` time**: gdb returns `^done,wpt=…`. The observable signal is the
+  next `debug.continue` returning `timed_out=True` with no stop — not a `set`-time error. The
+  `set_watchpoint` tool docstring names this, and `debug.continue` is a `suggested_next_action`.
+- **Debug registers are scarce (4 on x86-64).** Setting more watchpoints than free debug registers
+  (counting any hardware breakpoints) typically returns `^done,wpt=…` at `set` time and only fails
+  at **insertion** on the next `continue` ("Could not insert hardware watchpoints: …"). So
+  exhaustion, like the non-trap case, surfaces on `continue`, not `set`. `list_watchpoints` is the
+  affordance for an agent to see how many watchpoints are already armed before adding more.
+- **`watchpoint_unsupported` covers only the set-time refusal.** Criterion 5 detects the case where
+  gdb refuses `-break-watch` up front with a watchpoint-naming `^error` (e.g. "Target does not
+  support hardware watchpoints."). A stub that accepts-but-never-traps, or fails at insert time,
+  is **not** a `set`-time error and surfaces as the `continue` timeout above. This honestly scopes
+  the #922 acceptance criterion "clearly reports when the target cannot support the requested
+  watchpoint": the engine reports the refusal it can see and routes the silent cases to the
+  `continue`-timeout signal rather than claiming a guarantee it cannot keep.
+
 ## Success criteria
 
 Each maps to an acceptance-criteria checkbox on #922 and to a test.
@@ -69,10 +97,12 @@ Each maps to an acceptance-criteria checkbox on #922 and to a test.
 4. **Arbitrary expression rejected** — a non-identifier `symbol` →
    `CONFIGURATION_ERROR` / `code="bad_symbol_name"` (via `resolve_symbol`), raised before any
    watch command; the constructed expression is purely numeric, so no caller text reaches gdb.
-5. **Unsupported target reported** — when gdb answers `-break-watch` with an `^error` whose
-   redacted msg names a watchpoint (e.g. "Target does not support hardware watchpoints."), the
-   engine raises `DEBUG_ATTACH_FAILURE` / `code="watchpoint_unsupported"`; an unrelated gdb error
-   passes through unchanged.
+5. **Set-time unsupported target reported** — when gdb answers `-break-watch` with an `^error`
+   whose redacted msg names a watchpoint (e.g. "Target does not support hardware watchpoints."),
+   the engine raises `DEBUG_ATTACH_FAILURE` / `code="watchpoint_unsupported"`; an unrelated gdb
+   error passes through unchanged. This covers only the set-time refusal — an accept-but-never-trap
+   stub or insert-time debug-register exhaustion surfaces as a `debug.continue` timeout, not a
+   `set`-time error (see "Failure modes / limitations").
 6. **List** — `list_watchpoints` issues `-break-list` and returns only the rows whose `type`
    names a watchpoint, each as a `GdbWatchpointRef` (`number`, `type`, `expr` from `what`,
    `addr`, `enabled`); a breakpoint row in the same table is excluded. Tool returns
@@ -116,8 +146,11 @@ evaluation".
   command shape, address-path (no symbol resolution written), `bad_byte_count` (parametrized
   e.g. 0, 3, 16) with no command written, `bad_target` (both/neither), `bad_address`,
   `watchpoint_unsupported` on a watchpoint-naming `^error`, pass-through of an unrelated gdb
-  error, `list_watchpoints` filtering watchpoints from a mixed `-break-list` table, `clear`
-  numeric-id gate + `-break-delete` shape, and secret redaction in the `expr` field.
+  error, `list_watchpoints` filtering watchpoints from a realistic mixed `-break-list` table —
+  a `bkpt` body row whose `type="breakpoint"` alongside one whose `type="hw watchpoint"` with a
+  populated `what`, asserting only the watchpoint is returned and its `expr` maps from `what`
+  (pinning the assumed watchpoint-row wire shape) — `clear` numeric-id gate + `-break-delete`
+  shape, and secret redaction in the `expr` field.
 - **Tool** (`tests/mcp/debug/test_debug_ops.py`): `set_watchpoint` happy path returns
   `status="watching"` with `data={number, expr, byte_count}` and the next-action pointers;
   `list_watchpoints` returns `status="listed"` with the structured payload; `clear_watchpoint`
