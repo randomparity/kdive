@@ -124,6 +124,9 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "debug.disassemble": frozenset(
         {"disassemble", "disasm", "instructions", "asm", "opcodes", "code"}
     ),
+    "debug.set_watchpoint": frozenset({"watchpoint", "watch", "write", "monitor", "data", "debug"}),
+    "debug.list_watchpoints": frozenset({"watchpoints", "list", "watch", "debug"}),
+    "debug.clear_watchpoint": frozenset({"watchpoint", "clear", "remove", "delete", "debug"}),
     "debug.start_session": frozenset({"session", "start", "gdb", "debug", "attach"}),
     "debug.end_session": frozenset({"session", "end", "stop", "gdb", "debug"}),
     "debug.continue": frozenset({"continue", "resume", "run", "debug"}),

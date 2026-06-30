@@ -1612,6 +1612,302 @@ def test_disassemble_redacts_registered_secret_in_inst(tmp_path: Path) -> None:
     assert secret not in result.instructions[0].func_name
 
 
+# --- watchpoints (ADR-0277) ----------------------------------------------------------------
+
+
+def _watch_set_controller(command: str) -> _FakeMiController:
+    return _FakeMiController(
+        responses={
+            command: [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {"wpt": {"number": "2", "exp": "*(char(*)[8])0x1000"}},
+                }
+            ]
+        }
+    )
+
+
+def test_set_watchpoint_symbol_resolves_then_watches(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-data-evaluate-expression &d_hash_shift": [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {"value": "0xffffffff81000000 <d_hash_shift>"},
+                }
+            ],
+            "-break-watch *(char(*)[8])0xffffffff81000000": [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {"wpt": {"number": "3", "exp": "*(char(*)[8])0xffffffff81000000"}},
+                }
+            ],
+        }
+    )
+    ref = _engine().set_watchpoint(
+        _attachment(controller, tmp_path), symbol="d_hash_shift", address=None, byte_count=8
+    )
+    assert ref.number == "3"
+    assert ref.expr == "*(char(*)[8])0xffffffff81000000"
+
+
+def test_set_watchpoint_address_skips_symbol_resolution(tmp_path: Path) -> None:
+    command = "-break-watch *(char(*)[4])0x1000"
+    controller = _watch_set_controller(command)
+    ref = _engine().set_watchpoint(
+        _attachment(controller, tmp_path), symbol=None, address=0x1000, byte_count=4
+    )
+    assert ref.number == "2"
+    assert "-data-evaluate-expression &" not in " ".join(controller.written)
+    assert command in controller.written
+
+
+@pytest.mark.parametrize("bad", [0, 3, 16])
+def test_set_watchpoint_rejects_bad_byte_count_before_command(bad: int, tmp_path: Path) -> None:
+    controller = _FakeMiController()
+    with pytest.raises(CategorizedError) as exc:
+        _engine().set_watchpoint(
+            _attachment(controller, tmp_path), symbol=None, address=0x1000, byte_count=bad
+        )
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["code"] == "bad_byte_count"
+    assert exc.value.details["supported"] == [1, 2, 4, 8]
+    assert controller.written == []
+
+
+@pytest.mark.parametrize(("symbol", "address"), [("d_hash_shift", 0x1000), (None, None)])
+def test_set_watchpoint_rejects_bad_target(
+    symbol: str | None, address: int | None, tmp_path: Path
+) -> None:
+    controller = _FakeMiController()
+    with pytest.raises(CategorizedError) as exc:
+        _engine().set_watchpoint(
+            _attachment(controller, tmp_path), symbol=symbol, address=address, byte_count=8
+        )
+    assert exc.value.details["code"] == "bad_target"
+    assert controller.written == []
+
+
+@pytest.mark.parametrize("bad", [-1, 0x1_0000_0000_0000_0000])
+def test_set_watchpoint_rejects_out_of_range_address(bad: int, tmp_path: Path) -> None:
+    controller = _FakeMiController()
+    with pytest.raises(CategorizedError) as exc:
+        _engine().set_watchpoint(
+            _attachment(controller, tmp_path), symbol=None, address=bad, byte_count=8
+        )
+    assert exc.value.details["code"] == "bad_address"
+    assert controller.written == []
+
+
+def test_set_watchpoint_unsupported_target_is_categorized(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-break-watch *(char(*)[8])0x1000": [
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": "Target does not support hardware watchpoints."},
+                }
+            ]
+        }
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _engine().set_watchpoint(
+            _attachment(controller, tmp_path), symbol=None, address=0x1000, byte_count=8
+        )
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "watchpoint_unsupported"
+
+
+def test_set_watchpoint_running_target_is_inferior_running(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-break-watch *(char(*)[8])0x1000": [
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": "Cannot insert watchpoints while the target is running."},
+                }
+            ]
+        }
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _engine().set_watchpoint(
+            _attachment(controller, tmp_path), symbol=None, address=0x1000, byte_count=8
+        )
+    assert exc.value.details["code"] == "inferior_running"
+
+
+def test_set_watchpoint_malformed_result_is_categorized(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-break-watch *(char(*)[8])0x1000": [
+                {"type": "result", "message": "done", "payload": {"no-wpt": {}}}
+            ]
+        }
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _engine().set_watchpoint(
+            _attachment(controller, tmp_path), symbol=None, address=0x1000, byte_count=8
+        )
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "no_watchpoint_record"
+
+
+def test_set_watchpoint_passes_through_unrelated_gdb_error(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-break-watch *(char(*)[8])0x1000": [
+                {"type": "result", "message": "error", "payload": {"msg": "Some other failure"}}
+            ]
+        }
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _engine().set_watchpoint(
+            _attachment(controller, tmp_path), symbol=None, address=0x1000, byte_count=8
+        )
+    assert exc.value.details.get("code") not in {"watchpoint_unsupported", "inferior_running"}
+
+
+def test_list_watchpoints_filters_watchpoint_rows(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-break-list": [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {
+                        "BreakpointTable": {
+                            "body": [
+                                {"bkpt": {"number": "1", "type": "breakpoint", "func": "panic"}},
+                                {
+                                    "bkpt": {
+                                        "number": "2",
+                                        "type": "hw watchpoint",
+                                        "what": "*(char(*)[8])0x1000",
+                                        "enabled": "y",
+                                    }
+                                },
+                            ]
+                        }
+                    },
+                }
+            ]
+        }
+    )
+    refs = _engine().list_watchpoints(_attachment(controller, tmp_path))
+    assert [r.number for r in refs] == ["2"]
+    assert refs[0].expr == "*(char(*)[8])0x1000"
+    assert refs[0].enabled is True
+
+
+def test_list_watchpoints_parses_bare_body_rows(tmp_path: Path) -> None:
+    # Live gdbstub `-break-list` (ground truth from a real KVM run, #922) flattens body rows to
+    # bare dicts with no `bkpt` wrapper; the watchpoint row carries `what`, no `addr`.
+    controller = _FakeMiController(
+        responses={
+            "-break-list": [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {
+                        "BreakpointTable": {
+                            "body": [
+                                {
+                                    "number": "1",
+                                    "type": "breakpoint",
+                                    "enabled": "y",
+                                    "addr": "0xffffffff82455b20",
+                                    "func": "schedule",
+                                },
+                                {
+                                    "number": "2",
+                                    "type": "hw watchpoint",
+                                    "enabled": "y",
+                                    "what": "*(char(*)[8])0xffffffff83009a00",
+                                },
+                            ]
+                        }
+                    },
+                }
+            ]
+        }
+    )
+    refs = _engine().list_watchpoints(_attachment(controller, tmp_path))
+    assert [r.number for r in refs] == ["2"]
+    assert refs[0].expr == "*(char(*)[8])0xffffffff83009a00"
+    assert refs[0].enabled is True
+
+
+def test_list_breakpoints_parses_bare_body_rows(tmp_path: Path) -> None:
+    # Same live `-break-list` bare-row shape (#922): the shared `breakpoint_rows` fix must also
+    # keep `list_breakpoints` working when pygdbmi does not wrap rows in `bkpt`.
+    controller = _FakeMiController(
+        responses={
+            "-break-list": [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {
+                        "BreakpointTable": {
+                            "body": [
+                                {
+                                    "number": "1",
+                                    "type": "breakpoint",
+                                    "addr": "0xffffffff82455b20",
+                                    "func": "schedule",
+                                }
+                            ]
+                        }
+                    },
+                }
+            ]
+        }
+    )
+    refs = _engine().list_breakpoints(_attachment(controller, tmp_path))
+    assert [r.number for r in refs] == ["1"]
+    assert refs[0].func == "schedule"
+
+
+def test_clear_watchpoint_requires_numeric_id(tmp_path: Path) -> None:
+    controller = _FakeMiController()
+    with pytest.raises(CategorizedError) as exc:
+        _engine().clear_watchpoint(_attachment(controller, tmp_path), "abc")
+    assert exc.value.details["code"] == "bad_watchpoint_id"
+    assert controller.written == []
+
+
+def test_clear_watchpoint_deletes(tmp_path: Path) -> None:
+    controller = _FakeMiController()
+    _engine().clear_watchpoint(_attachment(controller, tmp_path), "2")
+    assert "-break-delete 2" in controller.written
+
+
+def test_set_watchpoint_redacts_registered_secret_in_expr(tmp_path: Path) -> None:
+    secret = "topsecretexpr"  # pragma: allowlist secret - fake test value
+    controller = _FakeMiController(
+        responses={
+            "-break-watch *(char(*)[8])0x1000": [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {"wpt": {"number": "2", "exp": secret}},
+                }
+            ]
+        }
+    )
+    engine = _engine(Redactor(secret_values=[secret], registry=SecretRegistry()))
+    ref = engine.set_watchpoint(
+        _attachment(controller, tmp_path), symbol=None, address=0x1000, byte_count=8
+    )
+    assert ref.expr is not None
+    assert secret not in ref.expr
+
+
 # --- error mapping ------------------------------------------------------------------------
 
 

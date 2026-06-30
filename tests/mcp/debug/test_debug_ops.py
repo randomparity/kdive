@@ -274,6 +274,9 @@ def _op_for(op: str, runtime: DebugEngineRuntime, session_id: str, **kwargs: Any
         "backtrace": debug_ops._backtrace_op,
         "read_frame": debug_ops._read_frame_op,
         "disassemble": debug_ops._disassemble_op,
+        "set_watchpoint": debug_ops._set_watchpoint_op,
+        "list_watchpoints": debug_ops._list_watchpoints_op,
+        "clear_watchpoint": debug_ops._clear_watchpoint_op,
     }[op]
     return factory(session_id, **kwargs)
 
@@ -679,6 +682,126 @@ def test_disassemble_no_instructions_is_categorized(migrated_url: str) -> None:
         assert resp.status == "error"
         assert resp.error_category == "debug_attach_failure"
         assert resp.data["code"] == "no_instructions"
+
+    asyncio.run(_run())
+
+
+def test_set_watchpoint_returns_watching(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-break-watch *(char(*)[8])0x1000": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {"wpt": {"number": "2", "exp": "*(char(*)[8])0x1000"}},
+                        }
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for(
+                    "set_watchpoint", runtime, session_id, symbol=None, address=0x1000, byte_count=8
+                ),
+            )
+        assert resp.status == "watching"
+        assert resp.data["number"] == "2"
+        assert resp.data["byte_count"] == 8
+        assert "debug.continue" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+def test_list_watchpoints_returns_listed(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-break-list": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {
+                                "BreakpointTable": {
+                                    "body": [
+                                        {
+                                            "bkpt": {
+                                                "number": "2",
+                                                "type": "hw watchpoint",
+                                                "what": "*(char(*)[8])0x1000",
+                                            }
+                                        }
+                                    ]
+                                }
+                            },
+                        }
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op(
+                pool, _ctx(), session_id, runtime, _op_for("list_watchpoints", runtime, session_id)
+            )
+        assert resp.status == "listed"
+        assert resp.data["count"] == 1
+
+    asyncio.run(_run())
+
+
+def test_clear_watchpoint_returns_cleared(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController({})
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for("clear_watchpoint", runtime, session_id, number="2"),
+            )
+        assert resp.status == "cleared"
+
+    asyncio.run(_run())
+
+
+def test_set_watchpoint_unsupported_is_categorized(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-break-watch *(char(*)[8])0x1000": [
+                        {
+                            "type": "result",
+                            "message": "error",
+                            "payload": {"msg": "Target does not support hardware watchpoints."},
+                        }
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for(
+                    "set_watchpoint", runtime, session_id, symbol=None, address=0x1000, byte_count=8
+                ),
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "debug_attach_failure"
+        assert resp.data["code"] == "watchpoint_unsupported"
 
     asyncio.run(_run())
 

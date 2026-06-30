@@ -39,6 +39,7 @@
 | [`control.power`](control.md#controlpower) | `implemented` |
 | [`debug.backtrace`](debug.md#debugbacktrace) | `implemented` |
 | [`debug.clear_breakpoint`](debug.md#debugclear_breakpoint) | `implemented` |
+| [`debug.clear_watchpoint`](debug.md#debugclear_watchpoint) | `implemented` |
 | [`debug.continue`](debug.md#debugcontinue) | `implemented` |
 | [`debug.disassemble`](debug.md#debugdisassemble) | `implemented` |
 | [`debug.end_session`](debug.md#debugend_session) | `implemented` |
@@ -46,11 +47,13 @@
 | [`debug.interrupt`](debug.md#debuginterrupt) | `implemented` |
 | [`debug.list_breakpoints`](debug.md#debuglist_breakpoints) | `implemented` |
 | [`debug.list_sessions`](debug.md#debuglist_sessions) | `implemented` |
+| [`debug.list_watchpoints`](debug.md#debuglist_watchpoints) | `implemented` |
 | [`debug.read_frame`](debug.md#debugread_frame) | `implemented` |
 | [`debug.read_memory`](debug.md#debugread_memory) | `implemented` |
 | [`debug.read_registers`](debug.md#debugread_registers) | `implemented` |
 | [`debug.resolve_symbol`](debug.md#debugresolve_symbol) | `implemented` |
 | [`debug.set_breakpoint`](debug.md#debugset_breakpoint) | `implemented` |
+| [`debug.set_watchpoint`](debug.md#debugset_watchpoint) | `implemented` |
 | [`debug.start_session`](debug.md#debugstart_session) | `implemented` |
 | [`fixtures.list`](fixtures.md#fixtureslist) | `implemented` |
 | [`fixtures.validate`](fixtures.md#fixturesvalidate) | `implemented` |

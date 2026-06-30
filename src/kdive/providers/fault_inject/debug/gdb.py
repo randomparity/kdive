@@ -13,6 +13,7 @@ from kdive.providers.ports.debug import (
     GdbInstruction,
     GdbMiAttachment,
     GdbStopRecord,
+    GdbWatchpointRef,
 )
 
 
@@ -50,6 +51,7 @@ class FaultInjectDebugEngine:
 
     def __init__(self) -> None:
         self._breakpoints: dict[Path, dict[str, GdbBreakpointRef]] = {}
+        self._watchpoints: dict[Path, dict[str, GdbWatchpointRef]] = {}
         self._next = 1
         self._lock = Lock()
 
@@ -113,6 +115,41 @@ class FaultInjectDebugEngine:
         return GdbFrame(
             level=level, func="panic", addr="0xffffffff81000000", file="kernel/panic.c", line=1
         )
+
+    def set_watchpoint(
+        self,
+        attachment: GdbMiAttachment,
+        *,
+        symbol: str | None = None,
+        address: int | None = None,
+        byte_count: int = 8,
+    ) -> GdbWatchpointRef:
+        del symbol
+        with self._lock:
+            number = str(self._next)
+            self._next += 1
+            target = address if address is not None else 0xFFFFFFFF81000000
+            ref = GdbWatchpointRef(
+                number=number,
+                type="hw watchpoint",
+                expr=f"*(char(*)[{byte_count}])0x{target:x}",
+                enabled=True,
+            )
+            self._watchpoints.setdefault(attachment.transcript_path, {})[number] = ref
+            return ref
+
+    def list_watchpoints(self, attachment: GdbMiAttachment) -> list[GdbWatchpointRef]:
+        with self._lock:
+            return list(self._watchpoints.get(attachment.transcript_path, {}).values())
+
+    def clear_watchpoint(self, attachment: GdbMiAttachment, number: str) -> None:
+        with self._lock:
+            bucket = self._watchpoints.get(attachment.transcript_path)
+            if bucket is None:
+                return
+            bucket.pop(number, None)
+            if not bucket:
+                self._watchpoints.pop(attachment.transcript_path, None)
 
     def disassemble(
         self,

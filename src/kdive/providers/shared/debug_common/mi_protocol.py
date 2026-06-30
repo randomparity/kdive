@@ -63,6 +63,16 @@ def result_payload_dict(records: list[MiRecord]) -> dict[str, Any]:
 
 
 def breakpoint_rows(records: list[MiRecord]) -> list[dict[str, Any]]:
+    """The breakpoint/watchpoint dicts from a ``-break-list`` result.
+
+    gdb/MI emits ``BreakpointTable={...,body=[bkpt={...},...]}``. Live gdbstub transcripts show
+    this pygdbmi flattens each body row to a bare dict (``{number,type,...}`` with no ``"bkpt"``
+    wrapper); other pygdbmi versions keep the ``{"bkpt": {...}}`` wrapping (the same divergence
+    ``stack_frames`` handles for ``-stack-list-frames``). Accept either: unwrap a dict ``bkpt`` key
+    when present, else treat a row carrying a top-level ``number`` as a bare entry; rows that are
+    neither (a non-dict ``bkpt``, an unrelated key) are ignored as malformed. Watchpoints appear
+    here too, as rows with ``type`` containing ``"watchpoint"`` and the expression in ``what``.
+    """
     payload = result_payload_dict(records)
     table = payload_dict(payload.get("BreakpointTable"))
     rows: list[dict[str, Any]] = []
@@ -70,6 +80,8 @@ def breakpoint_rows(records: list[MiRecord]) -> list[dict[str, Any]]:
         entry = row.get("bkpt")
         if isinstance(entry, dict):
             rows.append(entry)
+        elif "number" in row:
+            rows.append(row)
     return rows
 
 
