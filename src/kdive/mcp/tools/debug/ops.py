@@ -1,7 +1,8 @@
 """The Debug-plane gdb-MI tools — `debug.set_breakpoint/.clear/.list`, `.read_memory`,
 `.read_registers`, `.resolve_symbol`, `.continue`, `.interrupt`, `.backtrace`, `.read_frame`,
-`.disassemble`, `.set_watchpoint/.list_watchpoints/.clear_watchpoint`
-(ADR-0034, ADR-0248, ADR-0275, ADR-0276, ADR-0277).
+`.disassemble`, `.set_watchpoint/.list_watchpoints/.clear_watchpoint`,
+`.list_modules/.load_module_symbols`
+(ADR-0034, ADR-0248, ADR-0275, ADR-0276, ADR-0277, ADR-0278).
 
 These extend the `debug.*` session lifecycle tools registered by ``sessions.py``. A `live`
 `DebugSession` records an open single-attach gdbstub transport; the first Debug-plane op for
@@ -52,6 +53,7 @@ from kdive.providers.ports.debug import (
     GdbMiEngine,
 )
 from kdive.providers.ports.lifecycle import TransportHandleData
+from kdive.providers.shared.debug_common.gdbmi import MAX_MODULES
 from kdive.security.authz.context import RequestContext
 from kdive.serialization import JsonValue
 
@@ -455,6 +457,51 @@ def _clear_watchpoint_op(session_id: str, number: str) -> _EngineOp:
     return op
 
 
+def _list_modules_op(session_id: str) -> _EngineOp:
+    def op(engine: GdbMiEngine, attachment: GdbMiAttachment) -> ToolResponse:
+        result = engine.list_modules(attachment, max_modules=MAX_MODULES)
+        modules: list[JsonValue] = [
+            module.model_dump(mode="json", exclude_none=True) for module in result.modules
+        ]
+        return ToolResponse.success(
+            session_id,
+            "listed",
+            suggested_next_actions=["debug.load_module_symbols", "debug.backtrace"],
+            data={
+                "count": len(modules),
+                "truncated": result.truncated,
+                "decode_errors": result.decode_errors,
+                "modules": modules,
+            },
+        )
+
+    return op
+
+
+def _load_module_symbols_op(session_id: str, module: str, expected_base: int | None) -> _EngineOp:
+    def op(engine: GdbMiEngine, attachment: GdbMiAttachment) -> ToolResponse:
+        result = engine.load_module_symbols(attachment, module=module, expected_base=expected_base)
+        data: dict[str, JsonValue] = {
+            "module": result.name,
+            "base_address": result.base_address,
+            "symbols_loaded": result.symbols_loaded,
+        }
+        if result.identity_verified is not None:
+            data["identity_verified"] = result.identity_verified
+        return ToolResponse.success(
+            session_id,
+            "loaded",
+            suggested_next_actions=[
+                "debug.backtrace",
+                "debug.disassemble",
+                "debug.list_modules",
+            ],
+            data=data,
+        )
+
+    return op
+
+
 def _stop_data(reason: str | None, timed_out: bool) -> dict[str, JsonValue]:
     data: dict[str, JsonValue] = {"timed_out": timed_out}
     if reason is not None:
@@ -465,7 +512,7 @@ def _stop_data(reason: str | None, timed_out: bool) -> dict[str, JsonValue]:
 def _register_debug_ops(
     app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
 ) -> None:
-    """Register the fourteen gdb-MI `debug.*` tools on ``app``, sharing ``runtime`` (ADR-0034)."""
+    """Register the sixteen gdb-MI `debug.*` tools on ``app``, sharing ``runtime`` (ADR-0034)."""
     _register_debug_set_breakpoint(app, pool, runtime)
     _register_debug_clear_breakpoint(app, pool, runtime)
     _register_debug_list_breakpoints(app, pool, runtime)
@@ -480,6 +527,8 @@ def _register_debug_ops(
     _register_debug_set_watchpoint(app, pool, runtime)
     _register_debug_list_watchpoints(app, pool, runtime)
     _register_debug_clear_watchpoint(app, pool, runtime)
+    _register_debug_list_modules(app, pool, runtime)
+    _register_debug_load_module_symbols(app, pool, runtime)
 
 
 def _register_debug_set_breakpoint(
@@ -854,4 +903,63 @@ def _register_debug_clear_watchpoint(
             session_id,
             runtime,
             _clear_watchpoint_op(session_id, number),
+        )
+
+
+def _register_debug_list_modules(
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+) -> None:
+    @app.tool(
+        name="debug.list_modules",
+        annotations=_docmeta.read_only(),
+        meta=_gdbmi_maturity(),
+    )
+    async def debug_list_modules(
+        session_id: Annotated[
+            str, Field(description="The live DebugSession whose loaded modules to list.")
+        ],
+    ) -> ToolResponse:
+        """List loaded kernel modules (name, base address, whether symbols are loaded).
+
+        Requires contributor.
+        """
+        return await run_engine_op(
+            pool, current_context(), session_id, runtime, _list_modules_op(session_id)
+        )
+
+
+def _register_debug_load_module_symbols(
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+) -> None:
+    @app.tool(
+        name="debug.load_module_symbols",
+        annotations=_docmeta.mutating(),
+        meta=_gdbmi_maturity(),
+    )
+    async def debug_load_module_symbols(
+        session_id: Annotated[
+            str, Field(description="The live DebugSession to load module symbols on.")
+        ],
+        module: Annotated[
+            str,
+            Field(description="Loaded module name to load symbols for (from debug.list_modules)."),
+        ],
+        expected_base: Annotated[
+            int | None,
+            Field(
+                description="The base address seen in debug.list_modules; if it no longer matches "
+                "the live module, the load is refused as stale rather than loading wrong symbols."
+            ),
+        ] = None,
+    ) -> ToolResponse:
+        """Load one loaded module's symbols at its current base on a live DebugSession.
+
+        Requires contributor.
+        """
+        return await run_engine_op(
+            pool,
+            current_context(),
+            session_id,
+            runtime,
+            _load_module_symbols_op(session_id, module, expected_base),
         )

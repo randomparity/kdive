@@ -93,6 +93,8 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "debug.set_watchpoint": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.list_watchpoints": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.clear_watchpoint": ("tests/mcp/debug/test_debug_ops.py",),
+    "debug.list_modules": ("tests/mcp/debug/test_debug_ops.py",),
+    "debug.load_module_symbols": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.start_session": ("tests/mcp/debug/test_debug_tools.py",),
     "fixtures.list": ("tests/mcp/catalog/test_fixtures_list.py",),
     "fixtures.validate": ("tests/mcp/catalog/test_fixtures_validate.py",),

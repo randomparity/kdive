@@ -101,6 +101,18 @@ List all breakpoints on a live DebugSession. Requires contributor.
 |---|---|---|---|
 | `session_id` | string | yes | The live DebugSession whose breakpoints to list. |
 
+## `debug.list_modules`
+
+`implemented` · `read-only`
+
+List loaded kernel modules (name, base address, whether symbols are loaded).
+
+Requires contributor.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `session_id` | string | yes | The live DebugSession whose loaded modules to list. |
+
 ## `debug.list_sessions`
 
 `implemented` · `read-only`
@@ -129,6 +141,20 @@ List all watchpoints on a live DebugSession. Requires contributor.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `session_id` | string | yes | The live DebugSession whose watchpoints to list. |
+
+## `debug.load_module_symbols`
+
+`implemented`
+
+Load one loaded module's symbols at its current base on a live DebugSession.
+
+Requires contributor.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `expected_base` | integer (nullable) | no | The base address seen in debug.list_modules; if it no longer matches the live module, the load is refused as stale rather than loading wrong symbols. |
+| `module` | string | yes | Loaded module name to load symbols for (from debug.list_modules). |
+| `session_id` | string | yes | The live DebugSession to load module symbols on. |
 
 ## `debug.read_frame`
 

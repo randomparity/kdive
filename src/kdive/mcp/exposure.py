@@ -136,6 +136,8 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "debug.set_watchpoint": _CONTRIBUTOR,
     "debug.list_watchpoints": _CONTRIBUTOR,
     "debug.clear_watchpoint": _CONTRIBUTOR,
+    "debug.list_modules": _CONTRIBUTOR,
+    "debug.load_module_symbols": _CONTRIBUTOR,
     # images
     "images.build": _PLAT_OP,
     "images.publish": _PLAT_OP,

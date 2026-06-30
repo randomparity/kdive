@@ -277,6 +277,8 @@ def _op_for(op: str, runtime: DebugEngineRuntime, session_id: str, **kwargs: Any
         "set_watchpoint": debug_ops._set_watchpoint_op,
         "list_watchpoints": debug_ops._list_watchpoints_op,
         "clear_watchpoint": debug_ops._clear_watchpoint_op,
+        "list_modules": debug_ops._list_modules_op,
+        "load_module_symbols": debug_ops._load_module_symbols_op,
     }[op]
     return factory(session_id, **kwargs)
 
@@ -1011,3 +1013,102 @@ class _FakeConnector:
 
     def close_transport(self, handle: Any) -> None:
         del handle
+
+
+# --- module symbols (#923, ADR-0278) --------------------------------------------------------
+
+from kdive.providers.shared.debug_common.debuginfo import ModuleDebuginfo  # noqa: E402
+
+
+def _module_walk_responses() -> dict[str, list[dict[str, object]]]:
+    # One-module walk: offset 8, head 0x1000, ext4 at 0x2000 (node 0x2008), terminating at head.
+    def ev(value: str) -> list[dict[str, object]]:
+        return [{"type": "result", "message": "done", "payload": {"value": value}}]
+
+    return {
+        "-data-evaluate-expression &((struct module *)0)->list": ev("0x8"),
+        "-data-evaluate-expression &modules": ev("0x1000"),
+        "-data-evaluate-expression modules.next": ev("0x2008"),
+        "-data-evaluate-expression ((struct module *)0x2000)->name": ev('"ext4"'),
+        "-data-evaluate-expression ((struct module *)0x2000)->mem[0].base": ev("0x2000"),
+        "-data-evaluate-expression ((struct module *)0x2000)->srcversion": ev('"SRC1"'),
+        "-data-evaluate-expression ((struct list_head *)0x2008)->next": ev("0x1000"),
+    }
+
+
+def _runtime_with_resolver(attach: Any, info: ModuleDebuginfo) -> DebugEngineRuntime:
+    def resolver(run_id: str, module: str) -> ModuleDebuginfo:
+        return info
+
+    return DebugEngineRuntime(
+        engine=GdbMiEngine(module_debuginfo_resolver=resolver),
+        attach=attach,
+        transcript_dir=Path(tempfile.mkdtemp()),
+    )
+
+
+def test_list_modules_returns_listed(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(_module_walk_responses())
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op(
+                pool, _ctx(), session_id, runtime, _op_for("list_modules", runtime, session_id)
+            )
+        assert resp.status == "listed"
+        assert resp.data["count"] == 1
+        assert resp.data["truncated"] is False
+        assert resp.data["decode_errors"] == 0
+        modules = cast(list[dict[str, Any]], resp.data["modules"])
+        assert modules[0]["name"] == "ext4"
+        assert "debug.load_module_symbols" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+def test_load_module_symbols_returns_loaded(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(_module_walk_responses())
+            info = ModuleDebuginfo(path=Path("/x/ext4.ko"), srcversion="SRC1", build_id=None)
+            runtime = _runtime_with_resolver(_CountingAttach(controller), info)
+            resp = await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for(
+                    "load_module_symbols", runtime, session_id, module="ext4", expected_base=None
+                ),
+            )
+        assert resp.status == "loaded"
+        assert resp.data["module"] == "ext4"
+        assert resp.data["base_address"] == "0x2000"
+        assert resp.data["symbols_loaded"] is True
+        assert resp.data["identity_verified"] is True
+
+    asyncio.run(_run())
+
+
+def test_load_module_symbols_stale_is_categorized(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(_module_walk_responses())
+            info = ModuleDebuginfo(path=Path("/x/ext4.ko"), srcversion="SRC1", build_id=None)
+            runtime = _runtime_with_resolver(_CountingAttach(controller), info)
+            resp = await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for(
+                    "load_module_symbols", runtime, session_id, module="ext4", expected_base=0x9999
+                ),
+            )
+        assert resp.error_category == "debug_attach_failure"
+        assert resp.data["code"] == "stale_module_address"
+
+    asyncio.run(_run())
