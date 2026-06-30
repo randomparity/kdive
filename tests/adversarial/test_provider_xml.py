@@ -108,7 +108,9 @@ _hostile = st.sampled_from(
 def test_render_domain_xml_never_lets_a_profile_value_inject_markup(rootfs: str) -> None:
     rootfs_path = f"/var/lib/kdive/{rootfs}"
     # Drive the hostile value through both the disk attr and the new baseline <kernel> text path.
-    xml = render_domain_xml(_SYS, _profile(), disk_path=rootfs_path, kernel_path=Path(rootfs_path))
+    xml = render_domain_xml(
+        _SYS, _profile(), disk_path=rootfs_path, kernel_path=Path(rootfs_path), ssh_port=22022
+    )
     root = ET.fromstring(xml)  # noqa: S314 - self-rendered, asserting structure
     # Exactly one disk source, and its file attr equals the hostile value verbatim — the
     # value crossed as an attribute, creating no new elements.
@@ -132,6 +134,7 @@ def test_console_log_element_does_not_enable_append() -> None:
             _profile(),
             disk_path="/var/lib/kdive/rootfs/base.qcow2",
             kernel_path=Path("/var/lib/kdive/rootfs/k/kernel"),
+            ssh_port=22022,
         )
     )
     logs = domain.findall("./devices/serial/log")
