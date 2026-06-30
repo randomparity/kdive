@@ -23,7 +23,10 @@ raw gdb commands or evaluating arbitrary expressions.
 - A contributor can request disassembly from a live gdbstub `DebugSession` around either a bare
   C **symbol** or an explicit **address** and receive structured instructions (`address`,
   `inst`, optional `func_name`, optional `offset`) with textual fields redacted and the list
-  bounded to `instruction_count` with a `truncated` signal.
+  bounded to `instruction_count`. `truncated=true` means more instructions immediately follow
+  the returned window (a forward-pagination signal: re-call from the next address to continue),
+  not "this function is longer than N" — the forward window may cross a function boundary, which
+  `func_name` reveals.
 - The engine validates `instruction_count` against a fixed cap and refuses an out-of-range or
   unbounded request **before** issuing any gdb command.
 - Exactly one of `symbol` / `address` is required; supplying both or neither is a categorized
@@ -42,6 +45,18 @@ raw gdb commands or evaluating arbitrary expressions.
   `func_name`/`offset` symbol context. Possible future enrichment.
 - A caller-supplied raw byte range, raw opcode bytes (`read_memory` already returns verbatim
   bytes), or any new gdb session state.
+
+## Accepted behavior (not failures)
+
+- **Data symbol / data address** — `disassemble(symbol="d_hash_shift")` or a data `address`
+  resolves and disassembles those bytes as instructions, returning rendered garbage rather than
+  an error (gdb behavior; `resolve_symbol` resolves data globals as well as functions). The
+  engine does not guard against it — the symbol's type is not cheaply available — and an absent
+  `func_name` on the returned rows is the "not in a known function" signal. Callers target code
+  addresses.
+- **Unaligned address** — an `address` that is not an instruction boundary disassembles from
+  that byte; the first instruction may be misaligned until gdb resynchronizes. This is inherent
+  to disassembly and is the caller's responsibility (use an address from a frame/symbol).
 
 ## Success criteria
 
@@ -64,8 +79,13 @@ Each maps to an acceptance-criteria checkbox on #921 and to a test.
 6. **Malformed MI output** — empty / missing / non-list `asm_insns` →
    `DEBUG_ATTACH_FAILURE` / `code="no_instructions"`.
 7. **Truncation** — more than `instruction_count` instructions in the byte span →
-   `truncated=true`, list sliced to `instruction_count`.
-8. **Redaction** — a registered secret appearing in an `inst`/`func_name` field is masked before
+   `truncated=true`, list sliced to `instruction_count`. When gdb returns at or below the cap
+   (readable region ended within the window), `truncated=false`.
+8. **Partial-window readability** — when the oversized window's tail is unmapped (START near the
+   top of the loaded image), gdb errors on the whole range; the engine shrinks the window
+   (halving from `N*16` to a floor) and returns the readable prefix with `truncated=false`. Only
+   an unreadable START yields `no_instructions`.
+9. **Redaction** — a registered secret appearing in an `inst`/`func_name` field is masked before
    the instruction is returned.
 
 ## Design
@@ -80,8 +100,9 @@ brief:
   (mirrors `stack_frames`), tolerating a missing/non-list payload.
 - **Engine** (`providers/shared/debug_common/gdbmi.py`): `disassemble(...)` validates bounds and
   target up front, resolves a symbol via `resolve_symbol`, bounds the *response* by slicing the
-  unbounded-range result, and redacts each instruction. A `_disassemble_command` wrapper maps the
-  unmapped-range gdb `^error` to `no_instructions`.
+  oversized-window result, and redacts each instruction. A `_disassemble_command` wrapper drives
+  the shrink-retry on a memory-access `^error` and maps a still-unreadable START to
+  `no_instructions`.
 - **Tool** (`mcp/tools/debug/ops.py`): `_disassemble_op` + `_register_debug_disassemble`,
   read-only, contributor, via `run_engine_op`.
 - **Fault-inject** (`providers/fault_inject/debug/gdb.py`): a synthetic `disassemble` returning
@@ -96,8 +117,9 @@ No schema, migration, RBAC, persistence, config, or destructive-op gate change.
 - **Engine** (`tests/providers/local_libvirt/test_debug_gdbmi.py`): symbol-path resolution +
   command shape, address-path, truncation, `bad_instruction_count` (parametrized 0 and cap+1)
   with no command written, `bad_target` (both/neither), `bad_address`, `no_instructions` on
-  empty/malformed `asm_insns`, `no_instructions` on the unmapped-range `^error`, pass-through of
-  an unrelated gdb error, and secret redaction in an instruction field. Plus a
+  empty/malformed `asm_insns`, `no_instructions` on the unmapped-range `^error`, the shrink-retry
+  returning a readable prefix when the first oversized window errors but a smaller one succeeds,
+  pass-through of an unrelated gdb error, and secret redaction in an instruction field. Plus a
   `disassembly_rows` parser test for the flat and malformed shapes.
 - **Tool** (`tests/mcp/debug/test_debug_ops.py`): happy path returns `status="disassembled"`
   with the structured payload and the next-action pointers; a `no_instructions` failure is

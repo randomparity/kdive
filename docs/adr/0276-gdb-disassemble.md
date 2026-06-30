@@ -42,11 +42,31 @@ gain it) plus one MCP tool. No new gdb expression surface; no session state.
 
    Then **bound the response, not the gdb command** (the ADR-0275 trick): compute
    `end = start + instruction_count * MAX_INSTRUCTION_BYTES` (16 = x86-64's 15-byte maximum
-   rounded up — a generous byte span that is guaranteed to cover at least `instruction_count`
-   instructions of mapped code), issue `-data-disassemble -s 0x<start> -e 0x<end> -- 0`, parse
-   the `asm_insns` rows, set `truncated = total > instruction_count`, and return the first
-   `instruction_count` redacted `GdbInstruction`s. Slicing in Python is deterministic and
-   avoids gdb's range/disassemble-mode quirks across versions.
+   rounded up — a generous byte span guaranteed to cover at least `instruction_count`
+   instructions of fully-mapped code, since each instruction is ≤15 < 16 bytes), issue
+   `-data-disassemble -s 0x<start> -e 0x<end> -- 0`, parse the `asm_insns` rows, set
+   `truncated = total > instruction_count`, and return the first `instruction_count` redacted
+   `GdbInstruction`s. Slicing in Python is deterministic and avoids gdb's range/disassemble-mode
+   quirks across versions.
+
+   **`truncated` semantics.** `truncated=true` means gdb returned more instructions than
+   `instruction_count` within the probe window — i.e. at least one instruction immediately
+   follows the returned window, so an agent can paginate forward by re-calling with `address`
+   set to the next address past the last returned instruction. It is `false` only when gdb's
+   list was at or below the cap (the readable region within the window ended). Because the
+   window is a forward span from the target (not a function), it can cross a function boundary;
+   the per-instruction `func_name` (absent or changed) is the signal of where one function ends
+   and the next begins.
+
+   **Partial-window readability.** gdb's `-data-disassemble` raises
+   `^error,"Cannot access memory at address 0x..."` for the **whole** range when the tail is
+   unreadable (it does not return a partial list), and the deliberate `N*16` oversizing makes
+   that reachable when the target sits near the top of the loaded image (the window overruns
+   past the last mapped section). To avoid failing a request whose START is valid code, the
+   engine retries the disassemble with a shrinking byte span (halving from `N*16` down to a
+   floor) on a memory-access error, returning the readable instruction prefix it does get
+   (`truncated=false`, since that prefix is the genuine end of the readable region). Only when
+   even the minimal window fails — START itself is unreadable — is `no_instructions` raised.
 
 2. **Forward window.** "Around" is implemented as a forward window starting at the
    symbol/address, not a centered one. Reliable *backward* disassembly of variable-length x86
@@ -64,11 +84,20 @@ gain it) plus one MCP tool. No new gdb expression surface; no session state.
 4. **gdb `^error` classification.** A `_disassemble_command` wrapper inspects the redacted
    `^error` `msg` that `execute_mi_command` surfaces. gdb answers an unmapped or non-code range
    with `^error,"Cannot access memory at address 0x..."` / `"No function contains specified
-   address."` rather than an empty `^done,asm_insns=[]`, so a `_NO_CODE_RE` match re-raises the
-   caller's `no_instructions` code — the same code the empty/malformed-`asm_insns` path raises,
-   so both response shapes converge (mirroring ADR-0275's `no_frames` convergence). Other gdb
-   errors pass through unchanged. These gdb messages carry no secret, so matching the redacted
-   text is sound.
+   address."` rather than an empty `^done,asm_insns=[]`. A `_NO_CODE_RE` match drives the
+   shrink-retry above (a smaller window may be fully readable); when even the minimal window
+   still matches, it re-raises the caller's `no_instructions` code — the same code the
+   empty/malformed-`asm_insns` path raises, so both response shapes converge (mirroring
+   ADR-0275's `no_frames` convergence). Other gdb errors pass through unchanged. These gdb
+   messages carry no secret, so matching the redacted text is sound.
+
+   **Data symbols / data addresses.** `disassemble` accepts any code address, so it also
+   accepts a data symbol or a data address (`resolve_symbol` resolves data globals as well as
+   functions). gdb disassembles those bytes as instructions and returns rendered garbage rather
+   than an error — matching gdb's own behavior and the "disassemble any address" capability. The
+   engine does not guard against this (the symbol's type is not cheaply available from `&name`);
+   the signal to the caller is that `func_name` is absent on rows outside a known function. This
+   is accepted, not a failure mode.
 
 5. **`debug.disassemble` MCP tool.** Read-only, `contributor` RBAC (every live-debug op is
    `contributor`), gated to a `live` `DebugSession` by the shared `run_engine_op` (per-session
@@ -102,6 +131,12 @@ additive.
 - Failures are categorized with `data["code"]` discriminators (`bad_instruction_count`,
   `bad_target`, `bad_address`, `bad_symbol_name` via `resolve_symbol`, `no_instructions`) so an
   agent can branch on the cause.
+- A request whose START is valid code but whose oversized window overruns the top of the loaded
+  image returns the readable prefix (via the shrink-retry) instead of a false `no_instructions`;
+  `truncated=false` then signals the genuine end of the readable region.
+- `truncated` is a forward-pagination signal, not a "this function is longer than N" signal: the
+  window can cross function boundaries, surfaced by `func_name`. A data symbol/address yields
+  garbage instructions (gdb behavior), with an absent `func_name` as the not-in-a-function tell.
 - The new tool is covered by the `exposure.py` completeness guard, the `_BEHAVIOR_TESTS_BY_TOOL`
   coverage guard, the `tool_index` completeness guard, and the `just docs` generated-reference
   gate.
@@ -119,6 +154,13 @@ additive.
 - **A caller-supplied byte range (`start`/`end`).** Rejected: exposes gdb's range/disassemble
   semantics and a second numeric contract to the agent; a single `instruction_count` cap plus a
   symbol/address selector covers the use cases and keeps the response bounded.
+- **Failing the whole request when the oversized window overruns unmapped memory.** Rejected:
+  gdb errors on the entire range, so a valid START near the top of the loaded image would return
+  `no_instructions` despite real instructions at START. The shrink-retry returns the readable
+  prefix; a per-instruction-count gdb form that would avoid the overrun does not exist.
+- **Guarding against data symbols/addresses.** Rejected: `&name` does not cheaply yield the
+  symbol's type, and the `-s/-e` form deliberately disassembles any address; disassembling data
+  to garbage matches gdb, and an absent `func_name` already signals "not in a known function".
 - **Bounding via a gdb instruction count (`-data-disassemble` has none).** gdb's
   `-data-disassemble` bounds by address range only; there is no instruction-count form, so the
   byte-span-plus-Python-slice approach (as ADR-0275 did for frames) is the deterministic path.
