@@ -958,6 +958,32 @@ def test_stack_frames_extracts_frame_rows() -> None:
     assert [row.get("func") for row in rows] == ["panic", "do_exit"]
 
 
+def test_stack_frames_extracts_bare_frame_rows() -> None:
+    # Real gdb/pygdbmi emits ``stack=[frame={...},...]`` flattened to bare frame dicts
+    # (no ``"frame"`` wrapper) — the shape observed in a live gdbstub transcript. The parser
+    # must read these directly, not only the wrapped form.
+    records = [
+        MiRecord(
+            type="result",
+            message="done",
+            payload={
+                "stack": [
+                    {
+                        "level": "0",
+                        "func": "schedule",
+                        "addr": "0xffffffff82455b20",
+                        "file": "kernel/sched/core.c",
+                        "line": "6999",
+                    },
+                    {"level": "1", "func": "worker_thread", "addr": "0xffffffff81328350"},
+                ]
+            },
+        )
+    ]
+    rows = stack_frames(records)
+    assert [row.get("func") for row in rows] == ["schedule", "worker_thread"]
+
+
 def test_stack_frames_empty_for_missing_or_non_list_stack() -> None:
     assert stack_frames([MiRecord(type="result", message="done", payload={})]) == []
     assert stack_frames([MiRecord(type="result", message="done", payload={"stack": "oops"})]) == []
@@ -1095,13 +1121,15 @@ def test_resolve_symbol_rejects_unparseable_value_and_redacts_it(tmp_path: Path)
 def _stack_controller(
     frames: list[dict[str, object]], command: str = "-stack-list-frames"
 ) -> _FakeMiController:
+    # Bare frame dicts — the shape real gdb/pygdbmi emits (live-verified), not a ``{"frame": ...}``
+    # wrapper. ``test_stack_frames_extracts_frame_rows`` covers the wrapped form separately.
     return _FakeMiController(
         responses={
             command: [
                 {
                     "type": "result",
                     "message": "done",
-                    "payload": {"stack": [{"frame": frame} for frame in frames]},
+                    "payload": {"stack": list(frames)},
                 }
             ]
         }

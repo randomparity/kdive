@@ -74,12 +74,18 @@ def breakpoint_rows(records: list[MiRecord]) -> list[dict[str, Any]]:
 
 
 def stack_frames(records: list[MiRecord]) -> list[dict[str, Any]]:
-    """The frame dicts from a ``-stack-list-frames`` result (``stack=[frame={...},...]``)."""
+    """The frame dicts from a ``-stack-list-frames`` result.
+
+    gdb/MI emits ``stack=[frame={...},...]``. This pygdbmi flattens that array to bare frame
+    dicts (``[{level,addr,func,...}, ...]`` with no ``"frame"`` wrapper) — the shape observed in
+    a live gdbstub transcript; other pygdbmi versions keep each row wrapped as ``{"frame": {...}}``
+    (the way ``-break-list`` wraps rows as ``{"bkpt": {...}}``). Accept either: unwrap a ``frame``
+    key when present, otherwise treat the row itself as the frame.
+    """
     rows: list[dict[str, Any]] = []
     for row in _dict_rows(result_payload_dict(records).get("stack")):
         entry = row.get("frame")
-        if isinstance(entry, dict):
-            rows.append(entry)
+        rows.append(entry if isinstance(entry, dict) else row)
     return rows
 
 
