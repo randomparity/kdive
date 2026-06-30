@@ -74,6 +74,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "control.force_crash": ("tests/mcp/lifecycle/test_control_tools.py",),
     "control.power": ("tests/mcp/lifecycle/test_control_tools.py",),
     "debug.clear_breakpoint": ("tests/mcp/debug/test_debug_ops.py",),
+    "debug.backtrace": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.continue": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.end_session": (
         "tests/mcp/debug/test_debug_tools.py",
@@ -83,6 +84,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "debug.interrupt": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.list_breakpoints": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.list_sessions": ("tests/mcp/debug/test_debug_session_read.py",),
+    "debug.read_frame": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.read_memory": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.read_registers": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.resolve_symbol": ("tests/mcp/debug/test_debug_ops.py",),
