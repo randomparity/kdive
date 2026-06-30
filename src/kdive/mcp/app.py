@@ -11,6 +11,7 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.auth import build_verifier
 from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
 from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
+from kdive.mcp.middleware.doc_exposure import DocExposureMiddleware
 from kdive.mcp.middleware.exposure import ToolExposureMiddleware
 from kdive.mcp.middleware.telemetry import TelemetryMiddleware
 from kdive.mcp.middleware.usage import UsageTrackingMiddleware
@@ -45,6 +46,7 @@ def build_app(
     resolver = composition.build_provider_resolver()
     app.add_middleware(UsageTrackingMiddleware(pool))
     app.add_middleware(ToolExposureMiddleware(resolver))
+    app.add_middleware(DocExposureMiddleware())
     app.add_middleware(DenialAuditMiddleware(pool))
     app.add_middleware(BindingErrorMiddleware())
 
