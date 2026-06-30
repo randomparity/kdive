@@ -157,9 +157,12 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
 def audience_by_uri() -> dict[str, str]:
     """Return each allowlisted doc's URI mapped to its ``audience`` marker.
 
-    ``DocExposureMiddleware`` consults this so a doc's audience has a single source.
+    ``DocExposureMiddleware`` consults this so a doc's audience has a single source. Keys are
+    normalized through ``AnyUrl`` exactly as the registered ``TextResource`` and the read
+    request URI are, so the audience lookup and the resource store share one normalization —
+    a doc whose raw URI is not ``AnyUrl``-idempotent cannot then default to ``"all"`` and leak.
     """
-    return {entry.uri: entry.audience for entry in DOC_RESOURCES}
+    return {str(AnyUrl(entry.uri)): entry.audience for entry in DOC_RESOURCES}
 
 
 def register(app: FastMCP, *, resolver: ProviderResolver) -> int:

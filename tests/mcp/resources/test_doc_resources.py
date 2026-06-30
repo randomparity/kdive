@@ -49,8 +49,11 @@ def test_doc_resources_default_to_all_audience_and_no_kind() -> None:
 
 
 def test_audience_by_uri_covers_every_entry() -> None:
+    from pydantic import AnyUrl
+
     mapping = audience_by_uri()
-    assert set(mapping) == {entry.uri for entry in DOC_RESOURCES}
+    # Keys are AnyUrl-normalized so the middleware's str(uri) lookup matches them exactly.
+    assert set(mapping) == {str(AnyUrl(entry.uri)) for entry in DOC_RESOURCES}
     assert all(v in {"all", "operator"} for v in mapping.values())
 
 
