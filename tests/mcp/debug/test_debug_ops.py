@@ -273,6 +273,7 @@ def _op_for(op: str, runtime: DebugEngineRuntime, session_id: str, **kwargs: Any
         "interrupt": debug_ops._interrupt_op,
         "backtrace": debug_ops._backtrace_op,
         "read_frame": debug_ops._read_frame_op,
+        "disassemble": debug_ops._disassemble_op,
     }[op]
     return factory(session_id, **kwargs)
 
@@ -596,6 +597,88 @@ def test_read_frame_returns_read(migrated_url: str) -> None:
         assert resp.data["level"] == 2
         frame = cast("dict[str, Any]", resp.data["frame"])
         assert frame["func"] == "schedule"
+
+    asyncio.run(_run())
+
+
+def test_disassemble_returns_disassembled(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-data-disassemble -s 0x1000 -e 0x1080 -- 0": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {
+                                "asm_insns": [
+                                    {
+                                        "address": "0x1000",
+                                        "inst": "nop",
+                                        "func-name": "f",
+                                        "offset": "0",
+                                    },
+                                ]
+                            },
+                        }
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for(
+                    "disassemble",
+                    runtime,
+                    session_id,
+                    symbol=None,
+                    address=0x1000,
+                    instruction_count=8,
+                ),
+            )
+        assert resp.status == "disassembled"
+        assert resp.data["instruction_count"] == 1
+        assert resp.data["truncated"] is False
+        insns = cast("list[dict[str, Any]]", resp.data["instructions"])
+        assert insns[0]["inst"] == "nop"
+        assert "debug.read_memory" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+def test_disassemble_no_instructions_is_categorized(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-data-disassemble -s 0x1000 -e 0x1080 -- 0": [
+                        {"type": "result", "message": "done", "payload": {"asm_insns": []}}
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for(
+                    "disassemble",
+                    runtime,
+                    session_id,
+                    symbol=None,
+                    address=0x1000,
+                    instruction_count=8,
+                ),
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "debug_attach_failure"
+        assert resp.data["code"] == "no_instructions"
 
     asyncio.run(_run())
 
