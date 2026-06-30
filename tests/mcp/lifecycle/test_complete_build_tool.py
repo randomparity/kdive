@@ -31,6 +31,8 @@ from kdive.mcp.tools.catalog.artifacts.uploads import (
 )
 from kdive.mcp.tools.lifecycle.runs.complete_build import CompleteBuildHandlers
 from kdive.mcp.tools.lifecycle.runs.server_build import BuildRunHandlers
+from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
+from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import Role
 from tests.mcp.complete_build_support import (
     FakeValidator as _FakeValidator,
@@ -163,6 +165,23 @@ async def _artifact_keys(pool, run_id) -> set[str]:
         return {row["object_key"] for row in await cur.fetchall()}
 
 
+async def _get_run_data(pool, run_id) -> dict[str, Any]:
+    resp = await _get_run(pool, _ctx(), str(run_id), resolver=provider_resolver())
+    assert resp.status == RunState.SUCCEEDED.value, resp
+    return resp.data
+
+
+async def _complete_build_audit_args_digest(pool, run_id) -> str | None:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT args_digest FROM audit_log "
+            "WHERE tool = 'runs.complete_build' AND object_id = %s",
+            (str(run_id),),
+        )
+        row = await cur.fetchone()
+    return row["args_digest"] if row is not None else None
+
+
 async def _build_step_result(pool, run_id) -> dict[str, object]:
     async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -228,6 +247,143 @@ def test_complete_build_blank_cmdline_records_none(migrated_url: str) -> None:
             assert resp.status == "succeeded"
             result = await _build_step_result(pool, run_id)
         assert "cmdline" not in result
+
+    asyncio.run(_run())
+
+
+def test_complete_build_records_client_attested_provenance(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            resp = await _build_handlers(validator).complete_build(
+                pool,
+                _ctx(),
+                str(run_id),
+                build_id=None,
+                source_label="linux-6.9 worktree",
+                source_ref="abc1234",
+            )
+            assert resp.status == "succeeded"
+            result = await _build_step_result(pool, run_id)
+            data = await _get_run_data(pool, run_id)
+        expected = {
+            "client_attested": True,
+            "label": "linux-6.9 worktree",
+            "source_ref": "abc1234",
+        }
+        assert result["build_provenance"] == expected
+        assert data["build_provenance"] == expected
+
+    asyncio.run(_run())
+
+
+def test_complete_build_without_provenance_records_none(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            resp = await _build_handlers(validator).complete_build(
+                pool, _ctx(), str(run_id), build_id=None
+            )
+            assert resp.status == "succeeded"
+            result = await _build_step_result(pool, run_id)
+            data = await _get_run_data(pool, run_id)
+        assert "build_provenance" not in result
+        assert "build_provenance" not in data
+
+    asyncio.run(_run())
+
+
+def test_complete_build_blank_provenance_treated_as_absent(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            resp = await _build_handlers(validator).complete_build(
+                pool,
+                _ctx(),
+                str(run_id),
+                build_id=None,
+                source_label="   ",
+                source_ref="",
+            )
+            assert resp.status == "succeeded"
+            result = await _build_step_result(pool, run_id)
+        assert "build_provenance" not in result
+
+    asyncio.run(_run())
+
+
+def test_complete_build_rejects_invalid_provenance_without_finalizing(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            resp = await _build_handlers(validator).complete_build(
+                pool,
+                _ctx(),
+                str(run_id),
+                build_id=None,
+                source_label="a" * 257,
+            )
+            async with pool.connection() as conn:
+                run = await RUNS.get(conn, run_id)
+        assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert resp.data["reason"] == "invalid_source_provenance"
+        assert resp.data["field"] == "source_label"
+        assert validator.calls == 0  # rejected before any finalize work
+        assert run is not None and run.state is RunState.CREATED
+
+    asyncio.run(_run())
+
+
+def test_complete_build_provenance_verbatim_and_not_audited(migrated_url: str) -> None:
+    # AC7: a credential-like source_ref is echoed verbatim in runs.get and never lands in the
+    # complete_build audit record (its args carry only run_id).
+    secret_like = "https://user:tok3n@host/linux.git#deadbeef"  # pragma: allowlist secret
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            resp = await _build_handlers(validator).complete_build(
+                pool,
+                _ctx(),
+                str(run_id),
+                build_id=None,
+                source_ref=secret_like,
+            )
+            assert resp.status == "succeeded"
+            data = await _get_run_data(pool, run_id)
+            recorded_digest = await _complete_build_audit_args_digest(pool, run_id)
+        assert data["build_provenance"]["source_ref"] == secret_like
+        assert recorded_digest == args_digest({"run_id": str(run_id)})
+
+    asyncio.run(_run())
+
+
+def test_provenance_is_bound_on_first_completion(migrated_url: str) -> None:
+    # AC6: a replay cannot add or change provenance — the first completion binds it.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            handlers = _build_handlers(validator)
+            first = await handlers.complete_build(pool, _ctx(), str(run_id), build_id=None)
+            second = await handlers.complete_build(
+                pool,
+                _ctx(),
+                str(run_id),
+                build_id=None,
+                source_label="late-claim",
+                source_ref="late-ref",
+            )
+            result = await _build_step_result(pool, run_id)
+        assert first.status == "succeeded" and second.status == "succeeded"
+        assert validator.calls == 1  # the replay short-circuits before finalize
+        assert "build_provenance" not in result  # the replay's claim is not recorded
 
     asyncio.run(_run())
 
