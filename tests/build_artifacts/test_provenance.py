@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 
 from kdive.build_artifacts.provenance import (
+    dirty_tracked_files,
+    has_untracked_files,
     rev_parse_head,
     staged_tree_sha,
     working_tree_dirty,
@@ -138,3 +140,82 @@ def test_tree_sha_none_on_empty_path() -> None:
 def test_rev_parse_head_round_trips(tmp_path: Path) -> None:
     head = _init_commit(tmp_path)
     assert rev_parse_head(str(tmp_path)) == head
+
+
+# ---------------------------------------------------------------------------
+# dirty_tracked_files (#938, ADR-0282)
+# ---------------------------------------------------------------------------
+
+
+def test_dirty_tracked_files_empty_on_clean_tree(tmp_path: Path) -> None:
+    # A clean tree has no tracked-vs-HEAD changes: an empty list, NOT None (the probe succeeded).
+    _init_commit(tmp_path)
+    assert dirty_tracked_files(str(tmp_path)) == []
+
+
+def test_dirty_tracked_files_lists_tracked_edit(tmp_path: Path) -> None:
+    _init_commit(tmp_path)
+    (tmp_path / "f").write_text("edited")
+    assert dirty_tracked_files(str(tmp_path)) == ["f"]
+
+
+def test_dirty_tracked_files_excludes_untracked(tmp_path: Path) -> None:
+    # `git diff --name-only HEAD` reports tracked changes only; untracked files are not listed.
+    _init_commit(tmp_path)
+    (tmp_path / "new").write_text("z")
+    assert dirty_tracked_files(str(tmp_path)) == []
+
+
+def test_dirty_tracked_files_lists_deleted_tracked_file(tmp_path: Path) -> None:
+    _init_commit(tmp_path)
+    (tmp_path / "f").unlink()
+    assert dirty_tracked_files(str(tmp_path)) == ["f"]
+
+
+def test_dirty_tracked_files_none_on_non_git_tree(tmp_path: Path) -> None:
+    assert dirty_tracked_files(str(tmp_path)) is None
+
+
+def test_dirty_tracked_files_none_on_empty_path() -> None:
+    assert dirty_tracked_files("") is None
+
+
+# ---------------------------------------------------------------------------
+# has_untracked_files (#938, ADR-0282)
+# ---------------------------------------------------------------------------
+
+
+def test_has_untracked_false_on_clean_tree(tmp_path: Path) -> None:
+    _init_commit(tmp_path)
+    assert has_untracked_files(str(tmp_path)) is False
+
+
+def test_has_untracked_false_on_tracked_edit_only(tmp_path: Path) -> None:
+    _init_commit(tmp_path)
+    (tmp_path / "f").write_text("edited")
+    assert has_untracked_files(str(tmp_path)) is False
+
+
+def test_has_untracked_true_on_untracked_file(tmp_path: Path) -> None:
+    _init_commit(tmp_path)
+    (tmp_path / "new").write_text("z")
+    assert has_untracked_files(str(tmp_path)) is True
+
+
+def test_has_untracked_ignores_gitignored(tmp_path: Path) -> None:
+    # --exclude-standard honours .gitignore, so a gitignored file is not "untracked" (ADR-0265
+    # gitignored-blind posture); .gitignore itself is the only untracked path here.
+    _init_commit(tmp_path)
+    (tmp_path / ".gitignore").write_text("ignored\n")
+    _git(tmp_path, "add", ".gitignore")
+    _git(tmp_path, "commit", "-q", "-m", "ignore")
+    (tmp_path / "ignored").write_text("secret")
+    assert has_untracked_files(str(tmp_path)) is False
+
+
+def test_has_untracked_none_on_non_git_tree(tmp_path: Path) -> None:
+    assert has_untracked_files(str(tmp_path)) is None
+
+
+def test_has_untracked_none_on_empty_path() -> None:
+    assert has_untracked_files("") is None

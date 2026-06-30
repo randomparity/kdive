@@ -7,13 +7,14 @@ import subprocess  # noqa: S404 - fixed argv, no shell, best-effort provenance r
 DEFAULT_GIT_READ_TIMEOUT = 30.0
 
 
-def _git_read(tree: str, *args: str, timeout: float) -> str | None:
-    """Run ``git -C <tree> <args>`` read-only; return stripped stdout, or ``None`` on any failure.
+def _git_run(tree: str, *args: str, timeout: float) -> str | None:
+    """Run ``git -C <tree> <args>`` read-only; return raw stdout, or ``None`` on any failure.
 
     Best-effort: a non-zero exit, a missing ``git``, a non-git tree, an unowned repo (git
     ``safe.directory`` / dubious-ownership refusal when the worker runs as a different uid than
     the operator-staged tree), or a timeout all return ``None`` so a provenance probe never
-    raises into the build.
+    raises into the build. Unlike :func:`_git_read`, an empty (but successful) stdout is returned
+    as ``""`` so a caller can distinguish "succeeded with no output" from "failed".
     """
     if not tree:
         return None
@@ -29,7 +30,20 @@ def _git_read(tree: str, *args: str, timeout: float) -> str | None:
         return None
     if proc.returncode != 0:
         return None
-    return proc.stdout.strip() or None
+    return proc.stdout
+
+
+def _git_read(tree: str, *args: str, timeout: float) -> str | None:
+    """Run ``git -C <tree> <args>`` read-only; return stripped stdout, or ``None`` on any failure.
+
+    Thin wrapper over :func:`_git_run` that strips stdout and collapses an empty result to
+    ``None`` (the historical behavior for the commit/tree-sha probes, where empty output means
+    "nothing to report").
+    """
+    out = _git_run(tree, *args, timeout=timeout)
+    if out is None:
+        return None
+    return out.strip() or None
 
 
 def rev_parse_head(tree: str, *, timeout: float = DEFAULT_GIT_READ_TIMEOUT) -> str | None:
@@ -81,3 +95,38 @@ def staged_tree_sha(tree: str, *, timeout: float = DEFAULT_GIT_READ_TIMEOUT) -> 
     if stash is None:
         return None
     return _git_read(tree, "rev-parse", f"{stash}^{{tree}}", timeout=timeout)
+
+
+def dirty_tracked_files(
+    tree: str, *, timeout: float = DEFAULT_GIT_READ_TIMEOUT
+) -> list[str] | None:
+    """Return the tracked paths that differ from ``HEAD`` in the staged ``tree`` (#938, ADR-0282).
+
+    ``git -C <tree> diff --name-only -z HEAD`` lists every tracked path whose working-tree content
+    differs from ``HEAD`` (modified, added-to-index, or deleted), NUL-separated so paths with
+    unusual characters need no quote parsing. Untracked files are not reported (use
+    :func:`has_untracked_files`). Returns an empty list on a clean tracked state (the probe
+    succeeded with no changes) and ``None`` (unknowable) when ``tree`` is empty, not a git work
+    tree, has no ``HEAD``, or any git/OS error occurs — so a failed probe omits the key rather
+    than reporting a spurious empty list. Captures git-tracked content only (gitignored paths are
+    invisible, same as ADR-0265's ``tree_sha``).
+    """
+    out = _git_run(tree, "diff", "--name-only", "-z", "HEAD", timeout=timeout)
+    if out is None:
+        return None
+    return [path for path in out.split("\0") if path]
+
+
+def has_untracked_files(tree: str, *, timeout: float = DEFAULT_GIT_READ_TIMEOUT) -> bool | None:
+    """Return whether the staged ``tree`` has non-ignored untracked files (#938, ADR-0282).
+
+    ``True`` iff ``git -C <tree> ls-files --others --exclude-standard -z`` lists any path.
+    ``--exclude-standard`` honours ``.gitignore`` (the ADR-0265 gitignored-blind posture), so a
+    gitignored file is not "untracked". Returns ``None`` (unknowable) when ``tree`` is empty, not
+    a git work tree, or any git/OS error occurs, so the caller omits ``untracked`` rather than
+    guessing.
+    """
+    out = _git_run(tree, "ls-files", "--others", "--exclude-standard", "-z", timeout=timeout)
+    if out is None:
+        return None
+    return any(path for path in out.split("\0") if path)
