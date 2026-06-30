@@ -85,10 +85,11 @@ gain it) plus one MCP tool. No new gdb expression surface; no session state.
    acceptance-criterion gain.
 
 4. **gdb `^error` classification.** A `_disassemble_command` wrapper inspects the redacted
-   `^error` `msg` that `execute_mi_command` surfaces. gdb answers an unmapped or non-code range
-   with `^error,"Cannot access memory at address 0x..."` / `"No function contains specified
-   address."` rather than an empty `^done,asm_insns=[]`. A `_NO_CODE_RE` match drives the
-   shrink-retry above (a smaller window may be fully readable); when even the minimal window
+   `^error` `msg` that `execute_mi_command` surfaces. The `-s/-e` **range** form resolves no
+   function (unlike the `-a` form, which is not used here), so an unreadable address answers with
+   `^error,"Cannot access memory at address 0x..."` rather than an empty `^done,asm_insns=[]` —
+   it never emits the `-a`-form's `"No function contains"` message. A `_NO_MEMORY_RE` match drives
+   the shrink-retry above (a smaller window may be fully readable); when even the minimal window
    still matches, it re-raises the caller's `no_instructions` code — the same code the
    empty/malformed-`asm_insns` path raises, so both response shapes converge (mirroring
    ADR-0275's `no_frames` convergence). Other gdb errors pass through unchanged. These gdb

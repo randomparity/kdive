@@ -74,8 +74,10 @@ Each maps to an acceptance-criteria checkbox on #921 and to a test.
    `CONFIGURATION_ERROR` / `code="bad_address"`.
 4. **Unknown symbol** — `resolve_symbol` of an unknown name yields a gdb `^error` mapped to
    `DEBUG_ATTACH_FAILURE`; a non-identifier name → `CONFIGURATION_ERROR` / `bad_symbol_name`.
-5. **Invalid / non-code range** — gdb `^error,"Cannot access memory at address 0x..."` /
-   `"No function contains specified address."` → `DEBUG_ATTACH_FAILURE` / `code="no_instructions"`.
+5. **Invalid / non-code range** — the `-s/-e` range form errors only with
+   `^error,"Cannot access memory at address 0x..."` when START is unreadable (no function lookup,
+   so no `"No function contains"` message); after the criterion-8 shrink-retry exhausts at the
+   16-byte floor → `DEBUG_ATTACH_FAILURE` / `code="no_instructions"`.
 6. **Malformed MI output** — empty / missing / non-list `asm_insns` →
    `DEBUG_ATTACH_FAILURE` / `code="no_instructions"`.
 7. **Truncation** — more than `instruction_count` instructions in the byte span →
