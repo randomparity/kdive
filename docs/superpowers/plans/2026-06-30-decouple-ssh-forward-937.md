@@ -18,6 +18,22 @@ the forward is present.
 **Files:** `src/kdive/providers/local_libvirt/lifecycle/xml.py`;
 `tests/providers/local_libvirt/test_provisioning.py`.
 
+**Pre-implementation verification (done; results pinned here so the task is self-contained):**
+
+- The **only** production caller of this renderer is the provisioner (`provisioning.py:213`);
+  `remote_libvirt` has its own separate `render_domain_xml`. So making `ssh_port` required cannot
+  break a `src/` caller — only the test call sites below.
+- All direct `render_domain_xml(...)` test call sites that pass **no** `ssh_port` and so must gain one
+  (else they raise `CONFIGURATION_ERROR` once the forward is unconditional): the `_render()` helper
+  (line 85), and lines 109, 110, 242, 251, 289, 310, 329. Two of these carry assertions that also flip
+  (next bullet); the rest just need an `ssh_port` argument added (via the helper or inline).
+- Two gdbstub assertions flip because every render now emits a `<qemu:commandline>` with the SSH args:
+  `test_render_emits_loopback_gdbstub_when_flag_set` asserts the exact arg list
+  `== ["-gdb", "tcp:127.0.0.1:4444"]` (line 298) — must become a subset/`in` check, or assert the
+  gdb args are present alongside the SSH args; and `test_render_omits_gdbstub_when_flag_unset` asserts
+  `find("qemu:commandline") is None` (line 305) — that proxy is no longer valid (the SSH forward owns a
+  commandline element), so assert specifically that `recorded_gdb_port is None` / no `-gdb` arg.
+
 **TDD steps:**
 
 1. Update/replace the render tests first and watch them fail:
@@ -30,8 +46,10 @@ the forward is present.
      `test_render_rejects_missing_ssh_port`: render a **default** profile with `ssh_port=None`, assert
      `CONFIGURATION_ERROR` (the rejection no longer depends on the credential ref).
    - Add `ssh_port: int = 40022` to the `_render()` helper and thread it into its `render_domain_xml`
-     call, so the existing `_render()`-based tests (kernel, preserve-on-crash, etc.) still render a
-     valid domain. Keep `test_render_emits_loopback_ssh_forward_when_credential_ref_set` and
+     call. Add `ssh_port=<port>` to the direct call sites enumerated above (109, 110, 242, 251, 289,
+     310, 329) that go through `render_domain_xml` directly rather than the helper.
+   - Fix the two flipped gdbstub assertions (298, 305) per the verification bullet.
+   - Keep `test_render_emits_loopback_ssh_forward_when_credential_ref_set` and
      `test_render_gdbstub_and_ssh_share_one_commandline_element` (credential-ref path still works).
 2. Implement in `xml.py`:
    - Replace `if section.ssh_credential_ref is not None: _append_ssh_forward(domain, ssh_port)` with an
