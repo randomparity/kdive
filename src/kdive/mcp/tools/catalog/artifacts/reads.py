@@ -339,8 +339,10 @@ def _find_response_data(
                 artifact_id,
                 data={"reason": "artifact_too_large", "size_bytes": loaded.size_bytes},
             )
-        # Store outage: degrade honestly rather than claim "no match".
-        return {**(loaded.degraded or {}), "match_found": False}
+        # Store outage: surface only the content_unavailable reason (like plain `artifacts.get`).
+        # `match_found` is omitted because no search ran — emitting `match_found=false` would
+        # read as "searched, no such signature" when the truth is "could not read the log".
+        return loaded.degraded or {}
     hit = jump_find(
         loaded.body,
         terms=terms,

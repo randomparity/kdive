@@ -910,3 +910,22 @@ def test_search_text_tool_is_removed() -> None:
     app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
     assert asyncio.run(app.get_tool("artifacts.search_text")) is None
     assert asyncio.run(app.get_tool("artifacts.get")) is not None
+
+
+def test_get_find_store_outage_omits_match_found(migrated_url: str) -> None:
+    # A transient store failure must not claim match_found=false (could-not-search != no-match);
+    # it degrades exactly like a plain artifacts.get: content_unavailable, no match_found.
+    error = CategorizedError("head down", category=ErrorCategory.TRANSPORT_FAILURE)
+    store = _SearchStore(b"BUG: KASAN", head_error=error)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="BUG:"
+            )
+            assert resp.status == "available"
+            assert resp.data["content_unavailable"] == "store_error"
+            assert "match_found" not in resp.data
+
+    asyncio.run(_run())
