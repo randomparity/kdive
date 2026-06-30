@@ -8,7 +8,13 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from uuid import UUID
 
-from kdive.build_artifacts.provenance import rev_parse_head, staged_tree_sha, working_tree_dirty
+from kdive.build_artifacts.provenance import (
+    dirty_tracked_files,
+    has_untracked_files,
+    rev_parse_head,
+    staged_tree_sha,
+    working_tree_dirty,
+)
 from kdive.build_artifacts.results import BuildOutput
 from kdive.db.build_host_policy import check_warm_tree_source_admission
 from kdive.db.build_hosts import BuildHost, BuildHostKind
@@ -26,6 +32,11 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 
 # Patchable seam: tests substitute this to avoid real SSH.
 ssh_build_transport_from_host = SshBuildTransport.from_host
+
+# Upper bound on the warm-tree dirty-file manifest surfaced in build provenance (#938, ADR-0282).
+# Bounds the runs.get envelope; an over-cap list is truncated with `dirty_files_truncated`, and an
+# agent needing exact identity compares `tree_sha` (cap-independent).
+DIRTY_FILES_MANIFEST_MAX = 100
 
 # The factory receives the configured git build source so a transport that provisions a throwaway
 # guest (ephemeral_libvirt) can preflight egress to it before the clone (ADR-0155); ``None`` for a
@@ -147,23 +158,25 @@ def _with_local_git_build_host(result: BuildOutput, host: BuildHost) -> BuildOut
 def _with_warm_tree_provenance(
     result: BuildOutput, parsed: ServerBuildProfile, kernel_src: str
 ) -> BuildOutput:
-    """Attach best-effort ``{label, resolved_commit, dirty, tree_sha?}`` provenance (#778, #861).
+    """Attach best-effort ``{label, resolved_commit, dirty, untracked?, tree_sha?, dirty_files?}``
+    provenance (#778, #861, #938).
 
     A warm-tree build rsyncs ``$KDIVE_KERNEL_SRC`` **working-tree state** (uncommitted edits and
     untracked files included), not ``HEAD``, and the bare ``kernel_source_ref`` is a decorative
     label, not a remote. The label is always recorded. When the staged tree is a git work tree
     (``rev-parse HEAD`` succeeds) the HEAD it is based on is recorded as ``resolved_commit``
-    (decorative when dirty), plus ``dirty`` (does the tree differ from HEAD) and, for a dirty tree
-    with tracked changes, a content-deterministic ``tree_sha`` of the tracked working-tree state
-    (ADR-0265). Each probe is best-effort: a failed probe omits its key and never fails the build,
-    so a non-git tree degrades to ``{label}``. The probes read the live staged tree at
-    build-completion (the existing ``resolved_commit`` timing), and ``dirty``/``tree_sha`` cover
-    git-tracked content only.
+    (decorative when dirty), plus ``dirty`` (does the tree differ from HEAD). For a dirty tree the
+    dirty detail is added (ADR-0282): ``untracked`` (were non-ignored untracked files present), a
+    content-deterministic ``tree_sha`` of the tracked working-tree state, and ``dirty_files`` (the
+    tracked paths that differ from HEAD, capped). Each probe is best-effort: a failed probe omits
+    its key and never fails the build, so a non-git tree degrades to ``{label}``. The probes read
+    the live staged tree at build-completion (the existing ``resolved_commit`` timing), and
+    ``dirty``/``tree_sha``/``dirty_files`` cover git-tracked content only.
     """
     label = parsed.kernel_source_ref
     if not isinstance(label, str):
         return result
-    provenance: dict[str, str | bool] = {"label": label}
+    provenance: dict[str, str | bool | list[str]] = {"label": label}
     commit = rev_parse_head(kernel_src)
     if commit is not None:
         provenance["resolved_commit"] = commit
@@ -171,10 +184,32 @@ def _with_warm_tree_provenance(
         if dirty is not None:
             provenance["dirty"] = dirty
             if dirty:
-                tree_sha = staged_tree_sha(kernel_src)
-                if tree_sha is not None:
-                    provenance["tree_sha"] = tree_sha
+                _attach_dirty_detail(provenance, kernel_src)
     return result._replace(build_provenance=provenance)
+
+
+def _attach_dirty_detail(provenance: dict[str, str | bool | list[str]], kernel_src: str) -> None:
+    """Add the dirty-tree detail to a warm-tree manifest in place (#938, ADR-0282).
+
+    Each probe is best-effort and contributes its key only on success: ``untracked`` (non-ignored
+    untracked files present), ``tree_sha`` (content digest of tracked changes), and ``dirty_files``
+    (the tracked paths that differ from HEAD, capped at :data:`DIRTY_FILES_MANIFEST_MAX` with
+    ``dirty_files_truncated`` when over the cap). ``dirty_files`` is omitted when there are no
+    tracked changes (untracked-only dirtiness), so its absence is not an error.
+    """
+    untracked = has_untracked_files(kernel_src)
+    if untracked is not None:
+        provenance["untracked"] = untracked
+    tree_sha = staged_tree_sha(kernel_src)
+    if tree_sha is not None:
+        provenance["tree_sha"] = tree_sha
+    files = dirty_tracked_files(kernel_src)
+    if files:
+        if len(files) > DIRTY_FILES_MANIFEST_MAX:
+            provenance["dirty_files"] = files[:DIRTY_FILES_MANIFEST_MAX]
+            provenance["dirty_files_truncated"] = True
+        else:
+            provenance["dirty_files"] = files
 
 
 def _transport_factories(

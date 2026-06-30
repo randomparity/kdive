@@ -356,7 +356,7 @@ def test_warm_tree_clean_records_label_commit_and_dirty_false(tmp_path: Path) ->
     assert out.build_provenance == {"label": "linux-6.9", "resolved_commit": sha, "dirty": False}
 
 
-def test_warm_tree_dirty_tracked_edit_records_tree_sha(tmp_path: Path) -> None:
+def test_warm_tree_dirty_tracked_edit_records_files_untracked_and_tree_sha(tmp_path: Path) -> None:
     sha = _git_init_commit(tmp_path)
     (tmp_path / "f").write_text("edited")
     out = _run_warm(tmp_path)
@@ -365,19 +365,68 @@ def test_warm_tree_dirty_tracked_edit_records_tree_sha(tmp_path: Path) -> None:
     assert prov["label"] == "linux-6.9"
     assert prov["resolved_commit"] == sha
     assert prov["dirty"] is True
+    # A tracked edit with no untracked files: untracked is an explicit False, dirty_files names
+    # the tracked path, and tree_sha digests the tracked content (#938, ADR-0282).
+    assert prov["untracked"] is False
+    assert prov["dirty_files"] == ["f"]
+    assert "dirty_files_truncated" not in prov
     tree_sha = prov["tree_sha"]
     assert isinstance(tree_sha, str) and tree_sha
 
 
-def test_warm_tree_dirty_untracked_only_has_no_tree_sha(tmp_path: Path) -> None:
+def test_warm_tree_dirty_untracked_only_flags_untracked_no_files(tmp_path: Path) -> None:
     sha = _git_init_commit(tmp_path)
     (tmp_path / "untracked").write_text("z")
     out = _run_warm(tmp_path)
+    # Untracked-only dirtiness: untracked is True, but there is no tracked diff so dirty_files and
+    # tree_sha are both absent (#938, ADR-0282).
     assert out.build_provenance == {
         "label": "linux-6.9",
         "resolved_commit": sha,
         "dirty": True,
+        "untracked": True,
     }
+
+
+def test_warm_tree_dirty_tracked_and_untracked(tmp_path: Path) -> None:
+    _git_init_commit(tmp_path)
+    (tmp_path / "f").write_text("edited")
+    (tmp_path / "untracked").write_text("z")
+    out = _run_warm(tmp_path)
+    prov = out.build_provenance
+    assert prov is not None
+    assert prov["dirty"] is True
+    assert prov["untracked"] is True
+    assert prov["dirty_files"] == ["f"]
+    assert isinstance(prov["tree_sha"], str)
+
+
+def test_warm_tree_dirty_files_capped_and_marked_truncated(tmp_path: Path) -> None:
+    import subprocess
+
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    _git_init_commit(tmp_path)
+    # Commit many tracked files, then edit all of them so each is a tracked-vs-HEAD change.
+    for i in range(150):
+        (tmp_path / f"file_{i:03d}").write_text("v0")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, env={**env})
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-q", "-m", "many"], check=True, env={**env}
+    )
+    for i in range(150):
+        (tmp_path / f"file_{i:03d}").write_text("v1")
+    out = _run_warm(tmp_path)
+    prov = out.build_provenance
+    assert prov is not None
+    files = prov["dirty_files"]
+    assert isinstance(files, list)
+    assert len(files) == 100
+    assert prov["dirty_files_truncated"] is True
 
 
 def test_warm_tree_non_git_source_degrades_to_label_only(tmp_path: Path) -> None:

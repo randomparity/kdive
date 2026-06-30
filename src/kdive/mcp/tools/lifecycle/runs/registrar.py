@@ -72,8 +72,9 @@ class _RunsCreatePayload(ToolPayload):
             "label only - it does not select the tree; the operator stages the actual source "
             "via KDIVE_KERNEL_SRC on the worker. That lane builds the worker's working-tree "
             "state, not HEAD: runs.get reports data.build_provenance.{label, resolved_commit "
-            "(the HEAD the tree is based on, decorative when dirty), dirty (bool), tree_sha "
-            "(content digest of tracked changes, only when dirty)} - tracked git state only. "
+            "(the HEAD the tree is based on, decorative when dirty), dirty (bool), and when dirty: "
+            "untracked (bool), tree_sha (content digest of tracked changes), dirty_files (changed "
+            "tracked paths, capped with dirty_files_truncated)} - tracked git state only. "
             "The optional 'config' is a catalog ComponentRef "
             "(e.g. {'kind':'catalog','provider':'system','name':'kdump'}); omit it to get the "
             "seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a "
@@ -235,6 +236,19 @@ def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: Provid
         `data.console_artifacts_total` is the full count and `data.console_artifacts_truncated` is
         true (the oldest entries are dropped; the boot console stays at `refs.console`). The key is
         absent when the Run has no correlated console.
+
+        Build provenance: `data.build_provenance` (present once the build succeeded with recorded
+        provenance, absent otherwise) records what was built. A git/remote build carries
+        `{remote, ref, resolved_commit, build_host}`. A local warm-tree (`source='server'`) build
+        carries `{label, resolved_commit, dirty}` plus, when `dirty` is true:
+        `untracked` (were non-ignored untracked files staged), `tree_sha` (content digest of the
+        tracked changes), `dirty_files` (the changed tracked paths, capped — `dirty_files_truncated`
+        is true when the list was capped), and, for an external upload, `client_attested: true` with
+        the caller's `source_label`/`source_ref`. The warm-tree lane builds working-tree state, not
+        HEAD: `resolved_commit` is the HEAD it is based on (decorative when `dirty`), and
+        `dirty`/`tree_sha`/`dirty_files` cover git-tracked state only (gitignored paths are
+        invisible). Compare `tree_sha` across runs to confirm two builds compiled the same tracked
+        source.
         """
         return await _get_run(pool, current_context(), run_id, resolver=resolver)
 

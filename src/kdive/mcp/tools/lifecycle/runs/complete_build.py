@@ -85,7 +85,7 @@ class CompleteBuildHandlers:
         *,
         build_id: str | None,
         cmdline: str | None,
-        source_provenance: dict[str, str | bool] | None,
+        source_provenance: dict[str, str | bool | list[str]] | None,
     ) -> ToolResponse:
         run = await RUNS.get(conn, uid)
         if run is None or run.project not in ctx.projects:

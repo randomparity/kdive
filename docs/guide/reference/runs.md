@@ -101,7 +101,7 @@ Create a run, bound to a system or unbound against a target_kind.
 `request` fields:
 
 - `investigation_id` (`string`, required) — Investigation to attach the Run to.
-- `build_profile` (`object(source=external) \| object(source=server)`, required) — Build profile for the Run's kernel. The recommended default is source='external': ingest a prebuilt artifact. After runs.create with source='external', call artifacts.expected_uploads to learn the exact bytes to produce, artifacts.create_run_upload to upload, then runs.complete_build (where you may also record the optional source_label/source_ref provenance of the tree you built from - an unverified client claim, surfaced in runs.get data.build_provenance). source='server' builds from a kernel tree (kernel_source_ref required) and is a single-host convenience: for a local build host a warm-tree kernel_source_ref is a provenance label only - it does not select the tree; the operator stages the actual source via KDIVE_KERNEL_SRC on the worker. That lane builds the worker's working-tree state, not HEAD: runs.get reports data.build_provenance.{label, resolved_commit (the HEAD the tree is based on, decorative when dirty), dirty (bool), tree_sha (content digest of tracked changes, only when dirty)} - tracked git state only. The optional 'config' is a catalog ComponentRef (e.g. {'kind':'catalog','provider':'system','name':'kdump'}); omit it to get the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named fragment. Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the cmdline parameter to runs.build for server builds, or to runs.complete_build for external builds. See resource://kdive/docs/operating/external-build-upload.md for shaping a source='external' upload, or resource://kdive/docs/operating/build-source-staging.md for staging a server-build source.
+- `build_profile` (`object(source=external) \| object(source=server)`, required) — Build profile for the Run's kernel. The recommended default is source='external': ingest a prebuilt artifact. After runs.create with source='external', call artifacts.expected_uploads to learn the exact bytes to produce, artifacts.create_run_upload to upload, then runs.complete_build (where you may also record the optional source_label/source_ref provenance of the tree you built from - an unverified client claim, surfaced in runs.get data.build_provenance). source='server' builds from a kernel tree (kernel_source_ref required) and is a single-host convenience: for a local build host a warm-tree kernel_source_ref is a provenance label only - it does not select the tree; the operator stages the actual source via KDIVE_KERNEL_SRC on the worker. That lane builds the worker's working-tree state, not HEAD: runs.get reports data.build_provenance.{label, resolved_commit (the HEAD the tree is based on, decorative when dirty), dirty (bool), and when dirty: untracked (bool), tree_sha (content digest of tracked changes), dirty_files (changed tracked paths, capped with dirty_files_truncated)} - tracked git state only. The optional 'config' is a catalog ComponentRef (e.g. {'kind':'catalog','provider':'system','name':'kdump'}); omit it to get the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named fragment. Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the cmdline parameter to runs.build for server builds, or to runs.complete_build for external builds. See resource://kdive/docs/operating/external-build-upload.md for shaping a source='external' upload, or resource://kdive/docs/operating/build-source-staging.md for staging a server-build source.
   - _variant object(source=external):_
     - `schema_version` (``=1``, required)
     - `source` (``=external``, required)
@@ -203,6 +203,19 @@ read with `artifacts.get`. It is bounded: when more exist than the cap,
 `data.console_artifacts_total` is the full count and `data.console_artifacts_truncated` is
 true (the oldest entries are dropped; the boot console stays at `refs.console`). The key is
 absent when the Run has no correlated console.
+
+Build provenance: `data.build_provenance` (present once the build succeeded with recorded
+provenance, absent otherwise) records what was built. A git/remote build carries
+`{remote, ref, resolved_commit, build_host}`. A local warm-tree (`source='server'`) build
+carries `{label, resolved_commit, dirty}` plus, when `dirty` is true:
+`untracked` (were non-ignored untracked files staged), `tree_sha` (content digest of the
+tracked changes), `dirty_files` (the changed tracked paths, capped — `dirty_files_truncated`
+is true when the list was capped), and, for an external upload, `client_attested: true` with
+the caller's `source_label`/`source_ref`. The warm-tree lane builds working-tree state, not
+HEAD: `resolved_commit` is the HEAD it is based on (decorative when `dirty`), and
+`dirty`/`tree_sha`/`dirty_files` cover git-tracked state only (gitignored paths are
+invisible). Compare `tree_sha` across runs to confirm two builds compiled the same tracked
+source.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
