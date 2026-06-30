@@ -30,23 +30,9 @@ from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.services.accounting import ledger as accounting
 from kdive.services.allocation import renew as renew_service
 from kdive.services.allocation.renew import _RENEW_KIND
+from tests.clock import FrozenClock
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
-
-
-class _FrozenClock:
-    """A ``datetime`` stand-in whose ``now`` returns a fixed instant.
-
-    Monkeypatched over the renew service's module-level ``datetime`` so the clamp
-    ceiling (``now + KDIVE_LEASE_MAX``) is sampled from the same instant the test seeds
-    the lease against, instead of an independently-sampled wall clock (issue #854).
-    """
-
-    def __init__(self, instant: datetime) -> None:
-        self._instant = instant
-
-    def now(self, _tz: object = None) -> datetime:
-        return self._instant
 
 
 def _ctx(
@@ -273,7 +259,7 @@ def test_renew_clamps_added_window_to_cap(
     # pinning the seeded lease to the same instant keeps the billed window exactly 4h; an
     # unfrozen clock let a few ms of seed-vs-renew drift surface as 12.0001 (issue #854).
     frozen = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
-    monkeypatch.setattr(renew_service, "datetime", _FrozenClock(frozen))
+    monkeypatch.setattr(renew_service, "datetime", FrozenClock(frozen))
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
