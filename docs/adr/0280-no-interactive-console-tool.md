@@ -50,11 +50,15 @@ Two further facts post-date #936's framing and bound the decision:
 
 We will **not** add an interactive console tool (`console.attach/send/read/detach`
 or a narrower `console.send`) and we reaffirm ADR-0273's rejection. The reproducer
-need #936 raises is resolved by **redirect to the in-guest command-execution path**:
-SSH access (#782, shipped) plus bounded guest command execution (#909), run-owned
-reproducer records (#910), and the lightweight one-shot path (#937). Console
-remains output-only, read through `artifacts.{list,get,search_text}`. #936 is
-closed as resolved-by-redirect, not built.
+need #936 raises is **redirected to the in-guest command-execution path** rather
+than served by a console tool. That path is partly shipped and partly planned: SSH
+access (#782) has landed, while bounded guest command execution (#909), run-owned
+reproducer records (#910), and the lightweight one-shot path (#937) are all still
+`needs-design` and not yet built (#910 is blocked by #909). Closing #936 therefore
+hands its gap to that tracked, higher-priority cluster — it does not assert the
+reproducer workflow exists today. Console remains output-only, read through
+`artifacts.{list,get,search_text}`. #936 is closed as resolved-by-redirect, not
+built.
 
 This decision is directional: it has no implementing code. It governs the
 already-landed read-only-console and SSH-access architecture, so it is Accepted on
@@ -67,8 +71,8 @@ merge of this ADR.
   invariant — output-only, always redacted, served by one generic
   `artifacts.*` reader — with no new stateful session resource, no console write
   path to authorize and redact, and no transport concern added to MCP's
-  request/response surface. The reproducer capability accrues to #909/#910 where
-  it returns structured exit status and Run-correlated artifacts, which a raw
+  request/response surface. The reproducer capability accrues to #909/#910, whose
+  designs return structured exit status and Run-correlated artifacts that a raw
   console byte stream does not.
 
 - **Harder / residual risk.** The redirect assumes the SSH/command-execution path
