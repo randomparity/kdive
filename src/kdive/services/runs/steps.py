@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import cast
+from typing import LiteralString, cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -248,6 +248,31 @@ async def failed_boot_attempt(conn: AsyncConnection, run_id: UUID) -> BootAttemp
     if job is None or job.state is not JobState.FAILED:
         return None
     return BootAttempt(job_id=job.id, error_category=job.error_category)
+
+
+_LATEST_BOOTED_RUN_SQL: LiteralString = (
+    "SELECT r.id FROM runs r "
+    "JOIN run_steps st ON st.run_id = r.id AND st.step = 'boot' "
+    "WHERE r.system_id = %s "
+    "ORDER BY r.created_at DESC LIMIT 1"
+)
+
+
+async def latest_booted_run_id(conn: AsyncConnection, system_id: UUID) -> UUID | None:
+    """Return the System's most-recently-booted Run id, or ``None`` (ADR-0279, #935).
+
+    The console-rotation worker calls this once per job (under the per-System advisory lock)
+    to attribute the parts it seals to the Run that produced the current boot. "Most-recently-
+    booted" is the most-recently *created* Run bound to ``system_id`` that has a ``boot``
+    ``run_steps`` row: a System hosts Runs sequentially and a Run is created before it boots, so
+    among Runs that reached boot the newest-created one owns the live boot. Ordering is on the
+    immutable ``runs.created_at`` rather than the trigger-bumped ``run_steps.updated_at``. A Run
+    still in the build phase has no ``boot`` step and is excluded by the join.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(_LATEST_BOOTED_RUN_SQL, (system_id,))
+        row = await cur.fetchone()
+    return None if row is None else row[0]
 
 
 async def installed_initrd_ref(conn: AsyncConnection, run_id: UUID) -> str | None:

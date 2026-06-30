@@ -295,3 +295,107 @@ def test_terminal_system_seals_no_parts_after_teardown(
     assert result is None
     assert rows == [], "no console-part rows for a torn-down System"
     assert part_puts == [], "no part objects stored for a torn-down System"
+
+
+# --- Run correlation (ADR-0279, #935) -------------------------------------------------
+
+
+async def _seed_booted_run(pool: AsyncConnectionPool, system_id: UUID) -> UUID:
+    """Insert an Investigation + a Run bound to ``system_id`` with a succeeded boot step."""
+    run_id, investigation_id = uuid4(), uuid4()
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO investigations (id, principal, project, title, state) "
+            "VALUES (%s, 'tester', 'local', 't', 'open')",
+            (investigation_id,),
+        )
+        await conn.execute(
+            "INSERT INTO runs (id, investigation_id, system_id, target_kind, state, build_profile, "
+            "principal, project) "
+            "VALUES (%s, %s, %s, 'local-libvirt', 'succeeded', '{}'::jsonb, 'tester', 'local')",
+            (run_id, investigation_id, system_id),
+        )
+        await conn.execute(
+            "INSERT INTO run_steps (run_id, step, state) VALUES (%s, 'boot', 'succeeded')",
+            (run_id,),
+        )
+    return run_id
+
+
+async def _part_run_ids(pool: AsyncConnectionPool, system_id: UUID) -> list[UUID | None]:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT run_id FROM artifacts WHERE owner_kind = 'systems' AND owner_id = %s "
+            "AND object_key LIKE '%%console-part-%%' ORDER BY object_key",
+            (system_id,),
+        )
+        return [row[0] for row in await cur.fetchall()]
+
+
+def test_parts_attributed_to_booted_run(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system_id = uuid4()
+    log = _write_console(tmp_path, system_id, _CONSOLE)
+    monkeypatch.setattr(console_rotate, "console_log_path", lambda _sid: log)
+
+    async def _run() -> tuple[UUID, list[UUID | None], str | None]:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            await _seed_system(pool, system_id, "ready")
+            run_id = await _seed_booted_run(pool, system_id)
+            result = await _run_handler(pool, _FakeStore(), _job(system_id, "boot-A"))
+            return run_id, await _part_run_ids(pool, system_id), result
+
+    run_id, part_run_ids, result = asyncio.run(_run())
+    assert result == str(system_id)
+    assert part_run_ids, "fixture console must seal at least one part"
+    assert all(rid == run_id for rid in part_run_ids), part_run_ids
+
+
+def test_parts_uncorrelated_when_no_boot_step(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system_id = uuid4()
+    log = _write_console(tmp_path, system_id, _CONSOLE)
+    monkeypatch.setattr(console_rotate, "console_log_path", lambda _sid: log)
+
+    async def _run() -> tuple[list[UUID | None], str | None]:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            await _seed_system(pool, system_id, "ready")  # no Run / no boot step
+            result = await _run_handler(pool, _FakeStore(), _job(system_id, "boot-A"))
+            return await _part_run_ids(pool, system_id), result
+
+    part_run_ids, result = asyncio.run(_run())
+    assert result == str(system_id), "rotation still succeeds with no resolvable Run"
+    assert part_run_ids, "parts are still sealed"
+    assert all(rid is None for rid in part_run_ids), part_run_ids
+
+
+def test_resolver_failure_degrades_to_null_and_advances_sidecar(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system_id = uuid4()
+    log = _write_console(tmp_path, system_id, _CONSOLE)
+    monkeypatch.setattr(console_rotate, "console_log_path", lambda _sid: log)
+
+    async def _boom(_conn: object, _system_id: object) -> UUID | None:
+        raise RuntimeError("resolver exploded")
+
+    monkeypatch.setattr(console_rotate, "latest_booted_run_id", _boom)
+
+    async def _run() -> tuple[list[UUID | None], str | None, int]:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            await _seed_system(pool, system_id, "ready")
+            await _seed_booted_run(pool, system_id)
+            store = _FakeStore()
+            result = await _run_handler(pool, store, _job(system_id, "boot-A"))
+            state = read_sidecar(cast(ObjectStore, store), "local", system_id)
+            return await _part_run_ids(pool, system_id), result, state.plaintext_offset
+
+    part_run_ids, result, offset = asyncio.run(_run())
+    assert result == str(system_id), "a resolver failure must not fail the rotation job"
+    assert part_run_ids and all(rid is None for rid in part_run_ids), part_run_ids
+    assert offset == len(_CONSOLE), "the sidecar still advances so rotation does not stall"
