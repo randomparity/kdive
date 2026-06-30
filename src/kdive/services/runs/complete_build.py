@@ -101,6 +101,7 @@ class CompleteBuildFinalizer:
         *,
         build_id: str | None,
         cmdline: str | None,
+        source_provenance: dict[str, str | bool] | None = None,
     ) -> BuildStepResult:
         """Validate uploads and finalize an external Run from ``created`` to ``succeeded``."""
         try:
@@ -108,7 +109,9 @@ class CompleteBuildFinalizer:
             validated = await self._validate_uploads(
                 conn, run.id, str(run.id), prepared, build_id=build_id
             )
-            return await _finalize_external_build(conn, ctx, validated, cmdline=cmdline)
+            return await _finalize_external_build(
+                conn, ctx, validated, cmdline=cmdline, source_provenance=source_provenance
+            )
         except _CompleteBuildAlreadyRecorded as exc:
             return exc.result
 
@@ -289,6 +292,7 @@ async def _finalize_external_build(
     finalization: _ExternalBuildFinalization,
     *,
     cmdline: str | None,
+    source_provenance: dict[str, str | bool] | None = None,
 ) -> BuildStepResult:
     result = BuildStepResult(
         kernel_ref=finalization.output.kernel_ref,
@@ -296,6 +300,7 @@ async def _finalize_external_build(
         initrd_ref=finalization.keys.get("initrd"),
         build_id=finalization.output.build_id,
         cmdline=cmdline,
+        build_provenance=source_provenance,
     )
     run = finalization.run
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):

@@ -63,7 +63,10 @@ class _RunsCreatePayload(ToolPayload):
             "Build profile for the Run's kernel. The recommended default is source='external': "
             "ingest a prebuilt artifact. After runs.create with source='external', "
             "call artifacts.expected_uploads to learn the exact bytes to produce, "
-            "artifacts.create_run_upload to upload, then runs.complete_build. source='server' "
+            "artifacts.create_run_upload to upload, then runs.complete_build (where you may also "
+            "record the optional source_label/source_ref provenance of the tree you built from - "
+            "an unverified client claim, surfaced in runs.get data.build_provenance). "
+            "source='server' "
             "builds from a kernel tree (kernel_source_ref required) and is a single-host "
             "convenience: for a local build host a warm-tree kernel_source_ref is a provenance "
             "label only - it does not select the tree; the operator stages the actual source "
@@ -451,6 +454,26 @@ def _register_runs_complete_build(
                 "a vmlinux was uploaded. Case-insensitive."
             ),
         ] = None,
+        source_label: Annotated[
+            str | None,
+            Field(
+                description="Optional unverified provenance: a freeform handle for the local "
+                "source tree that produced these uploaded artifacts (e.g. 'my-fix worktree'). "
+                "Recorded as a client claim in runs.get data.build_provenance with "
+                "client_attested=true; kdive does not clone, resolve, or verify it. 1..256 "
+                "printable characters; bound on the first completion. Omit if unknown."
+            ),
+        ] = None,
+        source_ref: Annotated[
+            str | None,
+            Field(
+                description="Optional unverified provenance: the ref/commit you claim produced "
+                "these artifacts (e.g. a git SHA or 'v6.9-rc1+patch'). Recorded as a client claim "
+                "in runs.get data.build_provenance with client_attested=true; treated as an opaque "
+                "label, never fetched. 1..256 printable characters; bound on the first completion. "
+                "Omit if unknown."
+            ),
+        ] = None,
     ) -> ToolResponse:
         """Complete an externally built run."""
         ctx = current_context()
@@ -460,7 +483,13 @@ def _register_runs_complete_build(
             ctx,
             run_id,
             lambda _runtime: _complete_build_handlers().complete_build(
-                pool, ctx, run_id, build_id=build_id, cmdline=cmdline
+                pool,
+                ctx,
+                run_id,
+                build_id=build_id,
+                cmdline=cmdline,
+                source_label=source_label,
+                source_ref=source_ref,
             ),
             required_role=Role.CONTRIBUTOR,
         )

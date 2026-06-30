@@ -26,6 +26,7 @@ from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.security.authz.rbac import Role
+from tests.mcp.systems_support import provisioning_profile as _provisioning_profile
 
 TEST_DT = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -83,7 +84,7 @@ async def seed_system(conn_pool: AsyncConnectionPool) -> UUID:
                 project="proj",
                 allocation_id=alloc.id,
                 state=SystemState.READY,
-                provisioning_profile={"schema_version": 1},
+                provisioning_profile=_provisioning_profile(),
             ),
         )
     return system.id

@@ -10,6 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import RUNS
 from kdive.domain.errors import CategorizedError
+from kdive.domain.external_provenance import external_source_provenance
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -46,6 +47,8 @@ class CompleteBuildHandlers:
         *,
         build_id: str | None,
         cmdline: str | None = None,
+        source_label: str | None = None,
+        source_ref: str | None = None,
     ) -> ToolResponse:
         """Authorize and map external-build finalization to the MCP response envelope."""
         uid = _as_uuid(run_id)
@@ -57,10 +60,20 @@ class CompleteBuildHandlers:
             return _config_error(
                 run_id, data={"reason": "cmdline_overrides_platform_args", "token": owned}
             )
+        try:
+            source_provenance = external_source_provenance(source_label, source_ref)
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(run_id, exc)
         with bind_context(principal=ctx.principal):
             async with pool.connection() as conn:
                 return await self._complete_authorized_build(
-                    conn, ctx, uid, run_id, build_id=build_id, cmdline=cmdline
+                    conn,
+                    ctx,
+                    uid,
+                    run_id,
+                    build_id=build_id,
+                    cmdline=cmdline,
+                    source_provenance=source_provenance,
                 )
 
     async def _complete_authorized_build(
@@ -72,6 +85,7 @@ class CompleteBuildHandlers:
         *,
         build_id: str | None,
         cmdline: str | None,
+        source_provenance: dict[str, str | bool] | None,
     ) -> ToolResponse:
         run = await RUNS.get(conn, uid)
         if run is None or run.project not in ctx.projects:
@@ -87,7 +101,14 @@ class CompleteBuildHandlers:
             object_store_factory=self.object_store_factory,
         )
         try:
-            result = await service.complete(conn, ctx, run, build_id=build_id, cmdline=cmdline)
+            result = await service.complete(
+                conn,
+                ctx,
+                run,
+                build_id=build_id,
+                cmdline=cmdline,
+                source_provenance=source_provenance,
+            )
         except CompleteBuildConfigurationError as exc:
             return _config_error(run_id, data=exc.data)
         except CompleteBuildValidationError as exc:

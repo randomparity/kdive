@@ -50,8 +50,9 @@ _EXTERNAL_NOTE = (
     "building on a host. This example is host-independent — it names no build_host and no "
     "kernel_source_ref. After runs.create with this profile, call artifacts.expected_uploads "
     "to learn the exact bytes to produce, then artifacts.create_run_upload to upload, then "
-    "runs.complete_build. The per-host server-build examples below are a single-host "
-    "convenience that needs a staged source tree or git-clone access."
+    "runs.complete_build (which can also record the optional source_label/source_ref of the tree "
+    "you built from as an unverified provenance claim). The per-host server-build examples below "
+    "are a single-host convenience that needs a staged source tree or git-clone access."
 )
 
 # Placeholders the caller must replace before building.
