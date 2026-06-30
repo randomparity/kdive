@@ -31,7 +31,7 @@ from kdive.providers.shared.debug_common.gdbmi import (
     PygdbmiController,
     parse_mi_records,
 )
-from kdive.providers.shared.debug_common.mi_protocol import evaluate_value
+from kdive.providers.shared.debug_common.mi_protocol import evaluate_value, stack_frames
 from kdive.providers.shared.debug_common.transcript import append_transcript
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -928,6 +928,40 @@ def test_evaluate_value_returns_none_for_non_result_records() -> None:
 def test_evaluate_value_returns_none_for_non_string_value() -> None:
     records = [MiRecord(type="result", message="done", payload={"value": 16})]
     assert evaluate_value(records) is None
+
+
+# --- stack_frames helper -------------------------------------------------------------------
+
+
+def test_stack_frames_extracts_frame_rows() -> None:
+    records = [
+        MiRecord(
+            type="result",
+            message="done",
+            payload={
+                "stack": [
+                    {
+                        "frame": {
+                            "level": "0",
+                            "func": "panic",
+                            "addr": "0xffffffff81000000",
+                            "file": "kernel/panic.c",
+                            "line": "42",
+                        }
+                    },
+                    {"frame": {"level": "1", "func": "do_exit"}},
+                ]
+            },
+        )
+    ]
+    rows = stack_frames(records)
+    assert [row.get("func") for row in rows] == ["panic", "do_exit"]
+
+
+def test_stack_frames_empty_for_missing_or_non_list_stack() -> None:
+    assert stack_frames([MiRecord(type="result", message="done", payload={})]) == []
+    assert stack_frames([MiRecord(type="result", message="done", payload={"stack": "oops"})]) == []
+    assert stack_frames([MiRecord(type="result", message="done", payload={"stack": []})]) == []
 
 
 # --- symbol resolution ---------------------------------------------------------------------

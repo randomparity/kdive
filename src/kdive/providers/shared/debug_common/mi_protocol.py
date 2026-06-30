@@ -73,6 +73,16 @@ def breakpoint_rows(records: list[MiRecord]) -> list[dict[str, Any]]:
     return rows
 
 
+def stack_frames(records: list[MiRecord]) -> list[dict[str, Any]]:
+    """The frame dicts from a ``-stack-list-frames`` result (``stack=[frame={...},...]``)."""
+    rows: list[dict[str, Any]] = []
+    for row in _dict_rows(result_payload_dict(records).get("stack")):
+        entry = row.get("frame")
+        if isinstance(entry, dict):
+            rows.append(entry)
+    return rows
+
+
 def register_names(records: list[MiRecord]) -> list[str]:
     names = result_payload_dict(records).get("register-names")
     return [name for name in _payload_list(names) if isinstance(name, str)]
