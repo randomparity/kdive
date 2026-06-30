@@ -18,10 +18,11 @@
 - All textual instruction fields pass `Redactor` before return. No schema/migration/RBAC/config change.
 - Ruff line length 100, lints `E,F,I,UP,B,SIM`; `ty` strict whole-tree. Guardrails: `just lint`, `just type`, `just test`, `just docs` (regenerate reference).
 - Commit trailer required: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
+- **Protocol-method ordering:** `just type` is whole-tree and `DebugCapabilities.engine: GdbMiEngine` (`providers/core/runtime.py:62`) binds the Protocol at `providers/local_libvirt/composition.py:127`, `providers/remote_libvirt/composition.py:260` (both the shared concrete `GdbMiEngine`), and `providers/fault_inject/composition.py:117` (`FaultInjectDebugEngine`). Python structural typing lets a concrete class carry methods the Protocol omits, but NOT the reverse — so the `disassemble` Protocol method must be added **only after** both the concrete `GdbMiEngine` (Task 2) and `FaultInjectDebugEngine` (Task 3) have the method, else whole-tree `just type` goes red on non-conformance. Hence the Protocol signature lands as the final step of Task 3.
 
 ## File Structure
 
-- `src/kdive/providers/ports/debug.py` — add `GdbInstruction`, `GdbDisassembly` models + `disassemble` Protocol method.
+- `src/kdive/providers/ports/debug.py` — add `GdbInstruction`, `GdbDisassembly` models (Task 1); add the `disassemble` Protocol method **last** (Task 3, after both implementors exist).
 - `src/kdive/providers/shared/debug_common/mi_protocol.py` — add `disassembly_rows` parser.
 - `src/kdive/providers/shared/debug_common/gdbmi.py` — add constants, `disassemble`, `_disassemble_start`, `_disassemble_command`, `_instruction_from`, `_redact_instruction`, `_NO_MEMORY_RE`; import the new models + parser.
 - `src/kdive/providers/fault_inject/debug/gdb.py` — synthetic `disassemble`.
@@ -36,15 +37,15 @@
 
 ---
 
-### Task 1: Parser + port models + Protocol signature
+### Task 1: Parser + port models
 
 **Files:**
-- Modify: `src/kdive/providers/ports/debug.py` (add models after `GdbBacktrace`; add Protocol method after `read_frame`)
+- Modify: `src/kdive/providers/ports/debug.py` (add models after `GdbBacktrace`; the `disassemble` Protocol method is deliberately deferred to Task 3 — see Global Constraints "Protocol-method ordering")
 - Modify: `src/kdive/providers/shared/debug_common/mi_protocol.py` (add `disassembly_rows` after `stack_frames`)
 - Test: `tests/providers/local_libvirt/test_debug_gdbmi.py`
 
 **Interfaces:**
-- Produces: `GdbInstruction(address: str|None, inst: str|None, func_name: str|None, offset: int|None)`, `GdbDisassembly(instructions: list[GdbInstruction], truncated: bool=False)`, `disassembly_rows(records: list[MiRecord]) -> list[dict[str, Any]]`.
+- Produces: `GdbInstruction(address: str|None, inst: str|None, func_name: str|None, offset: int|None)`, `GdbDisassembly(instructions: list[GdbInstruction], truncated: bool=False)`, `disassembly_rows(records: list[MiRecord]) -> list[dict[str, Any]]`. (The `disassemble` Protocol method is added in Task 3.)
 
 - [ ] **Step 1: Write the failing parser test** in `tests/providers/local_libvirt/test_debug_gdbmi.py` (near the `stack_frames` tests). Import `disassembly_rows` alongside `stack_frames` in the existing `from ...mi_protocol import` line.
 
@@ -110,44 +111,15 @@ class GdbDisassembly(ProviderModel):
     truncated: bool = False
 ```
 
-- [ ] **Step 5: Add the Protocol method** to `GdbMiEngine` in `providers/ports/debug.py` after `read_frame`:
-
-```python
-    def disassemble(
-        self,
-        attachment: GdbMiAttachment,
-        *,
-        symbol: str | None,
-        address: int | None,
-        instruction_count: int,
-    ) -> GdbDisassembly:
-        """Disassemble a bounded forward instruction window around a symbol or address.
-
-        Exactly one of ``symbol`` / ``address`` must be given. Bounds the response to
-        ``instruction_count`` (slicing an oversized range), with ``truncated`` when more
-        instructions follow.
-
-        Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_instruction_count`` for an
-                out-of-range count, ``bad_target`` when not exactly one of symbol/address is
-                given, ``bad_address`` for an out-of-range address, ``bad_symbol_name`` (via
-                ``resolve_symbol``) for a non-identifier name (all raised before the disassemble
-                command); ``DEBUG_ATTACH_FAILURE`` / ``no_instructions`` when gdb returns no
-                usable instruction data or the address is unreadable; ``INFRASTRUCTURE_FAILURE``
-                for command timeouts.
-        """
-        ...
-```
-
-- [ ] **Step 6: Run the parser test to verify it passes**
+- [ ] **Step 5: Run the parser test to verify it passes**
 
 Run: `uv run python -m pytest tests/providers/local_libvirt/test_debug_gdbmi.py -k disassembly_rows -q`
 Expected: PASS.
 
-- [ ] **Step 7: Lint/type/commit**
+- [ ] **Step 6: Lint/type/commit**
 
 Run: `just lint && just type`
-Expected: clean.
+Expected: clean. (The `GdbInstruction`/`GdbDisassembly` models add no Protocol obligation, so whole-tree `ty` stays green; the `disassemble` Protocol method is added in Task 3 after both implementors exist.)
 
 ```bash
 git add src/kdive/providers/ports/debug.py src/kdive/providers/shared/debug_common/mi_protocol.py tests/providers/local_libvirt/test_debug_gdbmi.py
@@ -530,15 +502,17 @@ git commit -m "feat(921): add GdbMiEngine.disassemble with shrink-retry" -m "Co-
 
 ---
 
-### Task 3: Fault-inject synthetic `disassemble`
+### Task 3: Fault-inject synthetic `disassemble` + Protocol method
 
 **Files:**
 - Modify: `src/kdive/providers/fault_inject/debug/gdb.py`
+- Modify: `src/kdive/providers/ports/debug.py` (add the `disassemble` Protocol method last — both implementors now exist)
 - Test: `tests/providers/fault_inject/test_provider.py` (only if the existing suite asserts each engine op; otherwise rely on the protocol-conformance/import). Check `tests/providers/fault_inject/test_provider.py` for a backtrace/read_frame assertion and mirror it.
 
 **Interfaces:**
-- Consumes: `GdbInstruction`, `GdbDisassembly` (Task 1).
-- Produces: `FaultInjectDebugEngine.disassemble(...) -> GdbDisassembly`.
+- Consumes: `GdbInstruction`, `GdbDisassembly` (Task 1); concrete `GdbMiEngine.disassemble` (Task 2).
+- Produces: `FaultInjectDebugEngine.disassemble(...) -> GdbDisassembly`, plus the `disassemble` Protocol method on `GdbMiEngine` (`ports/debug.py`).
+- **Ordering:** add the Protocol method only after both `FaultInjectDebugEngine.disassemble` (this task) and the concrete `GdbMiEngine.disassemble` (Task 2) exist, so whole-tree `just type` stays green (see Global Constraints).
 
 - [ ] **Step 1: Add `GdbDisassembly, GdbInstruction` to the import block** in `fault_inject/debug/gdb.py`.
 
@@ -567,18 +541,51 @@ git commit -m "feat(921): add GdbMiEngine.disassemble with shrink-retry" -m "Co-
         )
 ```
 
-- [ ] **Step 3: If `test_provider.py` asserts backtrace/read_frame, add a mirror assertion** that `engine.disassemble(attachment, address=0x1000, instruction_count=8)` returns a `GdbDisassembly` with non-empty `instructions`.
+- [ ] **Step 3: Add the `disassemble` Protocol method** to `GdbMiEngine` in `providers/ports/debug.py` after `read_frame` (both implementors now exist, so this keeps `ty` green):
 
-- [ ] **Step 4: Run the fault-inject suite**
+```python
+    def disassemble(
+        self,
+        attachment: GdbMiAttachment,
+        *,
+        symbol: str | None,
+        address: int | None,
+        instruction_count: int,
+    ) -> GdbDisassembly:
+        """Disassemble a bounded forward instruction window around a symbol or address.
+
+        Exactly one of ``symbol`` / ``address`` must be given. Bounds the response to
+        ``instruction_count`` (slicing an oversized range), with ``truncated`` when more
+        instructions follow.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_instruction_count`` for an
+                out-of-range count, ``bad_target`` when not exactly one of symbol/address is
+                given, ``bad_address`` for an out-of-range address, ``bad_symbol_name`` (via
+                ``resolve_symbol``) for a non-identifier name (all raised before the disassemble
+                command); ``DEBUG_ATTACH_FAILURE`` / ``no_instructions`` when gdb returns no
+                usable instruction data or the address is unreadable; ``INFRASTRUCTURE_FAILURE``
+                for command timeouts.
+        """
+        ...
+```
+
+- [ ] **Step 4: If `test_provider.py` asserts backtrace/read_frame, add a mirror assertion** that `engine.disassemble(attachment, symbol=None, address=0x1000, instruction_count=8)` returns a `GdbDisassembly` with non-empty `instructions`.
+
+- [ ] **Step 5: Run the fault-inject suite + whole-tree type check**
 
 Run: `uv run python -m pytest tests/providers/fault_inject/ -q`
 Expected: PASS.
+Run: `just type`
+Expected: clean — both `GdbMiEngine` (Task 2) and `FaultInjectDebugEngine` (this task) satisfy the now-extended Protocol.
 
-- [ ] **Step 5: Lint/type/commit**
+- [ ] **Step 6: Lint/commit**
+
+Run: `just lint`
 
 ```bash
-git add src/kdive/providers/fault_inject/debug/gdb.py tests/providers/fault_inject/test_provider.py
-git commit -m "feat(921): synthetic fault-inject disassemble" -m "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+git add src/kdive/providers/fault_inject/debug/gdb.py src/kdive/providers/ports/debug.py tests/providers/fault_inject/test_provider.py
+git commit -m "feat(921): synthetic fault-inject disassemble + protocol method" -m "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
 
 ---
