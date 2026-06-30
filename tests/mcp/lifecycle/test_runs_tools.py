@@ -5710,6 +5710,44 @@ def test_get_succeeded_run_surfaces_warm_tree_dirty_as_native_bool(migrated_url:
     asyncio.run(_run())
 
 
+def test_get_succeeded_run_surfaces_dirty_files_list(migrated_url: str) -> None:
+    # A warm-tree build records dirty_files as a JSON string array (#938, ADR-0282); it must reach
+    # data["build_provenance"]["dirty_files"] as a real list through the DB JSON round-trip, not be
+    # dropped by the provenance coercion.
+    provenance = {
+        "label": "linux-6.9",
+        "resolved_commit": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",  # pragma: allowlist secret
+        "dirty": True,
+        "untracked": False,
+        "tree_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",  # pragma: allowlist secret
+        "dirty_files": ["kernel/sched/core.c", "mm/slub.c"],
+    }
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(
+                pool,
+                run_id,
+                "build",
+                "succeeded",
+                {
+                    "kernel_ref": f"local/runs/{run_id}/kernel",
+                    "debuginfo_ref": f"local/runs/{run_id}/vmlinux",
+                    "build_id": "abc123",
+                    "build_provenance": provenance,
+                },
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        surfaced = resp.data["build_provenance"]
+        assert surfaced == provenance
+        assert isinstance(surfaced, dict)
+        assert surfaced["dirty_files"] == ["kernel/sched/core.c", "mm/slub.c"]
+        assert surfaced["untracked"] is False
+
+    asyncio.run(_run())
+
+
 def test_get_succeeded_run_omits_build_provenance_key_when_absent(migrated_url: str) -> None:
     # A SUCCEEDED run whose build step recorded no provenance → "build_provenance" key must be
     # entirely absent from data (not present-as-null), so callers can key off its presence (#778).

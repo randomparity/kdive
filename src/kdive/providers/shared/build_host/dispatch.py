@@ -163,7 +163,7 @@ def _with_warm_tree_provenance(
     label = parsed.kernel_source_ref
     if not isinstance(label, str):
         return result
-    provenance: dict[str, str | bool] = {"label": label}
+    provenance: dict[str, str | bool | list[str]] = {"label": label}
     commit = rev_parse_head(kernel_src)
     if commit is not None:
         provenance["resolved_commit"] = commit

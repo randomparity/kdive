@@ -101,7 +101,7 @@ class CompleteBuildFinalizer:
         *,
         build_id: str | None,
         cmdline: str | None,
-        source_provenance: dict[str, str | bool] | None = None,
+        source_provenance: dict[str, str | bool | list[str]] | None = None,
     ) -> BuildStepResult:
         """Validate uploads and finalize an external Run from ``created`` to ``succeeded``."""
         try:
@@ -292,7 +292,7 @@ async def _finalize_external_build(
     finalization: _ExternalBuildFinalization,
     *,
     cmdline: str | None,
-    source_provenance: dict[str, str | bool] | None = None,
+    source_provenance: dict[str, str | bool | list[str]] | None = None,
 ) -> BuildStepResult:
     result = BuildStepResult(
         kernel_ref=finalization.output.kernel_ref,

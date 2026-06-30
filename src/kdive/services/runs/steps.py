@@ -41,21 +41,33 @@ def _optional_str_list(value: object) -> list[str] | None:
     return [item for item in value if isinstance(item, str)]
 
 
-def _optional_provenance_map(value: object) -> dict[str, str | bool] | None:
-    """Coerce a persisted JSON value to ``dict[str, str | bool]``; ``None`` otherwise (#778, #861).
+def _is_provenance_value(value: object) -> bool:
+    """Whether ``value`` is an admissible provenance value: ``str``, ``bool``, or a ``list[str]``.
 
-    Accepts only a mapping whose every key is a string and every value is a ``str`` or ``bool`` —
-    ``bool`` for the warm-tree ``dirty`` flag (ADR-0265), ``str`` for every other provenance field.
-    A malformed persisted ``build_provenance`` degrades to ``None`` rather than carrying mistyped
-    fields forward. ``bool`` subclasses ``int`` in Python, so the value check is ``str | bool``
-    explicitly (never ``int``) to keep a stray numeric value (e.g. ``123``) rejected.
+    ``bool`` for warm-tree flags (``dirty``/``untracked``, ADR-0265/0282), ``list[str]`` for the
+    ``dirty_files`` manifest (ADR-0282), ``str`` for every other field. ``bool`` subclasses ``int``
+    in Python, so the scalar check is ``str | bool`` explicitly (never ``int``) to keep a stray
+    numeric value (e.g. ``123``) rejected; a list is admitted only when every element is a ``str``.
+    """
+    if isinstance(value, str | bool):
+        return True
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _optional_provenance_map(value: object) -> dict[str, str | bool | list[str]] | None:
+    """Coerce a persisted JSON value to ``dict[str, str | bool | list[str]]``; else ``None``.
+
+    Accepts only a mapping whose every key is a string and every value satisfies
+    :func:`_is_provenance_value` (#778, #861, #938). A malformed persisted ``build_provenance``
+    (a non-mapping, a non-string key, a numeric value, a nested dict, or a list with a non-string
+    element) degrades the whole map to ``None`` rather than carrying mistyped fields forward.
     """
     if not isinstance(value, Mapping):
         return None
     items = cast("Mapping[object, object]", value).items()
-    if not all(isinstance(k, str) and isinstance(v, str | bool) for k, v in items):
+    if not all(isinstance(k, str) and _is_provenance_value(v) for k, v in items):
         return None
-    return {k: v for k, v in items if isinstance(k, str) and isinstance(v, str | bool)}
+    return {k: cast("str | bool | list[str]", v) for k, v in items if isinstance(k, str)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +79,7 @@ class BuildStepResult:
     build_id: str | None
     initrd_ref: str | None = None
     cmdline: str | None = None
-    build_provenance: dict[str, str | bool] | None = None
+    build_provenance: dict[str, str | bool | list[str]] | None = None
 
     @classmethod
     def load(cls, value: object) -> BuildStepResult | None:
@@ -83,8 +95,8 @@ class BuildStepResult:
             build_provenance=_optional_provenance_map(result.get("build_provenance")),
         )
 
-    def dump(self) -> dict[str, str | dict[str, str | bool]]:
-        result: dict[str, str | dict[str, str | bool]] = {}
+    def dump(self) -> dict[str, str | dict[str, str | bool | list[str]]]:
+        result: dict[str, str | dict[str, str | bool | list[str]]] = {}
         if self.kernel_ref is not None:
             result["kernel_ref"] = self.kernel_ref
         if self.debuginfo_ref is not None:

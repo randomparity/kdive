@@ -79,9 +79,9 @@ class CloneProvenance:
     ref: str
     resolved_commit: str
 
-    def dump(self) -> dict[str, str | bool]:
-        # Widened to the unified ``BuildOutput.build_provenance`` value type (#861, ADR-0265);
-        # the git lane only ever records string fields.
+    def dump(self) -> dict[str, str | bool | list[str]]:
+        # Widened to the unified ``BuildOutput.build_provenance`` value type (#861, #938,
+        # ADR-0265/0282); the git lane only ever records string fields.
         return {
             "remote": self.remote,
             "ref": self.ref,

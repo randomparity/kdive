@@ -52,7 +52,7 @@ def _clean(value: str | None, *, field: str) -> str | None:
 
 def external_source_provenance(
     source_label: str | None, source_ref: str | None
-) -> dict[str, str | bool] | None:
+) -> dict[str, str | bool | list[str]] | None:
     """Validate and assemble a client-attested source-provenance claim.
 
     Args:
@@ -75,7 +75,7 @@ def external_source_provenance(
     ref = _clean(source_ref, field="source_ref")
     if label is None and ref is None:
         return None
-    provenance: dict[str, str | bool] = {CLIENT_ATTESTED_KEY: True}
+    provenance: dict[str, str | bool | list[str]] = {CLIENT_ATTESTED_KEY: True}
     if label is not None:
         provenance["label"] = label
     if ref is not None:
