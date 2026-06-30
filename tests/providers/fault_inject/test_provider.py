@@ -396,3 +396,15 @@ def test_debug_engine_breakpoints_are_isolated_per_attachment(tmp_path: Path) ->
 
     assert [ref.number for ref in engine.list_breakpoints(first)] == []
     assert [ref.number for ref in engine.list_breakpoints(second)] == [second_ref.number]
+
+
+def test_debug_engine_watchpoints_round_trip(tmp_path: Path) -> None:
+    engine = FaultInjectDebugEngine()
+    attachment = fault_inject_attach_seam(
+        host="127.0.0.1", port=1234, run_id="r", transcript_path=tmp_path / "t.jsonl"
+    )
+    ref = engine.set_watchpoint(attachment, symbol=None, address=0x1000, byte_count=8)
+    listed = engine.list_watchpoints(attachment)
+    assert [w.number for w in listed] == [ref.number]
+    engine.clear_watchpoint(attachment, ref.number)
+    assert engine.list_watchpoints(attachment) == []

@@ -63,6 +63,16 @@ class GdbBreakpointRef(ProviderModel):
     enabled: bool | None = None
 
 
+class GdbWatchpointRef(ProviderModel):
+    """One gdb/MI watchpoint reference."""
+
+    number: str
+    type: str | None = None
+    expr: str | None = None
+    addr: str | None = None
+    enabled: bool | None = None
+
+
 class GdbController(Protocol):
     """Controller operations a gdb/MI attachment exposes."""
 
@@ -254,6 +264,51 @@ class GdbMiEngine(Protocol):
                 ``resolve_symbol``) for a non-identifier name (all raised before the disassemble
                 command); ``DEBUG_ATTACH_FAILURE`` / ``no_instructions`` when gdb returns no
                 usable instruction data or the address is unreadable; ``INFRASTRUCTURE_FAILURE``
+                for command timeouts.
+        """
+        ...
+
+    def set_watchpoint(
+        self,
+        attachment: GdbMiAttachment,
+        *,
+        symbol: str | None,
+        address: int | None,
+        byte_count: int,
+    ) -> GdbWatchpointRef:
+        """Set a hardware **write** watchpoint on a bare symbol or explicit address.
+
+        Exactly one of ``symbol`` / ``address`` must be given; ``byte_count`` must be one of
+        ``{1, 2, 4, 8}``. The watch expression is constructed from the resolved numeric address,
+        never a caller expression.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_byte_count`` for an unsupported size,
+                ``bad_target`` when not exactly one of symbol/address is given, ``bad_address`` for
+                an out-of-range address, ``bad_symbol_name`` (via ``resolve_symbol``) for a
+                non-identifier name (all before any MI command); ``DEBUG_ATTACH_FAILURE`` /
+                ``inferior_running`` when the target is running, ``watchpoint_unsupported`` when the
+                target refuses the watchpoint at set time, ``no_watchpoint_record`` for a malformed
+                ``-break-watch`` result, or for other gdb/MI command failures;
+                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+
+    def list_watchpoints(self, attachment: GdbMiAttachment) -> list[GdbWatchpointRef]:
+        """List watchpoints (only watchpoints, not breakpoints) through gdb/MI.
+
+        Raises:
+            CategorizedError: ``DEBUG_ATTACH_FAILURE`` for gdb/MI command failures or
+                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+
+    def clear_watchpoint(self, attachment: GdbMiAttachment, number: str) -> None:
+        """Clear a watchpoint by number through gdb/MI.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_watchpoint_id`` for a non-numeric id,
+                ``DEBUG_ATTACH_FAILURE`` for gdb/MI command failures, or ``INFRASTRUCTURE_FAILURE``
                 for command timeouts.
         """
         ...
