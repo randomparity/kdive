@@ -24,6 +24,17 @@ Clear a breakpoint by number on a live DebugSession. Requires contributor.
 | `number` | string | yes | Breakpoint number to clear (from debug.list_breakpoints). |
 | `session_id` | string | yes | The live DebugSession whose breakpoint to clear. |
 
+## `debug.clear_watchpoint`
+
+`implemented`
+
+Clear a watchpoint by number on a live DebugSession. Requires contributor.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `number` | string | yes | Watchpoint number to clear (from debug.list_watchpoints). |
+| `session_id` | string | yes | The live DebugSession whose watchpoint to clear. |
+
 ## `debug.continue`
 
 `implemented`
@@ -109,6 +120,16 @@ List the caller's debug sessions, filterable by run/system/project/state. Viewer
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
 - `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
 
+## `debug.list_watchpoints`
+
+`implemented` · `read-only`
+
+List all watchpoints on a live DebugSession. Requires contributor.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `session_id` | string | yes | The live DebugSession whose watchpoints to list. |
+
 ## `debug.read_frame`
 
 `implemented` · `read-only`
@@ -164,6 +185,22 @@ Set a breakpoint on a live DebugSession via gdb-MI. Requires contributor.
 |---|---|---|---|
 | `location` | string | yes | Bare C function or symbol name to break at. |
 | `session_id` | string | yes | The live DebugSession to set a breakpoint on. |
+
+## `debug.set_watchpoint`
+
+`implemented`
+
+Set a hardware write watchpoint on a symbol/address for a live DebugSession.
+
+Watchpoints are hardware (debug-register) watchpoints: the stub may accept one yet never
+trap, surfacing as a debug.continue timeout rather than an error. Requires contributor.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `address` | integer (nullable) | no | Start address (integer) to watch for writes (or use symbol). |
+| `byte_count` | integer | no | Bytes to watch; one of 1, 2, 4, or 8 (one hardware watchpoint). |
+| `session_id` | string | yes | The live DebugSession to set a watchpoint on. |
+| `symbol` | string (nullable) | no | Bare C symbol to watch for writes (or use address). |
 
 ## `debug.start_session`
 

@@ -1,6 +1,7 @@
 """The Debug-plane gdb-MI tools — `debug.set_breakpoint/.clear/.list`, `.read_memory`,
 `.read_registers`, `.resolve_symbol`, `.continue`, `.interrupt`, `.backtrace`, `.read_frame`,
-`.disassemble` (ADR-0034, ADR-0248, ADR-0275, ADR-0276).
+`.disassemble`, `.set_watchpoint/.list_watchpoints/.clear_watchpoint`
+(ADR-0034, ADR-0248, ADR-0275, ADR-0276, ADR-0277).
 
 These extend the `debug.*` session lifecycle tools registered by ``sessions.py``. A `live`
 `DebugSession` records an open single-attach gdbstub transport; the first Debug-plane op for
@@ -67,7 +68,10 @@ def _gdbmi_maturity() -> dict[str, object]:
     against a stopped ``schedule``, so they are in ``_LOCAL_PROVEN_DEBUG_TOOLS`` too.
     ``resolve_symbol`` (ADR-0248) is unit-tested against the scripted controller only — its
     ``-data-evaluate-expression`` form was not separately re-proven live — so it stays out of the
-    proven set until a live exercise lands.
+    proven set until a live exercise lands. The three watchpoint ops (ADR-0277) follow the same
+    ``resolve_symbol`` precedent: ``implemented`` (they ride the proven transport and are
+    unit-tested against the scripted controller) but not in ``_LOCAL_PROVEN_DEBUG_TOOLS`` until a
+    live exercise lands, since a hardware watchpoint over the gdbstub is not yet live-proven.
     """
     return _docmeta.maturity_meta("implemented")
 
@@ -405,6 +409,52 @@ def _disassemble_op(
     return op
 
 
+def _set_watchpoint_op(
+    session_id: str, symbol: str | None, address: int | None, byte_count: int
+) -> _EngineOp:
+    def op(engine: GdbMiEngine, attachment: GdbMiAttachment) -> ToolResponse:
+        ref = engine.set_watchpoint(
+            attachment, symbol=symbol, address=address, byte_count=byte_count
+        )
+        data: dict[str, JsonValue] = {"number": ref.number, "byte_count": byte_count}
+        if ref.expr is not None:
+            data["expr"] = ref.expr
+        return ToolResponse.success(
+            session_id,
+            "watching",
+            suggested_next_actions=["debug.continue", "debug.list_watchpoints"],
+            data=data,
+        )
+
+    return op
+
+
+def _list_watchpoints_op(session_id: str) -> _EngineOp:
+    def op(engine: GdbMiEngine, attachment: GdbMiAttachment) -> ToolResponse:
+        refs = engine.list_watchpoints(attachment)
+        watchpoints: list[JsonValue] = [
+            ref.model_dump(mode="json", exclude_none=True) for ref in refs
+        ]
+        return ToolResponse.success(
+            session_id,
+            "listed",
+            suggested_next_actions=["debug.set_watchpoint", "debug.continue"],
+            data={"count": len(watchpoints), "watchpoints": watchpoints},
+        )
+
+    return op
+
+
+def _clear_watchpoint_op(session_id: str, number: str) -> _EngineOp:
+    def op(engine: GdbMiEngine, attachment: GdbMiAttachment) -> ToolResponse:
+        engine.clear_watchpoint(attachment, number)
+        return ToolResponse.success(
+            session_id, "cleared", suggested_next_actions=["debug.list_watchpoints"]
+        )
+
+    return op
+
+
 def _stop_data(reason: str | None, timed_out: bool) -> dict[str, JsonValue]:
     data: dict[str, JsonValue] = {"timed_out": timed_out}
     if reason is not None:
@@ -415,7 +465,7 @@ def _stop_data(reason: str | None, timed_out: bool) -> dict[str, JsonValue]:
 def _register_debug_ops(
     app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
 ) -> None:
-    """Register the eleven gdb-MI `debug.*` tools on ``app``, sharing ``runtime`` (ADR-0034 §5)."""
+    """Register the fourteen gdb-MI `debug.*` tools on ``app``, sharing ``runtime`` (ADR-0034)."""
     _register_debug_set_breakpoint(app, pool, runtime)
     _register_debug_clear_breakpoint(app, pool, runtime)
     _register_debug_list_breakpoints(app, pool, runtime)
@@ -427,6 +477,9 @@ def _register_debug_ops(
     _register_debug_backtrace(app, pool, runtime)
     _register_debug_read_frame(app, pool, runtime)
     _register_debug_disassemble(app, pool, runtime)
+    _register_debug_set_watchpoint(app, pool, runtime)
+    _register_debug_list_watchpoints(app, pool, runtime)
+    _register_debug_clear_watchpoint(app, pool, runtime)
 
 
 def _register_debug_set_breakpoint(
@@ -717,4 +770,88 @@ def _register_debug_disassemble(
             session_id,
             runtime,
             _disassemble_op(session_id, symbol, address, instruction_count),
+        )
+
+
+def _register_debug_set_watchpoint(
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+) -> None:
+    @app.tool(
+        name="debug.set_watchpoint",
+        annotations=_docmeta.mutating(),
+        meta=_gdbmi_maturity(),
+    )
+    async def debug_set_watchpoint(
+        session_id: Annotated[
+            str, Field(description="The live DebugSession to set a watchpoint on.")
+        ],
+        symbol: Annotated[
+            str | None,
+            Field(description="Bare C symbol to watch for writes (or use address)."),
+        ] = None,
+        address: Annotated[
+            int | None,
+            Field(description="Start address (integer) to watch for writes (or use symbol)."),
+        ] = None,
+        byte_count: Annotated[
+            int,
+            Field(description="Bytes to watch; one of 1, 2, 4, or 8 (one hardware watchpoint)."),
+        ] = 8,
+    ) -> ToolResponse:
+        """Set a hardware write watchpoint on a symbol/address for a live DebugSession.
+
+        Watchpoints are hardware (debug-register) watchpoints: the stub may accept one yet never
+        trap, surfacing as a debug.continue timeout rather than an error. Requires contributor.
+        """
+        return await run_engine_op(
+            pool,
+            current_context(),
+            session_id,
+            runtime,
+            _set_watchpoint_op(session_id, symbol, address, byte_count),
+        )
+
+
+def _register_debug_list_watchpoints(
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+) -> None:
+    @app.tool(
+        name="debug.list_watchpoints",
+        annotations=_docmeta.read_only(),
+        meta=_gdbmi_maturity(),
+    )
+    async def debug_list_watchpoints(
+        session_id: Annotated[
+            str, Field(description="The live DebugSession whose watchpoints to list.")
+        ],
+    ) -> ToolResponse:
+        """List all watchpoints on a live DebugSession. Requires contributor."""
+        return await run_engine_op(
+            pool, current_context(), session_id, runtime, _list_watchpoints_op(session_id)
+        )
+
+
+def _register_debug_clear_watchpoint(
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+) -> None:
+    @app.tool(
+        name="debug.clear_watchpoint",
+        annotations=_docmeta.mutating(),
+        meta=_gdbmi_maturity(),
+    )
+    async def debug_clear_watchpoint(
+        session_id: Annotated[
+            str, Field(description="The live DebugSession whose watchpoint to clear.")
+        ],
+        number: Annotated[
+            str, Field(description="Watchpoint number to clear (from debug.list_watchpoints).")
+        ],
+    ) -> ToolResponse:
+        """Clear a watchpoint by number on a live DebugSession. Requires contributor."""
+        return await run_engine_op(
+            pool,
+            current_context(),
+            session_id,
+            runtime,
+            _clear_watchpoint_op(session_id, number),
         )
