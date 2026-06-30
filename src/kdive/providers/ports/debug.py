@@ -332,6 +332,21 @@ class GdbMiEngine(Protocol):
         """
         ...
 
+    def list_modules(self, attachment: GdbMiAttachment, *, max_modules: int) -> GdbModuleList:
+        """List loaded kernel modules by walking the ``modules`` list (ADR-0278).
+
+        Walks the kernel module list via internally-constructed expressions (never caller text),
+        bounded to ``max_modules`` (``truncated`` when more follow). A single undecodable row is
+        skipped and counted in ``decode_errors``; ``symbols_loaded`` reflects what this session
+        loaded.
+
+        Raises:
+            CategorizedError: ``DEBUG_ATTACH_FAILURE`` / ``inferior_running`` when the target is
+                running, ``module_decode_failed`` when the list head or base-address field cannot
+                be read; ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+
 
 class AttachSeam(Protocol):
     """Lazy attach seam returning a live gdb/MI attachment."""

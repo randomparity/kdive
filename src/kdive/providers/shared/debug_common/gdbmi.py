@@ -40,6 +40,8 @@ from kdive.providers.ports.debug import (
     GdbFrame,
     GdbInstruction,
     GdbMiAttachment,
+    GdbModule,
+    GdbModuleList,
     GdbStopRecord,
     GdbWatchpointRef,
 )
@@ -97,6 +99,12 @@ MAX_INSTRUCTION_BYTES = 16
 WATCH_BYTE_SIZES = (1, 2, 4, 8)
 # Default watched width: one 64-bit word (covers a kernel pointer/long/counter).
 DEFAULT_WATCH_BYTES = 8
+# Caps the module-list *walk*: a corrupt list never reaching the head, or an unusually large
+# module count, stays bounded; a longer list is flagged via GdbModuleList.truncated (ADR-0278).
+MAX_MODULES = 512
+# The kernel `struct module` base-address field moved across versions: `mem[MOD_TEXT].base`
+# (>=6.4) and `core_layout.base` (before). Probed once per session, in this order (ADR-0278).
+_MODULE_BASE_FIELDS = ("mem[0].base", "core_layout.base")
 _INTERRUPT_STOP_TIMEOUT_SEC = mi_execution.INTERRUPT_STOP_TIMEOUT_SEC
 _STOP_POLL_SLICE_SEC = mi_execution.STOP_POLL_SLICE_SEC
 _timeout_error = mi_controller.timeout_error
@@ -743,6 +751,136 @@ class GdbMiEngine:
             )
         )
 
+    # --- module symbols (ADR-0278) --------------------------------------------------------
+
+    def list_modules(
+        self, attachment: GdbMiAttachment, *, max_modules: int = MAX_MODULES
+    ) -> GdbModuleList:
+        """Walk the kernel ``modules`` list into a bounded, redacted module list (ADR-0278)."""
+        rows, truncated, decode_errors = self._module_walk(attachment, limit=max_modules)
+        modules = [
+            self._redact_module(
+                GdbModule(
+                    name=name,
+                    base_address=f"0x{base:x}",
+                    symbols_loaded=name in attachment.loaded_modules,
+                )
+            )
+            for name, base in rows
+        ]
+        return GdbModuleList(modules=modules, truncated=truncated, decode_errors=decode_errors)
+
+    def _module_walk(
+        self, attachment: GdbMiAttachment, *, limit: int
+    ) -> tuple[list[tuple[str, int]], bool, int]:
+        """Walk ``modules`` from ``modules.next`` to ``&modules``, bounded to ``limit``.
+
+        Returns ``(rows, truncated, decode_errors)``. The list head and base-field probe are
+        required (failure → ``inferior_running``/``module_decode_failed``); a single bad row is
+        skipped and counted; advancing via ``node->next`` is independent of decoding the module.
+        """
+        offset = self._module_eval_required(attachment, "&((struct module *)0)->list")
+        head = self._module_eval_required(attachment, "&modules")
+        node = self._module_eval_required(attachment, "modules.next")
+        rows: list[tuple[str, int]] = []
+        decode_errors = 0
+        base_field = ""
+        truncated = False
+        processed = 0
+        while node != head:
+            if processed >= limit:
+                truncated = True
+                break
+            processed += 1
+            module_ptr = (node - offset) & 0xFFFFFFFFFFFFFFFF
+            name = self._module_name(attachment, module_ptr)
+            base, base_field = self._module_base(attachment, module_ptr, base_field)
+            if name is not None and base is not None:
+                rows.append((name, base))
+            else:
+                decode_errors += 1
+            nxt = self._module_eval_optional(attachment, f"((struct list_head *)0x{node:x})->next")
+            if nxt is None or nxt == node:
+                break
+            node = nxt
+        return rows, truncated, decode_errors
+
+    def _module_eval_required(self, attachment: GdbMiAttachment, expr: str) -> int:
+        try:
+            value = evaluate_value(
+                self.execute_mi_command(attachment, f"-data-evaluate-expression {expr}")
+            )
+        except CategorizedError as exc:
+            raise self._module_walk_error(exc) from exc
+        addr = _hex_from(value)
+        if addr is None:
+            raise CategorizedError(
+                "gdb/MI returned no parseable module-list pointer",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={"code": "module_decode_failed", "expr": expr},
+            )
+        return addr
+
+    def _module_eval_optional(self, attachment: GdbMiAttachment, expr: str) -> int | None:
+        try:
+            value = evaluate_value(
+                self.execute_mi_command(attachment, f"-data-evaluate-expression {expr}")
+            )
+        except CategorizedError:
+            return None
+        return _hex_from(value)
+
+    def _module_name(self, attachment: GdbMiAttachment, module_ptr: int) -> str | None:
+        try:
+            value = evaluate_value(
+                self.execute_mi_command(
+                    attachment,
+                    f"-data-evaluate-expression ((struct module *)0x{module_ptr:x})->name",
+                )
+            )
+        except CategorizedError:
+            return None
+        match = re.search(r'"([^"]*)"', value) if isinstance(value, str) else None
+        name = match.group(1) if match is not None else None
+        return name or None
+
+    def _module_base(
+        self, attachment: GdbMiAttachment, module_ptr: int, base_field: str
+    ) -> tuple[int | None, str]:
+        if base_field:
+            expr = f"((struct module *)0x{module_ptr:x})->{base_field}"
+            return self._module_eval_optional(attachment, expr), base_field
+        for candidate in _MODULE_BASE_FIELDS:
+            expr = f"((struct module *)0x{module_ptr:x})->{candidate}"
+            base = self._module_eval_optional(attachment, expr)
+            if base is not None:
+                return base, candidate
+        raise CategorizedError(
+            "gdb/MI could not read any known module base-address field",
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            details={"code": "module_decode_failed", "fields": list(_MODULE_BASE_FIELDS)},
+        )
+
+    def _module_walk_error(self, exc: CategorizedError) -> CategorizedError:
+        payload = exc.details.get("payload")
+        msg = payload.get("msg") if isinstance(payload, dict) else None
+        if isinstance(msg, str) and _RUNNING_RE.search(msg):
+            return CategorizedError(
+                "gdb/MI cannot read the module list while the inferior is running",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={"code": "inferior_running"},
+            )
+        return CategorizedError(
+            "gdb/MI could not read the kernel module list",
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            details={"code": "module_decode_failed"},
+        )
+
+    def _redact_module(self, module: GdbModule) -> GdbModule:
+        return GdbModule.model_validate(
+            self._redactor().redact_value(module.model_dump(mode="json"))
+        )
+
     # --- interactive execution ------------------------------------------------------------
 
     def continue_(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
@@ -833,6 +971,14 @@ class GdbMiEngine:
             records=records,
             redactor=self._redactor(),
         )
+
+
+def _hex_from(value: object) -> int | None:
+    """The first ``0x...`` token in a gdb-rendered pointer value, as an int (ADR-0278)."""
+    if not isinstance(value, str):
+        return None
+    match = _SYMBOL_ADDR_RE.search(value)
+    return int(match.group(0), 16) if match is not None else None
 
 
 def _is_watchpoint_row(entry: dict[str, Any]) -> bool:

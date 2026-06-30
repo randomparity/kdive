@@ -2119,3 +2119,106 @@ def test_resolve_writes_to_dest_not_run_id_derived_path(tmp_path: Path) -> None:
     resolver.resolve("../../etc/passwd", dest)
     assert dest.read_bytes() == b"SYMBOLS"
     assert dest.parent == tmp_path
+
+
+# --- list_modules (#923, ADR-0278) ----------------------------------------------------------
+
+
+def _eval(value: object) -> list[dict[str, object]]:
+    return [{"type": "result", "message": "done", "payload": {"value": value}}]
+
+
+def _eval_error(msg: str) -> list[dict[str, object]]:
+    return [{"type": "result", "message": "error", "payload": {"msg": msg}}]
+
+
+# A two-module walk: offset 8, head 0x1000, module1 ("ext4") at 0x2000 (node 0x2008),
+# module2 ("btrfs") at 0x3000 (node 0x3008), terminating back at the head.
+_OFF = "-data-evaluate-expression &((struct module *)0)->list"
+_HEAD = "-data-evaluate-expression &modules"
+_FIRST = "-data-evaluate-expression modules.next"
+
+
+def _name_cmd(ptr: str) -> str:
+    return f"-data-evaluate-expression ((struct module *){ptr})->name"
+
+
+def _base_cmd(ptr: str, field: str = "mem[0].base") -> str:
+    return f"-data-evaluate-expression ((struct module *){ptr})->{field}"
+
+
+def _next_cmd(node: str) -> str:
+    return f"-data-evaluate-expression ((struct list_head *){node})->next"
+
+
+def _two_module_responses() -> dict[str, list[dict[str, object]]]:
+    return {
+        _OFF: _eval("(struct list_head *) 0x8"),
+        _HEAD: _eval("(struct list_head *) 0x1000"),
+        _FIRST: _eval("(struct list_head *) 0x2008"),
+        _name_cmd("0x2000"): _eval("\"ext4\", '\\000'"),
+        _base_cmd("0x2000"): _eval("(void *) 0x2000"),
+        _next_cmd("0x2008"): _eval("(struct list_head *) 0x3008"),
+        _name_cmd("0x3000"): _eval('"btrfs"'),
+        _base_cmd("0x3000"): _eval("0x3000"),
+        _next_cmd("0x3008"): _eval("(struct list_head *) 0x1000"),
+    }
+
+
+def test_list_modules_walks_two_modules(tmp_path: Path) -> None:
+    controller = _FakeMiController(responses=_two_module_responses())
+    attachment = _attachment(controller, tmp_path)
+    attachment.loaded_modules.add("ext4")
+    result = _engine().list_modules(attachment)
+    assert [m.name for m in result.modules] == ["ext4", "btrfs"]
+    assert [m.base_address for m in result.modules] == ["0x2000", "0x3000"]
+    assert [m.symbols_loaded for m in result.modules] == [True, False]
+    assert result.truncated is False
+    assert result.decode_errors == 0
+
+
+def test_list_modules_truncates_at_max(tmp_path: Path) -> None:
+    controller = _FakeMiController(responses=_two_module_responses())
+    result = _engine().list_modules(_attachment(controller, tmp_path), max_modules=1)
+    assert len(result.modules) == 1
+    assert result.truncated is True
+
+
+def test_list_modules_skips_garbage_row_and_counts(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    responses[_name_cmd("0x2000")] = _eval_error("Cannot access memory at address 0x2000")
+    controller = _FakeMiController(responses=responses)
+    result = _engine().list_modules(_attachment(controller, tmp_path))
+    assert [m.name for m in result.modules] == ["btrfs"]
+    assert result.decode_errors == 1
+
+
+def test_list_modules_running_target_is_inferior_running(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    responses[_OFF] = _eval_error("Cannot execute this command while the target is running.")
+    controller = _FakeMiController(responses=responses)
+    with pytest.raises(CategorizedError) as exc:
+        _engine().list_modules(_attachment(controller, tmp_path))
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "inferior_running"
+
+
+def test_list_modules_base_probe_failure_is_decode_failed(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    responses[_base_cmd("0x2000")] = _eval_error("no member named mem")
+    responses[_base_cmd("0x2000", "core_layout.base")] = _eval_error("no member named core_layout")
+    controller = _FakeMiController(responses=responses)
+    with pytest.raises(CategorizedError) as exc:
+        _engine().list_modules(_attachment(controller, tmp_path))
+    assert exc.value.details["code"] == "module_decode_failed"
+
+
+def test_list_modules_core_layout_fallback(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    # Kernel without mem[]: mem[0].base errors, core_layout.base resolves.
+    for ptr in ("0x2000", "0x3000"):
+        responses[_base_cmd(ptr)] = _eval_error("no member named mem")
+        responses[_base_cmd(ptr, "core_layout.base")] = _eval(f"(void *) {ptr}")
+    controller = _FakeMiController(responses=responses)
+    result = _engine().list_modules(_attachment(controller, tmp_path))
+    assert [m.base_address for m in result.modules] == ["0x2000", "0x3000"]

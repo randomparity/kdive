@@ -408,3 +408,18 @@ def test_debug_engine_watchpoints_round_trip(tmp_path: Path) -> None:
     assert [w.number for w in listed] == [ref.number]
     engine.clear_watchpoint(attachment, ref.number)
     assert engine.list_watchpoints(attachment) == []
+
+
+def test_debug_engine_list_modules(tmp_path: Path) -> None:
+    engine = FaultInjectDebugEngine()
+    attachment = fault_inject_attach_seam(
+        host="127.0.0.1", port=1234, run_id=str(_RUN), transcript_path=tmp_path / "mods.log"
+    )
+
+    result = engine.list_modules(attachment, max_modules=64)
+    assert result.truncated is False
+    assert result.decode_errors == 0
+    assert result.modules
+    assert result.modules[0].name is not None
+    assert result.modules[0].base_address is not None
+    assert result.modules[0].symbols_loaded is False
