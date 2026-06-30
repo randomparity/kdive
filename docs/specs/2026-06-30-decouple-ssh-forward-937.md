@@ -58,7 +58,15 @@ drgn-live introspection credential the debug-session path resolves
 - **No runtime retrofit of already-booted Systems.** A System booted under the old code has no
   forward; bringing it online without a reboot (libvirt attach-device + QMP `hostfwd_add` + guest
   DHCP) is fragile and out of scope. Always-render covers every System from boot; the gap is a
-  transient one-release condition on throwaway VMs.
+  transient one-release condition on throwaway VMs. Note one subtlety in the idempotent-retry path:
+  `provision()` calls `defineXML` (which rewrites the recorded XML to include the forward) then
+  `create()`, and `create()` on an already-running domain returns `OPERATION_INVALID` and is treated
+  as a no-op (`test_provision_already_running_domain_is_idempotent`). So if `provision()` is
+  re-invoked against a still-running pre-change domain, the recorded XML would claim a forward the
+  live QEMU lacks (`_recorded_ssh_port` reuse only helps a post-change domain that already recorded a
+  port). This is bounded: the supported enable path for an existing System is the **destructive**
+  `systems.reprovision` (teardown + fresh `create`, which does render the forward) — not a define-only
+  retry against a healthy running System, which is not a normal flow.
 - **No schema/migration, new tool/param, RBAC, error-category, or config change.** Local-libvirt only.
 
 ## Design
@@ -141,6 +149,17 @@ Connect (`tests/providers/local_libvirt/test_connect.py`):
   key-authenticated SSH port from boot — the forward ADR-0218/0271 already accepted for drgn-live
   Systems, now universal. Loopback-only (ADR-0210), egress-blocked, managed-key authenticated, no new
   stored secret. Acceptable for throwaway debug VMs per #782's threat model.
+- **Failure surface shifts from synchronous to async for guest-network-down Systems.** Today a
+  no-forward System fails synchronously at `ssh_info`/`authorize_ssh_key` with `CONFIGURATION_ERROR`
+  (`reason=ssh_not_provisioned`) — a clear, self-describing signal. After always-render,
+  `recorded_ssh_endpoint` returns coordinates for any ready local System, so `ssh_info` always
+  succeeds and `authorize_ssh_key` always enqueues a worker job; the reachability failure for a System
+  whose guest NIC is not up (the pre-existing #697 condition) now surfaces only as an asynchronous
+  worker `TRANSPORT_FAILURE` the agent sees after polling `jobs.*`. This grows the
+  "forward present but sshd unreachable" population from credential-ref Systems to all Systems. It is
+  accepted: the forward is plumbing and guest-NIC reachability is a separate, pre-existing gap (#697),
+  not a regression introduced here. `ssh_info` reads the recorded XML and never contacts the guest, so
+  it cannot diagnose reachability; the worker `TRANSPORT_FAILURE` remains the honest signal.
 - **Hidden gdbstub/ssh port collision in tests.** Surfaced above; the counter-fake fix is mandatory,
   not cosmetic — a constant fake would assert a domain that cannot start.
 - **Already-booted Systems.** Out of scope by design; documented as a transient condition.
