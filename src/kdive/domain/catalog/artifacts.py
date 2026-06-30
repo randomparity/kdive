@@ -22,7 +22,13 @@ class Sensitivity(StrEnum):
 
 
 class Artifact(DomainModel):
-    """A stored object referenced by a System or Run; write-once."""
+    """A stored object referenced by a System or Run; write-once.
+
+    ``run_id`` (ADR-0279) is an optional **correlation** attribute, orthogonal to the
+    ``(owner_kind, owner_id)`` ownership: a console artifact stays ``owner_kind='systems'``
+    and additionally records the id of the Run active during its window. ``None`` means
+    uncorrelated (the historical default, written by every non-console insert).
+    """
 
     owner_kind: str
     owner_id: UUID
@@ -30,6 +36,7 @@ class Artifact(DomainModel):
     etag: str
     sensitivity: Sensitivity
     retention_class: str
+    run_id: UUID | None = None
 
 
 __all__ = ["Artifact", "Sensitivity"]

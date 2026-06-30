@@ -8,6 +8,9 @@ System never interleave; the sidecar cursor is advanced only after the part rows
 crash before that write replays the identical ``(gen, index)`` parts as insert-if-absent no-ops.
 The handler is best-effort: a permission wall on the console log (a non-root worker, ADR-0223)
 degrades to "register no parts" rather than failing the job, and a missing object store is a no-op.
+
+Each sealed part is stamped with the System's most-recently-booted Run as a correlation attribute
+(ADR-0279), resolved once per job under the same per-System lock; ownership stays System-owned.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ from kdive.providers.console_parts.sidecar import read_sidecar, write_sidecar
 from kdive.providers.shared.runtime_paths import console_log_path, read_console_log
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.runs.steps import latest_booted_run_id
 from kdive.store.objectstore import ObjectStore
 
 _log = logging.getLogger(__name__)
@@ -117,9 +121,17 @@ def _put_part(store: ObjectStore, system_id: UUID, part: SealedPart) -> StoredAr
 
 
 async def _seal_part(
-    conn: AsyncConnection, store: ObjectStore, system_id: UUID, part: SealedPart
+    conn: AsyncConnection,
+    store: ObjectStore,
+    system_id: UUID,
+    part: SealedPart,
+    run_id: UUID | None,
 ) -> None:
-    """Store one part's gzipped object and register its row, idempotent on the object key."""
+    """Store one part's gzipped object and register its row, idempotent on the object key.
+
+    ``run_id`` is the System's most-recently-booted Run (ADR-0279), stamped as a correlation
+    attribute; ownership stays ``owner_kind='systems'``. ``None`` leaves the part uncorrelated.
+    """
     object_key = artifact_key(
         _TENANT, _OWNER_KIND, str(system_id), part_object_name(part.gen, part.index)
     )
@@ -127,7 +139,8 @@ async def _seal_part(
         return
     stored = await asyncio.to_thread(_put_part, store, system_id, part)
     await ARTIFACTS.insert(
-        conn, register_artifact_row(stored, owner_kind=_OWNER_KIND, owner_id=system_id)
+        conn,
+        register_artifact_row(stored, owner_kind=_OWNER_KIND, owner_id=system_id, run_id=run_id),
     )
 
 
@@ -160,11 +173,31 @@ async def _rotate_under_lock(
                 exc_info=True,
             )
             return None
+        run_id = await _resolve_run_id(conn, system_id)
         state = await asyncio.to_thread(read_sidecar, store, _TENANT, system_id)
         result = rotate(state, file_bytes, boot_id, redact)
         for part in result.parts:
-            await _seal_part(conn, store, system_id, part)
+            await _seal_part(conn, store, system_id, part, run_id)
         return result
+
+
+async def _resolve_run_id(conn: AsyncConnection, system_id: UUID) -> UUID | None:
+    """Resolve the System's most-recently-booted Run for part attribution (ADR-0279, #935).
+
+    Best-effort: a resolution failure logs once and degrades to ``None`` (uncorrelated parts) so a
+    transient query error never fails the rotation job or stalls the sidecar — capture stays
+    best-effort (ADR-0273). Resolved once per job under the per-System lock the caller holds, so the
+    boot it attributes to does not move while the job's parts are sealed.
+    """
+    try:
+        return await latest_booted_run_id(conn, system_id)
+    except Exception:
+        _log.warning(
+            "resolving the booted Run for system %s failed; sealing parts uncorrelated",
+            system_id,
+            exc_info=True,
+        )
+        return None
 
 
 async def console_rotate_handler(

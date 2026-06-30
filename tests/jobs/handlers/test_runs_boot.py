@@ -508,18 +508,50 @@ def test_local_console_artifact_is_per_run_immutable(migrated_url: str) -> None:
         key = f"local/systems/{system_id}/console-{run_id}"
         return StoredArtifact(key, etag, Sensitivity.REDACTED, "console")
 
+    async def _seed(conn: AsyncConnection) -> None:
+        # run_id is an FK (ADR-0279); both Runs must exist for their console rows to insert.
+        resource_id, allocation_id, investigation_id = uuid4(), uuid4(), uuid4()
+        await conn.execute(
+            "INSERT INTO resources (id, kind, pool, cost_class, status, host_uri) VALUES "
+            "(%s, 'local-libvirt', 'default', 'standard', 'available', 'qemu:///system')",
+            (resource_id,),
+        )
+        await conn.execute(
+            "INSERT INTO allocations (id, resource_id, state, principal, project) "
+            "VALUES (%s, %s, 'granted', 'p', 'proj')",
+            (allocation_id, resource_id),
+        )
+        await conn.execute(
+            "INSERT INTO systems (id, allocation_id, state, provisioning_profile, principal, "
+            "project) VALUES (%s, %s, 'ready', '{}'::jsonb, 'p', 'proj')",
+            (system_id, allocation_id),
+        )
+        await conn.execute(
+            "INSERT INTO investigations (id, principal, project, title, state) "
+            "VALUES (%s, 'p', 'proj', 't', 'open')",
+            (investigation_id,),
+        )
+        for run_id in (run_a, run_b):
+            await conn.execute(
+                "INSERT INTO runs (id, investigation_id, system_id, target_kind, state, "
+                "build_profile, principal, project) "
+                "VALUES (%s, %s, %s, 'local-libvirt', 'created', '{}'::jsonb, 'p', 'proj')",
+                (run_id, investigation_id, system_id),
+            )
+
     async def _run() -> tuple[boot_evidence.ConsoleArtifact, ...]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
             await pool.open()
             async with pool.connection() as conn:
+                await _seed(conn)
                 a1 = await boot_evidence._upsert_console_artifact_row(
-                    conn, system_id, _stored(run_a, "etag-a"), b"crash-A"
+                    conn, system_id, run_a, _stored(run_a, "etag-a"), b"crash-A"
                 )
                 b1 = await boot_evidence._upsert_console_artifact_row(
-                    conn, system_id, _stored(run_b, "etag-b"), b"boot-B"
+                    conn, system_id, run_b, _stored(run_b, "etag-b"), b"boot-B"
                 )
                 a2 = await boot_evidence._upsert_console_artifact_row(
-                    conn, system_id, _stored(run_a, "etag-a2"), b"crash-A"
+                    conn, system_id, run_a, _stored(run_a, "etag-a2"), b"crash-A"
                 )
         return a1, b1, a2
 

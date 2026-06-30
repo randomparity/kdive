@@ -225,6 +225,16 @@ def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: Provid
         `data.required_cmdline` is the platform-required boot args; append extra kernel debug
         args (e.g. `dhash_entries=1`) with the `cmdline` parameter on `runs.build` for server
         builds, or `runs.complete_build` for external builds.
+
+        Console evidence: `refs.console` is the boot-window console snapshot and
+        `data.console_access` names how to read it (`artifacts.get` windowed/paged, or
+        `artifacts.search_text`). `data.console_artifacts` is the Run-scoped console manifest —
+        an ordered, newest-first list of `{artifact_id, object_key, created_at}` for every console
+        artifact correlated to this Run (the boot snapshot plus the post-readiness rotating parts),
+        read with `artifacts.get`. It is bounded: when more exist than the cap,
+        `data.console_artifacts_total` is the full count and `data.console_artifacts_truncated` is
+        true (the oldest entries are dropped; the boot console stays at `refs.console`). The key is
+        absent when the Run has no correlated console.
         """
         return await _get_run(pool, current_context(), run_id, resolver=resolver)
 

@@ -1,4 +1,8 @@
-"""Console artifact capture and boot-failure evidence helpers."""
+"""Console artifact capture and boot-failure evidence helpers.
+
+The per-Run boot-evidence snapshot (``console-<run_id>``) is stamped with its Run id for
+Run-scoped correlation (ADR-0279); ownership stays ``owner_kind='systems'``.
+"""
 
 from __future__ import annotations
 
@@ -80,7 +84,7 @@ async def _capture_console_artifact(
         if redacted is None:
             return None
         stored = await _store_console_artifact(artifact_store, system_id, run_id, redacted)
-        return await _upsert_console_artifact_row(conn, system_id, stored, redacted)
+        return await _upsert_console_artifact_row(conn, system_id, run_id, stored, redacted)
     except CategorizedError as exc:
         if exc.details.get("operation") == "read_console_log":
             raise
@@ -177,6 +181,7 @@ async def _store_console_artifact(
 async def _upsert_console_artifact_row(
     conn: AsyncConnection,
     system_id: UUID,
+    run_id: UUID,
     stored: StoredArtifact,
     redacted: bytes,
 ) -> ConsoleArtifact:
@@ -184,7 +189,10 @@ async def _upsert_console_artifact_row(
         existing = await _existing_console_row(conn, system_id, stored.key)
         if existing is None:
             inserted = await ARTIFACTS.insert(
-                conn, register_artifact_row(stored, owner_kind="systems", owner_id=system_id)
+                conn,
+                register_artifact_row(
+                    stored, owner_kind="systems", owner_id=system_id, run_id=run_id
+                ),
             )
             return ConsoleArtifact(inserted.id, inserted.object_key, redacted)
         if existing.etag != stored.etag:
