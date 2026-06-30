@@ -364,6 +364,16 @@ def test_run_lifecycle_tools_cross_reference_real_cmdline_parameters() -> None:
         assert "cmdline" in description
 
 
+def test_runs_get_documents_build_provenance_shape() -> None:
+    # #938 addendum: an agent calling runs.get reads only the runs.get wrapper docstring, so the
+    # data.build_provenance field (and the new dirty_files manifest) must be documented there, not
+    # only on runs.create which a runs.get caller never reads.
+    tools = {t.name: t for t in TOOLS}
+    description = tools["runs.get"].description or ""
+    assert "build_provenance" in description
+    assert "dirty_files" in description
+
+
 def test_runs_create_documents_warm_tree_is_provenance_only() -> None:
     # D5 (#806): a warm-tree kernel_source_ref is a provenance label only — it does not
     # select the tree; the operator stages the real source via KDIVE_KERNEL_SRC on the

@@ -84,18 +84,27 @@ tree.
 
 `rsync -a --delete` mirrors the staged tree **as-is**, including uncommitted edits. So
 `runs.get` reports `data.build_provenance` for a warm-tree **git** tree as
-`{label, resolved_commit, dirty, tree_sha?}`:
+`{label, resolved_commit, dirty}` plus, when `dirty` is true,
+`{untracked, tree_sha?, dirty_files?, dirty_files_truncated?}`:
 
 - `resolved_commit` — `git rev-parse HEAD`: the commit the working tree is **based on**. It is
   **decorative when `dirty` is true** — it does not describe what was compiled.
 - `dirty` — `true` iff `git status --porcelain` is non-empty (tracked edits or untracked files);
   a native JSON boolean. `false` means "no **tracked** changes," not "byte-identical to a clean
   `resolved_commit` checkout."
+- `untracked` — present only when `dirty` is true: `true` iff non-ignored untracked files were
+  staged (`git ls-files --others --exclude-standard`). Makes untracked-only dirtiness explicit —
+  a tracked edit shows `untracked: false`, an untracked-only tree shows `untracked: true` with no
+  `dirty_files`/`tree_sha`.
 - `tree_sha` — present only when `dirty` is true with tracked changes: a content-deterministic
   git tree-object SHA (`git stash create` resolved to `^{tree}`) of the tracked working-tree
   state, so two builds of identical tracked content share a `tree_sha`. It captures
   **git-tracked** content only — gitignored paths (e.g. `.config`, build objects) and untracked
-  files are **not** in the digest; `dirty` still flags untracked files.
+  files are **not** in the digest; `dirty`/`untracked` still flag untracked files.
+- `dirty_files` — present only when `dirty` is true with tracked changes: the tracked paths that
+  differ from `resolved_commit` (`git diff --name-only HEAD`). Bounded at 100 paths; when the
+  list is capped, `dirty_files_truncated` is `true` and you compare `tree_sha` for exact identity.
+  Tracked content only, like `tree_sha` — untracked files are flagged by `untracked`, not listed.
 
 A non-git staged tree degrades to `{label}` (no HEAD to report). All probes are best-effort: a
 git/permission failure omits the affected key and never fails the build. They read the live
