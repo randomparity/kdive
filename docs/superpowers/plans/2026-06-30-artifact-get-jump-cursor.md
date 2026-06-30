@@ -31,6 +31,7 @@
 - Produces:
   - `JumpDirection = Literal["forward", "backward"]`
   - `@dataclass(frozen=True, slots=True) class JumpHit: match_offset: int; match_line: int; window_start: int; content: bytes; next_offset: int | None`
+  - `def resolve_anchor(size: int, *, direction: JumpDirection, byte_offset: int) -> int` (public; reused by the no-`find` backward handler path)
   - `def jump_find(body: bytes, *, terms: tuple[str, ...], direction: JumpDirection, byte_offset: int, max_bytes: int) -> JumpHit | None`
 
 - [ ] **Step 1: Write the failing tests** in `tests/security/artifacts/test_artifact_jump.py`:
@@ -160,7 +161,7 @@ class JumpHit:
     next_offset: int | None
 
 
-def _resolve_anchor(size: int, *, direction: JumpDirection, byte_offset: int) -> int:
+def resolve_anchor(size: int, *, direction: JumpDirection, byte_offset: int) -> int:
     """Resolve the search anchor to the direction's natural edge when unset/degenerate."""
     if direction == "forward":
         return max(byte_offset, 0)
@@ -206,7 +207,7 @@ def jump_find(
     """Locate the next/previous literal match and return its anchored window, or ``None``."""
     terms_b = tuple(term.encode("utf-8") for term in terms)
     size = len(body)
-    anchor = _resolve_anchor(size, direction=direction, byte_offset=byte_offset)
+    anchor = resolve_anchor(size, direction=direction, byte_offset=byte_offset)
     if direction == "forward":
         match = _first_match_at_or_after(body, terms_b, anchor)
     else:
@@ -263,51 +264,107 @@ git commit -m "feat(939): byte-space jump matcher for artifacts.get"
 
 **Approach:** Extract the fetch+redaction-gate+gzip path from `_artifact_content` into a shared loader so plain windowing, no-`find` backward windowing, and `find` matching all reuse one redaction gate (no duplicated gate = no drift risk). The existing `artifacts.get` test suite is the regression guard for the plain path — keep it byte-identical.
 
-- [ ] **Step 1: Write failing handler tests** (use the existing fixtures/factory in `tests/mcp/catalog/test_artifacts_tools.py` that seed a redacted artifact and a fake store; mirror an existing `artifacts_get` test for setup). Add:
+- [ ] **Step 1: Write failing handler tests.** Use the concrete harness already in `tests/mcp/catalog/test_artifacts_tools.py`: the `migrated_url: str` fixture, `async with _pool(migrated_url) as pool`, `_, _, red_id = await _seed_system_with_artifacts(pool)` (third element is the redacted id), `_ctx()` for a viewer context, and `_SearchStore(body)` passed as `store_factory=lambda: store` (the fake ignores the key and serves `body`; `_SearchStore(b"", size=N)` makes `head` report `N` bytes). A failure envelope is `resp.status == "error"` with `resp.data["reason"]` (see the existing oversized search test ~line 292). Add:
 
 ```python
-# find forward returns the match window + cursor fields
-async def test_get_find_forward_returns_match_window(...):
+def test_get_find_forward_returns_match_window(migrated_url: str) -> None:
     body = b"boot ok\nBUG: KASAN slab-out-of-bounds\nCall Trace:\n func+0x1\n"
-    resp = await _get(..., find="BUG: KASAN", direction="forward")
-    assert resp.status == "available"
-    assert resp.data["match_found"] is True
-    assert resp.data["match_line"] == 2
-    assert "BUG: KASAN" in resp.data["content"]
-    assert resp.data["match_offset"] == body.index(b"BUG: KASAN")
+    store = _SearchStore(body)
 
-# no match -> match_found False, no content
-async def test_get_find_no_match(...):
-    resp = await _get(..., find="nonexistent-signature", direction="forward")
-    assert resp.data["match_found"] is False
-    assert "content" not in resp.data
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="BUG: KASAN"
+            )
+            assert resp.status == "available"
+            assert resp.data["match_found"] is True
+            assert resp.data["match_line"] == 2
+            assert "BUG: KASAN" in str(resp.data["content"])
+            assert resp.data["match_offset"] == body.index(b"BUG: KASAN")
 
-# backward default starts from end (last match)
-async def test_get_find_backward_from_end(...):
+    asyncio.run(_run())
+
+
+def test_get_find_no_match(migrated_url: str) -> None:
+    store = _SearchStore(b"clean boot\nno crash here\n")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="BUG:"
+            )
+            assert resp.status == "available"
+            assert resp.data["match_found"] is False
+            assert "content" not in resp.data
+
+    asyncio.run(_run())
+
+
+def test_get_find_backward_from_end(migrated_url: str) -> None:
     body = b"BUG: first\nmid\nBUG: second\nend\n"
-    resp = await _get(..., find="BUG:", direction="backward")
-    assert resp.data["match_offset"] == body.rindex(b"BUG:")
+    store = _SearchStore(body)
 
-# oversized artifact + find rejects (NOT a silent miss)
-async def test_get_find_oversized_rejects(...):
-    # seed head.size_bytes > _MAX_WINDOWED_FETCH_BYTES
-    resp = await _get(..., find="BUG:")
-    assert resp.status == "configuration_error"
-    assert resp.data["reason"] == "artifact_too_large"
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store,
+                find="BUG:", direction="backward",
+            )
+            assert resp.data["match_offset"] == body.rindex(b"BUG:")
 
-# malformed find -> bad_search_input
-async def test_get_find_malformed_rejects(...):
-    resp = await _get(..., find="a||b")  # empty term
-    assert resp.status == "configuration_error"
-    assert resp.data["reason"] == "bad_search_input"
+    asyncio.run(_run())
 
-# plain get (no find) unchanged — regression: existing suite already covers this
-async def test_get_backward_no_find_is_tail(...):
+
+def test_get_find_oversized_rejects(migrated_url: str) -> None:
+    store = _SearchStore(b"", size=1024 * 1024 + 1)  # head reports > 1 MiB
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="BUG:"
+            )
+            assert resp.status == "error"
+            assert resp.data["reason"] == "artifact_too_large"
+
+    asyncio.run(_run())
+
+
+def test_get_find_malformed_rejects(migrated_url: str) -> None:
+    store = _SearchStore(b"anything")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="a||b"
+            )
+            assert resp.status == "error"
+            assert resp.data["reason"] == "bad_search_input"
+
+    asyncio.run(_run())
+
+
+def test_get_backward_no_find_is_tail(migrated_url: str) -> None:
     body = b"".join(b"line %d\n" % i for i in range(10000))  # > one window
-    resp = await _get(..., direction="backward")  # no find
-    assert resp.data["content"].endswith("line 9999\n")
-    assert resp.data["next_offset"] < len(body)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id,
+                store_factory=lambda: _SearchStore(body), direction="backward",
+            )
+            assert str(resp.data["content"]).endswith("line 9999\n")
+            assert int(resp.data["next_offset"]) > 0
+
+    asyncio.run(_run())
 ```
+
+Coverage note: `find` reuses `_authorized_redacted_artifact` + the shared loader, so viewer-enforcement, SENSITIVE/non-redacted, and quarantine gates are already exercised by the existing `artifacts.get` tests; Task 4 maps the deleted search-tool assertions onto these.
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -352,7 +409,7 @@ async def artifacts_get(
 ```
 
 Helper rules:
-- `_window_response_data`: when `loaded.body is None` return `loaded.degraded`. Forward = today's slice `body[byte_offset:byte_offset+effective_max]` with the existing `content_truncated`/`next_offset`/`size_bytes` keys, **byte-identical to current behavior** (the existing tests guard this). Backward (no find): window ends at the resolved offset (default = end), `window_start = max(0, end - effective_max)`, `next_offset = window_start` when `> 0` else omitted.
+- `_window_response_data`: when `loaded.body is None` return `loaded.degraded`. Forward = today's slice `body[byte_offset:byte_offset+effective_max]` with the existing `content_truncated`/`next_offset`/`size_bytes` keys, **byte-identical to current behavior** (the existing tests guard this). Backward (no find): resolve the window end with the shared `resolve_anchor(size, direction="backward", byte_offset=byte_offset)` from `artifact_jump` (so omitted/`0`/negative `byte_offset` = end-of-artifact, identical to the find path — never re-derive this inline), then `window_start = max(0, end - effective_max)`, `content = body[window_start:end]`, `next_offset = window_start` when `> 0` else omitted.
 - `_find_response_data`: when `loaded.body is None`, if the degrade is `artifact_too_large` return `_config_error(artifact_id, data={"reason": "artifact_too_large", "size_bytes": loaded.size_bytes})`; otherwise return `{**loaded.degraded, "match_found": False}` (store outage — degrade, don't lie). When body present, call `jump_find`; `None` → `{"match_found": False, "size_bytes": loaded.size_bytes}`; a `JumpHit` → `{"match_found": True, "size_bytes": loaded.size_bytes, "match_offset": hit.match_offset, "match_line": hit.match_line, "content": hit.content.decode("utf-8", errors="replace")}` plus `"next_offset": hit.next_offset` when not `None`.
 - `effective_max = min(max(max_bytes, 1), inline_cap, ARTIFACT_GET_WINDOW_MAX_BYTES)` (unchanged formula).
 
@@ -384,14 +441,11 @@ git commit -m "feat(939): jump-cursor find/direction on artifacts.get handler"
 - [ ] **Step 1: Write the failing schema test**
 
 ```python
-def test_get_schema_advertises_find_and_direction(app_with_tools):
-    schema = _tool_input_schema(app_with_tools, "artifacts.get")
-    props = schema["properties"]
+def test_get_schema_advertises_find_and_direction() -> None:
+    props = _tool_param_schema("artifacts.get")  # existing helper: returns properties dict
     assert "find" in props and "direction" in props
-    assert props["direction"]["enum"] == ["forward", "backward"] or \
-        "forward" in str(props["direction"])
-    assert "regex" not in props["find"]["description"].lower() or \
-        "no regex" in props["find"]["description"].lower()
+    assert "forward" in str(props["direction"]) and "backward" in str(props["direction"])
+    assert "no regex" in str(props["find"]["description"]).lower()
 ```
 
 - [ ] **Step 2: Run to verify failure** — `... -k advertises_find -q` → FAIL (no `find` property).
@@ -458,20 +512,31 @@ git commit -m "feat(939): advertise find/direction on the artifacts.get tool"
 In `tests/mcp/lifecycle/test_runs_tools.py` set `_CONSOLE_ACCESS_EXPECTED["search"] = "artifacts.get"`. Add a guard that `artifacts.search_text` is no longer a registered tool:
 
 ```python
-def test_search_text_tool_is_removed(app_with_tools):
-    names = {t.name for t in app_with_tools._tool_manager.list_tools()}  # match existing pattern
-    assert "artifacts.search_text" not in names
-    assert "artifacts.get" in names
+def test_search_text_tool_is_removed() -> None:
+    # _tool_param_schema builds a DB-free app via build_app + app.get_tool(name)
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    kp = make_keypair()
+    verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
+    app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
+    assert asyncio.run(app.get_tool("artifacts.search_text")) is None
+    assert asyncio.run(app.get_tool("artifacts.get")) is not None
 ```
+
+Note: `app.get_tool` raises `NotFoundError` rather than returning `None` in some FastMCP
+versions; if so, assert with `pytest.raises(NotFoundError)`. Confirm against the real return
+by reading how `_tool_param_schema` (which asserts `tool is not None`) behaves for a present
+tool, and mirror it.
 
 - [ ] **Step 2: Run to verify failure** — the new `removed` test fails (tool still present); the `_CONSOLE_ACCESS_EXPECTED` test fails.
 
-- [ ] **Step 3: Delete the tool layer.** Remove `_register_artifacts_search_text` and its call; delete `ArtifactSearchRequest`, `ArtifactReadHandlers`, `artifacts_search_text`, `_artifacts_search_text` from `reads.py`; update `_CONSOLE_ACCESS_HINT` and its comment (search is now `artifacts.get` with `find`). Delete the `artifacts.search_text` tool tests. Confirm `security/artifacts/artifact_search.py` and `jobs/handlers/runs/boot_evidence.py` are **untouched**. Regenerate: `just docs && just rbac-matrix`.
+- [ ] **Step 3: Delete the tool layer.** Remove `_register_artifacts_search_text` and its call; delete `ArtifactSearchRequest`, `ArtifactReadHandlers`, `artifacts_search_text`, `_artifacts_search_text` from `reads.py`; update `_CONSOLE_ACCESS_HINT` (set `"search": "artifacts.get"`) and its comment (search is now `artifacts.get` with `find`). Confirm `security/artifacts/artifact_search.py` and `jobs/handlers/runs/boot_evidence.py` are **untouched**. Regenerate: `just docs && just rbac-matrix`.
+
+  **Before deleting the `artifacts.search_text` tool tests, map each behavior to a survivor** (do not delete blind): the search tool's `requires_viewer`, `sensitive→not-found`/`non-redacted→config-error`, quarantine-exclusion, oversized, malformed-pattern, and store-error tests all assert gates that `artifacts.get` already enforces through the shared `_authorized_redacted_artifact` + loader. For any gate whose **only** assertion lived on the search tool (in particular the quarantine-exclusion case via `_seed_quarantined_artifact`, and the SENSITIVE/non-redacted gate), add the equivalent assertion as a `find=`-mode `artifacts_get` test before removing the search-tool test. Then delete the search-tool tests (`test_artifacts_search_text_*`, `_search_text_param_schema`, `_panic_search`/`_lookup_search_with_context`/`_invalid_pattern_search`, and `_artifact_read_handlers` if unused).
 
 - [ ] **Step 4: Run the full guardrail set**
 
-Run: `just lint && just type && just docs-check && uv run python -m pytest tests/mcp -q && uv run python -m pytest tests/security/artifacts tests/jobs -q && uv run python -m pytest tests/mcp/core/test_no_adr_leak.py tests/mcp/core/test_console_surface_docs.py -q`
-Expected: PASS. Verify `rg -n "artifacts.search_text" src/` returns nothing (historical docs excluded).
+Run: `just lint && just type && just docs-check && just rbac-matrix-check && just resources-docs-check && uv run python -m pytest tests/mcp -q && uv run python -m pytest tests/security/artifacts tests/jobs -q && uv run python -m pytest tests/mcp/core/test_no_adr_leak.py tests/mcp/core/test_console_surface_docs.py -q`
+Expected: PASS. (`resources-docs-check` is included as a belt-and-suspenders gate; no served `_content/*.md` snapshot references `artifacts.search_text`, so it should already be in sync.) Verify `rg -n "artifacts.search_text" src/` returns nothing (historical docs under `docs/specs/` and `docs/archive/` are intentionally left as point-in-time records).
 
 - [ ] **Step 5: Commit**
 
