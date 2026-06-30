@@ -148,6 +148,13 @@ symbol-name breakpoint resolve. (Live drgn introspection â€” `introspect.run` â€
 `drgn-live` session, not a gdbstub one, so it is a separate transport; the gdbstub leg here proves
 the gdb-MI attach + symbolization.)
 
+> **Developing or testing a `debug.*` tool?** `scripts/live-debug.py` collapses this whole
+> lifecycle into one command: `uv run python scripts/live-debug.py stopped --reuse` drives a
+> Run to a stopped gdbstub session and prints its `SESSION_ID` (reusing an already-booted Run
+> when present). `call <tool> '<json>'` invokes any tool, `transcript <session_id>` prints the
+> raw gdb/MI exchange (ground truth when a parser disagrees with gdb), and `reload` restarts
+> only the server to pick up a code change. See the script's module docstring.
+
 ### 4b. kdump
 
 Force a crash on System B:
