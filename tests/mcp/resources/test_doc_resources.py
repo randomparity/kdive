@@ -3,15 +3,41 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
+from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fastmcp import FastMCP
 
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.mcp.resources import registrar
 from kdive.mcp.resources.registrar import DOC_RESOURCES, audience_by_uri, register
+from kdive.providers.core.resolver import ProviderResolver
 
 _ROOT = Path(__file__).resolve().parents[3]
+
+
+class _FakeResolver:
+    """Minimal ProviderResolver stand-in exposing only ``registered_kinds``.
+
+    ``register`` calls only ``registered_kinds()``; building a real ``ProviderResolver``
+    needs non-empty concrete runtimes, so the structural fake is cast at the call helper.
+    """
+
+    def __init__(self, kinds: frozenset[ResourceKind]) -> None:
+        self._kinds = kinds
+
+    def registered_kinds(self) -> frozenset[ResourceKind]:
+        return self._kinds
+
+
+def _resolver(kinds: Iterable[ResourceKind]) -> ProviderResolver:
+    return cast(ProviderResolver, _FakeResolver(frozenset(kinds)))
+
+
+_ALL_KINDS = _resolver(ResourceKind)
 
 
 def test_doc_resources_default_to_all_audience_and_no_kind() -> None:
@@ -30,7 +56,7 @@ def test_audience_by_uri_covers_every_entry() -> None:
 
 def test_register_returns_count_and_lists_every_uri_verbatim() -> None:
     app = FastMCP("probe")
-    count = register(app)
+    count = register(app, resolver=_ALL_KINDS)
     assert count == len(DOC_RESOURCES)
 
     async def _uris() -> set[str]:
@@ -44,7 +70,7 @@ def test_register_returns_count_and_lists_every_uri_verbatim() -> None:
 
 def test_each_resource_reads_back_canonical_doc_text() -> None:
     app = FastMCP("probe")
-    register(app)
+    register(app, resolver=_ALL_KINDS)
 
     async def _read(uri: str) -> str:
         result = await app.read_resource(uri)
@@ -72,4 +98,28 @@ def test_packaged_snapshot_matches_canonical_source() -> None:
 def test_missing_snapshot_raises_packaging_regression(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(registrar, "_CONTENT_DIR", Path("/nonexistent/_content"))
     with pytest.raises(RuntimeError, match="snapshot missing"):
-        register(FastMCP("probe"))
+        register(FastMCP("probe"), resolver=_ALL_KINDS)
+
+
+def _gated_remote_doc() -> registrar.DocResource:
+    """A fixture doc gated to remote-libvirt, reusing an existing snapshot file."""
+    return replace(
+        DOC_RESOURCES[0],
+        uri="resource://kdive/docs/test/remote-only.md",
+        name="remote-only",
+        required_kind=ResourceKind.REMOTE_LIBVIRT,
+    )
+
+
+def test_register_skips_doc_whose_required_kind_is_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registrar, "DOC_RESOURCES", (*DOC_RESOURCES, _gated_remote_doc()))
+    app = FastMCP("probe")
+    count = register(app, resolver=_resolver({ResourceKind.LOCAL_LIBVIRT}))
+    assert count == len(DOC_RESOURCES)  # the gated entry is skipped
+
+
+def test_register_includes_doc_when_required_kind_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registrar, "DOC_RESOURCES", (*DOC_RESOURCES, _gated_remote_doc()))
+    app = FastMCP("probe")
+    count = register(app, resolver=_resolver({ResourceKind.REMOTE_LIBVIRT}))
+    assert count == len(DOC_RESOURCES) + 1
