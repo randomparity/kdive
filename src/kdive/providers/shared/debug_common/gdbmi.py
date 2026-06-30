@@ -4,9 +4,9 @@ The supported command surface is intentionally narrow: breakpoints (set/clear/li
 ``read_registers``, ``read_memory`` with a 4096-byte cap, ``resolve_symbol`` (a gated
 symbol→address lookup), ``continue_``, and ``interrupt``. ``resolve_symbol`` evaluates exactly
 one form, ``&<identifier>`` (address-of-a-name, ADR-0248) — a narrowing, not a reversal, of the
-"no expression evaluation" rule. Stack walking (ADR-0275), disassembly (ADR-0276), and write
-watchpoints (ADR-0277) are also in-contract; general expression evaluation and module loading
-remain outside this engine's contract.
+"no expression evaluation" rule. Stack walking (ADR-0275), disassembly (ADR-0276), write
+watchpoints (ADR-0277), and module-symbol loading (ADR-0278) are also in-contract; general
+expression evaluation remains outside this engine's contract.
 
 All **textual** MI transcript/record output passes through the :class:`Redactor` before it is
 persisted to the per-session transcript or returned in a response. The exception is
@@ -47,6 +47,10 @@ from kdive.providers.ports.debug import (
 )
 from kdive.providers.shared.debug_common import execution as mi_execution
 from kdive.providers.shared.debug_common import mi_controller
+from kdive.providers.shared.debug_common.debuginfo import (
+    ModuleDebuginfo,
+    ModuleDebuginfoResolverSeam,
+)
 from kdive.providers.shared.debug_common.execution import (
     MAX_INTERACTIVE_WAIT_SEC,
     ExecutionControl,
@@ -134,6 +138,12 @@ _REGISTER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _BREAK_LOCATION_RE = _SYMBOL_NAME_RE
 # A gdb breakpoint id is a bare integer.
 _BREAK_ID_RE = re.compile(r"^[0-9]+$")
+# A kernel module name as it appears in `struct module` (sysfs uses `_`); gates
+# `load_module_symbols` so the constructed `((struct module *)0x..)->...` reads stay
+# non-injectable (ADR-0278).
+_MODULE_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
+# In-memory kernel build-id width (BUILD_ID_SIZE_MAX); read as raw bytes for identity comparison.
+_BUILD_ID_BYTES = 20
 # gdb stop reasons meaning the inferior is gone (not a debuggable HALT).
 _TERMINAL_STOP_REASONS = frozenset({"exited", "exited-normally", "exited-signalled"})
 # gdb's ^error message for a stack command issued against a running target carries this token
@@ -177,6 +187,7 @@ class GdbMiEngine:
         redactor_factory: Callable[[], Redactor] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         host_policy: HostPolicy = require_loopback,
+        module_debuginfo_resolver: ModuleDebuginfoResolverSeam | None = None,
     ) -> None:
         self._controller_factory = controller_factory or (
             lambda command: PygdbmiController(command)
@@ -185,6 +196,7 @@ class GdbMiEngine:
         self._redactor_factory = _redactor_factory(redactor, redactor_factory)
         self._sleep = sleep
         self._host_policy = host_policy
+        self._module_resolver = module_debuginfo_resolver or _missing_module_resolver
         self._execution = ExecutionControl(self, command_timeout_sec=_MI_COMMAND_TIMEOUT_SEC)
 
     def _redactor(self) -> Redactor:
@@ -766,13 +778,13 @@ class GdbMiEngine:
                     symbols_loaded=name in attachment.loaded_modules,
                 )
             )
-            for name, base in rows
+            for name, base, _ptr in rows
         ]
         return GdbModuleList(modules=modules, truncated=truncated, decode_errors=decode_errors)
 
     def _module_walk(
         self, attachment: GdbMiAttachment, *, limit: int
-    ) -> tuple[list[tuple[str, int]], bool, int]:
+    ) -> tuple[list[tuple[str, int, int]], bool, int]:
         """Walk ``modules`` from ``modules.next`` to ``&modules``, bounded to ``limit``.
 
         Returns ``(rows, truncated, decode_errors)``. The list head and base-field probe are
@@ -782,7 +794,7 @@ class GdbMiEngine:
         offset = self._module_eval_required(attachment, "&((struct module *)0)->list")
         head = self._module_eval_required(attachment, "&modules")
         node = self._module_eval_required(attachment, "modules.next")
-        rows: list[tuple[str, int]] = []
+        rows: list[tuple[str, int, int]] = []
         decode_errors = 0
         base_field = ""
         truncated = False
@@ -796,7 +808,7 @@ class GdbMiEngine:
             name = self._module_name(attachment, module_ptr)
             base, base_field = self._module_base(attachment, module_ptr, base_field)
             if name is not None and base is not None:
-                rows.append((name, base))
+                rows.append((name, base, module_ptr))
             else:
                 decode_errors += 1
             nxt = self._module_eval_optional(attachment, f"((struct list_head *)0x{node:x})->next")
@@ -880,6 +892,119 @@ class GdbMiEngine:
         return GdbModule.model_validate(
             self._redactor().redact_value(module.model_dump(mode="json"))
         )
+
+    def load_module_symbols(
+        self, attachment: GdbMiAttachment, *, module: str, expected_base: int | None = None
+    ) -> GdbModule:
+        """Load one module's symbols at its freshly-read base, identity-checked (ADR-0278)."""
+        if not _MODULE_NAME_RE.match(module):
+            raise _config_error(
+                f"module name must be a bare identifier, got {module!r}",
+                code="bad_module_name",
+                details={"module": module},
+            )
+        located = self._module_locate(attachment, module)
+        if located is None:
+            raise CategorizedError(
+                f"module {module!r} is not in the live module list (unloaded or never loaded)",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={"code": "module_not_loaded", "module": module},
+            )
+        base, module_ptr = located
+        if expected_base is not None and expected_base != base:
+            raise CategorizedError(
+                f"module {module!r} base changed since listing (reloaded); refusing a stale load",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={"code": "stale_module_address", "module": module, "current_base": base},
+            )
+        if module in attachment.loaded_modules:
+            return self._redact_module(
+                GdbModule(name=module, base_address=f"0x{base:x}", symbols_loaded=True)
+            )
+        info = self._module_resolver(attachment.run_id, module)
+        verified = self._verify_identity(attachment, module, module_ptr, info)
+        self._add_symbol_file(attachment, module, info.path, base)
+        attachment.loaded_modules.add(module)
+        return self._redact_module(
+            GdbModule(
+                name=module,
+                base_address=f"0x{base:x}",
+                symbols_loaded=True,
+                identity_verified=verified,
+            )
+        )
+
+    def _module_locate(self, attachment: GdbMiAttachment, module: str) -> tuple[int, int] | None:
+        rows, _truncated, _decode_errors = self._module_walk(attachment, limit=MAX_MODULES)
+        for name, base, module_ptr in rows:
+            if name == module:
+                return base, module_ptr
+        return None
+
+    def _verify_identity(
+        self, attachment: GdbMiAttachment, module: str, module_ptr: int, info: ModuleDebuginfo
+    ) -> bool:
+        live_src = self._module_text_field(attachment, module_ptr, "srcversion")
+        if live_src is not None and info.srcversion is not None:
+            return self._identity_match(module, live_src == info.srcversion)
+        live_bid = self._module_build_id(attachment, module_ptr)
+        if live_bid is not None and info.build_id is not None:
+            return self._identity_match(module, live_bid.startswith(info.build_id))
+        return False
+
+    def _identity_match(self, module: str, ok: bool) -> bool:
+        if ok:
+            return True
+        raise CategorizedError(
+            f"the artifact .ko for {module!r} does not match the running module's identity",
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            details={"code": "module_binary_mismatch", "module": module},
+        )
+
+    def _module_text_field(
+        self, attachment: GdbMiAttachment, module_ptr: int, field: str
+    ) -> str | None:
+        try:
+            value = evaluate_value(
+                self.execute_mi_command(
+                    attachment,
+                    f"-data-evaluate-expression ((struct module *)0x{module_ptr:x})->{field}",
+                )
+            )
+        except CategorizedError:
+            return None
+        match = re.search(r'"([^"]*)"', value) if isinstance(value, str) else None
+        return match.group(1) if match is not None and match.group(1) else None
+
+    def _module_build_id(self, attachment: GdbMiAttachment, module_ptr: int) -> str | None:
+        addr = self._module_eval_optional(
+            attachment, f"&((struct module *)0x{module_ptr:x})->build_id"
+        )
+        if addr is None:
+            return None
+        try:
+            blob = self.read_memory(attachment, address=addr, byte_count=_BUILD_ID_BYTES)
+        except CategorizedError:
+            return None
+        return blob.hex()
+
+    def _add_symbol_file(
+        self, attachment: GdbMiAttachment, module: str, path: Path, base: int
+    ) -> None:
+        text = self._mi_path(path)
+        if '"' in text:
+            raise _config_error(
+                "staged module path is not safely quotable", code="add_symbol_failed"
+            )
+        command = f'-interpreter-exec console "add-symbol-file {text} 0x{base:x}"'
+        try:
+            self.execute_mi_command(attachment, command)
+        except CategorizedError as exc:
+            raise CategorizedError(
+                f"gdb/MI add-symbol-file failed for {module!r}",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={"code": "add_symbol_failed", "module": module},
+            ) from exc
 
     # --- interactive execution ------------------------------------------------------------
 
@@ -971,6 +1096,15 @@ class GdbMiEngine:
             records=records,
             redactor=self._redactor(),
         )
+
+
+def _missing_module_resolver(run_id: str, module: str) -> ModuleDebuginfo:
+    """Default ``module_debuginfo_resolver``: none wired (mirrors the attach-seam default)."""
+    raise CategorizedError(
+        "no module-debuginfo resolver is configured for this engine",
+        category=ErrorCategory.MISSING_DEPENDENCY,
+        details={"missing_tools": ["module_debuginfo_resolver"], "module": module},
+    )
 
 
 def _hex_from(value: object) -> int | None:

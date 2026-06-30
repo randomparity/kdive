@@ -423,3 +423,15 @@ def test_debug_engine_list_modules(tmp_path: Path) -> None:
     assert result.modules[0].name is not None
     assert result.modules[0].base_address is not None
     assert result.modules[0].symbols_loaded is False
+
+
+def test_debug_engine_load_module_symbols(tmp_path: Path) -> None:
+    engine = FaultInjectDebugEngine()
+    attachment = fault_inject_attach_seam(
+        host="127.0.0.1", port=1234, run_id=str(_RUN), transcript_path=tmp_path / "load.log"
+    )
+
+    loaded = engine.load_module_symbols(attachment, module="fault_inject_demo", expected_base=None)
+    assert loaded.symbols_loaded is True
+    listed = engine.list_modules(attachment, max_modules=64)
+    assert listed.modules[0].symbols_loaded is True

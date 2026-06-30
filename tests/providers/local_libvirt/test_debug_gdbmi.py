@@ -19,6 +19,7 @@ from kdive.mcp.tools.debug.session_registry import GdbMiSessionRegistry
 from kdive.providers.ports.debug import (
     GdbFrame,
     GdbMiAttachment,
+    GdbModule,
     GdbStopRecord,
 )
 from kdive.providers.shared.debug_common import gdbmi
@@ -2222,3 +2223,141 @@ def test_list_modules_core_layout_fallback(tmp_path: Path) -> None:
     controller = _FakeMiController(responses=responses)
     result = _engine().list_modules(_attachment(controller, tmp_path))
     assert [m.base_address for m in result.modules] == ["0x2000", "0x3000"]
+
+
+# --- load_module_symbols (#923, ADR-0278) ---------------------------------------------------
+
+from kdive.providers.shared.debug_common.debuginfo import ModuleDebuginfo  # noqa: E402
+
+
+def _srcversion_cmd(ptr: str) -> str:
+    return f"-data-evaluate-expression ((struct module *){ptr})->srcversion"
+
+
+def _engine_with_resolver(info: ModuleDebuginfo | CategorizedError) -> GdbMiEngine:
+    def resolver(run_id: str, module: str) -> ModuleDebuginfo:
+        if isinstance(info, CategorizedError):
+            raise info
+        return info
+
+    return GdbMiEngine(
+        redactor=Redactor(registry=SecretRegistry()), module_debuginfo_resolver=resolver
+    )
+
+
+def _add_symbol_cmd(path: str, base: str) -> str:
+    return f'-interpreter-exec console "add-symbol-file {path} {base}"'
+
+
+def _load(
+    engine: GdbMiEngine, attachment: GdbMiAttachment, module: str, expected_base: int | None = None
+) -> GdbModule:
+    return engine.load_module_symbols(attachment, module=module, expected_base=expected_base)
+
+
+def test_load_module_symbols_loads_at_fresh_base(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    responses[_srcversion_cmd("0x2000")] = _eval('"SRC123"')
+    controller = _FakeMiController(responses=responses)
+    engine = _engine_with_resolver(
+        ModuleDebuginfo(path=Path("/x/ext4.ko"), srcversion="SRC123", build_id=None)
+    )
+    attachment = _attachment(controller, tmp_path)
+    result = engine.load_module_symbols(attachment, module="ext4", expected_base=None)
+    assert result.symbols_loaded is True
+    assert result.identity_verified is True
+    assert result.base_address == "0x2000"
+    assert "ext4" in attachment.loaded_modules
+    assert _add_symbol_cmd("/x/ext4.ko", "0x2000") in controller.written
+
+
+def test_load_module_symbols_bad_name_issues_no_command(tmp_path: Path) -> None:
+    controller = _FakeMiController(responses=_two_module_responses())
+    engine = _engine_with_resolver(ModuleDebuginfo(Path("/x.ko"), None, None))
+    with pytest.raises(CategorizedError) as exc:
+        _load(engine, _attachment(controller, tmp_path), "foo;rm")
+    assert exc.value.details["code"] == "bad_module_name"
+    assert controller.written == []
+
+
+def test_load_module_symbols_absent_module_is_not_loaded(tmp_path: Path) -> None:
+    controller = _FakeMiController(responses=_two_module_responses())
+    engine = _engine_with_resolver(ModuleDebuginfo(Path("/x.ko"), "S", None))
+    with pytest.raises(CategorizedError) as exc:
+        _load(engine, _attachment(controller, tmp_path), "xfs")
+    assert exc.value.details["code"] == "module_not_loaded"
+    assert not any("add-symbol-file" in c for c in controller.written)
+
+
+def test_load_module_symbols_stale_base_is_rejected(tmp_path: Path) -> None:
+    controller = _FakeMiController(responses=_two_module_responses())
+    engine = _engine_with_resolver(ModuleDebuginfo(Path("/x.ko"), "S", None))
+    with pytest.raises(CategorizedError) as exc:
+        _load(engine, _attachment(controller, tmp_path), "ext4", 0x9999)
+    assert exc.value.details["code"] == "stale_module_address"
+    assert not any("add-symbol-file" in c for c in controller.written)
+
+
+def test_load_module_symbols_missing_debuginfo_propagates(tmp_path: Path) -> None:
+    controller = _FakeMiController(responses=_two_module_responses())
+    boom = CategorizedError(
+        "no .ko",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"reason": "no_module_debuginfo", "module": "ext4"},
+    )
+    engine = _engine_with_resolver(boom)
+    with pytest.raises(CategorizedError) as exc:
+        _load(engine, _attachment(controller, tmp_path), "ext4")
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["reason"] == "no_module_debuginfo"
+
+
+def test_load_module_symbols_binary_mismatch_is_rejected(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    responses[_srcversion_cmd("0x2000")] = _eval('"LIVE_SRC"')
+    controller = _FakeMiController(responses=responses)
+    engine = _engine_with_resolver(ModuleDebuginfo(Path("/x.ko"), "ARTIFACT_SRC", None))
+    with pytest.raises(CategorizedError) as exc:
+        _load(engine, _attachment(controller, tmp_path), "ext4")
+    assert exc.value.details["code"] == "module_binary_mismatch"
+    assert not any("add-symbol-file" in c for c in controller.written)
+
+
+def test_load_module_symbols_identity_unavailable_loads_unverified(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    responses[_srcversion_cmd("0x2000")] = _eval_error("no member named srcversion")
+    responses["-data-evaluate-expression &((struct module *)0x2000)->build_id"] = _eval_error(
+        "no member named build_id"
+    )
+    controller = _FakeMiController(responses=responses)
+    engine = _engine_with_resolver(ModuleDebuginfo(Path("/x/ext4.ko"), None, None))
+    result = _load(engine, _attachment(controller, tmp_path), "ext4")
+    assert result.identity_verified is False
+    assert result.symbols_loaded is True
+
+
+def test_load_module_symbols_build_id_fallback_matches(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    responses[_srcversion_cmd("0x2000")] = _eval_error("no member named srcversion")
+    responses["-data-evaluate-expression &((struct module *)0x2000)->build_id"] = _eval(
+        "(unsigned char (*)[20]) 0x2010"
+    )
+    responses["-data-read-memory-bytes 0x2010 20"] = [
+        {"type": "result", "message": "done", "payload": {"memory": [{"contents": "de" * 20}]}}
+    ]
+    controller = _FakeMiController(responses=responses)
+    engine = _engine_with_resolver(ModuleDebuginfo(Path("/x/ext4.ko"), None, "de" * 20))
+    result = _load(engine, _attachment(controller, tmp_path), "ext4")
+    assert result.identity_verified is True
+
+
+def test_load_module_symbols_idempotent_reload(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    responses[_srcversion_cmd("0x2000")] = _eval('"SRC123"')
+    controller = _FakeMiController(responses=responses)
+    attachment = _attachment(controller, tmp_path)
+    attachment.loaded_modules.add("ext4")
+    engine = _engine_with_resolver(ModuleDebuginfo(Path("/x/ext4.ko"), "SRC123", None))
+    out = _load(engine, attachment, "ext4")
+    assert out.symbols_loaded is True
+    assert not any("add-symbol-file" in c for c in controller.written)

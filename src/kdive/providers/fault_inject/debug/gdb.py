@@ -173,6 +173,19 @@ class FaultInjectDebugEngine:
             decode_errors=0,
         )
 
+    def load_module_symbols(
+        self, attachment: GdbMiAttachment, *, module: str, expected_base: int | None = None
+    ) -> GdbModule:
+        del expected_base
+        with self._lock:
+            self._loaded_modules.setdefault(attachment.transcript_path, set()).add(module)
+        return GdbModule(
+            name=module,
+            base_address=_SYNTHETIC_MODULE_BASE,
+            symbols_loaded=True,
+            identity_verified=True,
+        )
+
     def disassemble(
         self,
         attachment: GdbMiAttachment,

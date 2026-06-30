@@ -347,6 +347,25 @@ class GdbMiEngine(Protocol):
         """
         ...
 
+    def load_module_symbols(
+        self, attachment: GdbMiAttachment, *, module: str, expected_base: int | None
+    ) -> GdbModule:
+        """Load symbols for one loaded module via ``add-symbol-file`` (ADR-0278).
+
+        Re-reads the module's current base, verifies the artifact ``.ko``'s identity against the
+        running module, then loads at the freshly-read base — never a passed-in address.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_module_name`` for a non-identifier
+                module, ``no_module_debuginfo`` when the ``.ko`` is unavailable;
+                ``DEBUG_ATTACH_FAILURE`` / ``module_not_loaded`` when the module is not in the live
+                list, ``stale_module_address`` when ``expected_base`` differs from the live base,
+                ``module_binary_mismatch`` when the ``.ko`` identity differs from the running
+                module, ``add_symbol_failed`` for a gdb error; ``INFRASTRUCTURE_FAILURE`` on a
+                timeout.
+        """
+        ...
+
 
 class AttachSeam(Protocol):
     """Lazy attach seam returning a live gdb/MI attachment."""

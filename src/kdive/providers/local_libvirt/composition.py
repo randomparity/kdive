@@ -38,6 +38,7 @@ from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePoli
 from kdive.providers.local_libvirt.reaping import LibvirtInfraReaper
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
+from kdive.providers.shared.debug_common.debuginfo import real_module_debuginfo_resolver
 from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -124,7 +125,10 @@ def build_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
         supported_introspection=frozenset({"offline-vmcore", "live", "live-script"}),
         debug=DebugCapabilities(
             attach_seam=default_attach_seam,
-            engine=GdbMiEngine(redactor_factory=lambda: Redactor(registry=secret_registry)),
+            engine=GdbMiEngine(
+                redactor_factory=lambda: Redactor(registry=secret_registry),
+                module_debuginfo_resolver=real_module_debuginfo_resolver(),
+            ),
         ),
         component_sources=_component_sources(),
         build_config_validator=builder.validate_config_ref,

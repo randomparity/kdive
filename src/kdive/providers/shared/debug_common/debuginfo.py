@@ -39,6 +39,7 @@ type _Attach = Callable[[Path], GdbMiAttachment]
 type _GdbMiEngineFactory = Callable[[], _GdbMiAttachEngine]
 type _ReadKernelRef = Callable[[str], str | None]
 type _ReadModuleIdentity = Callable[[Path], tuple[str | None, str | None]]
+type ModuleDebuginfoResolverSeam = Callable[[str, str], "ModuleDebuginfo"]
 
 
 class _GdbMiAttachEngine(Protocol):
@@ -177,13 +178,17 @@ def real_read_kernel_ref(run_id: str) -> str | None:  # pragma: no cover - live_
         return kernel_ref_for_run_sync(conn, UUID(run_id))
 
 
-def real_module_debuginfo_resolver() -> ModuleDebuginfoResolver:  # pragma: no cover - live_vm
-    """The production module-debuginfo resolver wired to the live DB/object-store/ELF seams."""
+def real_module_debuginfo_resolver() -> ModuleDebuginfoResolverSeam:  # pragma: no cover - live_vm
+    """The production module-debuginfo resolver seam wired to the live DB/object-store/ELF seams.
+
+    Returns the bound ``resolve`` so the engine seam stays a plain ``(run_id, module)`` callable;
+    the closed-over resolver instance keeps its per-run staging cache alive across calls.
+    """
     return ModuleDebuginfoResolver(
         read_kernel_ref=real_read_kernel_ref,
         fetch_object=default_fetch_object,
         read_identity=read_module_identity,
-    )
+    ).resolve
 
 
 def read_module_identity(ko: Path) -> tuple[str | None, str | None]:  # pragma: no cover - live_vm
