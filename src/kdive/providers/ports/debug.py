@@ -73,6 +73,23 @@ class GdbWatchpointRef(ProviderModel):
     enabled: bool | None = None
 
 
+class GdbModule(ProviderModel):
+    """One loaded kernel module from a live gdbstub session (ADR-0278)."""
+
+    name: str | None = None
+    base_address: str | None = None
+    symbols_loaded: bool | None = None
+    identity_verified: bool | None = None
+
+
+class GdbModuleList(ProviderModel):
+    """A bounded, parsed list of loaded kernel modules (ADR-0278)."""
+
+    modules: list[GdbModule]
+    truncated: bool = False
+    decode_errors: int = 0
+
+
 class GdbController(Protocol):
     """Controller operations a gdb/MI attachment exposes."""
 
@@ -130,6 +147,8 @@ class GdbMiAttachment:
     rsp_port: int
     transcript_path: Path
     records: list[object] = field(default_factory=list)
+    run_id: str = ""
+    loaded_modules: set[str] = field(default_factory=set)
 
 
 class GdbMiEngine(Protocol):
