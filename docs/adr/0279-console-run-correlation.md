@@ -58,19 +58,28 @@ System.
 
 3. **Per-job, lock-held attribution for rotating parts.** A `console_rotate` job, once per job and
    inside the per-System advisory lock it already holds, resolves the System's **most-recently-booted
-   Run** (the Run bound to the System whose `boot` `run_steps` row is the most recent) and stamps that
-   id onto every part the job seals. This is race-free: a part is sealed only while the System is live
-   (reached only via a successful boot that wrote the `boot` step), and a power-cycle by a *new* Run
-   changes `boot_id` — which resets rotation to a fresh generation and serializes on the same per-
-   System lock — so within one job's lock-held section the current boot, and thus the most-recently-
-   booted Run, is stable. No straggler old-generation part can be misattributed. When no `boot` step
+   Run** (the Run bound to the System that has a `boot` `run_steps` row, taking the most-recently
+   *created* such Run — ordering on the immutable `runs.created_at`, not the trigger-bumped
+   `run_steps.updated_at`) and stamps that id onto every part the job seals. This is stable under the
+   lock: a part is sealed only while the System is live (reached only via a successful boot that wrote
+   the `boot` step), and a power-cycle by a *new* Run normally changes `boot_id` — which resets
+   rotation to a fresh generation and serializes on the same per-System lock — so within one job's
+   lock-held section the current boot does not move. It is **not** misattribution-proof in one
+   inherited edge: ADR-0273 R6b degrades `boot_id` to `""` on a worker stat failure, and a missed
+   power-cycle (unchanged `boot_id` plus a truncate-then-regrow past the old offset) lets the old Run's
+   ≤ `SEAM_OVERLAP` seam carry land in a part resolved to the new Run. The console byte stream is
+   already cross-contaminated at that seam by R6b, so `run_id` is no worse and the error is bounded to
+   the single straddling part — an accepted residual, not a new failure surface. When no `boot` step
    resolves, parts are stamped NULL, never wrongly attributed.
 
 4. **A bounded, ordered Run-scoped manifest on `runs.get`.** `runs.get` surfaces
-   `data.console_artifacts`: a newest-first list (mirroring `artifacts.list`'s `created_at DESC`) of
+   `data.console_artifacts`: a newest-first list ordered `(created_at DESC, object_key DESC)` — a
+   total order, since all parts of one rotation job share a transaction `created_at` and the
+   zero-padded `console-part-<gen>-<index>` key is the within-batch tiebreak — of
    `{artifact_id, object_key, created_at}` for the console artifacts where `run_id = <run>` and
    `owner_kind='systems'`, bounded to `CONSOLE_MANIFEST_MAX` (100) with `data.console_artifacts_total`
-   and `data.console_artifacts_truncated` when the cap is exceeded. The manifest includes the boot-
+   and `data.console_artifacts_truncated` when the cap is exceeded (the dropped entries are the
+   oldest; the boot console stays reachable via `refs.console`). The manifest includes the boot-
    evidence snapshot and every attributed part; the key is omitted when the Run has none, so an
    uncorrelated or pre-migration Run reads as today. `refs.console` and `data.console_access` are
    unchanged and additive to this.
@@ -113,9 +122,13 @@ written before the change keep `run_id = NULL`.
 - **Per-part run-id resolution (resolve at each `_seal_part`).** Rejected as redundant: the boot is
   stable for the whole lock-held job, so one resolution per job is sufficient and cheaper, and a per-
   part query buys no extra correctness.
-- **Persist a `boot_id → run_id` map (new table or sidecar field).** Rejected as unnecessary state:
-  the most-recently-booted-Run query over existing `run_steps` is race-free under the per-System lock
-  and needs no new mapping to maintain or reclaim.
+- **Persist a `boot_id → run_id` map (new table or sidecar field) to close the R6b residual.**
+  Rejected as disproportionate state: the most-recently-booted-Run query over existing `run_steps` is
+  stable under the per-System lock for every detected boot, and the one residual it does not cover
+  (the ADR-0273 R6b missed-power-cycle case, Decision 3) is bounded to a single straddling part whose
+  console bytes R6b already cross-contaminates — so a new per-generation sidecar field would add state
+  to maintain and reclaim for an error the byte stream already carries. Documented as accepted
+  coarseness instead.
 - **A new Run-scoped `artifacts.list` variant / a new MCP tool.** Rejected: the platform already has
   too many tools (ADR-0273's stance); the manifest rides on `runs.get`, which the agent already calls
   to drive the Run lifecycle, and the per-artifact `artifacts.get`/`search_text` reads are unchanged.

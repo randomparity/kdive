@@ -76,18 +76,31 @@ heuristic.
 
 R3. **Rotating-part attribution (per-job, under the lock).** A `console_rotate` job seals zero or
 more parts under the per-System advisory lock. Once per job, **inside that lock**, it resolves the
-System's **most-recently-booted Run** — the Run bound to this `system_id` whose `boot` `run_steps`
-row is the most recent — and stamps that `run_id` onto every part the job seals. The resolution is
-correct and race-free because:
+System's **most-recently-booted Run** — the Run bound to this `system_id` that has a `boot`
+`run_steps` row, taking the most-recently *created* such Run (R-query below) — and stamps that
+`run_id` onto every part the job seals. The resolution is stable within a job because:
 
 - A part is sealed only while the System is live (`ready`/`crashed`), which is reached only via a
   successful boot that wrote a `boot` `run_steps` row, so the most-recently-booted Run is the Run
   that produced the current boot.
-- A power-cycle by a *new* Run changes `boot_id`, which resets the rotation to a fresh generation
-  (ADR-0273 R6b) and drops the old generation's unsealed carry; and power-cycles serialize on the
-  same per-System lock this job holds. So within one job's lock-held section the current
-  boot — and therefore the most-recently-booted Run — is stable. There is no straggler old-generation
-  part to misattribute.
+- A power-cycle by a *new* Run normally changes `boot_id`, which resets the rotation to a fresh
+  generation (ADR-0273 R6b) and drops the old generation's unsealed carry; and power-cycles
+  serialize on the same per-System lock this job holds. So within one job's lock-held section the
+  current boot — and therefore the most-recently-booted Run — does not move under the job.
+
+**Residual coarseness (inherited from ADR-0273 R6b).** This is *not* misattribution-proof in one
+inherited edge: the reconciler degrades `boot_id` to `""` when it cannot `os.stat` the console file
+(non-co-located/unreadable, `console_rotation.py:_boot_id`). If a new Run's power-cycle leaves
+`boot_id` unchanged (`""` → `""`) **and** the new console file regrew past the old plaintext offset
+before a sweep observed a shrink, ADR-0273 R6b already does not detect the new boot — it mislabels
+the new boot's bytes as a continuation of the old generation, and the held-back seam `carry`
+(≤ `SEAM_OVERLAP` bytes) of the old Run is emitted into a part the job now resolves to the *new*
+most-recently-booted Run. The console **byte stream** is already cross-contaminated at that seam by
+R6b; the `run_id` attribution is no worse than that pre-existing limitation, and it is bounded to the
+single straddling part. We accept this residual rather than add per-generation sidecar state (see
+ADR-0279 rejected alternatives); it is the same missed-power-cycle case ADR-0273 already documents,
+not a new failure surface. The claim is therefore "stable under the lock, with the ADR-0273 R6b
+missed-power-cycle residual," not "misattribution impossible."
 
 When no `boot` step resolves (e.g. a boot step deleted by the ADR-0185 terminal-failure recycle on
 a System the reconciler has not yet torn down), the parts are stamped `run_id = NULL` — uncorrelated,
@@ -103,14 +116,32 @@ The capture's existing degrade-to-no-parts behavior on store/permission walls is
 R5. **Run-scoped console manifest on `runs.get`.** `runs.get` surfaces `data.console_artifacts`: an
 ordered list of `{artifact_id, object_key, created_at}` for the console artifacts correlated to this
 Run — `SELECT id, object_key, created_at FROM artifacts WHERE run_id = <run> AND
-owner_kind='systems' AND sensitivity='redacted'`. The list is **newest-first by `created_at`**
-(mirroring `artifacts.list`'s order, ADR-0273) and **bounded** to a fixed `CONSOLE_MANIFEST_MAX`
-(100). When more correlated console artifacts exist than the cap, `data.console_artifacts_total`
-carries the full count and `data.console_artifacts_truncated` is `true`; the returned entries are
-the newest `CONSOLE_MANIFEST_MAX`. The manifest includes the boot-evidence snapshot
-(`console-<run_id>`, now stamped under R2) and every attributed part. It is omitted entirely (no
-key) when the Run has no correlated console artifacts, so an uncorrelated or pre-migration Run reads
-exactly as today.
+owner_kind='systems' AND sensitivity='redacted'`. The list is **newest-first**, ordered
+`(created_at DESC, object_key DESC)` — a **total** order, because every part a single
+`console_rotate` job seals commits in one transaction and so shares an identical `created_at`
+(`now()` is the transaction timestamp); the zero-padded `console-part-<gen>-<index>` key is the
+within-batch tiebreak (the same deterministic rule ADR-0273 R8 uses for tail identification), so the
+manifest is not ambiguous within a same-second batch. It is **bounded** to a fixed
+`CONSOLE_MANIFEST_MAX` (100). When more correlated console artifacts exist than the cap,
+`data.console_artifacts_total` carries the full count and `data.console_artifacts_truncated` is
+`true`; the returned entries are the newest `CONSOLE_MANIFEST_MAX`. The manifest includes the
+boot-evidence snapshot (`console-<run_id>`, now stamped under R2) and every attributed part. It is
+omitted entirely (no key) when the Run has no correlated console artifacts, so an uncorrelated or
+pre-migration Run reads exactly as today.
+
+R5a. **Truncation drops the oldest entries — disclosed.** Because the manifest is newest-first, a
+Run with more than `CONSOLE_MANIFEST_MAX` correlated console artifacts omits its **oldest** parts
+from the returned list (`_total`/`_truncated` disclose that this happened). A crash signature that
+occurred early in a very long (> ~6 MiB console) Run can therefore fall outside the returned
+window. The boot-evidence snapshot (`console-<run_id>`) — which holds the boot-window console
+including a boot-time crash — is always the oldest entry and is dropped first under truncation, so an
+agent that needs the boot console under truncation reads `refs.console` directly (it is unchanged,
+R6). For an early *post-readiness* event under truncation, the entry is reachable by paging the
+correlated set: the agent has the newest 100 ids here, and older correlated parts are found via
+`artifacts.list(system_id)` filtered to the `console-part-*` keys (System-scoped, so it still mixes
+Runs — the residual the no-run-scoped-list ADR rejection leaves open, named as future work, not
+solved here). Newest-first is chosen because the live-tail and most-recent-crash cases are the
+common ones; the truncation blind spot is for the > 6 MiB-per-Run tail only.
 
 R6. **Existing console surface preserved.** `refs.console` (the boot-evidence artifact id) and
 `data.console_access` (ADR-0262 read-path hint) on `runs.get` are unchanged. The manifest is
@@ -144,8 +175,11 @@ caller is unchanged and writes NULL.
 ### Boot-evidence attribution (`jobs/handlers/runs/boot_evidence.py`)
 
 `_upsert_console_artifact_row` already receives `run_id`. Pass it into `register_artifact_row(...,
-run_id=run_id)`. On the idempotent re-capture path (`existing is not None`), the row already carries
-the correct `run_id` (same Run), so no update is needed.
+run_id=run_id)`. On the idempotent re-capture path (`existing is not None`), a row created
+post-migration already carries the correct `run_id` (same Run), so no update is needed; a row first
+written **before** migration 0054 keeps its `run_id = NULL` through re-capture — that straddle case
+is covered by the no-backfill non-goal (a pre-migration artifact stays uncorrelated, not silently
+healed), not a defect.
 
 ### Rotating-part attribution (`jobs/handlers/console_rotate.py`)
 
@@ -172,11 +206,18 @@ SELECT r.id
 FROM runs r
 JOIN run_steps st ON st.run_id = r.id AND st.step = 'boot'
 WHERE r.system_id = %s
-ORDER BY st.updated_at DESC
+ORDER BY r.created_at DESC
 LIMIT 1
 ```
 
-Returns the most-recently-booted Run for the System, or `None`.
+Returns the most-recently-booted Run for the System, or `None`. Ordering is on the **immutable**
+`runs.created_at`, not `run_steps.updated_at`: `run_steps` carries a `set_updated_at` trigger that
+bumps `updated_at` on any row mutation, so ordering by it would let an incidental later touch of an
+older Run's boot step invert the result. A System hosts Runs sequentially (admission allows at most
+one `CREATED`/`RUNNING` Run per System), and a Run is created before it boots, so among Runs that
+have a `boot` step (the JOIN), the most-recently *created* one is the one whose boot is current. A
+freshly `CREATED` Run that has not yet booted has no `boot` step and is excluded by the JOIN, so it
+cannot win over the Run whose boot is actually live.
 
 ## Acceptance criteria
 
@@ -194,9 +235,14 @@ Returns the most-recently-booted Run for the System, or `None`.
 - `runs.get` returns `data.console_artifacts` as a newest-first list of `{artifact_id, object_key,
   created_at}` for the Run's correlated console artifacts, including the boot-evidence snapshot and
   every attributed part; the key is omitted when the Run has none. (R5)
+- The manifest order is a **total** order `(created_at DESC, object_key DESC)`: two parts sealed in
+  the same `console_rotate` job share an identical `created_at` (one transaction's `now()`) and are
+  ordered deterministically by their `console-part-<gen>-<index>` key, so a same-second batch is not
+  ambiguous. (R5)
 - When more than `CONSOLE_MANIFEST_MAX` (100) console artifacts are correlated, the manifest returns
   the newest 100, `data.console_artifacts_total` is the full count, and
-  `data.console_artifacts_truncated` is `true`. (R5)
+  `data.console_artifacts_truncated` is `true`; the dropped entries are the **oldest**, and the
+  boot-evidence snapshot (always reachable via `refs.console`) is among the first dropped. (R5, R5a)
 - `refs.console` and `data.console_access` on `runs.get` are byte-identical before and after this
   change; a Run with one boot-evidence artifact and no parts reads as today plus a one-entry
   manifest. (R6)
@@ -212,17 +258,25 @@ Returns the most-recently-booted Run for the System, or `None`.
 
 ## Risks
 
-- **Coarse attribution at a Run boundary.** A part is attributed to whichever Run most recently
-  booted the System as of the (lock-held) job that seals it. Because a new boot resets the rotation
-  generation and serializes on the per-System lock, there is no realistic window for an old-generation
-  straggler to be misattributed (R3). The residual coarseness is a part sealed after a Run succeeds
-  but before any reprovision — correctly attributed to that still-current Run, which is the intent
-  (the #892 "succeeded Run, workload still emitting" case). Documented, not a defect.
-- **Manifest growth on a chatty long-lived System.** A multi-hour workload can correlate many parts
-  to one Run. The manifest is bounded (`CONSOLE_MANIFEST_MAX`, newest-first) with `_total` /
-  `_truncated` disclosure, so `runs.get` stays token-bounded; the full set is still reachable via
-  `artifacts.get` on each listed id and via `artifacts.list(system_id)`. This mirrors ADR-0273's
-  accepted "no `artifacts.list` pagination" stance and does not regress it.
+- **Coarse attribution at a Run boundary (ADR-0273 R6b residual).** A part is attributed to whichever
+  Run most recently booted the System as of the (lock-held) job that seals it. The normal case — a
+  new boot changes `boot_id`, resetting the generation under the per-System lock — leaves no
+  old-generation straggler to misattribute. The one residual is the inherited ADR-0273 R6b
+  missed-power-cycle case (`boot_id` degraded to `""` **and** a truncate-then-regrow that crossed the
+  old offset before a sweep saw a shrink): there the new boot is mislabeled as the old generation and
+  the old Run's ≤ `SEAM_OVERLAP` seam carry lands in a part resolved to the new Run. The console byte
+  stream is already cross-contaminated at that seam by R6b; `run_id` is no worse and is bounded to the
+  single straddling part (R3). Accepted, not a defect — adding per-generation sidecar state to close it
+  is the rejected alternative in ADR-0279.
+- **Manifest growth and truncation on a chatty long-lived System.** A multi-hour workload can
+  correlate many parts to one Run. The manifest is bounded (`CONSOLE_MANIFEST_MAX`, newest-first) with
+  `_total` / `_truncated` disclosure, so `runs.get` stays token-bounded. Under truncation the
+  **oldest** correlated parts are dropped from the list (R5a): an early post-readiness crash signature
+  in a > ~6 MiB-console Run may fall outside the returned window, and the only durable way to reach it
+  is `artifacts.list(system_id)` — which is System-scoped and still mixes Runs, the residual the
+  rejected run-scoped-list alternative leaves open. The boot console is always reachable via
+  `refs.console`. This mirrors ADR-0273's accepted "no `artifacts.list` pagination" stance; a paged
+  run-scoped manifest is named future work, not built here.
 - **FK to `runs`.** `run_id REFERENCES runs (id)` means a console artifact cannot name a Run that
   does not exist. Console artifacts are reclaimed at System teardown (ADR-0273), and a Run is not
   deleted out from under a live System, so the FK does not strand rows; should a future delete path
