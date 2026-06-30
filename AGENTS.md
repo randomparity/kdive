@@ -106,6 +106,17 @@ A new plane appends to the appropriate registrar tuple, so `build_app` and
 wrappers over plain async handlers that take an injected pool + `RequestContext`, so they
 are tested directly without a transport.
 
+**The wrapper docstring is the agent-facing contract.** FastMCP serializes only the
+`@app.tool`-decorated wrapper's docstring and its `Field(description=...)` text into the
+tool schema — the inner handler's docstring, module docstrings, and `docs/` are invisible
+to the agent at call time. When a tool's contract changes (parameters, returned `data`
+fields, poll/retry/timeout semantics), update the **wrapper** docstring and `Field` text,
+not only the handler. Guidance that lives only on the inner handler or in an ADR is a
+discoverability defect even when the behavior is correct: the agent acts on the schema it
+sees, so a contract it can't read it won't follow. When reviewing an MCP tool change,
+verify the agent-facing text (wrapper docstring + `Field` descriptions) names every field
+and constraint an agent must know, and does not invite a pattern the behavior discourages.
+
 ### Cross-cutting invariants (apply on every plane)
 
 - **Uniform response envelope** — every tool returns a `ToolResponse` (`mcp/responses.py`):
