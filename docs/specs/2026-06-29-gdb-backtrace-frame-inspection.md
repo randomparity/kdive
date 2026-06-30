@@ -54,14 +54,20 @@ them, plus two MCP tools wired through the existing `run_engine_op` gate.
   stack; the cap bounds the *response*, not the command, avoiding the "high level beyond depth"
   `^error` ambiguity). Parse the `stack=[frame={...},...]` payload. If gdb returns no usable
   frames (empty, missing `stack`, or non-list — "omitted or malformed frame data"), raise
-  `DEBUG_ATTACH_FAILURE` / `code="no_frames"`. Otherwise build redacted `GdbFrame`s; set
-  `truncated = len(frames) > max_frames` and return the first `max_frames`.
+  `DEBUG_ATTACH_FAILURE` / `code="no_frames"`. Otherwise measure before slicing: compute
+  `total = len(parsed)`, build redacted `GdbFrame`s, set `truncated = total > max_frames`, and
+  return `parsed[:max_frames]`.
 
-- **`read_frame(attachment, *, level) -> GdbFrame`.** Validate `level` is an int in
-  `0..MAX_BACKTRACE_FRAMES-1`, raising `CONFIGURATION_ERROR` / `code="bad_frame_level"` before
-  any MI command. Issue `-stack-list-frames level level` (inclusive single-frame window). No
-  frame at that level (empty/malformed) raises `DEBUG_ATTACH_FAILURE` /
-  `code="no_frame_at_level"` (carrying `level`). Otherwise return the redacted single frame.
+- **`read_frame(attachment, *, level) -> GdbFrame`.** Validate `level` is a **non-negative**
+  int, raising `CONFIGURATION_ERROR` / `code="bad_frame_level"` before any MI command. The
+  bound is intentionally *not* coupled to `MAX_BACKTRACE_FRAMES`: that cap bounds the backtrace
+  *response* size, whereas `read_frame` selects one frame and a deep kernel stack may have a
+  valid frame past 64 (`backtrace` signals this with `truncated=true`). Issue
+  `-stack-list-frames level level` (inclusive single-frame window) and let gdb decide whether
+  the level exists. No frame at that level (empty/missing/malformed `stack`) raises
+  `DEBUG_ATTACH_FAILURE` / `code="no_frame_at_level"` (carrying `level`) — so an
+  out-of-range level is a "no frame here" answer, not a `bad_frame_level` config error.
+  Otherwise return the redacted single frame.
 
 - **Running-inferior classification.** `-stack-list-frames` against a running target returns a
   gdb `^error` (`"Cannot execute this command while the target is running."`). The shared
@@ -104,7 +110,8 @@ The engine grows to ten ops; the tier docstrings, `exposure.py` `_TOOL_SCOPES`
 | Frames carry index/func/addr/file/line | engine parse test asserts all five fields |
 | Inspect one selected frame | engine: `read_frame(level=2)` → single frame; handler: `data["level"]`/`data["frame"]` |
 | Categorized failure when running | engine: `^error` "...target is running." → `DEBUG_ATTACH_FAILURE` `code="inferior_running"`; handler: `error_category` + `data["code"]` |
-| Categorized failure when frames omitted/malformed | engine: empty/missing/non-list `stack` → `no_frames`; bad level → `no_frame_at_level` |
+| Categorized failure when frames omitted/malformed | engine: empty/missing/non-list `stack` → `no_frames`; out-of-range level → `no_frame_at_level` (not `bad_frame_level`) |
+| `read_frame` reaches frames past the backtrace cap | engine: `read_frame(level=70)` issues `-stack-list-frames 70 70` (not rejected pre-command); negative level → `bad_frame_level` |
 | Truncated backtrace | engine: stack deeper than `max_frames` → `truncated=true`, `len(frames)==max_frames` |
 | Malformed MI output | engine: `^done` with garbage `stack` → `no_frames` `DEBUG_ATTACH_FAILURE` |
 | Bounded + redacted | engine: registered secret in `func` masked; `max_frames` over-cap rejected pre-command |

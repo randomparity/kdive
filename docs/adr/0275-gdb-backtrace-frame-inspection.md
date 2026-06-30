@@ -40,11 +40,15 @@ tools. No `-stack-select-frame` session state, no frame-local values.
    output) raises `DEBUG_ATTACH_FAILURE` / `code="no_frames"`. Otherwise build redacted
    `GdbFrame`s, set `truncated = total > max_frames`, and return the first `max_frames`.
 
-2. **`GdbMiEngine.read_frame(attachment, *, level) -> GdbFrame`.** Validate `level` is an int in
-   `0..MAX_BACKTRACE_FRAMES-1`, raising `CONFIGURATION_ERROR` / `code="bad_frame_level"` before
-   any MI command. Issue `-stack-list-frames level level`. No frame at that level raises
-   `DEBUG_ATTACH_FAILURE` / `code="no_frame_at_level"` (carrying `level`). Otherwise return the
-   single redacted frame.
+2. **`GdbMiEngine.read_frame(attachment, *, level) -> GdbFrame`.** Validate `level` is a
+   **non-negative** int, raising `CONFIGURATION_ERROR` / `code="bad_frame_level"` before any MI
+   command. The bound is deliberately *not* `MAX_BACKTRACE_FRAMES`: that cap bounds the
+   `backtrace` response, whereas `read_frame` selects a single frame and a deep kernel stack can
+   hold a valid frame past 64 (`backtrace` flags this with `truncated=true`). Issue
+   `-stack-list-frames level level` and let gdb decide whether the level exists. No frame at that
+   level (empty/missing/malformed) raises `DEBUG_ATTACH_FAILURE` / `code="no_frame_at_level"`
+   (carrying `level`) — an out-of-range level is a "no frame here" result, not a config error.
+   Otherwise return the single redacted frame.
 
 3. **Running-inferior classification.** `-stack-list-frames` against a running target returns a
    gdb `^error` that `execute_mi_command` already maps to `DEBUG_ATTACH_FAILURE` (payload
