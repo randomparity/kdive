@@ -19,11 +19,7 @@ from kdive.mcp.tools.catalog.artifacts.expected_uploads import (
     expected_uploads as _expected_uploads,
 )
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.security.artifacts.artifact_search import (
-    AFTER_LINES_RANGE,
-    BEFORE_LINES_RANGE,
-    MAX_MATCHES_RANGE,
-)
+from kdive.security.artifacts.artifact_jump import JumpDirection
 from kdive.serialization import JsonValue
 
 
@@ -49,7 +45,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_artifacts_list(app, pool)
     _register_artifacts_get(app, pool)
     _register_artifacts_fetch_raw(app, pool)
-    _register_artifacts_search_text(app, pool)
     _register_artifacts_create_run_upload(app, pool, resolver)
     _register_artifacts_create_system_upload(app, pool, resolver)
     _register_artifacts_expected_uploads(app)
@@ -93,9 +88,11 @@ def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
             int,
             Field(
                 description=(
-                    "Start byte of the inline window (0-based; a negative value reads from "
-                    "the start). Page through a large artifact with the returned "
-                    "data.next_offset until data.content_truncated is false."
+                    "Start byte of the window (0-based). With direction=forward (default) a "
+                    "negative value reads from the start; with direction=backward the window or "
+                    "find runs up from this byte and an omitted (0) or negative value means "
+                    "end-of-artifact. Page with the returned data.next_offset until "
+                    "data.content_truncated is false."
                 )
             ),
         ] = 0,
@@ -112,16 +109,47 @@ def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
                 )
             ),
         ] = artifact_reads.ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
+        find: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Jump to the nearest literal match instead of returning a plain window. "
+                    "'|' separates terms (e.g. 'BUG: KASAN|Call Trace'); the nearest term in "
+                    "direction is returned with data.match_offset, data.match_line, the "
+                    "surrounding data.content, and data.next_offset to continue "
+                    "(data.match_found is false when none remain). Per-line literal substring, "
+                    "case-sensitive, no regex and no Unicode normalization — match the "
+                    "artifact's exact bytes (kernel signatures are ASCII). Omit for a plain "
+                    "window."
+                )
+            ),
+        ] = None,
+        direction: Annotated[
+            JumpDirection,
+            Field(
+                description=(
+                    "Cursor direction for paging and for find. forward starts at byte_offset "
+                    "(default 0, the start). backward starts at end-of-artifact when byte_offset "
+                    "is omitted (read the tail and page up); a positive byte_offset bounds it."
+                )
+            ),
+        ] = "forward",
     ) -> ToolResponse:
-        """Fetch a byte window of one redacted artifact's content by id.
+        """Fetch a byte window of one redacted artifact, or jump to a literal match.
 
-        Returns the object ref plus, best-effort, a byte window of the redacted bytes
-        inline in `data.content` (the window is `[byte_offset, byte_offset + max_bytes)`,
-        capped at a hard 24 KiB token-safe ceiling and KDIVE_ARTIFACT_INLINE_MAX_BYTES).
-        `data.content_truncated` and
-        `data.next_offset` page the rest; an artifact above the fetch ceiling sets
-        `content_omitted` and is retrieved via the always-present presigned
-        `refs.download_uri`. Requires viewer; sensitive ids are not-found.
+        Without `find`, returns the object ref plus a byte window of the redacted bytes inline
+        in `data.content` (`[byte_offset, byte_offset + max_bytes)`, capped at a hard 24 KiB
+        token-safe ceiling and KDIVE_ARTIFACT_INLINE_MAX_BYTES); `data.content_truncated` and
+        `data.next_offset` page the rest, in `direction` (forward from the start, or backward
+        from the tail). An artifact above the fetch ceiling sets `content_omitted` and is
+        retrieved via the always-present presigned `refs.download_uri`.
+
+        With `find`, jumps to the nearest literal match in `direction` over the whole artifact
+        and returns `data.match_found` plus, on a hit, `data.match_offset`/`data.match_line`,
+        the surrounding `data.content`, and `data.next_offset` to continue. An artifact above
+        the fetch ceiling cannot be searched and returns a configuration error
+        (reason=artifact_too_large), not an empty match. Requires viewer; sensitive ids are
+        not-found.
         """
         return await artifact_reads.artifacts_get(
             pool,
@@ -129,6 +157,8 @@ def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
             artifact_id=artifact_id,
             byte_offset=byte_offset,
             max_bytes=max_bytes,
+            find=find,
+            direction=direction,
         )
 
 
@@ -153,73 +183,6 @@ def _register_artifacts_fetch_raw(app: FastMCP, pool: AsyncConnectionPool) -> No
         """
         return await artifact_raw_fetch.fetch_raw(
             pool, current_context(), run_id=run_id, asset=asset
-        )
-
-
-def _register_artifacts_search_text(app: FastMCP, pool: AsyncConnectionPool) -> None:
-    read_handlers = artifact_reads.ArtifactReadHandlers()
-
-    @app.tool(
-        name="artifacts.search_text",
-        annotations=_docmeta.read_only(),
-        meta=_docmeta.maturity_meta("implemented"),
-    )
-    async def artifacts_search_text(
-        artifact_id: Annotated[str, Field(description="The redacted System artifact id.")],
-        pattern: Annotated[
-            str,
-            Field(
-                description=(
-                    "Literal alternation pattern; '|' separates terms (grep-style), "
-                    "e.g. '__d_lookup|panic'. The word 'OR' is not special."
-                )
-            ),
-        ],
-        before_lines: Annotated[
-            int,
-            Field(
-                ge=BEFORE_LINES_RANGE[0],
-                le=BEFORE_LINES_RANGE[1],
-                description=(
-                    f"Context lines before each match "
-                    f"({BEFORE_LINES_RANGE[0]}–{BEFORE_LINES_RANGE[1]})."
-                ),
-            ),
-        ] = 2,
-        after_lines: Annotated[
-            int,
-            Field(
-                ge=AFTER_LINES_RANGE[0],
-                le=AFTER_LINES_RANGE[1],
-                description=(
-                    f"Context lines after each match "
-                    f"({AFTER_LINES_RANGE[0]}–{AFTER_LINES_RANGE[1]})."
-                ),
-            ),
-        ] = 4,
-        max_matches: Annotated[
-            int,
-            Field(
-                ge=MAX_MATCHES_RANGE[0],
-                le=MAX_MATCHES_RANGE[1],
-                description=(
-                    f"Maximum match windows to return "
-                    f"({MAX_MATCHES_RANGE[0]}–{MAX_MATCHES_RANGE[1]})."
-                ),
-            ),
-        ] = 20,
-    ) -> ToolResponse:
-        """Search a redacted System artifact with bounded literal line context."""
-        return await read_handlers.artifacts_search_text(
-            pool,
-            current_context(),
-            request=artifact_reads.ArtifactSearchRequest(
-                artifact_id=artifact_id,
-                pattern=pattern,
-                before_lines=before_lines,
-                after_lines=after_lines,
-                max_matches=max_matches,
-            ),
         )
 
 

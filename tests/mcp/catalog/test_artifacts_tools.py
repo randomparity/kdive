@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -17,20 +16,12 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.app import build_app
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog.artifacts.reads import (
     _MAX_WINDOWED_FETCH_BYTES,
     ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
     ARTIFACT_GET_WINDOW_MAX_BYTES,
-    ArtifactReadHandlers,
-    ArtifactSearchRequest,
     artifacts_get,
     artifacts_list,
-)
-from kdive.security.artifacts.artifact_search import (
-    AFTER_LINES_RANGE,
-    BEFORE_LINES_RANGE,
-    MAX_MATCHES_RANGE,
 )
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -38,12 +29,6 @@ from tests.integration._seed import seed_unbound_running_run
 from tests.mcp._seed import seed_crashed_system
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 from tests.mcp.json_data import data_bool, data_int, data_str
-
-_CONTEXT_BOUNDS = {
-    "before_lines": BEFORE_LINES_RANGE,
-    "after_lines": AFTER_LINES_RANGE,
-    "max_matches": MAX_MATCHES_RANGE,
-}
 
 
 def _tool_param_schema(tool_name: str) -> dict[str, dict[str, object]]:
@@ -55,11 +40,6 @@ def _tool_param_schema(tool_name: str) -> dict[str, dict[str, object]]:
     tool = asyncio.run(app.get_tool(tool_name))
     assert tool is not None
     return tool.parameters["properties"]
-
-
-def _search_text_param_schema() -> dict[str, dict[str, object]]:
-    """The `artifacts.search_text` parameter schema from a DB-free built app."""
-    return _tool_param_schema("artifacts.search_text")
 
 
 def _ctx(
@@ -167,58 +147,6 @@ class _SearchStore:
         return f"https://store.example/{key}?token=stub"
 
 
-def _artifact_read_handlers(store: _SearchStore) -> ArtifactReadHandlers:
-    return ArtifactReadHandlers(lambda: store)
-
-
-def _panic_search(artifact_id: str) -> ArtifactSearchRequest:
-    return ArtifactSearchRequest(
-        artifact_id=artifact_id,
-        pattern="panic",
-        before_lines=2,
-        after_lines=4,
-        max_matches=20,
-    )
-
-
-def _lookup_search_with_context(artifact_id: str) -> ArtifactSearchRequest:
-    return ArtifactSearchRequest(
-        artifact_id=artifact_id,
-        pattern="__d_lookup|Oops",
-        before_lines=1,
-        after_lines=1,
-        max_matches=20,
-    )
-
-
-def _invalid_pattern_search(artifact_id: str) -> ArtifactSearchRequest:
-    return ArtifactSearchRequest(
-        artifact_id=artifact_id,
-        pattern="a||b",
-        before_lines=2,
-        after_lines=4,
-        max_matches=20,
-    )
-
-
-def test_artifacts_search_text_maps_store_factory_failure() -> None:
-    error = CategorizedError("store missing", category=ErrorCategory.CONFIGURATION_ERROR)
-
-    def _raise_store() -> _SearchStore:
-        raise error
-
-    async def _run() -> ToolResponse:
-        pool = AsyncConnectionPool("postgresql://unused", open=False)
-        request = _panic_search("artifact-1")
-        return await ArtifactReadHandlers(_raise_store).artifacts_search_text(
-            pool, _ctx(), request=request
-        )
-
-    resp = asyncio.run(_run())
-    assert resp.object_id == "artifact-1"
-    assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
-
-
 def test_artifacts_list_returns_redacted_only(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -238,153 +166,6 @@ def test_artifacts_list_carries_total_and_truncated(migrated_url: str) -> None:
         assert resp.data["total"] == len(resp.items)
         assert resp.data["truncated"] is False
         assert "next_cursor" not in resp.data  # bounded set; no cursor
-
-    asyncio.run(_run())
-
-
-def test_artifacts_search_text_returns_bounded_matches(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            _, _, red_id = await _seed_system_with_artifacts(pool)
-            store = _SearchStore(b"before\nRIP: __d_lookup+0x1\nafter\n")
-            resp = await _artifact_read_handlers(store).artifacts_search_text(
-                pool,
-                _ctx(),
-                request=_lookup_search_with_context(red_id),
-            )
-        assert resp.status == "searched"
-        assert resp.data["match_count"] == 1
-        matches = json.loads(data_str(resp, "matches_json"))
-        assert matches[0]["line"] == 2
-        assert matches[0]["before"] == ["before"]
-        assert matches[0]["after"] == ["after"]
-
-    asyncio.run(_run())
-
-
-def test_artifacts_search_text_sensitive_is_not_found(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            _, sens_id, _ = await _seed_system_with_artifacts(pool)
-            resp = await _artifact_read_handlers(_SearchStore(b"panic")).artifacts_search_text(
-                pool,
-                _ctx(),
-                request=_panic_search(sens_id),
-            )
-        assert resp.status == "error"
-        assert resp.error_category == "not_found"
-
-    asyncio.run(_run())
-
-
-def test_artifacts_search_text_requires_viewer(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            _, _, red_id = await _seed_system_with_artifacts(pool)
-            with pytest.raises(AuthorizationError):
-                await _artifact_read_handlers(_SearchStore(b"panic")).artifacts_search_text(
-                    pool, _ctx(role=None), request=_panic_search(red_id)
-                )
-
-    asyncio.run(_run())
-
-
-def test_artifacts_search_text_rejects_oversized_before_get(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            _, _, red_id = await _seed_system_with_artifacts(pool)
-            store = _SearchStore(b"", size=1024 * 1024 + 1)
-            resp = await _artifact_read_handlers(store).artifacts_search_text(
-                pool, _ctx(), request=_panic_search(red_id)
-            )
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert resp.data["reason"] == "artifact_too_large"
-        assert store.got is False
-
-    asyncio.run(_run())
-
-
-def test_artifacts_search_text_missing_store_head_is_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            _, _, red_id = await _seed_system_with_artifacts(pool)
-            store = _SearchStore(b"panic", missing_head=True)
-            resp = await _artifact_read_handlers(store).artifacts_search_text(
-                pool, _ctx(), request=_panic_search(red_id)
-            )
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert store.got is False
-
-    asyncio.run(_run())
-
-
-def test_artifacts_search_text_maps_store_head_failure(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            _, _, red_id = await _seed_system_with_artifacts(pool)
-            store = _SearchStore(
-                b"panic",
-                head_error=CategorizedError(
-                    "store down", category=ErrorCategory.INFRASTRUCTURE_FAILURE
-                ),
-            )
-            resp = await _artifact_read_handlers(store).artifacts_search_text(
-                pool, _ctx(), request=_panic_search(red_id)
-            )
-        assert resp.status == "error"
-        assert resp.error_category == "infrastructure_failure"
-        assert store.got is False
-
-    asyncio.run(_run())
-
-
-def test_artifacts_search_text_rejects_non_redacted_fetch(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            _, _, red_id = await _seed_system_with_artifacts(pool)
-            store = _SearchStore(b"panic", sensitivity=Sensitivity.SENSITIVE)
-            resp = await _artifact_read_handlers(store).artifacts_search_text(
-                pool, _ctx(), request=_panic_search(red_id)
-            )
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert store.got is True
-
-    asyncio.run(_run())
-
-
-def test_artifacts_search_text_maps_store_get_failure(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            _, _, red_id = await _seed_system_with_artifacts(pool)
-            store = _SearchStore(
-                b"panic",
-                get_error=CategorizedError("stale", category=ErrorCategory.STALE_HANDLE),
-            )
-            resp = await _artifact_read_handlers(store).artifacts_search_text(
-                pool, _ctx(), request=_panic_search(red_id)
-            )
-        assert resp.status == "error"
-        assert resp.error_category == "stale_handle"
-
-    asyncio.run(_run())
-
-
-def test_artifacts_search_text_rejects_bad_pattern_before_head(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            _, _, red_id = await _seed_system_with_artifacts(pool)
-            store = _SearchStore(b"panic")
-            resp = await _artifact_read_handlers(store).artifacts_search_text(
-                pool, _ctx(), request=_invalid_pattern_search(red_id)
-            )
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert resp.data["reason"] == "bad_search_input"
-        assert store.headed is False
-        assert store.got is False
 
     asyncio.run(_run())
 
@@ -979,16 +760,6 @@ def test_artifacts_list_excludes_quarantined(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_search_text_schema_advertises_context_caps() -> None:
-    props = _search_text_param_schema()
-    for field, (low, high) in _CONTEXT_BOUNDS.items():
-        schema = props[field]
-        assert schema["minimum"] == low, field
-        assert schema["maximum"] == high, field
-        # The description states the range so the cap is discoverable in the schema text.
-        assert f"{low}–{high}" in str(schema["description"]), field
-
-
 def test_artifacts_get_schema_advertises_window_params() -> None:
     # Criterion 10: byte_offset/max_bytes are discoverable integer params whose
     # descriptions name the effective bound + the paging field.
@@ -1004,26 +775,157 @@ def test_artifacts_get_schema_advertises_window_params() -> None:
     assert str(ARTIFACT_GET_WINDOW_MAX_BYTES) in max_bytes_desc
 
 
-def test_search_text_model_bounds_equal_runtime_bounds() -> None:
-    # R5: the schema/model bound and the runtime `_bounded_int` bound are the same
-    # numbers, so a future edit to one without the other fails here.
-    props = ArtifactSearchRequest.model_json_schema()["properties"]
-    for field, (low, high) in _CONTEXT_BOUNDS.items():
-        assert props[field]["minimum"] == low, field
-        assert props[field]["maximum"] == high, field
+def test_get_find_forward_returns_match_window(migrated_url: str) -> None:
+    body = b"boot ok\nBUG: KASAN slab-out-of-bounds\nCall Trace:\n func+0x1\n"
+    store = _SearchStore(body)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="BUG: KASAN"
+            )
+            assert resp.status == "available"
+            assert data_bool(resp, "match_found") is True
+            assert data_int(resp, "match_line") == 2
+            assert "BUG: KASAN" in data_str(resp, "content")
+            assert data_int(resp, "match_offset") == body.index(b"BUG: KASAN")
+
+    asyncio.run(_run())
 
 
-def test_artifacts_search_text_quarantined_is_not_found(migrated_url: str) -> None:
+def test_get_find_no_match(migrated_url: str) -> None:
+    store = _SearchStore(b"clean boot\nno crash here\n")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="BUG:"
+            )
+            assert resp.status == "available"
+            assert data_bool(resp, "match_found") is False
+            assert "content" not in resp.data
+
+    asyncio.run(_run())
+
+
+def test_get_find_backward_from_end(migrated_url: str) -> None:
+    body = b"BUG: first\nmid\nBUG: second\nend\n"
+    store = _SearchStore(body)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool,
+                _ctx(),
+                artifact_id=red_id,
+                store_factory=lambda: store,
+                find="BUG:",
+                direction="backward",
+            )
+            assert data_int(resp, "match_offset") == body.rindex(b"BUG:")
+
+    asyncio.run(_run())
+
+
+def test_get_find_oversized_rejects(migrated_url: str) -> None:
+    store = _SearchStore(b"", size=_MAX_WINDOWED_FETCH_BYTES + 1)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="BUG:"
+            )
+            assert resp.status == "error"
+            assert resp.data["reason"] == "artifact_too_large"
+
+    asyncio.run(_run())
+
+
+def test_get_find_malformed_rejects(migrated_url: str) -> None:
+    store = _SearchStore(b"anything")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="a||b"
+            )
+            assert resp.status == "error"
+            assert resp.data["reason"] == "bad_search_input"
+
+    asyncio.run(_run())
+
+
+def test_get_backward_no_find_is_tail(migrated_url: str) -> None:
+    body = b"".join(b"line %d\n" % i for i in range(10000))  # larger than one window
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool,
+                _ctx(),
+                artifact_id=red_id,
+                store_factory=lambda: _SearchStore(body),
+                direction="backward",
+            )
+            assert data_str(resp, "content").endswith("line 9999\n")
+            assert data_int(resp, "next_offset") > 0
+
+    asyncio.run(_run())
+
+
+def test_get_find_quarantined_is_not_found(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id, _, _ = await _seed_system_with_artifacts(pool)
             quar_id = await _seed_quarantined_artifact(pool, sys_id)
-            store = _SearchStore(b"panic")
-            resp = await _artifact_read_handlers(store).artifacts_search_text(
-                pool, _ctx(), request=_panic_search(quar_id)
+            store = _SearchStore(b"BUG: panic")
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=quar_id, store_factory=lambda: store, find="BUG:"
             )
-        assert resp.status == "error"
-        assert resp.error_category == "not_found"
-        assert store.got is False  # excluded by SQL before any object fetch
+            assert resp.status == "error"
+            assert resp.error_category == "not_found"
+            assert store.got is False  # excluded before any object fetch
+
+    asyncio.run(_run())
+
+
+def test_get_schema_advertises_find_and_direction() -> None:
+    props = _tool_param_schema("artifacts.get")
+    assert "find" in props and "direction" in props
+    assert "forward" in str(props["direction"]) and "backward" in str(props["direction"])
+    assert "no regex" in str(props["find"]["description"]).lower()
+
+
+def test_search_text_tool_is_removed() -> None:
+    # build_app + app.get_tool mirrors _tool_param_schema; an absent tool returns None.
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    kp = make_keypair()
+    verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
+    app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
+    assert asyncio.run(app.get_tool("artifacts.search_text")) is None
+    assert asyncio.run(app.get_tool("artifacts.get")) is not None
+
+
+def test_get_find_store_outage_omits_match_found(migrated_url: str) -> None:
+    # A transient store failure must not claim match_found=false (could-not-search != no-match);
+    # it degrades exactly like a plain artifacts.get: content_unavailable, no match_found.
+    error = CategorizedError("head down", category=ErrorCategory.TRANSPORT_FAILURE)
+    store = _SearchStore(b"BUG: KASAN", head_error=error)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="BUG:"
+            )
+            assert resp.status == "available"
+            assert resp.data["content_unavailable"] == "store_error"
+            assert "match_found" not in resp.data
 
     asyncio.run(_run())

@@ -654,7 +654,7 @@ def test_envelope_for_run_matched_line_absent_when_progress_has_none() -> None:
 
 _CONSOLE_ACCESS_EXPECTED = {
     "ref": "console",
-    "search": "artifacts.search_text",
+    "search": "artifacts.get",
     "full_text": "artifacts.get",
 }
 
