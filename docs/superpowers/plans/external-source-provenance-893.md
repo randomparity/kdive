@@ -50,7 +50,11 @@ exactly 256 chars → accepted; surrounding whitespace trimmed in the stored val
 
 **Files:**
 - `src/kdive/services/runs/complete_build.py`
-- `tests/services/runs/` (extend the complete-build service test, or add one)
+- tests live in `tests/mcp/lifecycle/test_complete_build_tool.py` — the canonical home that
+  already drives `CompleteBuildHandlers.complete_build` through the handler boundary with an
+  injected `_FakeValidator` and reads the persisted build step via `_build_step_result`. There is
+  no `tests/services/runs/` complete_build module; do not create one. The finalizer is exercised
+  through this handler test.
 
 **Behavior:**
 - `CompleteBuildFinalizer.complete(...)` gains a keyword `source_provenance: dict[str, str | bool]
@@ -76,7 +80,10 @@ unchanged.
 **Files:**
 - `src/kdive/mcp/tools/lifecycle/runs/complete_build.py`
 - `src/kdive/mcp/tools/lifecycle/runs/registrar.py` (add the two params + descriptions)
-- `tests/mcp/lifecycle/test_runs_tools.py` (handler-level, no transport)
+- `tests/mcp/lifecycle/test_complete_build_tool.py` (handler-level, no transport — same module as
+  Task 2). Surfacing (AC1) and verbatim/audit-exclusion (AC7) are asserted by calling the existing
+  `get_run` view (with `provider_resolver()` from `tests.mcp.systems_support`) and querying the
+  audit table, alongside the persisted-row assertions via `_build_step_result`.
 
 **Behavior:**
 - `CompleteBuildHandlers.complete_build(...)` gains `source_label: str | None = None`,
