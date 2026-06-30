@@ -197,3 +197,136 @@ def test_gdb_attach_seam_uses_engine_factory_with_staged_vmlinux(
         "transcript_path": transcript_path,
         "vmlinux_path": staged_vmlinux,
     }
+
+
+# --- ModuleDebuginfoResolver (#923, ADR-0278) ----------------------------------------------
+
+import io  # noqa: E402
+import struct  # noqa: E402
+import tarfile  # noqa: E402
+
+
+def _make_modules_tar(entries: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for name, data in entries.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def test_module_resolve_returns_path_and_identity() -> None:
+    tar = _make_modules_tar({"lib/modules/6.0/kernel/fs/foo.ko": b"ELF-foo"})
+    fetch = _RecordingFetch(data=tar)
+    resolver = debuginfo.ModuleDebuginfoResolver(
+        read_kernel_ref=lambda run_id: "runs/r1/kernel.tar",
+        fetch_object=fetch,
+        read_identity=lambda path: ("SRC123", "BID456"),
+    )
+    result = resolver.resolve("r1", "foo")
+    assert result.path.read_bytes() == b"ELF-foo"
+    assert result.srcversion == "SRC123"
+    assert result.build_id == "BID456"
+    assert fetch.refs == ["runs/r1/kernel.tar"]
+
+
+def test_module_resolve_absent_ko_raises_no_module_debuginfo() -> None:
+    tar = _make_modules_tar({"lib/modules/6.0/kernel/fs/other.ko": b"x"})
+    resolver = debuginfo.ModuleDebuginfoResolver(
+        read_kernel_ref=lambda run_id: "runs/r1/kernel.tar",
+        fetch_object=_RecordingFetch(data=tar),
+        read_identity=lambda path: (None, None),
+    )
+    with pytest.raises(CategorizedError) as exc:
+        resolver.resolve("r1", "foo")
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["reason"] == "no_module_debuginfo"
+    assert exc.value.details["module"] == "foo"
+    assert "CONFIG_DEBUG_INFO" in str(exc.value)
+
+
+def test_module_resolve_matches_dash_underscore_variant() -> None:
+    tar = _make_modules_tar({"lib/modules/6.0/kernel/foo-bar.ko": b"FB"})
+    resolver = debuginfo.ModuleDebuginfoResolver(
+        read_kernel_ref=lambda run_id: "k",
+        fetch_object=_RecordingFetch(data=tar),
+        read_identity=lambda path: (None, None),
+    )
+    result = resolver.resolve("r1", "foo_bar")
+    assert result.path.read_bytes() == b"FB"
+
+
+def test_module_resolve_caches_fetch_per_run() -> None:
+    tar = _make_modules_tar({"lib/modules/6.0/foo.ko": b"f"})
+    fetch = _RecordingFetch(data=tar)
+    resolver = debuginfo.ModuleDebuginfoResolver(
+        read_kernel_ref=lambda run_id: "k",
+        fetch_object=fetch,
+        read_identity=lambda path: (None, None),
+    )
+    resolver.resolve("r1", "foo")
+    resolver.resolve("r1", "foo")
+    assert len(fetch.refs) == 1
+
+
+def test_module_resolve_no_kernel_ref_raises_no_module_debuginfo() -> None:
+    resolver = debuginfo.ModuleDebuginfoResolver(
+        read_kernel_ref=lambda run_id: None,
+        fetch_object=_RecordingFetch(data=b"unused"),
+        read_identity=lambda path: (None, None),
+    )
+    with pytest.raises(CategorizedError) as exc:
+        resolver.resolve("r1", "foo")
+    assert exc.value.details["reason"] == "no_module_debuginfo"
+
+
+# --- parse_module_identity (pure ELF parse) -------------------------------------------------
+
+
+def _make_ko_elf(*, srcversion: bytes | None, build_id: bytes | None) -> bytes:
+    shstrtab = b"\x00.shstrtab\x00.modinfo\x00.note.gnu.build-id\x00"
+    modinfo = b"license=GPL\x00"
+    if srcversion is not None:
+        modinfo += b"srcversion=" + srcversion + b"\x00"
+    note = b""
+    if build_id is not None:
+        note = struct.pack("<III", 4, len(build_id), 3) + b"GNU\x00" + build_id
+
+    blobs = [(b"", b""), (b".shstrtab", shstrtab), (b".modinfo", modinfo)]
+    if build_id is not None:
+        blobs.append((b".note.gnu.build-id", note))
+
+    name_off = {b".shstrtab": 1, b".modinfo": 11, b".note.gnu.build-id": 20, b"": 0}
+    body = bytearray()
+    spans: list[tuple[int, int]] = []
+    cursor = 64
+    for _name, data in blobs:
+        spans.append((cursor, len(data)))
+        body += data
+        cursor += len(data)
+    sh_off = 64 + len(body)
+
+    shdrs = bytearray()
+    for (name, _data), (offset, size) in zip(blobs, spans, strict=True):
+        shdrs += struct.pack("<IIQQQQIIQQ", name_off[name], 1, 0, 0, offset, size, 0, 0, 0, 0)
+
+    shnum = len(blobs)
+    shstrndx = 1
+    ehdr = b"\x7fELF\x02\x01\x01" + b"\x00" * 9
+    ehdr += struct.pack("<HHIQQQIHHHHHH", 1, 62, 1, 0, 0, sh_off, 0, 64, 0, 0, 64, shnum, shstrndx)
+    return bytes(ehdr) + bytes(body) + bytes(shdrs)
+
+
+def test_parse_module_identity_reads_srcversion_and_build_id() -> None:
+    elf = _make_ko_elf(srcversion=b"ABCD1234", build_id=b"\xde\xad\xbe\xef")
+    assert debuginfo.parse_module_identity(elf) == ("ABCD1234", "deadbeef")
+
+
+def test_parse_module_identity_missing_build_id_returns_none() -> None:
+    elf = _make_ko_elf(srcversion=b"SRC", build_id=None)
+    assert debuginfo.parse_module_identity(elf) == ("SRC", None)
+
+
+def test_parse_module_identity_non_elf_returns_none() -> None:
+    assert debuginfo.parse_module_identity(b"not an elf file at all") == (None, None)

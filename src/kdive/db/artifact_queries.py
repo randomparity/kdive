@@ -19,6 +19,8 @@ _REDACTED_VMCORE_LIKE = "%-redacted"
 
 _DEBUGINFO_REF_SQL: LiteralString = "SELECT debuginfo_ref FROM runs WHERE id = %s"
 
+_KERNEL_REF_SQL: LiteralString = "SELECT kernel_ref FROM runs WHERE id = %s"
+
 _RUN_FETCH_CONTEXT_SQL: LiteralString = (
     "SELECT project, system_id, debuginfo_ref FROM runs WHERE id = %s"
 )
@@ -91,4 +93,20 @@ def debuginfo_ref_for_run_sync(conn: Connection, run_id: UUID) -> str | None:
     if row is None:
         return None
     ref = row["debuginfo_ref"]
+    return str(ref) if isinstance(ref, str) and ref else None
+
+
+def kernel_ref_for_run_sync(conn: Connection, run_id: UUID) -> str | None:
+    """Return the Run's published combined kernel+modules tar object key, or ``None``.
+
+    Sync for the same reason as :func:`debuginfo_ref_for_run_sync` (the gdb-MI ops run off the
+    event loop). ``None`` covers both an absent Run row and a NULL ``kernel_ref``; the caller (the
+    module-debuginfo resolver) treats both as ``no_module_debuginfo``.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_KERNEL_REF_SQL, (run_id,))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    ref = row["kernel_ref"]
     return str(ref) if isinstance(ref, str) and ref else None
