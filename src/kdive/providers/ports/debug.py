@@ -29,6 +29,13 @@ class GdbStopRecord(ProviderModel):
     timed_out: bool = False
 
 
+class GdbBacktrace(ProviderModel):
+    """A bounded, parsed gdb/MI stack backtrace."""
+
+    frames: list[GdbFrame]
+    truncated: bool = False
+
+
 class GdbBreakpointRef(ProviderModel):
     """One gdb/MI breakpoint reference."""
 
