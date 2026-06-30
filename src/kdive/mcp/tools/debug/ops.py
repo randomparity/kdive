@@ -62,11 +62,12 @@ def _gdbmi_maturity() -> dict[str, object]:
 
     The seven original ops act over a live gdbstub-backed DebugSession whose full round-trip
     (set_breakpoint -> continue -> read_registers) was proven live on real KVM (M2.8 B6 #680),
-    so they are ``implemented``. ``resolve_symbol`` (ADR-0248), ``backtrace`` and ``read_frame``
-    (ADR-0275), and ``disassemble`` (ADR-0276) ride that same proven attach transport and are
-    unit-tested against the scripted controller here; their specific ``-data-evaluate-expression``
-    / ``-stack-list-frames`` / ``-data-disassemble`` commands were not separately re-proven live,
-    so they are omitted from ``_LOCAL_PROVEN_DEBUG_TOOLS`` until a live exercise lands.
+    so they are ``implemented``. ``backtrace`` and ``read_frame`` (ADR-0275, PR#929) and
+    ``disassemble`` (ADR-0276, PR#932) ride that same transport and were each re-proven live
+    against a stopped ``schedule``, so they are in ``_LOCAL_PROVEN_DEBUG_TOOLS`` too.
+    ``resolve_symbol`` (ADR-0248) is unit-tested against the scripted controller only — its
+    ``-data-evaluate-expression`` form was not separately re-proven live — so it stays out of the
+    proven set until a live exercise lands.
     """
     return _docmeta.maturity_meta("implemented")
 
