@@ -32,7 +32,7 @@
 **Interfaces:**
 - Produces: `artifacts.run_id uuid NULL REFERENCES runs (id)`; partial index `artifacts_run_id_idx ON artifacts (run_id) WHERE run_id IS NOT NULL`; `Artifact.run_id: UUID | None`.
 
-- [ ] **Step 1: Write the failing test** — insert an `artifacts` row with a real `run_id` via `ARTIFACTS.insert(register_artifact_row(..., ))` (after Task 2 adds the kwarg, this test can set the field directly on the model) and assert the persisted row round-trips `run_id`; insert without it and assert `run_id is None`. Also assert the partial index exists (`pg_indexes`).
+- [ ] **Step 1: Write the failing test** — construct `Artifact(..., run_id=uuid4())` **directly** (do not go through `register_artifact_row`; its `run_id` keyword lands in Task 2) and `ARTIFACTS.insert` it; assert the persisted row round-trips `run_id`. Construct another `Artifact` with `run_id=None`, insert it, assert the persisted `run_id is None`. Also assert the partial index exists (query `pg_indexes` for `artifacts_run_id_idx`).
 - [ ] **Step 2: Run test to verify it fails** — `uv run python -m pytest tests/db/test_artifacts_run_id_column.py -q` → FAIL (`Artifact` has no `run_id` / column missing). Run with `KDIVE_REQUIRE_DOCKER=1`.
 - [ ] **Step 3: Implement** — write migration `0054_artifacts_run_id.sql`: `ALTER TABLE artifacts ADD COLUMN run_id uuid REFERENCES runs (id);` then `CREATE INDEX artifacts_run_id_idx ON artifacts (run_id) WHERE run_id IS NOT NULL;` (forward-only, ADR-0015). Add `run_id: UUID | None = None` to `Artifact`. The generic `Repository.insert` derives columns from `model_fields`, so no repository change is needed.
 - [ ] **Step 4: Run test to verify it passes** — same command → PASS. Confirm `just type` passes (model field is `UUID | None`).
@@ -76,7 +76,7 @@
 
 - [ ] **Step 1: Write the failing tests** —
   - resolver: two Runs on one System, both with a `boot` step; assert the later-`created_at` Run is returned. A System with no `boot` step → `None`. A `CREATED` Run with no `boot` step on the same System does not win.
-  - rotation: drive `_rotate_under_lock` (fake store + seeded console file) for a System whose most-recently-booted Run is R; assert every sealed part row has `run_id == R`. A System with no resolvable boot → parts carry `run_id IS NULL` and the job still succeeds. Simulate a resolver raise → parts NULL, job does not fail (best-effort).
+  - rotation: drive `_rotate_under_lock` (fake store + seeded console file) for a System whose most-recently-booted Run is R; assert every sealed part row has `run_id == R`. A System with no resolvable boot → parts carry `run_id IS NULL` and the job still succeeds. Simulate a resolver raise → assert the parts are stamped NULL **and** `console_rotate_handler` returns `str(system_id)` (success) so `write_sidecar` runs and the cursor advances — i.e. a resolver failure is contained inside the lock-held section before the sidecar write and never stalls rotation (a re-seal of the same delta on the next sweep would be the regression).
 - [ ] **Step 2: Run tests to verify they fail** — `uv run python -m pytest tests/services/runs/test_latest_booted_run_id.py tests/jobs/handlers/test_console_rotate_run_id.py -q` → FAIL.
 - [ ] **Step 3: Implement** —
   - `latest_booted_run_id`: the spec's query (`runs JOIN run_steps step='boot' WHERE system_id=%s ORDER BY r.created_at DESC LIMIT 1`). Wrap the DB call so an exception is caught by the caller (or return `None` and log once at the call site).
@@ -107,7 +107,7 @@
 - [ ] **Step 2: Run tests to verify they fail** — `uv run python -m pytest tests/mcp/tools/lifecycle/test_runs_get_console_manifest.py -q` → FAIL.
 - [ ] **Step 3: Implement** —
   - `list_run_console_artifacts`: `SELECT id, object_key, created_at FROM artifacts WHERE run_id=%s AND owner_kind='systems' AND sensitivity='redacted' ORDER BY created_at DESC, object_key DESC LIMIT %s` with `limit = CONSOLE_MANIFEST_MAX + 1` to detect overflow, plus a cheap `count(*)`; return `(rows[:MAX], total)`.
-  - `view.py`: call on the non-failed success path (where `console_ref` is computed), pass the result into `envelope_for_run`.
+  - `view.py`: await `list_run_console_artifacts(conn, run.id, limit=...)` **inside** the existing `async with pool.connection() as conn:` block (it closes before `envelope_for_run` is called, so the query cannot run after it), on the non-failed success path; thread the returned `(rows, total)` out and pass it into `envelope_for_run`.
   - `common.py`: a `_console_manifest_data(...)` helper returns `{}` when empty, else `{console_artifacts: [...], (console_artifacts_total/_truncated when truncated)}`; merge into the success-path `data` dict next to `_console_access_data`.
 - [ ] **Step 4: Run tests to verify they pass** — same command → PASS.
 - [ ] **Step 5: Commit** — `feat(935): expose a Run-scoped console manifest on runs.get`
