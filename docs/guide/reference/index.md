@@ -37,6 +37,7 @@
 | [`buildconfig.set`](buildconfig.md#buildconfigset) | `implemented` |
 | [`control.force_crash`](control.md#controlforce_crash) | `implemented` |
 | [`control.power`](control.md#controlpower) | `implemented` |
+| [`debug.backtrace`](debug.md#debugbacktrace) | `implemented` |
 | [`debug.clear_breakpoint`](debug.md#debugclear_breakpoint) | `implemented` |
 | [`debug.continue`](debug.md#debugcontinue) | `implemented` |
 | [`debug.end_session`](debug.md#debugend_session) | `implemented` |
@@ -44,6 +45,7 @@
 | [`debug.interrupt`](debug.md#debuginterrupt) | `implemented` |
 | [`debug.list_breakpoints`](debug.md#debuglist_breakpoints) | `implemented` |
 | [`debug.list_sessions`](debug.md#debuglist_sessions) | `implemented` |
+| [`debug.read_frame`](debug.md#debugread_frame) | `implemented` |
 | [`debug.read_memory`](debug.md#debugread_memory) | `implemented` |
 | [`debug.read_registers`](debug.md#debugread_registers) | `implemented` |
 | [`debug.resolve_symbol`](debug.md#debugresolve_symbol) | `implemented` |

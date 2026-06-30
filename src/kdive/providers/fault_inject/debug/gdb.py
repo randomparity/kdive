@@ -6,7 +6,9 @@ from pathlib import Path
 from threading import Lock
 
 from kdive.providers.ports.debug import (
+    GdbBacktrace,
     GdbBreakpointRef,
+    GdbFrame,
     GdbMiAttachment,
     GdbStopRecord,
 )
@@ -87,3 +89,25 @@ class FaultInjectDebugEngine:
 
     def interrupt(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
         return GdbStopRecord(reason="signal-received", stopped_thread="1")
+
+    def backtrace(self, attachment: GdbMiAttachment, *, max_frames: int = 64) -> GdbBacktrace:
+        del attachment, max_frames
+        return GdbBacktrace(
+            frames=[
+                GdbFrame(
+                    level=0,
+                    func="panic",
+                    addr="0xffffffff81000000",
+                    file="kernel/panic.c",
+                    line=1,
+                ),
+                GdbFrame(level=1, func="do_exit", addr="0xffffffff81001000"),
+            ],
+            truncated=False,
+        )
+
+    def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
+        del attachment
+        return GdbFrame(
+            level=level, func="panic", addr="0xffffffff81000000", file="kernel/panic.c", line=1
+        )

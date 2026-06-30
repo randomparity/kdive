@@ -271,6 +271,8 @@ def _op_for(op: str, runtime: DebugEngineRuntime, session_id: str, **kwargs: Any
         "resolve_symbol": debug_ops._resolve_symbol_op,
         "continue": debug_ops._continue_op,
         "interrupt": debug_ops._interrupt_op,
+        "backtrace": debug_ops._backtrace_op,
+        "read_frame": debug_ops._read_frame_op,
     }[op]
     return factory(session_id, **kwargs)
 
@@ -474,6 +476,126 @@ def test_resolve_symbol_bad_name_rejected_without_command(migrated_url: str) -> 
         assert resp.data["code"] == "bad_symbol_name"
         # The bad name is rejected in the engine op before any MI command is written.
         assert attach.controller.written == []
+
+    asyncio.run(_run())
+
+
+def test_backtrace_returns_walked(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-stack-list-frames": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {
+                                "stack": [
+                                    {
+                                        "frame": {
+                                            "level": "0",
+                                            "func": "panic",
+                                            "addr": "0xffffffff81000000",
+                                            "file": "kernel/panic.c",
+                                            "line": "42",
+                                        }
+                                    },
+                                    {"frame": {"level": "1", "func": "do_exit"}},
+                                ]
+                            },
+                        }
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for("backtrace", runtime, session_id, max_frames=64),
+            )
+        assert resp.status == "walked"
+        assert resp.data["frame_count"] == 2
+        assert resp.data["truncated"] is False
+        frames = cast("list[dict[str, Any]]", resp.data["frames"])
+        assert frames[0]["func"] == "panic"
+        assert frames[0]["line"] == 42
+        assert "debug.read_frame" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+def test_backtrace_running_inferior_is_categorized(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-stack-list-frames": [
+                        {
+                            "type": "result",
+                            "message": "error",
+                            "payload": {
+                                "msg": "Cannot execute this command while the target is running."
+                            },
+                        }
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for("backtrace", runtime, session_id, max_frames=64),
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "debug_attach_failure"
+        assert resp.data["code"] == "inferior_running"
+
+    asyncio.run(_run())
+
+
+def test_read_frame_returns_read(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-stack-list-frames 2 2": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {
+                                "stack": [
+                                    {
+                                        "frame": {
+                                            "level": "2",
+                                            "func": "schedule",
+                                            "addr": "0xffffffff8100a000",
+                                        }
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for("read_frame", runtime, session_id, level=2),
+            )
+        assert resp.status == "read"
+        assert resp.data["level"] == 2
+        frame = cast("dict[str, Any]", resp.data["frame"])
+        assert frame["func"] == "schedule"
 
     asyncio.run(_run())
 

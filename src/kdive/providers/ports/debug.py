@@ -29,6 +29,13 @@ class GdbStopRecord(ProviderModel):
     timed_out: bool = False
 
 
+class GdbBacktrace(ProviderModel):
+    """A bounded, parsed gdb/MI stack backtrace."""
+
+    frames: list[GdbFrame]
+    truncated: bool = False
+
+
 class GdbBreakpointRef(ProviderModel):
     """One gdb/MI breakpoint reference."""
 
@@ -182,6 +189,30 @@ class GdbMiEngine(Protocol):
 
         Raises:
             CategorizedError: ``DEBUG_ATTACH_FAILURE`` for gdb/MI command failures or
+                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+
+    def backtrace(self, attachment: GdbMiAttachment, *, max_frames: int) -> GdbBacktrace:
+        """Walk the stopped inferior's stack through gdb/MI, bounded to ``max_frames``.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_frame_count`` for an out-of-range
+                ``max_frames`` (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` /
+                ``inferior_running`` when the target is running, ``no_frames`` when gdb returns
+                no usable frame data, or for other gdb/MI command failures;
+                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+
+    def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
+        """Inspect one selected stack frame by ``level`` through gdb/MI.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_frame_level`` for a negative or
+                non-integer ``level`` (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` /
+                ``inferior_running`` when the target is running, ``no_frame_at_level`` when no
+                frame exists at ``level``, or for other gdb/MI command failures;
                 ``INFRASTRUCTURE_FAILURE`` for command timeouts.
         """
         ...

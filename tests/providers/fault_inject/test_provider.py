@@ -345,6 +345,18 @@ def test_attach_seam_returns_an_attachment_at_the_loopback_endpoint(tmp_path: Pa
     assert attachment.rsp_port == 1234
 
 
+def test_debug_engine_backtrace_and_read_frame(tmp_path: Path) -> None:
+    engine = FaultInjectDebugEngine()
+    attachment = fault_inject_attach_seam(
+        host="127.0.0.1", port=1234, run_id=str(_RUN), transcript_path=tmp_path / "bt.log"
+    )
+
+    bt = engine.backtrace(attachment, max_frames=64)
+    assert bt.truncated is False
+    assert [frame.level for frame in bt.frames] == [0, 1]
+    assert engine.read_frame(attachment, level=3).level == 3
+
+
 def test_debug_engine_set_and_list_breakpoints_round_trip(tmp_path: Path) -> None:
     engine = FaultInjectDebugEngine()
     attachment = fault_inject_attach_seam(
