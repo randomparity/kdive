@@ -73,6 +73,23 @@ class GdbWatchpointRef(ProviderModel):
     enabled: bool | None = None
 
 
+class GdbModule(ProviderModel):
+    """One loaded kernel module from a live gdbstub session (ADR-0278)."""
+
+    name: str | None = None
+    base_address: str | None = None
+    symbols_loaded: bool | None = None
+    identity_verified: bool | None = None
+
+
+class GdbModuleList(ProviderModel):
+    """A bounded, parsed list of loaded kernel modules (ADR-0278)."""
+
+    modules: list[GdbModule]
+    truncated: bool = False
+    decode_errors: int = 0
+
+
 class GdbController(Protocol):
     """Controller operations a gdb/MI attachment exposes."""
 
@@ -130,6 +147,8 @@ class GdbMiAttachment:
     rsp_port: int
     transcript_path: Path
     records: list[object] = field(default_factory=list)
+    run_id: str = ""
+    loaded_modules: set[str] = field(default_factory=set)
 
 
 class GdbMiEngine(Protocol):
@@ -310,6 +329,40 @@ class GdbMiEngine(Protocol):
             CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_watchpoint_id`` for a non-numeric id,
                 ``DEBUG_ATTACH_FAILURE`` for gdb/MI command failures, or ``INFRASTRUCTURE_FAILURE``
                 for command timeouts.
+        """
+        ...
+
+    def list_modules(self, attachment: GdbMiAttachment, *, max_modules: int) -> GdbModuleList:
+        """List loaded kernel modules by walking the ``modules`` list (ADR-0278).
+
+        Walks the kernel module list via internally-constructed expressions (never caller text),
+        bounded to ``max_modules`` (``truncated`` when more follow). A single undecodable row is
+        skipped and counted in ``decode_errors``; ``symbols_loaded`` reflects what this session
+        loaded.
+
+        Raises:
+            CategorizedError: ``DEBUG_ATTACH_FAILURE`` / ``inferior_running`` when the target is
+                running, ``module_decode_failed`` when the list head or base-address field cannot
+                be read; ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+
+    def load_module_symbols(
+        self, attachment: GdbMiAttachment, *, module: str, expected_base: int | None
+    ) -> GdbModule:
+        """Load symbols for one loaded module via ``add-symbol-file`` (ADR-0278).
+
+        Re-reads the module's current base, verifies the artifact ``.ko``'s identity against the
+        running module, then loads at the freshly-read base — never a passed-in address.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_module_name`` for a non-identifier
+                module, ``no_module_debuginfo`` when the ``.ko`` is unavailable;
+                ``DEBUG_ATTACH_FAILURE`` / ``module_not_loaded`` when the module is not in the live
+                list, ``stale_module_address`` when ``expected_base`` differs from the live base,
+                ``module_binary_mismatch`` when the ``.ko`` identity differs from the running
+                module, ``add_symbol_failed`` for a gdb error; ``INFRASTRUCTURE_FAILURE`` on a
+                timeout.
         """
         ...
 

@@ -19,6 +19,7 @@ from kdive.mcp.tools.debug.session_registry import GdbMiSessionRegistry
 from kdive.providers.ports.debug import (
     GdbFrame,
     GdbMiAttachment,
+    GdbModule,
     GdbStopRecord,
 )
 from kdive.providers.shared.debug_common import gdbmi
@@ -2119,3 +2120,249 @@ def test_resolve_writes_to_dest_not_run_id_derived_path(tmp_path: Path) -> None:
     resolver.resolve("../../etc/passwd", dest)
     assert dest.read_bytes() == b"SYMBOLS"
     assert dest.parent == tmp_path
+
+
+# --- list_modules (#923, ADR-0278) ----------------------------------------------------------
+
+
+def _eval(value: object) -> list[dict[str, object]]:
+    return [{"type": "result", "message": "done", "payload": {"value": value}}]
+
+
+def _eval_error(msg: str) -> list[dict[str, object]]:
+    return [{"type": "result", "message": "error", "payload": {"msg": msg}}]
+
+
+# A two-module walk: offset 8, head 0x1000, module1 ("ext4") at 0x2000 (node 0x2008),
+# module2 ("btrfs") at 0x3000 (node 0x3008), terminating back at the head.
+def _de(expr: str) -> str:
+    """The MI command the engine must emit: the expression double-quoted as one MI arg.
+
+    gdb/MI tokenizes the command line on whitespace, so a module cast such as
+    ``(struct module *)0x...`` (which contains spaces) must be quoted or MI rejects it.
+    """
+    return f'-data-evaluate-expression "{expr}"'
+
+
+_OFF = _de("&((struct module *)0)->list")
+_HEAD = _de("&modules")
+_FIRST = _de("modules.next")
+
+
+def _name_cmd(ptr: str) -> str:
+    return _de(f"((struct module *){ptr})->name")
+
+
+def _base_cmd(ptr: str, field: str = "mem[0].base") -> str:
+    return _de(f"((struct module *){ptr})->{field}")
+
+
+def _next_cmd(node: str) -> str:
+    return _de(f"((struct list_head *){node})->next")
+
+
+def _two_module_responses() -> dict[str, list[dict[str, object]]]:
+    return {
+        _OFF: _eval("(struct list_head *) 0x8"),
+        _HEAD: _eval("(struct list_head *) 0x1000"),
+        _FIRST: _eval("(struct list_head *) 0x2008"),
+        _name_cmd("0x2000"): _eval("\"ext4\", '\\000'"),
+        _base_cmd("0x2000"): _eval("(void *) 0x2000"),
+        _next_cmd("0x2008"): _eval("(struct list_head *) 0x3008"),
+        _name_cmd("0x3000"): _eval('"btrfs"'),
+        _base_cmd("0x3000"): _eval("0x3000"),
+        _next_cmd("0x3008"): _eval("(struct list_head *) 0x1000"),
+    }
+
+
+def test_list_modules_walks_two_modules(tmp_path: Path) -> None:
+    controller = _FakeMiController(responses=_two_module_responses())
+    attachment = _attachment(controller, tmp_path)
+    attachment.loaded_modules.add("ext4")
+    result = _engine().list_modules(attachment)
+    assert [m.name for m in result.modules] == ["ext4", "btrfs"]
+    assert [m.base_address for m in result.modules] == ["0x2000", "0x3000"]
+    assert [m.symbols_loaded for m in result.modules] == [True, False]
+    assert result.truncated is False
+    assert result.decode_errors == 0
+
+
+def test_list_modules_truncates_at_max(tmp_path: Path) -> None:
+    controller = _FakeMiController(responses=_two_module_responses())
+    result = _engine().list_modules(_attachment(controller, tmp_path), max_modules=1)
+    assert len(result.modules) == 1
+    assert result.truncated is True
+
+
+def test_list_modules_skips_garbage_row_and_counts(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    responses[_name_cmd("0x2000")] = _eval_error("Cannot access memory at address 0x2000")
+    controller = _FakeMiController(responses=responses)
+    result = _engine().list_modules(_attachment(controller, tmp_path))
+    assert [m.name for m in result.modules] == ["btrfs"]
+    assert result.decode_errors == 1
+
+
+def test_list_modules_running_target_is_inferior_running(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    responses[_OFF] = _eval_error("Cannot execute this command while the target is running.")
+    controller = _FakeMiController(responses=responses)
+    with pytest.raises(CategorizedError) as exc:
+        _engine().list_modules(_attachment(controller, tmp_path))
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "inferior_running"
+
+
+def test_list_modules_base_probe_failure_is_decode_failed(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    responses[_base_cmd("0x2000")] = _eval_error("no member named mem")
+    responses[_base_cmd("0x2000", "core_layout.base")] = _eval_error("no member named core_layout")
+    controller = _FakeMiController(responses=responses)
+    with pytest.raises(CategorizedError) as exc:
+        _engine().list_modules(_attachment(controller, tmp_path))
+    assert exc.value.details["code"] == "module_decode_failed"
+
+
+def test_list_modules_core_layout_fallback(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    # Kernel without mem[]: mem[0].base errors, core_layout.base resolves.
+    for ptr in ("0x2000", "0x3000"):
+        responses[_base_cmd(ptr)] = _eval_error("no member named mem")
+        responses[_base_cmd(ptr, "core_layout.base")] = _eval(f"(void *) {ptr}")
+    controller = _FakeMiController(responses=responses)
+    result = _engine().list_modules(_attachment(controller, tmp_path))
+    assert [m.base_address for m in result.modules] == ["0x2000", "0x3000"]
+
+
+# --- load_module_symbols (#923, ADR-0278) ---------------------------------------------------
+
+from kdive.providers.shared.debug_common.debuginfo import ModuleDebuginfo  # noqa: E402
+
+
+def _srcversion_cmd(ptr: str) -> str:
+    return _de(f"((struct module *){ptr})->srcversion")
+
+
+def _engine_with_resolver(info: ModuleDebuginfo | CategorizedError) -> GdbMiEngine:
+    def resolver(run_id: str, module: str) -> ModuleDebuginfo:
+        if isinstance(info, CategorizedError):
+            raise info
+        return info
+
+    return GdbMiEngine(
+        redactor=Redactor(registry=SecretRegistry()), module_debuginfo_resolver=resolver
+    )
+
+
+def _add_symbol_cmd(path: str, base: str) -> str:
+    return f'-interpreter-exec console "add-symbol-file {path} {base}"'
+
+
+def _load(
+    engine: GdbMiEngine, attachment: GdbMiAttachment, module: str, expected_base: int | None = None
+) -> GdbModule:
+    return engine.load_module_symbols(attachment, module=module, expected_base=expected_base)
+
+
+def test_load_module_symbols_loads_at_fresh_base(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    responses[_srcversion_cmd("0x2000")] = _eval('"SRC123"')
+    controller = _FakeMiController(responses=responses)
+    engine = _engine_with_resolver(
+        ModuleDebuginfo(path=Path("/x/ext4.ko"), srcversion="SRC123", build_id=None)
+    )
+    attachment = _attachment(controller, tmp_path)
+    result = engine.load_module_symbols(attachment, module="ext4", expected_base=None)
+    assert result.symbols_loaded is True
+    assert result.identity_verified is True
+    assert result.base_address == "0x2000"
+    assert "ext4" in attachment.loaded_modules
+    assert _add_symbol_cmd("/x/ext4.ko", "0x2000") in controller.written
+
+
+def test_load_module_symbols_bad_name_issues_no_command(tmp_path: Path) -> None:
+    controller = _FakeMiController(responses=_two_module_responses())
+    engine = _engine_with_resolver(ModuleDebuginfo(Path("/x.ko"), None, None))
+    with pytest.raises(CategorizedError) as exc:
+        _load(engine, _attachment(controller, tmp_path), "foo;rm")
+    assert exc.value.details["code"] == "bad_module_name"
+    assert controller.written == []
+
+
+def test_load_module_symbols_absent_module_is_not_loaded(tmp_path: Path) -> None:
+    controller = _FakeMiController(responses=_two_module_responses())
+    engine = _engine_with_resolver(ModuleDebuginfo(Path("/x.ko"), "S", None))
+    with pytest.raises(CategorizedError) as exc:
+        _load(engine, _attachment(controller, tmp_path), "xfs")
+    assert exc.value.details["code"] == "module_not_loaded"
+    assert not any("add-symbol-file" in c for c in controller.written)
+
+
+def test_load_module_symbols_stale_base_is_rejected(tmp_path: Path) -> None:
+    controller = _FakeMiController(responses=_two_module_responses())
+    engine = _engine_with_resolver(ModuleDebuginfo(Path("/x.ko"), "S", None))
+    with pytest.raises(CategorizedError) as exc:
+        _load(engine, _attachment(controller, tmp_path), "ext4", 0x9999)
+    assert exc.value.details["code"] == "stale_module_address"
+    assert not any("add-symbol-file" in c for c in controller.written)
+
+
+def test_load_module_symbols_missing_debuginfo_propagates(tmp_path: Path) -> None:
+    controller = _FakeMiController(responses=_two_module_responses())
+    boom = CategorizedError(
+        "no .ko",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"reason": "no_module_debuginfo", "module": "ext4"},
+    )
+    engine = _engine_with_resolver(boom)
+    with pytest.raises(CategorizedError) as exc:
+        _load(engine, _attachment(controller, tmp_path), "ext4")
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["reason"] == "no_module_debuginfo"
+
+
+def test_load_module_symbols_binary_mismatch_is_rejected(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    responses[_srcversion_cmd("0x2000")] = _eval('"LIVE_SRC"')
+    controller = _FakeMiController(responses=responses)
+    engine = _engine_with_resolver(ModuleDebuginfo(Path("/x.ko"), "ARTIFACT_SRC", None))
+    with pytest.raises(CategorizedError) as exc:
+        _load(engine, _attachment(controller, tmp_path), "ext4")
+    assert exc.value.details["code"] == "module_binary_mismatch"
+    assert not any("add-symbol-file" in c for c in controller.written)
+
+
+def test_load_module_symbols_identity_unavailable_loads_unverified(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    responses[_srcversion_cmd("0x2000")] = _eval_error("no member named srcversion")
+    responses[_de("&((struct module *)0x2000)->build_id")] = _eval_error("no member named build_id")
+    controller = _FakeMiController(responses=responses)
+    engine = _engine_with_resolver(ModuleDebuginfo(Path("/x/ext4.ko"), None, None))
+    result = _load(engine, _attachment(controller, tmp_path), "ext4")
+    assert result.identity_verified is False
+    assert result.symbols_loaded is True
+
+
+def test_load_module_symbols_build_id_fallback_matches(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    responses[_srcversion_cmd("0x2000")] = _eval_error("no member named srcversion")
+    responses[_de("&((struct module *)0x2000)->build_id")] = _eval("(unsigned char (*)[20]) 0x2010")
+    responses["-data-read-memory-bytes 0x2010 20"] = [
+        {"type": "result", "message": "done", "payload": {"memory": [{"contents": "de" * 20}]}}
+    ]
+    controller = _FakeMiController(responses=responses)
+    engine = _engine_with_resolver(ModuleDebuginfo(Path("/x/ext4.ko"), None, "de" * 20))
+    result = _load(engine, _attachment(controller, tmp_path), "ext4")
+    assert result.identity_verified is True
+
+
+def test_load_module_symbols_idempotent_reload(tmp_path: Path) -> None:
+    responses = _two_module_responses()
+    responses[_srcversion_cmd("0x2000")] = _eval('"SRC123"')
+    controller = _FakeMiController(responses=responses)
+    attachment = _attachment(controller, tmp_path)
+    attachment.loaded_modules.add("ext4")
+    engine = _engine_with_resolver(ModuleDebuginfo(Path("/x/ext4.ko"), "SRC123", None))
+    out = _load(engine, attachment, "ext4")
+    assert out.symbols_loaded is True
+    assert not any("add-symbol-file" in c for c in controller.written)

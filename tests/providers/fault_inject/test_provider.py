@@ -343,6 +343,7 @@ def test_attach_seam_returns_an_attachment_at_the_loopback_endpoint(tmp_path: Pa
 
     assert attachment.rsp_host == "127.0.0.1"
     assert attachment.rsp_port == 1234
+    assert attachment.run_id == str(_RUN)  # run_id carried for load_module_symbols (#923)
 
 
 def test_debug_engine_backtrace_and_read_frame(tmp_path: Path) -> None:
@@ -408,3 +409,30 @@ def test_debug_engine_watchpoints_round_trip(tmp_path: Path) -> None:
     assert [w.number for w in listed] == [ref.number]
     engine.clear_watchpoint(attachment, ref.number)
     assert engine.list_watchpoints(attachment) == []
+
+
+def test_debug_engine_list_modules(tmp_path: Path) -> None:
+    engine = FaultInjectDebugEngine()
+    attachment = fault_inject_attach_seam(
+        host="127.0.0.1", port=1234, run_id=str(_RUN), transcript_path=tmp_path / "mods.log"
+    )
+
+    result = engine.list_modules(attachment, max_modules=64)
+    assert result.truncated is False
+    assert result.decode_errors == 0
+    assert result.modules
+    assert result.modules[0].name is not None
+    assert result.modules[0].base_address is not None
+    assert result.modules[0].symbols_loaded is False
+
+
+def test_debug_engine_load_module_symbols(tmp_path: Path) -> None:
+    engine = FaultInjectDebugEngine()
+    attachment = fault_inject_attach_seam(
+        host="127.0.0.1", port=1234, run_id=str(_RUN), transcript_path=tmp_path / "load.log"
+    )
+
+    loaded = engine.load_module_symbols(attachment, module="fault_inject_demo", expected_base=None)
+    assert loaded.symbols_loaded is True
+    listed = engine.list_modules(attachment, max_modules=64)
+    assert listed.modules[0].symbols_loaded is True

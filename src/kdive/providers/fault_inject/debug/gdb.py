@@ -12,9 +12,14 @@ from kdive.providers.ports.debug import (
     GdbFrame,
     GdbInstruction,
     GdbMiAttachment,
+    GdbModule,
+    GdbModuleList,
     GdbStopRecord,
     GdbWatchpointRef,
 )
+
+_SYNTHETIC_MODULE = "fault_inject_demo"
+_SYNTHETIC_MODULE_BASE = "0xffffffffa0000000"
 
 
 class _SyntheticGdbController:
@@ -43,6 +48,7 @@ def fault_inject_attach_seam(
         rsp_host=host,
         rsp_port=port,
         transcript_path=transcript_path,
+        run_id=run_id,
     )
 
 
@@ -52,6 +58,7 @@ class FaultInjectDebugEngine:
     def __init__(self) -> None:
         self._breakpoints: dict[Path, dict[str, GdbBreakpointRef]] = {}
         self._watchpoints: dict[Path, dict[str, GdbWatchpointRef]] = {}
+        self._loaded_modules: dict[Path, set[str]] = {}
         self._next = 1
         self._lock = Lock()
 
@@ -150,6 +157,35 @@ class FaultInjectDebugEngine:
             bucket.pop(number, None)
             if not bucket:
                 self._watchpoints.pop(attachment.transcript_path, None)
+
+    def list_modules(self, attachment: GdbMiAttachment, *, max_modules: int = 512) -> GdbModuleList:
+        del max_modules
+        with self._lock:
+            loaded = self._loaded_modules.get(attachment.transcript_path, set())
+        return GdbModuleList(
+            modules=[
+                GdbModule(
+                    name=_SYNTHETIC_MODULE,
+                    base_address=_SYNTHETIC_MODULE_BASE,
+                    symbols_loaded=_SYNTHETIC_MODULE in loaded,
+                )
+            ],
+            truncated=False,
+            decode_errors=0,
+        )
+
+    def load_module_symbols(
+        self, attachment: GdbMiAttachment, *, module: str, expected_base: int | None = None
+    ) -> GdbModule:
+        del expected_base
+        with self._lock:
+            self._loaded_modules.setdefault(attachment.transcript_path, set()).add(module)
+        return GdbModule(
+            name=module,
+            base_address=_SYNTHETIC_MODULE_BASE,
+            symbols_loaded=True,
+            identity_verified=True,
+        )
 
     def disassemble(
         self,

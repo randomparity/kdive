@@ -46,8 +46,10 @@
 | [`debug.get_session`](debug.md#debugget_session) | `implemented` |
 | [`debug.interrupt`](debug.md#debuginterrupt) | `implemented` |
 | [`debug.list_breakpoints`](debug.md#debuglist_breakpoints) | `implemented` |
+| [`debug.list_modules`](debug.md#debuglist_modules) | `implemented` |
 | [`debug.list_sessions`](debug.md#debuglist_sessions) | `implemented` |
 | [`debug.list_watchpoints`](debug.md#debuglist_watchpoints) | `implemented` |
+| [`debug.load_module_symbols`](debug.md#debugload_module_symbols) | `implemented` |
 | [`debug.read_frame`](debug.md#debugread_frame) | `implemented` |
 | [`debug.read_memory`](debug.md#debugread_memory) | `implemented` |
 | [`debug.read_registers`](debug.md#debugread_registers) | `implemented` |

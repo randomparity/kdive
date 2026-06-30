@@ -76,6 +76,7 @@ from kdive.providers.remote_libvirt.resource_details import project_resource_det
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactory
+from kdive.providers.shared.debug_common.debuginfo import real_module_debuginfo_resolver
 from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
 from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote
 from kdive.security.secrets.redaction import Redactor
@@ -260,6 +261,7 @@ def _debug_capabilities(secret_registry: SecretRegistry) -> DebugCapabilities:
         engine=GdbMiEngine(
             redactor_factory=lambda: Redactor(registry=secret_registry),
             host_policy=allow_acl_remote,
+            module_debuginfo_resolver=real_module_debuginfo_resolver(),
         ),
     )
 
