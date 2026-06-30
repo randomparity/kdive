@@ -546,8 +546,14 @@ _LOCAL_PLANNED_PROVIDER_TOOLS: frozenset[str] = frozenset()
 # those nine are `implemented`. The later stack/disassembly ops were each re-proven live over the
 # same transport: `backtrace`/`read_frame` against a stopped `schedule` (PR#929, #920/ADR-0275),
 # and `disassemble` (symbol + address paths, plus the categorized bad-bounds/bad-target/unknown
-# failures) against a stopped `schedule` (PR#932, #921/ADR-0276). `resolve_symbol` (ADR-0248) is
-# unit-tested only and stays out until its `-data-evaluate-expression` form is re-proven live.
+# failures) against a stopped `schedule` (PR#932, #921/ADR-0276). The three watchpoint ops
+# (#922/ADR-0277) were proven live against a stopped `schedule` on real KVM: set_watchpoint on
+# `jiffies` (symbol path) and on an explicit address, list_watchpoints (which caught the live
+# bare-row `-break-list` shape), clear_watchpoint, the categorized bad_byte_count/bad_target/
+# bad_symbol_name failures, and — decisively — `continue` trapped on the watched write
+# (reason=watchpoint-trigger in tick_do_update_jiffies64), so a hardware watchpoint does fire over
+# this gdbstub. `resolve_symbol` (ADR-0248) is unit-tested only and stays out until its
+# `-data-evaluate-expression` form is re-proven live.
 _LOCAL_PROVEN_DEBUG_TOOLS = frozenset(
     {
         "debug.set_breakpoint",
@@ -562,6 +568,9 @@ _LOCAL_PROVEN_DEBUG_TOOLS = frozenset(
         "debug.backtrace",
         "debug.read_frame",
         "debug.disassemble",
+        "debug.set_watchpoint",
+        "debug.list_watchpoints",
+        "debug.clear_watchpoint",
     }
 )
 

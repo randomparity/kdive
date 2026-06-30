@@ -56,16 +56,19 @@ clear — without exposing arbitrary gdb expression execution.
 A kernel data watchpoint over the gdbstub is necessarily a **hardware** (debug-register)
 watchpoint: a software watchpoint single-steps the inferior, which is infeasible for a running
 kernel. That constraint has three consequences the engine cannot fully detect at `set` time, so
-these tools are **not** added to the live-proof set until a live exercise lands (matching the
-ADR-0248/0276 precedent), and the `set` result is best-effort:
+the `set` result is best-effort. The #922 live exercise on real KVM proved the full set/list/
+clear cycle and that a watchpoint **does** trap (a `continue` after watching `jiffies` stopped
+with `reason=watchpoint-trigger` in `tick_do_update_jiffies64`), so the tools are in the
+live-proof set; the caveats below remain environment-dependent risks, not universal failures:
 
-- **The stub may accept the watchpoint but never trap.** QEMU's gdbstub does not reliably trap on
+- **A stub may accept the watchpoint but never trap.** QEMU's gdbstub does not always trap on
   hardware debug-register events — the documented reason `set_breakpoint` uses a *software*
-  breakpoint and avoids `-break-insert -h` (#711, see the `set_breakpoint` comment in
-  `gdbmi.py`). The same risk applies to watchpoints. When a watchpoint is set but never traps, the
-  failure is **silent at `set` time**: gdb returns `^done,wpt=…`. The observable signal is the
-  next `debug.continue` returning `timed_out=True` with no stop — not a `set`-time error. The
-  `set_watchpoint` tool docstring names this, and `debug.continue` is a `suggested_next_action`.
+  breakpoint and avoids `-break-insert -h` (#711, see the `set_breakpoint` comment in `gdbmi.py`).
+  The #922 host trapped cleanly, but trap reliability is kernel/QEMU/host-dependent. When a
+  watchpoint is set but never traps, the failure is **silent at `set` time**: gdb returns
+  `^done,wpt=…`. The observable signal is the next `debug.continue` returning `timed_out=True`
+  with no stop — not a `set`-time error. The `set_watchpoint` tool docstring names this, and
+  `debug.continue` is a `suggested_next_action`.
 - **Debug registers are scarce (4 on x86-64).** Setting more watchpoints than free debug registers
   (counting any hardware breakpoints) typically returns `^done,wpt=…` at `set` time and only fails
   at **insertion** on the next `continue` ("Could not insert hardware watchpoints: …"). So

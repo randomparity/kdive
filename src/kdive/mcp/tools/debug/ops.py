@@ -68,10 +68,10 @@ def _gdbmi_maturity() -> dict[str, object]:
     against a stopped ``schedule``, so they are in ``_LOCAL_PROVEN_DEBUG_TOOLS`` too.
     ``resolve_symbol`` (ADR-0248) is unit-tested against the scripted controller only — its
     ``-data-evaluate-expression`` form was not separately re-proven live — so it stays out of the
-    proven set until a live exercise lands. The three watchpoint ops (ADR-0277) follow the same
-    ``resolve_symbol`` precedent: ``implemented`` (they ride the proven transport and are
-    unit-tested against the scripted controller) but not in ``_LOCAL_PROVEN_DEBUG_TOOLS`` until a
-    live exercise lands, since a hardware watchpoint over the gdbstub is not yet live-proven.
+    proven set until a live exercise lands. The three watchpoint ops (ADR-0277) were proven live on
+    real KVM against a stopped ``schedule`` (set on ``jiffies`` + an explicit address, list, clear,
+    and a ``continue`` that trapped on the watched write in ``tick_do_update_jiffies64``), so they
+    join ``_LOCAL_PROVEN_DEBUG_TOOLS``.
     """
     return _docmeta.maturity_meta("implemented")
 
