@@ -50,13 +50,21 @@ engine itself read, an engine-staged file path — never accepted as caller text
 
 2. **`GdbMiEngine.load_module_symbols(attachment, *, module, expected_base=None) ->
    GdbModule`.** Gate `module` to a module-name identifier (`bad_module_name`) before any
-   MI. Then **re-read the module's current base, fresh** — the engine never loads at a
-   passed-in address, only at the address it just read, so a silent wrong-address load is
-   impossible by construction. A module absent from the live list is `module_not_loaded`
+   MI. If `module` is already in the per-attachment `loaded_modules` set (and still passes the
+   staleness checks), return `loaded` without re-issuing `add-symbol-file` — a second load of
+   the same objfile adds a duplicate symbol table (confirm is off at attach), so the loaded-set
+   is the idempotency guard, not just a reporting field. Then **re-read the module's current
+   base, fresh** — the engine never loads at a passed-in address, only at the address it just
+   read, so a silent wrong-**address** load is impossible by construction. The re-walk shares
+   `list_modules`' bound, so a module enumerated past `MAX_MODULES` reads as `module_not_loaded`
+   (>512 loaded modules is rare and flagged by `list_modules` `truncated`). A module absent from
+   the live list is `module_not_loaded`
    (it was listed earlier and has since unloaded — stale); an `expected_base` that differs
    from the freshly-read base is `stale_module_address` (the module reloaded at a new
    address since the agent's `list_modules`, so refuse rather than load where the agent did
-   not intend). Resolve the `.ko` via an injected `ModuleDebuginfoResolver` keyed on
+   not intend; `expected_base` is optional — when omitted the load proceeds at the fresh base
+   and the criterion-4 stale-address guard requires the agent to thread it back). Resolve the
+   `.ko` via an injected `ModuleDebuginfoResolver` keyed on
    `attachment.run_id` (lazy, run-id-keyed fetch/extract of the combined `kernel_ref` tar →
    the `.ko` path); an absent or DWARF-less module is `no_module_debuginfo`
    (`CONFIGURATION_ERROR`) **with remediation**. Load via
@@ -103,9 +111,13 @@ change is additive.
 - ADR-0034's expression-evaluation exclusion stays intact: the module-list walk and the
   watch/add-symbol commands are constructed from gated identifiers, engine-read numeric
   pointers, and engine-staged paths, never a caller expression.
-- A silent wrong-address load is impossible: `load_module_symbols` always loads at the base
-  it re-reads at call time, and surfaces `module_not_loaded` / `stale_module_address` when
-  the agent's view is stale.
+- A silent wrong-**address** load is impossible: `load_module_symbols` always loads at the
+  base it re-reads at call time, and surfaces `module_not_loaded` / `stale_module_address`
+  when the agent's view is stale. Criterion 4 is scoped to this enumeration/address staleness;
+  it does **not** verify the artifact `.ko` is the same binary as the running module (a
+  guest-side or rebuilt same-named module at the same base would load mismatched symbols
+  silently). An in-memory `srcversion`/build-id cross-check is a clean additive follow-up, not
+  claimed here.
 - Remote-libvirt inherits both ops for free (shared engine), matching the rest of the tier.
 - Failures are categorized with `data["code"]` discriminators (`bad_module_name`,
   `no_module_debuginfo`, `inferior_running`, `module_decode_failed`, `module_not_loaded`,
