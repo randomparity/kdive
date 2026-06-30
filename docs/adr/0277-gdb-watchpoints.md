@@ -53,13 +53,23 @@ caller expression.
    writer). Read (`-r`) and access (`-a`) watchpoints are a possible additive future flag; adding
    them now would widen the surface past the acceptance criteria.
 
-3. **"Target cannot support" classification.** A `_watchpoint_command` wrapper inspects the
-   redacted `^error` `msg`. gdb reports an unsupported or exhausted watchpoint with a message
-   naming the watchpoint (e.g. "Target does not support hardware watchpoints.", "Could not insert
-   hardware watchpoints: …"); a `_WATCHPOINT_UNSUPPORTED_RE` match re-raises as
-   `DEBUG_ATTACH_FAILURE` / `code="watchpoint_unsupported"` so an agent can branch on it. Other
-   gdb errors pass through unchanged. These gdb messages carry no secret, so matching the redacted
-   text is sound (the same property ADR-0275/0276 rely on).
+3. **`^error` classification.** A `_watchpoint_command` wrapper inspects the redacted `^error`
+   `msg`, in precedence order:
+   - A **running-target** error (the inferior is free-running, e.g. set right after attach or
+     between `continue`s) matches the existing `_RUNNING_RE` the stack ops use and re-raises as
+     `DEBUG_ATTACH_FAILURE` / `code="inferior_running"` (the agent fixes it with `debug.interrupt`).
+     This is checked **first** so a running-target message that also names a watchpoint is not
+     swallowed by the unsupported match.
+   - A **support-refusal** error re-raises as `DEBUG_ATTACH_FAILURE` /
+     `code="watchpoint_unsupported"`. `_WATCHPOINT_UNSUPPORTED_RE` is anchored to genuine
+     capability phrasing ("does not support", "cannot set hardware watchpoint") rather than any
+     message merely containing "watchpoint", so it does not capture running-target or insert-time
+     ("Could not insert hardware watchpoints…", which gdb reports on the next `continue`, not at
+     `set`) messages.
+   - Any other gdb error passes through unchanged.
+
+   These gdb messages carry no secret, so matching the redacted text is sound (the same property
+   ADR-0275/0276 rely on).
 
 4. **`GdbMiEngine.list_watchpoints(attachment) -> list[GdbWatchpointRef]`.** Issue `-break-list`
    and keep only rows whose `type` names a watchpoint (`"hw watchpoint"`, `"read watchpoint"`,
@@ -109,7 +119,7 @@ additive.
   identifier or a numeric address plus a bounded size, never a caller expression.
 - Remote-libvirt inherits the ops for free (shared engine), matching the rest of the tier.
 - Failures are categorized with `data["code"]` discriminators (`bad_byte_count`, `bad_target`,
-  `bad_address`, `bad_symbol_name` via `resolve_symbol`, `bad_watchpoint_id`,
+  `bad_address`, `bad_symbol_name` via `resolve_symbol`, `bad_watchpoint_id`, `inferior_running`,
   `watchpoint_unsupported`) so an agent can branch on the cause.
 - The new tools are covered by the `exposure.py` completeness guard, the
   `_BEHAVIOR_TESTS_BY_TOOL` coverage guard, the `tool_index` completeness guard, and the

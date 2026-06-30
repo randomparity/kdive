@@ -72,12 +72,22 @@ ADR-0248/0276 precedent), and the `set` result is best-effort:
   exhaustion, like the non-trap case, surfaces on `continue`, not `set`. `list_watchpoints` is the
   affordance for an agent to see how many watchpoints are already armed before adding more.
 - **`watchpoint_unsupported` covers only the set-time refusal.** Criterion 5 detects the case where
-  gdb refuses `-break-watch` up front with a watchpoint-naming `^error` (e.g. "Target does not
-  support hardware watchpoints."). A stub that accepts-but-never-traps, or fails at insert time,
-  is **not** a `set`-time error and surfaces as the `continue` timeout above. This honestly scopes
-  the #922 acceptance criterion "clearly reports when the target cannot support the requested
-  watchpoint": the engine reports the refusal it can see and routes the silent cases to the
-  `continue`-timeout signal rather than claiming a guarantee it cannot keep.
+  gdb refuses `-break-watch` up front with a *support-refusal* `^error` (e.g. "Target does not
+  support hardware watchpoints." / "Cannot set hardware watchpoint…"). A stub that
+  accepts-but-never-traps, or fails at insert time, is **not** a `set`-time error and surfaces as
+  the `continue` timeout above. This honestly scopes the #922 acceptance criterion "clearly reports
+  when the target cannot support the requested watchpoint": the engine reports the refusal it can
+  see and routes the silent cases to the `continue`-timeout signal rather than claiming a guarantee
+  it cannot keep.
+- **Setting while the inferior is running maps to `inferior_running`, not `watchpoint_unsupported`.**
+  If `-break-watch` is issued while the kernel is free-running (e.g. right after attach, or between
+  `continue`s), gdb may answer with a running-target `^error`. That is a transient state the agent
+  fixes with `debug.interrupt`, not a missing capability, so the engine classifies it as
+  `DEBUG_ATTACH_FAILURE` / `code="inferior_running"` — reusing the existing `_RUNNING_RE` the stack
+  ops use, **checked before** the `watchpoint_unsupported` match. The `watchpoint_unsupported`
+  matcher is therefore anchored to genuine support-refusal phrasing ("does not support", "cannot
+  set hardware watchpoint") rather than any message merely containing the word "watchpoint", so a
+  running-target or insert-time message is not misclassified as an unsupported target.
 
 ## Success criteria
 
@@ -124,9 +134,12 @@ brief:
 - **Engine** (`providers/shared/debug_common/gdbmi.py`): `set_watchpoint(...)` validates
   `byte_count` against `WATCH_BYTE_SIZES`, resolves the target via a shared `_resolve_target`
   (factored out of `disassemble`'s `_disassemble_start`), constructs the numeric write-watch
-  expression, and parses the redacted `wpt` ref; a `_watchpoint_command` wrapper maps a
-  watchpoint-naming `^error` to `watchpoint_unsupported`. `list_watchpoints(...)` filters
-  `breakpoint_rows` to watchpoint-typed rows. `clear_watchpoint(...)` gates the id and deletes.
+  expression, and parses the redacted `wpt` ref (a malformed `^done` with no `wpt` key →
+  `DEBUG_ATTACH_FAILURE`, mirroring the breakpoint `_breakpoint_ref` path); a `_watchpoint_command`
+  wrapper maps a running-target `^error` (`_RUNNING_RE`) to `inferior_running` **first**, then a
+  support-refusal `^error` to `watchpoint_unsupported`, passing any other gdb error through.
+  `list_watchpoints(...)` filters `breakpoint_rows` to watchpoint-typed rows. `clear_watchpoint(...)`
+  gates the id and deletes.
 - **Tool** (`mcp/tools/debug/ops.py`): `_set_watchpoint_op` / `_list_watchpoints_op` /
   `_clear_watchpoint_op` plus their `_register_*`, via `run_engine_op` (contributor, `live`
   session); set/clear `mutating`, list `read_only`.
@@ -145,8 +158,10 @@ evaluation".
 - **Engine** (`tests/providers/local_libvirt/test_debug_gdbmi.py`): symbol-path resolution +
   command shape, address-path (no symbol resolution written), `bad_byte_count` (parametrized
   e.g. 0, 3, 16) with no command written, `bad_target` (both/neither), `bad_address`,
-  `watchpoint_unsupported` on a watchpoint-naming `^error`, pass-through of an unrelated gdb
-  error, `list_watchpoints` filtering watchpoints from a realistic mixed `-break-list` table —
+  `watchpoint_unsupported` on a support-refusal `^error`, `inferior_running` on a running-target
+  `^error` (asserting it is **not** misclassified as `watchpoint_unsupported`), a malformed `^done`
+  with no `wpt` key → `DEBUG_ATTACH_FAILURE`, pass-through of an unrelated gdb error,
+  `list_watchpoints` filtering watchpoints from a realistic mixed `-break-list` table —
   a `bkpt` body row whose `type="breakpoint"` alongside one whose `type="hw watchpoint"` with a
   populated `what`, asserting only the watchpoint is returned and its `expr` maps from `what`
   (pinning the assumed watchpoint-row wire shape) — `clear` numeric-id gate + `-break-delete`
