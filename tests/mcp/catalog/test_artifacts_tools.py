@@ -1147,3 +1147,10 @@ def test_get_find_quarantined_is_not_found(migrated_url: str) -> None:
             assert store.got is False  # excluded before any object fetch
 
     asyncio.run(_run())
+
+
+def test_get_schema_advertises_find_and_direction() -> None:
+    props = _tool_param_schema("artifacts.get")
+    assert "find" in props and "direction" in props
+    assert "forward" in str(props["direction"]) and "backward" in str(props["direction"])
+    assert "no regex" in str(props["find"]["description"]).lower()
