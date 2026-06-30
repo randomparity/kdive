@@ -364,6 +364,30 @@ def test_complete_build_provenance_verbatim_and_not_audited(migrated_url: str) -
     asyncio.run(_run())
 
 
+def test_provenance_is_bound_on_first_completion(migrated_url: str) -> None:
+    # AC6: a replay cannot add or change provenance — the first completion binds it.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            handlers = _build_handlers(validator)
+            first = await handlers.complete_build(pool, _ctx(), str(run_id), build_id=None)
+            second = await handlers.complete_build(
+                pool,
+                _ctx(),
+                str(run_id),
+                build_id=None,
+                source_label="late-claim",
+                source_ref="late-ref",
+            )
+            result = await _build_step_result(pool, run_id)
+        assert first.status == "succeeded" and second.status == "succeeded"
+        assert validator.calls == 1  # the replay short-circuits before finalize
+        assert "build_provenance" not in result  # the replay's claim is not recorded
+
+    asyncio.run(_run())
+
+
 def test_contributor_completes_external_build(migrated_url: str) -> None:
     # ADR-0234 end-to-end: a contributor (not operator) can finalize an external build it
     # uploaded. Proves the re-gated ingest core admits the role and drives the Run to SUCCEEDED,
