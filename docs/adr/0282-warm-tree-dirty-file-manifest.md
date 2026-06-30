@@ -84,6 +84,14 @@ No schema, migration, RBAC, or config change.
 - **Untracked content is flagged, never listed or digested.** `untracked: true` says "some
   untracked non-ignored file was in the staged tree"; the file names and content are not
   captured (ADR-0265 cost trade). `tree_sha` and `dirty_files` cover tracked state only.
+- **`dirty_files` paths are not redacted.** They come from `git diff` of the operator-controlled
+  `KDIVE_KERNEL_SRC` tree — the same trust posture as the existing unredacted `label` /
+  `resolved_commit`, not the guest/console/gdb output the redaction invariant governs. Surfaced
+  verbatim; the `runs.get` read is already project-scoped.
+- **`dirty: true` with `dirty_files` absent is valid.** `dirty` (`git status --porcelain`) and
+  `dirty_files` (`git diff --name-only HEAD`) are different probes: absence means untracked-only
+  dirtiness or a tracked change `git diff HEAD` does not name (e.g. a file-mode-only change), not
+  a contract violation.
 - **`dirty_files` is git-tracked, gitignored-blind, and bounded.** Like `dirty`/`tree_sha`,
   it ignores gitignored paths (a modified `.config` or stale `.o` is invisible). A list longer
   than `DIRTY_FILES_MANIFEST_MAX` is truncated with `dirty_files_truncated: true`; the agent

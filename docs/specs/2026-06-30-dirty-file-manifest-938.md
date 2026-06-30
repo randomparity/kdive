@@ -88,7 +88,20 @@ unchanged at `{label, resolved_commit, dirty: false}` (preserving the ADR-0265 c
 are signalled by `untracked: true` but not listed (consistent with the ADR-0265 cost trade).
 `dirty_files` non-empty therefore co-occurs with `tree_sha` (both derive from tracked
 changes), but the two probes are independent and best-effort: a probe failure can leave one
-present and the other absent.
+present and the other absent. `dirty` (from `git status --porcelain`) and `dirty_files` (from
+`git diff --name-only HEAD`) also use different git probes, so `dirty: true` with `dirty_files`
+absent is a valid outcome — it means "no captured tracked-path diff" (untracked-only dirtiness,
+or a tracked change `git diff HEAD` does not name, e.g. a file-mode-only change). Absence is not
+a contract violation; an agent reads `untracked` and `tree_sha` alongside it.
+
+### Redaction posture
+
+`dirty_files` paths come from `git diff` of the operator-staged `KDIVE_KERNEL_SRC` tree — the
+same operator-controlled source as the existing `label` and `resolved_commit` fields, not
+untrusted guest/console/gdb output. Like those fields, the paths are surfaced verbatim and are
+**not** run through the secret redactor; the cross-cutting redaction invariant (AGENTS.md) governs
+guest-originated output, which these are not. The `runs.get` read is already project-scoped, so a
+path carries no cross-project signal.
 
 ### Bounding
 
