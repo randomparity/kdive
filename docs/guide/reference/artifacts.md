@@ -155,7 +155,14 @@ capped at a hard 24 KiB token-safe ceiling and KDIVE_ARTIFACT_INLINE_MAX_BYTES).
 
 `implemented` · `read-only`
 
-List the redacted artifacts for a System. Requires viewer.
+List a System's redacted artifacts. Requires viewer.
+
+This listing is **System-scoped**: it returns every redacted artifact owned by the System
+and so mixes all of the System's Runs and debug sessions. Console artifacts use two naming
+conventions — `console-<run_id>` is a Run's one-time boot-window snapshot, and
+`console-part-<gen>-<index>` are the rotating post-readiness console parts. Neither is
+correlated to a Run by this listing; to get the console artifacts for a specific Run, read
+`runs.get` `data.console_artifacts` (its Run-scoped console manifest) instead.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
