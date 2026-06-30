@@ -22,6 +22,8 @@ from tests.mcp.test_tool_index import _verifier
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _TOOLSET_RE = re.compile(r"toolsets/(?P<ns>[a-z_]+)\.md$")
+_AGENT_INDEX = _REPO_ROOT / "docs/guide/agent-index.md"
+_BACKTICKED_TOOL_RE = re.compile(r"`([a-z_]+\.[a-z_]+)`")
 
 
 def _live_tool_names() -> set[str]:
@@ -56,3 +58,23 @@ def test_each_served_toolset_doc_names_exactly_its_namespace_tools() -> None:
         stale = named - expected
         assert not missing, f"{path.name} omits live {namespace} tools: {sorted(missing)}"
         assert not stale, f"{path.name} names non-live {namespace} tools: {sorted(stale)}"
+
+
+def test_agent_index_references_only_live_tools() -> None:
+    """The index names a subset of tools across namespaces; each must be a live tool.
+
+    Unlike the per-namespace docs, the index is not exact-set (it intentionally names only
+    the first tool of each stage), so this is a stale-only check: an index that steers an
+    agent to a renamed or removed tool trips CI.
+    """
+    live = _live_tool_names()
+    live_namespaces = {name.split(".", 1)[0] for name in live}
+    body = _AGENT_INDEX.read_text(encoding="utf-8")
+    referenced = {
+        token
+        for token in _BACKTICKED_TOOL_RE.findall(body)
+        if token.split(".", 1)[0] in live_namespaces
+    }
+    assert referenced, "no tool references found in agent-index.md (regex drift?)"
+    stale = referenced - live
+    assert not stale, f"agent-index.md references non-live tools: {sorted(stale)}"
