@@ -67,6 +67,8 @@ from kdive.providers.local_libvirt.lifecycle.provisioning import domain_name_for
 from kdive.reconciler import loop
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.services.accounting import ledger as accounting
+from kdive.services.allocation import release as release_service
+from tests.clock import FrozenClock
 from tests.integration._seed import (
     provisioning_profile,
     register_resource,
@@ -86,6 +88,9 @@ from tests.mcp.systems_support import (
 )
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
+# The frozen instant the release path stamps active_ended_at at in the #3 reconciliation
+# test; the seeded active_started_at is pinned 2h before it so the billed interval is exact.
+_RELEASE_AT = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 _COEFF_LOCAL = Decimal("1.0")
 _SYSTEM_PROVISION_HANDLERS = SystemProvisionHandlers(
     _TEST_PROFILE_POLICY,
@@ -508,7 +513,9 @@ async def _provision_job_for_system(pool: AsyncConnectionPool, system_id: str) -
     return Job.model_validate(row)
 
 
-def test_c3_reconciliation_nets_to_actual_and_usage_matches(migrated_url: str) -> None:
+def test_c3_reconciliation_nets_to_actual_and_usage_matches(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """#3: the honest provision -> ready -> release path bills rate*active_hours, usage matches.
 
     Drives the real handlers end to end (no explicitly-seeded billing interval): provision
@@ -542,12 +549,16 @@ def test_c3_reconciliation_nets_to_actual_and_usage_matches(migrated_url: str) -
                     conn, job, resolver=_provider_resolver(provisioner=_FakeProvisioner())
                 )
             # The handler stamped active_started_at on ready; back-date it 2h to simulate
-            # the lease running before release (no explicit seed of the interval).
+            # the lease running before release. release stamps active_ended_at from its own
+            # datetime.now(UTC); freeze that read and seed the start against the same frozen
+            # instant so the billed interval is exactly 2h regardless of run-time drift
+            # between the two reads (the #931 wall-clock flake — see tests/clock.py).
             assert (await _alloc(pool, alloc_id)).active_started_at is not None
+            monkeypatch.setattr(release_service, "datetime", FrozenClock(_RELEASE_AT))
             async with pool.connection() as conn:
                 await conn.execute(
                     "UPDATE allocations SET active_started_at = %s WHERE id = %s",
-                    (datetime.now(UTC) - timedelta(hours=2), alloc_id),
+                    (_RELEASE_AT - timedelta(hours=2), alloc_id),
                 )
             resp = await release_allocation(pool, op, grant.object_id)
             assert resp.status == "released"
