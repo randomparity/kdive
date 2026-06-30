@@ -50,12 +50,14 @@ tools. No `-stack-select-frame` session state, no frame-local values.
    (carrying `level`) — an out-of-range level is a "no frame here" result, not a config error.
    Otherwise return the single redacted frame.
 
-3. **Running-inferior classification.** `-stack-list-frames` against a running target returns a
-   gdb `^error` that `execute_mi_command` already maps to `DEBUG_ATTACH_FAILURE` (payload
-   redacted). A `_stack_command` wrapper inspects the redacted error `msg`; a `running` match
-   re-raises `DEBUG_ATTACH_FAILURE` / `code="inferior_running"`. Other gdb errors pass through
-   unchanged. The running error message carries no secret, so matching the redacted text is
-   sound.
+3. **gdb `^error` classification.** A `_stack_command` wrapper inspects the redacted `^error`
+   `msg` that `execute_mi_command` surfaces. A `running` match re-raises
+   `DEBUG_ATTACH_FAILURE` / `code="inferior_running"`. Real gdb reports an out-of-range level or
+   an unwindable target with `^error,"No frame at level N."` / `"No stack."` rather than an empty
+   `^done`, so a `no (stack|frame)` match re-raises the caller's missing-data code (`no_frames` /
+   `no_frame_at_level`) — the same code the empty-`^done` path raises, so both response shapes
+   converge. Other gdb errors pass through unchanged. These gdb messages carry no secret, so
+   matching the redacted text is sound.
 
 4. **`debug.backtrace` / `debug.read_frame` MCP tools.** Read-only, `contributor` RBAC (every
    live-debug op is `contributor`), gated to a `live` `DebugSession` by the shared

@@ -69,12 +69,14 @@ them, plus two MCP tools wired through the existing `run_engine_op` gate.
   out-of-range level is a "no frame here" answer, not a `bad_frame_level` config error.
   Otherwise return the redacted single frame.
 
-- **Running-inferior classification.** `-stack-list-frames` against a running target returns a
-  gdb `^error` (`"Cannot execute this command while the target is running."`). The shared
-  `execute_mi_command` already maps `^error` → `DEBUG_ATTACH_FAILURE` and redacts the payload.
-  A small `_stack_command` wrapper inspects the (redacted) error `msg`; if it matches
-  `running`, it re-raises `DEBUG_ATTACH_FAILURE` / `code="inferior_running"`. Any other gdb
-  error passes through unchanged.
+- **gdb `^error` classification.** A `_stack_command` wrapper inspects the (redacted) `^error`
+  `msg` that `execute_mi_command` surfaces. A running target (`"...while the target is
+  running."`, `"Selected thread is running."`) becomes `code="inferior_running"`. Real gdb
+  reports an out-of-range level or an unwindable target with `^error,"No frame at level N."` /
+  `"No stack."` (not an empty `^done`), so a `no (stack|frame)` match becomes the caller's
+  missing-data code (`no_frames` for backtrace, `no_frame_at_level` for read_frame) — the same
+  code the empty-`^done` path raises, so both gdb response shapes yield the documented code. Any
+  other gdb error passes through unchanged.
 
 - **`GdbBacktrace(ProviderModel)`** in `providers/ports/debug.py`: `frames: list[GdbFrame]`,
   `truncated: bool`. The two methods are added to the `GdbMiEngine` Protocol; the
