@@ -72,7 +72,12 @@ the recorded result unchanged.
 The fields are the caller's own input echoed back to its own project read, so they are **not** run
 through the secret redactor (same posture as `label`, ADR-0264). They are documented as opaque
 provenance labels — never cloned, fetched, or resolved — so a credential-bearing URL pasted into
-`source_ref` is an opaque string, not a fetch target.
+`source_ref` is an opaque string, not a fetch target. This verbatim posture intentionally diverges
+from the server-build lane's convention that `build_provenance` URL fields are userinfo-stripped
+(`build_artifacts/results.py`): it is safe because the client-attested fields are not written to the
+`runs.complete_build` audit record (`args` carry only `run_id`) and are surfaced only to the owning
+project's VIEWER read, and the `client_attested: true` flag marks them as un-sanitized client claims
+so a maintainer does not assume the whole map is uniformly sanitized.
 
 Update the external-lane descriptions (`runs.complete_build`, the `runs.create` `build_profile`
 external paragraph, `runs.profile_examples` external note) to mention the optional source

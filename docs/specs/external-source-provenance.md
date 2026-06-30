@@ -73,6 +73,14 @@ A new pure helper `domain/external_provenance.py` mirrors `domain/labels.py`:
   through the secret redactor (same posture as `label`, ADR-0264). They are documented as opaque
   labels, never cloned or resolved, so a credential-bearing URL pasted into `source_ref` is treated
   as an opaque string, not a fetch target.
+- This verbatim posture **intentionally diverges** from the server-build lane's convention that
+  `build_provenance` URL fields are userinfo-stripped (`build_artifacts/results.py`: the git
+  lane's `remote` is recorded stripped). The divergence is safe because the client-attested fields
+  are never cloned/resolved, are **not** written to the `runs.complete_build` audit record (its
+  `args` carry only `run_id`), and are surfaced only to the owning project's VIEWER read — never a
+  broader sink. The `client_attested: true` flag marks the values as un-sanitized client claims so
+  a future maintainer extending `build_provenance` handling does not assume the whole map is
+  uniformly sanitized.
 
 ### Threading
 
@@ -95,6 +103,8 @@ and a replay returns the recorded result.
 5. The recorded provenance round-trips through `BuildStepResult.dump`/`load` and the
    `_optional_provenance_map` coercion (str/bool values only).
 6. Provenance is bound on first completion; an idempotent replay returns the recorded result.
+7. A credential-like `source_ref` is echoed verbatim in `runs.get data.build_provenance` **and**
+   does not appear in the `runs.complete_build` audit record (its `args` carry only `run_id`).
 
 ## Considered & rejected
 
