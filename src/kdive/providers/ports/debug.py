@@ -233,6 +233,31 @@ class GdbMiEngine(Protocol):
         """
         ...
 
+    def disassemble(
+        self,
+        attachment: GdbMiAttachment,
+        *,
+        symbol: str | None,
+        address: int | None,
+        instruction_count: int,
+    ) -> GdbDisassembly:
+        """Disassemble a bounded forward instruction window around a symbol or address.
+
+        Exactly one of ``symbol`` / ``address`` must be given. Bounds the response to
+        ``instruction_count`` (slicing an oversized range), with ``truncated`` when more
+        instructions follow.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_instruction_count`` for an
+                out-of-range count, ``bad_target`` when not exactly one of symbol/address is
+                given, ``bad_address`` for an out-of-range address, ``bad_symbol_name`` (via
+                ``resolve_symbol``) for a non-identifier name (all raised before the disassemble
+                command); ``DEBUG_ATTACH_FAILURE`` / ``no_instructions`` when gdb returns no
+                usable instruction data or the address is unreadable; ``INFRASTRUCTURE_FAILURE``
+                for command timeouts.
+        """
+        ...
+
 
 class AttachSeam(Protocol):
     """Lazy attach seam returning a live gdb/MI attachment."""

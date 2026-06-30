@@ -357,6 +357,18 @@ def test_debug_engine_backtrace_and_read_frame(tmp_path: Path) -> None:
     assert engine.read_frame(attachment, level=3).level == 3
 
 
+def test_debug_engine_disassemble(tmp_path: Path) -> None:
+    engine = FaultInjectDebugEngine()
+    attachment = fault_inject_attach_seam(
+        host="127.0.0.1", port=1234, run_id=str(_RUN), transcript_path=tmp_path / "dis.log"
+    )
+
+    result = engine.disassemble(attachment, symbol=None, address=0x1000, instruction_count=8)
+    assert result.truncated is False
+    assert result.instructions
+    assert result.instructions[0].inst is not None
+
+
 def test_debug_engine_set_and_list_breakpoints_round_trip(tmp_path: Path) -> None:
     engine = FaultInjectDebugEngine()
     attachment = fault_inject_attach_seam(
