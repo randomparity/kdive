@@ -1805,6 +1805,74 @@ def test_list_watchpoints_filters_watchpoint_rows(tmp_path: Path) -> None:
     assert refs[0].enabled is True
 
 
+def test_list_watchpoints_parses_bare_body_rows(tmp_path: Path) -> None:
+    # Live gdbstub `-break-list` (ground truth from a real KVM run, #922) flattens body rows to
+    # bare dicts with no `bkpt` wrapper; the watchpoint row carries `what`, no `addr`.
+    controller = _FakeMiController(
+        responses={
+            "-break-list": [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {
+                        "BreakpointTable": {
+                            "body": [
+                                {
+                                    "number": "1",
+                                    "type": "breakpoint",
+                                    "enabled": "y",
+                                    "addr": "0xffffffff82455b20",
+                                    "func": "schedule",
+                                },
+                                {
+                                    "number": "2",
+                                    "type": "hw watchpoint",
+                                    "enabled": "y",
+                                    "what": "*(char(*)[8])0xffffffff83009a00",
+                                },
+                            ]
+                        }
+                    },
+                }
+            ]
+        }
+    )
+    refs = _engine().list_watchpoints(_attachment(controller, tmp_path))
+    assert [r.number for r in refs] == ["2"]
+    assert refs[0].expr == "*(char(*)[8])0xffffffff83009a00"
+    assert refs[0].enabled is True
+
+
+def test_list_breakpoints_parses_bare_body_rows(tmp_path: Path) -> None:
+    # Same live `-break-list` bare-row shape (#922): the shared `breakpoint_rows` fix must also
+    # keep `list_breakpoints` working when pygdbmi does not wrap rows in `bkpt`.
+    controller = _FakeMiController(
+        responses={
+            "-break-list": [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {
+                        "BreakpointTable": {
+                            "body": [
+                                {
+                                    "number": "1",
+                                    "type": "breakpoint",
+                                    "addr": "0xffffffff82455b20",
+                                    "func": "schedule",
+                                }
+                            ]
+                        }
+                    },
+                }
+            ]
+        }
+    )
+    refs = _engine().list_breakpoints(_attachment(controller, tmp_path))
+    assert [r.number for r in refs] == ["1"]
+    assert refs[0].func == "schedule"
+
+
 def test_clear_watchpoint_requires_numeric_id(tmp_path: Path) -> None:
     controller = _FakeMiController()
     with pytest.raises(CategorizedError) as exc:
