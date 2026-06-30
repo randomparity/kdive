@@ -827,9 +827,7 @@ class GdbMiEngine:
 
     def _module_eval_required(self, attachment: GdbMiAttachment, expr: str) -> int:
         try:
-            value = evaluate_value(
-                self.execute_mi_command(attachment, f"-data-evaluate-expression {expr}")
-            )
+            value = evaluate_value(self.execute_mi_command(attachment, _eval_command(expr)))
         except CategorizedError as exc:
             raise self._module_walk_error(exc) from exc
         addr = _hex_from(value)
@@ -843,9 +841,7 @@ class GdbMiEngine:
 
     def _module_eval_optional(self, attachment: GdbMiAttachment, expr: str) -> int | None:
         try:
-            value = evaluate_value(
-                self.execute_mi_command(attachment, f"-data-evaluate-expression {expr}")
-            )
+            value = evaluate_value(self.execute_mi_command(attachment, _eval_command(expr)))
         except CategorizedError:
             return None
         return _hex_from(value)
@@ -855,7 +851,7 @@ class GdbMiEngine:
             value = evaluate_value(
                 self.execute_mi_command(
                     attachment,
-                    f"-data-evaluate-expression ((struct module *)0x{module_ptr:x})->name",
+                    _eval_command(f"((struct module *)0x{module_ptr:x})->name"),
                 )
             )
         except CategorizedError:
@@ -976,7 +972,7 @@ class GdbMiEngine:
             value = evaluate_value(
                 self.execute_mi_command(
                     attachment,
-                    f"-data-evaluate-expression ((struct module *)0x{module_ptr:x})->{field}",
+                    _eval_command(f"((struct module *)0x{module_ptr:x})->{field}"),
                 )
             )
         except CategorizedError:
@@ -1113,6 +1109,18 @@ def _missing_module_resolver(run_id: str, module: str) -> ModuleDebuginfo:
         category=ErrorCategory.MISSING_DEPENDENCY,
         details={"missing_tools": ["module_debuginfo_resolver"], "module": module},
     )
+
+
+def _eval_command(expr: str) -> str:
+    """The ``-data-evaluate-expression`` MI command for ``expr``, quoted as one MI argument.
+
+    gdb/MI tokenizes the command line on whitespace. Module-walk expressions such as
+    ``(struct module *)0x...`` contain spaces, so the expression must be double-quoted or MI
+    splits it into several arguments and rejects the command with a usage error (ADR-0278).
+    The expressions are engine-constructed from gated identifiers and numeric pointers and never
+    contain a double quote, so no escaping is required.
+    """
+    return f'-data-evaluate-expression "{expr}"'
 
 
 def _hex_from(value: object) -> int | None:

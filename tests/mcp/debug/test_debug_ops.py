@@ -1025,14 +1025,19 @@ def _module_walk_responses() -> dict[str, list[dict[str, object]]]:
     def ev(value: str) -> list[dict[str, object]]:
         return [{"type": "result", "message": "done", "payload": {"value": value}}]
 
+    # The engine double-quotes each expression as one MI argument (module casts contain spaces,
+    # which gdb/MI would otherwise tokenize into several arguments); key the fake to that form.
+    def de(expr: str) -> str:
+        return f'-data-evaluate-expression "{expr}"'
+
     return {
-        "-data-evaluate-expression &((struct module *)0)->list": ev("0x8"),
-        "-data-evaluate-expression &modules": ev("0x1000"),
-        "-data-evaluate-expression modules.next": ev("0x2008"),
-        "-data-evaluate-expression ((struct module *)0x2000)->name": ev('"ext4"'),
-        "-data-evaluate-expression ((struct module *)0x2000)->mem[0].base": ev("0x2000"),
-        "-data-evaluate-expression ((struct module *)0x2000)->srcversion": ev('"SRC1"'),
-        "-data-evaluate-expression ((struct list_head *)0x2008)->next": ev("0x1000"),
+        de("&((struct module *)0)->list"): ev("0x8"),
+        de("&modules"): ev("0x1000"),
+        de("modules.next"): ev("0x2008"),
+        de("((struct module *)0x2000)->name"): ev('"ext4"'),
+        de("((struct module *)0x2000)->mem[0].base"): ev("0x2000"),
+        de("((struct module *)0x2000)->srcversion"): ev('"SRC1"'),
+        de("((struct list_head *)0x2008)->next"): ev("0x1000"),
     }
 
 

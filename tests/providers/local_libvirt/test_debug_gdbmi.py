@@ -2135,21 +2135,30 @@ def _eval_error(msg: str) -> list[dict[str, object]]:
 
 # A two-module walk: offset 8, head 0x1000, module1 ("ext4") at 0x2000 (node 0x2008),
 # module2 ("btrfs") at 0x3000 (node 0x3008), terminating back at the head.
-_OFF = "-data-evaluate-expression &((struct module *)0)->list"
-_HEAD = "-data-evaluate-expression &modules"
-_FIRST = "-data-evaluate-expression modules.next"
+def _de(expr: str) -> str:
+    """The MI command the engine must emit: the expression double-quoted as one MI arg.
+
+    gdb/MI tokenizes the command line on whitespace, so a module cast such as
+    ``(struct module *)0x...`` (which contains spaces) must be quoted or MI rejects it.
+    """
+    return f'-data-evaluate-expression "{expr}"'
+
+
+_OFF = _de("&((struct module *)0)->list")
+_HEAD = _de("&modules")
+_FIRST = _de("modules.next")
 
 
 def _name_cmd(ptr: str) -> str:
-    return f"-data-evaluate-expression ((struct module *){ptr})->name"
+    return _de(f"((struct module *){ptr})->name")
 
 
 def _base_cmd(ptr: str, field: str = "mem[0].base") -> str:
-    return f"-data-evaluate-expression ((struct module *){ptr})->{field}"
+    return _de(f"((struct module *){ptr})->{field}")
 
 
 def _next_cmd(node: str) -> str:
-    return f"-data-evaluate-expression ((struct list_head *){node})->next"
+    return _de(f"((struct list_head *){node})->next")
 
 
 def _two_module_responses() -> dict[str, list[dict[str, object]]]:
@@ -2231,7 +2240,7 @@ from kdive.providers.shared.debug_common.debuginfo import ModuleDebuginfo  # noq
 
 
 def _srcversion_cmd(ptr: str) -> str:
-    return f"-data-evaluate-expression ((struct module *){ptr})->srcversion"
+    return _de(f"((struct module *){ptr})->srcversion")
 
 
 def _engine_with_resolver(info: ModuleDebuginfo | CategorizedError) -> GdbMiEngine:
@@ -2326,9 +2335,7 @@ def test_load_module_symbols_binary_mismatch_is_rejected(tmp_path: Path) -> None
 def test_load_module_symbols_identity_unavailable_loads_unverified(tmp_path: Path) -> None:
     responses = _two_module_responses()
     responses[_srcversion_cmd("0x2000")] = _eval_error("no member named srcversion")
-    responses["-data-evaluate-expression &((struct module *)0x2000)->build_id"] = _eval_error(
-        "no member named build_id"
-    )
+    responses[_de("&((struct module *)0x2000)->build_id")] = _eval_error("no member named build_id")
     controller = _FakeMiController(responses=responses)
     engine = _engine_with_resolver(ModuleDebuginfo(Path("/x/ext4.ko"), None, None))
     result = _load(engine, _attachment(controller, tmp_path), "ext4")
@@ -2339,9 +2346,7 @@ def test_load_module_symbols_identity_unavailable_loads_unverified(tmp_path: Pat
 def test_load_module_symbols_build_id_fallback_matches(tmp_path: Path) -> None:
     responses = _two_module_responses()
     responses[_srcversion_cmd("0x2000")] = _eval_error("no member named srcversion")
-    responses["-data-evaluate-expression &((struct module *)0x2000)->build_id"] = _eval(
-        "(unsigned char (*)[20]) 0x2010"
-    )
+    responses[_de("&((struct module *)0x2000)->build_id")] = _eval("(unsigned char (*)[20]) 0x2010")
     responses["-data-read-memory-bytes 0x2010 20"] = [
         {"type": "result", "message": "done", "payload": {"memory": [{"contents": "de" * 20}]}}
     ]
