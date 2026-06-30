@@ -26,10 +26,10 @@
 - Modify: `src/kdive/providers/ports/debug.py`
 
 **Interfaces:**
-- Produces: `GdbModule(ProviderModel)` with `name: str | None = None`, `base_address: str | None = None`, `symbols_loaded: bool | None = None`, `identity_verified: bool | None = None` (defaults so `model_dump(exclude_none=True)` drops list-only/load-only fields); `GdbMiAttachment` gains `run_id: str = ""` and `loaded_modules: set[str] = field(default_factory=set)`.
+- Produces: `GdbModule(ProviderModel)` with `name: str | None = None`, `base_address: str | None = None`, `symbols_loaded: bool | None = None`, `identity_verified: bool | None = None` (defaults so `model_dump(exclude_none=True)` drops list-only/load-only fields); `GdbModuleList(ProviderModel)` with `modules: list[GdbModule]`, `truncated: bool = False`, `decode_errors: int = 0` (the `list_modules` return type — a flat list cannot carry truncated/decode_errors); `GdbMiAttachment` gains `run_id: str = ""` and `loaded_modules: set[str] = field(default_factory=set)`.
 - Note: the two Protocol *methods* are deliberately NOT added here — they land with their implementations in Tasks 3/4 so `just type` stays green.
 
-- [ ] **Step 1:** Add the `GdbModule` model after `GdbWatchpointRef`; add `run_id`/`loaded_modules` to the `GdbMiAttachment` dataclass (defaults keep existing fakes/`engine.attach` construction working).
+- [ ] **Step 1:** Add the `GdbModule` and `GdbModuleList` models after `GdbWatchpointRef`; add `run_id`/`loaded_modules` to the `GdbMiAttachment` dataclass (defaults keep existing fakes/`engine.attach` construction working).
 - [ ] **Step 2:** `just type` and `just lint` — Expected: PASS (purely additive; no Protocol widening, no impl gap).
 - [ ] **Step 3:** Commit `feat(923): add GdbModule record + module attachment fields`.
 
@@ -63,13 +63,13 @@
 - Test: the engine unit test module (`tests/.../test_gdbmi.py` or the scripted-controller tests under `tests/mcp/debug/` — match the tree) + the fault-inject debug test
 
 **Interfaces:**
-- Consumes: `GdbModule` (Task 1); `evaluate_value`, `execute_mi_command`, `_redactor`, `_config_error`, `_RUNNING_RE` (gdbmi.py).
-- Produces: Protocol + concrete `list_modules(self, attachment, *, max_modules: int = MAX_MODULES) -> list[GdbModule]`; module constant `MAX_MODULES = 512`; private helpers `_module_walk(self, attachment) -> list[_RawModule]` (yields `name: str`, `base: int`, `node: int`) and `_module_base_field(self, attachment, first_node: int) -> str` (the one-time `mem[MOD_TEXT].base`→`core_layout.base` probe), both reused by Task 4. Fault-inject returns a deterministic synthetic list.
-- **Base is `int`** end-to-end (`_module_walk` yields int; `list_modules` formats `0x{base:x}` into `GdbModule.base_address`; Task 4 compares the int to `expected_base`).
+- Consumes: `GdbModule`, `GdbModuleList` (Task 1); `evaluate_value`, `execute_mi_command`, `_redactor`, `_config_error`, `_RUNNING_RE` (gdbmi.py).
+- Produces: Protocol + concrete `list_modules(self, attachment, *, max_modules: int = MAX_MODULES) -> GdbModuleList`; module constant `MAX_MODULES = 512`; private helpers `_module_walk(self, attachment, *, limit) -> tuple[list[_RawModule], bool, int]` (returns rows with `name: str`/`base: int`/`node: int`, a `truncated` bool, and a `decode_errors` count) and `_module_base_field(self, attachment, first_node: int) -> str` (the one-time `mem[MOD_TEXT].base`→`core_layout.base` probe), both reused by Task 4. Fault-inject returns a deterministic synthetic `GdbModuleList`.
+- **Base is `int`** end-to-end (`_module_walk` yields int; `list_modules` formats `0x{base:x}` into `GdbModule.base_address` and packs rows/truncated/decode_errors into `GdbModuleList`; Task 4 compares the int to `expected_base`).
 
 - [ ] **Step 1: Write failing tests** against the scripted `MiController` fake: (a) two-module walk (head read `&modules`/`modules.next`, per-node `container_of`+name+base evals, terminator back to head) → two `GdbModule`s with hex `base_address`, `symbols_loaded=False`; assert the `mem[MOD_TEXT]` probe path. (b) bound: small `max_modules` → `truncated` semantics surfaced by the op (Task 5) — here assert the engine stops at the bound. (c) one garbage row → skipped, the other present (decode-error count exposed to Task 5). (d) running-target `^error` on head read → `inferior_running`. (e) both base-field probes `^error` → `module_decode_failed`. Plus a fault-inject test asserting Protocol conformance + deterministic output.
 - [ ] **Step 2:** Run — Expected: FAIL (undefined).
-- [ ] **Step 3: Implement** the Protocol method, the concrete walk (derive `<list-offset>` via `&((struct module *)0)->list`; loop bounded by `max_modules`; per-row `^error`/parse failure → skip+count; classify head/running errors), the base-field probe, and the fault-inject synthetic `list_modules`. Keep functions ≤100 lines / complexity ≤8 via the two helpers. Decode-error count returned to the op via a small result holder or a 2-tuple `(rows, decode_errors)` from a private method while the Protocol returns `list[GdbModule]` (op derives count/decode via the engine helper) — finalize shape in Step 3 and keep the Protocol signature returning `list[GdbModule]`.
+- [ ] **Step 3: Implement** the Protocol method (returns `GdbModuleList`), the concrete walk (derive `<list-offset>` via `&((struct module *)0)->list`; loop bounded by `max_modules`; per-row `^error`/parse failure → skip+count; set `truncated` when a row exists past the bound; classify head/running errors), the base-field probe, and the fault-inject synthetic `list_modules`. `list_modules` redacts each row, formats `base_address`, and returns `GdbModuleList(modules=..., truncated=..., decode_errors=...)`. Keep functions ≤100 lines / complexity ≤8 via the two helpers.
 - [ ] **Step 4:** Run engine + fault-inject tests — Expected: PASS. `just lint` + `just type` (Protocol now satisfied by both engines).
 - [ ] **Step 5:** Commit `feat(923): list_modules kernel module-list walk (engine + fault-inject)`.
 
@@ -81,7 +81,7 @@
 - Modify: `src/kdive/providers/ports/debug.py` (add `load_module_symbols` to the Protocol)
 - Modify: `src/kdive/providers/shared/debug_common/gdbmi.py` (engine `__init__` gains `module_debuginfo_resolver` seam)
 - Modify: `src/kdive/providers/fault_inject/debug/gdb.py`
-- Modify: `src/kdive/providers/assembly/composition.py` (or wherever the real engine is constructed) to pass `real_module_debuginfo_resolver()` — verify the construction site; if the engine is built with defaults there, no change is needed beyond the default factory.
+- Modify: `src/kdive/providers/local_libvirt/composition.py:127` AND `src/kdive/providers/remote_libvirt/composition.py:260` — both construct the ops `engine=GdbMiEngine(...)`; pass `module_debuginfo_resolver=real_module_debuginfo_resolver()`. **Required**, not optional: the `__init__` default raises `MISSING_DEPENDENCY`, so an unwired resolver makes every live `load_module_symbols` fail. (Live-proof stays deferred, but the wiring must exist; the local/remote attach seams are already wired the same way.)
 - Test: engine unit test module + fault-inject test
 
 **Interfaces:**
@@ -112,7 +112,7 @@
 
 - [ ] **Step 1: Write failing tool-level tests** via `run_engine_op` on a seeded `live` session (mirror `test_set_watchpoint_returns_watching:689`): `debug.list_modules` → `status="listed"`, `data={count, truncated, decode_errors, modules:[...]}`; `debug.load_module_symbols` → `status="loaded"`, `data={module, base_address, symbols_loaded, identity_verified}`; and a `stale_module_address` failure envelope (`error_category="debug_attach_failure"`, `data["code"]`).
 - [ ] **Step 2:** Run `pytest tests/mcp/debug/test_debug_ops.py -k module -v` — Expected: FAIL.
-- [ ] **Step 3: Implement** the two op factories (`list` dumps rows via `model_dump(mode="json", exclude_none=True)`, carries `count`/`truncated`/`decode_errors`, next `["debug.load_module_symbols","debug.backtrace"]`; `load` next `["debug.backtrace","debug.disassemble","debug.list_modules"]`), the two registrations (`expected_base: int | None = None`), and append to `_register_debug_ops`. **In the same commit**, add both tools to `_TOOL_SCOPES` (`_CONTRIBUTOR`), `tool_index` vocab, and `_BEHAVIOR_TESTS_BY_TOOL`; regenerate `just docs`.
+- [ ] **Step 3: Implement** the two op factories (`list` reads the `GdbModuleList`, dumps `result.modules` rows via `model_dump(mode="json", exclude_none=True)`, sets `data={count: len(result.modules), truncated: result.truncated, decode_errors: result.decode_errors, modules: [...]}`, next `["debug.load_module_symbols","debug.backtrace"]`; `load` dumps the returned `GdbModule` into `data={module, base_address, symbols_loaded, identity_verified}`, next `["debug.backtrace","debug.disassemble","debug.list_modules"]`), the two registrations (`expected_base: int | None = None`), and append to `_register_debug_ops`. **In the same commit**, add both tools to `_TOOL_SCOPES` (`_CONTRIBUTOR`), `tool_index` vocab, and `_BEHAVIOR_TESTS_BY_TOOL`; regenerate `just docs`.
 - [ ] **Step 4:** Run the tool tests + the completeness/doc guards (`pytest tests/mcp/core/test_tool_docs.py tests/mcp/core/test_app.py -q`) + `just lint` + `just type` — Expected: PASS.
 - [ ] **Step 5:** Commit `feat(923): debug.list_modules + load_module_symbols tools + wiring`.
 
@@ -132,4 +132,4 @@
 
 **Placeholder scan:** code shown as representative sketches because this session implements the plan with TDD (tightly-coupled change); exact file/symbol names verified against the codebase during each task's red-step. No `TODO`/"handle edge cases" left as a deliverable.
 
-**Type consistency:** `GdbModule` fields, `list_modules`/`load_module_symbols` signatures, `ModuleDebuginfo`, the `module_debuginfo_resolver` seam, and the `_module_walk`(int base)/`_module_base_field`/`_verify_identity` helpers are used consistently across Tasks 1→5.
+**Type consistency:** `GdbModule`/`GdbModuleList` fields, `list_modules(...) -> GdbModuleList` / `load_module_symbols(...) -> GdbModule` signatures, `ModuleDebuginfo`, the `module_debuginfo_resolver` seam (wired at both composition sites), and the `_module_walk`(int base, returns rows+truncated+decode_errors)/`_module_base_field`/`_verify_identity` helpers are used consistently across Tasks 1→5.
