@@ -23,7 +23,6 @@
 | [`artifacts.fetch_raw`](artifacts.md#artifactsfetch_raw) | `implemented` |
 | [`artifacts.get`](artifacts.md#artifactsget) | `implemented` |
 | [`artifacts.list`](artifacts.md#artifactslist) | `implemented` |
-| [`artifacts.search_text`](artifacts.md#artifactssearch_text) | `implemented` |
 | [`audit.query`](audit.md#auditquery) | `implemented` |
 | [`build_envs.list`](build_envs.md#build_envslist) | `implemented` |
 | [`build_hosts.disable`](build_hosts.md#build_hostsdisable) | `implemented` |

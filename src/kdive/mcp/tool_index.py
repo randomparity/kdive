@@ -155,9 +155,10 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "allocations.renew": frozenset({"renew", "extend", "lease", "allocation"}),
     "allocations.wait": frozenset({"wait", "poll", "allocation", "ready"}),
     # artifacts
-    "artifacts.get": frozenset({"artifact", "get", "fetch", "download", "file"}),
+    "artifacts.get": frozenset(
+        {"artifact", "get", "fetch", "download", "file", "search", "find", "text", "console", "log"}
+    ),
     "artifacts.list": frozenset({"artifacts", "list", "files", "uploads"}),
-    "artifacts.search_text": frozenset({"search", "text", "console", "log", "artifact"}),
     "artifacts.fetch_raw": frozenset({"raw", "fetch", "vmcore", "vmlinux", "download"}),
     "artifacts.create_run_upload": frozenset({"upload", "artifact", "run", "create", "external"}),
     "artifacts.create_system_upload": frozenset({"upload", "artifact", "system", "create"}),

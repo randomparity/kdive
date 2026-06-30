@@ -1,4 +1,4 @@
-"""Redacted-only artifact list/get/search handlers."""
+"""Redacted-only artifact list/get handlers."""
 
 from __future__ import annotations
 
@@ -8,11 +8,10 @@ import logging
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Annotated, LiteralString, NamedTuple, Protocol
+from typing import LiteralString, NamedTuple, Protocol
 
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel, ConfigDict, Field
 
 import kdive.config as config
 from kdive.artifacts.storage import FetchedArtifact, HeadResult
@@ -29,12 +28,8 @@ from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security.artifacts.artifact_jump import JumpDirection, jump_find, resolve_anchor
 from kdive.security.artifacts.artifact_search import (
-    AFTER_LINES_RANGE,
-    BEFORE_LINES_RANGE,
-    MAX_MATCHES_RANGE,
     ArtifactSearchInputError,
     parse_literal_terms,
-    search_text,
 )
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
@@ -46,12 +41,9 @@ from kdive.store.objectstore import (
 
 _log = logging.getLogger(__name__)
 
-_MAX_SEARCHABLE_ARTIFACT_BYTES = 1024 * 1024
-# The largest object `artifacts.get` pulls whole into memory to slice a window from.
-# Intentionally equal to `_MAX_SEARCHABLE_ARTIFACT_BYTES` (both byte-reading read tools
-# share the 1 MiB in-memory ceiling), but a distinct constant so the two can diverge
-# later without surprise (ADR-0247). Larger objects omit inline content; the
-# always-present `refs.download_uri` serves them.
+# The largest object `artifacts.get` pulls whole into memory to slice a window from or to
+# search with `find` (ADR-0247, ADR-0283). Larger objects omit inline content and a `find`
+# request rejects (`artifact_too_large`); the always-present `refs.download_uri` serves them.
 _MAX_WINDOWED_FETCH_BYTES = 1024 * 1024
 # The default inline window `artifacts.get` returns when the caller names no `max_bytes`
 # (ADR-0247): 16 KiB ≈ 4k–5k tokens, sized to the tool-result token budget rather than the
@@ -88,81 +80,6 @@ class _SearchStore(Protocol):
 
 class _AuthorizedArtifact(NamedTuple):
     key: str
-
-
-class ArtifactSearchRequest(BaseModel):
-    """Request fields for bounded literal search in one redacted artifact."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    artifact_id: Annotated[str, Field(description="The redacted System artifact id.")]
-    pattern: Annotated[
-        str,
-        Field(
-            description=(
-                "Literal alternation pattern; '|' separates terms (grep-style), "
-                "e.g. '__d_lookup|panic'. The word 'OR' is not special."
-            )
-        ),
-    ]
-    before_lines: Annotated[
-        int,
-        Field(
-            ge=BEFORE_LINES_RANGE[0],
-            le=BEFORE_LINES_RANGE[1],
-            description=(
-                f"Context lines before each match "
-                f"({BEFORE_LINES_RANGE[0]}–{BEFORE_LINES_RANGE[1]})."
-            ),
-        ),
-    ] = 2
-    after_lines: Annotated[
-        int,
-        Field(
-            ge=AFTER_LINES_RANGE[0],
-            le=AFTER_LINES_RANGE[1],
-            description=(
-                f"Context lines after each match ({AFTER_LINES_RANGE[0]}–{AFTER_LINES_RANGE[1]})."
-            ),
-        ),
-    ] = 4
-    max_matches: Annotated[
-        int,
-        Field(
-            ge=MAX_MATCHES_RANGE[0],
-            le=MAX_MATCHES_RANGE[1],
-            description=(
-                f"Maximum match windows to return ({MAX_MATCHES_RANGE[0]}–{MAX_MATCHES_RANGE[1]})."
-            ),
-        ),
-    ] = 20
-
-
-@dataclass(frozen=True, slots=True)
-class ArtifactReadHandlers:
-    """Artifact read handlers with the object-store search seam bound at construction."""
-
-    search_store_factory: Callable[[], _SearchStore] = object_store_from_env
-
-    async def artifacts_search_text(
-        self,
-        pool: AsyncConnectionPool,
-        ctx: RequestContext,
-        *,
-        request: ArtifactSearchRequest,
-    ) -> ToolResponse:
-        try:
-            store = self.search_store_factory()
-        except CategorizedError as exc:
-            return ToolResponse.failure_from_error(
-                request.artifact_id, exc, suggested_next_actions=["artifacts.search_text"]
-            )
-        return await _artifacts_search_text(
-            pool,
-            ctx,
-            request=request,
-            store=store,
-        )
 
 
 async def _authorized_redacted_artifact(
@@ -443,59 +360,3 @@ def _find_response_data(
     if hit.next_offset is not None:
         data["next_offset"] = hit.next_offset
     return data
-
-
-async def _artifacts_search_text(
-    pool: AsyncConnectionPool,
-    ctx: RequestContext,
-    *,
-    request: ArtifactSearchRequest,
-    store: _SearchStore,
-) -> ToolResponse:
-    """Search one redacted System-owned text artifact with bounded literal context."""
-    artifact_id = request.artifact_id
-    authorized = await _authorized_redacted_artifact(pool, ctx, artifact_id=artifact_id)
-    if isinstance(authorized, ToolResponse):
-        return authorized
-    try:
-        parse_literal_terms(request.pattern)
-    except ArtifactSearchInputError:
-        return _config_error(artifact_id, data={"reason": "bad_search_input"})
-    key = authorized.key
-    try:
-        head = await asyncio.to_thread(store.head, key)
-    except CategorizedError as exc:
-        return ToolResponse.failure_from_error(artifact_id, exc)
-    if head is None:
-        return _config_error(artifact_id)
-    if head.size_bytes > _MAX_SEARCHABLE_ARTIFACT_BYTES:
-        return _config_error(
-            artifact_id,
-            data={"reason": "artifact_too_large", "size_bytes": head.size_bytes},
-        )
-    try:
-        fetched = await asyncio.to_thread(store.get_artifact, key, head.etag)
-        if fetched.sensitivity is not Sensitivity.REDACTED:
-            return _config_error(artifact_id)
-        result = search_text(
-            fetched.data,
-            pattern=request.pattern,
-            before_lines=request.before_lines,
-            after_lines=request.after_lines,
-            max_matches=request.max_matches,
-        )
-    except ArtifactSearchInputError:
-        return _config_error(artifact_id, data={"reason": "bad_search_input"})
-    except CategorizedError as exc:
-        return ToolResponse.failure_from_error(artifact_id, exc)
-    return ToolResponse.success(
-        artifact_id,
-        "searched",
-        suggested_next_actions=["artifacts.search_text", "runs.get"],
-        refs={"artifact": key},
-        data={
-            "match_count": result.match_count,
-            "truncated": result.truncated,
-            "matches_json": result.matches_json(),
-        },
-    )

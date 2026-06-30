@@ -20,11 +20,6 @@ from kdive.mcp.tools.catalog.artifacts.expected_uploads import (
 )
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.artifacts.artifact_jump import JumpDirection
-from kdive.security.artifacts.artifact_search import (
-    AFTER_LINES_RANGE,
-    BEFORE_LINES_RANGE,
-    MAX_MATCHES_RANGE,
-)
 from kdive.serialization import JsonValue
 
 
@@ -50,7 +45,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_artifacts_list(app, pool)
     _register_artifacts_get(app, pool)
     _register_artifacts_fetch_raw(app, pool)
-    _register_artifacts_search_text(app, pool)
     _register_artifacts_create_run_upload(app, pool, resolver)
     _register_artifacts_create_system_upload(app, pool, resolver)
     _register_artifacts_expected_uploads(app)
@@ -189,73 +183,6 @@ def _register_artifacts_fetch_raw(app: FastMCP, pool: AsyncConnectionPool) -> No
         """
         return await artifact_raw_fetch.fetch_raw(
             pool, current_context(), run_id=run_id, asset=asset
-        )
-
-
-def _register_artifacts_search_text(app: FastMCP, pool: AsyncConnectionPool) -> None:
-    read_handlers = artifact_reads.ArtifactReadHandlers()
-
-    @app.tool(
-        name="artifacts.search_text",
-        annotations=_docmeta.read_only(),
-        meta=_docmeta.maturity_meta("implemented"),
-    )
-    async def artifacts_search_text(
-        artifact_id: Annotated[str, Field(description="The redacted System artifact id.")],
-        pattern: Annotated[
-            str,
-            Field(
-                description=(
-                    "Literal alternation pattern; '|' separates terms (grep-style), "
-                    "e.g. '__d_lookup|panic'. The word 'OR' is not special."
-                )
-            ),
-        ],
-        before_lines: Annotated[
-            int,
-            Field(
-                ge=BEFORE_LINES_RANGE[0],
-                le=BEFORE_LINES_RANGE[1],
-                description=(
-                    f"Context lines before each match "
-                    f"({BEFORE_LINES_RANGE[0]}–{BEFORE_LINES_RANGE[1]})."
-                ),
-            ),
-        ] = 2,
-        after_lines: Annotated[
-            int,
-            Field(
-                ge=AFTER_LINES_RANGE[0],
-                le=AFTER_LINES_RANGE[1],
-                description=(
-                    f"Context lines after each match "
-                    f"({AFTER_LINES_RANGE[0]}–{AFTER_LINES_RANGE[1]})."
-                ),
-            ),
-        ] = 4,
-        max_matches: Annotated[
-            int,
-            Field(
-                ge=MAX_MATCHES_RANGE[0],
-                le=MAX_MATCHES_RANGE[1],
-                description=(
-                    f"Maximum match windows to return "
-                    f"({MAX_MATCHES_RANGE[0]}–{MAX_MATCHES_RANGE[1]})."
-                ),
-            ),
-        ] = 20,
-    ) -> ToolResponse:
-        """Search a redacted System artifact with bounded literal line context."""
-        return await read_handlers.artifacts_search_text(
-            pool,
-            current_context(),
-            request=artifact_reads.ArtifactSearchRequest(
-                artifact_id=artifact_id,
-                pattern=pattern,
-                before_lines=before_lines,
-                after_lines=after_lines,
-                max_matches=max_matches,
-            ),
         )
 
 

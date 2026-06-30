@@ -195,8 +195,9 @@ args (e.g. `dhash_entries=1`) with the `cmdline` parameter on `runs.build` for s
 builds, or `runs.complete_build` for external builds.
 
 Console evidence: `refs.console` is the boot-window console snapshot and
-`data.console_access` names how to read it (`artifacts.get` windowed/paged, or
-`artifacts.search_text`). `data.console_artifacts` is the Run-scoped console manifest —
+`data.console_access` names how to read it (`artifacts.get` windowed/paged, or jumped to
+a literal match with its `find` parameter). `data.console_artifacts` is the Run-scoped
+console manifest —
 an ordered, newest-first list of `{artifact_id, object_key, created_at}` for every console
 artifact correlated to this Run (the boot snapshot plus the post-readiness rotating parts),
 read with `artifacts.get`. It is bounded: when more exist than the cap,

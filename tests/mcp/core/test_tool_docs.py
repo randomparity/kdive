@@ -59,7 +59,6 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "artifacts.fetch_raw": ("tests/mcp/catalog/test_raw_fetch_tool.py",),
     "artifacts.get": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "artifacts.list": ("tests/mcp/catalog/test_artifacts_tools.py",),
-    "artifacts.search_text": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "audit.query": ("tests/mcp/ops/test_audit_query.py",),
     "build_envs.list": ("tests/mcp/ops/build_hosts/test_build_envs.py",),
     "build_hosts.disable": ("tests/mcp/ops/test_build_hosts.py",),

@@ -175,17 +175,3 @@ correlated to a Run by this listing; to get the console artifacts for a specific
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `system_id` | string | yes | The System whose redacted artifacts to list. |
-
-## `artifacts.search_text`
-
-`implemented` · `read-only`
-
-Search a redacted System artifact with bounded literal line context.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `after_lines` | integer | no | Context lines after each match (0–20). |
-| `artifact_id` | string | yes | The redacted System artifact id. |
-| `before_lines` | integer | no | Context lines before each match (0–10). |
-| `max_matches` | integer | no | Maximum match windows to return (1–50). |
-| `pattern` | string | yes | Literal alternation pattern; '\|' separates terms (grep-style), e.g. '__d_lookup\|panic'. The word 'OR' is not special. |
