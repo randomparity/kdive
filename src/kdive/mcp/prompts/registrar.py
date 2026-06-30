@@ -100,7 +100,8 @@ CANONICAL_PROMPTS: tuple[PromptSpec, ...] = (
             "default build lane (ADR-0234): upload a prebuilt artifact via "
             "artifacts.expected_uploads -> artifacts.create_run_upload -> runs.complete_build. "
             "A warm-tree server build (runs.build, after runs.create) is the secondary "
-            "single-host path. "
+            "single-host path; prefer runs.build_install_boot to run that lane as one "
+            "pollable job when you choose it. "
             "Prerequisite: an open investigation and a defined, allocated system "
             "(see start_investigation)."
         ),

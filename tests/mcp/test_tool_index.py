@@ -67,3 +67,10 @@ def test_instructions_cover_every_live_namespace() -> None:
         )
     assert "tools.search" in text, "instructions must mention tools.search"
     assert "tools.invoke" in text, "instructions must mention tools.invoke"
+
+
+def test_instructions_point_at_the_agent_index() -> None:
+    """build_instructions() names the agent-index doc resource as the workflow entry point."""
+    from kdive.mcp.tool_index import build_instructions
+
+    assert "resource://kdive/docs/guide/agent-index.md" in build_instructions()

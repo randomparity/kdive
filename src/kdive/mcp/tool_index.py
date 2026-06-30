@@ -65,6 +65,9 @@ discoverable via tools.search — pass a short description of what you want to d
 it returns the best matching tool names and descriptions. Once you have a name, call
 tools.invoke(name, arguments) to execute it.
 
+For a workflow-shaped map of the typical session and a per-toolset guide, read the doc
+resource resource://kdive/docs/guide/agent-index.md.
+
 Namespace table of contents (prefix before the first dot):
 {toc_lines}
 """

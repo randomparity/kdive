@@ -17,10 +17,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from fastmcp import FastMCP
 from fastmcp.resources import TextResource
 from pydantic import AnyUrl
+
+from kdive.domain.catalog.resources import ResourceKind
+from kdive.providers.core.resolver import ProviderResolver
 
 _CONTENT_DIR = Path(__file__).parent / "_content"
 _MARKDOWN = "text/markdown"
@@ -39,6 +43,12 @@ class DocResource:
         title: Human title shown in the listing.
         description: Human description shown in the listing.
         mime_type: The content mime type.
+        required_kind: Provider gate. When set, the doc is registered only if the
+            resolver's composed kinds include it (a provider-specific doc is absent on a
+            deployment that did not register that provider). ``None`` means always register.
+        audience: Role gate consulted by ``DocExposureMiddleware``. ``"operator"`` docs are
+            listed and read only by callers holding a platform role; ``"all"`` docs are
+            unrestricted.
     """
 
     uri: str
@@ -48,6 +58,8 @@ class DocResource:
     title: str
     description: str
     mime_type: str = _MARKDOWN
+    required_kind: ResourceKind | None = None
+    audience: Literal["all", "operator"] = "all"
 
 
 DOC_RESOURCES: tuple[DocResource, ...] = (
@@ -90,26 +102,93 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
             "advertised tool outputSchema."
         ),
     ),
+    DocResource(
+        uri="resource://kdive/docs/guide/agent-index.md",
+        source="docs/guide/agent-index.md",
+        content_file="agent-index.md",
+        name="agent-index",
+        title="Driving a kdive investigation",
+        description=(
+            "Entry point for an agent: the typical investigation session mapped to toolsets, "
+            "with a per-toolset guide link. Named in the server instructions."
+        ),
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/runs.md",
+        source="docs/guide/toolsets/runs.md",
+        content_file="toolsets-runs.md",
+        name="toolset-runs",
+        title="runs toolset",
+        description=(
+            "How each runs.* tool helps an investigation: the build, install, and boot lifecycle."
+        ),
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/artifacts.md",
+        source="docs/guide/toolsets/artifacts.md",
+        content_file="toolsets-artifacts.md",
+        name="toolset-artifacts",
+        title="artifacts toolset",
+        description="How each artifacts.* tool helps: reading run evidence and uploading builds.",
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/debug.md",
+        source="docs/guide/toolsets/debug.md",
+        content_file="toolsets-debug.md",
+        name="toolset-debug",
+        title="debug toolset",
+        description=(
+            "How each debug.* tool helps: live GDB kernel debugging — breakpoints, memory, stacks."
+        ),
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/systems.md",
+        source="docs/guide/toolsets/systems.md",
+        content_file="toolsets-systems.md",
+        name="toolset-systems",
+        title="systems toolset",
+        description=(
+            "How each systems.* tool helps: provision, reprovision, and reach the target over SSH."
+        ),
+    ),
 )
 
 
-def register(app: FastMCP) -> int:
-    """Register every allowlisted doc as a ``TextResource`` on ``app``.
+def audience_by_uri() -> dict[str, str]:
+    """Return each allowlisted doc's URI mapped to its ``audience`` marker.
+
+    ``DocExposureMiddleware`` consults this so a doc's audience has a single source. Keys are
+    normalized through ``AnyUrl`` exactly as the registered ``TextResource`` and the read
+    request URI are, so the audience lookup and the resource store share one normalization —
+    a doc whose raw URI is not ``AnyUrl``-idempotent cannot then default to ``"all"`` and leak.
+    """
+    return {str(AnyUrl(entry.uri)): entry.audience for entry in DOC_RESOURCES}
+
+
+def register(app: FastMCP, *, resolver: ProviderResolver) -> int:
+    """Register every allowlisted doc whose provider gate is satisfied.
 
     Reads each entry's packaged snapshot from ``_content/`` (importable package data, present
     in the runtime image). A missing snapshot is a packaging regression and raises rather
-    than registering an empty resource.
+    than registering an empty resource. An entry whose ``required_kind`` is not in
+    ``resolver.registered_kinds()`` is skipped, so a provider-specific doc is absent on a
+    deployment that did not register that provider (neither listable nor readable).
 
     Args:
         app: The FastMCP app to register resources on.
+        resolver: The composed provider resolver, used for the provider gate.
 
     Returns:
         The number of resources registered.
 
     Raises:
-        RuntimeError: If an entry's packaged snapshot file is absent.
+        RuntimeError: If a registered entry's packaged snapshot file is absent.
     """
+    kinds = resolver.registered_kinds()
+    registered = 0
     for entry in DOC_RESOURCES:
+        if entry.required_kind is not None and entry.required_kind not in kinds:
+            continue
         content_path = _CONTENT_DIR / entry.content_file
         if not content_path.is_file():
             raise RuntimeError(
@@ -127,4 +206,5 @@ def register(app: FastMCP) -> int:
                 text=text,
             )
         )
-    return len(DOC_RESOURCES)
+        registered += 1
+    return registered

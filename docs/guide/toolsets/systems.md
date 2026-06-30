@@ -1,0 +1,28 @@
+# systems toolset
+
+A system is the target machine a run builds, installs, and boots on. Reach for these after
+you hold an allocation (see the allocations stage in the index) to define, provision, and
+reach the target. For exact parameters, types, and return schema, read each tool's own
+description.
+
+## Defining and provisioning
+
+- `systems.define` — describe the target system (shape, image, profile) without
+  provisioning it yet.
+- `systems.provision` — define and provision a target in one step.
+- `systems.provision_defined` — provision a system you already defined.
+- `systems.profile_examples` — fetch ready-made system-profile templates to start from.
+- `systems.reprovision` — rebuild a system back to a clean baseline (for example, to
+  refresh a local-libvirt rootfs).
+- `systems.teardown` — destroy a system and release its host resources.
+
+## Inspecting
+
+- `systems.get` — read a system's status and connection details.
+- `systems.list` — list the systems you can see, with filters.
+
+## Reaching the guest over SSH
+
+- `systems.ssh_info` — get the SSH connection descriptor for a ready system.
+- `systems.authorize_ssh_key` — authorize your public key so you can run commands in the
+  guest over SSH.

@@ -223,9 +223,9 @@ def _register_report_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: Ap
 
 
 def _register_doc_resources(
-    app: FastMCP, _pool: AsyncConnectionPool, _assembly: AppAssembly
+    app: FastMCP, _pool: AsyncConnectionPool, assembly: AppAssembly
 ) -> None:
-    doc_resources.register(app)
+    doc_resources.register(app, resolver=assembly.resolver)
 
 
 def _register_lifecycle_prompts(
