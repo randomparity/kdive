@@ -117,9 +117,10 @@ _TERMINAL_STOP_REASONS = frozenset({"exited", "exited-normally", "exited-signall
 # generic command failure to the precise `inferior_running` code.
 _RUNNING_RE = re.compile(r"running", re.IGNORECASE)
 # gdb's ^error message when there is no unwindable stack ("No stack.") or the requested level is
-# beyond stack depth ("No frame at level N."). Real gdb reports the out-of-range/empty case this
-# way rather than an empty `^done,stack=[]`, so the missing-frame codes must catch both shapes.
-_NO_STACK_RE = re.compile(r"no (stack|frame)", re.IGNORECASE)
+# beyond stack depth. Live gdbstub proof shows `-stack-list-frames N N` past depth answers
+# `^error,"-stack-list-frames: Not enough frames in stack."` (not an empty `^done,stack=[]` and
+# not the CLI's "No frame at level N."), so the missing-frame codes must catch that phrasing too.
+_NO_STACK_RE = re.compile(r"no (stack|frame)|not enough frames", re.IGNORECASE)
 
 
 def _config_error(
@@ -446,9 +447,9 @@ class GdbMiEngine:
         """Inspect one selected stack frame by ``level`` (ADR-0275).
 
         ``level`` is gated only to a non-negative int; an out-of-range level is **not** a config
-        error — gdb answers it as ``no_frame_at_level`` (whether via ``^error,"No frame at level
-        N."`` or an empty ``^done``), so ``read_frame`` can reach a frame past the ``backtrace``
-        response cap on a deep kernel stack.
+        error — gdb answers it as ``no_frame_at_level`` (whether via ``^error,"...Not enough frames
+        in stack."`` or an empty ``^done``), so ``read_frame`` can reach a frame past the
+        ``backtrace`` response cap on a deep kernel stack.
         """
         if not isinstance(level, int) or level < 0:
             raise _config_error(
@@ -473,9 +474,9 @@ class GdbMiEngine:
     ) -> list[MiRecord]:
         """Run a stack MI command, mapping gdb ``^error`` to the precise debug codes.
 
-        A running-target error becomes ``inferior_running``; gdb's "No stack."/"No frame at level
-        N." (the real out-of-range/empty answer) becomes ``missing`` (the caller's ``no_frames`` /
-        ``no_frame_at_level``); any other gdb error passes through unchanged.
+        A running-target error becomes ``inferior_running``; gdb's "No stack." / "Not enough frames
+        in stack." (the real out-of-range/empty answer) becomes ``missing`` (the caller's
+        ``no_frames`` / ``no_frame_at_level``); any other gdb error passes through unchanged.
         """
         try:
             return self.execute_mi_command(attachment, command)

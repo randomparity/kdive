@@ -1294,6 +1294,29 @@ def test_read_frame_raises_no_frame_at_level(tmp_path: Path) -> None:
     assert exc.value.details["level"] == 9
 
 
+def test_read_frame_classifies_out_of_range_not_enough_frames(tmp_path: Path) -> None:
+    # Real gdb answers `-stack-list-frames N N` past stack depth with
+    # `^error,"-stack-list-frames: Not enough frames in stack."` (live-verified over a gdbstub) —
+    # not an empty `^done` and not "No frame at level N.". The out-of-range case must still map to
+    # no_frame_at_level, so the classifier matches this phrasing too.
+    controller = _FakeMiController(
+        responses={
+            "-stack-list-frames 999 999": [
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": "-stack-list-frames: Not enough frames in stack."},
+                }
+            ]
+        }
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _engine().read_frame(_attachment(controller, tmp_path), level=999)
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "no_frame_at_level"
+    assert exc.value.details["level"] == 999
+
+
 def test_read_frame_classifies_no_frame_error(tmp_path: Path) -> None:
     # Real gdb answers an out-of-range level with `^error,"No frame at level N."`, not `^done`.
     controller = _FakeMiController(
