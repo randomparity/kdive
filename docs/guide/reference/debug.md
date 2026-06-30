@@ -2,6 +2,17 @@
 
 # `debug` tools
 
+## `debug.backtrace`
+
+`implemented` · `read-only`
+
+Walk the stopped kernel's stack on a live DebugSession. Requires contributor.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `max_frames` | integer | no | Maximum frames to return (1-64); the backtrace is truncated past it. |
+| `session_id` | string | yes | The live DebugSession to walk the stopped stack on. |
+
 ## `debug.clear_breakpoint`
 
 `implemented`
@@ -82,6 +93,17 @@ List the caller's debug sessions, filterable by run/system/project/state. Viewer
 - `state` (``attach`, `live`, `detached` (nullable)`, optional) — Only sessions in this lifecycle state.
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
 - `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
+
+## `debug.read_frame`
+
+`implemented` · `read-only`
+
+Inspect one selected stack frame on a live DebugSession. Requires contributor.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `level` | integer | yes | Stack frame index to inspect (0 is the innermost frame). |
+| `session_id` | string | yes | The live DebugSession to inspect a stack frame on. |
 
 ## `debug.read_memory`
 
