@@ -56,26 +56,44 @@ description left to correct.
 ### Cursor and window mechanics
 
 One **direction-relative** cursor, always reported as `data.next_offset`, always "pass this
-back as `byte_offset` to continue in the same `direction`". Matching runs over the **entire**
-decoded body (`artifacts.get` already fetches the whole object, ≤1 MiB, into memory); the
-match is located against all of it, and only the **returned context window** is clipped to
-the existing 24 KiB token ceiling.
+back as `byte_offset` to continue in the same `direction`". Matching runs over the **entire
+(raw) body** (`artifacts.get` already fetches the whole object, ≤1 MiB, into memory — see the
+oversized-artifact rule under Error handling for the > 1 MiB case); the match is located
+against all of it, and only the **returned context window** is clipped to the existing 24 KiB
+token ceiling.
+
+**`byte_offset` defaults to the direction's natural starting edge.** `byte_offset` is the
+existing `artifacts.get` parameter (default `0`); today a negative value "reads from the
+start". The jump cursor generalizes that: the search anchor defaults to the **start for
+`forward`** and the **end-of-artifact for `backward`**. Concretely, in `backward` mode a
+`byte_offset` that is `0` (the default) **or** negative is interpreted as end-of-artifact
+(searching strictly backward from byte 0 is degenerate — it can only ever inspect offset 0 —
+so repurposing the default loses no real capability); a positive `byte_offset` bounds the
+backward search at that byte. In `forward` mode the existing meaning is unchanged (`0`/default
+and negative both mean from-start). This is stated in the `Field` text so the default is not
+surprising.
 
 - **forward** (`find` present): locate the first match at byte position `>= byte_offset`
-  (default `0`); the window is **anchored at the matched line and extends forward** to the
-  effective cap. `next_offset` = the byte just past the matched line, so the next call
-  resumes searching forward, after this match.
+  (default = start); the window is **anchored to include the match and extends forward** to
+  the effective cap (normally the matched line's start; see the long-line rule below).
+  `next_offset` = the byte just past the matched line, so the next call resumes searching
+  forward, after this match.
 - **backward** (`find` present): locate the last match at byte position `<= byte_offset`
-  (**default `byte_offset` = end-of-artifact**); the window is **anchored at the matched
-  line and extends backward**. `next_offset` = the byte just before the matched line.
+  (default = end-of-artifact, per the rule above); the window is **anchored to include the
+  match and extends backward**. `next_offset` = the byte just before the matched line.
 - **no match in `direction`** → `data.match_found = false`, no `content`, no `next_offset`.
-  The agent stops cleanly.
+  The agent stops cleanly. (This is distinct from "could not search"; see the oversized-artifact
+  rule under Error handling.)
 - The cursor **strictly advances** (forward: strictly increases; backward: strictly
   decreases), reusing the existing forward-progress guard, so paging can neither loop on a
   non-advancing cursor nor re-emit a boundary match.
 - On a hit, `data.match_offset` (exact byte) and `data.match_line` (1-based) are returned so
-  the agent can re-window precisely or correlate a hit; a match whose context exceeds the
-  24 KiB cap clips, and `match_offset` lets the agent re-window exactly.
+  the agent can re-window precisely or correlate a hit.
+- **Long-line rule.** The window normally anchors at the matched line's start so on-line
+  context precedes the match. When the matched line is longer than the effective cap, a
+  line-anchored window could end before the match and exclude the matched term; in that case
+  the window is **anchored at `match_offset` itself** so the returned `content` always
+  contains the matched bytes. `match_offset` is returned either way for exact re-windowing.
 
 `direction` is orthogonal to `find`. `direction="backward"` with **no** `find`, defaulting
 to end-of-artifact, is the tail-read + page-up path — the dominant kernel-crash triage
@@ -97,9 +115,10 @@ currency exact, matching operates in **byte space**:
   logs). `\n`-splitting is the correct line model for log data and is used only to land
   `next_offset` and context cleanly; the design never *requires* line orientation — where a
   match has no nearby `\n`, `next_offset` falls back to `match_offset ± len(term)`.
-- **Decoding is display-only**, per-window, `errors="replace"` (unchanged). The matched line
-  is whole because the window is anchored at its start; only a window's far seam may render a
-  `U+FFFD`, exactly as plain paging does today.
+- **Decoding is display-only**, per-window, `errors="replace"` (unchanged). The window's
+  **near** edge starts at a line boundary (or, under the long-line rule, at `match_offset`),
+  so the matched bytes are never split by a decode seam; only the window's **far** edge may
+  render a trailing `U+FFFD`, exactly as plain paging does today.
 - **No Unicode normalization** (NFC/NFD): a non-ASCII term must match the artifact's exact
   byte encoding. Kernel crash signatures are ASCII, so unaffected — the `Field` text states
   this rather than implying normalization.
@@ -148,9 +167,31 @@ tool surface, acceptable pre-first-release.
 
 - Empty / malformed / oversized `find` (via `parse_literal_terms`) → `configuration_error`,
   `data.reason = "bad_search_input"` (the existing search error envelope).
-- Artifact `> 1 MiB` and `SENSITIVE`/non-redacted gates are unchanged from `artifacts.get`.
+- **Oversized artifact + `find` (the one behavior change from plain `.get`).** A plain `.get`
+  on an artifact larger than `_MAX_WINDOWED_FETCH_BYTES` (1 MiB) omits inline content and
+  returns only `refs.download_uri` (`content_omitted = "artifact_too_large"`), because the
+  bytes are never fetched into memory. A `find` request cannot search bytes it never fetched,
+  so it must **not** silently return `match_found = false` (which would read as "no such crash
+  in the log"). Instead `find` on an oversized artifact returns `configuration_error`,
+  `data.reason = "artifact_too_large"` with `data.size_bytes` — preserving the retired
+  `search_text`'s rejection so "could not search" is never confused with "searched, no match".
+  The redacted-dmesg cap is exactly 1 MiB (`== _MAX_WINDOWED_FETCH_BYTES`, not `>`), so the
+  motivating artifact class stays searchable; only a pathological over-cap artifact rejects.
+- `SENSITIVE`/non-redacted gates are unchanged from `artifacts.get`.
 - `direction` outside the literal set is rejected by the typed parameter before the handler.
 - Store outages degrade exactly as `artifacts.get` does today (`content_unavailable`).
+
+## Cost
+
+Each `find` call is stateless: it re-fetches the whole artifact (≤ 1 MiB) from the object
+store and re-scans it to locate the next match — the same per-call fetch the retired
+`search_text` did, but now **once per paged match** rather than once for up to 50 windows.
+Enumerating N scattered matches therefore costs N object-store fetches and N scans, each
+bounded by the 1 MiB ceiling. This is accepted: triage is "find the crash, read around it"
+(a handful of calls), and the design's purpose is to bound the **token** cost of a large log,
+which it does regardless of the fetch count. An agent that needs to enumerate many matches in
+one shot should instead read a window and scan it client-side. No cross-call caching is
+introduced (it would add stateful complexity for a non-dominant path).
 
 ## Testing
 
@@ -158,11 +199,16 @@ Drive the handler directly (repo convention): forward first-hit; backward first-
 default end; full paging enumerates matches in order then `match_found=false`; backward + no
 `find` from end equals a tail read and pages upward; **forward + no `find` is byte-identical
 to today** (regression); `|`-OR jumps to the nearest of several terms; a gzip artifact matches
-on plaintext with plaintext offsets; `> 1 MiB` and `SENSITIVE` gates unchanged; empty/malformed
-`find` → `configuration_error` `reason=bad_search_input`; a match whose context exceeds the
-24 KiB cap clips with a correct `match_offset`; cursor strict-advance at both artifact ends; a
-match at offset 0 (empty `before`) and at EOF with no trailing newline. Migrate the existing
-`search_text` suite onto the filtered `artifacts.get`.
+on plaintext with plaintext offsets; **`find` on a `> 1 MiB` artifact → `configuration_error`
+`reason=artifact_too_large`** (not `match_found=false`), while a plain `.get` on the same
+artifact still returns `content_omitted`; `SENSITIVE`/non-redacted gates unchanged;
+empty/malformed `find` → `configuration_error` `reason=bad_search_input`; **a match on a line
+longer than the 24 KiB cap returns a `match_offset`-anchored window whose `content` contains
+the matched bytes**; backward default-edge resolution (omitted/0/negative `byte_offset` in
+`backward` starts from end; a positive value bounds it); cursor strict-advance at both artifact
+ends; a match at offset 0 (empty `before`) and at EOF with no trailing newline. Migrate the
+existing `search_text` tool-suite onto the filtered `artifacts.get`; the `search_text()`
+matcher's own tests stay (boot-evidence).
 
 ## Rollback
 

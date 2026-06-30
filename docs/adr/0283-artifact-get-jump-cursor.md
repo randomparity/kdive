@@ -52,8 +52,12 @@ to continue in the same `direction`".
 
 - **forward**: first match at byte `>= byte_offset` (default `0`); window anchored at the
   matched line, extending forward; `next_offset` = just past the matched line.
-- **backward**: last match at byte `<= byte_offset` (**default = end-of-artifact**); window
-  anchored at the matched line, extending backward; `next_offset` = just before it.
+- **backward**: last match at byte `<= byte_offset`; window anchored at the matched line,
+  extending backward; `next_offset` = just before it. `byte_offset` defaults to the
+  direction's natural edge: `forward` keeps the existing start (`0`/negative = from-start),
+  and `backward` treats an omitted/`0`/negative `byte_offset` as **end-of-artifact** (a strict
+  backward search from byte 0 is degenerate, so the default is repurposed losslessly); a
+  positive value bounds the backward search.
 - **no match in `direction`** → `data.match_found = false`, no `content`, no `next_offset`.
 - The cursor strictly advances (reusing the existing forward-progress guard), so paging
   cannot loop or re-emit a boundary match. A hit also returns `data.match_offset` (byte) and
@@ -100,8 +104,19 @@ committed tool reference (`just docs`). No schema, migration, RBAC, or config ch
 - **Breaking change to the agent tool surface** (`artifacts.search_text` removed). Acceptable
   pre-first-release; agents migrate to `artifacts.get` with `find`.
 - The jump cursor returns **one match per call**. Enumerating N scattered matches costs N
-  round-trips, versus `search_text`'s up to 50 windows in one call. Accepted: triage is
-  overwhelmingly "find the crash, read around it", not "enumerate all hits".
+  round-trips, versus `search_text`'s up to 50 windows in one call. Each call is stateless and
+  re-fetches the whole artifact (≤ 1 MiB) from the object store and re-scans it, so N matches
+  cost N bounded fetches + scans (no cross-call caching). Accepted: triage is overwhelmingly
+  "find the crash, read around it", not "enumerate all hits", and the design bounds the *token*
+  cost of a large log regardless of fetch count.
+- **`find` on an artifact larger than 1 MiB rejects, it does not silently miss.** A plain
+  `.get` over the 1 MiB windowed-fetch ceiling omits inline content and returns only a download
+  URI; `find` cannot search bytes never fetched, so it returns `configuration_error`
+  `reason=artifact_too_large` (preserving `search_text`'s rejection) rather than
+  `match_found=false`, so "could not search" is never read as "no such crash". Redacted dmesg is
+  capped at exactly 1 MiB, so the motivating class stays searchable.
+- **A match on a line longer than the 24 KiB window cap** returns a `match_offset`-anchored
+  window (not line-anchored) so the returned content always contains the matched bytes.
 - A single **console part** is byte-chunked (mid-line edges); a `find` term (≤256 chars) is
   far smaller than the 4 KiB inter-part overlap, so any single term appears whole in at least
   one part. Whole multi-line reasoning across a part seam remains the per-part read's limit;
