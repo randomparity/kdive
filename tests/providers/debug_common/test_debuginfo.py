@@ -166,12 +166,13 @@ def test_gdb_attach_seam_uses_engine_factory_with_staged_vmlinux(
 
     class FakeEngine:
         def attach(
-            self, *, host: str, port: int, vmlinux_path: Path, transcript_path: Path
+            self, *, host: str, port: int, vmlinux_path: Path, transcript_path: Path, run_id: str
         ) -> GdbMiAttachment:
             seen["host"] = host
             seen["port"] = port
             seen["vmlinux_path"] = vmlinux_path
             seen["transcript_path"] = transcript_path
+            seen["engine_run_id"] = run_id
             return sentinel
 
     def fake_stage_and_attach(
@@ -194,6 +195,7 @@ def test_gdb_attach_seam_uses_engine_factory_with_staged_vmlinux(
         "host": "127.0.0.1",
         "port": 1234,
         "run_id": "r1",
+        "engine_run_id": "r1",  # run_id is threaded into engine.attach (ADR-0278, #923)
         "transcript_path": transcript_path,
         "vmlinux_path": staged_vmlinux,
     }

@@ -205,9 +205,13 @@ class GdbMiEngine:
     # --- attach (live_vm) -----------------------------------------------------------------
 
     def attach(  # pragma: no cover - live_vm
-        self, *, host: str, port: int, vmlinux_path: Path, transcript_path: Path
+        self, *, host: str, port: int, vmlinux_path: Path, transcript_path: Path, run_id: str = ""
     ) -> GdbMiAttachment:
-        """Spawn gdb, load symbols, and connect RSP. Live-only; tests inject a fake attachment."""
+        """Spawn gdb, load symbols, and connect RSP. Live-only; tests inject a fake attachment.
+
+        ``run_id`` is carried on the attachment so ``load_module_symbols`` can resolve the Run's
+        module ``.ko`` via the injected resolver (ADR-0278).
+        """
         self._host_policy(host)
         gdb_path = self._gdb_path_finder("gdb")
         if gdb_path is None:
@@ -225,7 +229,11 @@ class GdbMiEngine:
             )
         controller = self._controller_factory([gdb_path, "--nx", "--quiet", "--interpreter=mi3"])
         attachment = GdbMiAttachment(
-            controller=controller, rsp_host=host, rsp_port=port, transcript_path=transcript_path
+            controller=controller,
+            rsp_host=host,
+            rsp_port=port,
+            transcript_path=transcript_path,
+            run_id=run_id,
         )
         try:
             self.execute_mi_command(attachment, "-gdb-set confirm off")

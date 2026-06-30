@@ -44,7 +44,7 @@ type ModuleDebuginfoResolverSeam = Callable[[str, str], "ModuleDebuginfo"]
 
 class _GdbMiAttachEngine(Protocol):
     def attach(
-        self, *, host: str, port: int, vmlinux_path: Path, transcript_path: Path
+        self, *, host: str, port: int, vmlinux_path: Path, transcript_path: Path, run_id: str
     ) -> GdbMiAttachment: ...
 
 
@@ -289,7 +289,11 @@ def gdb_attach_seam(*, engine_factory: _GdbMiEngineFactory) -> AttachSeam:
     def attach_seam(*, host: str, port: int, run_id: str, transcript_path: Path) -> GdbMiAttachment:
         def attach(vmlinux_path: Path) -> GdbMiAttachment:
             return engine_factory().attach(
-                host=host, port=port, vmlinux_path=vmlinux_path, transcript_path=transcript_path
+                host=host,
+                port=port,
+                vmlinux_path=vmlinux_path,
+                transcript_path=transcript_path,
+                run_id=run_id,
             )
 
         return stage_and_attach(run_id=run_id, attach=attach)

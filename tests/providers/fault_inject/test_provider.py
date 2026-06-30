@@ -343,6 +343,7 @@ def test_attach_seam_returns_an_attachment_at_the_loopback_endpoint(tmp_path: Pa
 
     assert attachment.rsp_host == "127.0.0.1"
     assert attachment.rsp_port == 1234
+    assert attachment.run_id == str(_RUN)  # run_id carried for load_module_symbols (#923)
 
 
 def test_debug_engine_backtrace_and_read_frame(tmp_path: Path) -> None:

@@ -48,6 +48,7 @@ def fault_inject_attach_seam(
         rsp_host=host,
         rsp_port=port,
         transcript_path=transcript_path,
+        run_id=run_id,
     )
 
 
