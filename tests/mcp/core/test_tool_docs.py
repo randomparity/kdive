@@ -554,7 +554,15 @@ _LOCAL_PLANNED_PROVIDER_TOOLS: frozenset[str] = frozenset()
 # bare-row `-break-list` shape), clear_watchpoint, the categorized bad_byte_count/bad_target/
 # bad_symbol_name failures, and — decisively — `continue` trapped on the watched write
 # (reason=watchpoint-trigger in tick_do_update_jiffies64), so a hardware watchpoint does fire over
-# this gdbstub. `resolve_symbol` (ADR-0248) is unit-tested only and stays out until its
+# this gdbstub. The two module-symbol ops (#923/ADR-0278) were proven live against a real kernel
+# (v7.1-rc4 vmlinux, nokaslr) with a dependency-free `.ko` loaded by a `finit_module` init:
+# list_modules walked the kernel `modules` list and found the module at its `mem[0].base`
+# (single-module walk terminating at `&modules`, decode_errors=0), and load_module_symbols
+# resolved the `.ko`, ran `add-symbol-file <ko> <base>`, and a symbol that read "No symbol in
+# current context" before the load resolved afterward; identity_verified was False because that
+# kernel exposes neither srcversion (no MODVERSIONS) nor build_id (no STACKTRACE_BUILD_ID), the
+# disclosed-unverified path. This also re-proved the quoted `-data-evaluate-expression` form the
+# walk depends on. `resolve_symbol` (ADR-0248) is unit-tested only and stays out until its
 # `-data-evaluate-expression` form is re-proven live.
 _LOCAL_PROVEN_DEBUG_TOOLS = frozenset(
     {
@@ -573,6 +581,8 @@ _LOCAL_PROVEN_DEBUG_TOOLS = frozenset(
         "debug.set_watchpoint",
         "debug.list_watchpoints",
         "debug.clear_watchpoint",
+        "debug.list_modules",
+        "debug.load_module_symbols",
     }
 )
 

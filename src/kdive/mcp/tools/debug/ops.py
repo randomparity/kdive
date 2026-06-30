@@ -73,7 +73,10 @@ def _gdbmi_maturity() -> dict[str, object]:
     proven set until a live exercise lands. The three watchpoint ops (ADR-0277) were proven live on
     real KVM against a stopped ``schedule`` (set on ``jiffies`` + an explicit address, list, clear,
     and a ``continue`` that trapped on the watched write in ``tick_do_update_jiffies64``), so they
-    join ``_LOCAL_PROVEN_DEBUG_TOOLS``.
+    join ``_LOCAL_PROVEN_DEBUG_TOOLS``. ``list_modules`` and ``load_module_symbols`` (ADR-0278)
+    were proven live against a real kernel with a loaded ``.ko`` (walk found the module at its
+    ``mem[0].base``; ``add-symbol-file`` made a previously-unknown module symbol resolvable), so
+    they join the proven set too.
     """
     return _docmeta.maturity_meta("implemented")
 
