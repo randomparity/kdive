@@ -66,12 +66,20 @@ engine itself read, an engine-staged file path — never accepted as caller text
    and the criterion-4 stale-address guard requires the agent to thread it back). Resolve the
    `.ko` via an injected `ModuleDebuginfoResolver` keyed on
    `attachment.run_id` (lazy, run-id-keyed fetch/extract of the combined `kernel_ref` tar →
-   the `.ko` path); an absent or DWARF-less module is `no_module_debuginfo`
-   (`CONFIGURATION_ERROR`) **with remediation**. Load via
-   `-interpreter-exec console "add-symbol-file <ko> 0x<base>"` — `add-symbol-file` has no
-   native MI verb, the path is engine-staged + MI-escaped (`_mi_path`), the base numeric, so
-   the console command is non-injectable; a gdb `^error` is `add_symbol_failed`. On success
-   record `module` in `loaded_modules`.
+   `ModuleDebuginfo{path, srcversion?, build_id?}`, the artifact identity read from the `.ko`'s
+   `.modinfo` and `.note.gnu.build-id`); an absent or DWARF-less module is `no_module_debuginfo`
+   (`CONFIGURATION_ERROR`) **with remediation**. Then **verify binary identity** before loading:
+   read the running module's `mod->srcversion` (with `CONFIG_MODVERSIONS`) or `mod->build_id`
+   (with `CONFIG_STACKTRACE_BUILD_ID`) — a missing field is a caught gdb `^error`, not fatal —
+   and compare to the artifact `.ko`'s. A same-kind mismatch is `module_binary_mismatch`
+   (refuse before `add-symbol-file`: the `.ko` is not the binary running at that base — a
+   guest-side or rebuilt module — so loading would silently misattribute symbols); a match
+   loads with `identity_verified=true`; neither side exposing a comparable identity loads with
+   `identity_verified=false` (disclosed, not refused, so a kernel without those configs stays
+   usable). Load via `-interpreter-exec console "add-symbol-file <ko> 0x<base>"` —
+   `add-symbol-file` has no native MI verb, the path is engine-staged + MI-escaped (`_mi_path`),
+   the base numeric, so the console command is non-injectable; a gdb `^error` is
+   `add_symbol_failed`. On success record `module` in `loaded_modules`.
 
 3. **`^error` classification.** A module-list read against a running target reuses the
    existing `_RUNNING_RE` reclassification (`inferior_running`, fixed with
@@ -111,17 +119,19 @@ change is additive.
 - ADR-0034's expression-evaluation exclusion stays intact: the module-list walk and the
   watch/add-symbol commands are constructed from gated identifiers, engine-read numeric
   pointers, and engine-staged paths, never a caller expression.
-- A silent wrong-**address** load is impossible: `load_module_symbols` always loads at the
-  base it re-reads at call time, and surfaces `module_not_loaded` / `stale_module_address`
-  when the agent's view is stale. Criterion 4 is scoped to this enumeration/address staleness;
-  it does **not** verify the artifact `.ko` is the same binary as the running module (a
-  guest-side or rebuilt same-named module at the same base would load mismatched symbols
-  silently). An in-memory `srcversion`/build-id cross-check is a clean additive follow-up, not
-  claimed here.
+- A silent wrong load — wrong address *or* wrong binary — is impossible whenever the kernel
+  gives the engine the data to detect it. `load_module_symbols` always loads at the base it
+  re-reads (`module_not_loaded` / `stale_module_address` on a stale address view), and refuses
+  a `.ko` whose `srcversion`/`build_id` differs from the running module's
+  (`module_binary_mismatch`). When the kernel exposes no module identity (no `CONFIG_MODVERSIONS`
+  and no `CONFIG_STACKTRACE_BUILD_ID`) the load proceeds with `identity_verified=false` —
+  disclosed in the response, not silent — rather than refusing and making the feature unusable
+  there.
 - Remote-libvirt inherits both ops for free (shared engine), matching the rest of the tier.
 - Failures are categorized with `data["code"]` discriminators (`bad_module_name`,
   `no_module_debuginfo`, `inferior_running`, `module_decode_failed`, `module_not_loaded`,
-  `stale_module_address`, `add_symbol_failed`) so an agent can branch on the cause.
+  `stale_module_address`, `module_binary_mismatch`, `add_symbol_failed`) so an agent can branch
+  on the cause.
 - The new tools are covered by the `exposure.py` completeness guard, the
   `_BEHAVIOR_TESTS_BY_TOOL` coverage guard, the `tool_index` completeness guard, and the
   `just docs` generated-reference gate.
@@ -155,6 +165,11 @@ change is additive.
   authority for what it `add-symbol-file`'d this session; a per-attachment `loaded_modules`
   set is simpler and deterministic than parsing objfile listings, and "when available" in
   the criterion scopes the signal to what the engine knows.
+- **Refuse the load when module identity is unverifiable.** Rejected: a kernel built without
+  `CONFIG_MODVERSIONS` and `CONFIG_STACKTRACE_BUILD_ID` exposes no in-memory identity, so a
+  fail-closed policy would make module-symbol loading unusable there. Loading with a disclosed
+  `identity_verified=false` keeps the feature usable while never hiding that the load was
+  unchecked; a same-kind identity *mismatch* is still a hard `module_binary_mismatch`.
 - **Per-section symbol placement (`.data`/`.bss` addresses).** Rejected for this issue:
   `add-symbol-file <ko> <text-base>` symbolizes module `.text` (the backtrace/disassemble
   target). Precise per-section placement is a clean additive follow-up.

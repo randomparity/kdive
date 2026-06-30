@@ -51,9 +51,9 @@ RBAC, or destructive-op-gate change.
 
 | Layer | Change |
 |-------|--------|
-| `providers/ports/debug.py` | `GdbModule(ProviderModel)` record; two Protocol methods on `GdbMiEngine`; `GdbMiAttachment` gains `run_id: str` and `loaded_modules: set[str]` |
+| `providers/ports/debug.py` | `GdbModule(ProviderModel)` record (`name`, `base_address`, `symbols_loaded`, `identity_verified: bool \| None` — `None`/omitted for list rows, set by load); two Protocol methods on `GdbMiEngine`; `GdbMiAttachment` gains `run_id: str` and `loaded_modules: set[str]` |
 | `providers/shared/debug_common/gdbmi.py` | `list_modules` + `load_module_symbols`; injected `module_debuginfo_resolver` seam (default raises `MISSING_DEPENDENCY`, like the live attach); the module-list walk + base-field probe |
-| `providers/shared/debug_common/debuginfo.py` | `ModuleDebuginfoResolver`: lazy, run-id-keyed fetch/extract of the combined `kernel_ref` tar → a `.ko` path (the live/IO seams injected, mirroring `DebuginfoResolver`) |
+| `providers/shared/debug_common/debuginfo.py` | `ModuleDebuginfoResolver`: lazy, run-id-keyed fetch/extract of the combined `kernel_ref` tar → `ModuleDebuginfo{path, srcversion?, build_id?}` (`.ko` path + identity from `.modinfo`/`.note.gnu.build-id`; live/IO seams injected, mirroring `DebuginfoResolver`) |
 | `providers/fault_inject/debug/gdb.py` | synthetic conforming `list_modules`/`load_module_symbols` |
 | `mcp/tools/debug/ops.py` | two op factories + two tool registrations |
 | `mcp/exposure.py`, `tool_index`, generated docs | `_CONTRIBUTOR` scopes, search vocab, `just docs` |
@@ -124,26 +124,41 @@ RBAC, or destructive-op-gate change.
 4. **Resolve the `.ko`** via the injected `ModuleDebuginfoResolver` keyed on
    `attachment.run_id`: lazily fetch the combined `kernel_ref` tar (only on first load),
    extract `lib/modules/<ver>/`, and locate `<module>.ko` (matching `-`/`_` name
-   variants). Absent (or DWARF-less) → `no_module_debuginfo` (`CONFIGURATION_ERROR`)
-   **with remediation** naming that the Run must be built with `CONFIG_DEBUG_INFO=y` and
-   the module present (criterion 3).
-5. **Load.** Issue `-interpreter-exec console "add-symbol-file <ko> 0x<base>"`. The path
+   variants). The resolver returns `ModuleDebuginfo{path, srcversion?, build_id?}` — the
+   artifact `.ko`'s identity read from its `.modinfo` (`srcversion=`) and `.note.gnu.build-id`
+   ELF note (parsed directly, no new dependency; both are emitted by `modpost`/the linker
+   independently of the in-memory `struct module` config). Absent (or DWARF-less) →
+   `no_module_debuginfo` (`CONFIGURATION_ERROR`) **with remediation** naming that the Run
+   must be built with `CONFIG_DEBUG_INFO=y` and the module present (criterion 3).
+5. **Verify binary identity (criterion 4, binary dimension).** Read the *running* module's
+   identity from `struct module` — try `mod->srcversion` first (exists with
+   `CONFIG_MODVERSIONS`), then `mod->build_id` (exists with `CONFIG_STACKTRACE_BUILD_ID`); a
+   gdb `^error` on a missing field is caught, not fatal. Compare against the artifact `.ko`'s
+   matching identity from step 4:
+   - Both sides expose the **same identity kind** and the values **differ** →
+     `module_binary_mismatch` (`DEBUG_ATTACH_FAILURE`), refuse **before** `add-symbol-file`:
+     the artifact `.ko` is not the binary running at that address (guest-side or rebuilt
+     module), so loading would silently misattribute symbols.
+   - Values **match** → proceed with `identity_verified=true`.
+   - Neither in-memory field exists, or the `.ko` lacks the matching one → cannot compare;
+     proceed with `identity_verified=false`. This is **disclosed in the response, not silent**
+     (the kernel was built without `MODVERSIONS`/`STACKTRACE_BUILD_ID`); the agent sees the
+     load was not identity-checked rather than assuming it was.
+6. **Load.** Issue `-interpreter-exec console "add-symbol-file <ko> 0x<base>"`. The path
    is engine-staged and MI-escaped (`_mi_path`), the base is numeric — non-injectable.
    A gdb `^error` → `add_symbol_failed` (`DEBUG_ATTACH_FAILURE`). On success record
    `module` in `attachment.loaded_modules`.
-6. **Tool output:** `status="loaded"`, `data={module, base_address, symbols_loaded:true}`,
-   next `["debug.backtrace", "debug.disassemble", "debug.list_modules"]`.
+7. **Tool output:** `status="loaded"`, `data={module, base_address, symbols_loaded:true,
+   identity_verified}`, next `["debug.backtrace", "debug.disassemble", "debug.list_modules"]`.
 
-**Scope of the staleness guard.** Criterion 4 is about *stale enumeration data* — the agent's
-view of which modules are loaded and at what address — and the checks above close that
-dimension: the engine never loads at a passed-in or previously-seen address, only at one it
-re-reads, and refuses on `module_not_loaded` / `stale_module_address`. It does **not** verify
-that the `.ko` taken from the Run's `kernel_ref` artifact is the *same binary* as the module
-actually running in the guest (a guest-side or rebuilt module with the same name and base would
-pass the address check). That binary-identity mismatch is a distinct risk the issue does not
-name; this design does not claim to close it (see Non-goals — an in-memory
-`srcversion`/build-id cross-check is a clean additive follow-up). The wording "silent
-wrong-address load impossible" is therefore scoped to the **address**, not binary identity.
+**Scope of criterion 4.** The checks above close both staleness dimensions. *Enumeration/address*
+staleness: the engine never loads at a passed-in or previously-seen address, only at one it
+re-reads, and refuses on `module_not_loaded` / `stale_module_address`. *Binary identity*: when
+the kernel exposes a module identity (`srcversion`/`build_id`) the engine refuses a mismatched
+`.ko` with `module_binary_mismatch`; when the kernel exposes none, it loads but reports
+`identity_verified=false` so the unverifiable case is disclosed, never silent. A silent wrong
+load — wrong address or wrong binary — is therefore impossible whenever the kernel gives the
+engine the data to detect it, and transparent when it does not.
 
 `-interpreter-exec console` is a new pattern for this engine (no prior console-exec use);
 `add-symbol-file` has no native MI verb, so the console form is required. It is confined
@@ -159,6 +174,7 @@ to this one engine-constructed command.
 | `module_decode_failed` | `DEBUG_ATTACH_FAILURE` | base-field probes fail / malformed MI eval value |
 | `module_not_loaded` | `DEBUG_ATTACH_FAILURE` | requested module not in the live list (stale) |
 | `stale_module_address` | `DEBUG_ATTACH_FAILURE` | `expected_base` ≠ current base (stale) |
+| `module_binary_mismatch` | `DEBUG_ATTACH_FAILURE` | running module's `srcversion`/`build_id` ≠ artifact `.ko`'s |
 | `add_symbol_failed` | `DEBUG_ATTACH_FAILURE` | gdb `^error` from `add-symbol-file` |
 
 `inferior_running` matches the existing `_RUNNING_RE` reclassification the stack/watchpoint
@@ -175,14 +191,19 @@ session (the established `tests/mcp/debug/test_debug_ops.py` pattern):
 - **list** — scripted module-list walk over two modules (one with the `mem[MOD_TEXT]`
   layout, asserting the probe path), `symbols_loaded` reflects the loaded-set, `truncated`
   on an over-`max_modules` walk.
-- **successful load** — fake resolver returns a `.ko` path; assert `add-symbol-file` issued
-  at the freshly-read base and the module joins the loaded-set (so a follow-up `list_modules`
-  shows `symbols_loaded=true`).
+- **successful load** — fake resolver returns a `.ko` path + matching `srcversion`; assert
+  `add-symbol-file` issued at the freshly-read base, `identity_verified=true`, and the module
+  joins the loaded-set (so a follow-up `list_modules` shows `symbols_loaded=true`).
 - **missing debuginfo** — resolver raises `no_module_debuginfo`; assert
   `configuration_error` + remediation in the envelope.
 - **stale address** — `expected_base` differs from the scripted current base →
   `stale_module_address`; and a module absent from the list → `module_not_loaded`. Assert
   **no** `add-symbol-file` command was issued in either case.
+- **binary mismatch** — scripted `mod->srcversion` differs from the fake resolver's `.ko`
+  `srcversion` → `module_binary_mismatch`, and assert **no** `add-symbol-file` was issued.
+- **identity unavailable** — `mod->srcversion`/`mod->build_id` both gdb-`^error` (configs
+  absent) → load proceeds with `identity_verified=false`. Cover the `build_id`-fallback match
+  path too (srcversion missing, build_id matches).
 - **idempotent re-load** — a second `load_module_symbols` for an already-loaded module returns
   `loaded` and issues **no** second `add-symbol-file`.
 - **partial decode** — a walk with one garbage row returns the decodable rows plus
@@ -202,12 +223,11 @@ but are **not** added to `_LOCAL_PROVEN_DEBUG_TOOLS` until a live KVM exercise l
 - **No per-section symbol placement.** `add-symbol-file <ko> <text-base>` places `.text`
   at the module base; precise per-section (`.data`/`.bss`) addresses are a possible
   follow-up. `.text` symbolization (backtrace/disassemble of module code) is the target.
-- **No `.ko`-vs-running-module binary-identity check.** The staleness guard validates the
-  load *address*, not that the artifact `.ko` is the same binary as the running module. A
-  guest-side or rebuilt same-named module at the same base would load mismatched symbols
-  silently. Comparing the in-memory `srcversion`/build-id (readable on the same walk) to the
-  `.ko`'s is a clean additive follow-up; this issue scopes criterion 4 to enumeration/address
-  staleness.
+- **Identity check degrades to disclosure, not refusal.** When the kernel exposes neither
+  `mod->srcversion` (no `CONFIG_MODVERSIONS`) nor `mod->build_id` (no
+  `CONFIG_STACKTRACE_BUILD_ID`), the engine cannot compare and loads with
+  `identity_verified=false` rather than refusing — refusing would make the feature unusable on
+  such kernels. The unverifiable case is disclosed in the response, never silent.
 - **`list_modules` is O(modules) MI round-trips** (a Python-side list walk), bounded by
   `MAX_MODULES`. Acceptable: module lists are small-to-moderate and the op is synchronous
   and bounded, like the other read ops.
