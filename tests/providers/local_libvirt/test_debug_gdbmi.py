@@ -1391,6 +1391,227 @@ def test_read_frame_classifies_running_inferior(tmp_path: Path) -> None:
     assert exc.value.details["code"] == "inferior_running"
 
 
+# --- disassembly (ADR-0276) ----------------------------------------------------------------
+
+
+def _disasm_controller(insns: list[dict[str, object]], command: str) -> _FakeMiController:
+    return _FakeMiController(
+        responses={
+            command: [{"type": "result", "message": "done", "payload": {"asm_insns": list(insns)}}]
+        }
+    )
+
+
+def test_disassemble_symbol_resolves_then_disassembles(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-data-evaluate-expression &schedule": [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {"value": "0xffffffff81000000 <schedule>"},
+                }
+            ],
+            "-data-disassemble -s 0xffffffff81000000 -e 0xffffffff81000400 -- 0": [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {
+                        "asm_insns": [
+                            {
+                                "address": "0xffffffff81000000",
+                                "func-name": "schedule",
+                                "offset": "0",
+                                "inst": "push %rbp",
+                            },
+                        ]
+                    },
+                }
+            ],
+        }
+    )
+    result = _engine().disassemble(
+        _attachment(controller, tmp_path), symbol="schedule", address=None, instruction_count=64
+    )
+    assert result.truncated is False
+    assert result.instructions[0].inst == "push %rbp"
+    assert result.instructions[0].func_name == "schedule"
+    assert result.instructions[0].offset == 0
+
+
+def test_disassemble_address_skips_symbol_resolution(tmp_path: Path) -> None:
+    command = "-data-disassemble -s 0x1000 -e 0x1400 -- 0"
+    controller = _disasm_controller([{"address": "0x1000", "inst": "nop"}], command)
+    result = _engine().disassemble(
+        _attachment(controller, tmp_path), symbol=None, address=0x1000, instruction_count=64
+    )
+    assert result.instructions[0].address == "0x1000"
+    assert "-data-evaluate-expression &" not in " ".join(controller.written)
+
+
+def test_disassemble_truncates_to_instruction_count(tmp_path: Path) -> None:
+    insns: list[dict[str, object]] = [
+        {"address": f"0x{0x1000 + i:x}", "inst": "nop"} for i in range(5)
+    ]
+    controller = _disasm_controller(insns, "-data-disassemble -s 0x1000 -e 0x1030 -- 0")
+    result = _engine().disassemble(
+        _attachment(controller, tmp_path), symbol=None, address=0x1000, instruction_count=3
+    )
+    assert result.truncated is True
+    assert len(result.instructions) == 3
+
+
+@pytest.mark.parametrize("bad", [0, gdbmi.MAX_DISASSEMBLE_INSTRUCTIONS + 1])
+def test_disassemble_rejects_bad_count_before_command(bad: int, tmp_path: Path) -> None:
+    controller = _FakeMiController()
+    with pytest.raises(CategorizedError) as exc:
+        _engine().disassemble(
+            _attachment(controller, tmp_path), symbol=None, address=0x1000, instruction_count=bad
+        )
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["code"] == "bad_instruction_count"
+    assert controller.written == []
+
+
+@pytest.mark.parametrize(("symbol", "address"), [("schedule", 0x1000), (None, None)])
+def test_disassemble_rejects_bad_target(
+    symbol: str | None, address: int | None, tmp_path: Path
+) -> None:
+    controller = _FakeMiController()
+    with pytest.raises(CategorizedError) as exc:
+        _engine().disassemble(
+            _attachment(controller, tmp_path),
+            symbol=symbol,
+            address=address,
+            instruction_count=64,
+        )
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["code"] == "bad_target"
+    assert controller.written == []
+
+
+@pytest.mark.parametrize("bad", [-1, 0x1_0000_0000_0000_0000])
+def test_disassemble_rejects_out_of_range_address(bad: int, tmp_path: Path) -> None:
+    controller = _FakeMiController()
+    with pytest.raises(CategorizedError) as exc:
+        _engine().disassemble(
+            _attachment(controller, tmp_path), symbol=None, address=bad, instruction_count=64
+        )
+    assert exc.value.details["code"] == "bad_address"
+    assert controller.written == []
+
+
+def test_disassemble_no_instructions_on_empty_asm_insns(tmp_path: Path) -> None:
+    controller = _disasm_controller([], "-data-disassemble -s 0x1000 -e 0x1400 -- 0")
+    with pytest.raises(CategorizedError) as exc:
+        _engine().disassemble(
+            _attachment(controller, tmp_path), symbol=None, address=0x1000, instruction_count=64
+        )
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "no_instructions"
+
+
+def test_disassemble_no_instructions_on_malformed_asm_insns(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-data-disassemble -s 0x1000 -e 0x1400 -- 0": [
+                {"type": "result", "message": "done", "payload": {"asm_insns": "garbage"}}
+            ]
+        }
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _engine().disassemble(
+            _attachment(controller, tmp_path), symbol=None, address=0x1000, instruction_count=64
+        )
+    assert exc.value.details["code"] == "no_instructions"
+
+
+def test_disassemble_shrink_retry_returns_prefix(tmp_path: Path) -> None:
+    # The full N*16 window is unreadable; the halved window succeeds and still holds >N.
+    controller = _FakeMiController(
+        responses={
+            "-data-disassemble -s 0x1000 -e 0x1400 -- 0": [
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": "Cannot access memory at address 0x1400"},
+                }
+            ],
+            "-data-disassemble -s 0x1000 -e 0x1200 -- 0": [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {
+                        "asm_insns": [
+                            {"address": f"0x{0x1000 + i:x}", "inst": "nop"} for i in range(80)
+                        ]
+                    },
+                }
+            ],
+        }
+    )
+    result = _engine().disassemble(
+        _attachment(controller, tmp_path), symbol=None, address=0x1000, instruction_count=64
+    )
+    assert len(result.instructions) == 64
+    assert result.truncated is True
+
+
+def test_disassemble_no_instructions_when_floor_window_unreadable(tmp_path: Path) -> None:
+    # Every window down to the 16-byte floor errors with a memory-access message.
+    controller = _FakeMiController(
+        responses={
+            f"-data-disassemble -s 0x1000 -e 0x{0x1000 + span:x} -- 0": [
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": "Cannot access memory at address 0x1000"},
+                }
+            ]
+            for span in (1024, 512, 256, 128, 64, 32, 16)
+        }
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _engine().disassemble(
+            _attachment(controller, tmp_path), symbol=None, address=0x1000, instruction_count=64
+        )
+    assert exc.value.details["code"] == "no_instructions"
+
+
+def test_disassemble_passes_through_unrelated_gdb_error(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-data-disassemble -s 0x1000 -e 0x1400 -- 0": [
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": "Some other gdb failure"},
+                }
+            ]
+        }
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _engine().disassemble(
+            _attachment(controller, tmp_path), symbol=None, address=0x1000, instruction_count=64
+        )
+    assert exc.value.details.get("code") != "no_instructions"
+    assert exc.value.details["command"] == "-data-disassemble -s 0x1000 -e 0x1400 -- 0"
+
+
+def test_disassemble_redacts_registered_secret_in_inst(tmp_path: Path) -> None:
+    secret = "topsecretsym"  # pragma: allowlist secret - fake test value
+    controller = _disasm_controller(
+        [{"address": "0x1000", "inst": "call", "func-name": secret}],
+        "-data-disassemble -s 0x1000 -e 0x1400 -- 0",
+    )
+    engine = _engine(Redactor(secret_values=[secret], registry=SecretRegistry()))
+    result = engine.disassemble(
+        _attachment(controller, tmp_path), symbol=None, address=0x1000, instruction_count=64
+    )
+    assert result.instructions[0].func_name is not None
+    assert secret not in result.instructions[0].func_name
+
+
 # --- error mapping ------------------------------------------------------------------------
 
 
