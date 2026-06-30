@@ -94,17 +94,24 @@ git commit -m "feat(920): add stack_frames MI parser"  # + Co-Authored-By traile
 
 ---
 
-### Task 2: `GdbBacktrace` port model + Protocol methods
+### Task 2: `GdbBacktrace` port model (model only — NOT the Protocol methods yet)
 
 **Files:**
 - Modify: `src/kdive/providers/ports/debug.py`
-- Test: covered transitively by Task 3/4 (a Protocol/model has no behavior to unit-test alone).
+- Test: covered transitively by Task 3 (a model has no behavior to unit-test alone).
+
+**Ordering rationale (read this):** `DebugCapabilities.engine` is typed as the `GdbMiEngine`
+**Protocol** (`src/kdive/providers/core/runtime.py:62`), and both the shared concrete engine
+(local-libvirt composition) and `FaultInjectDebugEngine`
+(`src/kdive/providers/fault_inject/composition.py:117`) are assigned to it. `ty` checks Protocol
+conformance at those assignment sites. So if the two new methods are added to the Protocol
+*before* every concrete implementer has them, `ty` goes red. Therefore: define only the
+`GdbBacktrace` model here; implement the concrete engines (Task 3, Task 4); add the methods to
+the Protocol **last** (Task 5), once every implementer already conforms.
 
 **Interfaces:**
-- Consumes: `GdbFrame`, `ProviderModel`, `GdbMiAttachment` (existing in `debug.py`).
-- Produces:
-  - `GdbBacktrace(ProviderModel)` with `frames: list[GdbFrame]` and `truncated: bool`.
-  - `GdbMiEngine` Protocol gains `backtrace(self, attachment: GdbMiAttachment, *, max_frames: int) -> GdbBacktrace` and `read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrame`.
+- Consumes: `GdbFrame`, `ProviderModel` (existing in `debug.py`).
+- Produces: `GdbBacktrace(ProviderModel)` with `frames: list[GdbFrame]` and `truncated: bool`.
 
 - [ ] **Step 1: Add the model**
 
@@ -118,46 +125,16 @@ class GdbBacktrace(ProviderModel):
     truncated: bool = False
 ```
 
-- [ ] **Step 2: Add the Protocol methods**
-
-In the `GdbMiEngine` Protocol in the same file, add (mirroring the docstring style of the existing ops):
-
-```python
-    def backtrace(self, attachment: GdbMiAttachment, *, max_frames: int) -> GdbBacktrace:
-        """Walk the stopped inferior's stack through gdb/MI, bounded to ``max_frames``.
-
-        Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_frame_count`` for an out-of-range
-                ``max_frames`` (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` /
-                ``inferior_running`` when the target is running, ``no_frames`` when gdb returns
-                no usable frame data, or for other gdb/MI command failures; ``INFRASTRUCTURE_FAILURE``
-                for command timeouts.
-        """
-        ...
-
-    def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
-        """Inspect one selected stack frame by ``level`` through gdb/MI.
-
-        Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_frame_level`` for a negative or
-                non-integer ``level`` (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` /
-                ``inferior_running`` when the target is running, ``no_frame_at_level`` when no
-                frame exists at ``level``, or for other gdb/MI command failures;
-                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
-        """
-        ...
-```
-
-- [ ] **Step 3: Lint, type**
+- [ ] **Step 2: Lint, type**
 
 Run: `just lint && just type`
-Expected: PASS (no behavior yet; `ty` confirms the model/Protocol are well-formed).
+Expected: PASS (a new model only; no Protocol change yet, so no implementer is forced).
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add src/kdive/providers/ports/debug.py
-git commit -m "feat(920): add GdbBacktrace model and engine Protocol methods"  # + trailer
+git commit -m "feat(920): add GdbBacktrace port model"  # + trailer
 ```
 
 ---
@@ -170,7 +147,13 @@ git commit -m "feat(920): add GdbBacktrace model and engine Protocol methods"  #
 
 **Interfaces:**
 - Consumes: `stack_frames` (Task 1), `GdbBacktrace` (Task 2), existing `execute_mi_command`, `_frame_from`, `_redactor`, `_config_error`, `GdbFrame`, `CategorizedError`, `ErrorCategory`.
-- Produces: concrete `backtrace(...) -> GdbBacktrace` and `read_frame(...) -> GdbFrame` on `GdbMiEngine`; module constant `MAX_BACKTRACE_FRAMES = 64`.
+- Produces: concrete `backtrace(...) -> GdbBacktrace` and `read_frame(...) -> GdbFrame` on the shared concrete `GdbMiEngine` class; module constant `MAX_BACKTRACE_FRAMES = 64`.
+
+**Ordering note:** the `GdbMiEngine` Protocol does **not** declare these methods yet (that lands
+in Task 5). Adding them to the concrete class here is safe — a concrete class may carry methods
+the Protocol doesn't list, and `ty` stays green because no Protocol-typed assignment requires
+them yet. The engine tests call the concrete class directly (`_engine().backtrace(...)`), not
+through the Protocol.
 
 **Notes for the implementer:**
 - `_frame_from(payload: dict) -> GdbFrame` already exists (lenient: maps each field with isinstance/`mi_int` guards). Reuse it.
@@ -437,7 +420,12 @@ git commit -m "feat(920): add backtrace and read_frame engine ops"  # + trailer
 
 **Files:**
 - Modify: `src/kdive/providers/fault_inject/debug/gdb.py`
-- Test: `tests/providers/fault_inject/test_provider.py` (if it already exercises the debug engine; otherwise rely on `ty` Protocol conformance + Task 6 handler tests).
+- Test: `tests/providers/fault_inject/test_provider.py` (already instantiates `FaultInjectDebugEngine` — add explicit assertions in Step 1b).
+
+**Ordering note:** the Protocol still does not declare the methods at this point (that lands in
+Task 5). Adding the concrete methods to `FaultInjectDebugEngine` here is additive and `ty` stays
+green. After this task BOTH Protocol implementers (shared concrete + fault-inject) carry the
+methods, which is the precondition Task 5 needs before it adds the methods to the Protocol.
 
 **Interfaces:**
 - Consumes: `GdbFrame`, `GdbBacktrace` (add to the existing `from kdive.providers.ports.debug import (...)`).
@@ -469,35 +457,90 @@ In `src/kdive/providers/fault_inject/debug/gdb.py`, add `GdbBacktrace` to the po
 
 Also add `GdbFrame` to the import if not present (the module currently imports `GdbBreakpointRef`, `GdbMiAttachment`, `GdbStopRecord`).
 
-- [ ] **Step 2: Type-check (Protocol conformance)**
+- [ ] **Step 1b: Add explicit assertions**
 
-Run: `just type`
-Expected: PASS — confirms `FaultInjectDebugEngine` still satisfies the `GdbMiEngine` Protocol after the two new Protocol methods were added in Task 2.
+In `tests/providers/fault_inject/test_provider.py`, near the existing `FaultInjectDebugEngine()`
+exercises, add a synthetic-frame test:
 
-- [ ] **Step 3: Run fault-inject provider tests**
+```python
+def test_fault_inject_engine_backtrace_and_read_frame() -> None:
+    from pathlib import Path
 
-Run: `uv run python -m pytest tests/providers/fault_inject/ -q`
-Expected: PASS.
+    from kdive.providers.ports.debug import GdbMiAttachment
+    from kdive.providers.fault_inject.debug.gdb import _SyntheticGdbController
 
-- [ ] **Step 4: Commit**
+    engine = FaultInjectDebugEngine()
+    attachment = GdbMiAttachment(
+        controller=_SyntheticGdbController(), rsp_host="127.0.0.1", rsp_port=1234,
+        transcript_path=Path("/tmp/fi-transcript.jsonl"),
+    )
+    bt = engine.backtrace(attachment, max_frames=64)
+    assert bt.truncated is False
+    assert [f.level for f in bt.frames] == [0, 1]
+    assert engine.read_frame(attachment, level=3).level == 3
+```
+
+(Adjust imports to match the file's existing style; reuse any attachment helper already present.)
+
+- [ ] **Step 2: Type-check + tests**
+
+Run: `just lint && just type && uv run python -m pytest tests/providers/fault_inject/ -q`
+Expected: PASS. `ty` is green because the Protocol does not yet require the methods (added in
+Task 5); the concrete class simply carries them.
+
+- [ ] **Step 3: Commit**
 
 ```bash
-just lint && just type
-git add src/kdive/providers/fault_inject/debug/gdb.py
+git add src/kdive/providers/fault_inject/debug/gdb.py tests/providers/fault_inject/test_provider.py
 git commit -m "feat(920): add synthetic backtrace/read_frame to fault-inject engine"  # + trailer
 ```
 
 ---
 
-### Task 5: MCP tool op factories + registrations
+### Task 5: declare Protocol methods, then add op factories + registrations
 
 **Files:**
+- Modify: `src/kdive/providers/ports/debug.py` (Protocol methods — Step 0)
 - Modify: `src/kdive/mcp/tools/debug/ops.py`
 - Test: `tests/mcp/debug/test_debug_ops.py`
 
 **Interfaces:**
-- Consumes: `run_engine_op`, `_EngineOp`, `ToolResponse`, `GdbMiEngine`, `GdbMiAttachment`, `_docmeta`, `JsonValue`, the engine ops from Task 3.
-- Produces: `_backtrace_op(session_id, max_frames) -> _EngineOp`, `_read_frame_op(session_id, level) -> _EngineOp`; tools `debug.backtrace` and `debug.read_frame`; these added to `_register_debug_ops`; the `_op_for` test map gets `"backtrace"`/`"read_frame"` entries.
+- Consumes: `run_engine_op`, `_EngineOp`, `ToolResponse`, `GdbMiEngine` (the port Protocol), `GdbMiAttachment`, `_docmeta`, `JsonValue`, the concrete engine ops from Task 3/4.
+- Produces: the `GdbMiEngine` **Protocol** now declares `backtrace`/`read_frame`; `_backtrace_op(session_id, max_frames) -> _EngineOp`, `_read_frame_op(session_id, level) -> _EngineOp`; tools `debug.backtrace`/`debug.read_frame` added to `_register_debug_ops`; the `_op_for` test map gets `"backtrace"`/`"read_frame"` entries.
+
+- [ ] **Step 0: Add the two methods to the `GdbMiEngine` Protocol**
+
+This is now safe — both concrete implementers (Task 3 shared engine, Task 4 fault-inject) already
+carry the methods, so adding them to the Protocol keeps `ty` green at every Protocol-typed
+assignment site. In `src/kdive/providers/ports/debug.py`, in the `GdbMiEngine` Protocol, add:
+
+```python
+    def backtrace(self, attachment: GdbMiAttachment, *, max_frames: int) -> GdbBacktrace:
+        """Walk the stopped inferior's stack through gdb/MI, bounded to ``max_frames``.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_frame_count`` for an out-of-range
+                ``max_frames`` (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` /
+                ``inferior_running`` when the target is running, ``no_frames`` when gdb returns
+                no usable frame data, or for other gdb/MI command failures;
+                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+
+    def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
+        """Inspect one selected stack frame by ``level`` through gdb/MI.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_frame_level`` for a negative or
+                non-integer ``level`` (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` /
+                ``inferior_running`` when the target is running, ``no_frame_at_level`` when no
+                frame exists at ``level``, or for other gdb/MI command failures;
+                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+```
+
+Run `just type` — expected PASS (every implementer already conforms).
 
 - [ ] **Step 1: Write the failing handler tests**
 
@@ -589,7 +632,11 @@ Expected: FAIL (`AttributeError: module ... has no attribute '_backtrace_op'`).
 
 - [ ] **Step 3: Write the op factories**
 
-In `src/kdive/mcp/tools/debug/ops.py`, after `_interrupt_op`, add:
+In `src/kdive/mcp/tools/debug/ops.py`, after `_interrupt_op`, add the following. Note: if `ty`
+rejects assigning `frame.model_dump(...)` (`dict[str, Any]`) into `list[JsonValue]`, wrap the
+comprehension in `cast("list[JsonValue]", [...])` (import `cast` from `typing`) — the dumped
+frame is a flat dict of `str`/`int`/`None` and is a valid `JsonValue` at runtime; the cast just
+satisfies the checker. Confirm against how neighboring handlers return nested structures.
 
 ```python
 def _backtrace_op(session_id: str, max_frames: int) -> _EngineOp:
@@ -682,8 +729,8 @@ Expected: PASS.
 
 ```bash
 just lint && just type
-git add src/kdive/mcp/tools/debug/ops.py tests/mcp/debug/test_debug_ops.py
-git commit -m "feat(920): add debug.backtrace and debug.read_frame tools"  # + trailer
+git add src/kdive/providers/ports/debug.py src/kdive/mcp/tools/debug/ops.py tests/mcp/debug/test_debug_ops.py
+git commit -m "feat(920): declare Protocol methods and add backtrace/read_frame tools"  # + trailer
 ```
 
 ---
