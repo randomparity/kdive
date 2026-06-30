@@ -17,7 +17,9 @@
 - Doc prose: no "critical/robust/comprehensive/elegant"; "Milestone" not "Sprint".
 - Guardrails before every commit (these CI-hard-gate individually): `just lint`, `just type`, `just test` (or focused `uv run python -m pytest <path> -q`). Generated-doc gates: `just docs-check`, `just rbac-matrix` (regenerate), `just config-docs-check`.
 - New tools marked `implemented` via the shared `_gdbmi_maturity()`; **not** added to `_LOCAL_PROVEN_DEBUG_TOOLS` (unit-tested only, like `resolve_symbol`).
-- **Commit grouping (type-coupling constraint).** The `ty` pre-commit hook runs `just type` **whole-tree** (`pass_filenames: false`), and `FaultInjectDebugEngine` is structurally typed against the `GdbMiEngine` Protocol at `providers/fault_inject/composition.py:117`. So the moment the Protocol gains the three methods (Task 1), the tree does not type-check until **every** concrete implementor has them. The only concrete implementors are the shared `GdbMiEngine` (used by both local- and remote-libvirt) and `FaultInjectDebugEngine` — no separate local/remote engine class implements the Protocol (verify with `rg -n "def set_breakpoint" src/kdive/providers` before starting; expect only the shared engine + fault-inject). Therefore **Tasks 1+2+3 are one commit-group**: stage them and run the `ty` gate / commit only at the end of Task 3, when the tree is green again. Tasks 4 and 5 are separate commits (they only add references and never break Protocol conformance).
+- **Commit grouping (type-coupling constraint).** The `ty` pre-commit hook runs `just type` **whole-tree** (`pass_filenames: false`), and `FaultInjectDebugEngine` is structurally typed against the `GdbMiEngine` Protocol at `providers/fault_inject/composition.py:117`. So the moment the Protocol gains the three methods (Task 1), the tree does not type-check until **every** concrete implementor has them. The only concrete implementors are the shared `GdbMiEngine` (used by both local- and remote-libvirt) and `FaultInjectDebugEngine` — no separate local/remote engine class implements the Protocol (verify with `rg -n "def set_breakpoint" src/kdive/providers` before starting; expect only the shared engine + fault-inject). Therefore **Tasks 1+2+3 are one commit-group**: stage them and run the `ty` gate / commit only at the end of Task 3, when the tree is green again.
+
+  A **second** coupling exists between Task 4 and Task 5: Task 4 *registers* the three tools, but registration-completeness guards (the `_BEHAVIOR_TESTS_BY_TOOL` map in `tests/mcp/core/test_tool_docs.py`, the `exposure.py` scope-completeness guard, the `tool_index` completeness guard, and the `just docs-check` generated-reference gate) fail `just test`/`just docs-check` until Task 5 adds the scope, vocabulary, behavior-map entries, and regenerated docs. The `ty`/pre-commit hooks do not run pytest, so they will not catch this. Therefore **Tasks 4+5 are also one commit-group**: stage Task 4, then complete Task 5 (scope, vocab, behavior-map, `just docs` + `just rbac-matrix`), and only then run the full guardrails (`just lint && just type && just test && just docs-check`) and make a single commit. Each commit-group leaves every CI-hard-gated check green.
 - Commit trailer: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
 
 ## File Structure
@@ -852,12 +854,7 @@ Update the module docstring's tool list (add `.set_watchpoint/.list_watchpoints/
 
 - [ ] **Step 5: Run to verify it passes** — `uv run python -m pytest tests/mcp/debug/test_debug_ops.py -k watchpoint -q`. Expected: PASS.
 
-- [ ] **Step 6: Guardrails + commit** — `just lint && just type`, then:
-
-```bash
-git add src/kdive/mcp/tools/debug/ops.py tests/mcp/debug/test_debug_ops.py
-git commit -m "feat(922): register debug watchpoint MCP tools"
-```
+- [ ] **Step 6: Lint+type only; do NOT commit yet.** Run `just lint && just type` → PASS. Do **not** run `just test` or commit: registering the three tools makes the completeness guards (`_BEHAVIOR_TESTS_BY_TOOL`, exposure scope, `tool_index`, `just docs-check`) red until Task 5. Leave Task 4 changes staged and proceed to Task 5; the single commit for Tasks 4+5 lands at the end of Task 5 (see "Commit grouping" in Global Constraints).
 
 ---
 
@@ -900,11 +897,13 @@ Do **not** add the new tools to `_LOCAL_PROVEN_DEBUG_TOOLS` (unit-tested only).
 
 - [ ] **Step 5: Run the full guard suites** — `uv run python -m pytest tests/mcp/core/test_tool_docs.py tests/mcp/test_tool_index.py -q`. Expected: PASS (registration/scope/vocab/behavior-map/reference completeness guards all green).
 
-- [ ] **Step 6: Guardrails + commit** — `just lint && just type`, then:
+- [ ] **Step 6: Full guardrails + the single commit for Tasks 4+5.** Now that the tools are registered (Task 4) and scoped/indexed/behavior-mapped with regenerated docs (Task 5), every completeness guard is satisfiable. Run `just lint && just type && just test && just docs-check && just config-docs-check` → PASS, then commit Tasks 4+5 together:
 
 ```bash
-git add src/kdive/mcp/exposure.py src/kdive/mcp/tool_index.py tests/mcp/core/test_tool_docs.py docs/guide/
-git commit -m "feat(922): wire watchpoint scope, vocab, docs"
+git add src/kdive/mcp/tools/debug/ops.py tests/mcp/debug/test_debug_ops.py \
+  src/kdive/mcp/exposure.py src/kdive/mcp/tool_index.py \
+  tests/mcp/core/test_tool_docs.py docs/guide/
+git commit -m "feat(922): register watchpoint MCP tools + wire scope, vocab, docs"
 ```
 
 ---
