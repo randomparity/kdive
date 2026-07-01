@@ -146,10 +146,12 @@ asserts each declared tag is backed by concrete build evidence:
 | `build` | `kind == "build"` |
 | `agent` | not declared by any local family (reserved for the remote guest contract) |
 
-The guard reads `packages()` and drives `customize_argv` with a synthetic `CustomizeContext`,
-inspecting the resulting tokens; it needs no libguestfs and no boot. Iterating `_FAMILIES`
-means a newly-registered family is covered automatically — including that its `guest_mac`
-maps to a MAC tag (so an unmapped posture fails the guard here, not at a later `build-fs`).
+Every evidence rule reads `packages()` or the `guest_mac` attribute, so the guard needs no
+`customize_argv`, no libguestfs, and no boot. Iterating `_FAMILIES` means a newly-registered
+family is covered automatically — including that its `guest_mac` maps to a MAC tag (so an
+unmapped posture fails the guard here, not at a later `build-fs`). The guard also fails a
+family that declares a tag with **no** evidence rule, so a stray tag cannot slip through
+unchecked.
 
 What the guard proves and does not prove: it enforces **declaration ↔ recipe** consistency
 (the family declares exactly what its `packages()`/`customize_argv` install). It does not
@@ -194,11 +196,12 @@ resolve_rootfs_entry(name) ── entry(kind,distro,version,family) ──▶ fa
   family accepts, exactly as `packages()` does.
 - An unknown `guest_mac` posture (a new family added without a MAC mapping) surfaces from
   `_mac_tag` at **`capabilities()` call time** — i.e. during `catalog_rootfs_build`/`build-fs`,
-  not at family construction. Because the anti-drift guard iterates the live `_FAMILIES`
-  registry, any registered family with an unmapped posture fails the guard in CI before it can
-  reach a real build. To make the runtime surface actionable rather than a bare traceback,
-  `catalog_rootfs_build` wraps an unmapped-posture `ValueError` as a `CONFIGURATION_ERROR`
-  naming the family and posture.
+  not at family construction. `_mac_tag` raises a `ValueError` whose message names the
+  unmapped posture, which is the actionable signal.
+- Because the anti-drift guard iterates the live `_FAMILIES` registry and asserts every
+  family's `guest_mac` maps to a MAC tag, a registered family with an unmapped posture fails
+  the guard in CI before it can ever reach a real build. That guard — not a runtime wrapper —
+  is the mechanism that keeps the `ValueError` unreachable in practice.
 - No new failure path for the two shipped families: their postures map, so capability
   resolution is pure and precedes the build.
 
