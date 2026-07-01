@@ -1,10 +1,10 @@
-"""Unit tests for the debian FamilyCustomizer argv contract (ADR-0251, #824).
+"""Unit tests for the debian FamilyCustomizer argv contract (ADR-0251, #824, ADR-0288).
 
 These pin the virt-customize argv the debian customizer builds without running libguestfs: apt
 install, ``ssh.service``/``kdump-tools.service`` enable, ``USE_KDUMP=1``, the NMI-panic sysctl,
-ssh-inject, the kdive-ready unit, and the version-proof cloud-init disable + machine-id seed on a
-cloud-image base — and the deliberate Debian divergences from ``rhel``: no ``/etc/selinux/config``
-edit, no NetworkManager keyfile, ``ssh.service`` not ``sshd.service``.
+ssh-inject, the kdive-ready unit, and the shared cloud-init first-boot baking (ADR-0288) — and the
+deliberate Debian divergences from ``rhel``: no ``/etc/selinux/config`` edit, no NetworkManager
+keyfile, ``ssh.service`` not ``sshd.service``.
 """
 
 from __future__ import annotations
@@ -91,16 +91,14 @@ def test_debug_argv_injects_key_and_readiness_unit(tmp_path: Path) -> None:
     assert "systemctl enable kdive-ready.service" in argv
 
 
-def test_debug_argv_stages_sshd_host_key_generation(tmp_path: Path) -> None:
-    # Debian genericcloud ships openssh-server with NO host keys (cloud-init makes them per-instance
-    # at first boot); disabling cloud-init removes that, and Debian has no Fedora/RHEL sshd-keygen
-    # unit, so ssh.service fails its `sshd -t` preflight. Stage a oneshot that runs `ssh-keygen -A`
-    # before ssh.service so SSH (the drgn-live transport) comes up (#824, live-found).
+def test_debian_argv_bakes_cloud_init_drops_sshd_keygen(tmp_path: Path) -> None:
     argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
     j = " ".join(argv)
-    assert "ssh-keygen -A" in j, "must generate missing sshd host keys"
-    assert "Before=ssh.service" in j, "keygen must be ordered before ssh.service"
-    assert "systemctl enable kdive-sshd-keygen.service" in argv
+    assert "/etc/cloud/cloud.cfg.d/99-kdive.cfg" in j
+    assert "systemctl enable cloud-init-local.service" in j
+    assert "--touch /etc/cloud/cloud-init.disabled" not in j  # no longer disabled
+    assert "kdive-sshd-keygen" not in j  # cloud-init generates host keys
+    assert "ssh-keygen -A" not in j
 
 
 def test_debug_argv_touches_no_selinux_and_stages_no_nm_keyfile(tmp_path: Path) -> None:
@@ -119,19 +117,11 @@ def test_debug_argv_stages_kdive_drgn_helper(tmp_path: Path) -> None:
     assert "chmod 0755 /usr/local/sbin/kdive-drgn" in argv
 
 
-def test_cloud_image_disables_cloud_init_version_proof_and_seeds_machine_id(tmp_path: Path) -> None:
-    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
-    j = " ".join(argv)
-    # version-proof across the Debian 13 cloud-init unit rename: the disable file, not unit masks.
-    assert "/etc/cloud/cloud-init.disabled" in j
-    assert "/etc/machine-id" in j, "seed machine-id so first-boot preset-all keeps kdump enabled"
-
-
-def test_virt_builder_source_skips_cloud_init_and_machine_id(tmp_path: Path) -> None:
+def test_virt_builder_base_installs_cloud_init_and_seeds_machine_id(tmp_path: Path) -> None:
     argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=False))
     j = " ".join(argv)
-    assert "cloud-init.disabled" not in j
-    assert "/etc/machine-id" not in j
+    assert "--install cloud-init" in j
+    assert "/etc/machine-id" in j
 
 
 def test_build_argv_omits_kdump_nmi_and_drgn_helper(tmp_path: Path) -> None:

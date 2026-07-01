@@ -5,11 +5,9 @@ Debian diverges from ``rhel`` in ways that need a distinct family (all verified 
 package database / manpages, 2026-06-26): apt package names (``kdump-tools``, ``python3-drgn``,
 ``crash``); ``kdump-tools.service`` not ``kdump.service``; ``ssh.service`` not ``sshd.service``;
 AppArmor instead of SELinux (profile-based, so the repack needs no relabel and there is no
-``/etc/selinux/config`` to touch); and — on a cloud-image base — disabling cloud-init with the
-version-proof ``/etc/cloud/cloud-init.disabled`` file (Debian 13 renamed ``cloud-init.service`` to
-``cloud-init-network.service``, so a fixed unit-mask list would silently miss a stage) plus seeding
-``/etc/machine-id`` (empty on genericcloud) so the first-boot ``preset-all`` does not disable
-``kdump-tools.service``.
+``/etc/selinux/config`` to touch). It also enables cloud-init via a baked NoCloud seed (ADR-0288),
+the uniform rootfs first-boot mechanism: cloud-init's ssh module generates the sshd host keys
+Debian genericcloud ships without, so there is no need for a distro-specific keygen unit.
 """
 
 from __future__ import annotations
@@ -24,7 +22,7 @@ from kdive.images.families._fedora_customize import (
     KDUMP_SYSCTL_CONTENT,
     KDUMP_SYSCTL_PATH,
     READINESS_MARKER,
-    SEED_MACHINE_ID,
+    cloud_init_first_boot_args,
     drgn_helper_args,
     makedumpfile_version_marker_args,
 )
@@ -59,32 +57,6 @@ _USE_KDUMP_CMD = (
     "sed -i '/^[[:space:]]*#\\?[[:space:]]*USE_KDUMP[[:space:]]*=/d' /etc/default/kdump-tools && "
     "printf 'USE_KDUMP=1\\n' >> /etc/default/kdump-tools"
 )
-# Version-proof cloud-init disable: cloud-init no-ops if this file exists, regardless of the
-# per-stage unit names (which Debian 13 renamed) — one write, correct on both 12 and 13.
-_CLOUD_INIT_DISABLED_PATH = "/etc/cloud/cloud-init.disabled"
-
-# Debian genericcloud ships openssh-server with NO host keys: cloud-init generates them
-# per-instance on first boot. Disabling cloud-init (above) therefore leaves sshd keyless, so
-# ``ssh.service`` fails its ``sshd -t`` preflight and rate-limits — SSH (the drgn-live transport)
-# never comes up (#824, found by live boot). Debian has no Fedora/RHEL ``sshd-keygen@.service``, so
-# stage a oneshot that runs ``ssh-keygen -A`` (creates any missing host-key types) ordered
-# ``Before=ssh.service``. The ``ConditionPathExists=!`` gate keeps keys per-instance: it generates
-# on a fresh boot but skips a guest that already has keys, so it never overwrites an existing
-# identity.
-_SSHD_KEYGEN_UNIT_PATH = "/etc/systemd/system/kdive-sshd-keygen.service"
-_SSHD_KEYGEN_UNIT = """[Unit]
-Description=Generate sshd host keys (kdive)
-Before=ssh.service
-ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/ssh-keygen -A
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-"""
 _GUESTFISH_TIMEOUT_S = 5 * 60
 
 type RunGuestfs = Callable[..., None]
@@ -119,11 +91,6 @@ class DebianFamily:
             ",".join(ctx.packages),
             "--run-command",
             "systemctl enable ssh.service",
-            # Generate the sshd host keys cloud-init would have made (see _SSHD_KEYGEN_UNIT).
-            "--write",
-            f"{_SSHD_KEYGEN_UNIT_PATH}:{_SSHD_KEYGEN_UNIT}",
-            "--run-command",
-            "systemctl enable kdive-sshd-keygen.service",
         ]
         # Gate kdump enable + the NMI-panic sysctl on the kdump package (in every debug set, absent
         # from the build set) so a build-host image never panics on a stray NMI.
@@ -136,13 +103,7 @@ class DebianFamily:
                 "--write",
                 f"{KDUMP_SYSCTL_PATH}:{KDUMP_SYSCTL_CONTENT}",
             ]
-        if ctx.is_cloud_image:
-            argv += [
-                "--touch",
-                _CLOUD_INIT_DISABLED_PATH,
-                "--write",
-                f"/etc/machine-id:{SEED_MACHINE_ID}",  # pragma: allowlist secret
-            ]
+        argv += cloud_init_first_boot_args(ctx)  # cloud-init owns network + host keys now
         # The debug image carries the reviewed kdive-drgn helper (the live introspection contract);
         # Debian needs no NetworkManager keyfile (cloud-init's cloud-ifupdown-helper DHCPs the NIC).
         if ctx.kind == "debug":
