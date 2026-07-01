@@ -526,8 +526,8 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ### Task 7: Converge staged-path metadata, drop the phantom profile requirement, update stale assertions
 
 **Files:**
-- Modify: `systems.toml.example`, `docs/operating/providers/examples/systems-local-libvirt.toml`, `examples/local-libvirt/README.md`, `src/kdive/admin/default_fixtures.py`
-- Modify: `fixtures/local-libvirt/profiles/console-ready_x86_64.yaml` and the profile YAML embedded in `src/kdive/admin/default_fixtures.py` — the `requires.rootfs.capabilities: [agent]` block (see Step 1b)
+- Modify (image capability sets): `systems.toml.example`, `docs/operating/providers/examples/systems-local-libvirt.toml`, `examples/local-libvirt/README.md` — these carry staged-path `[[image]]` capability declarations. (Note: `default_fixtures.py` is **profiles-only** — it seeds no image rows, so it has no image capability list to converge.)
+- Modify (profile requirement, Step 1b): `fixtures/local-libvirt/profiles/console-ready_x86_64.yaml` and the profile YAML embedded in `src/kdive/admin/default_fixtures.py` — the `requires.rootfs.capabilities: [agent]` block
 - Modify: any test asserting the prior literal capability set (found in Step 1)
 
 **Interfaces:**
@@ -596,10 +596,12 @@ Expected: FAIL — current seed still uses the old set.
 
 - [ ] **Step 3: Converge the declarations**
 
-Edit each staged-path entry to its per-distro set. Fedora/Rocky/CentOS-Stream entries →
+Edit each staged-path `[[image]]` entry to its per-distro set, in the three files that carry
+image declarations (`systems.toml.example`, `docs/operating/providers/examples/systems-local-libvirt.toml`,
+`examples/local-libvirt/README.md`). Fedora/Rocky/CentOS-Stream entries →
 `capabilities = ["ssh", "selinux", "kdump", "drgn"]`; Debian entries →
-`capabilities = ["ssh", "apparmor", "kdump", "drgn"]`. Apply the matching Python list in
-`src/kdive/admin/default_fixtures.py`.
+`capabilities = ["ssh", "apparmor", "kdump", "drgn"]`. Do **not** edit `default_fixtures.py`
+here — it is profiles-only (no image rows); its sole change is the Step 1b profile requirement.
 
 - [ ] **Step 4: Run tests + fixture validation**
 
