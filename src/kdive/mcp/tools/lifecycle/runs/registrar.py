@@ -10,11 +10,14 @@ from pydantic import Field
 
 from kdive.db.build_hosts import list_all_hosts
 from kdive.domain.capacity.state import RunState
+from kdive.domain.external_provenance import PROVENANCE_FIELD_MAX_LEN
+from kdive.domain.labels import LABEL_MAX_LEN
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
+from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run_target_kind
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest as _RunBindRequest
 from kdive.mcp.tools.lifecycle.runs.bind import bind_run as _bind_run
@@ -51,6 +54,7 @@ from kdive.profiles.types import BuildProfileInput, ExpectedBootFailureInput
 from kdive.providers.assembly.build_hosts import declared_remote_instance_names
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
+from kdive.security.artifacts.artifact_search import MAX_PATTERN_CHARS, MAX_TERMS
 from kdive.security.authz.rbac import Role
 
 
@@ -111,8 +115,9 @@ class _RunsCreatePayload(ToolPayload):
             "kernel'}; a preset and a custom 'pattern' are mutually exclusive. The pattern is "
             "matched as a case-sensitive literal substring (not a regex), tested line-by-line "
             "against the redacted console log; a single line containing the substring is a match. "
-            "Use '|' to OR alternatives (e.g. 'Oops|Unable to handle kernel') - up to 16 terms, "
-            "256 characters total, each term non-empty. A match makes the expected crash the Run's "
+            f"Use '|' to OR alternatives (e.g. 'Oops|Unable to handle kernel') - up to {MAX_TERMS} "
+            f"terms, {MAX_PATTERN_CHARS} characters total, each term non-empty. A match makes the "
+            "expected crash the Run's "
             "success outcome."
         ),
     )
@@ -128,9 +133,9 @@ class _RunsCreatePayload(ToolPayload):
         default=None,
         description=(
             "Optional human handle for this Run, echoed back as data.label in runs.get / "
-            "runs.list so you thread fewer bare UUIDs. Freeform and non-unique: 1..200 "
-            "printable characters (surrounding whitespace trimmed); not a lookup key. Omit "
-            "for no handle."
+            "runs.list so you thread fewer bare UUIDs. Freeform and non-unique: "
+            f"1..{LABEL_MAX_LEN} printable characters (surrounding whitespace trimmed); not a "
+            "lookup key. Omit for no handle."
         ),
     )
 
@@ -156,7 +161,8 @@ class _RunsListPayload(ToolPayload):
     )
     state: RunState | None = Field(default=None, description="Only Runs in this build-phase state.")
     limit: int = Field(
-        default=_DEFAULT_LIST_LIMIT, description="Maximum rows returned (capped at 200)."
+        default=_DEFAULT_LIST_LIMIT,
+        description=f"Maximum rows returned (capped at {_MAX_LIST_LIMIT}).",
     )
     cursor: str | None = Field(
         default=None, description="Opaque continuation cursor from a prior page's next_cursor."
@@ -485,8 +491,9 @@ def _register_runs_complete_build(
                 description="Optional unverified provenance: a freeform handle for the local "
                 "source tree that produced these uploaded artifacts (e.g. 'my-fix worktree'). "
                 "Recorded as a client claim in runs.get data.build_provenance with "
-                "client_attested=true; kdive does not clone, resolve, or verify it. 1..256 "
-                "printable characters; bound on the first completion. Omit if unknown."
+                f"client_attested=true; kdive does not clone, resolve, or verify it. "
+                f"1..{PROVENANCE_FIELD_MAX_LEN} printable characters; bound on the first "
+                "completion. Omit if unknown."
             ),
         ] = None,
         source_ref: Annotated[
@@ -495,8 +502,8 @@ def _register_runs_complete_build(
                 description="Optional unverified provenance: the ref/commit you claim produced "
                 "these artifacts (e.g. a git SHA or 'v6.9-rc1+patch'). Recorded as a client claim "
                 "in runs.get data.build_provenance with client_attested=true; treated as an opaque "
-                "label, never fetched. 1..256 printable characters; bound on the first completion. "
-                "Omit if unknown."
+                f"label, never fetched. 1..{PROVENANCE_FIELD_MAX_LEN} printable characters; bound "
+                "on the first completion. Omit if unknown."
             ),
         ] = None,
     ) -> ToolResponse:

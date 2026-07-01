@@ -171,7 +171,7 @@ Inspect one selected stack frame on a live DebugSession. Requires contributor.
 
 `implemented` · `read-only`
 
-Read raw memory bytes from a live DebugSession (up to 4096). Requires contributor.
+Read raw memory bytes from a live DebugSession (bounded by byte_count). Contributor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

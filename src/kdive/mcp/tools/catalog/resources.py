@@ -30,7 +30,7 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
 from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
@@ -56,7 +56,8 @@ class _ResourcesListPayload(ToolPayload):
         description="Filter by resource kind (e.g. 'local-libvirt'); omit for all.",
     )
     limit: int = Field(
-        default=DEFAULT_LIST_LIMIT, description="Maximum rows returned (capped at 200)."
+        default=DEFAULT_LIST_LIMIT,
+        description=f"Maximum rows returned (capped at {MAX_LIST_LIMIT}).",
     )
     cursor: str | None = Field(
         default=None, description="Opaque continuation cursor from a prior page's next_cursor."

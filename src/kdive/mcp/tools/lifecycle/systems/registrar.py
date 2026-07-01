@@ -10,12 +10,14 @@ from pydantic import Field
 
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError
+from kdive.domain.labels import LABEL_MAX_LEN
 from kdive.mcp.auth import current_context
 from kdive.mcp.provider_schema import assert_kind_composed
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
+from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_allocation, with_runtime_for_system
 from kdive.mcp.tools.lifecycle.systems.admin import (
     SystemAdminHandlers as _SystemAdminHandlers,
@@ -54,8 +56,8 @@ from kdive.security.authz.rbac import Role
 
 _LABEL_DESCRIPTION = (
     "Optional human handle for this System, echoed back as data.label in systems.get / "
-    "systems.list so you thread fewer bare UUIDs. Freeform and non-unique: 1..200 printable "
-    "characters (surrounding whitespace trimmed); not a lookup key. Omit for no handle."
+    f"systems.list so you thread fewer bare UUIDs. Freeform and non-unique: 1..{LABEL_MAX_LEN} "
+    "printable characters (surrounding whitespace trimmed); not a lookup key. Omit for no handle."
 )
 
 
@@ -77,7 +79,8 @@ class _SystemsListPayload(ToolPayload):
         description="Only Systems whose Allocation claims a matching '<vendor>:<device>' spec.",
     )
     limit: int = Field(
-        default=_DEFAULT_LIST_LIMIT, description="Maximum rows returned (capped at 200)."
+        default=_DEFAULT_LIST_LIMIT,
+        description=f"Maximum rows returned (capped at {_MAX_LIST_LIMIT}).",
     )
     cursor: str | None = Field(
         default=None, description="Opaque continuation cursor from a prior page's next_cursor."

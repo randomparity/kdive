@@ -28,7 +28,7 @@ from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor, _short_id
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidCursor, _short_id
 from kdive.mcp.tools._common import ConfigErrorReason as _ConfigErrorReason
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
@@ -245,7 +245,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     )
     async def images_list(
         limit: Annotated[
-            int, Field(description="Maximum rows returned (capped at 200).")
+            int, Field(description=f"Maximum rows returned (capped at {MAX_LIST_LIMIT}).")
         ] = DEFAULT_LIST_LIMIT,
         cursor: Annotated[
             str | None,

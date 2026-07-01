@@ -100,12 +100,14 @@ def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
             int,
             Field(
                 description=(
-                    "Maximum inline window bytes; default 16384, sized to the tool-result "
-                    "token budget. The server caps the window at the smaller of a hard "
-                    "24576-byte token-safe ceiling and KDIVE_ARTIFACT_INLINE_MAX_BYTES "
-                    "(default 65536), so a larger value still returns at most 24576 bytes "
-                    "with data.next_offset to page the rest; an artifact above the fetch "
-                    "ceiling omits inline content — use refs.download_uri for the whole object."
+                    "Maximum inline window bytes; default "
+                    f"{artifact_reads.ARTIFACT_GET_WINDOW_DEFAULT_BYTES}, sized to the "
+                    "tool-result token budget. The server caps the window at the smaller of a "
+                    f"hard {artifact_reads.ARTIFACT_GET_WINDOW_MAX_BYTES}-byte token-safe ceiling "
+                    "and KDIVE_ARTIFACT_INLINE_MAX_BYTES, so a larger value still returns at most "
+                    f"{artifact_reads.ARTIFACT_GET_WINDOW_MAX_BYTES} bytes with data.next_offset "
+                    "to page the rest; an artifact above the fetch ceiling omits inline content "
+                    "— use refs.download_uri for the whole object."
                 )
             ),
         ] = artifact_reads.ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
@@ -129,8 +131,9 @@ def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(
                 description=(
                     "Cursor direction for paging and for find. forward starts at byte_offset "
-                    "(default 0, the start). backward starts at end-of-artifact when byte_offset "
-                    "is omitted (read the tail and page up); a positive byte_offset bounds it."
+                    "(the artifact start when omitted). backward starts at end-of-artifact when "
+                    "byte_offset is omitted (read the tail and page up); a positive byte_offset "
+                    "bounds it."
                 )
             ),
         ] = "forward",
@@ -138,8 +141,8 @@ def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """Fetch a byte window of one redacted artifact, or jump to a literal match.
 
         Without `find`, returns the object ref plus a byte window of the redacted bytes inline
-        in `data.content` (`[byte_offset, byte_offset + max_bytes)`, capped at a hard 24 KiB
-        token-safe ceiling and KDIVE_ARTIFACT_INLINE_MAX_BYTES); `data.content_truncated` and
+        in `data.content` (`[byte_offset, byte_offset + max_bytes)`, capped at a hard token-safe
+        ceiling and KDIVE_ARTIFACT_INLINE_MAX_BYTES); `data.content_truncated` and
         `data.next_offset` page the rest, in `direction` (forward from the start, or backward
         from the tail). An artifact above the fetch ceiling sets `content_omitted` and is
         retrieved via the always-present presigned `refs.download_uri`.

@@ -373,6 +373,38 @@ def test_runs_get_documents_build_provenance_shape() -> None:
     assert "dirty_files" in description
 
 
+def test_jobs_wait_description_conveys_retry_contract() -> None:
+    # #941: an agent calling jobs.wait reads only the wrapper docstring + Field text, so the
+    # transport-reset retry contract must be surfaced there rather than living only on the inner
+    # handler / the guide. The agent must learn that a non-terminal return is normal ("call
+    # jobs.wait again", signalled via suggested_next_actions), that a transport drop on a long
+    # wait is transient and retryable, and that the short default is preferred over one long hold
+    # an intermediary proxy can sever.
+    tools = {t.name: t for t in TOOLS}
+    wait = tools["jobs.wait"]
+
+    description = (wait.description or "").lower()
+    # The non-terminal "still running, call again" signal and the field that carries it.
+    assert "jobs.wait" in description
+    assert "suggested_next_actions" in description
+    assert "terminal" in description
+    # A transport drop on a long wait is transient and safe to retry, not a real failure.
+    assert "retry" in description or "retryable" in description
+    assert "transient" in description or "transport" in description
+
+    timeout_desc = wait.parameters["properties"]["timeout_s"]["description"].lower()
+    # The surfaced default and cap are derived from the source constants, so the number an
+    # agent reads cannot drift from the value the handler actually enforces.
+    from kdive.mcp.tools.jobs import DEFAULT_WAIT_S, MAX_WAIT_S
+
+    assert str(int(DEFAULT_WAIT_S)) in timeout_desc
+    assert str(int(MAX_WAIT_S)) in timeout_desc
+    # Warns that a large value risks an intermediary proxy severing the held stream, and steers
+    # toward repeated short waits over one long hold.
+    assert "proxy" in timeout_desc
+    assert "short" in timeout_desc
+
+
 def test_runs_create_documents_warm_tree_is_provenance_only() -> None:
     # D5 (#806): a warm-tree kernel_source_ref is a provenance label only — it does not
     # select the tree; the operator stages the real source via KDIVE_KERNEL_SRC on the
@@ -798,6 +830,173 @@ def test_confusable_systems_tools_name_their_alternative() -> None:
         assert _NEGATIVE_GUIDANCE.search(description), (
             f"{name} description must carry a when-not-to-use cue: {description!r}"
         )
+
+
+_TOOLS_PKG = _REPO_ROOT / "src" / "kdive" / "mcp" / "tools"
+
+# A number stated next to bound/limit vocabulary in agent-facing text (a Field description or
+# an `@app.tool` wrapper docstring). Such a number duplicates the source constant that enforces
+# it and silently drifts when that constant changes, so it must be interpolated from the
+# constant (an f-string `{...}` segment), never hand-typed. Interpolated numbers live in an
+# f-string FormattedValue, which `_static_description_text` drops, so they never reach this regex.
+_BOUND_LITERAL = re.compile(
+    r"(?ix)"
+    r"(?: (?: capped \s+ at | up \s+ to | at \s+ most | no \s+ more \s+ than"
+    r"      | maximum (?: \s+ of)? | limit (?: ed \s+ to)? | default s? (?: \s+ to)?"
+    r"      | <= \s* | \b 1 \s* \.\. \s* ) \s* \d+ )"
+    r"| (?: \d+ \s* -? \s* (?: bytes | chars | characters | terms | KiB | MiB | seconds? ) \b )",
+)
+
+# Bound-context literals that are genuinely not constant-backed (external protocol facts, not a
+# kdive-tunable limit), keyed by module path suffix -> allowed snippets. Keep this minimal and
+# justify every entry; a real internal cap belongs in a named constant, interpolated.
+_BOUND_LITERAL_ALLOWLIST: dict[str, frozenset[str]] = {}
+
+
+def _call_callee_name(call: ast.Call) -> str | None:
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    return None
+
+
+def _keyword_value(call: ast.Call, name: str) -> ast.expr | None:
+    for kw in call.keywords:
+        if kw.arg == name:
+            return kw.value
+    return None
+
+
+def _module_string_aliases(tree: ast.Module) -> dict[str, ast.expr]:
+    """Map each module-level ``NAME = <string expr>`` to its value node.
+
+    Descriptions are often assigned to a module constant and passed as ``description=NAME``;
+    resolving the alias stops a hardcoded bound from hiding behind an indirection.
+    """
+    aliases: dict[str, ast.expr] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+            value: ast.expr = node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                aliases[target.id] = value
+    return aliases
+
+
+def _static_description_text(node: ast.expr, aliases: dict[str, ast.expr] | None = None) -> str:
+    """The literal string segments of ``node``, with f-string interpolations dropped.
+
+    Resolves a ``Name`` reference through ``aliases`` (module-level string constants) so a
+    bound literal cannot escape the guard by living in a named string.
+    """
+    aliases = aliases or {}
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(_static_description_text(part, aliases) for part in node.values)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _static_description_text(node.left, aliases)
+        return left + _static_description_text(node.right, aliases)
+    if isinstance(node, ast.Name) and node.id in aliases:
+        remaining = {name: value for name, value in aliases.items() if name != node.id}
+        return _static_description_text(aliases[node.id], remaining)
+    return ""  # FormattedValue (interpolated) or a non-literal reference: nothing static
+
+
+def _is_app_tool(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    for dec in func.decorator_list:
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        if isinstance(target, ast.Attribute) and target.attr == "tool":
+            return True
+    return False
+
+
+def _iter_agent_facing_descriptions() -> list[tuple[Path, str, str]]:
+    """Every `Field(description=...)` and `@app.tool` wrapper docstring in the tools package."""
+    found: list[tuple[Path, str, str]] = []
+    for path in sorted(_TOOLS_PKG.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        aliases = _module_string_aliases(tree)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and _call_callee_name(node) == "Field":
+                desc = _keyword_value(node, "description")
+                if desc is not None:
+                    text = _static_description_text(desc, aliases)
+                    found.append((path, "Field.description", text))
+            elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and _is_app_tool(node):
+                doc = ast.get_docstring(node, clean=False)
+                if doc:
+                    found.append((path, f"{node.name} docstring", doc))
+    return found
+
+
+def test_agent_facing_numeric_bounds_are_interpolated_not_hardcoded() -> None:
+    # A hand-typed bound (e.g. "capped at 300", "at most 24576 bytes") in a Field description or
+    # `@app.tool` docstring is the wrapper-vs-source drift this guard exists to prevent: the number
+    # the agent reads must be derived from the constant the handler enforces, so bump the constant
+    # and the surface follows. Interpolate `{int(MAX_WAIT_S)}` etc.; do not retype the value.
+    offenders: list[str] = []
+    for path, kind, text in _iter_agent_facing_descriptions():
+        suffix_allow = next(
+            (
+                snips
+                for suffix, snips in _BOUND_LITERAL_ALLOWLIST.items()
+                if path.as_posix().endswith(suffix)
+            ),
+            frozenset(),
+        )
+        for match in _BOUND_LITERAL.finditer(text):
+            snippet = match.group(0)
+            if snippet in suffix_allow:
+                continue
+            rel = path.relative_to(_REPO_ROOT)
+            offenders.append(f"{rel} [{kind}]: {snippet!r}")
+    assert not offenders, (
+        "agent-facing numeric bounds must be interpolated from the enforcing constant, not "
+        "hand-typed literals that drift when the constant changes:\n" + "\n".join(sorted(offenders))
+    )
+
+
+def _guard_static_text(expr_src: str, aliases_src: str = "") -> str:
+    """Run the guard's detection primitives over a parsed expression (for self-testing)."""
+    aliases = _module_string_aliases(ast.parse(aliases_src)) if aliases_src else {}
+    node = ast.parse(expr_src, mode="eval").body
+    return _static_description_text(node, aliases)
+
+
+def test_bound_literal_guard_detects_and_ignores() -> None:
+    # The guard above only runs over the (now-clean) live tree, so on its own it cannot prove it
+    # still catches a violation. Exercise the primitives directly against synthetic inputs so a
+    # regression that neuters detection (or the regex) fails here instead of passing silently.
+
+    # A hardcoded bound in a plain literal is caught.
+    assert _BOUND_LITERAL.search(_guard_static_text('"rows (capped at 200)."'))
+    # Explicit string concatenation is flattened before matching.
+    assert _BOUND_LITERAL.search(_guard_static_text('"rows " + "(capped at 200)."'))
+    # A bound hidden behind a module-level string alias is resolved and caught.
+    assert _BOUND_LITERAL.search(_guard_static_text("DESC", 'DESC = "queue up to 16 terms"'))
+    # The broadened vocabulary catches maximum/limit/seconds phrasings too.
+    assert _BOUND_LITERAL.search(_guard_static_text('"wait maximum 300 seconds"'))
+    assert _BOUND_LITERAL.search(_guard_static_text('"limit 200 rows"'))
+
+    # An interpolated bound is invisible: the number lives in an f-string FormattedValue, which
+    # _static_description_text drops, so a correctly-interpolated description passes.
+    assert not _BOUND_LITERAL.search(_guard_static_text('f"rows (capped at {CAP})."'))
+    # A bound-free description is not flagged.
+    assert not _BOUND_LITERAL.search(_guard_static_text('"Opaque continuation cursor."'))
+
+    # Known blind spot: a description sourced from an unresolved (e.g. imported) name yields empty
+    # static text and is not inspected, so any bound behind such an indirection must stay
+    # interpolated at its definition. This assertion pins the limitation so a future change that
+    # closes it updates this test deliberately.
+    assert _guard_static_text("SOME_IMPORTED_CONST") == ""
 
 
 def test_active_tools_have_a_covering_test() -> None:

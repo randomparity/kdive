@@ -445,8 +445,9 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             float,
             Field(
                 description=(
-                    "In-guest execution bound (seconds); clamped to [1.0, operator ceiling]. "
-                    "Defaults to 30. A wedged script is recovered with debug.end_session."
+                    f"In-guest execution bound (seconds); clamped to [{_TIMEOUT_FLOOR}, operator "
+                    f"ceiling]. Defaults to {int(_DEFAULT_SCRIPT_TIMEOUT)}. A wedged script is "
+                    "recovered with debug.end_session."
                 )
             ),
         ] = _DEFAULT_SCRIPT_TIMEOUT,
