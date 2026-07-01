@@ -2,8 +2,9 @@
 
 Single source of truth for the constants and argv fragments the local-libvirt rootfs build
 shares with the :mod:`kdive.images.families.rhel` FamilyCustomizer: the kdive-ready serial
-readiness unit, the kdump NMI-panic sysctl and ``final_action`` pin, the debug-image drgn /
-SSH-NIC staging, and the default debug/build package sets. Relocated here from
+readiness unit, the kdump NMI-panic sysctl and ``final_action`` pin, the debug-image drgn
+staging, the shared cloud-init first-boot seed (ADR-0288), and the default debug/build package
+sets. Relocated here from
 ``providers/local_libvirt/rootfs_build.py`` (which now imports them) so the legacy in-line
 builder and the new family customizer encode them once.
 """
