@@ -66,6 +66,10 @@ class FamilyCustomizer(Protocol):
         """Return the package set this family installs for ``kind`` on ``distro``/``version``."""
         ...
 
+    def capabilities(self, kind: str, distro: str, version: str) -> tuple[Capability, ...]:
+        """Return the capability tags this family bakes for ``kind`` on ``distro``/``version``."""
+        ...
+
     def customize_argv(self, ctx: CustomizeContext) -> list[str]:
         """Return the virt-customize argv fragment that customizes the base image."""
         ...
