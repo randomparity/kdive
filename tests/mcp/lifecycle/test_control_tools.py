@@ -39,6 +39,7 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PowerPayload, SystemPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle import control as control_tools
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.rbac import AuthorizationError, Role
 from tests.mcp.systems_support import provider_resolver
@@ -657,3 +658,160 @@ def test_register_handlers_binds_power_and_force_crash() -> None:
     control_plane.register_handlers(registry, resolver=provider_resolver(controller=_FakeControl()))
     assert registry.get(JobKind.POWER) is not None
     assert registry.get(JobKind.FORCE_CRASH) is not None
+
+
+async def _diagnostic_sysrq(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    system_id: str,
+    command: str,
+    resolver: ProviderResolver | None = None,
+) -> Any:
+    return await control_tools.diagnostic_sysrq_system(
+        pool,
+        ctx,
+        system_id=system_id,
+        command=command,
+        resolver=resolver if resolver is not None else provider_resolver(),
+        idempotency_key=None,
+    )
+
+
+def test_diagnostic_sysrq_enqueues_job_for_contributor(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resp = await _diagnostic_sysrq(
+                pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, command="show_blocked_tasks"
+            )
+            assert resp.status == "queued"
+            assert resp.data["system_id"] == sys_id
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT payload FROM jobs WHERE kind = 'diagnostic_sysrq' "
+                    "AND dedup_key LIKE %s",
+                    (f"{sys_id}:diagnostic_sysrq:show_blocked_tasks:%",),
+                )
+                row = await cur.fetchone()
+        assert row is not None
+        assert row["payload"]["command"] == "show_blocked_tasks"
+
+    asyncio.run(_run())
+
+
+def test_diagnostic_sysrq_unknown_command_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resp = await _diagnostic_sysrq(
+                pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, command="show_everything"
+            )
+            assert resp.error_category == "configuration_error"
+            assert resp.data["reason"] == "unknown_command"
+
+    asyncio.run(_run())
+
+
+def test_diagnostic_sysrq_destructive_command_redirects_to_force_crash(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resp = await _diagnostic_sysrq(
+                pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, command="crash"
+            )
+            assert resp.error_category == "configuration_error"
+            assert resp.data["reason"] == "destructive_command"
+            assert "control.force_crash" in str(resp.data["remediation"])
+
+    asyncio.run(_run())
+
+
+def test_diagnostic_sysrq_not_ready_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
+            resp = await _diagnostic_sysrq(
+                pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, command="show_memory"
+            )
+            assert resp.error_category == "configuration_error"
+            assert resp.data["current_status"] == "provisioning"
+
+    asyncio.run(_run())
+
+
+def test_diagnostic_sysrq_viewer_is_denied(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            with pytest.raises(AuthorizationError):
+                await _diagnostic_sysrq(
+                    pool, _ctx(Role.VIEWER), system_id=sys_id, command="show_memory"
+                )
+
+    asyncio.run(_run())
+
+
+def test_diagnostic_sysrq_non_local_provider_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            disc = LocalLibvirtDiscovery(
+                host_uri="qemu:///system",
+                connect=lambda: FakeLibvirtConn(),
+                concurrent_allocation_cap=2,
+            )
+            async with pool.connection() as conn:
+                res = await register_discovered_resource(
+                    conn, disc.list_resources()[0], pool="remote-libvirt", cost_class="local"
+                )
+                await conn.execute(
+                    "UPDATE resources SET kind = 'remote-libvirt' WHERE id = %s", (res.id,)
+                )
+                alloc = await ALLOCATIONS.insert(
+                    conn,
+                    Allocation(
+                        id=uuid4(),
+                        created_at=_DT,
+                        updated_at=_DT,
+                        principal="user-1",
+                        project="proj",
+                        resource_id=res.id,
+                        state=AllocationState.GRANTED,
+                    ),
+                )
+                system = await SYSTEMS.insert(
+                    conn,
+                    System(
+                        id=uuid4(),
+                        created_at=_DT,
+                        updated_at=_DT,
+                        principal="user-1",
+                        project="proj",
+                        allocation_id=alloc.id,
+                        state=SystemState.READY,
+                        provisioning_profile=_PROFILE,
+                    ),
+                )
+            runtime = provider_resolver().runtimes()[0]
+            resolver = ProviderResolver(
+                {
+                    ResourceKind.LOCAL_LIBVIRT: runtime,
+                    ResourceKind.REMOTE_LIBVIRT: runtime,
+                }
+            )
+            resp = await _diagnostic_sysrq(
+                pool,
+                _ctx(Role.CONTRIBUTOR),
+                system_id=str(system.id),
+                command="show_memory",
+                resolver=resolver,
+            )
+            assert resp.error_category == "configuration_error"
+            assert resp.data["reason"] == "not_local_libvirt"
+
+    asyncio.run(_run())
