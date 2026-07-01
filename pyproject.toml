@@ -1,5 +1,5 @@
 [build-system]
-requires = ["uv_build==0.11.21"]
+requires = ["uv_build==0.11.24"]
 build-backend = "uv_build"
 
 [project]
@@ -15,7 +15,7 @@ dependencies = [
   "psycopg[binary]==3.3.4",
   "psycopg-pool==3.3.1",
   "boto3==1.43.21",
-  "botocore==1.43.32",
+  "botocore==1.43.36",
   "defusedxml==0.7.1",
   "httpx==0.28.1",
   "libvirt-python==12.4.0",
@@ -41,12 +41,12 @@ Changelog = "https://github.com/randomparity/kdive/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
-  "ruff==0.15.17",
-  "ty==0.0.50",
-  "pytest==9.1.0",
+  "ruff==0.15.19",
+  "ty==0.0.53",
+  "pytest==9.1.1",
   "pytest-xdist==3.8.0",
   "testcontainers==4.14.2",
-  "hypothesis==6.155.3",
+  "hypothesis==6.155.7",
   "jinja2==3.1.6",
   "jsonschema==4.26.0",
   "openpyxl==3.1.5",
