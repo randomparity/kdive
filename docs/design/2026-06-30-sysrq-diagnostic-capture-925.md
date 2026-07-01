@@ -195,12 +195,14 @@ real time, no real libvirt. It returns the captured bytes and the exit reason
 
 ### Observability
 
-The worker records a `diagnostic_sysrq` capture-outcome counter tagged by outcome
-(`captured` / `no_output` / `control_failure`) and `provider_kind`, so a deployment where
-the mechanism is silently failing (guest lacks the keyboard driver, `kernel.sysrq` disabled)
-is visible as a rising `no_output` rate rather than an invisible dead feature. Because the
-default `provider_kind` tagging already exists on worker capture paths, this reuses the
-established pattern.
+Capture outcomes are visible through the worker's **existing per-kind job telemetry** — no new
+metric is added (it would duplicate what the job pipeline already emits). A captured dump
+completes the job; `no_console_output` and `control_failure` fail it with those
+`error_category` values. So the standard job success/failure-by-category telemetry, keyed on
+`kind=diagnostic_sysrq`, already exposes a rising `configuration_error` (`no_console_output`)
+rate — the signal that the mechanism is silently failing (guest lacks the keyboard driver,
+`kernel.sysrq` disabled). The handler also tags `provider_kind` via the established
+`set_provider_kind` seam.
 
 ### Why `run_id = None`
 
