@@ -47,6 +47,7 @@ from kdive.providers.local_libvirt.lifecycle.materialize import (
     RootfsUploadContext,
     materialize_rootfs_base,
 )
+from kdive.providers.local_libvirt.lifecycle.overlay_customize import OverlayCustomizer
 from kdive.providers.local_libvirt.lifecycle.rootfs_catalog_fetch import (
     rootfs_catalog_fetch_from_env,
 )
@@ -188,7 +189,13 @@ class LocalLibvirtProvisioning:
             catalog_fetch=rootfs_catalog_fetch_from_env(allowed_roots),
         )
 
-    def provision(self, system_id: UUID, profile: ProvisioningProfile) -> str:
+    def provision(
+        self,
+        system_id: UUID,
+        profile: ProvisioningProfile,
+        *,
+        overlay_customizers: tuple[OverlayCustomizer, ...] = (),
+    ) -> str:
         """Define and start the tagged domain; return its name.
 
         Idempotent: ``defineXML`` redefines an existing domain, and a ``create`` that reports
@@ -197,6 +204,11 @@ class LocalLibvirtProvisioning:
         running System failed. The overlay is created only when **absent**: a retry must never
         recreate the overlay a running QEMU holds open (qemu-img would fail the lock or truncate
         the live disk), so a present overlay is left in place (ADR-0060).
+
+        ``overlay_customizers`` (ADR-0289, #963) run in order against the overlay **only when
+        this call created it** — never on the reuse/retry path, so a retry against a running QEMU
+        never re-mutates a live disk. A customizer failure reclaims the just-created overlay, like
+        any other ``CategorizedError`` raised inside this call.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for invalid profile/rootfs input,
@@ -223,6 +235,9 @@ class LocalLibvirtProvisioning:
             initrd_path=baseline.initrd,
         )
         try:
+            if overlay.created:
+                for customize in overlay_customizers:
+                    customize(overlay.path)
             self._files.prepare_console(system_id)
             self._define_and_start(xml, system_id)
         except CategorizedError:
