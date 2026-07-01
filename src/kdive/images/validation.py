@@ -21,8 +21,10 @@ from pathlib import Path
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 # Each contract element maps to a canonical in-guest path whose presence proves the element is
-# installed. A guest agent, the kdump service unit, the drgn module, and the allowlisted-helper
-# marker installed by the build plane.
+# installed. The keys are the file-verifiable subset of the closed ``Capability`` vocabulary
+# (ADR-0286) — ``build`` has no in-guest marker — enforced by a guard test so the guest-contract
+# and capability vocabularies cannot drift. A guest agent, the kdump service unit, the drgn
+# module, and the allowlisted-helper marker installed by the build plane.
 GUEST_CONTRACT_PATHS: dict[str, str] = {
     "agent": "/usr/sbin/qemu-ga",
     "kdump": "/usr/lib/systemd/system/kdump.service",

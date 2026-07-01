@@ -65,6 +65,22 @@ def test_wellformed_parses() -> None:
     assert doc.remote_libvirt[0].base_image == "base"
 
 
+def test_image_rejects_unknown_capability_token() -> None:
+    # capabilities is the closed Capability vocabulary (ADR-0286); an off-vocabulary tag is a
+    # hard parse error, not a silent passthrough.
+    d = _doc()
+    d["image"][0]["capabilities"] = ["ssh"]
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(d)
+
+
+def test_image_accepts_known_capability_tokens() -> None:
+    d = _doc()
+    d["image"][0]["capabilities"] = ["agent", "kdump", "drgn", "build"]
+    doc = InventoryDoc.parse(d)
+    assert [str(c) for c in doc.image[0].capabilities] == ["agent", "kdump", "drgn", "build"]
+
+
 def test_remote_libvirt_requires_size_ceiling() -> None:
     # vcpus/memory_mb are the admission ≤-resource-caps ceiling; remote-libvirt is config-owned,
     # so omitting either is a hard parse error (no host without a grantable ceiling).

@@ -127,7 +127,7 @@ def test_validate_profile_validates_the_profiles_own_catalog_rootfs(
         'format = "qcow2"\n'
         'root_device = "/dev/vda"\n'
         'visibility = "public"\n'
-        'capabilities = ["kdive-ready-console"]\n'
+        'capabilities = ["agent"]\n'
         "[image.source]\n"
         'kind = "s3"\n'
         'object_key = "rootfs/local/declared.qcow2"\n',

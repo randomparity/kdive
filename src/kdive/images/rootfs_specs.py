@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from kdive.domain.catalog.image_format import ImageFormat
+from kdive.domain.catalog.images import Capability
 from kdive.images.families import family_for
 from kdive.images.planes.base import RootfsBuildSpec
 from kdive.images.rootfs_catalog import (
@@ -16,9 +17,9 @@ from kdive.images.rootfs_catalog import (
 ROOTFS_FORMAT: ImageFormat = "qcow2"
 ROOTFS_ROOT_DEVICE = "/dev/vda"
 
-_KIND_CAPABILITIES: dict[str, tuple[str, ...]] = {
-    "debug": ("agent", "kdump", "drgn"),
-    "build": ("agent", "build"),
+_KIND_CAPABILITIES: dict[str, tuple[Capability, ...]] = {
+    "debug": (Capability.AGENT, Capability.KDUMP, Capability.DRGN),
+    "build": (Capability.AGENT, Capability.BUILD),
 }
 
 

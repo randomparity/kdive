@@ -26,4 +26,4 @@ def test_console_ready_profile_carries_required_boot_policy() -> None:
         "console=ttyS0",
         "root=/dev/vda",
     ]
-    assert "kdive-ready-console" in profile["requires"]["rootfs"]["capabilities"]
+    assert "agent" in profile["requires"]["rootfs"]["capabilities"]

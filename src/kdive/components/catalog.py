@@ -14,6 +14,7 @@ from kdive.components.requirements import CmdlineRequirements, ConfigRequirement
 from kdive.components.visibility import PUBLIC_VISIBILITY, Visibility
 from kdive.config.core_settings import FIXTURE_CATALOG_PATH
 from kdive.domain.catalog.image_format import ImageFormat
+from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 DEFAULT_FIXTURE_CATALOG_PATH = Path(__file__).parents[3] / "fixtures" / "local-libvirt"
@@ -32,7 +33,7 @@ class RootfsRequirements(BaseModel):
 
     format: ImageFormat
     root_device: str
-    capabilities: list[str] = Field(default_factory=list)
+    capabilities: list[Capability] = Field(default_factory=list)
 
 
 class ProfileRequirements(BaseModel):
@@ -63,7 +64,7 @@ class RootfsCatalogEntry(BaseModel):
     root_device: str
     source: ComponentRef
     visibility: Visibility
-    capabilities: list[str] = Field(default_factory=list)
+    capabilities: list[Capability] = Field(default_factory=list)
 
 
 class ProfileCatalogEntry(BaseModel):

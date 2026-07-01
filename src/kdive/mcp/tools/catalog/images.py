@@ -19,10 +19,10 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageVisibility
+from kdive.images.capability_signals import REGISTERED_SIGNALS
 from kdive.images.kdump_support import (
     DEFAULT_KERNEL_BASIS,
     KernelVersion,
-    kdump_capability,
 )
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
@@ -136,36 +136,23 @@ _DESCRIBE_SQL = """
 """
 
 
-def _kdump_block(entry: ImageCatalogEntry, basis: KernelVersion) -> dict[str, JsonValue]:
-    """The computed kdump capability for ``entry`` against ``basis`` (ADR-0253).
+def _capability_signals(entry: ImageCatalogEntry, basis: KernelVersion) -> dict[str, JsonValue]:
+    """The computed capability signals for ``entry`` against ``basis`` (ADR-0286).
 
-    Reads the build-recorded ``provenance["makedumpfile_version"]`` (``None`` when absent or not a
-    string) and whether the image carries the ``"kdump"`` tooling tag, then computes the capability,
-    echoing the kernel basis it was computed against. A reader never raises on image data — an
-    unparseable stored version degrades to ``unverified`` inside :func:`kdump_capability`.
+    Iterates the registered signals, keying each rendered block by signal name. Today the only
+    member is ``kdump``. Each signal reads a build-recorded provenance operand and degrades to a
+    non-confident status when the operand is absent, so a reader never raises on image data.
     """
-    raw = entry.provenance.get("makedumpfile_version")
-    cap = kdump_capability(
-        makedumpfile_version=raw if isinstance(raw, str) and raw else None,
-        target_kernel=basis,
-        kdump_tooling="kdump" in entry.capabilities,
-    )
-    return {
-        "makedumpfile_version": raw if isinstance(raw, str) else "",
-        "target_kernel": cap.target_kernel,
-        "capability": cap.status,
-        "min_makedumpfile_required": cap.min_makedumpfile_required,
-        "note": cap.note,
-    }
+    return {sig.name: sig.render(entry, basis) for sig in REGISTERED_SIGNALS}
 
 
 def _describe_envelope(entry: ImageCatalogEntry, basis: KernelVersion) -> ToolResponse:
     """Full per-image detail; withholds the staged ``path`` and the S3 ``object_key``.
 
     Surfaces ``provenance`` verbatim (build metadata, no secret values), the boot layout, digest,
-    capabilities, scope, publish state, and a computed ``kdump`` block (capability for ``basis``).
-    ``expires_at`` is an ISO-8601 string when set (a ``datetime`` is not a ``JsonValue``), ``""``
-    otherwise.
+    capabilities, scope, publish state, and the computed ``capability_signals`` block (each signal
+    keyed by name, computed for ``basis``; today the only signal is ``kdump``). ``expires_at`` is an
+    ISO-8601 string when set (a ``datetime`` is not a ``JsonValue``), ``""`` otherwise.
     """
     return ToolResponse.success(
         str(entry.id),
@@ -180,9 +167,9 @@ def _describe_envelope(entry: ImageCatalogEntry, basis: KernelVersion) -> ToolRe
             "owner": entry.owner or "",
             "state": entry.state.value,
             "digest": entry.digest or "",
-            "capabilities": list(entry.capabilities),
+            "capabilities": [cap.value for cap in entry.capabilities],
             "provenance": entry.provenance,
-            "kdump": _kdump_block(entry, basis),
+            "capability_signals": _capability_signals(entry, basis),
             "volume": entry.volume or "",
             "expires_at": entry.expires_at.isoformat() if entry.expires_at else "",
             "managed_by": entry.managed_by.value,
@@ -203,8 +190,9 @@ async def describe_image(
     filtered in SQL so an unauthorized private row never leaves the database. A malformed id is a
     ``configuration_error``; a valid id with no visible row is ``not_found`` (byte-identical
     whether absent or invisible — no existence/membership leak). ``target_kernel`` (optional)
-    selects the kernel the ``data.kdump`` capability is computed against, defaulting to the
-    characterized basis; a malformed value is a ``configuration_error`` (``invalid_version``).
+    selects the kernel the ``data.capability_signals`` kdump capability is computed against,
+    defaulting to the characterized basis; a malformed value is a ``configuration_error``
+    (``invalid_version``).
     """
     uid = _as_uuid(image_id)
     if uid is None:
@@ -270,8 +258,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             str | None,
             Field(
                 description=(
-                    "Target kernel version (e.g. 7.1) to compute the data.kdump capability "
-                    "against; defaults to the characterized basis when omitted."
+                    "Target kernel version (e.g. 7.1) to compute the data.capability_signals "
+                    "kdump capability against; defaults to the characterized basis when omitted."
                 )
             ),
         ] = None,
@@ -279,7 +267,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """Return full detail for one catalog image visible to the caller.
 
         Includes boot layout, digest, capabilities, scope, publish state, build ``provenance``
-        (with captured ``package_versions``/``makedumpfile_version`` when present), and a computed
-        ``data.kdump`` block (capability for ``target_kernel``, with the kernel basis disclosed).
+        (with captured ``package_versions``/``makedumpfile_version`` when present), and computed
+        ``data.capability_signals`` (each signal keyed by name — today only ``kdump``, the
+        capability for ``target_kernel`` with the kernel basis disclosed).
         """
         return await describe_image(pool, current_context(), image_id, target_kernel)

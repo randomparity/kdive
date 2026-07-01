@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from kdive.domain.catalog.images import Capability
+
 
 @dataclass(frozen=True, slots=True)
 class RootfsBuildSpec:
@@ -33,8 +35,9 @@ class RootfsBuildSpec:
         releasever: The base-OS release the image is built from (e.g. ``"43"``).
         packages: The package set installed into the guest, in install order.
         source_image_digest: A digest pinning the base/template image the build customizes.
-        capabilities: The guest-contract tags the image is expected to satisfy (agent, kdump,
-            drgn, allowlisted helpers).
+        capabilities: The tooling the build bakes into the image, from the closed
+            :class:`~kdive.domain.catalog.images.Capability` vocabulary (agent, kdump, drgn,
+            build) — a build fact, not a liveness guarantee.
         distro: The base-OS family the image is built from (the extensibility seam; only
             ``"fedora"`` is implemented). The build plane resolves the base source/family from
             the rootfs catalog (:mod:`kdive.images.rootfs_catalog`).
@@ -46,7 +49,7 @@ class RootfsBuildSpec:
     releasever: str
     packages: tuple[str, ...]
     source_image_digest: str
-    capabilities: tuple[str, ...]
+    capabilities: tuple[Capability, ...]
     distro: str = "fedora"
 
 

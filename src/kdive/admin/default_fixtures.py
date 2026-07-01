@@ -41,7 +41,7 @@ requires:
     format: qcow2
     root_device: /dev/vda
     capabilities:
-      - kdive-ready-console
+      - agent
 """
 
 

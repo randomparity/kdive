@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from kdive.domain.catalog.images import Capability
 from kdive.images.planes.base import (
     RootfsBuildOutput,
     RootfsBuildPlane,
@@ -38,7 +39,7 @@ def test_spec_fields_and_types() -> None:
         releasever="43",
         packages=("a",),
         source_image_digest="sha256:x",
-        capabilities=("agent",),
+        capabilities=(Capability.AGENT,),
     )
     assert dataclasses.is_dataclass(spec)
     assert spec.distro == "fedora", "distro defaults to the only implemented base OS"

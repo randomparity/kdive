@@ -19,7 +19,7 @@ arch = "x86_64"
 format = "qcow2"
 root_device = "/dev/vda"
 visibility = "public"
-capabilities = ["kdive-ready-console", "ssh", "drgn"]
+capabilities = ["agent", "drgn"]
 [image.source]
 kind = "s3"
 object_key = "rootfs/local/fedora-kdive-ready-44.qcow2"
@@ -31,7 +31,7 @@ arch = "x86_64"
 format = "qcow2"
 root_device = "/dev/vda"
 visibility = "public"
-capabilities = ["kdive-ready-console", "ssh", "drgn"]
+capabilities = ["agent", "drgn"]
 [image.source]
 kind = "s3"
 object_key = "rootfs/local/fedora-kdive-ready-43.qcow2"

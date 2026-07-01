@@ -12,8 +12,15 @@ from pathlib import Path
 
 import pytest
 
+from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.validation import GUEST_CONTRACT_PATHS, InspectSeam, validate_guest_contract
+
+
+def test_guest_contract_elements_are_a_subset_of_the_capability_vocabulary() -> None:
+    # The upload path stores validated `required` guest-contract elements as image capabilities,
+    # so every guest-contract key must be a Capability (ADR-0286); the vocabularies cannot drift.
+    assert set(GUEST_CONTRACT_PATHS) <= {c.value for c in Capability}
 
 
 def _present(*paths: str) -> InspectSeam:

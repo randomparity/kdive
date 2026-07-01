@@ -13,6 +13,21 @@ from kdive.domain.catalog.image_format import ImageFormat
 from kdive.domain.catalog.ownership import ManagedBy
 
 
+class Capability(StrEnum):
+    """Closed vocabulary of tooling a rootfs build bakes into an image.
+
+    A tag is a build fact — the tooling is present — not a liveness guarantee. Whether a
+    feature works end to end is answered by the computed signals in
+    :mod:`kdive.images.capability_signals`.
+    """
+
+    AGENT = "agent"
+    KDUMP = "kdump"
+    DRGN = "drgn"
+    BUILD = "build"
+    HELPERS = "helpers"
+
+
 class ImageVisibility(StrEnum):
     """Resolution scope of an image_catalog row (ADR-0092/0093).
 
@@ -58,7 +73,7 @@ class ImageCatalogEntry(DomainModel):
     root_device: str
     object_key: str | None = None
     digest: str | None = None
-    capabilities: list[str] = Field(default_factory=list)
+    capabilities: list[Capability] = Field(default_factory=list)
     provenance: dict[str, Any] = Field(default_factory=dict)
     visibility: ImageVisibility
     owner: str | None = None
@@ -70,4 +85,4 @@ class ImageCatalogEntry(DomainModel):
     path: str | None = None
 
 
-__all__ = ["ImageCatalogEntry", "ImageState", "ImageVisibility"]
+__all__ = ["Capability", "ImageCatalogEntry", "ImageState", "ImageVisibility"]

@@ -34,7 +34,7 @@ def _entry(**kw: object) -> ImageCatalogEntry:
         "root_device": "/dev/vda",
         "object_key": "images/local-libvirt/base/x86_64.qcow2",
         "digest": "sha256:abc",
-        "capabilities": ["console", "drgn"],
+        "capabilities": ["agent", "drgn"],
         "provenance": {"releasever": "43"},
         "visibility": ImageVisibility.PUBLIC,
         "owner": None,
