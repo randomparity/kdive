@@ -226,9 +226,11 @@ Expected: FAIL — `list[str]` accepts `"ssh"`, no `ValidationError`.
 - `inventory/model.py`: import `Capability`; `capabilities: list[Capability] = Field(default_factory=list)`.
 - `components/catalog.py`: import `Capability`; both `RootfsRequirements.capabilities` and
   `RootfsCatalogEntry.capabilities` → `list[Capability] = Field(default_factory=list)`.
-- `inventory/serialize.py`: `ImageRow.capabilities: list[Capability]`; in `_read_images`, build the
-  row with `capabilities=[Capability(cap) for cap in capabilities]` (or let the model coerce by
-  passing the raw list — Pydantic coerces `str → Capability`), removing the `[str(cap) for cap in …]`.
+- `inventory/serialize.py`: `ImageRow` is a `@dataclass(frozen=True)`, **not** a Pydantic model, so
+  typing the field alone does not validate at runtime. Type `ImageRow.capabilities: list[Capability]`
+  (for `ty`) **and** build the row in `_read_images` with `capabilities=[Capability(cap) for cap in
+  capabilities]` — `Capability(cap)` raises `ValueError` on an off-vocabulary DB token, which is the
+  serialize-out enforcement — replacing the old `[str(cap) for cap in capabilities]`.
 - `images/planes/base.py`: import `Capability`; `capabilities: tuple[Capability, ...]`; tighten the
   docstring line to name the vocabulary (`agent`, `kdump`, `drgn`, `build`) — no "allowlisted helpers".
 - `images/rootfs_specs.py`: import `Capability`; `_KIND_CAPABILITIES` maps to enum members, e.g.
@@ -521,8 +523,9 @@ Run: `just lint && just type && uv run python -m pytest tests/mcp/catalog -q`
 Expected: green.
 
 ```bash
+# `just docs` writes one file per namespace; add whatever it regenerated (usually only images.md).
 git add src/kdive/mcp/tools/catalog/images.py tests/mcp/catalog/test_images_describe.py \
-        docs/guide/reference/images.md
+        docs/guide/reference/
 git commit -m "feat(957): surface data.capability_signals on images.describe"
 ```
 

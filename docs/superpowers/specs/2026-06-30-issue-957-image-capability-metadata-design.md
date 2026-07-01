@@ -77,14 +77,16 @@ or serialized:
 | `ImageRow` | `inventory/serialize.py` | DB row → serialized inventory TOML | read/out |
 | `RootfsBuildSpec` | `images/planes/base.py` | internal build spec (from `_KIND_CAPABILITIES`) | internal |
 
-Validation is Pydantic enum coercion at each model: an unknown token is a `ValidationError`
-when inventory TOML is loaded (`ImageEntry`), when a fixture manifest is parsed, and when a
-DB row is read by a read tool or serialized out (`ImageRow` — turning any legacy/junk DB
-token into a hard error on the way out, not a silent passthrough). `serialize.py`'s raw
-`[str(cap) for cap in capabilities]` construction is replaced by letting the typed model
-coerce. `RootfsBuildSpec` is a `dataclass`, not a Pydantic model; its `capabilities`
-becomes `tuple[Capability, ...]` sourced directly from the enum-typed
-`_KIND_CAPABILITIES`, so it cannot carry an off-vocabulary token by construction. No DB
+Enforcement is Pydantic enum coercion at each *Pydantic* model — an unknown token is a
+`ValidationError` when inventory TOML is loaded (`ImageEntry`), when a fixture manifest is
+parsed (`RootfsCatalogEntry`/`RootfsRequirements`), and when a DB row is read by a read tool
+(`ImageCatalogEntry`). `ImageRow` and `RootfsBuildSpec` are frozen `dataclass`es, not
+Pydantic models, so a typed field alone does not validate at runtime: `ImageRow`'s
+`serialize.py` constructor coerces each token via `Capability(cap)` (raising on an
+off-vocabulary DB token — the serialize-out enforcement, replacing the raw
+`[str(cap) for cap in capabilities]`), and `RootfsBuildSpec.capabilities` becomes
+`tuple[Capability, ...]` sourced directly from the enum-typed `_KIND_CAPABILITIES`, so it
+cannot carry an off-vocabulary token by construction. No DB
 `CHECK`, no migration: every write reaches `image_catalog` through one of the write-boundary
 models, and the closed set evolves at the domain layer without a schema change.
 
