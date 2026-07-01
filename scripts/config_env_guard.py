@@ -61,8 +61,7 @@ class _OsAliases:
 
     Built from the file's imports so an aliased access form (``from os import environ``,
     ``import os as o``) cannot bypass the guard. A *local* rebinding like
-    ``environ = os.environ`` is deliberately excluded — that name is not an import alias
-    and the only such case (managed_ssh_key) is allowlisted.
+    ``environ = os.environ`` is deliberately excluded — that name is not an import alias.
     """
 
     modules: frozenset[str]
