@@ -234,7 +234,9 @@ def test_handler_propagates_validation_category_when_called_directly(
                     inspect=_none_present,
                 )
             assert err.value.category is ErrorCategory.CONFIGURATION_ERROR
-            assert "agent" in str(err.value)
+            # A local fedora debug image's guest-contract elements are kdump/drgn (ssh/selinux
+            # are build-fact tags without an in-guest path, ADR-0287); the first missing is kdump.
+            assert "kdump" in str(err.value)
 
     asyncio.run(_run())
 

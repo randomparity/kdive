@@ -173,7 +173,7 @@ def test_run_build_fs_debug_image_sets_debug_packages_and_capabilities(
         "keyutils",
         "openssh-server",
     )
-    assert seen_specs[0].capabilities == ("agent", "kdump", "drgn")
+    assert seen_specs[0].capabilities == ("ssh", "selinux", "kdump", "drgn")
     assert seen_specs[0].distro == "fedora"
     assert seen_specs[0].source_image_digest == "virt-builder:fedora-43"
 
@@ -207,7 +207,7 @@ def test_run_build_fs_build_image_sets_build_packages_and_capabilities(
     run_build_fs(args)
 
     assert "gcc" in seen_specs[0].packages and "make" in seen_specs[0].packages
-    assert seen_specs[0].capabilities == ("agent", "build")
+    assert seen_specs[0].capabilities == ("selinux", "build")
 
 
 def test_run_build_fs_uses_catalog_identity_and_digest(

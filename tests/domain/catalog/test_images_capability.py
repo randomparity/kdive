@@ -6,7 +6,22 @@ from kdive.domain.catalog.images import Capability
 
 
 def test_capability_values_are_the_closed_build_vocabulary() -> None:
-    assert {c.value for c in Capability} == {"agent", "kdump", "drgn", "build", "helpers"}
+    assert {c.value for c in Capability} == {
+        "agent",
+        "kdump",
+        "drgn",
+        "build",
+        "helpers",
+        "ssh",
+        "selinux",
+        "apparmor",
+    }
+
+
+def test_new_static_tags_present() -> None:
+    assert Capability.SSH == "ssh"
+    assert Capability.SELINUX == "selinux"
+    assert Capability.APPARMOR == "apparmor"
 
 
 def test_capability_is_str_subclass_for_db_and_membership() -> None:

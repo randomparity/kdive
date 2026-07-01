@@ -6,6 +6,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from kdive.domain.catalog.images import Capability
+
+
+def _mac_tag(guest_mac: str) -> Capability:
+    """Map a family's ``guest_mac`` posture to its capability tag.
+
+    Deriving the tag from ``guest_mac`` (rather than a second literal) keeps the declared tag
+    and the recorded provenance from disagreeing.
+    """
+    if guest_mac.startswith("selinux"):
+        return Capability.SELINUX
+    if guest_mac == "apparmor":
+        return Capability.APPARMOR
+    raise ValueError(f"unmapped guest_mac posture: {guest_mac!r}")
+
 
 @dataclass(frozen=True, slots=True)
 class CustomizeContext:
@@ -49,6 +64,10 @@ class FamilyCustomizer(Protocol):
 
     def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
         """Return the package set this family installs for ``kind`` on ``distro``/``version``."""
+        ...
+
+    def capabilities(self, kind: str, distro: str, version: str) -> tuple[Capability, ...]:
+        """Return the capability tags this family bakes for ``kind`` on ``distro``/``version``."""
         ...
 
     def customize_argv(self, ctx: CustomizeContext) -> list[str]:

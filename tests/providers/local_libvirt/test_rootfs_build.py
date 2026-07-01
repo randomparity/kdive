@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families._fedora_customize import SSH_NIC_KEYFILE_CONTENT
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
@@ -60,6 +61,9 @@ class _FakeFamily:
 
     def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
         return ("marker-pkg",)
+
+    def capabilities(self, kind: str, distro: str, version: str) -> tuple[Capability, ...]:
+        return (Capability.SSH,)
 
     def customize_argv(self, ctx: CustomizeContext) -> list[str]:
         self.rec.customize_ctxs.append(ctx)

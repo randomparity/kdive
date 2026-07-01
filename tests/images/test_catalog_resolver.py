@@ -203,3 +203,16 @@ def test_resolve_public_sync_ignores_private(migrated_url: str) -> None:
             expires_at=_FUTURE,
         )
         assert resolve_public_rootfs_sync(conn, "local-libvirt", "fed", "x86_64") is None
+
+
+def test_catalog_build_capabilities_are_per_distro() -> None:
+    from kdive.domain.catalog.images import Capability
+    from kdive.images.rootfs_specs import catalog_rootfs_build
+
+    fedora = catalog_rootfs_build("local-libvirt", "fedora-kdive-ready-44").spec.capabilities
+    debian = catalog_rootfs_build("local-libvirt", "debian-kdive-ready-13").spec.capabilities
+
+    assert Capability.SELINUX in fedora and Capability.APPARMOR not in fedora
+    assert Capability.APPARMOR in debian and Capability.SELINUX not in debian
+    assert Capability.AGENT not in fedora and Capability.AGENT not in debian
+    assert Capability.SSH in fedora and Capability.SSH in debian

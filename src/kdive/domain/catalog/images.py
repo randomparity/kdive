@@ -26,6 +26,9 @@ class Capability(StrEnum):
     DRGN = "drgn"
     BUILD = "build"
     HELPERS = "helpers"
+    SSH = "ssh"
+    SELINUX = "selinux"
+    APPARMOR = "apparmor"
 
 
 class ImageVisibility(StrEnum):

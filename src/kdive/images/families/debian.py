@@ -18,6 +18,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
+from kdive.domain.catalog.images import Capability
 from kdive.images.families._fedora_customize import (
     FSTAB,
     KDUMP_SYSCTL_CONTENT,
@@ -27,7 +28,7 @@ from kdive.images.families._fedora_customize import (
     drgn_helper_args,
     makedumpfile_version_marker_args,
 )
-from kdive.images.families.base import CustomizeContext
+from kdive.images.families.base import CustomizeContext, _mac_tag
 from kdive.images.planes._build_common import run_guestfs_tool
 
 # Debian debug/guest rootfs: the in-target crash + introspection toolchain by apt name. ``drgn``
@@ -102,6 +103,14 @@ class DebianFamily:
         if kind == "build":
             return _DEBIAN_BUILD_PACKAGES
         return _DEBIAN_DEBUG_PACKAGES
+
+    def capabilities(self, kind: str, distro: str, version: str) -> tuple[Capability, ...]:
+        """Return the tags this family bakes (distro/version unused, kept for parity)."""
+        del distro, version
+        mac = _mac_tag(self.guest_mac)
+        if kind == "build":
+            return (mac, Capability.BUILD)
+        return (Capability.SSH, mac, Capability.KDUMP, Capability.DRGN)
 
     def customize_argv(self, ctx: CustomizeContext) -> list[str]:
         """Build the virt-customize argv that turns the Debian base into a kdive-ready rootfs."""
