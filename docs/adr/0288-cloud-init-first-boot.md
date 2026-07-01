@@ -30,34 +30,45 @@ fixes: a local NoCloud seed removes the datasource hang, and seeding `machine-id
 Make **cloud-init the uniform first-boot mechanism**, fed a **build-time baked NoCloud seed**,
 and delete the hand-rolled first-boot fragments.
 
-- **Seed (build-time, static).** Write `/var/lib/cloud/seed/nocloud/{meta-data,network-config,
-  user-data}` into the image during `virt-customize`. `network-config` is netplan-v2 DHCP
-  matching all ethernet interfaces (`match: {name: "e*"}`), interface-name-independent under the
-  SLIRP NIC — the property the rhel NM keyfile provided, now uniform. cloud-init finds the local
-  seed instantly; no datasource probe, no hang.
+- **Authoritative network config in a `cloud.cfg.d` drop-in, not only the seed.**
+  `/etc/cloud/cloud.cfg.d/99-kdive.cfg` carries the netplan-v2 DHCP config (`match: {name:
+  "e*"}`, interface-name-independent under the SLIRP NIC — the property the rhel NM keyfile
+  provided, now uniform). cloud-init's *system config* network setting outranks the datasource,
+  so putting network here — not only in a seed `network-config` file — defeats a base image that
+  ships `network: {config: disabled}` (some vendor cloud images do), which would otherwise
+  silently void the seed and reproduce the no-IP failure. The build also **strips any base
+  drop-in that disables cloud-init network config** and asserts its absence (build self-check).
 
-- **Pin + protect via `/etc/cloud/cloud.cfg.d/99-kdive.cfg`.** `datasource_list: [NoCloud]`
-  (no off-cloud metadata probing) and **`disable_root: false`** — mandatory, because the base
-  images default `disable_root: true`, which would clobber root's `authorized_keys` and break
-  the managed-key root SSH the worker and `authorize_ssh_key` depend on. Disable `growpart`/
-  `resizefs` (no-op noise on the partitionless whole-disk-ext4 layout, ADR-0030).
+- **Pin the datasource + protect root.** The same drop-in sets `datasource_list: [NoCloud]`
+  (no off-cloud metadata probing — the original hang) and `disable_root: false`. The latter is
+  **defensive, not the load-bearing fix**: cloud-init's `disable_root` prefix only rewrites root
+  keys it installs *from the datasource*, and this design provides none (the managed key is
+  `--ssh-inject`'d onto the filesystem), so `disable_root: true` is most likely inert for us.
+  The real root-SSH vectors a re-enabled cloud-init can touch (`PermitRootLogin`, `users_groups`
+  root lock, `ssh_pwauth`) are verified by the live proof, not assumed. `growpart`/`resizefs`
+  are trimmed (no-op noise on the partitionless whole-disk-ext4 layout, ADR-0030).
 
 - **cloud-init owns network + SSH host keys.** The `ssh` module generates host keys (replacing
-  the debian `kdive-sshd-keygen` oneshot and the distro `sshd-keygen@` reliance); the seed's
-  `network-config` brings up the NIC.
+  the debian `kdive-sshd-keygen` oneshot and the distro `sshd-keygen@` reliance — the live proof
+  asserts host keys exist and sshd answers on Debian, catching an ordering regression); the
+  drop-in brings up the NIC.
 
 - **The managed authorized key stays on `--ssh-inject`.** It is a libguestfs builtin, not
   drift-prone glue, and baking it into the filesystem guarantees the worker can log in even if
   cloud-init fails — the robustness `authorize_ssh_key` requires. cloud-init is scoped to the
   genuinely first-boot, interface-dependent concerns.
 
-- **Uniform presence.** cloud-init is unmasked/enabled on the cloud bases; on the lone
-  virt-builder base (`fedora-kdive-ready-43`, which does not ship cloud-init) it is installed
-  (`--install cloud-init`) so removing the NM keyfile does not leave it network-less.
+- **Enable the whole cloud-init pipeline.** cloud-init is four units plus a generator;
+  `cloud-init-local.service` applies the datasource network config at the pre-network stage.
+  Unmask/enable **all four** (`cloud-init-local`, `cloud-init`, `cloud-config`, `cloud-final`)
+  on the cloud bases (the rhel mask covered all four); on the lone virt-builder base
+  (`fedora-kdive-ready-43`, ships no cloud-init) `--install cloud-init` and explicitly enable
+  all four (an offline `--install` may not apply the systemd preset). Enabling only
+  `cloud-init.service` would leave the network stage off and reship the bug.
 
-- **`ready` implies network.** The shared `kdive-ready` unit gains `Wants=/After=
-  network-online.target`, so `ready` implies a DHCP lease and `authorize_ssh_key` at `ready`
-  does not race cloud-init's network bring-up.
+- **Readiness ordering unchanged.** `kdive-ready` is *not* ordered after
+  `network-online.target` (see rejected): `cloud-init-local` configures the NIC pre-network, so
+  there is no race, and the ordering would import a wait-online timeout onto every provision.
 
 - **Keep the kdive-specific pieces:** `kdive-ready`, kdump sysctl/`final_action`/`USE_KDUMP`,
   `kdive-drgn`, the rhel SELinux permissive relabel, and the `machine-id` seed (now on every
@@ -76,6 +87,14 @@ and delete the hand-rolled first-boot fragments.
 - No migration, no domain-XML change, no provisioning change: the seed lives entirely in the
   build plane. `build-fs` output changes (seed files present, NM keyfile/sshd-keygen absent);
   provision/boot/teardown are untouched.
+- CI cannot boot the image (KVM + a multi-minute 6 GB rebuild are behind live-VM markers) and
+  the unit tests assert only the argv shape, so a silent no-op (a base re-disabling network, a
+  missed unit-enable) could emit correct-looking argv and still ship broken. `build()` therefore
+  runs an **offline guestfish self-check** on the built qcow2 before publish — no
+  `network: {config: disabled}` drop-in remains, all four cloud-init units are enabled, and the
+  seed + `99-kdive.cfg` exist — failing the build (`PROVISIONING_FAILURE`) on any host if not.
+  The end-to-end "SSH answers" proof remains operator-run behind the live-VM markers, not a CI
+  gate.
 - Capability tags (ADR-0287) are unchanged: `ssh` remains build-truthful, and now runtime-
   effective. The S2 `ssh_reachable` boot-probe (future) verifies efficacy end-to-end.
 
@@ -107,3 +126,9 @@ and delete the hand-rolled first-boot fragments.
 - **Minimal fix: add a static `systemd-networkd` DHCP `.network` to the debian family only.**
   Fixes the immediate bug but keeps the divergent, hand-rolled per-family first-boot model this
   ADR is replacing, and leaves the rhel NM keyfile and debian sshd-keygen glue in place.
+
+- **Order `kdive-ready` after `network-online.target`** (to make `ready` imply a lease).
+  Rejected: `systemd-*-wait-online` blocks on all managed links with a ~120 s timeout, importing
+  a stall onto the provisioning path; and it is unnecessary because `cloud-init-local` brings the
+  NIC up pre-network, long before `kdive-ready` fires. Reachability verification belongs to the
+  S2 `ssh_reachable` boot-probe, which can gate on it without the wait-online penalty.
