@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from kdive.domain.catalog.images import Capability
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory, load_inventory_optional
 from kdive.inventory.model import StagedPathSource
@@ -122,3 +123,14 @@ def test_repo_systems_toml_example_parses_with_staged_path_image() -> None:
     assert img.provider == "local-libvirt"
     assert isinstance(img.source, StagedPathSource)
     assert img.source.path.startswith("/var/lib/kdive/rootfs/")
+
+
+def test_repo_systems_toml_example_uses_only_known_capability_tokens() -> None:
+    # Every capability tag in the shipped inventory must be a member of the closed vocabulary
+    # (ADR-0286); no off-vocabulary `kdive-ready-console`/`ssh`/`cloud-init` tokens.
+    example = Path(__file__).resolve().parents[2] / "systems.toml.example"
+    doc = load_inventory(example)
+    known = {c.value for c in Capability}
+    for img in doc.image:
+        for cap in img.capabilities:
+            assert cap in known, f"unknown capability token {cap!r} in systems.toml.example"
