@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, mo
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.operations.jobs import Job, JobAuthorizing, JobKind, PowerAction
+from kdive.domain.operations.sysrq import SysRqCommand
 
 
 class PayloadValidationError(ValueError):
@@ -111,6 +112,17 @@ class PowerPayload(SystemPayload):
     action: PowerAction
 
 
+class SysRqPayload(SystemPayload):
+    """A `diagnostic_sysrq` job: the System plus the allowlisted command to inject (ADR-0285).
+
+    ``command`` is a :class:`~kdive.domain.operations.sysrq.SysRqCommand` value; the tool
+    validates it against the allowlist before enqueue, and the worker resolves its magic-SysRq
+    trigger character.
+    """
+
+    command: SysRqCommand
+
+
 class CaptureVmcorePayload(RunPayload):
     """A `capture_vmcore` job: the crashing Run + core method (ADR-0244).
 
@@ -162,6 +174,7 @@ _PayloadModel = (
     | type[ReprovisionPayload]
     | type[RunPayload]
     | type[PowerPayload]
+    | type[SysRqPayload]
     | type[CaptureVmcorePayload]
     | type[ImageBuildPayload]
     | type[DiagnosticsWorkerCheckPayload]
@@ -173,6 +186,7 @@ PayloadModel = (
     | ReprovisionPayload
     | RunPayload
     | PowerPayload
+    | SysRqPayload
     | CaptureVmcorePayload
     | ImageBuildPayload
     | DiagnosticsWorkerCheckPayload
@@ -189,6 +203,7 @@ _PAYLOAD_MODELS: dict[JobKind, _PayloadModel] = {
     JobKind.BOOT: RunPayload,
     JobKind.FORCE_CRASH: SystemPayload,
     JobKind.POWER: PowerPayload,
+    JobKind.DIAGNOSTIC_SYSRQ: SysRqPayload,
     JobKind.CAPTURE_VMCORE: CaptureVmcorePayload,
     JobKind.IMAGE_BUILD: ImageBuildPayload,
     JobKind.DIAGNOSTICS_WORKER_CHECK: DiagnosticsWorkerCheckPayload,
