@@ -20,7 +20,12 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.images.rootfs_specs import CatalogRootfsBuild, catalog_rootfs_build
-from kdive.images.validation import DEFAULT_INSPECT, InspectSeam, validate_guest_contract
+from kdive.images.validation import (
+    DEFAULT_INSPECT,
+    GUEST_CONTRACT_PATHS,
+    InspectSeam,
+    validate_guest_contract,
+)
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ImageBuildPayload, load_payload
 from kdive.providers.core.resolver import ProviderResolver
@@ -59,10 +64,14 @@ async def image_build_handler(
     catalog_build = _resolve_catalog_build(payload)
     build_plane = _resolve_build_plane(resolver, payload.provider)
     output = await asyncio.to_thread(build_plane.build, catalog_build.spec)
+    # Only capabilities with an in-guest path marker are verifiable as a guest contract; the
+    # build-fact tags without one (ssh/selinux/apparmor, ADR-0287) are not guest-contract
+    # elements and are skipped here.
+    guest_contract = [c for c in catalog_build.spec.capabilities if c in GUEST_CONTRACT_PATHS]
     await asyncio.to_thread(
         validate_guest_contract,
         output.qcow2_path,
-        required=list(catalog_build.spec.capabilities),
+        required=guest_contract,
         inspect=inspect,
     )
     request = PublishRequest(
