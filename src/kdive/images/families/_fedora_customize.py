@@ -2,8 +2,9 @@
 
 Single source of truth for the constants and argv fragments the local-libvirt rootfs build
 shares with the :mod:`kdive.images.families.rhel` FamilyCustomizer: the kdive-ready serial
-readiness unit, the kdump NMI-panic sysctl and ``final_action`` pin, the debug-image drgn /
-SSH-NIC staging, and the default debug/build package sets. Relocated here from
+readiness unit, the kdump NMI-panic sysctl and ``final_action`` pin, the debug-image drgn
+staging, the shared cloud-init first-boot seed (ADR-0288), and the default debug/build package
+sets. Relocated here from
 ``providers/local_libvirt/rootfs_build.py`` (which now imports them) so the legacy in-line
 builder and the new family customizer encode them once.
 """
@@ -14,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.families.base import CustomizeContext
 from kdive.images.planes._build_common import MAKEDUMPFILE_MARKER_GUEST_PATH
 
 # Today's debug/guest rootfs: the in-target crash + introspection toolchain. ``keyutils`` provides
@@ -42,6 +44,81 @@ READINESS_MARKER = "kdive-ready"
 # a fixed build-time identity, intentionally constant and shared across families (#824).
 SEED_MACHINE_ID = "0a1b2c3d4e5f60718293a4b5c6d7e8f9"  # pragma: allowlist secret
 
+# The authoritative kdive first-boot config. cloud-init's *system config* network setting
+# outranks the datasource, so carrying the DHCP config here (not only in the seed) defeats a base
+# image that ships `network: {config: disabled}`. `mode: "off"` is quoted — unquoted `off` is a
+# YAML boolean. `match: {name: "e*"}` is interface-name-independent under the SLIRP NIC.
+KDIVE_CLOUD_CFG_PATH = "/etc/cloud/cloud.cfg.d/99-kdive.cfg"
+KDIVE_CLOUD_CFG_CONTENT = """\
+datasource_list: [ NoCloud ]
+disable_root: false
+network:
+  version: 2
+  ethernets:
+    kdive-dhcp:
+      match: { name: "e*" }
+      dhcp4: true
+      dhcp-identifier: mac
+growpart: { mode: "off" }
+resize_rootfs: false
+"""
+NOCLOUD_SEED_DIR = "/var/lib/cloud/seed/nocloud"
+_NOCLOUD_META_DATA = "instance-id: kdive-rootfs\nlocal-hostname: kdive\n"
+_NOCLOUD_USER_DATA = "#cloud-config\n"
+# Best-effort strip of any base drop-in that disables cloud-init network management; the build
+# self-check (rootfs_build.py) is the guard that asserts none remain.
+_STRIP_NET_DISABLE_CMD = (
+    "for f in /etc/cloud/cloud.cfg.d/*.cfg; do "
+    '[ -e "$f" ] || continue; '
+    "grep -qs 'config:[[:space:]]*disabled' \"$f\" && grep -qs 'network' \"$f\" "
+    '&& rm -f "$f"; done; true'
+)
+
+
+def _staged_upload(content: str, suffix: str, dest: str, cleanup: list[Path]) -> list[str]:
+    """Stage ``content`` to a tempfile (appended to ``cleanup``) and upload it to ``dest``."""
+    with tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False) as handle:
+        handle.write(content)
+        staged = Path(handle.name)
+    cleanup.append(staged)
+    return ["--upload", f"{staged}:{dest}"]
+
+
+def cloud_init_first_boot_args(ctx: CustomizeContext) -> list[str]:
+    """virt-customize fragment that makes cloud-init the uniform first-boot mechanism (ADR-0288).
+
+    Bakes the authoritative kdive ``cloud.cfg.d`` drop-in (network + NoCloud pin + root
+    protection) and a NoCloud seed, strips any base network-disabling drop-in, undoes any
+    cloud-init disable, and seeds ``machine-id``. Family-neutral. Installs cloud-init on a
+    non-cloud (virt-builder) base, which ships none.
+
+    It does **not** ``systemctl enable`` specific cloud-init units: the vendor cloud bases ship
+    the cloud-init units already enabled, and ``--install cloud-init`` enables them via the
+    package systemd preset on the virt-builder base. Enumerating unit names would break across
+    cloud-init versions (24.x renamed ``cloud-init.service`` to ``cloud-init-network.service``,
+    live-found on Debian 13); leaving enablement to the vendor/package is version-robust.
+
+    Args:
+        ctx: The customize context; ``is_cloud_image`` gates the cloud-init install and
+            ``cleanup`` receives the staged tempfiles for the caller to unlink.
+    """
+    argv: list[str] = []
+    if not ctx.is_cloud_image:
+        argv += ["--install", "cloud-init"]
+    argv += ["--mkdir", NOCLOUD_SEED_DIR]
+    argv += _staged_upload(KDIVE_CLOUD_CFG_CONTENT, ".cfg", KDIVE_CLOUD_CFG_PATH, ctx.cleanup)
+    argv += _staged_upload(_NOCLOUD_META_DATA, ".md", f"{NOCLOUD_SEED_DIR}/meta-data", ctx.cleanup)
+    argv += _staged_upload(_NOCLOUD_USER_DATA, ".ud", f"{NOCLOUD_SEED_DIR}/user-data", ctx.cleanup)
+    argv += [
+        "--run-command",
+        _STRIP_NET_DISABLE_CMD,
+        "--run-command",
+        "rm -f /etc/cloud/cloud-init.disabled",
+        "--write",
+        f"/etc/machine-id:{SEED_MACHINE_ID}",  # pragma: allowlist secret
+    ]
+    return argv
+
 
 def readiness_unit(kdump_unit: str) -> str:
     """Render the kdive-ready serial unit ordered ``After=<kdump_unit>`` (#817, #824).
@@ -57,6 +134,13 @@ def readiness_unit(kdump_unit: str) -> str:
     unit's terminal state, success or failure), so the System still reaches ``ready`` and a
     force_crash surfaces the capture-time readiness failure instead of provisioning hanging.
 
+    ``After=network-online.target`` (+ ``Wants=``) makes ``ready`` also imply the NIC obtained its
+    cloud-init DHCP lease (ADR-0288): without it the serial ``ready`` marker fires the same instant
+    the network comes up, so an ``authorize_ssh_key`` at ``ready`` races the lease and fails
+    ``transport_failure`` (live-found on Debian 13, where cloud-init.target and the marker landed in
+    the same second). local-libvirt renders exactly one NIC under SLIRP, which always leases, so
+    ``systemd-networkd-wait-online`` cannot stall on an un-leased link.
+
     Args:
         kdump_unit: The family's kdump systemd unit (``kdump.service`` on ``rhel``,
             ``kdump-tools.service`` on ``debian``); a wrong/absent name silently reopens the race
@@ -64,8 +148,8 @@ def readiness_unit(kdump_unit: str) -> str:
     """
     return f"""[Unit]
 Description=Signal kdive serial readiness
-After=dev-ttyS0.device {kdump_unit}
-Wants=dev-ttyS0.device
+After=dev-ttyS0.device {kdump_unit} network-online.target
+Wants=dev-ttyS0.device network-online.target
 
 [Service]
 Type=oneshot
@@ -104,23 +188,6 @@ KDUMP_FINAL_ACTION_CMD = (
 # tree. Staged only on the debug image (``drgn`` in packages) (ADR-0220, #724).
 DRGN_HELPER_GUEST_PATH = "/usr/local/sbin/kdive-drgn"
 DRGN_HELPER_REPO_RELPATH = ("deploy", "remote-libvirt-guest-helpers", "kdive-drgn")
-# The drgn-live SSH transport (ADR-0218) renders a SLIRP NIC the guest must DHCP to be reachable.
-# An interface-name-independent NetworkManager keyfile DHCPs whatever ethernet device the SSH NIC
-# enumerates as under direct-kernel boot (no stable NIC naming). Written 0600 — NM ignores a
-# world-readable keyfile (ADR-0220, #724).
-SSH_NIC_KEYFILE_PATH = "/etc/NetworkManager/system-connections/kdive-ssh-nic.nmconnection"
-SSH_NIC_KEYFILE_CONTENT = """[connection]
-id=kdive-ssh-nic
-type=ethernet
-autoconnect=true
-autoconnect-priority=-100
-
-[ipv4]
-method=auto
-
-[ipv6]
-method=ignore
-"""
 
 
 def drgn_helper_source() -> Path:
@@ -157,25 +224,6 @@ def drgn_helper_args() -> list[str]:
     ]
 
 
-def _ssh_nic_keyfile_args(cleanup: list[Path]) -> list[str]:
-    """Stage the NetworkManager SSH-NIC DHCP keyfile (ADR-0218), 0600 so NM loads it (#724).
-
-    Appends the staged tempfile to ``cleanup`` for the caller to unlink. NetworkManager-specific —
-    used by the ``rhel`` family; ``debian`` genericcloud has no NetworkManager and DHCPs the extra
-    NIC via cloud-init's ``cloud-ifupdown-helper`` instead (#824).
-    """
-    with tempfile.NamedTemporaryFile("w", suffix=".nmconnection", delete=False) as keyfile:
-        keyfile.write(SSH_NIC_KEYFILE_CONTENT)
-        keyfile_path = Path(keyfile.name)
-    cleanup.append(keyfile_path)
-    return [
-        "--upload",
-        f"{keyfile_path}:{SSH_NIC_KEYFILE_PATH}",
-        "--run-command",
-        f"chmod 0600 {SSH_NIC_KEYFILE_PATH}",
-    ]
-
-
 def makedumpfile_version_marker_args() -> list[str]:
     """virt-customize fragment recording ``makedumpfile --version`` to a guest marker file.
 
@@ -197,17 +245,12 @@ def makedumpfile_version_marker_args() -> list[str]:
 
 
 def debug_image_args(packages: tuple[str, ...], cleanup: list[Path]) -> list[str]:
-    """Stage the drgn helper + SSH-NIC DHCP keyfile for an ``rhel`` debug image (ADR-0220, #724).
+    """Stage the drgn helper for an ``rhel`` debug image (ADR-0220, #724).
 
-    Returns the virt-customize/virt-builder argv fragment and appends any tempfiles to
-    ``cleanup`` for the caller to unlink. Non-debug images (no ``drgn`` in ``packages``) get an
-    empty fragment.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` if the reviewed ``kdive-drgn`` helper is not a
-            readable file in the source tree — fail loud rather than ship a guest that cannot
-            introspect.
+    ``cleanup`` is retained for signature stability with the caller; the drgn helper stages no
+    tempfile. Non-debug images (no ``drgn`` in ``packages``) get an empty fragment.
     """
+    del cleanup
     if "drgn" not in packages:
         return []
-    return [*drgn_helper_args(), *_ssh_nic_keyfile_args(cleanup)]
+    return drgn_helper_args()

@@ -42,6 +42,8 @@ _NOT_ENV: frozenset[str] = frozenset(
         "KDIVE_METADATA_NS",  # object-store metadata namespace prefix
         "KDIVE_PROVIDER_CA",  # secret-ref label, not an env var
         "KDIVE_ROOTFS_AUTHORIZED_KEY",  # secret-ref label, not an env var
+        "KDIVE_CLOUD_CFG_PATH",  # cloud-init drop-in guest path constant (ADR-0288), not an env var
+        "KDIVE_CLOUD_CFG_CONTENT",  # cloud-init drop-in body constant (ADR-0288), not an env var
         # A config-validation error message token in tests/mcp/core/test_app.py.
         "KDIVE_S3_ENDPOINT",
         # Internal bash array constant in scripts/live-stack/lib.sh (unconditional assignment,
