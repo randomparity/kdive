@@ -158,24 +158,28 @@ type VerifyCloudInit = Callable[[Path], None]
 def _real_verify_cloud_init(qcow2: Path) -> None:  # pragma: no cover - live_vm
     """Assert cloud-init first-boot is correctly baked into the built image (ADR-0288).
 
-    Fails the build if any cloud.cfg.d drop-in still disables cloud-init networking, if the four
-    cloud-init units are not enabled, or if the kdive drop-in / NoCloud seed are missing — the
-    offline guard for silent no-ops CI cannot catch by booting.
+    A version-robust offline guard for silent no-ops CI cannot catch by booting. Each check runs
+    in the guest via guestfish ``sh`` (which aborts the script non-zero on any failed check,
+    verified empirically): the kdive drop-in and NoCloud seed exist, cloud-init is installed,
+    nothing re-disables it, and no cloud.cfg.d drop-in disables cloud-init networking. It does
+    **not** assert specific unit-enable state — unit names vary across cloud-init versions (24.x
+    renamed ``cloud-init.service`` to ``cloud-init-network.service``, live-found on Debian 13);
+    the vendor cloud base ships cloud-init enabled and ``--install`` enables it via the package
+    preset, so enumerating names would be fragile without adding safety.
     """
     from kdive.images.families._fedora_customize import (
-        CLOUD_INIT_UNITS,
         KDIVE_CLOUD_CFG_PATH,
         NOCLOUD_SEED_DIR,
     )
 
-    units = " ".join(f"is-enabled {u}" for u in CLOUD_INIT_UNITS.split())
-    # guestfish reads the offline image; `sh` runs inside it via the appliance.
-    script = (
-        f"exists {KDIVE_CLOUD_CFG_PATH}\n"
-        f"exists {NOCLOUD_SEED_DIR}/meta-data\n"
-        "! sh 'grep -rqs \"config:[[:space:]]*disabled\" /etc/cloud/cloud.cfg.d/'\n"
-        f"sh 'systemctl {units}'\n"
+    checks = (
+        f"test -e {KDIVE_CLOUD_CFG_PATH}",
+        f"test -e {NOCLOUD_SEED_DIR}/meta-data",
+        "test ! -e /etc/cloud/cloud-init.disabled",
+        "test -x /usr/bin/cloud-init",
+        '! grep -rqs "config:[[:space:]]*disabled" /etc/cloud/cloud.cfg.d/',
     )
+    script = "".join(f"sh '{check}'\n" for check in checks)
     run_guestfs_tool(
         ["guestfish", "--ro", "-a", str(qcow2), "-i"],
         stage="cloud-init-self-check",

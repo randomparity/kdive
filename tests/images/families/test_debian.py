@@ -95,7 +95,7 @@ def test_debian_argv_bakes_cloud_init_drops_sshd_keygen(tmp_path: Path) -> None:
     argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
     j = " ".join(argv)
     assert "/etc/cloud/cloud.cfg.d/99-kdive.cfg" in j
-    assert "systemctl enable cloud-init-local.service" in j
+    assert "rm -f /etc/cloud/cloud-init.disabled" in j  # undoes any cloud-init disable
     assert "--touch /etc/cloud/cloud-init.disabled" not in j  # no longer disabled
     assert "kdive-sshd-keygen" not in j  # cloud-init generates host keys
     assert "ssh-keygen -A" not in j

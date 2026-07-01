@@ -136,7 +136,7 @@ def test_rhel_argv_bakes_cloud_init_and_stops_masking(tmp_path: Path) -> None:
     argv = RhelFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
     j = " ".join(argv)
     assert "/etc/cloud/cloud.cfg.d/99-kdive.cfg" in j  # authoritative drop-in
-    assert "systemctl enable cloud-init-local.service" in j  # full pipeline enabled
+    assert "rm -f /etc/cloud/cloud-init.disabled" in j  # undoes any cloud-init disable
     assert "systemctl mask cloud-init" not in j  # no longer masked
 
 

@@ -65,11 +65,6 @@ resize_rootfs: false
 NOCLOUD_SEED_DIR = "/var/lib/cloud/seed/nocloud"
 _NOCLOUD_META_DATA = "instance-id: kdive-rootfs\nlocal-hostname: kdive\n"
 _NOCLOUD_USER_DATA = "#cloud-config\n"
-# The full cloud-init pipeline: cloud-init-local applies the datasource network config at the
-# PRE-network stage, so enabling only cloud-init.service would leave the NIC unconfigured.
-CLOUD_INIT_UNITS = (
-    "cloud-init-local.service cloud-init.service cloud-config.service cloud-final.service"
-)
 # Best-effort strip of any base drop-in that disables cloud-init network management; the build
 # self-check (rootfs_build.py) is the guard that asserts none remain.
 _STRIP_NET_DISABLE_CMD = (
@@ -93,9 +88,15 @@ def cloud_init_first_boot_args(ctx: CustomizeContext) -> list[str]:
     """virt-customize fragment that makes cloud-init the uniform first-boot mechanism (ADR-0288).
 
     Bakes the authoritative kdive ``cloud.cfg.d`` drop-in (network + NoCloud pin + root
-    protection) and a NoCloud seed, strips any base network-disabling drop-in, enables the full
-    four-unit cloud-init pipeline, and seeds ``machine-id``. Family-neutral. Installs cloud-init
-    on a non-cloud (virt-builder) base, which ships none.
+    protection) and a NoCloud seed, strips any base network-disabling drop-in, undoes any
+    cloud-init disable, and seeds ``machine-id``. Family-neutral. Installs cloud-init on a
+    non-cloud (virt-builder) base, which ships none.
+
+    It does **not** ``systemctl enable`` specific cloud-init units: the vendor cloud bases ship
+    the cloud-init units already enabled, and ``--install cloud-init`` enables them via the
+    package systemd preset on the virt-builder base. Enumerating unit names would break across
+    cloud-init versions (24.x renamed ``cloud-init.service`` to ``cloud-init-network.service``,
+    live-found on Debian 13); leaving enablement to the vendor/package is version-robust.
 
     Args:
         ctx: The customize context; ``is_cloud_image`` gates the cloud-init install and
@@ -113,10 +114,6 @@ def cloud_init_first_boot_args(ctx: CustomizeContext) -> list[str]:
         _STRIP_NET_DISABLE_CMD,
         "--run-command",
         "rm -f /etc/cloud/cloud-init.disabled",
-        "--run-command",
-        f"systemctl unmask {CLOUD_INIT_UNITS}",
-        "--run-command",
-        f"systemctl enable {CLOUD_INIT_UNITS}",
         "--write",
         f"/etc/machine-id:{SEED_MACHINE_ID}",  # pragma: allowlist secret
     ]
@@ -137,6 +134,13 @@ def readiness_unit(kdump_unit: str) -> str:
     unit's terminal state, success or failure), so the System still reaches ``ready`` and a
     force_crash surfaces the capture-time readiness failure instead of provisioning hanging.
 
+    ``After=network-online.target`` (+ ``Wants=``) makes ``ready`` also imply the NIC obtained its
+    cloud-init DHCP lease (ADR-0288): without it the serial ``ready`` marker fires the same instant
+    the network comes up, so an ``authorize_ssh_key`` at ``ready`` races the lease and fails
+    ``transport_failure`` (live-found on Debian 13, where cloud-init.target and the marker landed in
+    the same second). local-libvirt renders exactly one NIC under SLIRP, which always leases, so
+    ``systemd-networkd-wait-online`` cannot stall on an un-leased link.
+
     Args:
         kdump_unit: The family's kdump systemd unit (``kdump.service`` on ``rhel``,
             ``kdump-tools.service`` on ``debian``); a wrong/absent name silently reopens the race
@@ -144,8 +148,8 @@ def readiness_unit(kdump_unit: str) -> str:
     """
     return f"""[Unit]
 Description=Signal kdive serial readiness
-After=dev-ttyS0.device {kdump_unit}
-Wants=dev-ttyS0.device
+After=dev-ttyS0.device {kdump_unit} network-online.target
+Wants=dev-ttyS0.device network-online.target
 
 [Service]
 Type=oneshot
