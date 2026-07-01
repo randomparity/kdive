@@ -1,7 +1,7 @@
 """Worker handler: append an agent public key to a guest's root authorized_keys (ADR-0271).
 
-The worker already holds the kdive-managed SSH private key (ADR-0052) and can root-SSH any
-SSH-provisioned guest over the loopback forward (ADR-0218). This handler reuses that identity to
+The worker loads the System's per-System SSH bootstrap private key (ADR-0289, #963) and can
+root-SSH that guest over the loopback forward (ADR-0218). This handler uses that identity to
 append the agent's validated public key to ``/root/.ssh/authorized_keys`` — a flock-serialized,
 idempotent append — so the agent can then SSH in with its own private key. KDIVE never holds the
 agent's private key.
@@ -18,7 +18,10 @@ from psycopg import AsyncConnection
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.payloads import AuthorizeSshKeyPayload, load_payload
-from kdive.prereqs.managed_ssh_key import managed_private_key_path
+from kdive.prereqs.system_bootstrap_key import (
+    load_system_bootstrap_private_key,
+    materialized_private_key,
+)
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.shared.runtime_paths import domain_name_for
@@ -51,12 +54,12 @@ _REMOTE_SCRIPT = (
 )
 
 
-def build_authorize_argv(port: int) -> list[str]:
+def build_authorize_argv(port: int, key_path: str) -> list[str]:
     """Build the fixed loopback SSH argv that runs the append script (key arrives on stdin)."""
     return [
         "ssh",
         "-i",
-        str(managed_private_key_path()),
+        key_path,
         "-o",
         "BatchMode=yes",
         "-o",
@@ -104,11 +107,12 @@ async def authorize_ssh_key_handler(
     resolver: ProviderResolver,
     ssh_exec: SshExec = _real_ssh_exec,
 ) -> str | None:
-    """Append the agent public key to the guest root authorized_keys over the managed-key SSH.
+    """Append the agent public key to the guest root authorized_keys over the bootstrap-key SSH.
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when the System has no recorded SSH forward;
-            ``TRANSPORT_FAILURE`` when the guest sshd is unreachable or the append fails.
+        CategorizedError: ``CONFIGURATION_ERROR`` when the System has no recorded SSH forward or
+            no bootstrap key; ``TRANSPORT_FAILURE`` when the guest sshd is unreachable or the
+            append fails.
     """
     payload = load_payload(job, AuthorizeSshKeyPayload)
     system_id = UUID(payload.system_id)
@@ -127,5 +131,7 @@ async def authorize_ssh_key_handler(
             details={"reason": "ssh_not_provisioned"},
         )
     _host, port = endpoint
-    ssh_exec(build_authorize_argv(port), payload.public_key)
+    private_key = await load_system_bootstrap_private_key(conn, system_id)
+    with materialized_private_key(private_key) as key_path:
+        ssh_exec(build_authorize_argv(port, str(key_path)), payload.public_key)
     return None

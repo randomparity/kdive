@@ -1,14 +1,17 @@
-"""Tests for the authorize_ssh_key worker handler (ADR-0271, #782)."""
+"""Tests for the authorize_ssh_key worker handler (ADR-0271, #782; ADR-0289, #963)."""
 
 from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
+from psycopg import AsyncConnection
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind, JobState
@@ -16,18 +19,23 @@ from kdive.jobs.handlers.ssh_authorize import (
     authorize_ssh_key_handler,
     build_authorize_argv,
 )
+from kdive.prereqs.system_bootstrap_key import ensure_system_bootstrap_key
 
 _NOW = datetime(2025, 1, 1)
 _KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 agent@host"
 
 
 def _job(public_key: str = _KEY) -> Job:
+    return _job_for(uuid4(), public_key=public_key)
+
+
+def _job_for(system_id: UUID, *, public_key: str = _KEY) -> Job:
     return Job(
         id=uuid4(),
         created_at=_NOW,
         updated_at=_NOW,
         kind=JobKind.AUTHORIZE_SSH_KEY,
-        payload={"system_id": str(uuid4()), "public_key": public_key},
+        payload={"system_id": str(system_id), "public_key": public_key},
         state=JobState.RUNNING,
         max_attempts=3,
         authorizing={"principal": "user", "agent_session": None, "project": "proj"},
@@ -45,7 +53,7 @@ def _resolver(endpoint: tuple[str, int] | None) -> MagicMock:
 
 
 def test_argv_is_fixed_and_excludes_the_key() -> None:
-    argv = build_authorize_argv(22022)
+    argv = build_authorize_argv(22022, "/tmp/kdive-bootkey-use-x/id")
     assert argv[0] == "ssh"
     assert "root@127.0.0.1" in argv
     assert "22022" in argv
@@ -56,56 +64,7 @@ def test_argv_is_fixed_and_excludes_the_key() -> None:
     script = argv[-1]
     assert "flock" in script and "grep -qxF" in script
     assert "key=$(cat)" in script
-
-
-def test_handler_authorizes_via_managed_key_ssh_and_pipes_key_on_stdin() -> None:
-    recorded: list[tuple[list[str], str]] = []
-    resolver = _resolver(("127.0.0.1", 22022))
-
-    result = asyncio.run(
-        authorize_ssh_key_handler(
-            MagicMock(),
-            _job(),
-            resolver=resolver,
-            ssh_exec=lambda argv, key: recorded.append((argv, key)),
-        )
-    )
-
-    assert result is None
-    assert len(recorded) == 1
-    argv, key = recorded[0]
-    assert "root@127.0.0.1" in argv and "22022" in argv
-    assert _KEY not in argv  # not in the command
-    assert key == _KEY  # delivered on stdin
-
-
-def test_handler_resolves_endpoint_by_domain_name() -> None:
-    # The connector resolves the live libvirt domain by name, so the handler must pass the
-    # System's `kdive-<id>` domain name, not the bare id (regression for the live-proof bug where
-    # the bare id raised VIR_ERR_NO_DOMAIN -> spurious ssh_not_provisioned).
-    sys_id = uuid4()
-    job = Job(
-        id=uuid4(),
-        created_at=_NOW,
-        updated_at=_NOW,
-        kind=JobKind.AUTHORIZE_SSH_KEY,
-        payload={"system_id": str(sys_id), "public_key": _KEY},
-        state=JobState.RUNNING,
-        max_attempts=3,
-        authorizing={"principal": "user", "agent_session": None, "project": "proj"},
-        dedup_key="test",
-    )
-    resolver = _resolver(("127.0.0.1", 22022))
-    connector = resolver.binding_for_system.return_value.runtime.connector
-
-    asyncio.run(
-        authorize_ssh_key_handler(
-            MagicMock(), job, resolver=resolver, ssh_exec=lambda _argv, _key: None
-        )
-    )
-
-    handle = connector.recorded_ssh_endpoint.call_args.args[0]
-    assert str(handle) == f"kdive-{sys_id}"
+    assert argv[argv.index("-i") + 1] == "/tmp/kdive-bootkey-use-x/id"
 
 
 def test_handler_unprovisioned_is_configuration_error() -> None:
@@ -124,14 +83,130 @@ def test_handler_unprovisioned_is_configuration_error() -> None:
     assert "reprovision" not in str(excinfo.value).lower()
 
 
-def test_handler_ssh_failure_propagates_transport_failure() -> None:
-    resolver = _resolver(("127.0.0.1", 22022))
+# Async-DB tests follow the PROVEN in-repo pattern in
+# tests/jobs/handlers/test_boot_evidence_run_id.py: a SYNC `def test_(migrated_url)` with an
+# inner `async def _run()` driven by `asyncio.run(_run())`. The handler now loads the per-System
+# bootstrap key from Postgres (kdive.prereqs.system_bootstrap_key), so these tests need a REAL
+# conn — a MagicMock conn cannot answer a real `SELECT`. The mock-based tests above stay mocked
+# because they never reach the load-key call (they fail before it, or don't assert on it).
 
+
+async def _seed_system(conn: AsyncConnection) -> UUID:
+    """Seed the resources -> allocations -> systems FK chain; return the system_id."""
+    resource_id, allocation_id, system_id = uuid4(), uuid4(), uuid4()
+    await conn.execute(
+        "INSERT INTO resources (id, kind, pool, cost_class, status, host_uri) "
+        "VALUES (%s, 'local-libvirt', 'default', 'standard', 'available', 'qemu:///system')",
+        (resource_id,),
+    )
+    await conn.execute(
+        "INSERT INTO allocations (id, resource_id, state, principal, project) "
+        "VALUES (%s, %s, 'granted', 'p', 'proj')",
+        (allocation_id, resource_id),
+    )
+    await conn.execute(
+        "INSERT INTO systems (id, allocation_id, state, provisioning_profile, principal, project) "
+        "VALUES (%s, %s, 'ready', '{}'::jsonb, 'p', 'proj')",
+        (system_id, allocation_id),
+    )
+    return system_id
+
+
+def test_handler_authorizes_via_per_system_key_and_cleans_up_temp_key(
+    migrated_url: str,
+) -> None:
+    async def _run() -> tuple[list[tuple[list[str], str]], Path | None, bool | None]:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            async with pool.connection() as conn:
+                system_id = await _seed_system(conn)
+                await ensure_system_bootstrap_key(conn, system_id)
+                job = _job_for(system_id)
+                resolver = _resolver(("127.0.0.1", 22022))
+
+                recorded: list[tuple[list[str], str]] = []
+                seen_key_path: Path | None = None
+                seen_key_existed: bool | None = None
+
+                def _capture(argv: list[str], key: str) -> None:
+                    nonlocal seen_key_path, seen_key_existed
+                    recorded.append((argv, key))
+                    seen_key_path = Path(argv[argv.index("-i") + 1])
+                    seen_key_existed = seen_key_path.exists()
+
+                result = await authorize_ssh_key_handler(
+                    conn, job, resolver=resolver, ssh_exec=_capture
+                )
+                assert result is None
+                return recorded, seen_key_path, seen_key_existed
+
+    recorded, key_path, key_existed = asyncio.run(_run())
+    assert len(recorded) == 1
+    argv, key = recorded[0]
+    assert "root@127.0.0.1" in argv and "22022" in argv
+    assert _KEY not in argv  # not in the command
+    assert key == _KEY  # delivered on stdin
+    assert key_existed is True  # temp key was materialized during the call
+    assert key_path is not None and not key_path.exists()  # and cleaned up after
+
+
+def test_handler_resolves_endpoint_by_domain_name(migrated_url: str) -> None:
+    # The connector resolves the live libvirt domain by name, so the handler must pass the
+    # System's `kdive-<id>` domain name, not the bare id (regression for the live-proof bug where
+    # the bare id raised VIR_ERR_NO_DOMAIN -> spurious ssh_not_provisioned).
+    async def _run() -> tuple[str, UUID]:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            async with pool.connection() as conn:
+                system_id = await _seed_system(conn)
+                await ensure_system_bootstrap_key(conn, system_id)
+                job = _job_for(system_id)
+                resolver = _resolver(("127.0.0.1", 22022))
+                connector = resolver.binding_for_system.return_value.runtime.connector
+
+                await authorize_ssh_key_handler(
+                    conn, job, resolver=resolver, ssh_exec=lambda _argv, _key: None
+                )
+                handle = connector.recorded_ssh_endpoint.call_args.args[0]
+                return str(handle), system_id
+
+    domain_name, system_id = asyncio.run(_run())
+    assert domain_name == f"kdive-{system_id}"
+
+
+def test_handler_ssh_failure_propagates_transport_failure(migrated_url: str) -> None:
     def _boom(_argv: list[str], _key: str) -> None:
         raise CategorizedError("ssh down", category=ErrorCategory.TRANSPORT_FAILURE)
 
-    with pytest.raises(CategorizedError) as excinfo:
-        asyncio.run(
-            authorize_ssh_key_handler(MagicMock(), _job(), resolver=resolver, ssh_exec=_boom)
-        )
-    assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            async with pool.connection() as conn:
+                system_id = await _seed_system(conn)
+                await ensure_system_bootstrap_key(conn, system_id)
+                job = _job_for(system_id)
+                resolver = _resolver(("127.0.0.1", 22022))
+                with pytest.raises(CategorizedError) as excinfo:
+                    await authorize_ssh_key_handler(conn, job, resolver=resolver, ssh_exec=_boom)
+                assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+
+    asyncio.run(_run())
+
+
+def test_handler_no_bootstrap_key_is_configuration_error(migrated_url: str) -> None:
+    """No key row (System predates ADR-0289 or was never provisioned) fails closed."""
+
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            async with pool.connection() as conn:
+                system_id = await _seed_system(conn)  # no ensure_system_bootstrap_key call
+                job = _job_for(system_id)
+                resolver = _resolver(("127.0.0.1", 22022))
+                with pytest.raises(CategorizedError) as excinfo:
+                    await authorize_ssh_key_handler(
+                        conn, job, resolver=resolver, ssh_exec=lambda _argv, _key: None
+                    )
+                assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+    asyncio.run(_run())
