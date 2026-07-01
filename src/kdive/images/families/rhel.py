@@ -14,6 +14,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+from kdive.domain.catalog.images import Capability
 from kdive.images.families._fedora_customize import (
     DEFAULT_BUILD_FS_PACKAGES,
     DEFAULT_DEBUG_FS_PACKAGES,
@@ -26,7 +27,7 @@ from kdive.images.families._fedora_customize import (
     debug_image_args,
     makedumpfile_version_marker_args,
 )
-from kdive.images.families.base import CustomizeContext
+from kdive.images.families.base import CustomizeContext, _mac_tag
 from kdive.images.planes._build_common import run_guestfs_tool
 
 _CLOUD_INIT_MASK = (
@@ -83,6 +84,14 @@ class RhelFamily:
         if major is not None and major <= 9:
             return _EL8_EL9_DEBUG_PACKAGES
         return (*DEFAULT_DEBUG_FS_PACKAGES, "openssh-server")
+
+    def capabilities(self, kind: str, distro: str, version: str) -> tuple[Capability, ...]:
+        """Return the tags this family bakes. EL-major-invariant, so distro/version unused."""
+        del distro, version
+        mac = _mac_tag(self.guest_mac)
+        if kind == "build":
+            return (mac, Capability.BUILD)
+        return (Capability.SSH, mac, Capability.KDUMP, Capability.DRGN)
 
     def customize_argv(self, ctx: CustomizeContext) -> list[str]:
         """Build the virt-customize argv that turns the base image into a kdive-ready rootfs."""
