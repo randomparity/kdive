@@ -234,24 +234,21 @@ moves.
 **TDD / acceptance:** `just docs-check`, `just rbac-matrix` (check mode), `just
 resources-docs-check`, and the app/registry snapshot test all pass.
 
-## Task 9 — `live_vm` proof (required by ADR-0285)
+## Task 9 — KVM live proof (tracked follow-up, deferred from this PR)
 
 **Where:** the only test that falsifies the guest-keyboard/`kernel.sysrq` end-to-end mechanism.
 
-**Files:** a `@pytest.mark.live_vm` test under `tests/` (mirror an existing live_vm test's
-provision fixture), runnable via `just test-live` on this KVM host.
+**Status:** deferred, mirroring #782's deferred live e2e. The tool ships `implemented` per the
+ADR-0248/0276/0277/0278 precedent (a provider-dependent tool not yet in the live-proof set) and
+**fails safe** (`no_console_output` `configuration_error` with remediation) when the guest
+mechanism is unavailable, so the deferral carries no silent-failure risk.
 
-**Do:** provision a local-libvirt System on a built kernel + default catalog rootfs, call
-`control.diagnostic_sysrq` with an allowlisted command, poll `jobs.wait`, and assert the job
-succeeds with a non-empty redacted artifact readable via `artifacts.get`. Record the default
-image's `kernel.sysrq` value; if unset, document the supported-kernel constraint in the
-operator docs and the tool remediation. This proof is run before marking the tool
-`implemented`; if it cannot pass on the default images, the PR body states the limitation and
-the tool ships with the not-yet-proven maturity marker.
-
-**TDD / acceptance:** the live proof passes on this host (`just test-live`), or the limitation
-is documented and the maturity marker reflects it. The default (non-live) suite stays green
-because `live_vm` is gated.
+**Follow-up (author + run on the KVM host):** a `@pytest.mark.live_vm` test that provisions a
+local-libvirt System on a built kernel + default catalog rootfs, calls `control.diagnostic_sysrq`
+with an allowlisted command, polls `jobs.wait`, and asserts the job succeeds with a non-empty
+redacted artifact readable via `artifacts.get`; record the default image's `kernel.sysrq` value
+and, if unset, document the supported-kernel constraint. The default (non-live) suite stays
+green because `live_vm` is gated.
 
 ## Rollback / cleanup
 

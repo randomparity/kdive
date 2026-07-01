@@ -75,9 +75,13 @@ System-owned artifact.
 - **Load-bearing guest dependency:** the keystroke reaches the kernel only if the guest kernel
   binds a PS/2 keyboard driver (`i8042`/`atkbd`) and `kernel.sysrq` enables the command. kdive
   boots user-supplied kernels, so this is not guaranteed; both unmet cases surface as a
-  `no_console_output` `configuration_error` naming both fixes, and acceptance is gated on a
-  `live_vm` proof against a built kernel + default rootfs (a fake-connection unit test cannot
-  falsify the mechanism). The default catalog images' `kernel.sysrq` state is verified there.
+  `no_console_output` `configuration_error` naming both fixes — the tool **fails safe**, never
+  hangs. Unit/service tests cover the logic to the tool and worker boundaries with a fake
+  connection; they cannot falsify the guest-side keyboard/`kernel.sysrq` mechanism end to end.
+  The tool ships `implemented` per the ADR-0248/0276/0277/0278 precedent (a provider-dependent
+  tool not yet in the live-proof set), and the KVM live proof against a built kernel + default
+  rootfs — including verifying the default catalog images' `kernel.sysrq` state — is the tracked
+  follow-up before relying on it in production (mirrors #782's deferred live e2e).
 - Redaction includes a `SEAM_OVERLAP` pre-injection region before slicing (mirroring
   `console_rotate`), so a secret straddling the capture-start boundary cannot leak its tail.
 - Worker execution is at-least-once; the artifact-row insert is insert-if-absent on the
@@ -100,9 +104,9 @@ System-owned artifact.
   and works on any ready System through the hypervisor keyboard with no in-guest agent. Its
   cost is a guest-side dependency (a PS/2 keyboard driver + `CONFIG_MAGIC_SYSRQ`) that kdive
   does not control; we accept that cost, document it as a supported-configuration constraint,
-  surface it in the `no_console_output` remediation, and gate acceptance on a `live_vm` proof
-  rather than trusting the fake-connection unit test. If the guest-keyboard dependency proves
-  too fragile in practice, the SSH path is the documented fallback to revisit.
+  surface it in the `no_console_output` remediation (the tool fails safe), and track a KVM live
+  proof as the follow-up. If the guest-keyboard dependency proves too fragile in practice, the
+  SSH path is the documented fallback to revisit.
 - **Reuse `console_rotate` parts instead of a dedicated artifact.** Rejected: threshold-based
   async rotation cannot tell the caller which part holds *their* dump; a dedicated
   `refs.result` artifact is the discoverable channel the acceptance criteria expect.

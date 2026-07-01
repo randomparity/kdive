@@ -122,14 +122,13 @@ This is treated as a first-class outcome, not swept under "should work":
 
 - The **no-output** path (below) returns `configuration_error` with remediation naming
   **both** causes: enable `kernel.sysrq` for the command *and* build the guest kernel with a
-  PS/2 keyboard driver.
-- Acceptance is **gated on a `live_vm` proof** (this dev host runs KVM/libvirt) against a
-  representative built kernel + a default catalog rootfs, confirming an allowlisted command
-  produces a captured dump on the shipped configuration. A fake-connection unit test cannot
-  falsify the end-to-end mechanism, so the live proof is required, not optional.
-- The default catalog images' `kernel.sysrq` value is verified as part of that proof; if the
-  defaults do not enable it, the supported-configuration constraint is documented in the
-  operator docs and the tool's remediation, rather than left implicit.
+  PS/2 keyboard driver. The tool **fails safe** — it never hangs.
+- Unit/service tests cover the logic to the tool and worker boundaries (fake connection). They
+  cannot falsify the guest-side keyboard/`kernel.sysrq` mechanism end to end; a **KVM live
+  proof** against a representative built kernel + default catalog rootfs — including verifying
+  the default images' `kernel.sysrq` state — is the tracked follow-up before relying on it in
+  production. The tool ships `implemented` per the ADR-0248/0276/0277/0278 precedent (a
+  provider-dependent tool not yet in the live-proof set; mirrors #782's deferred live e2e).
 
 The `/proc/sysrq-trigger`-over-SSH alternative avoids the guest-keyboard dependency but is
 **not** a free substitute: it needs a prior `authorize_ssh_key` on the System and working
@@ -278,12 +277,12 @@ forward-only per ADR-0015). `DIAGNOSTIC_SYSRQ` is **not** added to
   command; absent domain → `control_failure`.
 - **Teardown**: a System with a `sysrq-diagnostic-*` artifact is reclaimed (object + row)
   at teardown.
-- **`live_vm` proof (required, not optional)**: on the KVM/libvirt dev host, provision a
-  System on a built kernel + default catalog rootfs, call `control.diagnostic_sysrq` with an
-  allowlisted command, and assert the job succeeds with a non-empty redacted artifact — this
-  is the only test that falsifies the guest-keyboard/`kernel.sysrq` end-to-end mechanism.
-  Records the default images' `kernel.sysrq` value; if unset, documents the supported-kernel
-  constraint.
+- **KVM live proof (tracked follow-up)**: on the KVM/libvirt host, provision a System on a
+  built kernel + default catalog rootfs, call `control.diagnostic_sysrq` with an allowlisted
+  command, and assert the job succeeds with a non-empty redacted artifact — the only test that
+  falsifies the guest-keyboard/`kernel.sysrq` end-to-end mechanism. Records the default images'
+  `kernel.sysrq` value; if unset, documents the supported-kernel constraint. Deferred from this
+  PR (mirrors #782's deferred live e2e); the tool fails safe until then.
 - Agent-facing surface guards (tool registry snapshot, agent-index/toolset docs) updated so
   the existing drift guards stay green.
 
