@@ -371,7 +371,13 @@ class LocalLibvirtProvisioning:
             return
         self._materialize_rootfs_base(rootfs, UUID(int=0))
 
-    def reprovision(self, system_id: UUID, profile: ProvisioningProfile) -> str:
+    def reprovision(
+        self,
+        system_id: UUID,
+        profile: ProvisioningProfile,
+        *,
+        overlay_customizers: tuple[OverlayCustomizer, ...] = (),
+    ) -> str:
         """Wipe the System's current install and define+start the new profile in place.
 
         Destructive (ADR-0038 §3): destroys+undefines the System's current domain, then
@@ -381,12 +387,16 @@ class LocalLibvirtProvisioning:
         partial wipe still provisions), and a ``provision`` failure surfaces as
         ``PROVISIONING_FAILURE`` (so the handler drives ``reprovisioning -> failed``).
 
+        ``overlay_customizers`` (ADR-0289, #963) are forwarded to the internal ``provision``
+        call: since ``teardown`` above always removes the prior overlay, ``provision`` always
+        recreates it here, so the customizers always run.
+
         Raises:
             CategorizedError: ``PROVISIONING_FAILURE`` if the new domain cannot be
                 defined/started; ``INFRASTRUCTURE_FAILURE`` if the wipe cannot be completed.
         """
         self.teardown(domain_name_for(system_id))
-        return self.provision(system_id, profile)
+        return self.provision(system_id, profile, overlay_customizers=overlay_customizers)
 
     def teardown(self, domain_name: str) -> None:
         """Destroy+undefine the domain and reclaim its overlay + baseline kernel dir; idempotent.

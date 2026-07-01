@@ -111,6 +111,13 @@ class ProviderRuntime:
     # resolver can bind the runtime's ports to the op's Resource by name. ``None`` → identity
     # (local-libvirt / fault-inject share one host, so no per-resource config).
     rebind_for_resource: Callable[[str], ProviderRuntime] | None = None
+    # Per-System bootstrap-key overlay customizer factory (ADR-0289, #963). Given the System's
+    # bootstrap public key, returns an ``OverlayCustomizer`` (``Callable[[str], None]`` over the
+    # overlay path) the provision/reprovision handler passes to ``Provisioner.provision``. Set by
+    # local-libvirt's composition to its ``virt-customize``-backed injector; ``None`` for a
+    # provider with no local overlay to customize (fault-inject, remote-libvirt) — the handler
+    # then passes no customizers, matching those provisioners' no-op acceptance of the kwarg.
+    bootstrap_key_customizer: Callable[[str], Callable[[str], None]] | None = None
 
     async def register_discovery(self, pool: AsyncConnectionPool) -> None:
         if self.discovery_registrar is not None:

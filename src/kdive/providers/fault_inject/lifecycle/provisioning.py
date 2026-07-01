@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from uuid import UUID
 
 from kdive.profiles.provisioning import ProvisioningProfile
@@ -18,8 +19,16 @@ class FaultInjectProvisioning:
     def __init__(self, inventory: FaultInjectInventory) -> None:
         self._inventory = inventory
 
-    def provision(self, system_id: UUID, profile: ProvisioningProfile) -> str:
-        del profile
+    def provision(
+        self,
+        system_id: UUID,
+        profile: ProvisioningProfile,
+        *,
+        overlay_customizers: tuple[Callable[[str], None], ...] = (),
+    ) -> str:
+        # No real overlay exists for a synthetic domain (ADR-0289, #963): the customizers accepted
+        # here for Provisioner-call-site parity are never invoked.
+        del profile, overlay_customizers
         domain = domain_name(system_id)
         self._inventory.record(system_id, domain)
         return domain
@@ -27,6 +36,12 @@ class FaultInjectProvisioning:
     def teardown(self, domain_name: str) -> None:
         self._inventory.forget(domain_name)
 
-    def reprovision(self, system_id: UUID, profile: ProvisioningProfile) -> str:
+    def reprovision(
+        self,
+        system_id: UUID,
+        profile: ProvisioningProfile,
+        *,
+        overlay_customizers: tuple[Callable[[str], None], ...] = (),
+    ) -> str:
         self._inventory.forget(domain_name(system_id))
-        return self.provision(system_id, profile)
+        return self.provision(system_id, profile, overlay_customizers=overlay_customizers)

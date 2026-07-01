@@ -33,6 +33,7 @@ from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.local_libvirt.lifecycle.control import LocalLibvirtControl
 from kdive.providers.local_libvirt.lifecycle.install import LocalLibvirtInstall
+from kdive.providers.local_libvirt.lifecycle.overlay_customize import authorized_key_customizer
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.local_libvirt.reaping import LibvirtInfraReaper
@@ -134,4 +135,7 @@ def build_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
         build_config_validator=builder.validate_config_ref,
         rootfs_validator=provisioner.validate_rootfs_ref,
         rootfs_build_plane=LocalLibvirtRootfsBuildPlane.from_env(),
+        # The per-System bootstrap key (ADR-0289, #963) is injected via virt-customize into the
+        # local overlay only local-libvirt owns; other providers leave this unset.
+        bootstrap_key_customizer=authorized_key_customizer,
     )

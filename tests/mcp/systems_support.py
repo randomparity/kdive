@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -31,6 +31,7 @@ from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
+from kdive.providers.local_libvirt.lifecycle.overlay_customize import authorized_key_customizer
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.ports.lifecycle import (
     DEBUG_TRANSPORT_KINDS,
@@ -114,6 +115,9 @@ def provider_resolver(
     supported_introspection: frozenset[IntrospectionMode] | None = None,
     profile_policy: object | None = None,
     platform_root_cmdline: str | None = "root=/dev/vda",
+    bootstrap_key_customizer: Callable[[str], Callable[[str], None]] | None = (
+        authorized_key_customizer
+    ),
 ) -> ProviderResolver:
     """Return a local-libvirt resolver with optional fake runtime ports.
 
@@ -126,6 +130,8 @@ def provider_resolver(
     capability-aware-admission test (ADR-0209) passes an empty/narrowed set to model an unsupported
     plane. ``vmcore_introspector`` is injectable so an admission *admit*-path test can run a fake
     port behind the gate; it defaults to an unused port for the deny/short-circuit tests.
+    ``bootstrap_key_customizer`` (ADR-0289, #963) defaults to the real local-libvirt injector,
+    matching production composition; pass ``None`` to model a provider with no local overlay.
     """
     unused_port = cast(Any, object())
     runtime = ProviderRuntime(
@@ -162,6 +168,7 @@ def provider_resolver(
         component_sources=TEST_COMPONENT_SOURCES,
         rootfs_validator=lambda _: None,
         platform_root_cmdline=platform_root_cmdline,
+        bootstrap_key_customizer=bootstrap_key_customizer,
     )
     return ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
 
@@ -248,11 +255,15 @@ class FakeProvisioning:
         self.provisioned: list[UUID] = []
         self.torn_down: list[str] = []
         self.reprovisioned: list[UUID] = []
+        self.overlay_customizers: list[tuple[Any, ...]] = []
         self._provision_error = provision_error
         self._reprovision_error = reprovision_error
 
-    def provision(self, system_id: UUID, profile: Any) -> str:
+    def provision(
+        self, system_id: UUID, profile: Any, *, overlay_customizers: tuple[Any, ...] = ()
+    ) -> str:
         self.provisioned.append(system_id)
+        self.overlay_customizers.append(overlay_customizers)
         if self._provision_error:
             raise CategorizedError("boom", category=ErrorCategory.PROVISIONING_FAILURE)
         return f"kdive-{system_id}"
@@ -260,8 +271,11 @@ class FakeProvisioning:
     def teardown(self, domain_name: str) -> None:
         self.torn_down.append(domain_name)
 
-    def reprovision(self, system_id: UUID, profile: Any) -> str:
+    def reprovision(
+        self, system_id: UUID, profile: Any, *, overlay_customizers: tuple[Any, ...] = ()
+    ) -> str:
         self.reprovisioned.append(system_id)
+        self.overlay_customizers.append(overlay_customizers)
         if self._reprovision_error:
             raise CategorizedError("boom", category=ErrorCategory.PROVISIONING_FAILURE)
         return f"kdive-{system_id}"

@@ -492,10 +492,16 @@ def test_c3_estimate_equals_reserved_row(migrated_url: str) -> None:
 class _FakeProvisioner:
     """A Provisioner stand-in: provision/teardown return a domain name and record nothing."""
 
-    def provision(self, system_id: UUID, profile: object) -> str:
+    def provision(
+        self, system_id: UUID, profile: object, *, overlay_customizers: tuple[object, ...] = ()
+    ) -> str:
+        del overlay_customizers
         return domain_name_for(system_id)
 
-    def reprovision(self, system_id: UUID, profile: object) -> str:
+    def reprovision(
+        self, system_id: UUID, profile: object, *, overlay_customizers: tuple[object, ...] = ()
+    ) -> str:
+        del overlay_customizers
         return domain_name_for(system_id)
 
     def teardown(self, domain_name: str) -> None:
@@ -1049,10 +1055,16 @@ class _RecordingProvisioner:
     def __init__(self) -> None:
         self.reprovisioned: list[UUID] = []
 
-    def provision(self, system_id: UUID, profile: object) -> str:
+    def provision(
+        self, system_id: UUID, profile: object, *, overlay_customizers: tuple[object, ...] = ()
+    ) -> str:
+        del overlay_customizers
         return domain_name_for(system_id)
 
-    def reprovision(self, system_id: UUID, profile: object) -> str:
+    def reprovision(
+        self, system_id: UUID, profile: object, *, overlay_customizers: tuple[object, ...] = ()
+    ) -> str:
+        del overlay_customizers
         self.reprovisioned.append(system_id)
         return domain_name_for(system_id)
 
