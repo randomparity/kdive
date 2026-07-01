@@ -9,10 +9,19 @@
 
 Every debug rootfs image is stamped with the same `(agent, kdump, drgn)` capability tuple,
 regardless of distro, because `images/rootfs_specs.py` reads a fixed `_KIND_CAPABILITIES`
-table rather than asking the family what it bakes. The table both **omits** traits every
-family bakes (`ssh`, the MAC posture) and **flattens** a real per-distro difference (rhel
-sets SELinux, debian uses AppArmor). An agent reading `capabilities` cannot tell a
-SELinux Fedora image from an AppArmor Debian image, and cannot see that sshd is baked in.
+table rather than asking the family what it bakes. The table is wrong three ways:
+
+- it **asserts a false tag**: `agent` is defined as the QEMU guest agent
+  (`GUEST_CONTRACT_PATHS["agent"] = /usr/sbin/qemu-ga`, `images/validation.py`), but the
+  local families (`RhelFamily`/`DebianFamily`) install **no** qemu-guest-agent — local-libvirt
+  drives guests over SSH plus the `kdive-ready` serial unit, not qemu-ga. So `agent` is false
+  for every local staged image today;
+- it **omits** traits every debug image bakes (`ssh` — openssh-server is explicitly installed
+  — and the MAC posture); and
+- it **flattens** a real per-distro difference: rhel sets SELinux, debian uses AppArmor.
+
+An agent reading `capabilities` sees a phantom `agent`, cannot tell a SELinux Fedora image
+from an AppArmor Debian image, and cannot see that sshd is baked in.
 
 ## Scope
 
@@ -24,9 +33,18 @@ does it boot direct-kernel) is S2–S4 and out of scope here.
 In scope:
 - Add `ssh`, `selinux`, `apparmor` to the `Capability` enum.
 - Add a `FamilyCustomizer.capabilities()` seam; each family declares its baked tags.
+- Stop declaring `agent` for local families (it is false — no qemu-ga is installed); the
+  `agent` member stays in the enum, reserved for the remote provider's guest contract.
 - Route `catalog_rootfs_build` through the family; delete `_KIND_CAPABILITIES`.
-- A structural guard tying declared tags to build evidence.
+- A structural guard tying declared tags to build evidence, iterated over the whole family
+  registry.
 - Converge the repo-tracked staged-path metadata to the family-accurate per-distro sets.
+
+What S1's honesty claim does and does not cover: the guard proves **declaration ↔ recipe
+consistency** — that a family declares exactly the tags its own `packages()`/`customize_argv`
+install. It does **not** prove **recipe ↔ image efficacy** — that the installed tooling
+actually works at runtime (sshd answers, the relabel didn't deny the key). Runtime truth is
+verified by the S2 boot-probe; S1 tags mean "the build installs this", not "this works".
 
 Out of scope:
 - Any boot, probe, or runtime verification (S2+).
@@ -66,22 +84,25 @@ def capabilities(self, kind: str, distro: str, version: str) -> tuple[Capability
     ...
 ```
 
-Each family returns exactly what its `customize_argv`/`packages` produce. Because
-`customize_argv` enables sshd, injects the key, uploads the readiness unit, and sets the MAC
-posture for **both** kinds, `agent`/`ssh`/MAC are on every image; `kdump`/`drgn` are
-debug-only (gated on the kdump/drgn packages), and `build` marks the build kind.
+Each family returns exactly what its `packages()`/`customize_argv` install. The MAC posture
+is set for **both** kinds (so `selinux`/`apparmor` is on every image); `ssh` is declared only
+where **openssh-server is explicitly in `packages()`** — the debug sets — so the tag never
+rests on the base image happening to ship sshd; `kdump`/`drgn` are debug-only (gated on the
+kdump/drgn packages); `build` marks the build kind. `agent` is **not** declared — the local
+families install no qemu-guest-agent.
 
 | family · kind | capabilities |
 | --- | --- |
-| rhel · debug | `agent, ssh, selinux, kdump, drgn` |
-| rhel · build | `agent, ssh, selinux, build` |
-| debian · debug | `agent, ssh, apparmor, kdump, drgn` |
-| debian · build | `agent, ssh, apparmor, build` |
+| rhel · debug | `ssh, selinux, kdump, drgn` |
+| rhel · build | `selinux, build` |
+| debian · debug | `ssh, apparmor, kdump, drgn` |
+| debian · build | `apparmor, build` |
 
 Tags are **EL-major-invariant**: EL 8/9 vs Fedora/EL 10 differ in `packages()` (drgn from
-EPEL, makedumpfile bundled in `kexec-tools`) but reach the same trait set. `capabilities()`
-therefore does not branch on `version` for the rhel family the way `packages()` does; the
-`distro`/`version` parameters exist for parity and future use.
+EPEL, makedumpfile bundled in `kexec-tools`, openssh-server present in each debug set) but
+reach the same trait set. `capabilities()` therefore does not branch on `version` for the
+rhel family the way `packages()` does; the `distro`/`version` parameters exist for parity
+with `packages()` and future use.
 
 Implementation note — derive the MAC tag from the existing `guest_mac` attribute so the tag
 and the recorded provenance cannot disagree:
@@ -112,22 +133,29 @@ stays `tuple[Capability, ...]` (already enum-typed, #957).
 
 ### Anti-drift guard
 
-A test (`tests/images/families/test_capability_evidence.py`) asserts, for every
-family × kind × representative distro, that each declared tag is backed by concrete build
-evidence:
+A test (`tests/images/families/test_capability_evidence.py`) iterates the **live family
+registry** (`kdive.images.families._FAMILIES`, not a hand-listed set) × both kinds, and
+asserts each declared tag is backed by concrete build evidence:
 
 | tag | evidence |
 | --- | --- |
-| `agent` | the readiness unit is uploaded in `customize_argv` |
-| `ssh` | an ssh-enable and/or `--ssh-inject` step appears in `customize_argv` |
+| `ssh` | `openssh-server` is in `packages()` (an explicit install, not a bare enable step) |
 | `selinux` / `apparmor` | equals `_mac_tag(family.guest_mac)` |
 | `kdump` | a kdump package (`kexec-tools`/`kdump-tools`) in `packages()` |
 | `drgn` | a drgn package (`drgn`/`python3-drgn`) in `packages()` |
 | `build` | `kind == "build"` |
+| `agent` | not declared by any local family (reserved for the remote guest contract) |
 
-The guard drives `customize_argv` with a synthetic `CustomizeContext` and inspects the argv
-tokens; it needs no libguestfs and no boot. If a future change bakes a trait without
-declaring it (or declares one it stopped baking), the guard fails.
+The guard reads `packages()` and drives `customize_argv` with a synthetic `CustomizeContext`,
+inspecting the resulting tokens; it needs no libguestfs and no boot. Iterating `_FAMILIES`
+means a newly-registered family is covered automatically — including that its `guest_mac`
+maps to a MAC tag (so an unmapped posture fails the guard here, not at a later `build-fs`).
+
+What the guard proves and does not prove: it enforces **declaration ↔ recipe** consistency
+(the family declares exactly what its `packages()`/`customize_argv` install). It does not
+prove **recipe ↔ efficacy** (that a `systemctl enable` was not a no-op, that sshd actually
+answers). That is the S2 boot-probe's job; S1 deliberately stops at "the build installs
+this".
 
 ### Staged-path metadata convergence
 
@@ -139,10 +167,12 @@ family-accurate per-distro sets:
 - `fixtures/local-libvirt/*` staged-path entries
 - `admin/default_fixtures.py`
 
-Fedora/Rocky/CentOS-Stream debug entries → `["agent", "ssh", "selinux", "kdump", "drgn"]`;
-Debian debug entries → `["agent", "ssh", "apparmor", "kdump", "drgn"]`. This makes a declared
-local image match what `build-fs` would stamp, and is validated by the existing
-fixture-load/validate tests.
+Fedora/Rocky/CentOS-Stream debug entries → `["ssh", "selinux", "kdump", "drgn"]`;
+Debian debug entries → `["ssh", "apparmor", "kdump", "drgn"]` (no `agent` — see the Problem
+section). All repo-tracked staged-path entries are debug-kind rootfs images; there are no
+build-kind staged entries to converge. This makes a declared local image match what
+`build-fs` would stamp; the existing fixture-load tests confirm the tokens are valid
+vocabulary, and any test asserting the prior literal set is updated in the same change.
 
 ## Data flow
 
@@ -161,22 +191,30 @@ resolve_rootfs_entry(name) ── entry(kind,distro,version,family) ──▶ fa
 ## Error handling
 
 - `family.capabilities()` is total: it returns a tuple for any `(kind, distro, version)` the
-  family accepts, exactly as `packages()` does. An unknown `guest_mac` posture is a
-  programming error (a new family added without a MAC mapping) and raises `ValueError` at
-  construction — caught by the guard test, never reached at runtime for the two shipped
-  families.
-- No new failure path in `build-fs`: capability resolution is pure and precedes the build.
+  family accepts, exactly as `packages()` does.
+- An unknown `guest_mac` posture (a new family added without a MAC mapping) surfaces from
+  `_mac_tag` at **`capabilities()` call time** — i.e. during `catalog_rootfs_build`/`build-fs`,
+  not at family construction. Because the anti-drift guard iterates the live `_FAMILIES`
+  registry, any registered family with an unmapped posture fails the guard in CI before it can
+  reach a real build. To make the runtime surface actionable rather than a bare traceback,
+  `catalog_rootfs_build` wraps an unmapped-posture `ValueError` as a `CONFIGURATION_ERROR`
+  naming the family and posture.
+- No new failure path for the two shipped families: their postures map, so capability
+  resolution is pure and precedes the build.
 
 ## Testing
 
 - **Unit** (`tests/images/test_rootfs_specs.py` / family tests): `RhelFamily.capabilities`
   for `debug`/`build` across `fedora 44`, `rocky 8` (EL8), `rocky 10` (EL10) all return the
-  same rhel tuples; `DebianFamily.capabilities` for `12`/`13`; assert exact membership.
-- **Guard** (`tests/images/families/test_capability_evidence.py`): declared ⊆ evidenced, per
-  family × kind (the anti-drift mechanism above).
+  same rhel tuples; `DebianFamily.capabilities` for `12`/`13`; assert exact membership,
+  including that no set contains `agent`.
+- **Guard** (`tests/images/families/test_capability_evidence.py`): iterates `_FAMILIES` ×
+  `{debug, build}`; asserts declared ⊆ evidenced per the evidence table (the anti-drift
+  mechanism above), and that every family's `guest_mac` maps to a declared MAC tag.
 - **Integration** (`tests/images/test_catalog_resolver.py` or `test_rootfs_specs.py`):
-  `catalog_rootfs_build("local-libvirt", "fedora-kdive-ready-44")` carries `selinux`;
-  `...("...","debian-kdive-ready-13")` carries `apparmor`; neither carries the other.
+  `catalog_rootfs_build("local-libvirt", "fedora-kdive-ready-44")` carries `selinux` and not
+  `apparmor`/`agent`; `...("...","debian-kdive-ready-13")` carries `apparmor` and not
+  `selinux`/`agent`.
 - **Fixture regression**: existing fixture-validate tests pass with the converged per-distro
   capability sets; any test asserting the old `(agent, kdump, drgn)` tuple or referencing
   `_KIND_CAPABILITIES` is updated.

@@ -19,11 +19,15 @@ _KIND_CAPABILITIES = {
 
 so every debug image — Fedora, Rocky, CentOS Stream, Debian — is stamped with the identical
 `(agent, kdump, drgn)` tuple regardless of what its `FamilyCustomizer` actually bakes. That
-table is wrong in two directions at once:
+table is wrong in three directions at once:
 
-- it **omits** traits every family does bake (`customize_argv` enables sshd, injects the
-  managed key, uploads the readiness unit, and sets a mandatory-access-control posture for
-  **both** kinds); and
+- it **asserts a false tag**: `agent` is the QEMU guest agent
+  (`GUEST_CONTRACT_PATHS["agent"] = "/usr/sbin/qemu-ga"`, `images/validation.py`), the remote
+  provider's access seam — but the local families install **no** qemu-guest-agent;
+  local-libvirt drives guests over SSH plus the `kdive-ready` serial unit. `agent` is false
+  for every local staged image;
+- it **omits** traits every debug image does bake: `openssh-server` is explicitly installed,
+  and a mandatory-access-control posture is set; and
 - it **flattens** a genuine per-distro difference: the rhel family sets SELinux
   (`guest_mac = "selinux-permissive"`), the debian family uses AppArmor
   (`guest_mac = "apparmor"`). Two images with materially different MAC postures describe
@@ -54,29 +58,41 @@ structural guard.
   the new members only widen the enum; `helpers`/`drgn` guest-contract semantics are
   untouched.
 
+- **Drop the false `agent` tag from local images.** The local families do not install
+  qemu-guest-agent, so they do not declare `agent`. The `agent` member stays in the enum,
+  reserved for the remote provider's guest contract (`GUEST_CONTRACT_PATHS`). The honest
+  "you can drive this guest" tag for a local image is `ssh`.
+
 - **Family-declared capabilities.** Add a `capabilities(kind, distro, version) ->
   tuple[Capability, ...]` method to the `FamilyCustomizer` protocol, mirroring `packages()`.
-  Each family returns exactly the tags it bakes:
+  Each family returns exactly the tags its `packages()`/`customize_argv` install. `ssh` is
+  declared only where `openssh-server` is explicitly in `packages()` (the debug sets), so the
+  tag never rests on the base image happening to ship sshd; the MAC posture is on both kinds;
+  `kdump`/`drgn` are debug-only; `build` marks the build kind:
 
   | family · kind | capabilities |
   | --- | --- |
-  | rhel · debug | `agent, ssh, selinux, kdump, drgn` |
-  | rhel · build | `agent, ssh, selinux, build` |
-  | debian · debug | `agent, ssh, apparmor, kdump, drgn` |
-  | debian · build | `agent, ssh, apparmor, build` |
+  | rhel · debug | `ssh, selinux, kdump, drgn` |
+  | rhel · build | `selinux, build` |
+  | debian · debug | `ssh, apparmor, kdump, drgn` |
+  | debian · build | `apparmor, build` |
 
   `catalog_rootfs_build` calls `family.capabilities(...)` instead of indexing
   `_KIND_CAPABILITIES`; the table is **deleted** (no shim). Tags are EL-major-invariant:
   EL 8/9 and Fedora differ in *packages* (drgn via EPEL, makedumpfile bundled in
-  `kexec-tools`), not in the resulting trait set.
+  `kexec-tools`, openssh-server in each debug set), not in the resulting trait set.
 
-- **Anti-drift guard.** A test asserts every declared tag is backed by concrete build
-  evidence for each family × kind: `ssh` ⇒ an ssh-enable/`--ssh-inject` step in
-  `customize_argv`; `selinux`/`apparmor` ⇒ agreement with `family.guest_mac`; `kdump` ⇒ a
-  kdump package in `packages()`; `drgn` ⇒ a drgn package; `agent` ⇒ the readiness unit is
-  uploaded; `build` ⇒ the build kind. If baking and declaration diverge later, the guard
-  fails. This is the structural mechanism that keeps the tags from decaying back into the
-  fiction ADR-0286 set out to eliminate.
+- **Anti-drift guard.** A test iterates the live family registry (`_FAMILIES`) × both kinds
+  and asserts every declared tag is backed by concrete build evidence: `ssh` ⇒ `openssh-server`
+  in `packages()`; `selinux`/`apparmor` ⇒ agreement with `family.guest_mac`; `kdump` ⇒ a
+  kdump package in `packages()`; `drgn` ⇒ a drgn package; `build` ⇒ the build kind. Iterating
+  the registry (not a hand-listed family set) means a newly-registered family is covered
+  automatically, including that its `guest_mac` maps to a MAC tag. The guard enforces
+  **declaration ↔ recipe** consistency — that a family declares exactly what its own
+  `packages()`/`customize_argv` install. It does **not** prove **recipe ↔ efficacy** (that a
+  `systemctl enable` was not a no-op, that sshd answers); that runtime truth is the S2
+  boot-probe's job. S1 tags mean "the build installs this", and the guard keeps that claim
+  from drifting from the recipe.
 
 - **Converge the staged-path metadata.** Update the hand-authored staged-path
   `capabilities` in the repo (`fixtures/local-libvirt/`, `systems.toml.example`,
@@ -86,8 +102,13 @@ structural guard.
 
 ## Consequences
 
-- `images.describe` now differentiates rhel (`selinux`) from debian (`apparmor`) and shows
-  `ssh` as a baked trait; the metadata stops lying by omission and by flattening.
+- `images.describe` now differentiates rhel (`selinux`) from debian (`apparmor`), shows `ssh`
+  as a baked trait, and no longer advertises a phantom `agent` on local images; the metadata
+  stops lying by assertion, by omission, and by flattening.
+- Dropping `agent` from local images is a visible change to every local staged image's
+  `capabilities`. No local code path gates on `agent` (it is a remote guest-contract element;
+  local resolution/boot does not consult it), so nothing regresses; readers that displayed the
+  tag will simply stop seeing a value that was never true.
 - Per-distro tag knowledge has one home (the family), reachable by both the build argv and
   the declared tag set, with a guard tying them together.
 - `_KIND_CAPABILITIES` is removed; callers and tests that referenced it or the old 3-tuple
@@ -114,6 +135,13 @@ structural guard.
   honestly confirmable by the S3 boot-probe. Adding a static `sysrq` tag in S1 would assert
   a trait the rootfs alone does not guarantee. Deferred to S3, where it is verified
   end-to-end.
+
+- **Keep declaring `agent` on local images (install qemu-guest-agent, or redefine `agent`).**
+  Installing qemu-ga would make the tag true but adds a package local provisioning never uses
+  (local drives guests over SSH) and changes build behavior S1 is meant to keep constant.
+  Redefining `agent` to mean "kdive-ready readiness" would reinterpret an existing
+  remote-provider contract (`GUEST_CONTRACT_PATHS`, the upload path), a far larger blast
+  radius than the phantom tag warrants. Rejected both; drop the tag locally instead.
 
 - **Promote MAC posture as a single `mac` tag carrying the mode.** A flat `text[]` tag
   cannot carry `permissive`/`enforcing` structure cleanly; `selinux` vs `apparmor` as
