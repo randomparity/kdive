@@ -81,18 +81,17 @@ scoped to the genuinely first-boot, interface-dependent concerns (network, host 
    the default `ssh` module; network comes from the drop-in above. (This file exists so NoCloud
    has a complete seed; it carries no key or network config.)
 
-4. **Enable the full cloud-init pipeline — all four units, not just one.** cloud-init is a
-   four-unit pipeline plus a generator: `cloud-init-local.service` applies the datasource
-   network config at the **pre-network** stage, then `cloud-init.service`,
-   `cloud-config.service`, `cloud-final.service`. Enabling/unmasking only `cloud-init.service`
-   leaves `cloud-init-local` off and the NIC unconfigured — the exact bug this fixes. So:
-   - **cloud images (masked today):** unmask **all four** (`cloud-init-local`, `cloud-init`,
-     `cloud-config`, `cloud-final`) — the rhel `_CLOUD_INIT_MASK` masks all four — and confirm
-     they are enabled.
+4. **Undo the cloud-init disable — do not enumerate units by name.** cloud-init is a four-unit
+   pipeline (`cloud-init-local` applies the datasource network config at the **pre-network**
+   stage, then `cloud-init`, `cloud-config`, `cloud-final`), but the vendor cloud bases ship
+   those units **enabled**; the build only has to stop disabling them. So:
+   - **cloud images (masked/disabled today):** `rm -f /etc/cloud/cloud-init.disabled` and strip
+     any `network: {config: disabled}` drop-in — nothing re-enables units by name.
    - **virt-builder base** (`fedora-kdive-ready-43`, `is_cloud_image = False`, ships no
-     cloud-init): `--install cloud-init`, then **explicitly `systemctl enable` all four** — a
-     `--install` in the offline virt-customize chroot may not apply the package's systemd
-     preset, so do not rely on the preset.
+     cloud-init): `--install cloud-init`, whose package systemd preset enables the pipeline.
+   Enumerating unit names is deliberately avoided: cloud-init 24.x renamed `cloud-init.service`
+   to `cloud-init-network.service`, so `systemctl enable cloud-init.service` aborts the build on
+   Debian 13 (live-found). Enablement is the vendor base's / package preset's responsibility.
 
 ### What is removed
 
@@ -107,62 +106,68 @@ scoped to the genuinely first-boot, interface-dependent concerns (network, host 
 
 ### What stays unchanged (not cloud-init's job)
 
-- `kdive-ready` serial readiness unit (ordering **unchanged** — see below), kdump
-  sysctl/`final_action`/`USE_KDUMP`, the `kdive-drgn` helper, the rhel SELinux permissive
+- kdump sysctl/`final_action`/`USE_KDUMP`, the `kdive-drgn` helper, the rhel SELinux permissive
   relabel, and the `machine-id` seed (closes the first-boot `preset-all`→kdump-disable landmine
   independent of cloud-init; now seeded on **every** built image, cloud and virt-builder, since
-  re-enabling cloud-init makes an uninitialized machine-id more consequential).
+  re-enabling cloud-init makes an uninitialized machine-id more consequential). The `kdive-ready`
+  serial readiness unit keeps its kdump ordering but **gains** a network edge — see below.
 
-### Readiness ordering is intentionally NOT changed
+### Readiness ordering: `kdive-ready` ordered after `network-online.target`
 
-An earlier draft ordered `kdive-ready` `After=network-online.target`. Dropped: it adds a
-`systemd-*-wait-online` timeout (~120 s) onto the critical provisioning path — wait-online
-blocks on *all* managed links by default, so any un-leased NIC would stall or delay reaching
-`ready`. It is also unnecessary here: `cloud-init-local` brings the NIC up at the pre-network
-stage, long before `kdive-ready` fires at `multi-user.target`, so there is no real race for
-`authorize_ssh_key` to lose. Verifying that SSH actually answers at `ready` is the S2
-`ssh_reachable` boot-probe's job (a future slice), which can gate on reachability without
-importing a wait-online stall into every provision.
+An earlier draft left `kdive-ready` unordered w.r.t. the network, reasoning that
+`cloud-init-local` brings the NIC up pre-network so there is no race. The **live proof reversed
+this** (2026-07-01): on Debian 13 the serial `ready` marker and `cloud-init.target` landed in the
+same second, so `authorize_ssh_key` at `ready` raced the DHCP lease and failed
+`transport_failure` (exit 255). `readiness_unit()` therefore now emits `After=`/`Wants=
+network-online.target` (alongside the existing kdump edge), so `ready` implies the lease. The
+`wait-online` stall the draft feared does not arise here: local-libvirt renders exactly one NIC
+under SLIRP, which always leases, so `wait-online` returns immediately. Ongoing efficacy
+verification still belongs to the future S2 `ssh_reachable` boot-probe.
 
 ## Components touched
 
 - `images/families/_fedora_customize.py` — add seed + `99-kdive.cfg` staging helpers (family-
   neutral, mirroring the existing tempfile + `--upload` + cleanup idiom); remove
-  `SSH_NIC_KEYFILE_*` + `_ssh_nic_keyfile_args`. `readiness_unit()` is **not** changed.
-- `images/families/rhel.py` — drop the NM keyfile call and `_CLOUD_INIT_MASK`; unmask/enable the
-  four cloud-init units; add the seed + drop-in; keep SELinux/kdump/drgn/`--ssh-inject`.
-- `images/families/debian.py` — drop `cloud-init.disabled` + `kdive-sshd-keygen`; enable the
-  four cloud-init units; add the seed + drop-in; keep kdump/drgn/`--ssh-inject`.
-- `providers/local_libvirt/rootfs_build.py` — `--install cloud-init` + enable the four units on
-  the non-cloud base; seed machine-id on all images; add the **built-image self-check** below.
+  `SSH_NIC_KEYFILE_*` + `_ssh_nic_keyfile_args`. `readiness_unit()` **gains** `After=`/`Wants=
+  network-online.target`.
+- `images/families/rhel.py` — drop the NM keyfile call and `_CLOUD_INIT_MASK`; undo the cloud-init
+  disable (do **not** enumerate/enable units by name — see below); add the seed + drop-in; keep
+  SELinux/kdump/drgn/`--ssh-inject`.
+- `images/families/debian.py` — drop `cloud-init.disabled` + `kdive-sshd-keygen`; undo the
+  cloud-init disable; add the seed + drop-in; keep kdump/drgn/`--ssh-inject`.
+- `providers/local_libvirt/rootfs_build.py` — `--install cloud-init` on the non-cloud base (its
+  package preset enables the units); seed machine-id on all images; add the **built-image
+  self-check** below.
 
 ### Build-time self-check (closes the CI blind spot)
 
 CI cannot run the live boot (KVM + a ~minutes 6 GB rebuild are behind live-VM markers), and the
 unit tests only assert the **argv shape** — so a silent no-op (a base that re-disables network,
-or a missed unit-enable) would emit correct-looking argv and still ship broken. To catch that
-without booting, `build()` runs a fast **offline guestfish assertion** on the freshly built
-qcow2 before publishing: (a) no remaining `/etc/cloud/cloud.cfg.d/*` drop-in sets
-`network: {config: disabled}`; (b) the four cloud-init units are enabled — asserted by
-`is-enabled` status / the presence of their enable symlinks in the correct wants-dir
-(cloud-init's units are `WantedBy=cloud-init.target`, so the symlinks live in
-`cloud-init.target.wants/`, and `cloud-init.target` itself is enabled into
-`multi-user.target.wants/`; the exact paths are confirmed against a real image in the plan);
-(c) `/etc/cloud/cloud.cfg.d/99-kdive.cfg` and the NoCloud seed files exist. A failed assertion fails the build (`PROVISIONING_FAILURE`),
-so a regression is caught at build time on any host, not only on the live-VM machine.
+or a dropped seed) would emit correct-looking argv and still ship broken. To catch that without
+booting, `build()` runs a fast **offline guestfish assertion** on the freshly built qcow2 before
+publishing, via in-guest `sh` checks (guestfish aborts the script non-zero on any failed check):
+(a) `/etc/cloud/cloud.cfg.d/99-kdive.cfg` and the NoCloud seed `meta-data` exist; (b) cloud-init
+is installed (`/usr/bin/cloud-init` executable) and not re-disabled
+(`/etc/cloud/cloud-init.disabled` absent); (c) no `/etc/cloud/cloud.cfg.d/*` drop-in sets
+`config: disabled`. It does **not** assert unit-enable state: cloud-init unit names vary across
+versions (24.x renamed `cloud-init.service` to `cloud-init-network.service`), so enumerating them
+is fragile — enablement is left to the vendor base and the `--install` package preset. A failed
+assertion fails the build (`PROVISIONING_FAILURE`), so a regression is caught at build time on any
+host, not only on the live-VM machine.
 
 ## Testing
 
 - **Unit** (no libguestfs): assert each family's `customize_argv` writes the seed + drop-in with
-  `datasource_list: [NoCloud]`, `disable_root: false`, and the `network:` DHCP block; enables all
-  **four** cloud-init units (not just `cloud-init.service`); and no longer emits the NM keyfile /
-  `cloud-init.disabled` / `kdive-sshd-keygen` / `_CLOUD_INIT_MASK`. `readiness_unit()` output is
-  unchanged (regression pin).
+  `datasource_list: [NoCloud]`, `disable_root: false`, and the `network:` DHCP block; undoes the
+  cloud-init disable (`rm -f /etc/cloud/cloud-init.disabled`) **without** enumerating unit-enable
+  commands (no `systemctl enable cloud-init`); and no longer emits the NM keyfile /
+  `cloud-init.disabled` touch / `kdive-sshd-keygen` / `_CLOUD_INIT_MASK`. `readiness_unit()` is
+  ordered `After=network-online.target` (regression pin).
 - **Anti-regression**: the capability tags (ADR-0287) and kdump/SELinux fragments are unchanged;
   the `--ssh-inject` managed key is still emitted.
-- **Build self-check** (unit-testable via the injected guestfs seam): the offline assertion
-  passes on a correctly-built tree and fails when a `network: {config: disabled}` drop-in or a
-  missing cloud-init unit-enable is injected.
+- **Build self-check** (unit-testable via the injected guestfs seam): the offline assertion is a
+  fixed set of in-guest `sh` checks; the seam is exercised by asserting the guestfish argv shape
+  (the live assertion itself runs behind the live-VM marker).
 - **Live e2e — operator-run, not a CI gate.** CI green proves argv + offline structure, **not**
   that cloud-init actually DHCPs the NIC. The acceptance proof is operator-run behind the
   live-VM markers: rebuild debian-13 (and one rhel image), provision a System,
@@ -185,6 +190,11 @@ so a regression is caught at build time on any host, not only on the live-VM mac
 - **Move the managed key into cloud-init user-data** — cleaner "single authority" but less
   robust: a cloud-init failure would leave the worker unable to log in. Keeping `--ssh-inject`
   makes the managed key present independent of cloud-init.
-- **Order `kdive-ready` after `network-online.target`** — imports a wait-online timeout onto the
-  provisioning path for no real race (cloud-init-local configures the NIC pre-network);
-  reachability verification belongs to the S2 `ssh_reachable` probe.
+- **Leave `kdive-ready` unordered w.r.t. the network** — the original draft, reversed by the live
+  proof: on Debian 13 `authorize_ssh_key` at `ready` raced the DHCP lease and failed. Ordering
+  after `network-online.target` is cheap on local-libvirt's single-NIC SLIRP topology, so it is
+  now the decision (above); the S2 `ssh_reachable` probe still owns ongoing efficacy checks.
+- **Enumerate and enable the four cloud-init units by name** — cloud-init 24.x renamed
+  `cloud-init.service` to `cloud-init-network.service`, so `systemctl enable cloud-init.service`
+  aborts the build on Debian 13 (live-found). The vendor base ships the units enabled and
+  `--install` applies the package preset, so naming them adds only version fragility.

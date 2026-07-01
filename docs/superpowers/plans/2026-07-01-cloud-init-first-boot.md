@@ -8,6 +8,20 @@
 
 **Tech Stack:** Python 3.14, `uv`/`.venv`, `pytest -q`, `ruff`, `ty`, libguestfs (`virt-customize`/`guestfish`), cloud-init NoCloud datasource.
 
+> **Live-proof revisions (2026-07-01) — this plan's task steps predate them.** The live rebuild
+> reversed two decisions; the shipped code and ADR/spec reflect the revised form, so trust those
+> over the pre-reversal snippets in Tasks below:
+> 1. **No unit enumeration.** The build does **not** `systemctl enable cloud-init-local.service`
+>    (etc.). cloud-init 24.x renamed `cloud-init.service` to `cloud-init-network.service`, aborting
+>    the build on Debian 13; enablement is left to the vendor base and the `--install` package
+>    preset. Steps/tests asserting `systemctl enable cloud-init*` are superseded — the shipped tests
+>    assert `systemctl enable cloud-init` is *absent* and that the disable is undone (`rm -f
+>    /etc/cloud/cloud-init.disabled`).
+> 2. **Readiness ordering added.** `readiness_unit()` now emits `After=`/`Wants=
+>    network-online.target` so `ready` implies the DHCP lease (an `authorize_ssh_key` at `ready`
+>    otherwise raced the lease and failed). Steps calling `readiness_unit()` "unchanged" are
+>    superseded.
+
 ## Global Constraints
 
 - Absolute imports only; ≤100 lines/function; ≤100-char lines; Google-style docstrings on public APIs.
