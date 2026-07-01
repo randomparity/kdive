@@ -3,10 +3,8 @@
 Encodes the virt-customize argv PROVEN live on Fedora 44 in the #817 de-risk spike: install the
 dnf package set, enable ``sshd``/``kdump``, write the NMI-panic sysctl, pin kdump
 ``final_action poweroff``, stage the debug-image drgn/SSH-NIC helpers, inject the managed SSH key,
-upload+enable the kdive-ready serial-readiness unit, and set SELinux permissive. For a cloud-image
-base it additionally masks cloud-init and seeds ``/etc/machine-id`` (without the seed, Fedora
-Cloud's ``machine-id=uninitialized`` triggers a first-boot ``preset-all`` that disables
-kdump.service — proven failure ``kexec_crash_loaded=0``).
+upload+enable the kdive-ready serial-readiness unit, and set SELinux permissive. It also enables
+cloud-init via a baked NoCloud seed (ADR-0288), the uniform rootfs first-boot mechanism.
 """
 
 from __future__ import annotations
@@ -23,17 +21,13 @@ from kdive.images.families._fedora_customize import (
     KDUMP_SYSCTL_CONTENT,
     KDUMP_SYSCTL_PATH,
     READINESS_MARKER,
-    SEED_MACHINE_ID,
+    cloud_init_first_boot_args,
     debug_image_args,
     makedumpfile_version_marker_args,
 )
 from kdive.images.families.base import CustomizeContext, _mac_tag
 from kdive.images.planes._build_common import run_guestfs_tool
 
-_CLOUD_INIT_MASK = (
-    "systemctl mask cloud-init.service cloud-init-local.service "
-    "cloud-config.service cloud-final.service"
-)
 # Cloud-image SELinux ships enforcing; the bare-ext4 repack drops xattrs, so a relabel-on-boot is
 # required. Set permissive so the first boot relabels (``/.autorelabel``) without denying the
 # host-written authorized_keys, matching the spike-proven F44 image.
@@ -115,13 +109,7 @@ class RhelFamily:
                 "--run-command",
                 KDUMP_FINAL_ACTION_CMD,
             ]
-        if ctx.is_cloud_image:
-            argv += [
-                "--run-command",
-                _CLOUD_INIT_MASK,
-                "--write",
-                f"/etc/machine-id:{SEED_MACHINE_ID}",  # pragma: allowlist secret
-            ]
+        argv += cloud_init_first_boot_args(ctx)
         argv += debug_image_args(ctx.packages, ctx.cleanup)
         if ctx.kind == "debug":
             argv += makedumpfile_version_marker_args()

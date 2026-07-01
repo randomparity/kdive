@@ -2,9 +2,9 @@
 
 These pin the virt-customize argv the rhel customizer builds without running libguestfs: the
 PROVEN Fedora-44 customization (kdump + sshd enable, NMI-panic sysctl, ssh-inject, kdive-ready
-unit, SELinux permissive) plus the cloud-image-only cloud-init mask and ``/etc/machine-id`` seed,
-and the EL-major-aware package divergence (#823): EL 8/9 take makedumpfile/kdumpctl from
-``kexec-tools`` and EL 8 enables EPEL for ``drgn``.
+unit, SELinux permissive) plus the cloud-init first-boot baking (ADR-0288), and the
+EL-major-aware package divergence (#823): EL 8/9 take makedumpfile/kdumpctl from ``kexec-tools``
+and EL 8 enables EPEL for ``drgn``.
 """
 
 from __future__ import annotations
@@ -124,26 +124,25 @@ def test_rhel_debug_argv_injects_key_and_readiness_unit(tmp_path: Path) -> None:
     assert any("SELINUX" in a and "permissive" in a for a in argv)
 
 
-def test_rhel_cloud_image_disables_cloud_init_and_seeds_machine_id(tmp_path: Path) -> None:
-    argv = RhelFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
-    assert any("cloud-init" in a for a in argv)
-    # machine-id seed (else first-boot preset-all disables kdump on Fedora Cloud)
-    assert any("/etc/machine-id" in a for a in argv)
-
-
-def test_rhel_virt_builder_source_skips_machine_id_seed(tmp_path: Path) -> None:
-    argv = RhelFamily().customize_argv(_ctx(tmp_path, is_cloud_image=False))
-    assert not any("/etc/machine-id" in a for a in argv)
-
-
-def test_rhel_virt_builder_source_skips_cloud_init(tmp_path: Path) -> None:
-    argv = RhelFamily().customize_argv(_ctx(tmp_path, is_cloud_image=False))
-    assert not any("cloud-init" in a for a in argv)
-
-
 def test_rhel_argv_stages_no_nm_ssh_nic_keyfile(tmp_path: Path) -> None:
     # ADR-0288: cloud-init DHCPs the NIC now; the NetworkManager SSH-NIC keyfile is gone.
     argv = RhelFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
     j = " ".join(argv)
     assert "kdive-ssh-nic" not in j
     assert "NetworkManager/system-connections" not in j
+
+
+def test_rhel_argv_bakes_cloud_init_and_stops_masking(tmp_path: Path) -> None:
+    argv = RhelFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
+    j = " ".join(argv)
+    assert "/etc/cloud/cloud.cfg.d/99-kdive.cfg" in j  # authoritative drop-in
+    assert "systemctl enable cloud-init-local.service" in j  # full pipeline enabled
+    assert "systemctl mask cloud-init" not in j  # no longer masked
+
+
+def test_rhel_argv_still_injects_key_and_selinux(tmp_path: Path) -> None:
+    # Anti-regression: the --ssh-inject managed key and SELinux permissive edit stay.
+    argv = RhelFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
+    j = " ".join(argv)
+    assert f"root:file:{tmp_path / 'key.pub'}" in j
+    assert "SELINUX=permissive" in j
