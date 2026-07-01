@@ -1,6 +1,6 @@
 # ADR 0285 — SysRq diagnostic capture for local-libvirt Systems
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-30
 - **Deciders:** kdive maintainers
 
