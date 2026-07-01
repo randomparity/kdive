@@ -41,14 +41,19 @@ Model image capabilities as two distinct, honest things and stop the vocabulary 
 
 - **One closed, validated vocabulary.** A new `Capability` StrEnum — `agent`, `kdump`,
   `drgn`, `build` — is the single source of truth, exactly the set the build bakes.
-  `ImageCatalogEntry.capabilities` becomes `list[Capability]`, so an unknown token is a
-  Pydantic `ValidationError` at the domain boundary through which every catalog read and
-  write funnels (`model_validate` in the reconcile, serialize, and read-tool paths). No DB
-  migration and no DB `CHECK`: domain-boundary validation is sufficient because no write
-  reaches `image_catalog` except through the model, and it keeps the vocabulary free to
-  evolve without a schema change. The three drifted sources converge on the enum: the seed
-  fixture's `kdive-ready-console` becomes `agent`, and `ssh`/`console`/`cloud-init` are
-  scrubbed from the inventory examples (the build never emitted them).
+  `capabilities` is carried by five models — the read-tool `ImageCatalogEntry`, the
+  write-path `ImageEntry` (inventory TOML → reconcile insert/update), the fixture-manifest
+  `RootfsCatalogEntry`/`RootfsRequirements`, the serialize-out `ImageRow`, and the internal
+  `RootfsBuildSpec` — and typing only the read model would leave the primary ingestion path
+  unvalidated. All five become `Capability`-typed (`list[Capability]`, or
+  `tuple[Capability, ...]` for the `RootfsBuildSpec` dataclass), so an unknown token is a
+  Pydantic `ValidationError` when inventory TOML or a fixture manifest is loaded, when a DB
+  row is read by a read tool, and when a row is serialized out. No DB migration and no DB
+  `CHECK`: every write reaches `image_catalog` through a write-boundary model, and the closed
+  set evolves at the domain layer without a schema change. The three drifted sources converge
+  on the enum: the seed fixture's `kdive-ready-console` becomes `agent`, and
+  `ssh`/`console`/`cloud-init` are scrubbed from the inventory examples (the build never
+  emitted them).
 
 - **A thin computed-signal framework generalizing ADR-0253.** A frozen `CapabilitySignal`
   (`name`, `operand_keys`, a pure `render(entry, target_kernel)`), and a

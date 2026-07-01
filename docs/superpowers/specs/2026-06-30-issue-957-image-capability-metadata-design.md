@@ -61,13 +61,32 @@ drgn   — the drgn binary is baked in
 build  — the kernel build toolchain is baked in
 ```
 
-Exactly the set `rootfs_specs._KIND_CAPABILITIES` bakes. `ImageCatalogEntry.capabilities`
-becomes `list[Capability]`. Validation is at the domain boundary (Pydantic
-`model_validate`), through which every catalog read and write funnels — reconcile
-(`inventory/reconcile/images.py`), serialize (`inventory/serialize.py`), and the read tools
-(`mcp/tools/catalog/images.py`). An unknown token is a `ValidationError`. No DB `CHECK`, no
-migration: no write reaches `image_catalog` except through the model, and the closed set
-evolves at the domain layer without a schema change.
+Exactly the set `rootfs_specs._KIND_CAPABILITIES` bakes.
+
+`capabilities` is carried by **five** models, not one, and the read-tool model
+(`ImageCatalogEntry`) is *not* on the write path — so typing only it would leave the primary
+ingestion path (inventory TOML → reconcile → `image_catalog`) unvalidated. All five are
+typed `list[Capability]` so the vocabulary is enforced wherever a token is authored, read,
+or serialized:
+
+| Model | File | Role | Boundary |
+|---|---|---|---|
+| `ImageEntry` | `inventory/model.py` | authored inventory TOML → reconcile **insert/update** | **write** |
+| `RootfsCatalogEntry`, `RootfsRequirements` | `components/catalog.py` | authored fixture-manifest rows | **write** |
+| `ImageCatalogEntry` | `domain/catalog/images.py` | DB row → `images.list`/`describe` | read |
+| `ImageRow` | `inventory/serialize.py` | DB row → serialized inventory TOML | read/out |
+| `RootfsBuildSpec` | `images/planes/base.py` | internal build spec (from `_KIND_CAPABILITIES`) | internal |
+
+Validation is Pydantic enum coercion at each model: an unknown token is a `ValidationError`
+when inventory TOML is loaded (`ImageEntry`), when a fixture manifest is parsed, and when a
+DB row is read by a read tool or serialized out (`ImageRow` — turning any legacy/junk DB
+token into a hard error on the way out, not a silent passthrough). `serialize.py`'s raw
+`[str(cap) for cap in capabilities]` construction is replaced by letting the typed model
+coerce. `RootfsBuildSpec` is a `dataclass`, not a Pydantic model; its `capabilities`
+becomes `tuple[Capability, ...]` sourced directly from the enum-typed
+`_KIND_CAPABILITIES`, so it cannot carry an off-vocabulary token by construction. No DB
+`CHECK`, no migration: every write reaches `image_catalog` through one of the write-boundary
+models, and the closed set evolves at the domain layer without a schema change.
 
 Converge the drifted sources onto the enum:
 - `admin/default_fixtures.py`: `kdive-ready-console` → `agent`.
@@ -155,7 +174,10 @@ follow-up issue implements the gate.
 
 ## Acceptance criteria
 
-- `ImageCatalogEntry.capabilities` is `list[Capability]`; an unknown token fails validation.
+- All five `capabilities` carriers (`ImageEntry`, `RootfsCatalogEntry`/`RootfsRequirements`,
+  `ImageCatalogEntry`, `ImageRow`, `RootfsBuildSpec`) are `Capability`-typed; an unknown
+  token fails validation on inventory-TOML load, fixture-manifest parse, read-tool read, and
+  serialize-out — verified by a test that feeds each write-boundary model a junk token.
 - The three vocabularies are converged; no example emits `ssh`/`console`/`cloud-init`.
 - `images.describe` returns `data.capability_signals` (with a `kdump` member equal to the old
   `data.kdump`); the wrapper docstring and generated tool reference are updated.
