@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.families.base import CustomizeContext
 from kdive.images.planes._build_common import MAKEDUMPFILE_MARKER_GUEST_PATH
 
 # Today's debug/guest rootfs: the in-target crash + introspection toolchain. ``keyutils`` provides
@@ -41,6 +42,84 @@ READINESS_MARKER = "kdive-ready"
 # Fedora Cloud and Debian genericcloud, whose machine-id ships uninitialized/empty). Not a secret:
 # a fixed build-time identity, intentionally constant and shared across families (#824).
 SEED_MACHINE_ID = "0a1b2c3d4e5f60718293a4b5c6d7e8f9"  # pragma: allowlist secret
+
+# The authoritative kdive first-boot config. cloud-init's *system config* network setting
+# outranks the datasource, so carrying the DHCP config here (not only in the seed) defeats a base
+# image that ships `network: {config: disabled}`. `mode: "off"` is quoted — unquoted `off` is a
+# YAML boolean. `match: {name: "e*"}` is interface-name-independent under the SLIRP NIC.
+KDIVE_CLOUD_CFG_PATH = "/etc/cloud/cloud.cfg.d/99-kdive.cfg"
+KDIVE_CLOUD_CFG_CONTENT = """\
+datasource_list: [ NoCloud ]
+disable_root: false
+network:
+  version: 2
+  ethernets:
+    kdive-dhcp:
+      match: { name: "e*" }
+      dhcp4: true
+      dhcp-identifier: mac
+growpart: { mode: "off" }
+resize_rootfs: false
+"""
+NOCLOUD_SEED_DIR = "/var/lib/cloud/seed/nocloud"
+_NOCLOUD_META_DATA = "instance-id: kdive-rootfs\nlocal-hostname: kdive\n"
+_NOCLOUD_USER_DATA = "#cloud-config\n"
+# The full cloud-init pipeline: cloud-init-local applies the datasource network config at the
+# PRE-network stage, so enabling only cloud-init.service would leave the NIC unconfigured.
+CLOUD_INIT_UNITS = (
+    "cloud-init-local.service cloud-init.service cloud-config.service cloud-final.service"
+)
+# Best-effort strip of any base drop-in that disables cloud-init network management; the build
+# self-check (rootfs_build.py) is the guard that asserts none remain.
+_STRIP_NET_DISABLE_CMD = (
+    "for f in /etc/cloud/cloud.cfg.d/*.cfg; do "
+    '[ -e "$f" ] || continue; '
+    "grep -qs 'config:[[:space:]]*disabled' \"$f\" && grep -qs 'network' \"$f\" "
+    '&& rm -f "$f"; done; true'
+)
+
+
+def _staged_upload(content: str, suffix: str, dest: str, cleanup: list[Path]) -> list[str]:
+    """Stage ``content`` to a tempfile (appended to ``cleanup``) and upload it to ``dest``."""
+    with tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False) as handle:
+        handle.write(content)
+        staged = Path(handle.name)
+    cleanup.append(staged)
+    return ["--upload", f"{staged}:{dest}"]
+
+
+def cloud_init_first_boot_args(ctx: CustomizeContext) -> list[str]:
+    """virt-customize fragment that makes cloud-init the uniform first-boot mechanism (ADR-0288).
+
+    Bakes the authoritative kdive ``cloud.cfg.d`` drop-in (network + NoCloud pin + root
+    protection) and a NoCloud seed, strips any base network-disabling drop-in, enables the full
+    four-unit cloud-init pipeline, and seeds ``machine-id``. Family-neutral. Installs cloud-init
+    on a non-cloud (virt-builder) base, which ships none.
+
+    Args:
+        ctx: The customize context; ``is_cloud_image`` gates the cloud-init install and
+            ``cleanup`` receives the staged tempfiles for the caller to unlink.
+    """
+    argv: list[str] = []
+    if not ctx.is_cloud_image:
+        argv += ["--install", "cloud-init"]
+    argv += ["--mkdir", NOCLOUD_SEED_DIR]
+    argv += _staged_upload(KDIVE_CLOUD_CFG_CONTENT, ".cfg", KDIVE_CLOUD_CFG_PATH, ctx.cleanup)
+    argv += _staged_upload(_NOCLOUD_META_DATA, ".md", f"{NOCLOUD_SEED_DIR}/meta-data", ctx.cleanup)
+    argv += _staged_upload(_NOCLOUD_USER_DATA, ".ud", f"{NOCLOUD_SEED_DIR}/user-data", ctx.cleanup)
+    argv += [
+        "--run-command",
+        _STRIP_NET_DISABLE_CMD,
+        "--run-command",
+        "rm -f /etc/cloud/cloud-init.disabled",
+        "--run-command",
+        f"systemctl unmask {CLOUD_INIT_UNITS}",
+        "--run-command",
+        f"systemctl enable {CLOUD_INIT_UNITS}",
+        "--write",
+        f"/etc/machine-id:{SEED_MACHINE_ID}",  # pragma: allowlist secret
+    ]
+    return argv
 
 
 def readiness_unit(kdump_unit: str) -> str:
