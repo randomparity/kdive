@@ -41,7 +41,7 @@ from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import paginate as _paginate
 from kdive.mcp.tools._platform_auth import (
@@ -374,7 +374,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             str | None, Field(description="Filter to allocations/systems on one host UUID.")
         ] = None,
         limit: Annotated[
-            int, Field(description="Maximum rows per stream returned (capped at 200).")
+            int,
+            Field(description=f"Maximum rows per stream returned (capped at {MAX_LIST_LIMIT})."),
         ] = DEFAULT_LIST_LIMIT,
     ) -> ToolResponse:
         """Cross-project systems/allocations summary. Requires platform auditor.

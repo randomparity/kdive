@@ -47,9 +47,20 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 
 `implemented` · `read-only`
 
-Poll one durable job until it is terminal or the timeout elapses.
+Poll one durable job until it is terminal or the short timeout elapses.
+
+Returns as soon as the job reaches a terminal state (succeeded/failed/canceled)
+or ``timeout_s`` elapses, whichever comes first. A non-terminal return is normal,
+not an error: it carries the job's current (queued/running) status and lists
+``jobs.wait`` in ``suggested_next_actions``, meaning "still running, call
+``jobs.wait`` again". Re-issue short waits to poll a job to completion.
+
+Prefer many short waits over one long hold. An intermediary proxy can sever a
+long-held request as a raw transport drop (a socket close, not an error
+envelope). That drop is transient: retry the call. ``jobs.wait`` and the other
+``jobs.*`` reads are idempotent, so retrying is safe.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `job_id` | string | yes | The Job to poll until terminal. |
-| `timeout_s` | number | no | Maximum seconds to wait (capped at 300). |
+| `timeout_s` | number | no | Seconds to wait before returning a non-terminal 'still running' result; defaults to 30 and is capped at 300. Prefer the short default and repeated calls over a large value: a long wait holds one request open long enough that an intermediary proxy may sever the stream. Re-issue short waits rather than one long hold. |

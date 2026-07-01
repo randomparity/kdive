@@ -15,7 +15,8 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload, ToolPayload
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
+from kdive.mcp.tools.lifecycle.allocations.common import MAX_WAIT_S
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import (
     release_allocation as _release_allocation,
 )
@@ -41,7 +42,8 @@ class _AllocationsListPayload(ToolPayload):
         default=None, description="Only allocations in this lifecycle state."
     )
     limit: int = Field(
-        default=DEFAULT_LIST_LIMIT, description="Maximum rows returned (capped at 200)."
+        default=DEFAULT_LIST_LIMIT,
+        description=f"Maximum rows returned (capped at {MAX_LIST_LIMIT}).",
     )
     cursor: str | None = Field(
         default=None, description="Opaque continuation cursor from a prior page's next_cursor."
@@ -197,7 +199,15 @@ def _register_allocations_wait(app: FastMCP, pool: AsyncConnectionPool) -> None:
             ),
         ],
         timeout_s: Annotated[
-            float, Field(description="Maximum seconds to wait (capped at 300).")
+            float,
+            Field(
+                description=(
+                    f"Seconds to wait before returning; capped at {int(MAX_WAIT_S)}. A "
+                    "non-terminal return is the 'still queued, call allocations.wait again' "
+                    "signal; prefer repeated short waits over one long hold that an "
+                    "intermediary proxy may sever."
+                )
+            ),
         ] = 30.0,
     ) -> ToolResponse:
         """Poll until the allocation leaves the queued state or the deadline elapses."""

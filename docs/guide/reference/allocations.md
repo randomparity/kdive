@@ -95,4 +95,4 @@ Poll until the allocation leaves the queued state or the deadline elapses.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `allocation_id` | string | yes | The Allocation to poll until it leaves the requested (queued) state. |
-| `timeout_s` | number | no | Maximum seconds to wait (capped at 300). |
+| `timeout_s` | number | no | Seconds to wait before returning; capped at 300. A non-terminal return is the 'still queued, call allocations.wait again' signal; prefer repeated short waits over one long hold that an intermediary proxy may sever. |

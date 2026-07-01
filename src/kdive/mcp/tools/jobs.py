@@ -35,7 +35,7 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
@@ -50,6 +50,7 @@ from kdive.security.authz.rbac import AuthorizationError, Role, RoleDenied, requ
 _log = logging.getLogger(__name__)
 
 POLL_INTERVAL_S = 0.5
+DEFAULT_WAIT_S = 30.0
 MAX_WAIT_S = 300.0
 
 _TERMINAL = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED})
@@ -67,7 +68,8 @@ class _JobsListPayload(ToolPayload):
         ),
     )
     limit: int = Field(
-        default=DEFAULT_LIST_LIMIT, description="Maximum rows returned (capped at 200)."
+        default=DEFAULT_LIST_LIMIT,
+        description=f"Maximum rows returned (capped at {MAX_LIST_LIMIT}).",
     )
     cursor: str | None = Field(
         default=None, description="Opaque continuation cursor from a prior page's next_cursor."
@@ -155,16 +157,16 @@ async def wait_job(
     *,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> ToolResponse:
-    """Poll until the job is terminal or ``timeout_s`` (clamped) elapses.
+    """Poll until the job is terminal or ``timeout_s`` (clamped to ``MAX_WAIT_S``) elapses.
 
     Each poll acquires and releases a pool connection (holds none while sleeping). A
-    non-positive timeout means a single read.
+    non-positive timeout means a single read. On a non-terminal timeout this returns the
+    job's current (``queued``/``running``) envelope with ``jobs.wait`` in
+    ``suggested_next_actions`` — the bounded "still running, call again" signal.
 
-    On a non-terminal timeout this returns the job's current (``queued``/``running``)
-    envelope with ``jobs.wait`` in ``suggested_next_actions`` — the "still running, call
-    again" signal. That bounded re-poll is the retry contract (ADR-0138): an agent should
-    re-issue short waits (the 30s default) rather than hold one ``timeout_s``-near-``MAX_WAIT_S``
-    idle stream, which an intermediary proxy can sever as a raw transport drop.
+    The agent-facing retry contract (short waits over one long hold; a transport drop on a
+    long wait is transient and retryable) lives on the ``jobs_wait`` wrapper docstring, which
+    is the text serialized into the tool schema; keep the two in step. See ADR-0138.
     """
     uid = _as_uuid(job_id)
     if uid is None:
@@ -317,10 +319,31 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def jobs_wait(
         job_id: Annotated[str, Field(description="The Job to poll until terminal.")],
         timeout_s: Annotated[
-            float, Field(description="Maximum seconds to wait (capped at 300).")
-        ] = 30.0,
+            float,
+            Field(
+                description=(
+                    "Seconds to wait before returning a non-terminal 'still running' result; "
+                    f"defaults to {int(DEFAULT_WAIT_S)} and is capped at {int(MAX_WAIT_S)}. "
+                    "Prefer the short default and repeated calls over a large value: a long "
+                    "wait holds one request open long enough that an intermediary proxy may "
+                    "sever the stream. Re-issue short waits rather than one long hold."
+                )
+            ),
+        ] = DEFAULT_WAIT_S,
     ) -> ToolResponse:
-        """Poll one durable job until it is terminal or the timeout elapses."""
+        """Poll one durable job until it is terminal or the short timeout elapses.
+
+        Returns as soon as the job reaches a terminal state (succeeded/failed/canceled)
+        or ``timeout_s`` elapses, whichever comes first. A non-terminal return is normal,
+        not an error: it carries the job's current (queued/running) status and lists
+        ``jobs.wait`` in ``suggested_next_actions``, meaning "still running, call
+        ``jobs.wait`` again". Re-issue short waits to poll a job to completion.
+
+        Prefer many short waits over one long hold. An intermediary proxy can sever a
+        long-held request as a raw transport drop (a socket close, not an error
+        envelope). That drop is transient: retry the call. ``jobs.wait`` and the other
+        ``jobs.*`` reads are idempotent, so retrying is safe.
+        """
         return await wait_job(pool, current_context(), job_id, timeout_s)
 
     @app.tool(

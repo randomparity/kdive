@@ -13,8 +13,10 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
 from kdive.mcp.tools.lifecycle.investigations_handlers import (
+    _DESCRIPTION_MAX,
+    _TITLE_MAX,
     ExternalRefInput,
     ExternalRefKey,
     close_investigation,
@@ -37,7 +39,8 @@ class _InvestigationsListPayload(ToolPayload):
         default=None, description="Filter by state (open/active/closed/abandoned)."
     )
     limit: int = Field(
-        default=DEFAULT_LIST_LIMIT, description="Maximum rows returned (capped at 200)."
+        default=DEFAULT_LIST_LIMIT,
+        description=f"Maximum rows returned (capped at {MAX_LIST_LIMIT}).",
     )
     cursor: str | None = Field(
         default=None, description="Opaque continuation cursor from a prior page's next_cursor."
@@ -63,10 +66,14 @@ def _register_investigations_open(app: FastMCP, pool: AsyncConnectionPool) -> No
     )
     async def investigations_open(
         project: Annotated[str, Field(description="Project to create the Investigation under.")],
-        title: Annotated[str, Field(description="Human-readable title (1..=200 chars).")],
+        title: Annotated[str, Field(description=f"Human-readable title (1..={_TITLE_MAX} chars).")],
         description: Annotated[
             str | None,
-            Field(description="Optional free-form description for reporting (<=4096 chars)."),
+            Field(
+                description=(
+                    f"Optional free-form description for reporting (<={_DESCRIPTION_MAX} chars)."
+                )
+            ),
         ] = None,
         external_refs: Annotated[
             list[ExternalRefInput] | None,
@@ -163,11 +170,16 @@ def _register_investigations_set(app: FastMCP, pool: AsyncConnectionPool) -> Non
         investigation_id: Annotated[str, Field(description="The Investigation to edit.")],
         title: Annotated[
             str | None,
-            Field(description="New title (1..=200 chars); omit to leave unchanged."),
+            Field(description=f"New title (1..={_TITLE_MAX} chars); omit to leave unchanged."),
         ] = None,
         description: Annotated[
             str | None,
-            Field(description='New description (<=4096); "" clears it; omit to leave unchanged.'),
+            Field(
+                description=(
+                    f'New description (<={_DESCRIPTION_MAX}); "" clears it; '
+                    "omit to leave unchanged."
+                )
+            ),
         ] = None,
     ) -> ToolResponse:
         """Edit a non-terminal Investigation's title and/or free-form description."""

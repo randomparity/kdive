@@ -53,7 +53,7 @@ from kdive.providers.ports.debug import (
     GdbMiEngine,
 )
 from kdive.providers.ports.lifecycle import TransportHandleData
-from kdive.providers.shared.debug_common.gdbmi import MAX_MODULES
+from kdive.providers.shared.debug_common.gdbmi import MAX_MEMORY_READ_BYTES, MAX_MODULES
 from kdive.security.authz.context import RequestContext
 from kdive.serialization import JsonValue
 
@@ -615,9 +615,11 @@ def _register_debug_read_memory(
     async def debug_read_memory(
         session_id: Annotated[str, Field(description="The live DebugSession to read memory from.")],
         address: Annotated[int, Field(description="Start address (integer) to read from.")],
-        byte_count: Annotated[int, Field(description="Number of bytes to read (capped at 4096).")],
+        byte_count: Annotated[
+            int, Field(description=f"Number of bytes to read (capped at {MAX_MEMORY_READ_BYTES}).")
+        ],
     ) -> ToolResponse:
-        """Read raw memory bytes from a live DebugSession (up to 4096). Requires contributor."""
+        """Read raw memory bytes from a live DebugSession (bounded by byte_count). Contributor."""
         return await run_engine_op(
             pool,
             current_context(),

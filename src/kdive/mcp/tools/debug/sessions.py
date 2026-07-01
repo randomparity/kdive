@@ -16,6 +16,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
+from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT
 from kdive.mcp.tools.debug.ops import DebugRuntimeResolver, _register_debug_ops
 from kdive.mcp.tools.debug.sessions_lifecycle import (
     _GDBSTUB,
@@ -60,7 +61,8 @@ class _DebugSessionsListPayload(ToolPayload):
         description="Only sessions in this lifecycle state.",
     )
     limit: int = Field(
-        default=_DEFAULT_LIST_LIMIT, description="Maximum rows returned (capped at 200)."
+        default=_DEFAULT_LIST_LIMIT,
+        description=f"Maximum rows returned (capped at {_MAX_LIST_LIMIT}).",
     )
     cursor: str | None = Field(
         default=None, description="Opaque continuation cursor from a prior page's next_cursor."
