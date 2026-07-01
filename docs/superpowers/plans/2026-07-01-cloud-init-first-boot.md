@@ -471,44 +471,100 @@ git commit -m "feat(962): route debian family first-boot through cloud-init"
 
 ### Task 5: Offline build self-check
 
+> **Provisional until Task 6.** The seam wiring below is fully unit-tested, but the *real*
+> `_real_verify_cloud_init` guestfish script (verbs `exists`/`! sh`/`systemctl`) is
+> `pragma: no cover - live_vm` and is only exercised on the KVM host in Task 6. Treat this task
+> as not-done until Task 6 confirms the script on a real built image; any verb correction lands
+> back here and the unit seam tests below must stay green before the PR ships.
+
 **Files:**
 - Modify: `src/kdive/providers/local_libvirt/rootfs_build.py`
-- Test: `tests/providers/local_libvirt/test_rootfs_build.py`
+- Modify: `tests/providers/local_libvirt/test_rootfs_build.py` (the `_Recorder` + `_tools` helpers)
 
 **Interfaces:**
 - Consumes: `KDIVE_CLOUD_CFG_PATH`, `NOCLOUD_SEED_DIR`, `CLOUD_INIT_UNITS` from Task 1.
-- Produces: a `verify_cloud_init` seam on `RootfsBuildTools` (default `_real_verify_cloud_init`), called in `build()` after `family.normalize(staged)` and before `publish_qcow2`.
+- Produces: a `verify_cloud_init: VerifyCloudInit` field on `RootfsBuildTools` (default
+  `_real_verify_cloud_init`), called in `build()` after `family.normalize(staged)` and before
+  `publish_qcow2`.
 
-- [ ] **Step 1: Write the failing test** in `tests/providers/local_libvirt/test_rootfs_build.py`:
+The test module already has a `_Recorder` (records `order`/`customize_argvs`/…), a `_tools(rec,
+inspect_versions=…, probe_makedumpfile=…)` factory that builds `RootfsBuildTools(...)`
+explicitly, a `_plane(tmp_path, rec, …)` factory, and a `_key(tmp_path)` helper. **Because
+Task 5 adds a `verify_cloud_init` field whose default is the real guestfish runner, `_tools`
+must be updated to pass a stub** — otherwise every existing build test would invoke real
+guestfish.
+
+- [ ] **Step 1: Extend `_Recorder` and `_tools`** in `tests/providers/local_libvirt/test_rootfs_build.py`.
+
+Add to the `_Recorder` dataclass (alongside the other `list[...]` fields):
 
 ```python
-def test_build_runs_cloud_init_self_check_before_publish(migrated_tmp) -> None:
-    # The plane must call the injected verify_cloud_init seam on the staged qcow2 before publish.
-    calls: list[Path] = []
-    tools = _tools(customize=..., verify_cloud_init=lambda p: calls.append(p))  # see _tools below
-    plane = LocalLibvirtRootfsBuildPlane(workspace=..., tools=tools)
-    plane.build(_spec())
-    assert calls, "verify_cloud_init must run on the built image"
+    verify_calls: list[Path] = field(default_factory=list)
+
+    def verify_cloud_init(self, qcow2: Path) -> None:
+        self.order.append("verify")
+        self.verify_calls.append(qcow2)
+```
+
+Update `_tools` to accept and forward the seam (defaulting to the recorder's stub so no test
+touches real guestfish):
+
+```python
+def _tools(
+    rec: _Recorder,
+    inspect_versions: VersionInspectSeam = _no_versions,
+    probe_makedumpfile: MakedumpfileProbeSeam = _no_makedumpfile,
+    verify_cloud_init: object | None = None,
+) -> RootfsBuildTools:
+    return RootfsBuildTools(
+        resolve_authorized_key=rec.resolve_authorized_key,
+        acquire_base=rec.acquire_base,
+        customize=rec.customize,
+        repack_whole_disk_ext4=rec.repack_whole_disk_ext4,
+        family_for=rec.family_for,
+        inspect_versions=inspect_versions,
+        probe_makedumpfile=probe_makedumpfile,
+        verify_cloud_init=verify_cloud_init or rec.verify_cloud_init,  # ty: ignore[invalid-argument-type]
+    )
+```
+
+- [ ] **Step 2: Write the failing tests** (append to the same test module):
+
+```python
+def test_build_runs_cloud_init_self_check_after_normalize(tmp_path: Path) -> None:
+    # The plane must run verify_cloud_init on the staged image, after normalize, before publish.
+    rec = _Recorder(authorized_key=_key(tmp_path))
+    _plane(tmp_path, rec).build(_spec())
+    assert rec.verify_calls, "verify_cloud_init must run on the built image"
+    assert rec.order.index("verify") > rec.order.index("normalize")
 
 
-def test_build_fails_when_self_check_rejects(...) -> None:
-    def _reject(_p: Path) -> None:
-        raise CategorizedError("cloud-init self-check failed",
-                               category=ErrorCategory.PROVISIONING_FAILURE)
-    tools = _tools(verify_cloud_init=_reject)
+def test_build_fails_when_cloud_init_self_check_rejects(tmp_path: Path) -> None:
+    rec = _Recorder(authorized_key=_key(tmp_path))
+
+    def _reject(_qcow2: Path) -> None:
+        raise CategorizedError(
+            "cloud-init self-check failed",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+        )
+
+    plane = LocalLibvirtRootfsBuildPlane(
+        workspace=tmp_path / "work",
+        tools=_tools(rec, verify_cloud_init=_reject),
+    )
     with pytest.raises(CategorizedError) as err:
-        LocalLibvirtRootfsBuildPlane(workspace=..., tools=tools).build(_spec())
+        plane.build(_spec())
     assert err.value.category is ErrorCategory.PROVISIONING_FAILURE
 ```
 
-Extend the test module's `RootfsBuildTools` constructor usage (the existing `_tools`/recorder helper) to pass `verify_cloud_init`. If the existing tests build `RootfsBuildTools(...)` directly, add `verify_cloud_init=lambda _p: None` to those constructions so they keep passing.
+(`_plane` calls `_tools(rec, …)`, which now defaults `verify_cloud_init` to `rec.verify_cloud_init`, so the first test needs no extra wiring.)
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 3: Run to verify they fail**
 
-Run: `.venv/bin/pytest tests/providers/local_libvirt/test_rootfs_build.py -k self_check -q`
-Expected: FAIL (`TypeError: unexpected keyword 'verify_cloud_init'`).
+Run: `.venv/bin/pytest tests/providers/local_libvirt/test_rootfs_build.py -k "self_check or reject" -q`
+Expected: FAIL (`TypeError: RootfsBuildTools got an unexpected keyword 'verify_cloud_init'`).
 
-- [ ] **Step 3: Implement the seam + the real check** in `rootfs_build.py`. Add the type + field + default, and call it in `build()`:
+- [ ] **Step 4: Implement the seam + the real check** in `rootfs_build.py`. Add the type + field + default, and call it in `build()`:
 
 ```python
 type VerifyCloudInit = Callable[[Path], None]
@@ -560,12 +616,12 @@ In `build()`, after `family.normalize(staged)` and before `installed = self._ins
 
 Note for the implementer: the exact `guestfish` verb spelling (`is-enabled` via `systemctl` in the appliance, `exists`, `! sh`) must be confirmed against a real built image during the live proof (Task 6); the seam is injected so unit tests do not depend on guestfish. If `systemctl is-enabled` is unreliable in the read-only appliance, assert instead on the presence of the enable symlinks under `/etc/systemd/system/cloud-init.target.wants/` (cloud-init units are `WantedBy=cloud-init.target`) and `cloud-init.target` under `multi-user.target.wants/`.
 
-- [ ] **Step 4: Run to verify pass**
+- [ ] **Step 5: Run to verify pass**
 
 Run: `.venv/bin/pytest tests/providers/local_libvirt/test_rootfs_build.py -q && .venv/bin/ruff check src/kdive/providers/local_libvirt/rootfs_build.py && .venv/bin/ty check src/kdive/providers/local_libvirt/rootfs_build.py`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/kdive/providers/local_libvirt/rootfs_build.py tests/providers/local_libvirt/test_rootfs_build.py
@@ -581,7 +637,33 @@ git commit -m "feat(962): offline cloud-init self-check on the built rootfs"
 
 This task is not unit-testable; it is the acceptance proof and is run on the KVM build host, not in CI.
 
-- [ ] **Step 1: Rebuild the affected images** with the new build path:
+- [ ] **Step 0: Prerequisites** — the provision→SSH flow (Step 3) drives the full MCP lifecycle, so it needs the live stack, a token, project funding, and a kernel tree. Without these, `allocations.request` is denied (zero quota/budget) or provision skips.
+
+```bash
+# Bring up the live stack (compose backends + host server/reconciler/worker + libvirt).
+bash scripts/live-stack/up.sh                 # or scripts/live-stack/status.sh if already up
+# The server env already exports these on this host; re-export for the driver shell:
+export KDIVE_DATABASE_URL="postgresql://kdive:kdive@localhost:5432/kdive"  # pragma: allowlist secret
+export KDIVE_KERNEL_SRC="/home/dave/src/linux"          # a prebuilt kernel tree (has arch/x86/boot/bzImage)
+export KDIVE_STACK_BASE_URL="http://127.0.0.1:8000/mcp"
+# Token: use the operator-supplied bearer, or mint one from the bundled OIDC issuer.
+export KDIVE_TOKEN="$(cat <the operator token file>)"   # projects:["demo"], roles:{"demo":"admin"}
+```
+
+Seed the `demo` project's budget + quota so the first `allocations.request` is granted (idempotent upsert, mirrors `tests/integration/live_stack/spine.py::seed_metering`):
+
+```python
+import psycopg, os
+with psycopg.connect(os.environ["KDIVE_DATABASE_URL"]) as c:
+    c.execute("INSERT INTO budgets (project, limit_kcu) VALUES ('demo','1000000') "
+              "ON CONFLICT (project) DO UPDATE SET limit_kcu=EXCLUDED.limit_kcu")
+    c.execute("INSERT INTO quotas (project, max_concurrent_allocations, max_concurrent_systems) "
+              "VALUES ('demo',4,4) ON CONFLICT (project) DO UPDATE SET "
+              "max_concurrent_allocations=4, max_concurrent_systems=4")
+    c.commit()
+```
+
+- [ ] **Step 1: Rebuild the affected images** with the new build path. NOTE: `build-fs` overwrites the staged qcow2 at `/var/lib/kdive/rootfs/local/<name>.qcow2` in place — on a broken build the previously-working image is gone (rebuild-only recovery). This is a devel host, so overwrite is acceptable; do not run on anything you cannot rebuild.
 
 ```bash
 .venv/bin/python -m kdive build-fs --image debian-kdive-ready-13
