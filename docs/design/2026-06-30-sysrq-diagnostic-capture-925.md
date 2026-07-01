@@ -100,9 +100,9 @@ domain.sendKey(libvirt.VIR_KEYCODE_SET_LINUX, HOLDTIME_MS,
 
 The Linux input keycodes for the trigger characters live in the local-libvirt provider
 (`KEY_T=20, KEY_W=17, KEY_M=50, KEY_D=32, KEY_P=25, KEY_L=38, KEY_Q=16`, plus
-`KEY_LEFTALT=56, KEY_SYSRQ=99`). The kernel's SysRq handler is registered on the keyboard
-input path regardless of where the console is routed, so the resulting dump is printed to
-**all** consoles including the serial `ttyS0` that kdive captures. This mirrors
+`KEY_LEFTALT=56, KEY_SYSRQ=99`). `sendKey` delivers to the QEMU PS/2 keyboard (the `i8042`
+controller is part of the emulated `pc`/`q35` chipset, so it is present even though the
+domain declares no `<graphics>`/`<input>` device — see `lifecycle/xml.py`). This mirrors
 `force_crash`'s use of a single libvirt domain method and is unit-tested with a fake
 connection; the real `sendKey` adapter is `live_vm`-only.
 
@@ -110,9 +110,39 @@ connection; the real `sendKey` adapter is `live_vm`-only.
 `CONTROL_FAILURE` (`not_supported`) — the tool never routes a non-local System to it
 (gated below), so this is a defensive stub, not a second implementation.
 
+### Guest prerequisites (a load-bearing, kdive-uncontrolled dependency)
+
+The keyboard-SysRq path reaches the running kernel only if the **guest kernel** binds a
+PS/2 keyboard driver (`CONFIG_SERIO_I8042` + `CONFIG_KEYBOARD_ATKBD`) *and* magic SysRq is
+enabled for the requested command (`CONFIG_MAGIC_SYSRQ`, runtime `kernel.sysrq` bitmask).
+kdive boots **user-supplied** kernels, and a minimal serial+virtio-only config can omit the
+PS/2 keyboard stack; a hardened image can ship `kernel.sysrq=0` or a restrictive mask. When
+any of these is unmet the keystroke is silently dropped and the capture yields no output.
+This is treated as a first-class outcome, not swept under "should work":
+
+- The **no-output** path (below) returns `configuration_error` with remediation naming
+  **both** causes: enable `kernel.sysrq` for the command *and* build the guest kernel with a
+  PS/2 keyboard driver.
+- Acceptance is **gated on a `live_vm` proof** (this dev host runs KVM/libvirt) against a
+  representative built kernel + a default catalog rootfs, confirming an allowlisted command
+  produces a captured dump on the shipped configuration. A fake-connection unit test cannot
+  falsify the end-to-end mechanism, so the live proof is required, not optional.
+- The default catalog images' `kernel.sysrq` value is verified as part of that proof; if the
+  defaults do not enable it, the supported-configuration constraint is documented in the
+  operator docs and the tool's remediation, rather than left implicit.
+
+The `/proc/sysrq-trigger`-over-SSH alternative avoids the guest-keyboard dependency but is
+**not** a free substitute: it needs a prior `authorize_ssh_key` on the System and working
+guest DHCP/networking (open #697; #782's live SSH e2e is deferred), whereas keyboard-sendKey
+needs no credential and works on any ready System. ADR-0285 records this trade-off.
+
 ### Capture (worker handler)
 
-Under the per-System advisory lock, the handler:
+The capture is a **redacted console tail from shortly before injection to the settle
+point** — it is not a perfectly isolated command transcript. The guest is still running, so
+the tail may interleave unrelated console lines; the artifact is labelled and documented as
+"console tail after a SysRq injection," not "exactly the command's bytes." Under the
+per-System advisory lock, the handler:
 
 1. Reads the console log length before injection (`mark`) — the local serial log is the
    whole current-boot file (`read_console_log`, ADR-0258; `append="off"` truncates per
@@ -121,22 +151,44 @@ Under the per-System advisory lock, the handler:
 3. Polls the console for growth with a bounded, count-driven loop (no wall-clock, so it is
    deterministic under test): up to `MAX_POLLS` iterations of `POLL_INTERVAL`, breaking
    early once the log has grown past `mark` and then stabilized for `SETTLE_POLLS`
-   consecutive reads. Total bound ≈ 5 s.
-4. `delta = console_bytes[mark:]`.
-5. **No output** → the job fails with `configuration_error`, `reason="no_console_output"`,
-   remediation "enable magic SysRq in the guest (`kernel.sysrq`) and confirm an active
-   serial console" (the common cause is `kernel.sysrq` disabled or masked). This is
-   requirement 5's timeout/no-output path.
-6. Redacts `delta` through `Redactor(registry=secret_registry)` (same pattern as
+   consecutive reads. The loop records whether it exited by **stabilization** or by hitting
+   the **iteration bound** (a large bursty dump — `show_task_states`/`show_memory` on a busy
+   guest — that is still growing at the bound is disclosed, below, so a truncated capture is
+   detectable, never silently trusted). `MAX_POLLS`/`POLL_INTERVAL`/`SETTLE_POLLS` are named
+   constants sized so the total bound comfortably exceeds a normal printk burst; the live
+   proof validates them against a real dump.
+4. `overlap_start = max(0, mark - SEAM_OVERLAP)`; capture `raw = console_bytes[overlap_start:]`.
+   Redacting a small pre-injection overlap (mirroring `console_rotate`'s seam-overlap carry)
+   keeps a secret that straddles the `mark` byte boundary contiguous, so it cannot be split
+   and leak its tail. The artifact therefore begins a few KiB before injection — harmless,
+   redacted context.
+5. **No captured growth** (`len(console_bytes) <= mark`) → the job fails with
+   `configuration_error`, `reason="no_console_output"`, remediation naming **both** causes:
+   enable `kernel.sysrq` for the command, and build the guest kernel with a PS/2 keyboard
+   driver (see Guest prerequisites). This is requirement 5's timeout/no-output path.
+6. Redacts `raw` through `Redactor(registry=secret_registry)` (same pattern as
    `console_rotate` / `read_redacted_console`).
 7. Stores it as a System-owned object `sysrq-diagnostic-<job_id>`
    (`owner_kind="systems"`, `tenant="local"`, `sensitivity=REDACTED`,
-   `retention_class="console"`), registers the row (`run_id=None` — see below), and
-   returns `str(artifact.id)` as the job's `result_ref`.
+   `retention_class="console"`), registers the row **insert-if-absent on the object key**
+   (mirroring `console_rotate._existing_part_row` — jobs are at-least-once, so a worker
+   retry re-runs the handler; the re-injection is a harmless second dump, but the row insert
+   must not duplicate — `artifacts.object_key` has no unique constraint), stamps `run_id=None`
+   (see below), and returns `str(artifact.id)` as the job's `result_ref`.
 
 The capture-poll core is a pure async function taking injected `read_console`, `inject`,
 and `sleep` callables so tests drive it with scripted console reads and a no-op sleep — no
-real time, no real libvirt.
+real time, no real libvirt. It returns the captured bytes and the exit reason
+(stabilized / hit-bound) for the handler to store and record.
+
+### Observability
+
+The worker records a `diagnostic_sysrq` capture-outcome counter tagged by outcome
+(`captured` / `no_output` / `control_failure`) and `provider_kind`, so a deployment where
+the mechanism is silently failing (guest lacks the keyboard driver, `kernel.sysrq` disabled)
+is visible as a rising `no_output` rate rather than an invisible dead feature. Because the
+default `provider_kind` tagging already exists on worker capture paths, this reuses the
+established pattern.
 
 ### Why `run_id = None`
 
@@ -197,15 +249,26 @@ forward-only per ADR-0015). `DIAGNOSTIC_SYSRQ` is **not** added to
 - **Tool**: allowed command enqueues a `diagnostic_sysrq` job (assert dedup key + payload);
   unknown/destructive command → `configuration_error`; non-local / not-READY →
   `configuration_error`; under-privileged ctx → `authorization_denied`.
-- **Capture core**: scripted `read_console` returning growth → returns the delta; no growth
-  → empty; growth-then-stable early-exit.
+- **Capture core**: scripted `read_console` returning growth → returns the delta with exit
+  reason `stabilized`; no growth → empty; growth-then-stable early-exit; still-growing at the
+  iteration bound → returns exit reason `hit_bound` (truncation disclosed); a secret
+  straddling the `mark` boundary is redacted because the `SEAM_OVERLAP` pre-injection region
+  is included before redaction.
 - **Worker handler**: fake Control records the injected trigger; fake console reader +
   no-op sleep; asserts a redacted System-owned artifact is written and `result_ref` is its
-  id; no-output → job `configuration_error`; a registered secret in the delta is redacted.
+  id; no-output → job `configuration_error`; a registered secret in the delta is redacted; a
+  **replayed handler run** (at-least-once) does not create a duplicate artifact row
+  (insert-if-absent).
 - **Provider**: fake libvirt domain records the `sendKey` codeset + keycodes for each
   command; absent domain → `control_failure`.
 - **Teardown**: a System with a `sysrq-diagnostic-*` artifact is reclaimed (object + row)
   at teardown.
+- **`live_vm` proof (required, not optional)**: on the KVM/libvirt dev host, provision a
+  System on a built kernel + default catalog rootfs, call `control.diagnostic_sysrq` with an
+  allowlisted command, and assert the job succeeds with a non-empty redacted artifact — this
+  is the only test that falsifies the guest-keyboard/`kernel.sysrq` end-to-end mechanism.
+  Records the default images' `kernel.sysrq` value; if unset, documents the supported-kernel
+  constraint.
 - Agent-facing surface guards (tool registry snapshot, agent-index/toolset docs) updated so
   the existing drift guards stay green.
 

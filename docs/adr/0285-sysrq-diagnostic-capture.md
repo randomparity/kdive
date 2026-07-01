@@ -66,12 +66,23 @@ System-owned artifact.
 - Adds one Control-port method (two implementations, one a defensive stub), one job kind +
   migration, one payload, and a teardown-reclaim clause. The agent-facing surface guards
   (tool registry snapshot, control toolset doc / agent index) must be updated in the same PR.
-- Capture is best-effort and point-in-time: a bounded settle window means an unusually slow
-  or `kernel.sysrq`-disabled guest reads as `no_console_output` (with remediation). SysRq
-  printk output is effectively immediate, so the bound is ample in practice.
-- Relies on the guest having an emulated keyboard (QEMU default) and `kernel.sysrq` enabled
-  for the requested command; both unmet cases surface as `no_console_output` remediation
-  rather than a hang.
+- Capture is best-effort, point-in-time, and a **console tail** (not an isolated command
+  transcript): a still-running guest may interleave other console lines, and a bounded settle
+  window means a very large bursty dump can hit the iteration bound. The poll records whether
+  it exited by stabilization or by the bound, and the worker emits a capture-outcome metric
+  (`captured`/`no_output`/`control_failure` by `provider_kind`), so a truncated or silently
+  dead capture is detectable rather than trusted.
+- **Load-bearing guest dependency:** the keystroke reaches the kernel only if the guest kernel
+  binds a PS/2 keyboard driver (`i8042`/`atkbd`) and `kernel.sysrq` enables the command. kdive
+  boots user-supplied kernels, so this is not guaranteed; both unmet cases surface as a
+  `no_console_output` `configuration_error` naming both fixes, and acceptance is gated on a
+  `live_vm` proof against a built kernel + default rootfs (a fake-connection unit test cannot
+  falsify the mechanism). The default catalog images' `kernel.sysrq` state is verified there.
+- Redaction includes a `SEAM_OVERLAP` pre-injection region before slicing (mirroring
+  `console_rotate`), so a secret straddling the capture-start boundary cannot leak its tail.
+- Worker execution is at-least-once; the artifact-row insert is insert-if-absent on the
+  object key (no unique constraint exists), and a retry's re-injection is a harmless extra
+  dump.
 
 ## Alternatives considered
 
@@ -81,10 +92,17 @@ System-owned artifact.
 - **Raw SysRq character / runtime deny-list.** Rejected in favor of a friendly allowlist
   enum: a positive allowlist makes destructive commands structurally impossible and gives the
   agent literal, self-documenting identifiers, with no deny-list to drift.
-- **Write to `/proc/sysrq-trigger` over SSH.** Rejected: needs guest SSH/networking and
-  credentials, does not work for an early-boot or wedged guest, and diverges from
-  `force_crash`'s libvirt-domain mechanism. `sendKey` reaches the guest through the
-  hypervisor keyboard with no in-guest agent.
+- **Write to `/proc/sysrq-trigger` over SSH.** Rejected, but the trade-off is real and worth
+  stating precisely because ADR-0281 now renders an SSH forward on *every* ready System — so
+  "needs SSH reachability" is no longer the whole objection. The SSH path still requires a
+  **prior `authorize_ssh_key`** on the System and **working guest DHCP/networking** (open
+  #697; #782's live SSH e2e is deferred), whereas keyboard-`sendKey` needs **no credential**
+  and works on any ready System through the hypervisor keyboard with no in-guest agent. Its
+  cost is a guest-side dependency (a PS/2 keyboard driver + `CONFIG_MAGIC_SYSRQ`) that kdive
+  does not control; we accept that cost, document it as a supported-configuration constraint,
+  surface it in the `no_console_output` remediation, and gate acceptance on a `live_vm` proof
+  rather than trusting the fake-connection unit test. If the guest-keyboard dependency proves
+  too fragile in practice, the SSH path is the documented fallback to revisit.
 - **Reuse `console_rotate` parts instead of a dedicated artifact.** Rejected: threshold-based
   async rotation cannot tell the caller which part holds *their* dump; a dedicated
   `refs.result` artifact is the discoverable channel the acceptance criteria expect.
