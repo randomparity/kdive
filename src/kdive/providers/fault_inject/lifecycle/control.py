@@ -11,3 +11,6 @@ class FaultInjectControl:
 
     def force_crash(self, domain_name: str) -> None:
         return None
+
+    def diagnostic_sysrq(self, domain_name: str, trigger: str) -> None:
+        return None

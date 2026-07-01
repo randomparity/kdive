@@ -116,6 +116,21 @@ class RemoteLibvirtControl:
             except libvirt.libvirtError as exc:
                 raise self._control_failure("injecting NMI into", domain_name) from exc
 
+    def diagnostic_sysrq(self, domain_name: str, trigger: str) -> None:
+        """Diagnostic SysRq is local-libvirt only (ADR-0285); remote raises ``CONTROL_FAILURE``.
+
+        The tool never routes a non-local System here; this stub satisfies the ``Controller``
+        Protocol and fails closed if ever reached.
+
+        Raises:
+            CategorizedError: ``CONTROL_FAILURE`` (``not_supported``) always.
+        """
+        raise CategorizedError(
+            "diagnostic SysRq is not supported on remote-libvirt",
+            category=ErrorCategory.CONTROL_FAILURE,
+            details={"domain": domain_name, "trigger": trigger, "reason": "not_supported"},
+        )
+
     def _connection(self) -> AbstractContextManager[_ControlConn]:
         return remote_connection(
             self._config_factory(),

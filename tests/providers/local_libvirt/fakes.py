@@ -29,6 +29,7 @@ class FakeDomain:
     calls: list[str] = field(default_factory=list)  # records control ops in call order
     raise_on: dict[str, int] = field(default_factory=dict)  # op -> libvirt error code to raise
     active: bool = False  # isActive() result; boot's "destroy if running" reads it
+    sent_keys: list[tuple[int, list[int]]] = field(default_factory=list)  # (codeset, keycodes)
     xml_desc: str | None = None  # XMLDesc() result; install reads it to add a direct-kernel <os>
 
     def name(self) -> str:
@@ -92,6 +93,14 @@ class FakeDomain:
 
     def isActive(self) -> int:  # noqa: N802 - mirrors the libvirt binding name
         return 1 if self.active else 0
+
+    def sendKey(  # noqa: N802 - mirrors the libvirt binding name
+        self, codeset: int, holdtime: int, keycodes: list[int], nkeycodes: int, flags: int
+    ) -> int:
+        self.calls.append("sendKey")
+        self.sent_keys.append((codeset, list(keycodes)))
+        self._maybe_raise("sendKey")
+        return 0
 
 
 @dataclass
