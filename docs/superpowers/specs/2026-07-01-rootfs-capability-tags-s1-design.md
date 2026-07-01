@@ -176,6 +176,16 @@ build-kind staged entries to converge. This makes a declared local image match w
 `build-fs` would stamp; the existing fixture-load tests confirm the tokens are valid
 vocabulary, and any test asserting the prior literal set is updated in the same change.
 
+Two profile fixtures (`fixtures/local-libvirt/profiles/console-ready_x86_64.yaml` and the
+profile embedded in `admin/default_fixtures.py`) additionally declare a *requirement*
+`requires.rootfs.capabilities: [agent]` — a demand that a matched image carry `agent`. Since
+S1 drops `agent` from every local image, that requirement would name a capability no local
+image provides. No code enforces the requirement against an image today (`profiles/build.py`
+does not read it; the only capability membership checks are the kdump signal and a log label),
+so it is not a runtime break — but it is the same contradiction this slice removes, so change
+it to `[]`. The profile's real gate is its `config`/`cmdline` requirements; no current tag
+denotes "console-ready", and requiring `ssh` would be wrong for a console-only profile.
+
 ## Data flow
 
 ```

@@ -523,23 +523,57 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 7: Converge staged-path metadata + update stale assertions
+### Task 7: Converge staged-path metadata, drop the phantom profile requirement, update stale assertions
 
 **Files:**
 - Modify: `systems.toml.example`, `docs/operating/providers/examples/systems-local-libvirt.toml`, `examples/local-libvirt/README.md`, `src/kdive/admin/default_fixtures.py`
+- Modify: `fixtures/local-libvirt/profiles/console-ready_x86_64.yaml` and the profile YAML embedded in `src/kdive/admin/default_fixtures.py` — the `requires.rootfs.capabilities: [agent]` block (see Step 1b)
 - Modify: any test asserting the prior literal capability set (found in Step 1)
 
 **Interfaces:**
-- Consumes: the per-distro sets — Fedora/Rocky/CentOS-Stream → `["ssh","selinux","kdump","drgn"]`; Debian → `["ssh","apparmor","kdump","drgn"]`.
+- Consumes: the per-distro image sets — Fedora/Rocky/CentOS-Stream → `["ssh","selinux","kdump","drgn"]`; Debian → `["ssh","apparmor","kdump","drgn"]`.
+
+**Design decision (profile requirement):** two profile fixtures declare
+`requires.rootfs.capabilities: [agent]` — a *requirement* that a matched image carry `agent`.
+S1 drops `agent` from every local image, so this requirement would name a capability no local
+image provides. No code enforces it against an image today (verified: `profiles/build.py` does
+not read it; the only capability membership checks in the tree are the kdump signal and a log
+label), so this is not a runtime break — but leaving it is the exact contradiction S1 removes.
+Change the requirement to `[]` (empty): the profile's real gate is its `config`/`cmdline`
+requirements, no current tag denotes "console-ready", and requiring `ssh` would be wrong for a
+console-only profile.
 
 - [ ] **Step 1: Find every staged-path capability declaration and stale assertion**
 
 Run:
 ```bash
 .venv/bin/rg -n 'capabilities' systems.toml.example docs/operating/providers/examples/systems-local-libvirt.toml examples/local-libvirt/README.md src/kdive/admin/default_fixtures.py
-.venv/bin/rg -n 'kdive-ready-console|"agent".*"kdump"|capabilities.*agent' tests/ src/
+.venv/bin/rg -n 'capabilities' fixtures/local-libvirt/profiles/ src/kdive/admin/
+.venv/bin/rg -n 'kdive-ready-console|"agent"|- agent|capabilities.*agent' tests/ src/ fixtures/
 ```
-Confirm every staged `[[image]]`/fixture entry is a debug rootfs (no `kind = "build"` staged entry). Record the exact lines to edit and any test asserting `["agent", ...]`.
+Confirm every staged `[[image]]`/fixture entry is a debug rootfs (no `kind = "build"` staged entry). Record the exact lines to edit, the two profile `requires.rootfs.capabilities: [agent]` blocks, and any test asserting `["agent", ...]`.
+
+- [ ] **Step 1b: Empty the phantom profile requirement**
+
+In `fixtures/local-libvirt/profiles/console-ready_x86_64.yaml` and the embedded profile YAML in
+`src/kdive/admin/default_fixtures.py`, change:
+
+```yaml
+  rootfs:
+    format: qcow2
+    root_device: /dev/vda
+    capabilities:
+      - agent
+```
+
+to an empty requirement (drop the `capabilities` key, or set `capabilities: []`):
+
+```yaml
+  rootfs:
+    format: qcow2
+    root_device: /dev/vda
+    capabilities: []
+```
 
 - [ ] **Step 2: Adjust the failing assertion in place**
 
@@ -577,8 +611,8 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add systems.toml.example docs/operating/providers/examples/systems-local-libvirt.toml examples/local-libvirt/README.md src/kdive/admin/default_fixtures.py tests/
-git commit -m "feat(957-s1): converge staged-path capabilities to per-distro sets
+git add systems.toml.example docs/operating/providers/examples/systems-local-libvirt.toml examples/local-libvirt/README.md src/kdive/admin/default_fixtures.py fixtures/local-libvirt/profiles/console-ready_x86_64.yaml tests/
+git commit -m "feat(957-s1): converge staged capabilities; drop phantom agent requirement
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -589,7 +623,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] Run the full suite once: `just ci`. Expected: green (architecture/doc/boundary tests included).
 - [ ] `.venv/bin/rg -n "_KIND_CAPABILITIES" src tests` → no matches.
-- [ ] `.venv/bin/rg -n '"agent"' systems.toml.example src/kdive/admin/default_fixtures.py` → no local staged image declares `agent`.
+- [ ] `.venv/bin/rg -n '"agent"|- agent' systems.toml.example src/kdive/admin/default_fixtures.py fixtures/local-libvirt/profiles/` → no local staged image *or profile requirement* names `agent`.
 - [ ] Confirm `test_exit_criteria.py::_REQUIRED` (the remote guest-contract `("agent","kdump","drgn","helpers")`) is untouched — S1 does not change the remote contract.
 
 ## Rollback
