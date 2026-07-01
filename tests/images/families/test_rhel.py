@@ -139,3 +139,11 @@ def test_rhel_virt_builder_source_skips_machine_id_seed(tmp_path: Path) -> None:
 def test_rhel_virt_builder_source_skips_cloud_init(tmp_path: Path) -> None:
     argv = RhelFamily().customize_argv(_ctx(tmp_path, is_cloud_image=False))
     assert not any("cloud-init" in a for a in argv)
+
+
+def test_rhel_argv_stages_no_nm_ssh_nic_keyfile(tmp_path: Path) -> None:
+    # ADR-0288: cloud-init DHCPs the NIC now; the NetworkManager SSH-NIC keyfile is gone.
+    argv = RhelFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
+    j = " ".join(argv)
+    assert "kdive-ssh-nic" not in j
+    assert "NetworkManager/system-connections" not in j

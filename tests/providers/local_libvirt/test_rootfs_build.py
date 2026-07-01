@@ -18,7 +18,6 @@ import pytest
 
 from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.families._fedora_customize import SSH_NIC_KEYFILE_CONTENT
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.families.rhel import RhelFamily
 from kdive.images.planes._build_common import MakedumpfileProbeSeam, VersionInspectSeam
@@ -426,24 +425,11 @@ def test_family_argv_stages_kdive_drgn_helper_for_a_debug_image(tmp_path: Path) 
     assert "chmod 0755 /usr/local/sbin/kdive-drgn" in argv, "helper is made read-executable"
 
 
-def test_family_argv_stages_ssh_nic_dhcp_keyfile_for_a_debug_image(tmp_path: Path) -> None:
-    # The drgn-live SSH transport (ADR-0218) renders a SLIRP NIC the guest must DHCP to reach; the
-    # debug image stages an interface-name-independent NM keyfile, uploaded then chmod 0600.
-    keyfile = "/etc/NetworkManager/system-connections/kdive-ssh-nic.nmconnection"
-    argv = _rhel_argv(tmp_path, packages=("drgn",))
-    _upload_target(argv, keyfile)
-    assert "method=auto" in SSH_NIC_KEYFILE_CONTENT, "the keyfile DHCPs the NIC"
-    assert "interface-name" not in SSH_NIC_KEYFILE_CONTENT
-    assert f"chmod 0600 {keyfile}" in argv, "keyfile is mode 0600 so NM loads it"
-
-
-def test_family_argv_omits_drgn_helper_and_keyfile_for_a_non_debug_image(tmp_path: Path) -> None:
+def test_family_argv_omits_drgn_helper_for_a_non_debug_image(tmp_path: Path) -> None:
     # A non-debug (e.g. build-host) image carries no drgn and no introspection contract, so it gets
-    # neither the kdive-drgn helper nor the SSH-NIC keyfile — gated on `drgn in packages`.
+    # no kdive-drgn helper — gated on `drgn in packages`.
     joined = " ".join(_rhel_argv(tmp_path, packages=("gcc", "make")))
     assert "kdive-drgn" not in joined
-    assert "kdive-ssh-nic" not in joined
-    assert "NetworkManager" not in joined
 
 
 def test_family_argv_fails_loud_when_drgn_helper_source_is_absent(

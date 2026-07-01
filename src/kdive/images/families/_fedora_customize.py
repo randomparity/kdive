@@ -183,23 +183,6 @@ KDUMP_FINAL_ACTION_CMD = (
 # tree. Staged only on the debug image (``drgn`` in packages) (ADR-0220, #724).
 DRGN_HELPER_GUEST_PATH = "/usr/local/sbin/kdive-drgn"
 DRGN_HELPER_REPO_RELPATH = ("deploy", "remote-libvirt-guest-helpers", "kdive-drgn")
-# The drgn-live SSH transport (ADR-0218) renders a SLIRP NIC the guest must DHCP to be reachable.
-# An interface-name-independent NetworkManager keyfile DHCPs whatever ethernet device the SSH NIC
-# enumerates as under direct-kernel boot (no stable NIC naming). Written 0600 — NM ignores a
-# world-readable keyfile (ADR-0220, #724).
-SSH_NIC_KEYFILE_PATH = "/etc/NetworkManager/system-connections/kdive-ssh-nic.nmconnection"
-SSH_NIC_KEYFILE_CONTENT = """[connection]
-id=kdive-ssh-nic
-type=ethernet
-autoconnect=true
-autoconnect-priority=-100
-
-[ipv4]
-method=auto
-
-[ipv6]
-method=ignore
-"""
 
 
 def drgn_helper_source() -> Path:
@@ -236,25 +219,6 @@ def drgn_helper_args() -> list[str]:
     ]
 
 
-def _ssh_nic_keyfile_args(cleanup: list[Path]) -> list[str]:
-    """Stage the NetworkManager SSH-NIC DHCP keyfile (ADR-0218), 0600 so NM loads it (#724).
-
-    Appends the staged tempfile to ``cleanup`` for the caller to unlink. NetworkManager-specific —
-    used by the ``rhel`` family; ``debian`` genericcloud has no NetworkManager and DHCPs the extra
-    NIC via cloud-init's ``cloud-ifupdown-helper`` instead (#824).
-    """
-    with tempfile.NamedTemporaryFile("w", suffix=".nmconnection", delete=False) as keyfile:
-        keyfile.write(SSH_NIC_KEYFILE_CONTENT)
-        keyfile_path = Path(keyfile.name)
-    cleanup.append(keyfile_path)
-    return [
-        "--upload",
-        f"{keyfile_path}:{SSH_NIC_KEYFILE_PATH}",
-        "--run-command",
-        f"chmod 0600 {SSH_NIC_KEYFILE_PATH}",
-    ]
-
-
 def makedumpfile_version_marker_args() -> list[str]:
     """virt-customize fragment recording ``makedumpfile --version`` to a guest marker file.
 
@@ -276,17 +240,12 @@ def makedumpfile_version_marker_args() -> list[str]:
 
 
 def debug_image_args(packages: tuple[str, ...], cleanup: list[Path]) -> list[str]:
-    """Stage the drgn helper + SSH-NIC DHCP keyfile for an ``rhel`` debug image (ADR-0220, #724).
+    """Stage the drgn helper for an ``rhel`` debug image (ADR-0220, #724).
 
-    Returns the virt-customize/virt-builder argv fragment and appends any tempfiles to
-    ``cleanup`` for the caller to unlink. Non-debug images (no ``drgn`` in ``packages``) get an
-    empty fragment.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` if the reviewed ``kdive-drgn`` helper is not a
-            readable file in the source tree — fail loud rather than ship a guest that cannot
-            introspect.
+    ``cleanup`` is retained for signature stability with the caller; the drgn helper stages no
+    tempfile. Non-debug images (no ``drgn`` in ``packages``) get an empty fragment.
     """
+    del cleanup
     if "drgn" not in packages:
         return []
-    return [*drgn_helper_args(), *_ssh_nic_keyfile_args(cleanup)]
+    return drgn_helper_args()
