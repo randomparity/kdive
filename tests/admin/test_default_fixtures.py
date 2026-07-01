@@ -26,4 +26,6 @@ def test_console_ready_profile_carries_required_boot_policy() -> None:
         "console=ttyS0",
         "root=/dev/vda",
     ]
-    assert "agent" in profile["requires"]["rootfs"]["capabilities"]
+    # The console-ready profile's gate is its config/cmdline requirements; it requires no
+    # rootfs capability (ADR-0287 dropped the phantom `agent` requirement).
+    assert profile["requires"]["rootfs"]["capabilities"] == []

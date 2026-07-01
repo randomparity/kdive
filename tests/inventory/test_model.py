@@ -69,7 +69,7 @@ def test_image_rejects_unknown_capability_token() -> None:
     # capabilities is the closed Capability vocabulary (ADR-0286); an off-vocabulary tag is a
     # hard parse error, not a silent passthrough.
     d = _doc()
-    d["image"][0]["capabilities"] = ["ssh"]
+    d["image"][0]["capabilities"] = ["kdive-ready-console"]
     with pytest.raises(InventoryError):
         InventoryDoc.parse(d)
 

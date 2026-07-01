@@ -196,7 +196,7 @@ arch = "x86_64"
 format = "qcow2"
 root_device = "/dev/vda"
 visibility = "public"
-capabilities = ["agent", "drgn"]
+capabilities = ["ssh", "selinux", "kdump", "drgn"]
 [image.source]
 kind = "staged-path"
 path = "/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2"
@@ -211,7 +211,7 @@ arch = "x86_64"
 format = "qcow2"
 root_device = "/dev/vda"
 visibility = "public"
-capabilities = ["agent", "drgn"]
+capabilities = ["ssh", "selinux", "kdump", "drgn"]
 [image.source]
 kind = "staged-path"
 path = "/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2"

@@ -40,8 +40,7 @@ requires:
   rootfs:
     format: qcow2
     root_device: /dev/vda
-    capabilities:
-      - agent
+    capabilities: []
 """
 
 
