@@ -59,9 +59,13 @@ Postgres — the `systems.*` handlers drive the state machine"):
 CREATE TABLE system_bootstrap_keys (
     system_id   uuid PRIMARY KEY REFERENCES systems (id) ON DELETE CASCADE,
     private_key text NOT NULL,
+    public_key  text NOT NULL,
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 ```
+
+Storing the public half alongside lets `ensure_`'s reuse path return it directly — no
+`ssh-keygen -y` re-derive, so the private key never touches disk on a provision retry.
 
 - Worker-agnostic: any worker servicing a later `authorize`/drgn job for the System loads the key
   from the DB (no host-local key file pinning it to the provisioning host — matters for >1 worker
@@ -79,12 +83,12 @@ Pure stdlib keygen + typed DB accessors:
   path). Mirrors the mode/timeout discipline of the deleted `managed_ssh_key.py`.
 - `async ensure_system_bootstrap_key(conn, system_id) -> str` — returns the **public** key.
   Concurrency-safe by construction: `INSERT ... ON CONFLICT (system_id) DO NOTHING` with a freshly
-  generated keypair, then `SELECT private_key` for the (winning or pre-existing) row and re-derive
-  the public half from it (`ssh-keygen -y` on a 0600 temp file, `finally`-unlinked). Two concurrent
-  provisions therefore converge on **one** row and one pubkey regardless of ordering or whether the
-  caller holds the per-System lock; a retry reuses the stored key, never regenerating one the
-  running disk would not trust. The freshly generated private half of a losing INSERT is simply
-  discarded (never written).
+  generated keypair (both halves), then `SELECT public_key` for the (winning or pre-existing) row.
+  Two concurrent provisions therefore converge on **one** row and one pubkey regardless of ordering
+  or whether the caller holds the per-System lock; a retry reuses the stored key, never
+  regenerating one the running disk would not trust. The freshly generated keypair of a losing
+  INSERT is simply discarded (never written), and the reuse path never reads or re-derives the
+  private half.
 - `async load_system_bootstrap_private_key(conn, system_id) -> str` — return the stored private
   key (register with `SecretRegistry`); raise `CONFIGURATION_ERROR` if absent.
 - `async delete_system_bootstrap_key(conn, system_id) -> None` — idempotent `DELETE`.
@@ -182,8 +186,11 @@ today's persistent managed-key file, but still closed explicitly).
   injected still leaves the key row intact, so the retry reuses the matching key rather than
   minting a mismatched one.
 - Missing key row at authorize/drgn time → `CONFIGURATION_ERROR` with `reason`.
-- Teardown delete is idempotent; a crashed teardown re-run is a no-op. An `authorize`/drgn job
-  cannot race teardown on the same System: both run under `advisory_xact_lock(SYSTEM)`.
+- Teardown delete is idempotent; a crashed teardown re-run is a no-op. The `authorize` job is
+  lock-serialized against teardown under `advisory_xact_lock(SYSTEM)`; drgn-live is a live read
+  that races teardown **benignly** — it materializes the key at call start, and once teardown
+  removes the guest a subsequent drgn correctly fails `TRANSPORT_FAILURE`/`CONFIGURATION_ERROR`.
+  (The plan verifies whether the drgn path also takes the SYSTEM lock.)
 - Recoverability is moot: nothing long-lived to back up — a lost key means tear down and
   reprovision.
 
