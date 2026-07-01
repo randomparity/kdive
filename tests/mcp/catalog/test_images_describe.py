@@ -180,9 +180,39 @@ _DEBUG_CAPS = ["agent", "kdump", "drgn"]
 
 
 def _kdump(resp: ToolResponse) -> dict[str, JsonValue]:
-    block = resp.data["kdump"]
+    signals = resp.data["capability_signals"]
+    assert isinstance(signals, dict)
+    block = signals["kdump"]
     assert isinstance(block, dict)
     return block
+
+
+def test_describe_exposes_capability_signals_with_kdump(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            iid = await _insert(
+                pool,
+                name="fedora-44",
+                visibility="public",
+                owner=None,
+                capabilities=_DEBUG_CAPS,
+                provenance='{"makedumpfile_version": "1.7.9"}',
+            )
+            resp = await catalog_images.describe_image(pool, _ctx(), iid)
+        signals = resp.data["capability_signals"]
+        assert isinstance(signals, dict)
+        assert "kdump" in signals
+        block = signals["kdump"]
+        assert isinstance(block, dict)
+        assert set(block) == {
+            "makedumpfile_version",
+            "target_kernel",
+            "capability",
+            "min_makedumpfile_required",
+            "note",
+        }
+
+    asyncio.run(_run())
 
 
 def test_describe_kdump_block_capable_for_default_basis(migrated_url: str) -> None:
