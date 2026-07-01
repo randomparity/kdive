@@ -123,7 +123,6 @@ async def capture_console_delta(
 class _Snapshot(NamedTuple):
     domain_name: str
     project: str
-    mark: int
     controller: Controller
 
 
@@ -142,7 +141,11 @@ def _changed_state_error(system_id: UUID) -> CategorizedError:
 async def _snapshot(
     conn: AsyncConnection, system_id: UUID, resolver: ProviderResolver
 ) -> _Snapshot:
-    """Under the per-System lock (tx 1): verify live+local+READY and read the pre-injection mark."""
+    """Under the per-System lock (tx 1): verify live+local+READY and resolve domain+controller.
+
+    The pre-injection mark is read by the capture core just before injection (tighter than a
+    lock-held read here), so this snapshot only validates state and resolves the ports.
+    """
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None or system.state is not SystemState.READY:
@@ -155,11 +158,9 @@ async def _snapshot(
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"reason": "not_local_libvirt", "provider_kind": binding.kind.value},
             )
-        mark_bytes = await asyncio.to_thread(read_console_log, console_log_path(system_id))
         return _Snapshot(
             domain_name=_resolved_domain_name(system),
             project=system.project,
-            mark=len(mark_bytes),
             controller=binding.runtime.controller,
         )
 
