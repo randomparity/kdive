@@ -29,7 +29,6 @@ class CustomizeContext:
     Attributes:
         kind: The image kind (``debug`` or ``build``) the packages were selected for.
         packages: The resolved package set to install.
-        authorized_key: Path to the kdive-managed SSH public key to inject for ``root``.
         readiness_unit_path: Host path of the rendered kdive-ready systemd unit to upload.
         is_cloud_image: True when the base is a cloud-image (needs cloud-init masking and a
             seeded ``/etc/machine-id``); False for a virt-builder scratch.
@@ -41,7 +40,6 @@ class CustomizeContext:
 
     kind: str
     packages: tuple[str, ...]
-    authorized_key: Path
     readiness_unit_path: Path
     is_cloud_image: bool
     cleanup: list[Path]

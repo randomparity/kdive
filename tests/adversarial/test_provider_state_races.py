@@ -74,7 +74,8 @@ class _TrackingProvisioner:
         self.reprovisioned: list[UUID] = []
         self.torn_down: list[str] = []
 
-    def provision(self, system_id: UUID, profile: Any) -> str:
+    def provision(self, system_id: UUID, profile: Any, *, overlay_customizers: Any = ()) -> str:
+        del overlay_customizers
         name = f"kdive-{system_id}"
         self.provisioned.append(system_id)
         self.live.add(name)
@@ -84,7 +85,8 @@ class _TrackingProvisioner:
         self.torn_down.append(domain_name)
         self.live.discard(domain_name)
 
-    def reprovision(self, system_id: UUID, profile: Any) -> str:
+    def reprovision(self, system_id: UUID, profile: Any, *, overlay_customizers: Any = ()) -> str:
+        del overlay_customizers
         name = f"kdive-{system_id}"
         self.reprovisioned.append(system_id)
         self.live.add(name)
@@ -167,10 +169,12 @@ async def _race_once(pool: AsyncConnectionPool, *, provision_first: bool) -> tup
 
     async def run_provision() -> None:
         async with pool.connection() as conn:
+            await conn.set_autocommit(True)  # the worker runs handlers in autocommit
             await systems_handlers.provision_handler(conn, pjob, resolver=resolver)
 
     async def run_teardown() -> None:
         async with pool.connection() as conn:
+            await conn.set_autocommit(True)  # the worker runs handlers in autocommit
             await systems_handlers.teardown_handler(conn, tjob, resolver=resolver)
 
     tasks = (
@@ -186,7 +190,8 @@ def test_provision_failure_marks_system_failed_and_raises_terminally(migrated_ur
     # (job `succeeded` while the System is `failed`). The handler re-raises the categorized error
     # marked `terminal` so the worker dead-letters at once and the real reason reaches the agent.
     class _FailingProvisioner(_TrackingProvisioner):
-        def provision(self, system_id: UUID, profile: Any) -> str:
+        def provision(self, system_id: UUID, profile: Any, *, overlay_customizers: Any = ()) -> str:
+            del overlay_customizers
             raise CategorizedError(
                 "base image volume not staged",
                 category=ErrorCategory.CONFIGURATION_ERROR,

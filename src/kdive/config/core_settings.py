@@ -328,17 +328,6 @@ SECRETS_ROOT = Setting(
     help="Root directory for the file-ref secret backend.",
 )
 
-SSH_KEY_DIR = Setting(
-    name="KDIVE_SSH_KEY_DIR",
-    parse=_str,
-    group="ssh",
-    processes=_WORKER,
-    help=(
-        "Override for the managed SSH keypair directory (absolute). Read standalone by "
-        "the builder's host python; documented here for the contract."
-    ),
-)
-
 BUILD_WORKSPACE = Setting(
     name="KDIVE_BUILD_WORKSPACE",
     parse=_str,
@@ -651,7 +640,6 @@ SETTINGS = [
     CRASH_DIR,
     LIVE_SCRIPT_MAX_TIMEOUT_SECONDS,
     SECRETS_ROOT,
-    SSH_KEY_DIR,
     BUILD_WORKSPACE,
     KERNEL_SRC,
     BUILD_COMPONENT_ROOTS,

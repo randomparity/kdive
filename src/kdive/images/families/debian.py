@@ -110,8 +110,6 @@ class DebianFamily:
             argv += drgn_helper_args()
             argv += makedumpfile_version_marker_args()
         argv += [
-            "--ssh-inject",
-            f"root:file:{ctx.authorized_key}",
             "--upload",
             f"{ctx.readiness_unit_path}:/etc/systemd/system/{READINESS_MARKER}.service",
             "--run-command",

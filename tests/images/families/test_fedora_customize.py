@@ -65,7 +65,6 @@ def _ci_ctx(tmp_path: Path, *, is_cloud_image: bool) -> CustomizeContext:
     return CustomizeContext(
         kind="debug",
         packages=("openssh-server",),
-        authorized_key=tmp_path / "key.pub",
         readiness_unit_path=tmp_path / "u.service",
         is_cloud_image=is_cloud_image,
         cleanup=[],

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
+from collections.abc import Callable
 from typing import LiteralString
 from uuid import UUID
 
@@ -26,10 +28,15 @@ from kdive.jobs.handlers.ssh_authorize import authorize_ssh_key_handler
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReprovisionPayload, SystemPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
+from kdive.prereqs.system_bootstrap_key import (
+    delete_system_bootstrap_key,
+    ensure_system_bootstrap_key,
+)
 from kdive.profiles.provider_policy import ProfilePolicy, rootfs_upload_window_allowed
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.console_parts.sidecar import sidecar_object_name
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.store.objectstore import ObjectStore, artifact_key
@@ -56,6 +63,23 @@ _SELECT_PART_KEYS_SQL: LiteralString = (
 # System-owned diagnostic SysRq captures (ADR-0285); reclaimed at teardown like console parts,
 # since no gc expiry sweep touches owner_kind='systems'.
 _SYSRQ_DIAGNOSTIC_LIKE: LiteralString = "%sysrq-diagnostic-%"
+
+
+async def _bootstrap_key_customizers(
+    conn: AsyncConnection, system_id: UUID, runtime: ProviderRuntime
+) -> tuple[Callable[[str], None], ...]:
+    """Ensure the System's bootstrap key (committed) and build its overlay customizer, if any.
+
+    The ``ensure`` commits in its own transaction BEFORE this returns (ADR-0289, #963): the
+    overlay is created and the key injected into it strictly after this call, so a later
+    rollback in the caller's transaction never un-records a key the overlay may already trust.
+    A provider runtime with no ``bootstrap_key_customizer`` factory (no local overlay to
+    customize) yields no customizers.
+    """
+    async with conn.transaction():
+        pubkey = await ensure_system_bootstrap_key(conn, system_id)
+    factory = runtime.bootstrap_key_customizer
+    return (factory(pubkey),) if factory is not None else ()
 
 
 async def audit_transition(
@@ -223,8 +247,13 @@ async def provision_handler(
             )
         return str(system_id)
     profile = ProvisioningProfile.parse(system.provisioning_profile)
+    customizers = await _bootstrap_key_customizers(conn, system_id, runtime)
     try:
-        domain_name = await asyncio.to_thread(provisioner.provision, system_id, profile)
+        domain_name = await asyncio.to_thread(
+            functools.partial(
+                provisioner.provision, system_id, profile, overlay_customizers=customizers
+            )
+        )
     except CategorizedError as exc:
         await _record_system_failure(
             conn,
@@ -269,8 +298,16 @@ async def reprovision_handler(
     if system.state is not SystemState.REPROVISIONING:
         return str(system_id)
     profile = ProvisioningProfile.parse(system.provisioning_profile)
+    # Same commit-before-overlay ordering as provision_handler (ADR-0289, #963): reprovision wipes
+    # and recreates the overlay, so it must re-inject the SAME stored key — ensure_ returns the
+    # existing key on reuse, and this commits before the overlay is ever touched.
+    customizers = await _bootstrap_key_customizers(conn, system_id, binding.runtime)
     try:
-        domain_name = await asyncio.to_thread(provisioner.reprovision, system_id, profile)
+        domain_name = await asyncio.to_thread(
+            functools.partial(
+                provisioner.reprovision, system_id, profile, overlay_customizers=customizers
+            )
+        )
     except CategorizedError as exc:
         await _record_system_failure(
             conn,
@@ -387,6 +424,12 @@ async def teardown_handler(
     set_provider_kind(binding.kind.value)
     provisioner = binding.runtime.provisioner
     await asyncio.to_thread(provisioner.teardown, domain_name)
+    # The bootstrap key (ADR-0289, #963) is System-owned like the console/sysrq artifacts, but its
+    # deletion is not best-effort: a stale row after teardown wrongly reports a System as
+    # SSH-reachable, so it runs unconditionally (unlike the artifact_store-gated reclaim below) and
+    # is not swallowed by the best-effort try/except.
+    async with conn.transaction():
+        await delete_system_bootstrap_key(conn, system_id)
     if artifact_store is not None:
         try:
             await _reclaim_console_artifacts(conn, artifact_store, system_id)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, NamedTuple, Protocol, cast
 from uuid import UUID
@@ -82,8 +83,19 @@ class InstallRequest:
 class Provisioner(Protocol):
     """Provisioning port keyed on the already-minted System id."""
 
-    def provision(self, system_id: UUID, profile: ProvisioningProfile) -> str:
+    def provision(
+        self,
+        system_id: UUID,
+        profile: ProvisioningProfile,
+        *,
+        overlay_customizers: tuple[Callable[[str], None], ...] = (),
+    ) -> str:
         """Create and start a System, returning the provider domain name.
+
+        ``overlay_customizers`` (ADR-0289, #963) run in provider-defined order against a
+        freshly-created overlay only — never on a provision retry that reuses an existing one. A
+        provider without a local overlay to customize (e.g. a synthetic or remote-volume-backed
+        plane) accepts and ignores this argument.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for invalid provider-specific profile
@@ -105,8 +117,16 @@ class Provisioner(Protocol):
         """
         ...
 
-    def reprovision(self, system_id: UUID, profile: ProvisioningProfile) -> str:
+    def reprovision(
+        self,
+        system_id: UUID,
+        profile: ProvisioningProfile,
+        *,
+        overlay_customizers: tuple[Callable[[str], None], ...] = (),
+    ) -> str:
         """Replace a System's provider state, returning the new provider domain name.
+
+        ``overlay_customizers`` (ADR-0289, #963) is forwarded the same as :meth:`provision`.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for invalid provider-specific profile

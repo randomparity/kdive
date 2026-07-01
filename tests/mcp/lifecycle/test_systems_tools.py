@@ -932,10 +932,13 @@ def test_provision_handler_failure_when_already_terminal_preserves_category(
             super().__init__(provision_error=True)
             self._url = url
 
-        def provision(self, system_id: UUID, profile: Any) -> str:
+        def provision(
+            self, system_id: UUID, profile: Any, *, overlay_customizers: tuple[Any, ...] = ()
+        ) -> str:
             with psycopg.connect(self._url, autocommit=True) as c:
                 c.execute("UPDATE systems SET state = 'torn_down' WHERE id = %s", (system_id,))
-            return super().provision(system_id, profile)  # raises PROVISIONING_FAILURE
+            # raises PROVISIONING_FAILURE
+            return super().provision(system_id, profile, overlay_customizers=overlay_customizers)
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -988,8 +991,10 @@ def test_provision_handler_failed_compensation_retries_reap_on_requeue(migrated_
             self._url = url
             self._fail_next_teardown = True
 
-        def provision(self, system_id: UUID, profile: Any) -> str:
-            name = super().provision(system_id, profile)
+        def provision(
+            self, system_id: UUID, profile: Any, *, overlay_customizers: tuple[Any, ...] = ()
+        ) -> str:
+            name = super().provision(system_id, profile, overlay_customizers=overlay_customizers)
             with psycopg.connect(self._url, autocommit=True) as c:
                 c.execute("UPDATE systems SET state = 'torn_down' WHERE id = %s", (system_id,))
             return name
@@ -1049,8 +1054,10 @@ def test_provision_handler_superseded_midflight_tears_down_created_domain(
             super().__init__()
             self._url = url
 
-        def provision(self, system_id: UUID, profile: Any) -> str:
-            name = super().provision(system_id, profile)
+        def provision(
+            self, system_id: UUID, profile: Any, *, overlay_customizers: tuple[Any, ...] = ()
+        ) -> str:
+            name = super().provision(system_id, profile, overlay_customizers=overlay_customizers)
             with psycopg.connect(self._url, autocommit=True) as c:
                 c.execute("UPDATE systems SET state = 'torn_down' WHERE id = %s", (system_id,))
             return name
@@ -1083,8 +1090,10 @@ def test_provision_handler_concurrent_same_job_ready_does_not_tear_down(migrated
             super().__init__()
             self._url = url
 
-        def provision(self, system_id: UUID, profile: Any) -> str:
-            name = super().provision(system_id, profile)
+        def provision(
+            self, system_id: UUID, profile: Any, *, overlay_customizers: tuple[Any, ...] = ()
+        ) -> str:
+            name = super().provision(system_id, profile, overlay_customizers=overlay_customizers)
             with psycopg.connect(self._url, autocommit=True) as c:
                 c.execute(
                     "UPDATE systems SET state = 'ready', domain_name = %s WHERE id = %s",
@@ -1922,8 +1931,10 @@ def test_reprovision_handler_superseded_midflight_tears_down_domain(
             super().__init__()
             self._url = url
 
-        def reprovision(self, system_id: UUID, profile: Any) -> str:
-            name = super().reprovision(system_id, profile)
+        def reprovision(
+            self, system_id: UUID, profile: Any, *, overlay_customizers: tuple[Any, ...] = ()
+        ) -> str:
+            name = super().reprovision(system_id, profile, overlay_customizers=overlay_customizers)
             with psycopg.connect(self._url, autocommit=True) as c:
                 c.execute("UPDATE systems SET state = 'torn_down' WHERE id = %s", (system_id,))
             return name

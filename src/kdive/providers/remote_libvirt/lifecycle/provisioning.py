@@ -144,13 +144,24 @@ class RemoteLibvirtProvisioning:
         self._agent_timeout_s = agent_timeout_s
         self._agent_poll_s = agent_poll_s
 
-    def provision(self, system_id: UUID, profile: ProvisioningProfile) -> str:
+    def provision(
+        self,
+        system_id: UUID,
+        profile: ProvisioningProfile,
+        *,
+        overlay_customizers: tuple[Callable[[str], None], ...] = (),
+    ) -> str:
         """Define and start the System's disk-image domain; wait for its guest agent.
 
         Idempotent (ADR-0080 §4): a deterministic name+uuid redefines in place on
         retry, ``create()`` treats already-running as the achieved post-state, the
         overlay is created only when absent, and a retry reuses the System's own
         recorded gdbstub port.
+
+        ``overlay_customizers`` (ADR-0289, #963) is accepted for ``Provisioner`` call-site
+        parity with local-libvirt but not yet wired here: the remote overlay is a storage-pool
+        volume provisioned over TLS, not a local qcow2 file ``virt-customize`` can touch, so a
+        remote-libvirt System's bootstrap key is not yet injected (tracked separately).
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for a profile without a remote
@@ -161,6 +172,7 @@ class RemoteLibvirtProvisioning:
                 ``INFRASTRUCTURE_FAILURE`` for other provider control-plane faults;
                 ``TRANSPORT_FAILURE`` when the TLS connect fails.
         """
+        del overlay_customizers
         section = self._remote_section(profile)
         require_concrete_sizing(profile)
         config = self._connections.config()
@@ -201,14 +213,20 @@ class RemoteLibvirtProvisioning:
             )
         return domain_name
 
-    def reprovision(self, system_id: UUID, profile: ProvisioningProfile) -> str:
+    def reprovision(
+        self,
+        system_id: UUID,
+        profile: ProvisioningProfile,
+        *,
+        overlay_customizers: tuple[Callable[[str], None], ...] = (),
+    ) -> str:
         """Wipe the System's domain + overlay and provision the new profile in place.
 
         Raises:
             CategorizedError: as :meth:`teardown` and :meth:`provision`.
         """
         self.teardown(domain_name_for(system_id))
-        return self.provision(system_id, profile)
+        return self.provision(system_id, profile, overlay_customizers=overlay_customizers)
 
     def teardown(self, domain_name: str) -> None:
         """Destroy+undefine the domain and delete its overlay volume; idempotent.

@@ -1,7 +1,7 @@
 """Worker handler: append an agent public key to a guest's root authorized_keys (ADR-0271).
 
-The worker already holds the kdive-managed SSH private key (ADR-0052) and can root-SSH any
-SSH-provisioned guest over the loopback forward (ADR-0218). This handler reuses that identity to
+The worker loads the System's per-System SSH bootstrap private key (ADR-0289, #963) and can
+root-SSH that guest over the loopback forward (ADR-0218). This handler uses that identity to
 append the agent's validated public key to ``/root/.ssh/authorized_keys`` — a flock-serialized,
 idempotent append — so the agent can then SSH in with its own private key. KDIVE never holds the
 agent's private key.
@@ -18,10 +18,14 @@ from psycopg import AsyncConnection
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.payloads import AuthorizeSshKeyPayload, load_payload
-from kdive.prereqs.managed_ssh_key import managed_private_key_path
+from kdive.prereqs.system_bootstrap_key import (
+    load_system_bootstrap_private_key,
+    materialized_private_key,
+)
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.shared.runtime_paths import domain_name_for
+from kdive.providers.shared.ssh_connect_retry import SshRetryPolicy, run_ssh_with_retry
 
 type SshExec = Callable[[list[str], str], None]
 
@@ -30,6 +34,10 @@ _SSH_USER = "root"
 _SSH_CONNECT_TIMEOUT_S = 10
 _SSH_RUN_TIMEOUT_S = 30
 _LOCK = "/root/.ssh/.kdive-authz.lock"
+# A freshly-`ready` System's guest sshd may not be accepting yet (readiness is the boot marker,
+# ~46 ms before sshd binds — ADR-0289 live proof), so the first authorize SSH is refused. Retry
+# connection-level failures over this window; auth/host-key errors still fail fast.
+_AUTHORIZE_SSH_RETRY = SshRetryPolicy()
 
 # The remote append script (ADR-0271). The key is **never** in this string: `ssh host CMD` joins
 # any post-host argv into one string the remote login shell re-parses, so an argv-positioned key
@@ -51,12 +59,12 @@ _REMOTE_SCRIPT = (
 )
 
 
-def build_authorize_argv(port: int) -> list[str]:
+def build_authorize_argv(port: int, key_path: str) -> list[str]:
     """Build the fixed loopback SSH argv that runs the append script (key arrives on stdin)."""
     return [
         "ssh",
         "-i",
-        str(managed_private_key_path()),
+        key_path,
         "-o",
         "BatchMode=yes",
         "-o",
@@ -75,20 +83,23 @@ def build_authorize_argv(port: int) -> list[str]:
 
 
 def _real_ssh_exec(argv: list[str], key: str) -> None:  # pragma: no cover - live_vm
-    try:
-        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; key is piped on stdin
-            argv,
-            input=key,
-            text=True,
-            timeout=_SSH_RUN_TIMEOUT_S,
-            check=False,
-            capture_output=True,
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        raise CategorizedError(
-            "ssh to the guest to authorize the key timed out or could not launch",
-            category=ErrorCategory.TRANSPORT_FAILURE,
-        ) from exc
+    def run_once() -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(  # noqa: S603 - fixed argv, no shell; key is piped on stdin
+                argv,
+                input=key,
+                text=True,
+                timeout=_SSH_RUN_TIMEOUT_S,
+                check=False,
+                capture_output=True,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise CategorizedError(
+                "ssh to the guest to authorize the key timed out or could not launch",
+                category=ErrorCategory.TRANSPORT_FAILURE,
+            ) from exc
+
+    proc = run_ssh_with_retry(run_once, policy=_AUTHORIZE_SSH_RETRY)
     if proc.returncode != 0:
         raise CategorizedError(
             "ssh authorize-key command failed in the guest",
@@ -104,11 +115,12 @@ async def authorize_ssh_key_handler(
     resolver: ProviderResolver,
     ssh_exec: SshExec = _real_ssh_exec,
 ) -> str | None:
-    """Append the agent public key to the guest root authorized_keys over the managed-key SSH.
+    """Append the agent public key to the guest root authorized_keys over the bootstrap-key SSH.
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when the System has no recorded SSH forward;
-            ``TRANSPORT_FAILURE`` when the guest sshd is unreachable or the append fails.
+        CategorizedError: ``CONFIGURATION_ERROR`` when the System has no recorded SSH forward or
+            no bootstrap key; ``TRANSPORT_FAILURE`` when the guest sshd is unreachable or the
+            append fails.
     """
     payload = load_payload(job, AuthorizeSshKeyPayload)
     system_id = UUID(payload.system_id)
@@ -127,5 +139,7 @@ async def authorize_ssh_key_handler(
             details={"reason": "ssh_not_provisioned"},
         )
     _host, port = endpoint
-    ssh_exec(build_authorize_argv(port), payload.public_key)
+    private_key = await load_system_bootstrap_private_key(conn, system_id)
+    with materialized_private_key(private_key) as key_path:
+        ssh_exec(build_authorize_argv(port, str(key_path)), payload.public_key)
     return None

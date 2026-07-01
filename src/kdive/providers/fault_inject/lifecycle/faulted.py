@@ -69,13 +69,25 @@ class FaultedProvisioning:
         self._attempt_for = attempt_for
         self._sleep_s = sleep_s
 
-    def provision(self, system_id: UUID, profile: ProvisioningProfile) -> str:
+    def provision(
+        self,
+        system_id: UUID,
+        profile: ProvisioningProfile,
+        *,
+        overlay_customizers: tuple[Callable[[str], None], ...] = (),
+    ) -> str:
         self._draw(system_id, FaultPlane.PROVISION)
-        return self._inner.provision(system_id, profile)
+        return self._inner.provision(system_id, profile, overlay_customizers=overlay_customizers)
 
-    def reprovision(self, system_id: UUID, profile: ProvisioningProfile) -> str:
+    def reprovision(
+        self,
+        system_id: UUID,
+        profile: ProvisioningProfile,
+        *,
+        overlay_customizers: tuple[Callable[[str], None], ...] = (),
+    ) -> str:
         self._draw(system_id, FaultPlane.PROVISION)
-        return self._inner.reprovision(system_id, profile)
+        return self._inner.reprovision(system_id, profile, overlay_customizers=overlay_customizers)
 
     def teardown(self, domain_name: str) -> None:
         # Teardown is compensation, not a perturbed op — it must always reap, so no draw.

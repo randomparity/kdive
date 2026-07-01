@@ -136,13 +136,19 @@ class _BuildProvider:
 
 
 class _ProvisionProvider:
-    def provision(self, system_id: UUID, profile: object) -> str:
+    def provision(
+        self, system_id: UUID, profile: object, *, overlay_customizers: tuple[object, ...] = ()
+    ) -> str:
+        del overlay_customizers
         return f"domain-{system_id}"
 
     def teardown(self, domain_name: str) -> None:
         self.torn_down = domain_name
 
-    def reprovision(self, system_id: UUID, profile: object) -> str:
+    def reprovision(
+        self, system_id: UUID, profile: object, *, overlay_customizers: tuple[object, ...] = ()
+    ) -> str:
+        del overlay_customizers
         return f"domain-{system_id}"
 
 
@@ -200,11 +206,13 @@ class _IntrospectorProvider:
     ) -> IntrospectOutput:
         return IntrospectOutput(tasks={}, modules={}, sysinfo={}, truncated=False)
 
-    def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
+    def introspect_live(
+        self, *, transport_handle: str, helper: str, key_path: str
+    ) -> IntrospectOutput:
         return IntrospectOutput(tasks={}, modules={}, sysinfo={}, truncated=False)
 
     def run_script(
-        self, *, transport_handle: str, script: str, timeout_sec: float
+        self, *, transport_handle: str, script: str, timeout_sec: float, key_path: str
     ) -> LiveScriptOutput:
         return LiveScriptOutput(output="", truncated=False)
 

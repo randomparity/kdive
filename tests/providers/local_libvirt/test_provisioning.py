@@ -1142,6 +1142,55 @@ def test_teardown_removes_overlay_even_when_domain_already_gone() -> None:
     assert removed == [overlay_path(_SYS)]
 
 
+def test_provision_runs_customizers_only_when_overlay_created() -> None:
+    # Customizers mutate the overlay's guest filesystem (e.g. injecting the per-System SSH
+    # bootstrap key, #963); running them against a present overlay would re-mutate a live disk a
+    # running QEMU already holds open, so the loop must be gated on `PreparedOverlay.created`.
+    calls: list[str] = []
+
+    def customizer(overlay: str) -> None:
+        calls.append(overlay)
+
+    created_conn = _ProvConn()
+    _prov(created_conn, overlay_exists=lambda _overlay: False).provision(
+        _SYS, _profile(), overlay_customizers=(customizer,)
+    )
+    assert calls == [overlay_path(_SYS)]
+
+    calls.clear()
+    name = domain_name_for(_SYS)
+    reuse_conn = _ProvConn(
+        defined={name: _ProvDomain(name, create_error=libvirt.VIR_ERR_OPERATION_INVALID)}
+    )
+    _prov(reuse_conn, overlay_exists=lambda _overlay: True).provision(
+        _SYS, _profile(), overlay_customizers=(customizer,)
+    )
+    assert calls == []
+
+
+def test_provision_customizer_failure_removes_the_overlay() -> None:
+    # A customizer failure must reclaim the just-created overlay, mirroring a real start failure
+    # (the loop runs inside the same try/except that catches CategorizedError).
+    removed: list[str] = []
+
+    def failing_customizer(_overlay: str) -> None:
+        raise CategorizedError(
+            "synthetic customizer failure",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+        )
+
+    conn = _ProvConn()
+    with pytest.raises(CategorizedError) as caught:
+        _prov(conn, remove_overlay=removed.append).provision(
+            _SYS, _profile(), overlay_customizers=(failing_customizer,)
+        )
+
+    assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert removed == [overlay_path(_SYS)]
+    # The customizer runs before define/start: no domain should have been defined.
+    assert conn.recorded_xml == []
+
+
 def test_provision_skips_overlay_create_when_it_already_exists() -> None:
     # Idempotent retry of an already-running System: the overlay QEMU still holds open must NOT
     # be recreated (qemu-img would fail the lock or truncate the live disk). provision skips the

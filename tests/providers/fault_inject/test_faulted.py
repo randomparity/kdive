@@ -59,11 +59,17 @@ class _SpyProvisioningInner:
         self.reprovision_calls: list[tuple[UUID, object]] = []
         self.teardown_calls: list[str] = []
 
-    def provision(self, system_id: UUID, profile: object) -> str:
+    def provision(
+        self, system_id: UUID, profile: object, *, overlay_customizers: tuple[object, ...] = ()
+    ) -> str:
+        del overlay_customizers
         self.provision_calls.append((system_id, profile))
         return "spy-domain"
 
-    def reprovision(self, system_id: UUID, profile: object) -> str:
+    def reprovision(
+        self, system_id: UUID, profile: object, *, overlay_customizers: tuple[object, ...] = ()
+    ) -> str:
+        del overlay_customizers
         self.reprovision_calls.append((system_id, profile))
         return "spy-domain"
 

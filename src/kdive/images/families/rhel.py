@@ -2,9 +2,10 @@
 
 Encodes the virt-customize argv PROVEN live on Fedora 44 in the #817 de-risk spike: install the
 dnf package set, enable ``sshd``/``kdump``, write the NMI-panic sysctl, pin kdump
-``final_action poweroff``, stage the debug-image drgn/SSH-NIC helpers, inject the managed SSH key,
-upload+enable the kdive-ready serial-readiness unit, and set SELinux permissive. It also enables
-cloud-init via a baked NoCloud seed (ADR-0288), the uniform rootfs first-boot mechanism.
+``final_action poweroff``, stage the debug-image drgn/SSH-NIC helpers, upload+enable the
+kdive-ready serial-readiness unit, and set SELinux permissive. It also enables cloud-init via a
+baked NoCloud seed (ADR-0288), the uniform rootfs first-boot mechanism. The image bakes no
+authorized key (ADR-0289, #963); the per-System bootstrap key is injected at provision time.
 """
 
 from __future__ import annotations
@@ -114,8 +115,6 @@ class RhelFamily:
         if ctx.kind == "debug":
             argv += makedumpfile_version_marker_args()
         argv += [
-            "--ssh-inject",
-            f"root:file:{ctx.authorized_key}",
             "--upload",
             f"{ctx.readiness_unit_path}:/etc/systemd/system/{READINESS_MARKER}.service",
             "--run-command",
