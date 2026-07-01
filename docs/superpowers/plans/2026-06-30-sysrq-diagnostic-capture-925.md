@@ -21,12 +21,27 @@ impl, focused test + guardrails green, refactor green.
   each, imperative subject ≤72 chars, `Co-Authored-By: Claude Opus 4.8 (1M context)` trailer.
 - Tasks are ordered by dependency; later tasks import symbols earlier tasks create.
 
-## Task 1 — Domain: `SysRqCommand` allowlist enum + `JobKind`/payload
+> **Commit-atomicity rule (guardrails green at every commit).** A guard goes red the
+> instant the code half of a change lands without the generated/schema half it invalidates.
+> Two pairs **must land in the same commit**: (a) the `JobKind` enum addition **and**
+> migration 0055 — `tests/db/test_migrate.py` parametrizes `("jobs_kind_check", JobKind)` and
+> fails if the enum has a kind the applied CHECK rejects; (b) the tool registration **and**
+> the regenerated live-registry docs — `just docs-check`, `just rbac-matrix` (check), and
+> `just resources-docs-check` fail the moment the registry gains a tool the committed
+> snapshots don't reflect. So **Task 1 and Task 2 are one commit**, and **Task 8's
+> regeneration is folded into Task 6's commit** (Task 8 is a checklist of regenerators to run
+> within that commit, not a standalone later commit).
 
-**Where:** the persistence + allowlist foundation everything else builds on.
+## Task 1 + 2 — Domain allowlist + `JobKind`/payload + migration 0055 (one commit)
+
+**Where:** the persistence + allowlist foundation everything else builds on. Committed
+together so `test_migrate.py`'s enum↔CHECK parity never goes red.
 
 **Files:** `src/kdive/domain/operations/sysrq.py` (new), `src/kdive/domain/operations/jobs.py`,
-`src/kdive/jobs/payloads.py`, `tests/domain/test_sysrq.py` (new), `tests/jobs/test_payloads.py`.
+`src/kdive/jobs/payloads.py`, `src/kdive/db/schema/0055_diagnostic_sysrq_job_kind.sql` (new),
+`tests/domain/test_sysrq.py` (new), `tests/jobs/test_payloads.py`,
+`tests/db/test_migration_0055_diagnostic_sysrq.py` (new, mirroring
+`test_migration_0053_console_rotate.py`).
 
 **Do:**
 - New `src/kdive/domain/operations/sysrq.py`: `class SysRqCommand(StrEnum)` with the seven
@@ -41,6 +56,10 @@ impl, focused test + guardrails green, refactor green.
   `DESTRUCTIVE_JOB_KINDS`.
 - `payloads.py`: add `SysRqPayload(system_id: str, command: str)` following the existing
   payload dataclass/`load_payload` pattern.
+- `src/kdive/db/schema/0055_diagnostic_sysrq_job_kind.sql`: copy
+  `0053_console_rotate_job_kind.sql`'s drop-and-recreate shape; the new CHECK lists every
+  current kind **plus** `'diagnostic_sysrq'`. Header comment: additive/forward-only
+  (ADR-0015), constraint name stable, cites #925.
 
 **TDD / acceptance:**
 - Test each friendly value maps to the expected trigger char; unknown value → `CONFIGURATION_ERROR`
@@ -48,21 +67,11 @@ impl, focused test + guardrails green, refactor green.
 - Update any JobKind-exhaustiveness test (`tests/domain/test_models.py`,
   `tests/jobs/test_payloads.py`) that enumerates kinds; a new kind must not break them.
 - `SysRqPayload` round-trips through `load_payload`.
-
-## Task 2 — Migration 0055: widen `jobs_kind_check`
-
-**Where:** persistence must admit the new kind before any enqueue path is exercised end-to-end.
-
-**Files:** `src/kdive/db/schema/0055_diagnostic_sysrq_job_kind.sql` (new); the schema test that
-asserts the applied CHECK matches `JobKind` (find via `rg "jobs_kind_check" tests`).
-
-**Do:** copy `0053_console_rotate_job_kind.sql`'s drop-and-recreate shape; the new CHECK lists
-every current kind **plus** `'diagnostic_sysrq'`. Header comment: additive/forward-only
-(ADR-0015), constraint name stable, cites #925.
-
-**TDD / acceptance:** the migration applies on a fresh DB (testcontainers) and a
-`diagnostic_sysrq` job row inserts; the SQL↔enum tie test passes. Requires Docker (skips
-locally if absent; CI sets `KDIVE_REQUIRE_DOCKER=1`).
+- Migration test (mirroring `test_migration_0053_console_rotate.py`): pre-0055 a
+  `diagnostic_sysrq` row violates `jobs_kind_check`; post-0055 it inserts and no existing kind
+  is dropped. `tests/db/test_migrate.py`'s `("jobs_kind_check", JobKind)` parity stays green
+  **because the enum and migration land in this same commit**. Requires Docker (skips locally
+  if absent; CI sets `KDIVE_REQUIRE_DOCKER=1`).
 
 ## Task 3 — Control port method + local-libvirt `sendKey`; remote stub
 
@@ -157,12 +166,15 @@ lock-store.
 - Mid-capture state change (System set not-READY between tx1 and tx2) → `system_changed_state`.
 - `artifact_store=None` → `CONFIGURATION_ERROR`.
 
-## Task 6 — MCP tool `control.diagnostic_sysrq`
+## Task 6 — MCP tool `control.diagnostic_sysrq` (+ regenerate the agent surface, one commit)
 
 **Where:** the agent-facing admission path, in the `control.*` toolset next to `force_crash`.
+Registering the tool invalidates the live-registry doc guards, so **Task 8's regeneration is
+part of this commit** (see the commit-atomicity rule).
 
 **Files:** `src/kdive/mcp/tools/lifecycle/control.py`,
-`tests/mcp/lifecycle/test_control_tools.py`.
+`tests/mcp/lifecycle/test_control_tools.py`, plus the regenerated agent-surface artifacts from
+Task 8 (tool reference, rbac matrix, resource snapshots, toolset purpose doc).
 
 **Do:**
 - Handler `diagnostic_sysrq_system(pool, ctx, *, system_id, command, resolver, idempotency_key)`
@@ -203,9 +215,11 @@ existing teardown test).
 the row removed at teardown; a System without one is unaffected; existing console-part reclaim
 still passes.
 
-## Task 8 — Agent-facing surface guards + generated docs
+## Task 8 — Agent-facing surface guards + generated docs (run inside Task 6's commit)
 
-**Where:** keep the drift guards green (adding a tool changes generated artifacts).
+**Where:** keep the drift guards green (adding a tool changes generated artifacts). This is a
+checklist executed **within Task 6's commit**, not a standalone later commit — otherwise
+`docs-check`/`rbac-matrix`/`resources-docs-check` are red between commits.
 
 **Files:** `just docs` output (tool reference), `just rbac-matrix` output
 (`docs/guide/safety-and-rbac.md`), `just resources-docs` output (agent-index / control
