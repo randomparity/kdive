@@ -141,14 +141,22 @@ needs no credential and works on any ready System. ADR-0285 records this trade-o
 The capture is a **redacted console tail from shortly before injection to the settle
 point** — it is not a perfectly isolated command transcript. The guest is still running, so
 the tail may interleave unrelated console lines; the artifact is labelled and documented as
-"console tail after a SysRq injection," not "exactly the command's bytes." Under the
-per-System advisory lock, the handler:
+"console tail after a SysRq injection," not "exactly the command's bytes."
 
-1. Reads the console log length before injection (`mark`) — the local serial log is the
-   whole current-boot file (`read_console_log`, ADR-0258; `append="off"` truncates per
-   power-cycle, so no cross-boot offset).
-2. Injects the SysRq via the Control port (`asyncio.to_thread`).
-3. Polls the console for growth with a bounded, count-driven loop (no wall-clock, so it is
+**Lock scoping.** `advisory_xact_lock` is transaction-scoped, so the handler must **not**
+hold it across the multi-second settle poll — that would keep a Postgres transaction
+idle-in-transaction and serialize every other per-System op (teardown, `force_crash`,
+`power`, `console_rotate`) behind the capture. The lock is taken in **two brief
+transactions** with the lock-free poll between them; correctness allows this because the
+local console log only grows while the System is READY (`append="off"` truncates only on
+power-cycle), so the tail read needs no cross-op exclusion:
+
+1. **Under the lock (tx 1):** verify the System is live, local-libvirt, and READY; resolve
+   the domain name; read the console length before injection (`mark`) — the local serial log
+   is the whole current-boot file (`read_console_log`, ADR-0258). Commit.
+2. **Lock-free:** inject the SysRq via the Control port (`asyncio.to_thread`).
+3. **Lock-free:** poll the console for growth with a bounded, count-driven loop (no
+   wall-clock, so it is
    deterministic under test): up to `MAX_POLLS` iterations of `POLL_INTERVAL`, breaking
    early once the log has grown past `mark` and then stabilized for `SETTLE_POLLS`
    consecutive reads. The loop records whether it exited by **stabilization** or by hitting
@@ -166,15 +174,19 @@ per-System advisory lock, the handler:
    `configuration_error`, `reason="no_console_output"`, remediation naming **both** causes:
    enable `kernel.sysrq` for the command, and build the guest kernel with a PS/2 keyboard
    driver (see Guest prerequisites). This is requirement 5's timeout/no-output path.
-6. Redacts `raw` through `Redactor(registry=secret_registry)` (same pattern as
+6. **Lock-free:** redact `raw` through `Redactor(registry=secret_registry)` (same pattern as
    `console_rotate` / `read_redacted_console`).
-7. Stores it as a System-owned object `sysrq-diagnostic-<job_id>`
-   (`owner_kind="systems"`, `tenant="local"`, `sensitivity=REDACTED`,
-   `retention_class="console"`), registers the row **insert-if-absent on the object key**
-   (mirroring `console_rotate._existing_part_row` — jobs are at-least-once, so a worker
-   retry re-runs the handler; the re-injection is a harmless second dump, but the row insert
-   must not duplicate — `artifacts.object_key` has no unique constraint), stamps `run_id=None`
-   (see below), and returns `str(artifact.id)` as the job's `result_ref`.
+7. **Under the lock (tx 2):** re-verify the System is still live+READY. If it left that state
+   during the poll (a concurrent `force_crash`/`teardown`, or a power-cycle that truncated the
+   log), fail with `configuration_error` `reason="system_changed_state"` rather than mislabel
+   it `no_console_output` — the outcome is not a sysrq/keyboard problem. Otherwise store the
+   redacted bytes as a System-owned object `sysrq-diagnostic-<job_id>` (`owner_kind="systems"`,
+   `tenant="local"`, `sensitivity=REDACTED`, `retention_class="console"`), register the row
+   **insert-if-absent on the object key** (mirroring `console_rotate._existing_part_row` —
+   jobs are at-least-once, so a worker retry re-runs the handler; the re-injection is a
+   harmless second dump, but the row insert must not duplicate — `artifacts.object_key` has no
+   unique constraint), stamp `run_id=None` (see below), and return `str(artifact.id)` as the
+   job's `result_ref`.
 
 The capture-poll core is a pure async function taking injected `read_console`, `inject`,
 and `sleep` callables so tests drive it with scripted console reads and a no-op sleep — no
@@ -241,6 +253,7 @@ forward-only per ADR-0015). `DIAGNOSTIC_SYSRQ` is **not** added to
 | Unknown or destructive command         | `configuration_error`  | tool    |
 | Non-local-libvirt / not READY          | `configuration_error`  | tool    |
 | No console output within the bound     | `configuration_error`  | worker  |
+| System left live+READY during capture  | `configuration_error`  | worker (`reason=system_changed_state`) |
 | Console log unreadable (non-root wall) | `configuration_error`  | worker (existing `read_console_log`) |
 | Absent domain / libvirt fault          | `control_failure`      | worker (Control port) |
 
