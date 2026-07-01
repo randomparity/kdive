@@ -54,6 +54,14 @@ the secret; the provider (connectionless, owns libguestfs) owns the injection.
   credential and are safe to treat as public.
 - The provision hot path gains one libguestfs pass (`--ssh-inject` on the overlay, seconds) and a
   small `ssh-keygen`; both are bounded and per-System.
+- The two SSH consumers tolerate the guest sshd startup window. local-libvirt declares a System
+  `ready` on its boot marker — tens of milliseconds before the guest sshd binds the loopback
+  forward — so an immediate `authorize_ssh_key` (or an early drgn-live) SSH is refused with
+  exit 255. Both re-source paths run a bounded connect-retry (`providers/shared/ssh_connect_retry`):
+  connection-level failures (refused/reset/timed-out) retry with backoff across the startup window,
+  while auth/host-key errors and a remote command's own non-zero exit fail fast. Live-proven — the
+  identical `provision → ready → authorize_ssh_key` flow that failed pre-retry now succeeds first
+  try.
 - kdive now custodies an ephemeral per-System bootstrap **private** key in Postgres. This does not
   violate ADR-0271's "KDIVE never holds the *agent's* key" — it is kdive's own infra key for its
   own worker operations, scoped to one System and deleted at teardown. At-rest protection is DB
