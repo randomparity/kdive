@@ -1,6 +1,6 @@
 # ADR 0287 — Per-distro static capability tags via a family-declared `capabilities()` seam
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-01
 - **Deciders:** kdive maintainers
 
