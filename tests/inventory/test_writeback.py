@@ -19,6 +19,7 @@ import httpx
 import pytest
 
 import kdive.config as config
+from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory import serialize, writeback
 
@@ -177,7 +178,7 @@ def test_serialize_image_s3_source_with_digest_exact() -> None:
         format="qcow2",
         root_device="/dev/vda",
         visibility="public",
-        capabilities=["a", "b"],
+        capabilities=[Capability.AGENT, Capability.DRGN],
         object_key="objects/img-a.qcow2",
         digest="sha256:deadbeef",
         volume=None,
@@ -196,7 +197,7 @@ def test_serialize_image_s3_source_with_digest_exact() -> None:
             'format = "qcow2"',
             'root_device = "/dev/vda"',
             'visibility = "public"',
-            'capabilities = ["a", "b"]',
+            'capabilities = ["agent", "drgn"]',
             "[image.source]",
             'kind = "s3"',
             'object_key = "objects/img-a.qcow2"',
@@ -610,21 +611,9 @@ def test_toml_str_does_not_escape_space() -> None:
 
 
 def test_toml_array_escapes_each_element() -> None:
-    image = serialize.ImageRow(
-        provider="p",
-        name="img",
-        arch="x86_64",
-        format="qcow2",
-        root_device="/dev/vda",
-        visibility="public",
-        capabilities=['has"quote', "plain"],
-        object_key="k",
-        digest=None,
-        volume=None,
-        state="built",
-    )
-    rendered = serialize.serialize_inventory(_empty_snapshot(images=(image,)))
-    assert r'capabilities = ["has\"quote", "plain"]' in rendered
+    # `capabilities` is now a closed enum with no quotable values, so exercise the array
+    # helper directly to keep its per-element escaping covered.
+    assert serialize._toml_array(['has"quote', "plain"]) == r'["has\"quote", "plain"]'
 
 
 # ---- fake adapter ---------------------------------------------------------------------

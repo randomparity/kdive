@@ -21,7 +21,12 @@ import pytest
 
 from kdive.artifacts import storage as artifact_types
 from kdive.db.repositories import IMAGE_CATALOG
-from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
+from kdive.domain.catalog.images import (
+    Capability,
+    ImageCatalogEntry,
+    ImageState,
+    ImageVisibility,
+)
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.catalog import resolve_rootfs
 from kdive.services.images.publish import PublishRequest, publish_image
@@ -74,7 +79,7 @@ _PUBLIC_REQUEST = PublishRequest(
     format="qcow2",
     root_device="/dev/vda",
     digest=_DIGEST,
-    capabilities=("console", "kdump"),
+    capabilities=("agent", "kdump"),
     provenance={"releasever": "43"},
     visibility=ImageVisibility.PUBLIC,
 )
@@ -193,7 +198,7 @@ def test_realizing_defined_baseline_follows_same_path(migrated_url: str, tmp_pat
                 root_device="/dev/vda",
                 object_key=None,
                 digest=None,
-                capabilities=["console"],
+                capabilities=[Capability.AGENT],
                 provenance={},
                 visibility=ImageVisibility.PUBLIC,
                 owner=None,

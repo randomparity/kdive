@@ -6,7 +6,7 @@ from kdive.domain.catalog.images import Capability
 
 
 def test_capability_values_are_the_closed_build_vocabulary() -> None:
-    assert {c.value for c in Capability} == {"agent", "kdump", "drgn", "build"}
+    assert {c.value for c in Capability} == {"agent", "kdump", "drgn", "build", "helpers"}
 
 
 def test_capability_is_str_subclass_for_db_and_membership() -> None:

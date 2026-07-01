@@ -25,6 +25,7 @@ class Capability(StrEnum):
     KDUMP = "kdump"
     DRGN = "drgn"
     BUILD = "build"
+    HELPERS = "helpers"
 
 
 class ImageVisibility(StrEnum):
@@ -72,7 +73,7 @@ class ImageCatalogEntry(DomainModel):
     root_device: str
     object_key: str | None = None
     digest: str | None = None
-    capabilities: list[str] = Field(default_factory=list)
+    capabilities: list[Capability] = Field(default_factory=list)
     provenance: dict[str, Any] = Field(default_factory=dict)
     visibility: ImageVisibility
     owner: str | None = None

@@ -31,7 +31,7 @@ def test_load_fixture_catalog_filters_provider(tmp_path: Path) -> None:
         "  kind: local\n"
         "  path: /var/lib/kdive/rootfs/base.qcow2\n"
         "visibility: public\n"
-        "capabilities: [kdive-ready-console]\n",
+        "capabilities: [agent]\n",
         encoding="utf-8",
     )
     (fixture / "profiles" / "console.yaml").write_text(
@@ -47,7 +47,7 @@ def test_load_fixture_catalog_filters_provider(tmp_path: Path) -> None:
         "  rootfs:\n"
         "    format: qcow2\n"
         "    root_device: /dev/vda\n"
-        "    capabilities: [kdive-ready-console]\n",
+        "    capabilities: [agent]\n",
         encoding="utf-8",
     )
 
@@ -84,7 +84,7 @@ def test_fixture_catalog_hides_non_public_rootfs_entries(tmp_path: Path) -> None
         "  kind: local\n"
         "  path: /var/lib/kdive/rootfs/{name}.qcow2\n"
         "visibility: {visibility}\n"
-        "capabilities: [kdive-ready-console]\n"
+        "capabilities: [agent]\n"
     )
     (fixture / "rootfs" / "public.yaml").write_text(
         rootfs_template.format(name="public-base", visibility="public"),

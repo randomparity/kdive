@@ -22,10 +22,12 @@ before a fresh start. An unedited ``remote_libvirt`` skeleton does not parse.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from kdive.domain.catalog.images import Capability
 from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     MEMORY_MB_KEY,
@@ -104,7 +106,7 @@ class ImageRow:
     format: str
     root_device: str
     visibility: str
-    capabilities: list[str]
+    capabilities: list[Capability]
     object_key: str | None
     digest: str | None
     volume: str | None
@@ -186,7 +188,7 @@ def _toml_str(value: str) -> str:
     return "".join(out)
 
 
-def _toml_array(items: list[str]) -> str:
+def _toml_array(items: Sequence[str]) -> str:
     """Emit a list of strings as a TOML inline array with escaped elements."""
     if not items:
         return "[]"
@@ -409,7 +411,7 @@ async def _read_images(conn: AsyncConnection) -> tuple[ImageRow, ...]:
                 format=str(fmt),
                 root_device=str(root_device),
                 visibility=str(visibility),
-                capabilities=[str(cap) for cap in capabilities],
+                capabilities=[Capability(cap) for cap in capabilities],
                 object_key=None if object_key is None else str(object_key),
                 digest=None if digest is None else str(digest),
                 volume=None if volume is None else str(volume),
