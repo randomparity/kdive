@@ -25,6 +25,7 @@ from kdive.prereqs.system_bootstrap_key import (
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.shared.runtime_paths import domain_name_for
+from kdive.providers.shared.ssh_connect_retry import SshRetryPolicy, run_ssh_with_retry
 
 type SshExec = Callable[[list[str], str], None]
 
@@ -33,6 +34,10 @@ _SSH_USER = "root"
 _SSH_CONNECT_TIMEOUT_S = 10
 _SSH_RUN_TIMEOUT_S = 30
 _LOCK = "/root/.ssh/.kdive-authz.lock"
+# A freshly-`ready` System's guest sshd may not be accepting yet (readiness is the boot marker,
+# ~46 ms before sshd binds — ADR-0289 live proof), so the first authorize SSH is refused. Retry
+# connection-level failures over this window; auth/host-key errors still fail fast.
+_AUTHORIZE_SSH_RETRY = SshRetryPolicy()
 
 # The remote append script (ADR-0271). The key is **never** in this string: `ssh host CMD` joins
 # any post-host argv into one string the remote login shell re-parses, so an argv-positioned key
@@ -78,20 +83,23 @@ def build_authorize_argv(port: int, key_path: str) -> list[str]:
 
 
 def _real_ssh_exec(argv: list[str], key: str) -> None:  # pragma: no cover - live_vm
-    try:
-        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; key is piped on stdin
-            argv,
-            input=key,
-            text=True,
-            timeout=_SSH_RUN_TIMEOUT_S,
-            check=False,
-            capture_output=True,
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        raise CategorizedError(
-            "ssh to the guest to authorize the key timed out or could not launch",
-            category=ErrorCategory.TRANSPORT_FAILURE,
-        ) from exc
+    def run_once() -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(  # noqa: S603 - fixed argv, no shell; key is piped on stdin
+                argv,
+                input=key,
+                text=True,
+                timeout=_SSH_RUN_TIMEOUT_S,
+                check=False,
+                capture_output=True,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise CategorizedError(
+                "ssh to the guest to authorize the key timed out or could not launch",
+                category=ErrorCategory.TRANSPORT_FAILURE,
+            ) from exc
+
+    proc = run_ssh_with_retry(run_once, policy=_AUTHORIZE_SSH_RETRY)
     if proc.returncode != 0:
         raise CategorizedError(
             "ssh authorize-key command failed in the guest",

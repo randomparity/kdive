@@ -46,6 +46,7 @@ from kdive.providers.shared.debug_common.introspect import (
     assemble_report,
     assemble_script_output,
 )
+from kdive.providers.shared.ssh_connect_retry import SshRetryPolicy, run_ssh_with_retry
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 # The fixed live-helper set (ADR-0033 §2 / ADR-0085): the same three in-tree helpers as the
@@ -60,6 +61,9 @@ _SSH_USER = "root"  # the per-System bootstrap public key is injected to root (A
 # also caps how long a wedged sshd can hold a worker thread-pool slot.
 _LIVE_INTROSPECT_SSH_TIMEOUT_S = 60
 _SSH_CONNECT_TIMEOUT_S = 10
+# Live introspection normally runs well after readiness, so the guest sshd is up; a short retry
+# absorbs a transient connection blip without hanging on a torn-down guest (ADR-0289, #963).
+_LIVE_SSH_RETRY = SshRetryPolicy(deadline_s=20.0)
 
 # --- LocalLibvirtVmcoreIntrospect (the realized port) --------------------------------------
 
@@ -436,24 +440,28 @@ def _exec_live_helper(argv: list[str]) -> dict[str, object]:  # pragma: no cover
     with a reachable loopback-forwarded sshd, the per-System bootstrap key authorized, and the
     in-guest ``kdive-drgn`` + ``drgn`` (the ADR-0219 named live gaps).
     """
-    try:
-        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; helper pre-validated
-            argv,
-            timeout=_LIVE_INTROSPECT_SSH_TIMEOUT_S,
-            check=False,
-            capture_output=True,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise CategorizedError(
-            "live drgn introspection ssh round-trip exceeded the timeout",
-            category=ErrorCategory.TRANSPORT_FAILURE,
-            details={"timeout_s": _LIVE_INTROSPECT_SSH_TIMEOUT_S},
-        ) from exc
-    except OSError as exc:
-        raise CategorizedError(
-            "could not launch ssh for live drgn introspection",
-            category=ErrorCategory.TRANSPORT_FAILURE,
-        ) from exc
+
+    def run_once() -> subprocess.CompletedProcess[bytes]:
+        try:
+            return subprocess.run(  # noqa: S603 - fixed argv, no shell; helper pre-validated
+                argv,
+                timeout=_LIVE_INTROSPECT_SSH_TIMEOUT_S,
+                check=False,
+                capture_output=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise CategorizedError(
+                "live drgn introspection ssh round-trip exceeded the timeout",
+                category=ErrorCategory.TRANSPORT_FAILURE,
+                details={"timeout_s": _LIVE_INTROSPECT_SSH_TIMEOUT_S},
+            ) from exc
+        except OSError as exc:
+            raise CategorizedError(
+                "could not launch ssh for live drgn introspection",
+                category=ErrorCategory.TRANSPORT_FAILURE,
+            ) from exc
+
+    proc = run_ssh_with_retry(run_once, policy=_LIVE_SSH_RETRY)
     if proc.returncode != 0:
         raise CategorizedError(
             "in-guest drgn helper exited non-zero (could not attach to the live kernel)",
@@ -517,25 +525,29 @@ def _exec_live_script(  # pragma: no cover - live_vm
     ``kdive-drgn`` + ``drgn``). The in-guest ``timeout`` bounds drgn; ``ssh_timeout_s`` (the
     in-guest bound + slack) bounds a wedged channel so the worker thread is always released.
     """
-    try:
-        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; script via stdin only
-            argv,
-            input=script.encode("utf-8"),
-            timeout=ssh_timeout_s,
-            check=False,
-            capture_output=True,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise CategorizedError(
-            "live drgn script ssh round-trip exceeded the timeout",
-            category=ErrorCategory.TRANSPORT_FAILURE,
-            details={"timeout_s": ssh_timeout_s},
-        ) from exc
-    except OSError as exc:
-        raise CategorizedError(
-            "could not launch ssh for live drgn script introspection",
-            category=ErrorCategory.TRANSPORT_FAILURE,
-        ) from exc
+
+    def run_once() -> subprocess.CompletedProcess[bytes]:
+        try:
+            return subprocess.run(  # noqa: S603 - fixed argv, no shell; script via stdin only
+                argv,
+                input=script.encode("utf-8"),
+                timeout=ssh_timeout_s,
+                check=False,
+                capture_output=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise CategorizedError(
+                "live drgn script ssh round-trip exceeded the timeout",
+                category=ErrorCategory.TRANSPORT_FAILURE,
+                details={"timeout_s": ssh_timeout_s},
+            ) from exc
+        except OSError as exc:
+            raise CategorizedError(
+                "could not launch ssh for live drgn script introspection",
+                category=ErrorCategory.TRANSPORT_FAILURE,
+            ) from exc
+
+    proc = run_ssh_with_retry(run_once, policy=_LIVE_SSH_RETRY)
     if proc.returncode != 0:
         raise CategorizedError(
             "in-guest drgn script exited non-zero (script error or could not attach)",
