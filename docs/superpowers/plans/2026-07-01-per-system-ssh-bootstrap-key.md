@@ -99,13 +99,14 @@ CREATE TABLE system_bootstrap_keys (
 ```python
 from __future__ import annotations
 
-import os
+import asyncio
 import stat
 from pathlib import Path
 from uuid import UUID, uuid4
 
-import psycopg
 import pytest
+from psycopg import AsyncConnection
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.prereqs.system_bootstrap_key import (
@@ -141,63 +142,94 @@ def test_materialized_private_key_cleans_up_on_exception() -> None:
     assert captured is not None and not captured.exists()
 
 
-async def _seed_system(conn: psycopg.AsyncConnection) -> UUID:
-    # Minimal FK parent rows so system_bootstrap_keys.system_id resolves.
-    async with conn.cursor() as cur:
-        await cur.execute(
-            "INSERT INTO allocations (id, project, principal, state) "
-            "VALUES (gen_random_uuid(), 'demo', 'demo', 'active') RETURNING id"
-        )
-        row = await cur.fetchone()
-        allocation_id = row[0]
-        await cur.execute(
-            "INSERT INTO systems (id, allocation_id, state, provisioning_profile, principal, "
-            "project) VALUES (gen_random_uuid(), %s, 'defined', '{}'::jsonb, 'demo', 'demo') "
-            "RETURNING id",
-            (allocation_id,),
-        )
-        row = await cur.fetchone()
-        return row[0]
+# Async-DB tests follow the PROVEN in-repo pattern in
+# tests/jobs/handlers/test_boot_evidence_run_id.py: a SYNC `def test_(migrated_url)` with an
+# inner `async def _run()` driven by `asyncio.run(_run())`, a conn from
+# `AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False)`, and an
+# `async def _seed_system(conn: AsyncConnection)` using the real FK chain. There is NO
+# `asyncio_mode=auto` in this repo — do NOT write bare `async def test_*` or `async def` fixtures.
+# Required extra imports: `import asyncio`; `from psycopg import AsyncConnection`;
+# `from psycopg_pool import AsyncConnectionPool`.
+
+async def _seed_system(conn: AsyncConnection) -> UUID:
+    """Seed the resources -> allocations -> systems FK chain; return the system_id.
+
+    Mirrors _seed_run in tests/jobs/handlers/test_boot_evidence_run_id.py (allocations requires a
+    NOT NULL resource_id -> resources(id); systems requires allocation_id + provisioning_profile).
+    """
+    resource_id, allocation_id, system_id = uuid4(), uuid4(), uuid4()
+    await conn.execute(
+        "INSERT INTO resources (id, kind, pool, cost_class, status, host_uri) "
+        "VALUES (%s, 'local-libvirt', 'default', 'standard', 'available', 'qemu:///system')",
+        (resource_id,),
+    )
+    await conn.execute(
+        "INSERT INTO allocations (id, resource_id, state, principal, project) "
+        "VALUES (%s, %s, 'granted', 'p', 'proj')",
+        (allocation_id, resource_id),
+    )
+    await conn.execute(
+        "INSERT INTO systems (id, allocation_id, state, provisioning_profile, principal, project) "
+        "VALUES (%s, %s, 'ready', '{}'::jsonb, 'p', 'proj')",
+        (system_id, allocation_id),
+    )
+    return system_id
 
 
-@pytest.fixture
-async def conn(migrated_url: str):
-    async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as c:
-        yield c
+def test_ensure_is_idempotent_one_row_one_pubkey(migrated_url: str) -> None:
+    async def _run() -> tuple[str, str, int]:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            async with pool.connection() as conn:
+                system_id = await _seed_system(conn)
+                first = await ensure_system_bootstrap_key(conn, system_id)
+                second = await ensure_system_bootstrap_key(conn, system_id)
+                count = await (
+                    await conn.execute(
+                        "SELECT count(*) FROM system_bootstrap_keys WHERE system_id = %s",
+                        (system_id,),
+                    )
+                ).fetchone()
+                return first, second, count[0]
+
+    first, second, count = asyncio.run(_run())
+    assert first == second and first.startswith("ssh-ed25519 ") and count == 1
 
 
-async def test_ensure_is_idempotent_one_row_one_pubkey(conn: psycopg.AsyncConnection) -> None:
-    system_id = await _seed_system(conn)
-    first = await ensure_system_bootstrap_key(conn, system_id)
-    second = await ensure_system_bootstrap_key(conn, system_id)
-    assert first == second and first.startswith("ssh-ed25519 ")
-    async with conn.cursor() as cur:
-        await cur.execute(
-            "SELECT count(*) FROM system_bootstrap_keys WHERE system_id = %s", (system_id,)
-        )
-        assert (await cur.fetchone())[0] == 1
+def test_load_returns_private_key_and_raises_when_absent(migrated_url: str) -> None:
+    async def _run() -> str:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            async with pool.connection() as conn:
+                system_id = await _seed_system(conn)
+                with pytest.raises(CategorizedError) as excinfo:
+                    await load_system_bootstrap_private_key(conn, system_id)
+                assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+                await ensure_system_bootstrap_key(conn, system_id)
+                return await load_system_bootstrap_private_key(conn, system_id)
+
+    assert "OPENSSH PRIVATE KEY" in asyncio.run(_run())
 
 
-async def test_load_returns_private_key_and_raises_when_absent(
-    conn: psycopg.AsyncConnection,
-) -> None:
-    system_id = await _seed_system(conn)
-    with pytest.raises(CategorizedError) as excinfo:
-        await load_system_bootstrap_private_key(conn, system_id)
-    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
-    await ensure_system_bootstrap_key(conn, system_id)
-    private_key = await load_system_bootstrap_private_key(conn, system_id)
-    assert "OPENSSH PRIVATE KEY" in private_key
+def test_delete_is_idempotent(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            async with pool.connection() as conn:
+                system_id = await _seed_system(conn)
+                await ensure_system_bootstrap_key(conn, system_id)
+                await delete_system_bootstrap_key(conn, system_id)
+                await delete_system_bootstrap_key(conn, system_id)  # no-op, no raise
+                with pytest.raises(CategorizedError):
+                    await load_system_bootstrap_private_key(conn, system_id)
 
-
-async def test_delete_is_idempotent(conn: psycopg.AsyncConnection) -> None:
-    system_id = await _seed_system(conn)
-    await ensure_system_bootstrap_key(conn, system_id)
-    await delete_system_bootstrap_key(conn, system_id)
-    await delete_system_bootstrap_key(conn, system_id)  # no-op, no raise
-    with pytest.raises(CategorizedError):
-        await load_system_bootstrap_private_key(conn, system_id)
+    asyncio.run(_run())
 ```
+
+> The concurrency guarantee (`ON CONFLICT` under two racing `ensure_`) is covered by the
+> idempotency test above (two sequential calls, one row); a true parallel-connection race test is
+> optional — if added, open two pool connections and `asyncio.gather` the two `ensure_` calls, then
+> assert one row.
 
 - [ ] **Step 3: Run tests, verify they fail** (module missing).
   Run: `.venv/bin/python -m pytest tests/prereqs/test_system_bootstrap_key.py -q`
@@ -231,7 +263,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.security.secrets.secret_registry import register_secret
+from kdive.security.secrets.secret_registry import PROCESS_SECRET_REGISTRY, SecretRegistry
 
 _SSH_KEYGEN_TIMEOUT_S = 30
 
@@ -312,10 +344,17 @@ async def ensure_system_bootstrap_key(conn: AsyncConnection, system_id: UUID) ->
     return row[0]
 
 
-async def load_system_bootstrap_private_key(conn: AsyncConnection, system_id: UUID) -> str:
-    """Return the System's bootstrap private key (registered as a secret) or raise.
+async def load_system_bootstrap_private_key(
+    conn: AsyncConnection,
+    system_id: UUID,
+    *,
+    secret_registry: SecretRegistry = PROCESS_SECRET_REGISTRY,
+) -> str:
+    """Return the System's bootstrap private key (registered for redaction) or raise.
 
-    Raises:
+    Registers the key value with ``secret_registry`` so it is scrubbed from logs/errors — callers
+    that hold their own registry (e.g. the drgn tool) pass it; a caller without one uses the
+    process singleton. Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` when no key row exists (System predates ADR-0289
             or was never provisioned) — fail closed.
     """
@@ -330,7 +369,7 @@ async def load_system_bootstrap_private_key(conn: AsyncConnection, system_id: UU
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "no_bootstrap_key", "system_id": str(system_id)},
         )
-    register_secret(row[0])
+    secret_registry.register(row[0], scope=None)
     return row[0]
 
 
@@ -360,11 +399,11 @@ def materialized_private_key(private_key: str) -> Iterator[Path]:
         shutil.rmtree(scratch, ignore_errors=True)
 ```
 
-> **Implementer note:** verify `register_secret` is the real symbol exported by
-> `kdive.security.secrets.secret_registry` (Task-1 self-check: `rg -n "def register_secret|^def
-> register" src/kdive/security/secrets/secret_registry.py`). If the redaction API is instead an
-> instance method (`SecretRegistry.register`), adapt `load_*` to accept/register through the
-> caller's registry and update the callers in Tasks 4/5; note the choice in the report.
+> **Secret-registry API (settled):** `secret_registry.py` exposes `class SecretRegistry` with
+> `register(value, *, scope)` and a `PROCESS_SECRET_REGISTRY` singleton — there is no module-level
+> `register_secret`. `load_*` takes a `secret_registry` parameter that defaults to the
+> `PROCESS_SECRET_REGISTRY` singleton; the drgn tool (Task 5) already holds a `SecretRegistry` and
+> passes it, the authorize handler (Task 4) uses the default. Do not import a bare `register_secret`.
 
 - [ ] **Step 5: Run tests, verify they pass.**
   Run: `.venv/bin/python -m pytest tests/prereqs/test_system_bootstrap_key.py -q`
@@ -559,8 +598,10 @@ existing `try`, or ensure it is covered by it — verify the try boundary).
   test); (c) teardown_handler calls `delete_system_bootstrap_key`. Drive the handler with the
   existing fake provisioner used by sibling handler tests (search
   `tests/jobs/handlers/test_*` for the `provision_handler` harness — e.g. a stub `runtime` whose
-  `provisioner.provision` records its kwargs). Use the `migrated_url` async conn so the key row is
-  real.
+  `provisioner.provision` records its kwargs). Use the **same async-DB harness as Task 1** (sync
+  `def test_(migrated_url)` + inner `async def _run()` + `asyncio.run`, `AsyncConnectionPool`, and
+  the `_seed_system` FK chain from `tests/jobs/handlers/test_boot_evidence_run_id.py`) so the key
+  row is real.
 
 ```python
 async def test_provision_handler_ensures_key_and_passes_customizer(...) -> None:
@@ -698,14 +739,19 @@ engine `introspect_live(*, transport_handle, helper, key_path)` /
   In `mcp/tools/debug/introspect.py`, load the per-System key and materialize it:
 
 ```python
-private_key = await load_system_bootstrap_private_key(conn, system_id)
+private_key = await load_system_bootstrap_private_key(
+    conn, system_id, secret_registry=self._secret_registry
+)
 with materialized_private_key(private_key) as key_path:
     result = engine.introspect_live(transport_handle=..., helper=..., key_path=str(key_path))
 ```
 
-> Implementer: confirm the tool has (or can get) `conn` and `system_id`. If the tool reaches the
-> engine without a connection, load the key one layer up where `conn` exists and pass the path
-> down; record the exact call path in the report.
+> Implementer: the introspect engine already threads a `SecretRegistry` (introspect.py
+> `LocalLibvirtLiveIntrospect.from_env(*, secret_registry)`), so pass it to `load_*`. Trace
+> `mcp/tools/debug/introspect.py` to find where `conn` + `system_id` are available (the MCP tool
+> layer holds the request `conn`); load the key there and pass the path down. Pin the exact call
+> path in the report — this is the one task whose wiring must be confirmed against the code before
+> the implementation, not discovered during it.
 
 - [ ] **Step 4: Run tests + `just lint && just type`.**
 
