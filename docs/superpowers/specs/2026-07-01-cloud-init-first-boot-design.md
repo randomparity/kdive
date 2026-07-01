@@ -52,9 +52,13 @@ scoped to the genuinely first-boot, interface-dependent concerns (network, host 
          match: { name: "e*" }
          dhcp4: true
          dhcp-identifier: mac          # per-System DUID independent of the shared machine-id
-   # trim the disk-growth modules: the rootfs is a no-partition-table whole-disk ext4
-   # (ADR-0030); growpart/resizefs find no partition and only add boot noise.
-   cloud_init_modules: [ ... minus growpart, resizefs ... ]  # exact list pinned in the plan
+   # Disable disk-growth with targeted config keys — NOT by overriding the module lists.
+   # The rootfs is a no-partition-table whole-disk ext4 (ADR-0030), so growpart finds no
+   # partition and only adds boot noise. `growpart: {mode: off}` + `resize_rootfs: false`
+   # disable the behavior without rewriting `cloud_config_modules`, which would risk dropping
+   # a module the design needs (e.g. `ssh`, which generates host keys).
+   growpart: { mode: off }
+   resize_rootfs: false
    ```
 
    **`disable_root: false` is defensive, not the load-bearing fix.** cloud-init's `disable_root`
@@ -139,9 +143,12 @@ unit tests only assert the **argv shape** — so a silent no-op (a base that re-
 or a missed unit-enable) would emit correct-looking argv and still ship broken. To catch that
 without booting, `build()` runs a fast **offline guestfish assertion** on the freshly built
 qcow2 before publishing: (a) no remaining `/etc/cloud/cloud.cfg.d/*` drop-in sets
-`network: {config: disabled}`; (b) all four cloud-init unit symlinks are present in
-`multi-user.target.wants` (or the units are enabled); (c) `/etc/cloud/cloud.cfg.d/99-kdive.cfg`
-and the NoCloud seed files exist. A failed assertion fails the build (`PROVISIONING_FAILURE`),
+`network: {config: disabled}`; (b) the four cloud-init units are enabled — asserted by
+`is-enabled` status / the presence of their enable symlinks in the correct wants-dir
+(cloud-init's units are `WantedBy=cloud-init.target`, so the symlinks live in
+`cloud-init.target.wants/`, and `cloud-init.target` itself is enabled into
+`multi-user.target.wants/`; the exact paths are confirmed against a real image in the plan);
+(c) `/etc/cloud/cloud.cfg.d/99-kdive.cfg` and the NoCloud seed files exist. A failed assertion fails the build (`PROVISIONING_FAILURE`),
 so a regression is caught at build time on any host, not only on the live-VM machine.
 
 ## Testing
