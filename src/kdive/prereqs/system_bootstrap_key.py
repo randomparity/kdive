@@ -83,6 +83,10 @@ async def ensure_system_bootstrap_key(conn: AsyncConnection, system_id: UUID) ->
     invariant, ADR-0289) — run it in its own transaction.
     """
     private_key, public_key = generate_keypair()
+    # Register the generated private key for redaction (defense-in-depth, mirrors the load path):
+    # it is never logged on the normal path, but a locals-capturing logger firing on an INSERT
+    # failure must not surface it.
+    PROCESS_SECRET_REGISTRY.register(private_key, scope=None)
     async with conn.cursor() as cur:
         await cur.execute(
             "INSERT INTO system_bootstrap_keys (system_id, private_key, public_key) "
