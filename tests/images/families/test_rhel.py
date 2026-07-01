@@ -146,3 +146,11 @@ def test_rhel_argv_still_injects_key_and_selinux(tmp_path: Path) -> None:
     j = " ".join(argv)
     assert f"root:file:{tmp_path / 'key.pub'}" in j
     assert "SELINUX=permissive" in j
+
+
+def test_rhel_virt_builder_base_installs_cloud_init(tmp_path: Path) -> None:
+    # A non-cloud (virt-builder) base ships no cloud-init; the family must install it so the
+    # baked NoCloud seed applies uniformly (ADR-0288).
+    argv = RhelFamily().customize_argv(_ctx(tmp_path, is_cloud_image=False))
+    assert "--install cloud-init" in " ".join(argv)
+    assert "/etc/cloud/cloud.cfg.d/99-kdive.cfg" in " ".join(argv)
