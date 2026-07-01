@@ -53,6 +53,10 @@ _SELECT_PART_KEYS_SQL: LiteralString = (
     "AND owner_id = %s AND object_key LIKE %s"
 )
 
+# System-owned diagnostic SysRq captures (ADR-0285); reclaimed at teardown like console parts,
+# since no gc expiry sweep touches owner_kind='systems'.
+_SYSRQ_DIAGNOSTIC_LIKE: LiteralString = "%sysrq-diagnostic-%"
+
 
 async def audit_transition(
     conn: AsyncConnection, job: Job, *, project: str, object_id: UUID, transition: str, tool: str
@@ -333,6 +337,24 @@ async def _reclaim_console_artifacts(
     await asyncio.to_thread(store.delete, sidecar_key)
 
 
+async def _reclaim_sysrq_artifacts(
+    conn: AsyncConnection, store: ObjectStore, system_id: UUID
+) -> None:
+    """Delete the System's diagnostic SysRq capture objects + rows (ADR-0285).
+
+    Objects are deleted before their ``artifacts`` rows so a mid-cleanup store failure leaves the
+    rows for the artifact-expiry reconciler (#768) to reclaim, mirroring the console-part reclaim.
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(_SELECT_PART_KEYS_SQL, (system_id, _SYSRQ_DIAGNOSTIC_LIKE))
+        keys = [row["object_key"] for row in await cur.fetchall()]
+    for key in keys:
+        await asyncio.to_thread(store.delete, key)
+    if keys:
+        async with conn.transaction():
+            await conn.execute(_DELETE_PART_ROWS_SQL, (system_id, _SYSRQ_DIAGNOSTIC_LIKE))
+
+
 async def teardown_handler(
     conn: AsyncConnection,
     job: Job,
@@ -368,9 +390,10 @@ async def teardown_handler(
     if artifact_store is not None:
         try:
             await _reclaim_console_artifacts(conn, artifact_store, system_id)
+            await _reclaim_sysrq_artifacts(conn, artifact_store, system_id)
         except Exception:  # noqa: BLE001 - reclaim is best-effort; teardown must still succeed
             _log.warning(
-                "best-effort console-artifact reclaim for system %s failed",
+                "best-effort System-artifact reclaim for system %s failed",
                 system_id,
                 exc_info=True,
             )

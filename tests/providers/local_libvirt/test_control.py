@@ -109,6 +109,53 @@ def test_force_crash_libvirt_error_is_control_failure() -> None:
     assert exc.value.details == {"domain": "kdive-x"}
 
 
+_ALT = 56
+_SYSRQ = 99
+
+
+@pytest.mark.parametrize(
+    ("trigger", "keycode"),
+    [("t", 20), ("w", 17), ("m", 50), ("d", 32), ("p", 25), ("l", 38), ("q", 16)],
+)
+def test_diagnostic_sysrq_sends_alt_sysrq_keycombo(trigger: str, keycode: int) -> None:
+    domain = FakeDomain(domain_name="kdive-x", system_id="x")
+    control, domain = _control(domain)
+    control.diagnostic_sysrq("kdive-x", trigger)
+    assert domain is not None
+    assert domain.sent_keys == [(libvirt.VIR_KEYCODE_SET_LINUX, [_ALT, _SYSRQ, keycode])]
+
+
+def test_diagnostic_sysrq_absent_domain_is_control_failure() -> None:
+    control, _ = _control(None)
+    with pytest.raises(CategorizedError) as exc:
+        control.diagnostic_sysrq("kdive-gone", "w")
+    assert exc.value.category is ErrorCategory.CONTROL_FAILURE
+    assert str(exc.value) == "libvirt error looking up domain"
+    assert exc.value.details == {"domain": "kdive-gone"}
+
+
+def test_diagnostic_sysrq_libvirt_error_is_control_failure() -> None:
+    domain = FakeDomain(
+        domain_name="kdive-x",
+        system_id="x",
+        raise_on={"sendKey": libvirt.VIR_ERR_INTERNAL_ERROR},
+    )
+    control, _ = _control(domain)
+    with pytest.raises(CategorizedError) as exc:
+        control.diagnostic_sysrq("kdive-x", "w")
+    assert exc.value.category is ErrorCategory.CONTROL_FAILURE
+    assert str(exc.value) == "libvirt error sending SysRq to domain"
+    assert exc.value.details == {"domain": "kdive-x"}
+
+
+def test_diagnostic_sysrq_unknown_trigger_is_configuration_error() -> None:
+    domain = FakeDomain(domain_name="kdive-x", system_id="x")
+    control, _ = _control(domain)
+    with pytest.raises(CategorizedError) as exc:
+        control.diagnostic_sysrq("kdive-x", "z")
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
 def test_from_env_connect_opens_configured_uri(monkeypatch: pytest.MonkeyPatch) -> None:
     # from_env reads KDIVE_LIBVIRT_URI and wires a connect that opens exactly that URI; it does
     # not connect eagerly (the lambda is only invoked here).

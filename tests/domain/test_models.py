@@ -322,6 +322,9 @@ def test_job_kind_covers_the_async_tool_surface() -> None:
         # Server-internal (not agent-facing): the reconciler dispatches this per live
         # local-libvirt System to rotate its growing console into redacted part artifacts (#892).
         "console_rotate",
+        # control.diagnostic_sysrq enqueues this to inject one allowlisted magic-SysRq
+        # keystroke into a ready local-libvirt guest and capture the console dump (ADR-0285, #925).
+        "diagnostic_sysrq",
     }
 
 

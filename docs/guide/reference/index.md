@@ -34,6 +34,7 @@
 | [`buildconfig.get`](buildconfig.md#buildconfigget) | `implemented` |
 | [`buildconfig.list`](buildconfig.md#buildconfiglist) | `implemented` |
 | [`buildconfig.set`](buildconfig.md#buildconfigset) | `implemented` |
+| [`control.diagnostic_sysrq`](control.md#controldiagnostic_sysrq) | `implemented` |
 | [`control.force_crash`](control.md#controlforce_crash) | `implemented` |
 | [`control.power`](control.md#controlpower) | `implemented` |
 | [`debug.backtrace`](debug.md#debugbacktrace) | `implemented` |

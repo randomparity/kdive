@@ -72,6 +72,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "buildconfig.set": ("tests/mcp/catalog/test_build_configs_tool.py",),
     "control.force_crash": ("tests/mcp/lifecycle/test_control_tools.py",),
     "control.power": ("tests/mcp/lifecycle/test_control_tools.py",),
+    "control.diagnostic_sysrq": ("tests/mcp/lifecycle/test_control_tools.py",),
     "debug.clear_breakpoint": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.backtrace": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.continue": ("tests/mcp/debug/test_debug_ops.py",),

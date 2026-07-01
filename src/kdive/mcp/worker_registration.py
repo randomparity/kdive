@@ -80,6 +80,20 @@ def _register_control_handlers(
     control.register_handlers(registry, resolver=assembly.resolver)
 
 
+def _register_diagnostic_sysrq_handler(
+    registry: HandlerRegistry,
+    assembly: WorkerHandlerAssembly,
+) -> None:
+    from kdive.jobs.handlers import diagnostic_sysrq
+
+    diagnostic_sysrq.register_handlers(
+        registry,
+        resolver=assembly.resolver,
+        secret_registry=assembly.secret_registry,
+        artifact_store=assembly.object_stores.optional_upload_store,
+    )
+
+
 def _register_vmcore_handlers(
     registry: HandlerRegistry,
     assembly: WorkerHandlerAssembly,
@@ -132,6 +146,7 @@ HANDLER_REGISTRARS: tuple[HandlerRegistrar, ...] = (
     _register_run_handlers,
     _register_console_rotate_handler,
     _register_control_handlers,
+    _register_diagnostic_sysrq_handler,
     _register_vmcore_handlers,
     _register_image_build_handler,
     _register_diagnostics_handlers,

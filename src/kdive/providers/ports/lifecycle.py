@@ -210,3 +210,20 @@ class Controller(Protocol):
                 connect.
         """
         ...
+
+    def diagnostic_sysrq(self, domain_name: str, trigger: str) -> None:
+        """Inject one non-destructive magic-SysRq keystroke into a guest (ADR-0285).
+
+        ``trigger`` is a single magic-SysRq character from the diagnostic allowlist (the tool
+        validates it before enqueue). Injection is fire-and-forget: the resulting kernel dump
+        is captured from the console by the worker handler, not returned here.
+
+        Raises:
+            CategorizedError: ``CONTROL_FAILURE`` for an absent domain or provider injection
+                fault, ``CONFIGURATION_ERROR`` for an unsupported trigger or invalid provider
+                connection configuration, ``INFRASTRUCTURE_FAILURE`` for provider setup faults,
+                or ``TRANSPORT_FAILURE`` when a remote provider's control channel cannot
+                connect. A provider that does not support SysRq injection raises
+                ``CONTROL_FAILURE``.
+        """
+        ...

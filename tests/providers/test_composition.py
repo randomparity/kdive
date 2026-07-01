@@ -172,6 +172,9 @@ class _ControllerProvider:
     def force_crash(self, domain_name: str) -> None:
         self.crashed = domain_name
 
+    def diagnostic_sysrq(self, domain_name: str, trigger: str) -> None:
+        self.sysrq = (domain_name, trigger)
+
 
 class _RetrieveProvider:
     def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:

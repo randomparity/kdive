@@ -116,6 +116,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     # control
     "control.power": _OPERATOR,  # `on` is operator; destructive actions gate to admin
     "control.force_crash": _ADMIN,
+    "control.diagnostic_sysrq": _CONTRIBUTOR,  # non-destructive diagnostic capture, ADR-0285
     # debug
     "debug.list_breakpoints": _CONTRIBUTOR,
     "debug.get_session": _VIEWER,

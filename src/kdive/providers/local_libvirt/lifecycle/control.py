@@ -31,12 +31,32 @@ from kdive.providers.ports.lifecycle import Controller as Controller
 _log = logging.getLogger(__name__)
 
 
+# Linux input-event keycodes for the magic-SysRq combination (VIR_KEYCODE_SET_LINUX), as
+# `virsh send-key <dom> --codeset linux KEY_LEFTALT KEY_SYSRQ KEY_<X>` sends them (ADR-0285).
+_KEY_LEFTALT = 56
+_KEY_SYSRQ = 99
+_SYSRQ_KEYCODES: dict[str, int] = {
+    "t": 20,  # KEY_T
+    "w": 17,  # KEY_W
+    "m": 50,  # KEY_M
+    "d": 32,  # KEY_D
+    "p": 25,  # KEY_P
+    "l": 38,  # KEY_L
+    "q": 16,  # KEY_Q
+}
+# Hold the Alt+SysRq+key chord briefly so the guest input layer registers the combination.
+_SYSRQ_HOLDTIME_MS = 100
+
+
 class _LibvirtDomain(Protocol):
     def create(self) -> int: ...
     def destroy(self) -> int: ...
     def reset(self, flags: int) -> int: ...
     def reboot(self, flags: int) -> int: ...
     def injectNMI(self, flags: int) -> int: ...
+    def sendKey(  # noqa: N802 - mirrors the libvirt binding name
+        self, codeset: int, holdtime: int, keycodes: list[int], nkeycodes: int, flags: int
+    ) -> int: ...
 
 
 class _LibvirtConn(Protocol):
@@ -96,6 +116,32 @@ class LocalLibvirtControl:
                 domain.injectNMI(0)
             except libvirt.libvirtError as exc:
                 raise self._control_failure("injecting NMI into", domain_name) from exc
+        finally:
+            _close(conn)
+
+    def diagnostic_sysrq(self, domain_name: str, trigger: str) -> None:
+        """Inject a magic-SysRq keystroke via ``sendKey`` (Alt+SysRq+<trigger>).
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` if ``trigger`` is not an allowlisted
+                SysRq character (a programming error — the tool validates it), or
+                ``CONTROL_FAILURE`` if the domain is absent or libvirt errors.
+        """
+        keycode = _SYSRQ_KEYCODES.get(trigger)
+        if keycode is None:
+            raise CategorizedError(
+                f"unsupported SysRq trigger {trigger!r}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"domain": domain_name, "trigger": trigger},
+            )
+        conn = self._open()
+        try:
+            domain = self._lookup(conn, domain_name)
+            keycodes = [_KEY_LEFTALT, _KEY_SYSRQ, keycode]
+            try:
+                domain.sendKey(libvirt.VIR_KEYCODE_SET_LINUX, _SYSRQ_HOLDTIME_MS, keycodes, 3, 0)
+            except libvirt.libvirtError as exc:
+                raise self._control_failure("sending SysRq to", domain_name) from exc
         finally:
             _close(conn)
 

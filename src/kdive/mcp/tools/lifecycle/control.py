@@ -25,10 +25,13 @@ from pydantic import Field
 
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
+from kdive.domain.catalog.resources import ResourceKind
+from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind, PowerAction
+from kdive.domain.operations.sysrq import SysRqCommand, parse_command
 from kdive.jobs import queue
-from kdive.jobs.payloads import PowerPayload, SystemPayload
+from kdive.jobs.payloads import PowerPayload, SysRqPayload, SystemPayload
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
@@ -61,6 +64,10 @@ _POWER = JobKind.POWER
 # Idempotency-store kinds (the registered tool names); ADR-0193.
 _POWER_KIND = "control.power"
 _FORCE_CRASH_KIND = "control.force_crash"
+_DIAGNOSTIC_SYSRQ_KIND = "control.diagnostic_sysrq"
+# The agent-facing allowlist rendered into the `command` Field description (single source of
+# truth is `SysRqCommand`; ADR-0285).
+_SYSRQ_COMMANDS = ", ".join(command.value for command in SysRqCommand)
 # Power on is a reversible lifecycle move (operator); off/cycle/reset tear into a running
 # guest and are destructive-administration ops (admin) — ADR-0037 §1/§2.
 _POWER_ON_ACTIONS = frozenset({PowerAction.ON})
@@ -229,6 +236,66 @@ async def force_crash_system(
             )
 
 
+async def diagnostic_sysrq_system(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    system_id: str,
+    command: str,
+    resolver: ProviderResolver,
+    idempotency_key: str | None = None,
+) -> ToolResponse:
+    """Admit a diagnostic SysRq on a ready local-libvirt System and enqueue the capture job.
+
+    Non-destructive: requires ``contributor`` (no destructive-op gate), rejects an unknown or
+    destructive ``command`` and any non-local-libvirt or non-``ready`` System with a
+    ``configuration_error``. The role check binds to the target System's project and runs after
+    the in-project check, so it is never evaluated against a foreign project.
+    """
+    uid = _as_uuid(system_id)
+    if uid is None:
+        return _config_error(system_id)
+    with bind_context(principal=ctx.principal):
+        async with pool.connection() as conn:
+            system = await SYSTEMS.get(conn, uid)
+            if system is None or system.project not in ctx.projects:
+                return _config_error(system_id)
+            require_role(ctx, system.project, Role.CONTRIBUTOR)
+            try:
+                sysrq_command = parse_command(command)
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(system_id, exc)
+            binding = await resolver.binding_for_system(conn, system.id)
+            if binding.kind is not ResourceKind.LOCAL_LIBVIRT:
+                return _config_error(
+                    system_id,
+                    detail="diagnostic SysRq is supported only on local-libvirt Systems",
+                    data={"reason": "not_local_libvirt", "provider_kind": binding.kind.value},
+                )
+            if system.state is not SystemState.READY:
+                return _config_error(system_id, data={"current_status": system.state.value})
+            dedup_suffix = idempotency_key if idempotency_key is not None else str(uuid4())
+
+            async def _enqueue() -> ToolResponse:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.DIAGNOSTIC_SYSRQ,
+                    SysRqPayload(system_id=system_id, command=sysrq_command),
+                    job_authorizing(ctx, system.project),
+                    f"{system_id}:diagnostic_sysrq:{sysrq_command.value}:{dedup_suffix}",
+                )
+                return job_envelope(job, "system_id", uid)
+
+            return await keyed_mutation(
+                conn,
+                idempotency_key=idempotency_key,
+                principal=ctx.principal,
+                project=system.project,
+                kind=_DIAGNOSTIC_SYSRQ_KIND,
+                do_work=_enqueue,
+            )
+
+
 def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:
     """Register the `control.*` tools on ``app``, bound to ``pool``."""
 
@@ -276,6 +343,46 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             pool,
             current_context(),
             system_id=system_id,
+            resolver=resolver,
+            idempotency_key=idempotency_key,
+        )
+
+    @app.tool(
+        name="control.diagnostic_sysrq",
+        annotations=_docmeta.mutating(),
+        meta=_docmeta.maturity_meta("implemented"),
+    )
+    async def control_diagnostic_sysrq(
+        system_id: Annotated[
+            str, Field(description="The ready local-libvirt System to inspect (non-destructive).")
+        ],
+        command: Annotated[
+            str,
+            Field(
+                description=(
+                    "The diagnostic SysRq to inject. One of: "
+                    f"{_SYSRQ_COMMANDS}. Destructive SysRq (crash/reboot/poweroff) is rejected — "
+                    "use control.force_crash to crash a System."
+                )
+            ),
+        ],
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
+    ) -> ToolResponse:
+        """Inject one non-destructive diagnostic SysRq into a ready local-libvirt guest and
+        capture the kernel's console dump. Requires contributor (no destructive gate); enqueues
+        a job and returns `{job_id, status: queued}` — poll `jobs.wait`. On success the job's
+        `refs.result` is the redacted console-dump artifact id; read it with `artifacts.get`. No
+        console output (guest SysRq disabled or no keyboard driver) fails with a
+        `configuration_error`; an unknown/destructive `command`, a non-local-libvirt System, or
+        a non-ready System is a `configuration_error`."""
+        return await diagnostic_sysrq_system(
+            pool,
+            current_context(),
+            system_id=system_id,
+            command=command,
             resolver=resolver,
             idempotency_key=idempotency_key,
         )

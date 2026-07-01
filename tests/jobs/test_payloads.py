@@ -13,6 +13,7 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.operations.jobs import Job, JobKind, PowerAction
+from kdive.domain.operations.sysrq import SysRqCommand
 from kdive.jobs.payloads import (
     Authorizing,
     BuildPayload,
@@ -21,6 +22,7 @@ from kdive.jobs.payloads import (
     PayloadValidationError,
     PowerPayload,
     ReprovisionPayload,
+    SysRqPayload,
     dump_authorizing,
     dump_payload,
     load_payload,
@@ -218,6 +220,37 @@ def test_power_payload_dumps_json_and_loads_enum() -> None:
 
     assert payload == {"system_id": str(system_id), "action": "reset"}
     assert decoded.action is PowerAction.RESET
+
+
+def test_sysrq_payload_dumps_json_and_loads_enum() -> None:
+    system_id = uuid4()
+    now = datetime.now(UTC)
+
+    payload = dump_payload(
+        JobKind.DIAGNOSTIC_SYSRQ,
+        {"system_id": str(system_id), "command": "show_blocked_tasks"},
+    )
+    job = Job(
+        id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        kind=JobKind.DIAGNOSTIC_SYSRQ,
+        payload=payload,
+        state=JobState.QUEUED,
+        max_attempts=3,
+        authorizing={"principal": "alice", "agent_session": None, "project": "kernel-team"},
+        dedup_key="sysrq",
+    )
+
+    decoded = load_payload(job, SysRqPayload)
+
+    assert payload == {"system_id": str(system_id), "command": "show_blocked_tasks"}
+    assert decoded.command is SysRqCommand.SHOW_BLOCKED_TASKS
+
+
+def test_sysrq_payload_rejects_unknown_command() -> None:
+    with pytest.raises(PayloadValidationError):
+        dump_payload(JobKind.DIAGNOSTIC_SYSRQ, {"system_id": str(uuid4()), "command": "crash"})
 
 
 def test_image_build_payload_serializes_private_scope() -> None:

@@ -2,6 +2,24 @@
 
 # `control` tools
 
+## `control.diagnostic_sysrq`
+
+`implemented`
+
+Inject one non-destructive diagnostic SysRq into a ready local-libvirt guest and
+capture the kernel's console dump. Requires contributor (no destructive gate); enqueues
+a job and returns `{job_id, status: queued}` — poll `jobs.wait`. On success the job's
+`refs.result` is the redacted console-dump artifact id; read it with `artifacts.get`. No
+console output (guest SysRq disabled or no keyboard driver) fails with a
+`configuration_error`; an unknown/destructive `command`, a non-local-libvirt System, or
+a non-ready System is a `configuration_error`.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `command` | string | yes | The diagnostic SysRq to inject. One of: show_task_states, show_blocked_tasks, show_memory, show_locks, show_registers, show_backtrace_all_cpus, show_timers. Destructive SysRq (crash/reboot/poweroff) is rejected — use control.force_crash to crash a System. |
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
+| `system_id` | string | yes | The ready local-libvirt System to inspect (non-destructive). |
+
 ## `control.force_crash`
 
 `implemented` · `destructive`

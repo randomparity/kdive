@@ -210,6 +210,50 @@ def test_teardown_reclaims_console_parts_and_sidecar(
     assert not sidecar_present, "sidecar object must be deleted at teardown"
 
 
+async def _seed_sysrq_artifact(
+    pool: AsyncConnectionPool, store: _FakeStore, system_id: UUID
+) -> str:
+    name = f"sysrq-diagnostic-{uuid4()}"
+    stored = store.put_artifact(
+        ArtifactWriteRequest(
+            tenant="local",
+            owner_kind="systems",
+            owner_id=str(system_id),
+            name=name,
+            data=b"sysrq dump\n",
+            sensitivity=Sensitivity.REDACTED,
+            retention_class="console",
+        )
+    )
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+            "retention_class) VALUES ('systems', %s, %s, %s, 'redacted', 'console')",
+            (system_id, stored.key, stored.etag),
+        )
+    return stored.key
+
+
+def test_teardown_reclaims_sysrq_diagnostic_artifacts(migrated_url: str) -> None:
+    async def _run() -> tuple[list[str], list[str], bool]:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool)
+            store = _FakeStore()
+            key = await _seed_sysrq_artifact(pool, store, system_id)
+            assert key in store.objects
+            before = await _part_rows(pool, system_id)
+            await _teardown(pool, store, system_id)
+            after = await _part_rows(pool, system_id)
+            return before, after, key in store.objects
+
+    before, after, still_present = asyncio.run(_run())
+
+    assert any("sysrq-diagnostic-" in key for key in before), "fixture must seed a sysrq artifact"
+    assert [k for k in after if "sysrq-diagnostic-" in k] == [], "sysrq rows must be reclaimed"
+    assert not still_present, "sysrq object must be deleted at teardown"
+
+
 def test_teardown_succeeds_with_nothing_to_clean(migrated_url: str) -> None:
     async def _run() -> tuple[str, list[str], list[str]]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
