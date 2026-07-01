@@ -55,13 +55,21 @@ planned `live_drgn` signal.
 New `Capability(StrEnum)` in `domain/catalog/images.py`:
 
 ```
-agent  — the kdive guest agent / console readiness is baked in
-kdump  — kdump tooling (kexec-tools, makedumpfile) is baked in
-drgn   — the drgn binary is baked in
-build  — the kernel build toolchain is baked in
+agent    — the kdive guest agent / console readiness is baked in
+kdump    — kdump tooling (kexec-tools, makedumpfile) is baked in
+drgn     — the drgn binary is baked in
+build    — the kernel build toolchain is baked in
+helpers  — the allowlisted in-guest helpers are baked in
 ```
 
-Exactly the set `rootfs_specs._KIND_CAPABILITIES` bakes.
+The build bakes `agent`/`kdump`/`drgn`/`build` (`rootfs_specs._KIND_CAPABILITIES`); `helpers`
+is the fifth member because the private-upload path lets an operator declare it. That upload
+path validates a declared `required` set against `images/validation.py:GUEST_CONTRACT_PATHS`
+(a fourth vocabulary the audit missed — `agent`/`kdump`/`drgn`/`helpers`) and then stores it
+as the image's `capabilities`; a guard test keeps `GUEST_CONTRACT_PATHS` keys a subset of
+`Capability` (`build` alone has no in-guest marker), so the upload boundary
+(`validate_guest_contract`, which runs before the DB write) enforces the unified vocabulary
+and a valid guest-contract element never fails the capability read-back.
 
 `capabilities` is carried by **five** models, not one, and the read-tool model
 (`ImageCatalogEntry`) is *not* on the write path — so typing only it would leave the primary

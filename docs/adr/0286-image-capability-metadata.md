@@ -40,7 +40,14 @@ Model image capabilities as two distinct, honest things and stop the vocabulary 
   image trait with provider and profile operands.
 
 - **One closed, validated vocabulary.** A new `Capability` StrEnum — `agent`, `kdump`,
-  `drgn`, `build` — is the single source of truth, exactly the set the build bakes.
+  `drgn`, `build`, `helpers` — is the single source of truth: the set the build bakes
+  (`agent`/`kdump`/`drgn`/`build`) plus `helpers`, the allowlisted in-guest helpers an upload
+  may declare. It also reconciles a fourth drifted vocabulary the audit missed — the
+  `GUEST_CONTRACT_PATHS` keys (`agent`/`kdump`/`drgn`/`helpers`) that the private-upload path
+  validates a declared `required` set against and then stores as the image's `capabilities`.
+  Those keys are now a guarded subset of `Capability` (`build` alone has no in-guest marker),
+  so a valid guest-contract element can never fail the capability read-back, and a junk upload
+  token is rejected at `validate_guest_contract` before any DB write.
   `capabilities` is carried by five models — the read-tool `ImageCatalogEntry`, the
   write-path `ImageEntry` (inventory TOML → reconcile insert/update), the fixture-manifest
   `RootfsCatalogEntry`/`RootfsRequirements`, the serialize-out `ImageRow`, and the internal
