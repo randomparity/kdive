@@ -211,8 +211,15 @@ class RemoteLibvirtLiveIntrospect:
         """Build from env; opens no connection (config read per op)."""
         return cls(secret_registry=secret_registry, config_factory=config_factory)
 
-    def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
+    def introspect_live(
+        self, *, transport_handle: str, helper: str, key_path: str
+    ) -> IntrospectOutput:
         """Run one allowlisted in-guest drgn helper; return a redacted, byte-bounded report.
+
+        ``key_path`` is unused here: the remote provider reaches the guest over the qemu-guest-agent
+        channel (no SSH), so it carries no key identity. It is accepted only to satisfy the shared
+        ``LiveIntrospector`` port, which the local-libvirt SSH transport realizes with a real
+        per-System bootstrap key (ADR-0289).
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for an unknown helper or a blank handle;
@@ -220,6 +227,7 @@ class RemoteLibvirtLiveIntrospect:
                 for a malformed agent reply or undecodable helper output; ``DEBUG_ATTACH_FAILURE``
                 for a non-zero helper exit (drgn could not attach in-guest).
         """
+        del key_path
         if helper not in _LIVE_HELPERS:
             raise CategorizedError(
                 f"unknown live introspection helper: {helper}",
@@ -244,19 +252,22 @@ class RemoteLibvirtLiveIntrospect:
         )
 
     def run_script(
-        self, *, transport_handle: str, script: str, timeout_sec: float
+        self, *, transport_handle: str, script: str, timeout_sec: float, key_path: str
     ) -> LiveScriptOutput:
         """Run a caller drgn script in-guest via the guest agent; cap + redact its stdout.
 
         The script rides the guest-exec ``input-data`` (stdin), so argv stays the fixed,
         allowlisted ``[kdive-drgn, run-script, <timeout>]`` and the single-program allowlist is
         unchanged (ADR-0240). drgn runs **in the guest**; the worker only opens the agent channel.
+        ``key_path`` is unused (see ``introspect_live``): no SSH identity is needed over the
+        guest-agent channel; it is accepted only to satisfy the shared ``LiveIntrospector`` port.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for a blank handle; ``TRANSPORT_FAILURE``
                 for an unreachable guest agent; ``DEBUG_ATTACH_FAILURE`` for a non-zero in-guest
                 exit (script error or drgn could not attach).
         """
+        del key_path
         domain_name = transport_handle.strip()
         if not domain_name:
             raise CategorizedError(

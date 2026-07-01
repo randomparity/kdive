@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from uuid import UUID, uuid4
@@ -23,6 +24,7 @@ from kdive.domain.lifecycle.records import DebugSession
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug import introspect as introspect_tools
+from kdive.prereqs.system_bootstrap_key import ensure_system_bootstrap_key
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.ports.retrieve import (
@@ -419,7 +421,14 @@ def _live_ctx(role: Role | None = Role.OPERATOR, *, projects: tuple[str, ...] = 
 
 
 class _FakeLiveIntrospector:
-    """Records live introspection input; returns a canned output or raises a planted error."""
+    """Records live introspection input; returns a canned output or raises a planted error.
+
+    ``key_path`` is recorded separately from ``kwargs`` (in ``key_paths_seen``) since its value is
+    a fresh mkdtemp path on every call — callers that don't care about the exact path keep
+    asserting ``kwargs == {...}`` for the stable fields, and separately assert a temp key path was
+    passed (non-empty, and — since the tool materializes-then-removes it — no longer on disk by
+    the time the call returns).
+    """
 
     def __init__(
         self, *, output: IntrospectOutput | None = None, raises: CategorizedError | None = None
@@ -427,21 +436,26 @@ class _FakeLiveIntrospector:
         self._output = output if output is not None else _output()
         self._raises = raises
         self.kwargs: dict[str, object] = {}
+        self.key_paths_seen: list[str] = []
 
-    def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
+    def introspect_live(
+        self, *, transport_handle: str, helper: str, key_path: str
+    ) -> IntrospectOutput:
         self.kwargs = {"transport_handle": transport_handle, "helper": helper}
+        self.key_paths_seen.append(key_path)
         if self._raises is not None:
             raise self._raises
         return self._output
 
     def run_script(
-        self, *, transport_handle: str, script: str, timeout_sec: float
+        self, *, transport_handle: str, script: str, timeout_sec: float, key_path: str
     ) -> LiveScriptOutput:
         self.kwargs = {
             "transport_handle": transport_handle,
             "script": script,
             "timeout_sec": timeout_sec,
         }
+        self.key_paths_seen.append(key_path)
         if self._raises is not None:
             raise self._raises
         return LiveScriptOutput(output="ok", truncated=False)
@@ -483,11 +497,20 @@ async def _seed_live_drgn_session(
     transport: str = "drgn-live",
     transport_handle: str | None = None,
     project: str = "proj",
+    with_bootstrap_key: bool = True,
 ) -> str:
+    """Seed a DebugSession on a crashed System; by default also seeds its bootstrap key row.
+
+    ``with_bootstrap_key=False`` seeds a session on a System with no `system_bootstrap_keys` row,
+    for testing the fail-closed CONFIGURATION_ERROR path (ADR-0289).
+    """
     sys_id = await seed_crashed_system(pool, project=project)
     run_id = await seed_run_on_system(
         pool, sys_id, debuginfo_ref="k/runs/r/vmlinux", build_id="deadbeef", project=project
     )
+    if with_bootstrap_key:
+        async with pool.connection() as conn:
+            await ensure_system_bootstrap_key(conn, UUID(sys_id))
     handle = transport_handle if transport_handle is not None else f"{transport}://127.0.0.1:22"
     async with pool.connection() as conn:
         session = await DEBUG_SESSIONS.insert(
@@ -525,6 +548,69 @@ def test_run_live_routes_bare_domain_handle_to_introspector(migrated_url: str) -
         assert port.kwargs == {"transport_handle": "kdive-remote-1", "helper": "tasks"}
 
     asyncio.run(_run())
+
+
+def test_run_live_loads_and_materializes_the_per_system_bootstrap_key(migrated_url: str) -> None:
+    """introspect.run loads the System's bootstrap key and passes a materialized temp path down.
+
+    Mirrors the ssh_authorize handler test (tests/jobs/handlers/test_ssh_authorize.py): the engine
+    receives a real, existing key file at call time; by the time the tool call returns, the temp
+    key has been removed (the `with materialized_private_key(...)` scope wraps the engine call).
+    """
+
+    class _RecordingIntrospector(_FakeLiveIntrospector):
+        def __init__(self) -> None:
+            super().__init__()
+            self.key_path_existed_during_call = False
+
+        def introspect_live(
+            self, *, transport_handle: str, helper: str, key_path: str
+        ) -> IntrospectOutput:
+            self.key_path_existed_during_call = Path(key_path).is_file()
+            return super().introspect_live(
+                transport_handle=transport_handle, helper=helper, key_path=key_path
+            )
+
+    async def _run() -> tuple[ToolResponse, _RecordingIntrospector]:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_drgn_session(pool)
+            port = _RecordingIntrospector()
+            resp = await introspect_tools.introspect_run(
+                pool,
+                _live_ctx(),
+                session_id=session_id,
+                helper="tasks",
+                resolver=_live_resolver(port),
+            )
+        return resp, port
+
+    resp, port = asyncio.run(_run())
+    assert resp.status != "error"
+    assert port.key_path_existed_during_call is True
+    assert len(port.key_paths_seen) == 1
+    key_path = port.key_paths_seen[0]
+    assert key_path  # a real path was passed, not empty/None
+    assert not Path(key_path).exists()  # removed after the call (materialized_private_key scope)
+
+
+def test_run_live_no_bootstrap_key_is_configuration_error(migrated_url: str) -> None:
+    """A System with no `system_bootstrap_keys` row fails closed (ADR-0289) before the SSH seam."""
+
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_drgn_session(pool, with_bootstrap_key=False)
+            port = _FakeLiveIntrospector()
+            return await introspect_tools.introspect_run(
+                pool,
+                _live_ctx(),
+                session_id=session_id,
+                helper="tasks",
+                resolver=_live_resolver(port),
+            )
+
+    resp = asyncio.run(_run())
+    assert resp.status == "error"
+    assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR
 
 
 def test_run_live_happy_path_returns_redacted_report(migrated_url: str) -> None:

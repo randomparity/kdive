@@ -455,12 +455,12 @@ def _live_introspector(
 ) -> LocalLibvirtLiveIntrospect:
     """Build a live introspector with the SSH-exec helper seam injected as a fake.
 
-    The fake stands in for ``_real_run_live_helper``: given ``(transport_handle, helper)`` it
-    returns the section the in-guest ``kdive-drgn <helper>`` would print, without SSH or drgn.
+    The fake stands in for ``_real_run_live_helper``: given ``(transport_handle, helper, key_path)``
+    it returns the section the in-guest ``kdive-drgn <helper>`` would print, without SSH or drgn.
     """
     prog = program if program is not None else _FakeProgram()
 
-    def _run_live(transport_handle: str, helper: str) -> dict[str, object]:
+    def _run_live(transport_handle: str, helper: str, key_path: str) -> dict[str, object]:
         if seam_raises is not None:
             raise seam_raises
         return _section_for(helper, prog)
@@ -470,24 +470,28 @@ def _live_introspector(
 
 def test_live_introspector_is_protocol() -> None:
     class _Impl:
-        def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
+        def introspect_live(
+            self, *, transport_handle: str, helper: str, key_path: str
+        ) -> IntrospectOutput:
             return IntrospectOutput(tasks={}, modules={}, sysinfo={}, truncated=False)
 
         def run_script(
-            self, *, transport_handle: str, script: str, timeout_sec: float
+            self, *, transport_handle: str, script: str, timeout_sec: float, key_path: str
         ) -> LiveScriptOutput:
             return LiveScriptOutput(output="", truncated=False)
 
     impl: LiveIntrospector = _Impl()
     assert (
-        impl.introspect_live(transport_handle="ssh://127.0.0.1:22", helper="tasks").truncated
+        impl.introspect_live(
+            transport_handle="ssh://127.0.0.1:22", helper="tasks", key_path="/tmp/key"
+        ).truncated
         is False
     )
 
 
 def test_run_happy_path_runs_selected_helper() -> None:
     out = _live_introspector().introspect_live(
-        transport_handle="ssh://127.0.0.1:22", helper="tasks"
+        transport_handle="ssh://127.0.0.1:22", helper="tasks", key_path="/tmp/key"
     )
     assert cast("list[object]", out.tasks["tasks"])  # the canned blocked task is present
     assert out.modules == {}
@@ -505,7 +509,7 @@ def test_run_routes_section_into_the_matching_report_field(helper: str, field: s
         tasks=[_FakeTask(42, "blocked", "D")], modules=[_FakeModule("nfs", refcount=3)]
     )
     out = _live_introspector(program=prog).introspect_live(
-        transport_handle="ssh://127.0.0.1:22", helper=helper
+        transport_handle="ssh://127.0.0.1:22", helper=helper, key_path="/tmp/key"
     )
     fields = {"tasks": out.tasks, "modules": out.modules, "sysinfo": out.sysinfo}
     assert fields[field]  # the routed section is non-empty
@@ -520,7 +524,7 @@ def test_run_unknown_helper_is_configuration_error_before_seam_runs() -> None:
     """An unknown helper is rejected before any SSH round-trip (the seam is never called)."""
     calls: list[tuple[str, str]] = []
 
-    def _run_live(transport_handle: str, helper: str) -> dict[str, object]:
+    def _run_live(transport_handle: str, helper: str, key_path: str) -> dict[str, object]:
         calls.append((transport_handle, helper))
         return {}
 
@@ -528,31 +532,35 @@ def test_run_unknown_helper_is_configuration_error_before_seam_runs() -> None:
         secret_registry=SecretRegistry(), run_live_helper=_run_live
     )
     with pytest.raises(CategorizedError) as exc:
-        introspector.introspect_live(transport_handle="ssh://127.0.0.1:22", helper="bogus")
+        introspector.introspect_live(
+            transport_handle="ssh://127.0.0.1:22", helper="bogus", key_path="/tmp/key"
+        )
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert calls == []  # the seam was never reached
 
 
 def test_run_threads_handle_and_helper_into_the_seam() -> None:
-    """The seam receives exactly the persisted transport handle and the selected helper."""
-    seen: list[tuple[str, str]] = []
+    """The seam receives exactly the persisted transport handle, helper, and key path."""
+    seen: list[tuple[str, str, str]] = []
 
-    def _run_live(transport_handle: str, helper: str) -> dict[str, object]:
-        seen.append((transport_handle, helper))
+    def _run_live(transport_handle: str, helper: str, key_path: str) -> dict[str, object]:
+        seen.append((transport_handle, helper, key_path))
         return _section_for(helper, _FakeProgram())
 
     introspector = LocalLibvirtLiveIntrospect(
         secret_registry=SecretRegistry(), run_live_helper=_run_live
     )
-    introspector.introspect_live(transport_handle="ssh://127.0.0.1:2222", helper="modules")
-    assert seen == [("ssh://127.0.0.1:2222", "modules")]
+    introspector.introspect_live(
+        transport_handle="ssh://127.0.0.1:2222", helper="modules", key_path="/tmp/key"
+    )
+    assert seen == [("ssh://127.0.0.1:2222", "modules", "/tmp/key")]
 
 
 def test_run_transport_failure_propagates_typed() -> None:
     boom = CategorizedError("ssh dropped", category=ErrorCategory.TRANSPORT_FAILURE)
     with pytest.raises(CategorizedError) as exc:
         _live_introspector(seam_raises=boom).introspect_live(
-            transport_handle="ssh://127.0.0.1:22", helper="tasks"
+            transport_handle="ssh://127.0.0.1:22", helper="tasks", key_path="/tmp/key"
         )
     assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
 
@@ -561,7 +569,7 @@ def test_run_attach_failure_propagates_typed() -> None:
     boom = CategorizedError("drgn cannot attach", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
     with pytest.raises(CategorizedError) as exc:
         _live_introspector(seam_raises=boom).introspect_live(
-            transport_handle="ssh://127.0.0.1:22", helper="tasks"
+            transport_handle="ssh://127.0.0.1:22", helper="tasks", key_path="/tmp/key"
         )
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
 
@@ -570,7 +578,7 @@ def test_run_arbitrary_seam_error_becomes_debug_attach_failure() -> None:
     # A non-categorized fault from the live seam is normalized to an attach failure (as offline).
     with pytest.raises(CategorizedError) as exc:
         _live_introspector(seam_raises=RuntimeError("kcore permission denied")).introspect_live(
-            transport_handle="ssh://127.0.0.1:22", helper="tasks"
+            transport_handle="ssh://127.0.0.1:22", helper="tasks", key_path="/tmp/key"
         )
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
 
@@ -578,7 +586,7 @@ def test_run_arbitrary_seam_error_becomes_debug_attach_failure() -> None:
 def test_run_redacts_guest_strings_at_the_port_boundary() -> None:
     prog = _FakeProgram(tasks=[_FakeTask(13, "token=hunter2", "D")])
     out = _live_introspector(program=prog).introspect_live(
-        transport_handle="ssh://127.0.0.1:22", helper="tasks"
+        transport_handle="ssh://127.0.0.1:22", helper="tasks", key_path="/tmp/key"
     )
     rows = cast("list[dict[str, object]]", out.tasks["tasks"])
     assert "hunter2" not in str(rows)
@@ -588,7 +596,7 @@ def test_run_redacts_guest_strings_at_the_port_boundary() -> None:
 def test_run_modules_decode_skew_degrades_not_raises() -> None:
     prog = _FakeProgram(modules=[_FakeModule("a", raises=True), _FakeModule("b", raises=True)])
     out = _live_introspector(program=prog).introspect_live(
-        transport_handle="ssh://127.0.0.1:22", helper="modules"
+        transport_handle="ssh://127.0.0.1:22", helper="modules", key_path="/tmp/key"
     )
     assert out.modules["all_failed"] is True
     assert out.modules["modules"] == []
@@ -598,7 +606,9 @@ def test_run_byte_cap_trims_tasks_and_sets_truncated() -> None:
     prog = _FakeProgram(tasks=[_FakeTask(i, "blocked", "D", stack=["x" * 64]) for i in range(200)])
     introspector = _live_introspector(program=prog)
     introspector._report_byte_cap = 256
-    out = introspector.introspect_live(transport_handle="ssh://127.0.0.1:22", helper="tasks")
+    out = introspector.introspect_live(
+        transport_handle="ssh://127.0.0.1:22", helper="tasks", key_path="/tmp/key"
+    )
     assert out.truncated is True
     assert len(cast("list[object]", out.tasks["tasks"])) < 200
 
@@ -607,7 +617,9 @@ def test_run_requires_the_live_seam() -> None:
     """A ``None`` live seam is off-gate: the port raises before any IO."""
     off_gate = LocalLibvirtLiveIntrospect(secret_registry=SecretRegistry(), run_live_helper=None)
     with pytest.raises(CategorizedError) as exc:
-        off_gate.introspect_live(transport_handle="ssh://127.0.0.1:22", helper="tasks")
+        off_gate.introspect_live(
+            transport_handle="ssh://127.0.0.1:22", helper="tasks", key_path="/tmp/key"
+        )
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
 
 
@@ -621,7 +633,9 @@ def test_live_from_env_bad_handle_is_configuration_error_before_io() -> None:
     """The wired real seam rejects a non-ssh handle as CONFIGURATION_ERROR before any SSH/drgn."""
     introspector = LocalLibvirtLiveIntrospect.from_env(secret_registry=SecretRegistry())
     with pytest.raises(CategorizedError) as exc:
-        introspector.introspect_live(transport_handle="gdbstub://127.0.0.1:22", helper="tasks")
+        introspector.introspect_live(
+            transport_handle="gdbstub://127.0.0.1:22", helper="tasks", key_path="/tmp/key"
+        )
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
@@ -629,46 +643,47 @@ def test_live_from_env_non_loopback_handle_is_configuration_error_before_io() ->
     """A loopback re-check at use time rejects an off-loopback ssh handle before any SSH/drgn."""
     introspector = LocalLibvirtLiveIntrospect.from_env(secret_registry=SecretRegistry())
     with pytest.raises(CategorizedError) as exc:
-        introspector.introspect_live(transport_handle="ssh://10.0.0.5:22", helper="tasks")
-    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-
-
-def test_real_seam_missing_managed_key_is_configuration_error_before_ssh(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A loopback ssh handle with the managed key absent fails CONFIGURATION_ERROR before ssh.
-
-    Drives the real seam past handle validation to the managed-key resolve with the keypair
-    path pointed at a nonexistent file, so no ssh subprocess is ever spawned.
-    """
-    from kdive.providers.local_libvirt.debug import introspect as introspect_mod
-
-    monkeypatch.setattr(
-        introspect_mod, "managed_private_key_path", lambda: tmp_path / "absent_id_ed25519"
-    )
-    with pytest.raises(CategorizedError) as exc:
-        introspect_mod._real_run_live_helper(
-            "ssh://127.0.0.1:2222", "tasks", secret_registry=SecretRegistry()
+        introspector.introspect_live(
+            transport_handle="ssh://10.0.0.5:22", helper="tasks", key_path="/tmp/key"
         )
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
-def test_live_ssh_argv_validates_key_registers_secret_and_appends_command(
+def test_real_run_live_helper_threads_key_path_into_argv(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """`_real_run_live_helper` passes the caller-supplied key_path straight to `_live_ssh_argv`.
+
+    It no longer resolves the managed key itself (that moved to the tool boundary, ADR-0289): a
+    caller-supplied path — even one that doesn't exist — reaches the argv unchanged, so this
+    drives the real seam up to (but never actually spawning) ssh via the exec seam.
+    """
     from kdive.providers.local_libvirt.debug import introspect as introspect_mod
 
-    key = tmp_path / "id_ed25519"
-    key.write_text("super-secret-key", encoding="utf-8")
-    monkeypatch.setattr(introspect_mod, "managed_private_key_path", lambda: key)
+    key = tmp_path / "absent_id_ed25519"
+    seen_argv: list[str] = []
+    monkeypatch.setattr(
+        introspect_mod, "_exec_live_helper", lambda argv: seen_argv.extend(argv) or {}
+    )
+    introspect_mod._real_run_live_helper(
+        "ssh://127.0.0.1:2222", "tasks", str(key), secret_registry=SecretRegistry()
+    )
+    assert seen_argv[seen_argv.index("-i") + 1] == str(key)
+
+
+def test_live_ssh_argv_uses_the_passed_key_path_and_appends_command() -> None:
+    from kdive.providers.local_libvirt.debug import introspect as introspect_mod
+
     registry = SecretRegistry()
 
-    argv = introspect_mod._live_ssh_argv("ssh://127.0.0.1:2222", registry, ["run-script", "5"])
+    argv = introspect_mod._live_ssh_argv(
+        "ssh://127.0.0.1:2222", registry, ["run-script", "5"], "/tmp/kdive-bootkey-use-x/id"
+    )
 
     assert argv == [
         "ssh",
         "-i",
-        str(key),
+        "/tmp/kdive-bootkey-use-x/id",
         "-o",
         "BatchMode=yes",
         "-o",
@@ -685,7 +700,6 @@ def test_live_ssh_argv_validates_key_registers_secret_and_appends_command(
         "run-script",
         "5",
     ]
-    assert "super-secret-key" in registry.snapshot()
 
 
 # --- LocalLibvirtLiveIntrospect.run_script (ADR-0240, arbitrary drgn over SSH stdin) ---------
@@ -695,13 +709,13 @@ def _live_script_introspector(
     *,
     stdout: str = "",
     seam_raises: Exception | None = None,
-    seen: list[tuple[str, str, float]] | None = None,
+    seen: list[tuple[str, str, float, str]] | None = None,
 ) -> LocalLibvirtLiveIntrospect:
     """A live introspector whose run-script seam is a fake (no SSH, no drgn)."""
 
-    def _run_script(transport_handle: str, script: str, timeout_sec: float) -> str:
+    def _run_script(transport_handle: str, script: str, timeout_sec: float, key_path: str) -> str:
         if seen is not None:
-            seen.append((transport_handle, script, timeout_sec))
+            seen.append((transport_handle, script, timeout_sec, key_path))
         if seam_raises is not None:
             raise seam_raises
         return stdout
@@ -711,25 +725,34 @@ def _live_script_introspector(
 
 def test_run_script_returns_redacted_capped_stdout() -> None:
     out = _live_script_introspector(stdout="d_hash_shift = 0x14\n").run_script(
-        transport_handle="ssh://127.0.0.1:22", script="print(prog['d_hash_shift'])", timeout_sec=5.0
+        transport_handle="ssh://127.0.0.1:22",
+        script="print(prog['d_hash_shift'])",
+        timeout_sec=5.0,
+        key_path="/tmp/key",
     )
     assert "0x14" in out.output
     assert out.truncated is False
 
 
-def test_run_script_threads_handle_script_and_timeout_into_the_seam() -> None:
-    seen: list[tuple[str, str, float]] = []
+def test_run_script_threads_handle_script_timeout_and_key_path_into_the_seam() -> None:
+    seen: list[tuple[str, str, float, str]] = []
     _live_script_introspector(stdout="ok", seen=seen).run_script(
-        transport_handle="ssh://127.0.0.1:2222", script="print(1)", timeout_sec=12.0
+        transport_handle="ssh://127.0.0.1:2222",
+        script="print(1)",
+        timeout_sec=12.0,
+        key_path="/tmp/key",
     )
-    assert seen == [("ssh://127.0.0.1:2222", "print(1)", 12.0)]
+    assert seen == [("ssh://127.0.0.1:2222", "print(1)", 12.0, "/tmp/key")]
 
 
 def test_run_script_off_gate_is_missing_dependency() -> None:
     off_gate = LocalLibvirtLiveIntrospect(secret_registry=SecretRegistry(), run_live_script=None)
     with pytest.raises(CategorizedError) as exc:
         off_gate.run_script(
-            transport_handle="ssh://127.0.0.1:22", script="print(1)", timeout_sec=5.0
+            transport_handle="ssh://127.0.0.1:22",
+            script="print(1)",
+            timeout_sec=5.0,
+            key_path="/tmp/key",
         )
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
 
@@ -738,7 +761,10 @@ def test_run_script_transport_failure_propagates_typed() -> None:
     boom = CategorizedError("ssh dropped", category=ErrorCategory.TRANSPORT_FAILURE)
     with pytest.raises(CategorizedError) as exc:
         _live_script_introspector(seam_raises=boom).run_script(
-            transport_handle="ssh://127.0.0.1:22", script="print(1)", timeout_sec=5.0
+            transport_handle="ssh://127.0.0.1:22",
+            script="print(1)",
+            timeout_sec=5.0,
+            key_path="/tmp/key",
         )
     assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
 
@@ -746,7 +772,10 @@ def test_run_script_transport_failure_propagates_typed() -> None:
 def test_run_script_arbitrary_seam_error_becomes_debug_attach_failure() -> None:
     with pytest.raises(CategorizedError) as exc:
         _live_script_introspector(seam_raises=RuntimeError("drgn died")).run_script(
-            transport_handle="ssh://127.0.0.1:22", script="boom", timeout_sec=5.0
+            transport_handle="ssh://127.0.0.1:22",
+            script="boom",
+            timeout_sec=5.0,
+            key_path="/tmp/key",
         )
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
 
@@ -755,7 +784,10 @@ def test_run_script_byte_caps_and_sets_truncated() -> None:
     introspector = _live_script_introspector(stdout="y" * 5000)
     introspector._live_script_byte_cap = 64
     out = introspector.run_script(
-        transport_handle="ssh://127.0.0.1:22", script="print('y'*5000)", timeout_sec=5.0
+        transport_handle="ssh://127.0.0.1:22",
+        script="print('y'*5000)",
+        timeout_sec=5.0,
+        key_path="/tmp/key",
     )
     assert out.truncated is True
     assert len(out.output.encode("utf-8")) <= 64

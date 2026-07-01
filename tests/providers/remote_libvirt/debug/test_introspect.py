@@ -300,7 +300,7 @@ def test_introspect_live_unknown_helper_is_configuration_error():
     agent = _ScriptedAgent(lambda argv: AgentExecResult(0, b"{}", b""))
     live = _live(agent)
     with pytest.raises(CategorizedError) as exc:
-        live.introspect_live(transport_handle="kdive-sys", helper="evil")
+        live.introspect_live(transport_handle="kdive-sys", helper="evil", key_path="/tmp/key")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert str(exc.value) == "unknown live introspection helper: evil"
     assert agent.argvs == []  # rejected before any agent round-trip
@@ -310,7 +310,7 @@ def test_introspect_live_blank_handle_is_configuration_error():
     agent = _ScriptedAgent(lambda argv: AgentExecResult(0, b"{}", b""))
     live = _live(agent)
     with pytest.raises(CategorizedError) as exc:
-        live.introspect_live(transport_handle="   ", helper="sysinfo")
+        live.introspect_live(transport_handle="   ", helper="sysinfo", key_path="/tmp/key")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert agent.argvs == []
 
@@ -327,7 +327,7 @@ def test_introspect_live_runs_allowlisted_helper_through_real_guest_agent():
     }
     agent = _ScriptedAgent(lambda argv: AgentExecResult(0, json.dumps(section).encode(), b""))
     live = _live(agent)
-    out = live.introspect_live(transport_handle="kdive-sys", helper="sysinfo")
+    out = live.introspect_live(transport_handle="kdive-sys", helper="sysinfo", key_path="/tmp/key")
     # the single allowlisted program
     assert agent.argvs == [["/usr/local/sbin/kdive-drgn", "sysinfo"]]
     assert out.sysinfo["release"] == "6.1.0"
@@ -344,7 +344,7 @@ def test_introspect_live_routes_section_into_the_matching_report_field(helper, f
     section = {"value": marker}
     agent = _ScriptedAgent(lambda argv: AgentExecResult(0, json.dumps(section).encode(), b""))
     live = _live(agent)
-    out = live.introspect_live(transport_handle="kdive-sys", helper=helper)
+    out = live.introspect_live(transport_handle="kdive-sys", helper=helper, key_path="/tmp/key")
 
     assert getattr(out, field).get("value") == marker
     for other in ("tasks", "modules", "sysinfo"):
@@ -374,7 +374,7 @@ def test_introspect_live_threads_handle_into_domain_lookup():
 
     agent = _DomainCapturingAgent(lambda argv: AgentExecResult(0, b"{}", b""))
     live = _live(agent, conn=_RecordingConn())
-    live.introspect_live(transport_handle="  kdive-sys  ", helper="sysinfo")
+    live.introspect_live(transport_handle="  kdive-sys  ", helper="sysinfo", key_path="/tmp/key")
 
     assert looked_up == ["kdive-sys"]
     assert agent_domains and agent_domains[0] is not None
@@ -387,7 +387,7 @@ def test_introspect_live_tasks_section_is_byte_capped():
     section = {"tasks": [{"pid": i} for i in range(3)]}
     agent = _ScriptedAgent(lambda argv: AgentExecResult(0, json.dumps(section).encode(), b""))
     live = _live(agent)
-    out = live.introspect_live(transport_handle="kdive-sys", helper="tasks")
+    out = live.introspect_live(transport_handle="kdive-sys", helper="tasks", key_path="/tmp/key")
 
     assert out.tasks["tasks"] == [{"pid": 0}, {"pid": 1}, {"pid": 2}]
     assert out.truncated is False
@@ -399,7 +399,7 @@ def test_introspect_live_redacts_using_the_provider_secret_registry():
     section = {"leak": "see topsecret-value here"}
     agent = _ScriptedAgent(lambda argv: AgentExecResult(0, json.dumps(section).encode(), b""))
     live = _live(agent, secret_registry=registry)
-    out = live.introspect_live(transport_handle="kdive-sys", helper="modules")
+    out = live.introspect_live(transport_handle="kdive-sys", helper="modules", key_path="/tmp/key")
 
     assert "topsecret-value" not in str(out.modules)
     assert "[REDACTED]" in str(out.modules)
@@ -409,7 +409,7 @@ def test_introspect_live_nonzero_exit_is_debug_attach_failure():
     agent = _ScriptedAgent(lambda argv: AgentExecResult(1, b"", b"boom"))
     live = _live(agent)
     with pytest.raises(CategorizedError) as exc:
-        live.introspect_live(transport_handle="kdive-sys", helper="tasks")
+        live.introspect_live(transport_handle="kdive-sys", helper="tasks", key_path="/tmp/key")
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
     assert str(exc.value) == (
         "in-guest drgn helper exited non-zero (could not attach to the live kernel)"
@@ -421,7 +421,7 @@ def test_introspect_live_undecodable_output_is_infrastructure_failure():
     agent = _ScriptedAgent(lambda argv: AgentExecResult(0, b"not json", b""))
     live = _live(agent)
     with pytest.raises(CategorizedError) as exc:
-        live.introspect_live(transport_handle="kdive-sys", helper="modules")
+        live.introspect_live(transport_handle="kdive-sys", helper="modules", key_path="/tmp/key")
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert str(exc.value) == "in-guest drgn helper returned undecodable JSON"
 
@@ -431,7 +431,7 @@ def test_introspect_live_non_object_json_is_infrastructure_failure():
     agent = _ScriptedAgent(lambda argv: AgentExecResult(0, b"[1, 2, 3]", b""))
     live = _live(agent)
     with pytest.raises(CategorizedError) as exc:
-        live.introspect_live(transport_handle="kdive-sys", helper="tasks")
+        live.introspect_live(transport_handle="kdive-sys", helper="tasks", key_path="/tmp/key")
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert str(exc.value) == "in-guest drgn helper output was not a JSON object"
 
@@ -754,21 +754,27 @@ _DRGN_HELPER = "/usr/local/sbin/kdive-drgn"
 
 def test_run_script_returns_capped_stdout():
     agent = _ScriptedAgent(lambda argv: AgentExecResult(0, b"hash_shift=20\n", b""))
-    out = _live(agent).run_script(transport_handle="kdive-sys", script="print(1)", timeout_sec=5.0)
+    out = _live(agent).run_script(
+        transport_handle="kdive-sys", script="print(1)", timeout_sec=5.0, key_path="/tmp/key"
+    )
     assert "hash_shift=20" in out.output
     assert out.truncated is False
 
 
 def test_run_script_uses_allowlisted_run_script_argv_and_clamped_int_timeout():
     agent = _ScriptedAgent(lambda argv: AgentExecResult(0, b"ok", b""))
-    _live(agent).run_script(transport_handle="kdive-sys", script="print(1)", timeout_sec=5.0)
+    _live(agent).run_script(
+        transport_handle="kdive-sys", script="print(1)", timeout_sec=5.0, key_path="/tmp/key"
+    )
     assert agent.argvs == [[_DRGN_HELPER, "run-script", "5"]]
 
 
 def test_run_script_blank_handle_is_configuration_error():
     agent = _ScriptedAgent(lambda argv: AgentExecResult(0, b"", b""))
     with pytest.raises(CategorizedError) as exc:
-        _live(agent).run_script(transport_handle="   ", script="print(1)", timeout_sec=5.0)
+        _live(agent).run_script(
+            transport_handle="   ", script="print(1)", timeout_sec=5.0, key_path="/tmp/key"
+        )
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert agent.argvs == []  # rejected before any agent round-trip
 
@@ -776,7 +782,9 @@ def test_run_script_blank_handle_is_configuration_error():
 def test_run_script_nonzero_exit_is_debug_attach_failure():
     agent = _ScriptedAgent(lambda argv: AgentExecResult(3, b"", b"boom"))
     with pytest.raises(CategorizedError) as exc:
-        _live(agent).run_script(transport_handle="kdive-sys", script="boom", timeout_sec=5.0)
+        _live(agent).run_script(
+            transport_handle="kdive-sys", script="boom", timeout_sec=5.0, key_path="/tmp/key"
+        )
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
 
 
@@ -784,7 +792,9 @@ def test_run_script_byte_caps_and_sets_truncated():
     agent = _ScriptedAgent(lambda argv: AgentExecResult(0, b"z" * 5000, b""))
     live = _live(agent)
     live._live_script_byte_cap = 64
-    out = live.run_script(transport_handle="kdive-sys", script="print('z'*5000)", timeout_sec=5.0)
+    out = live.run_script(
+        transport_handle="kdive-sys", script="print('z'*5000)", timeout_sec=5.0, key_path="/tmp/key"
+    )
     assert out.truncated is True
     assert len(out.output.encode("utf-8")) <= 64
 
@@ -793,5 +803,7 @@ def test_run_script_floors_in_guest_timeout_argv_at_one():
     # Defense in depth: even if a caller passes timeout_sec < 1 directly to the port, the in-guest
     # `timeout` argv must be >= 1 (coreutils `timeout 0` disables the bound).
     agent = _ScriptedAgent(lambda argv: AgentExecResult(0, b"ok", b""))
-    _live(agent).run_script(transport_handle="kdive-sys", script="print(1)", timeout_sec=0.0)
+    _live(agent).run_script(
+        transport_handle="kdive-sys", script="print(1)", timeout_sec=0.0, key_path="/tmp/key"
+    )
     assert agent.argvs == [[_DRGN_HELPER, "run-script", "1"]]

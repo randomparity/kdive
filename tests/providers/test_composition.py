@@ -206,11 +206,13 @@ class _IntrospectorProvider:
     ) -> IntrospectOutput:
         return IntrospectOutput(tasks={}, modules={}, sysinfo={}, truncated=False)
 
-    def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
+    def introspect_live(
+        self, *, transport_handle: str, helper: str, key_path: str
+    ) -> IntrospectOutput:
         return IntrospectOutput(tasks={}, modules={}, sysinfo={}, truncated=False)
 
     def run_script(
-        self, *, transport_handle: str, script: str, timeout_sec: float
+        self, *, transport_handle: str, script: str, timeout_sec: float, key_path: str
     ) -> LiveScriptOutput:
         return LiveScriptOutput(output="", truncated=False)
 

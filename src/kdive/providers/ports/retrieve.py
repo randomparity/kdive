@@ -100,8 +100,16 @@ class VmcoreIntrospector(Protocol):
 class LiveIntrospector(Protocol):
     """Live introspection port over an existing transport handle."""
 
-    def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
+    def introspect_live(
+        self, *, transport_handle: str, helper: str, key_path: str
+    ) -> IntrospectOutput:
         """Inspect a live guest through an existing debug transport.
+
+        ``key_path`` is the per-System SSH bootstrap private key (ADR-0289), already loaded and
+        materialized to a caller-owned temp file by the MCP tool boundary; an SSH-based realization
+        (local-libvirt) uses it as the ``root`` identity, a guest-agent-based realization
+        (remote-libvirt) ignores it — every realization accepts it to keep the tool's call site
+        uniform across providers.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for malformed handles or unknown
@@ -111,9 +119,11 @@ class LiveIntrospector(Protocol):
         ...
 
     def run_script(
-        self, *, transport_handle: str, script: str, timeout_sec: float
+        self, *, transport_handle: str, script: str, timeout_sec: float, key_path: str
     ) -> LiveScriptOutput:
         """Run a caller-supplied drgn script in-guest; return its byte-capped stdout (ADR-0240).
+
+        ``key_path`` carries the same per-System bootstrap key as ``introspect_live``.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for a malformed handle,

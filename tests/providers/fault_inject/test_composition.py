@@ -230,7 +230,9 @@ def test_introspect_outputs_are_empty_but_non_null_collections() -> None:
     introspect = FaultInjectIntrospect()
 
     offline = introspect.from_vmcore(vmcore_ref="v", debuginfo_ref="d", expected_build_id="b")
-    live = introspect.introspect_live(transport_handle="gdbstub://127.0.0.1:1234", helper="drgn")
+    live = introspect.introspect_live(
+        transport_handle="gdbstub://127.0.0.1:1234", helper="drgn", key_path="/tmp/key"
+    )
 
     for output in (offline, live):
         assert output.tasks == {}

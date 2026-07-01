@@ -7,7 +7,7 @@ from kdive.providers.fault_inject.debug.introspect import FaultInjectIntrospect
 
 def test_run_script_returns_synthetic_output() -> None:
     out = FaultInjectIntrospect().run_script(
-        transport_handle="x", script="print(1)", timeout_sec=5.0
+        transport_handle="x", script="print(1)", timeout_sec=5.0, key_path="/tmp/key"
     )
     assert out.output == ""
     assert out.truncated is False

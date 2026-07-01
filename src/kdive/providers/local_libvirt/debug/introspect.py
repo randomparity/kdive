@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import cast
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.prereqs.managed_ssh_key import managed_private_key_path
 from kdive.providers.ports.lifecycle import TransportHandleData
 from kdive.providers.ports.retrieve import (
     IntrospectOutput,
@@ -56,7 +55,7 @@ _LIVE_HELPERS = frozenset({"tasks", "modules", "sysinfo"})
 # argv against the guest's live /proc/kcore, prints one section JSON object on stdout.
 _DRGN_HELPER = "/usr/local/sbin/kdive-drgn"
 _LOOPBACK_HOST = "127.0.0.1"  # the live transport is loopback-only (ADR-0218 §1)
-_SSH_USER = "root"  # the rootfs --ssh-injects the managed key to root (ADR-0052/0218 §1)
+_SSH_USER = "root"  # the per-System bootstrap public key is injected to root (ADR-0289/0218 §1)
 # Bound the SSH+helper round-trip. introspect.run runs the seam via asyncio.to_thread, so this
 # also caps how long a wedged sshd can hold a worker thread-pool slot.
 _LIVE_INTROSPECT_SSH_TIMEOUT_S = 60
@@ -200,10 +199,12 @@ def _normalize_attach_error(exc: Exception, message: str) -> CategorizedError:
 
 # --- LocalLibvirtLiveIntrospect (the live drgn-over-SSH port, ADR-0219) ----------------------
 
-# (transport_handle, helper) -> the section dict the in-guest ``kdive-drgn <helper>`` emits.
-type _RunLiveHelper = Callable[[str, str], dict[str, object]]
-# (transport_handle, script, timeout_sec) -> the in-guest ``kdive-drgn run-script`` stdout.
-type _RunLiveScript = Callable[[str, str, float], str]
+# (transport_handle, helper, key_path) -> the section dict the in-guest ``kdive-drgn <helper>``
+# emits. ``key_path`` is the caller-materialized per-System bootstrap private key (ADR-0289).
+type _RunLiveHelper = Callable[[str, str, str], dict[str, object]]
+# (transport_handle, script, timeout_sec, key_path) -> the in-guest ``kdive-drgn run-script``
+# stdout.
+type _RunLiveScript = Callable[[str, str, float, str], str]
 # Seconds added to the agent-chosen in-guest timeout to bound the SSH round-trip (ADR-0240):
 # a wedged sshd still releases the thread, but a legitimately long script is not severed.
 _LIVE_SCRIPT_SSH_SLACK_S = 10.0
@@ -222,7 +223,9 @@ class LocalLibvirtLiveIntrospect:
     The ``run_live_helper`` seam is ``None`` off-gate; ``introspect_live`` then raises
     ``MISSING_DEPENDENCY``, mirroring the offline port's seam guard. ``from_env`` wires the real
     ``_real_run_live_helper`` (its ``subprocess`` SSH call is the only ``live_vm`` seam; the handle
-    validation and error mapping run in CI).
+    validation and error mapping run in CI). Callers pass ``key_path`` — the per-System bootstrap
+    private key (ADR-0289), loaded and materialized by the MCP tool boundary — into
+    ``introspect_live``/``run_script``; this port never resolves or reads key material itself.
     """
 
     def __init__(
@@ -242,17 +245,23 @@ class LocalLibvirtLiveIntrospect:
     def from_env(cls, *, secret_registry: SecretRegistry) -> LocalLibvirtLiveIntrospect:
         """Build from env with the real SSH-exec seams (opens no SSH and imports no drgn here).
 
-        The seams close over ``secret_registry`` so they can register the managed key value for
-        redaction; their real ``subprocess`` SSH calls run only under the ``live_vm`` gate, but the
-        handle-validation / managed-key-resolution branches run in CI.
+        The seams close over ``secret_registry`` only for defense-in-depth error-path redaction;
+        the caller-supplied ``key_path`` (per-System bootstrap key, ADR-0289) is loaded and
+        registered by the MCP tool boundary before it ever reaches this port. Their real
+        ``subprocess`` SSH calls run only under the ``live_vm`` gate, but the handle-validation
+        branches run in CI.
         """
 
-        def _seam(transport_handle: str, helper: str) -> dict[str, object]:
-            return _real_run_live_helper(transport_handle, helper, secret_registry=secret_registry)
+        def _seam(transport_handle: str, helper: str, key_path: str) -> dict[str, object]:
+            return _real_run_live_helper(
+                transport_handle, helper, key_path, secret_registry=secret_registry
+            )
 
-        def _script_seam(transport_handle: str, script: str, timeout_sec: float) -> str:
+        def _script_seam(
+            transport_handle: str, script: str, timeout_sec: float, key_path: str
+        ) -> str:
             return _real_run_live_script(
-                transport_handle, script, timeout_sec, secret_registry=secret_registry
+                transport_handle, script, timeout_sec, key_path, secret_registry=secret_registry
             )
 
         return cls(
@@ -262,13 +271,16 @@ class LocalLibvirtLiveIntrospect:
         )
 
     def run_script(
-        self, *, transport_handle: str, script: str, timeout_sec: float
+        self, *, transport_handle: str, script: str, timeout_sec: float, key_path: str
     ) -> LiveScriptOutput:
         """SSH-exec a caller drgn script in-guest over the drgn-live transport; cap + redact stdout.
 
         The script is piped to the in-guest ``kdive-drgn run-script`` over SSH stdin (never argv);
         its stdout is redacted (platform secrets only) and byte-capped through
         ``assemble_script_output``. drgn runs **in the guest**; the worker only opens SSH.
+        ``key_path`` is the per-System bootstrap private key (ADR-0289), already loaded and
+        materialized to a ``0600`` temp file by the caller (the MCP tool boundary), which also
+        registered its content with a ``SecretRegistry`` for redaction.
 
         Raises:
             CategorizedError: ``MISSING_DEPENDENCY`` if the live seam was not configured (off-gate);
@@ -282,7 +294,7 @@ class LocalLibvirtLiveIntrospect:
                 category=ErrorCategory.MISSING_DEPENDENCY,
             )
         try:
-            stdout = self._run_live_script(transport_handle, script, timeout_sec)
+            stdout = self._run_live_script(transport_handle, script, timeout_sec, key_path)
         except Exception as exc:  # noqa: BLE001 - any seam fault becomes a typed failure
             raise _normalize_attach_error(
                 exc, "drgn could not run the script in the live guest"
@@ -291,12 +303,16 @@ class LocalLibvirtLiveIntrospect:
             stdout, byte_cap=self._live_script_byte_cap, secret_registry=self._secret_registry
         )
 
-    def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
+    def introspect_live(
+        self, *, transport_handle: str, helper: str, key_path: str
+    ) -> IntrospectOutput:
         """SSH-exec one in-guest helper over the drgn-live transport; return a redacted report.
 
         Validates ``helper`` against the fixed set **before** the seam runs (no SSH round-trip for
         a bad helper), routes the returned section into its report field, and redacts + byte-caps
-        through ``assemble_report``.
+        through ``assemble_report``. ``key_path`` is the per-System bootstrap private key
+        (ADR-0289), already loaded and materialized to a ``0600`` temp file by the caller (the MCP
+        tool boundary), which also registered its content with a ``SecretRegistry`` for redaction.
 
         Raises:
             CategorizedError: ``MISSING_DEPENDENCY`` if the live seam was not configured (off-gate);
@@ -317,7 +333,7 @@ class LocalLibvirtLiveIntrospect:
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
         try:
-            section = self._run_live_helper(transport_handle, helper)
+            section = self._run_live_helper(transport_handle, helper, key_path)
         except Exception as exc:  # noqa: BLE001 - any seam fault becomes a typed failure
             raise _normalize_attach_error(
                 exc, "drgn could not attach to the live guest kernel"
@@ -360,22 +376,21 @@ def _validate_ssh_target(transport_handle: str) -> int:
 
 
 def _live_ssh_argv(
-    transport_handle: str, secret_registry: SecretRegistry, drgn_args: list[str]
+    transport_handle: str, secret_registry: SecretRegistry, drgn_args: list[str], key_path: str
 ) -> list[str]:
-    """Build the fixed loopback SSH argv for an in-guest ``kdive-drgn`` invocation."""
+    """Build the fixed loopback SSH argv for an in-guest ``kdive-drgn`` invocation.
+
+    ``key_path`` is the caller-materialized per-System bootstrap private key (ADR-0289); its
+    content was already loaded and registered with ``secret_registry`` by the MCP tool boundary
+    before this call, so this seam does no key IO or registration of its own — ``secret_registry``
+    is accepted only so the type stays consistent with the rest of the module's seams.
+    """
     port = _validate_ssh_target(transport_handle)
-    key_path = managed_private_key_path()
-    if not key_path.is_file():
-        raise CategorizedError(
-            "the kdive-managed SSH private key is not present on this worker host",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"key_path": str(key_path)},
-        )
-    secret_registry.register(key_path.read_text(encoding="utf-8"), scope=None)
+    del secret_registry  # unused: key content is registered by the caller (the tool boundary)
     return [
         "ssh",
         "-i",
-        str(key_path),
+        key_path,
         "-o",
         "BatchMode=yes",
         "-o",
@@ -394,22 +409,23 @@ def _live_ssh_argv(
 
 
 def _real_run_live_helper(
-    transport_handle: str, helper: str, *, secret_registry: SecretRegistry
+    transport_handle: str, helper: str, key_path: str, *, secret_registry: SecretRegistry
 ) -> dict[str, object]:
     """SSH-exec ``kdive-drgn <helper>`` in the guest and return its section dict (ADR-0219).
 
-    Decodes + re-validates the handle (loopback ssh, before IO), resolves the kdive-managed
-    private key as the ``root`` identity, and runs ``ssh … kdive-drgn <helper>`` with fixed argv.
-    The helper name is validated by the caller against the fixed set, so no caller-controlled
-    string reaches the remote command.
+    Decodes + re-validates the handle (loopback ssh, before IO) and runs ``ssh … kdive-drgn
+    <helper>`` with fixed argv using the caller-supplied ``key_path`` (the per-System bootstrap
+    key, ADR-0289, already materialized by the MCP tool boundary) as the ``root`` identity. The
+    helper name is validated by the caller against the fixed set, so no caller-controlled string
+    reaches the remote command.
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` for a non-ssh/non-loopback handle or an absent
-            managed key (both before IO); ``TRANSPORT_FAILURE`` for an SSH launch/connect fault or
-            timeout; ``DEBUG_ATTACH_FAILURE`` for a non-zero helper exit (drgn could not attach
-            in-guest); ``INFRASTRUCTURE_FAILURE`` for undecodable / non-object helper stdout.
+        CategorizedError: ``CONFIGURATION_ERROR`` for a non-ssh/non-loopback handle (before IO);
+            ``TRANSPORT_FAILURE`` for an SSH launch/connect fault or timeout;
+            ``DEBUG_ATTACH_FAILURE`` for a non-zero helper exit (drgn could not attach in-guest);
+            ``INFRASTRUCTURE_FAILURE`` for undecodable / non-object helper stdout.
     """
-    argv = _live_ssh_argv(transport_handle, secret_registry, [helper])
+    argv = _live_ssh_argv(transport_handle, secret_registry, [helper], key_path)
     return _exec_live_helper(argv)
 
 
@@ -417,8 +433,8 @@ def _exec_live_helper(argv: list[str]) -> dict[str, object]:  # pragma: no cover
     """Run the fixed ssh argv and decode the in-guest helper's one JSON section object.
 
     The ``# pragma: no cover - live_vm`` covers the real ssh subprocess; it needs a booted guest
-    with a reachable loopback-forwarded sshd, the managed key authorized, and the in-guest
-    ``kdive-drgn`` + ``drgn`` (the ADR-0219 named live gaps).
+    with a reachable loopback-forwarded sshd, the per-System bootstrap key authorized, and the
+    in-guest ``kdive-drgn`` + ``drgn`` (the ADR-0219 named live gaps).
     """
     try:
         proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; helper pre-validated
@@ -460,24 +476,33 @@ def _exec_live_helper(argv: list[str]) -> dict[str, object]:  # pragma: no cover
 
 
 def _real_run_live_script(
-    transport_handle: str, script: str, timeout_sec: float, *, secret_registry: SecretRegistry
+    transport_handle: str,
+    script: str,
+    timeout_sec: float,
+    key_path: str,
+    *,
+    secret_registry: SecretRegistry,
 ) -> str:
     """SSH-exec ``kdive-drgn run-script <timeout>`` with the script on stdin (ADR-0240).
 
-    Decodes + re-validates the handle (loopback ssh, before IO), resolves the kdive-managed key,
-    and runs ``ssh … kdive-drgn run-script <timeout>`` with the caller script piped over stdin —
-    never argv — so the fixed argv reaches the remote command. Returns the script's raw stdout.
+    Decodes + re-validates the handle (loopback ssh, before IO) and runs ``ssh … kdive-drgn
+    run-script <timeout>`` with the caller script piped over stdin — never argv — using the
+    caller-supplied ``key_path`` (the per-System bootstrap key, ADR-0289, already materialized by
+    the MCP tool boundary). Returns the script's raw stdout.
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` for a non-ssh/non-loopback handle or an absent
-            managed key (both before IO); ``TRANSPORT_FAILURE`` for an SSH launch/connect fault or
-            timeout; ``DEBUG_ATTACH_FAILURE`` for a non-zero in-guest exit (script error or drgn
-            could not attach).
+        CategorizedError: ``CONFIGURATION_ERROR`` for a non-ssh/non-loopback handle (before IO);
+            ``TRANSPORT_FAILURE`` for an SSH launch/connect fault or timeout;
+            ``DEBUG_ATTACH_FAILURE`` for a non-zero in-guest exit (script error or drgn could not
+            attach).
     """
     # Re-assert the in-guest timeout floor at the argv boundary (defense in depth): coreutils
     # `timeout 0` disables the bound, so the in-guest value is always >= 1 regardless of caller.
     argv = _live_ssh_argv(
-        transport_handle, secret_registry, ["run-script", str(max(1, int(timeout_sec)))]
+        transport_handle,
+        secret_registry,
+        ["run-script", str(max(1, int(timeout_sec)))],
+        key_path,
     )
     return _exec_live_script(argv, script, timeout_sec + _LIVE_SCRIPT_SSH_SLACK_S)
 
@@ -488,9 +513,9 @@ def _exec_live_script(  # pragma: no cover - live_vm
     """Run the fixed ssh argv with the caller script on stdin; return its raw stdout.
 
     The ``# pragma: no cover - live_vm`` covers the real ssh subprocess (a booted guest with a
-    reachable loopback-forwarded sshd, the managed key authorized, and in-guest ``kdive-drgn`` +
-    ``drgn``). The in-guest ``timeout`` bounds drgn; ``ssh_timeout_s`` (the in-guest bound + slack)
-    bounds a wedged channel so the worker thread is always released.
+    reachable loopback-forwarded sshd, the per-System bootstrap key authorized, and in-guest
+    ``kdive-drgn`` + ``drgn``). The in-guest ``timeout`` bounds drgn; ``ssh_timeout_s`` (the
+    in-guest bound + slack) bounds a wedged channel so the worker thread is always released.
     """
     try:
         proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; script via stdin only

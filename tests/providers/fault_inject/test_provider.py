@@ -325,7 +325,9 @@ def test_introspect_from_vmcore_and_live_return_plausible_shapes() -> None:
     introspect = FaultInjectIntrospect()
 
     offline = introspect.from_vmcore(vmcore_ref="v", debuginfo_ref="d", expected_build_id="b")
-    live = introspect.introspect_live(transport_handle="gdbstub://127.0.0.1:1234", helper="drgn")
+    live = introspect.introspect_live(
+        transport_handle="gdbstub://127.0.0.1:1234", helper="drgn", key_path="/tmp/key"
+    )
 
     assert offline.truncated is False
     assert live.truncated is False

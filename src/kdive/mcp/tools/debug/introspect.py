@@ -37,6 +37,10 @@ from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_target_failure
 from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
+from kdive.prereqs.system_bootstrap_key import (
+    load_system_bootstrap_private_key,
+    materialized_private_key,
+)
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.ports.lifecycle import (
@@ -151,10 +155,11 @@ class LiveDrgnSession(NamedTuple):
     project: str
     transport_handle: str
     session_id: UUID
+    system_id: UUID
 
 
 type _LiveIntrospectionAction = Callable[
-    [LiveDrgnSession, ProviderRuntime], Awaitable[ToolResponse]
+    [LiveDrgnSession, ProviderRuntime, str], Awaitable[ToolResponse]
 ]
 
 
@@ -166,7 +171,8 @@ async def resolve_live_drgn_session(
     Gates on UUID shape, project scope, ``contributor`` role, ``live`` state, and the
     ``drgn-live`` transport (live introspection rides drgn-live, not gdbstub; ADR-0039 §4 /
     ADR-0085). The provider realizes drgn-live over SSH (local) or the guest agent (remote);
-    core treats the resolved ``transport_handle`` as opaque.
+    core treats the resolved ``transport_handle`` as opaque. Also resolves the session's owning
+    System id (via its Run) so the caller can load the System's SSH bootstrap key (ADR-0289).
     """
     resolved = await resolve_debug_session_context(
         conn,
@@ -174,10 +180,17 @@ async def resolve_live_drgn_session(
         session_id,
         required_transport=_DRGN_LIVE,
         require_live=True,
+        include_system=True,
     )
-    if isinstance(resolved, ToolResponse) or resolved.transport_handle is None:
+    if (
+        isinstance(resolved, ToolResponse)
+        or resolved.transport_handle is None
+        or resolved.system_id is None
+    ):
         raise _session_config_error()
-    return LiveDrgnSession(resolved.project, resolved.transport_handle, resolved.session_id)
+    return LiveDrgnSession(
+        resolved.project, resolved.transport_handle, resolved.session_id, resolved.system_id
+    )
 
 
 async def _with_live_introspection(
@@ -193,12 +206,13 @@ async def _with_live_introspection(
         try:
             resolved = await resolve_live_drgn_session(conn, ctx, session_id)
             runtime = await resolver.runtime_for_session(conn, resolved.session_id)
+            denied = _require_introspection(session_id, runtime, mode)
+            if denied is not None:
+                return denied
+            private_key = await load_system_bootstrap_private_key(conn, resolved.system_id)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(session_id, exc)
-    denied = _require_introspection(session_id, runtime, mode)
-    if denied is not None:
-        return denied
-    return await action(resolved, runtime)
+    return await action(resolved, runtime, private_key)
 
 
 def _session_config_error() -> CategorizedError:
@@ -221,20 +235,24 @@ async def introspect_run(
     Requires a `live` drgn-live DebugSession (contributor). The ``helper`` must be one of the fixed
     in-tree helpers — there is no caller-supplied drgn script. The port is the single redaction
     boundary, so the returned report is already masked; the raw drgn transcript is ``sensitive``
-    and is never returned (the response only advertises that, ADR-0039 §2/§3).
+    and is never returned (the response only advertises that, ADR-0039 §2/§3). Roots the SSH
+    connection in the target System's per-System bootstrap key (ADR-0289), loaded and materialized
+    to a caller-owned temp file removed on every exit path; a System with no bootstrap key row
+    fails closed with ``CONFIGURATION_ERROR``.
     Off a prepared live host, the provider seam reports ``missing_dependency`` instead of
     importing drgn.
     """
     with bind_context(principal=ctx.principal):
 
         async def _run_live_helper(
-            resolved: LiveDrgnSession, runtime: ProviderRuntime
+            resolved: LiveDrgnSession, runtime: ProviderRuntime, private_key: str
         ) -> ToolResponse:
             return await _introspect_live_session(
                 session_id,
                 resolved=resolved,
                 helper=helper,
                 introspector=runtime.live_introspector,
+                private_key=private_key,
             )
 
         return await _with_live_introspection(
@@ -253,15 +271,18 @@ async def _introspect_live_session(
     resolved: LiveDrgnSession,
     helper: str,
     introspector: LiveIntrospector,
+    private_key: str,
 ) -> ToolResponse:
     if helper not in _LIVE_HELPERS:
         return _config_error(response_id)
     try:
-        output = await asyncio.to_thread(
-            introspector.introspect_live,
-            transport_handle=resolved.transport_handle,
-            helper=helper,
-        )
+        with materialized_private_key(private_key) as key_path:
+            output = await asyncio.to_thread(
+                introspector.introspect_live,
+                transport_handle=resolved.transport_handle,
+                helper=helper,
+                key_path=str(key_path),
+            )
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(response_id, exc)
     sections = {"tasks": output.tasks, "modules": output.modules, "sysinfo": output.sysinfo}
@@ -295,13 +316,16 @@ async def introspect_script(
     Requires a `live` drgn-live DebugSession (contributor). ``timeout_sec`` is clamped to
     ``[1.0, ceiling]`` before it reaches the guest. The port runs the script **in the guest** and
     is the single redaction boundary, so the returned stdout is already masked of platform secrets
-    and byte-capped; the raw transcript is ``sensitive`` and is never returned. Off a prepared live
-    host, the provider seam reports ``missing_dependency`` instead of importing drgn (ADR-0240).
+    and byte-capped; the raw transcript is ``sensitive`` and is never returned. Roots the SSH
+    connection in the target System's per-System bootstrap key (ADR-0289), loaded and materialized
+    to a caller-owned temp file removed on every exit path; a System with no bootstrap key row
+    fails closed with ``CONFIGURATION_ERROR``. Off a prepared live host, the provider seam reports
+    ``missing_dependency`` instead of importing drgn (ADR-0240).
     """
     with bind_context(principal=ctx.principal):
 
         async def _run_live_script_callback(
-            resolved: LiveDrgnSession, runtime: ProviderRuntime
+            resolved: LiveDrgnSession, runtime: ProviderRuntime, private_key: str
         ) -> ToolResponse:
             return await _run_live_script(
                 session_id,
@@ -309,6 +333,7 @@ async def introspect_script(
                 script=script,
                 timeout_sec=timeout_sec,
                 introspector=runtime.live_introspector,
+                private_key=private_key,
             )
 
         return await _with_live_introspection(
@@ -328,6 +353,7 @@ async def _run_live_script(
     script: str,
     timeout_sec: float,
     introspector: LiveIntrospector,
+    private_key: str,
 ) -> ToolResponse:
     """Clamp the timeout, run the script off-loop, shape the response (shared by tool + tests)."""
     script_bytes = len(script.encode("utf-8"))
@@ -342,12 +368,14 @@ async def _run_live_script(
         )
     clamped = _clamp_timeout(timeout_sec)
     try:
-        output: LiveScriptOutput = await asyncio.to_thread(
-            introspector.run_script,
-            transport_handle=resolved.transport_handle,
-            script=script,
-            timeout_sec=clamped,
-        )
+        with materialized_private_key(private_key) as key_path:
+            output: LiveScriptOutput = await asyncio.to_thread(
+                introspector.run_script,
+                transport_handle=resolved.transport_handle,
+                script=script,
+                timeout_sec=clamped,
+                key_path=str(key_path),
+            )
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(response_id, exc)
     return ToolResponse.success(
