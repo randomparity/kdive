@@ -1,0 +1,216 @@
+# SysRq diagnostic capture for local-libvirt Systems (#925)
+
+- **Issue:** #925
+- **ADR:** [0285](../adr/0285-sysrq-diagnostic-capture.md)
+- **Status:** Draft
+- **Date:** 2026-06-30
+
+## Problem
+
+A ready local-libvirt System exposes no way to ask the running kernel for a live
+diagnostic dump — blocked tasks, held locks, per-CPU registers, memory usage, task
+state. Today the only guest-injection path is `control.force_crash`, which panics the
+guest via NMI (destructive, admin-gated). Investigators need the *non-destructive*
+counterpart: trigger a magic-SysRq diagnostic and capture what the kernel prints to the
+serial console, without crashing the guest.
+
+## Requirements (issue acceptance criteria)
+
+1. An authorized caller can trigger allowlisted diagnostic SysRq commands on a ready
+   local-libvirt System.
+2. Console output produced by the command is captured as redacted artifacts with bounded
+   inline snippets.
+3. Destructive SysRq commands are rejected unless already represented by an existing
+   destructive tool (i.e. crash → `control.force_crash`).
+4. Unsupported guest/profile state returns `configuration_error` with remediation.
+5. Tests cover: allowed diagnostic command, disallowed destructive command, output
+   capture, timeout/no-output, and authorization denial.
+
+## Non-goals
+
+- No interactive console (reaffirmed by ADR-0280); this is one-shot inject-and-capture.
+- No new console *write*/reproducer path (ADR-0280 redirects that to in-guest exec).
+- Remote-libvirt and other providers are out of scope; the tool is local-libvirt only.
+- No loglevel/reboot/poweroff/sync/remount SysRq keys — those are destructive or
+  non-diagnostic and are not in the allowlist.
+
+## Design
+
+### Shape: a synchronous tool that enqueues a worker job (mirrors `control.force_crash`)
+
+Provider Control-plane ports are only ever called from **worker job handlers** (via
+`asyncio.to_thread`, under the per-System advisory lock), and the capture step blocks for
+a bounded settle window while the guest prints to the console. Both facts rule out a
+synchronous server-side call. The tool therefore admits synchronously (validate → gate →
+enqueue) and returns a `{job_id, status: queued}` envelope, exactly like `control.power`
+and `control.force_crash`. Worker-owned execution injects the keystroke, captures the
+console delta, and stores the artifact.
+
+### Tool: `control.diagnostic_sysrq`
+
+Placed in the `control.*` toolset next to `control.force_crash` (its destructive sibling)
+for discoverability. Annotated `mutating` (not `read_only` — it injects a keystroke; not
+`destructive` — it changes no state and the guest keeps running).
+
+Parameters:
+
+- `system_id` (str) — the ready local-libvirt System to inspect.
+- `command` (str) — the diagnostic command, a friendly enum value (below). An unknown
+  value is a `configuration_error` listing the allowed commands.
+- `idempotency_key` (str | None) — replay-safe key; a repeated key returns the prior
+  envelope. Absent, every call is a fresh capture (a diagnostic dump is inherently not
+  idempotent).
+
+On success the returned job's `refs.result` is the **redacted console artifact id**; the
+caller reads the bounded inline snippet with `artifacts.get` (VIEWER, existing 24 KiB
+token-safe window — no new snippet-bounding code).
+
+### Allowlist (friendly name → SysRq trigger)
+
+A single source of truth `SysRqCommand` StrEnum in
+`src/kdive/domain/operations/sysrq.py`, each mapped to its magic-SysRq trigger character:
+
+| `command` value           | SysRq | Kernel effect                          |
+|---------------------------|-------|----------------------------------------|
+| `show_task_states`        | `t`   | Dump state of all tasks                |
+| `show_blocked_tasks`      | `w`   | Dump tasks in uninterruptible (D) sleep|
+| `show_memory`             | `m`   | Dump memory info                       |
+| `show_locks`              | `d`   | Dump all locks held                    |
+| `show_registers`          | `p`   | Dump current-CPU registers             |
+| `show_backtrace_all_cpus` | `l`   | Backtrace all active CPUs              |
+| `show_timers`             | `q`   | Dump hrtimers / clock event devices    |
+
+Every entry is read-only from the kernel's perspective (a printk dump). Destructive keys
+(`c` crash, `b` reboot, `o` poweroff, `s` sync, `u` remount-ro, `e`/`i` signal-all,
+`f` OOM-kill, `k` SAK) are simply absent from the enum, so they are **structurally
+unexpressible** through this tool. Requirement 3 is met by construction: a caller who
+wants the crash path uses `control.force_crash`; a caller who passes `crash`/`c`/`reboot`
+gets a `configuration_error` whose remediation names `control.force_crash`.
+
+### Injection mechanism (local-libvirt)
+
+A new Control-port method `diagnostic_sysrq(domain_name, trigger)` sends the magic-SysRq
+key combination to the guest's emulated keyboard, exactly as `virsh send-key <dom>
+--codeset linux KEY_LEFTALT KEY_SYSRQ KEY_<X>` does:
+
+```
+domain.sendKey(libvirt.VIR_KEYCODE_SET_LINUX, HOLDTIME_MS,
+               [KEY_LEFTALT, KEY_SYSRQ, KEY_<trigger>], 3, 0)
+```
+
+The Linux input keycodes for the trigger characters live in the local-libvirt provider
+(`KEY_T=20, KEY_W=17, KEY_M=50, KEY_D=32, KEY_P=25, KEY_L=38, KEY_Q=16`, plus
+`KEY_LEFTALT=56, KEY_SYSRQ=99`). The kernel's SysRq handler is registered on the keyboard
+input path regardless of where the console is routed, so the resulting dump is printed to
+**all** consoles including the serial `ttyS0` that kdive captures. This mirrors
+`force_crash`'s use of a single libvirt domain method and is unit-tested with a fake
+connection; the real `sendKey` adapter is `live_vm`-only.
+
+`remote_libvirt`'s `Controller` gains the method for Protocol conformance but raises
+`CONTROL_FAILURE` (`not_supported`) — the tool never routes a non-local System to it
+(gated below), so this is a defensive stub, not a second implementation.
+
+### Capture (worker handler)
+
+Under the per-System advisory lock, the handler:
+
+1. Reads the console log length before injection (`mark`) — the local serial log is the
+   whole current-boot file (`read_console_log`, ADR-0258; `append="off"` truncates per
+   power-cycle, so no cross-boot offset).
+2. Injects the SysRq via the Control port (`asyncio.to_thread`).
+3. Polls the console for growth with a bounded, count-driven loop (no wall-clock, so it is
+   deterministic under test): up to `MAX_POLLS` iterations of `POLL_INTERVAL`, breaking
+   early once the log has grown past `mark` and then stabilized for `SETTLE_POLLS`
+   consecutive reads. Total bound ≈ 5 s.
+4. `delta = console_bytes[mark:]`.
+5. **No output** → the job fails with `configuration_error`, `reason="no_console_output"`,
+   remediation "enable magic SysRq in the guest (`kernel.sysrq`) and confirm an active
+   serial console" (the common cause is `kernel.sysrq` disabled or masked). This is
+   requirement 5's timeout/no-output path.
+6. Redacts `delta` through `Redactor(registry=secret_registry)` (same pattern as
+   `console_rotate` / `read_redacted_console`).
+7. Stores it as a System-owned object `sysrq-diagnostic-<job_id>`
+   (`owner_kind="systems"`, `tenant="local"`, `sensitivity=REDACTED`,
+   `retention_class="console"`), registers the row (`run_id=None` — see below), and
+   returns `str(artifact.id)` as the job's `result_ref`.
+
+The capture-poll core is a pure async function taking injected `read_console`, `inject`,
+and `sleep` callables so tests drive it with scripted console reads and a no-op sleep — no
+real time, no real libvirt.
+
+### Why `run_id = None`
+
+Console-evidence artifacts are Run-correlated (ADR-0279) so `runs.get`'s
+`console_artifacts` manifest can list them. A SysRq dump is not boot/console evidence; it
+is reached only through the job's `refs.result`. Leaving `run_id` NULL keeps the
+`console_artifacts` manifest meaning "console evidence" and avoids polluting it with
+diagnostic dumps.
+
+### Teardown reclaim (no artifact leak)
+
+System-owned artifacts are reclaimed only at teardown (via an object-key `LIKE`); no gc
+expiry sweep touches `owner_kind='systems'`. So `teardown_handler` is extended to also
+delete `sysrq-diagnostic-*` objects+rows for the System, alongside the existing
+`console-part-*` reclaim. Without this the dumps would leak past teardown.
+
+### Authorization and preconditions (tool, fail-fast)
+
+Minimum role **CONTRIBUTOR** — this is a non-destructive investigation action, and
+CONTRIBUTOR already covers the debug/introspect/post-mortem loop. No destructive-op gate
+(that is `force_crash`'s ADMIN + profile opt-in path). `require_role` denial is audited and
+returned as `authorization_denied` by the existing denial middleware.
+
+Ordered precondition checks (each a fail-fast `configuration_error`, cross-project details
+suppressed exactly as `force_crash` does):
+
+1. Malformed `system_id` → `configuration_error`.
+2. System absent or not in caller's projects → `configuration_error`.
+3. `require_role(ctx, project, CONTRIBUTOR)` (→ `authorization_denied` on under-reach).
+4. Unknown/destructive `command` → `configuration_error` listing allowed commands (crash
+   intent → remediation names `control.force_crash`).
+5. Provider kind ≠ local-libvirt → `configuration_error`, remediation "diagnostic SysRq is
+   supported only on local-libvirt Systems".
+6. System state ≠ READY → `configuration_error` with `current_status`.
+
+### Persistence: new job kind (migration 0055)
+
+`JobKind.DIAGNOSTIC_SYSRQ = "diagnostic_sysrq"` and a `SysRqPayload(system_id, command)`.
+`jobs.kind` is guarded by the `jobs_kind_check` CHECK constraint, so migration
+`0055_diagnostic_sysrq_job_kind.sql` widens it (drop-and-recreate, constraint name stable,
+forward-only per ADR-0015). `DIAGNOSTIC_SYSRQ` is **not** added to
+`DESTRUCTIVE_JOB_KINDS`.
+
+## Error taxonomy summary
+
+| Condition                              | Category               | Where   |
+|----------------------------------------|------------------------|---------|
+| Malformed id / not visible             | `configuration_error`  | tool    |
+| Under-privileged caller                | `authorization_denied` | tool    |
+| Unknown or destructive command         | `configuration_error`  | tool    |
+| Non-local-libvirt / not READY          | `configuration_error`  | tool    |
+| No console output within the bound     | `configuration_error`  | worker  |
+| Console log unreadable (non-root wall) | `configuration_error`  | worker (existing `read_console_log`) |
+| Absent domain / libvirt fault          | `control_failure`      | worker (Control port) |
+
+## Testing
+
+- **Tool**: allowed command enqueues a `diagnostic_sysrq` job (assert dedup key + payload);
+  unknown/destructive command → `configuration_error`; non-local / not-READY →
+  `configuration_error`; under-privileged ctx → `authorization_denied`.
+- **Capture core**: scripted `read_console` returning growth → returns the delta; no growth
+  → empty; growth-then-stable early-exit.
+- **Worker handler**: fake Control records the injected trigger; fake console reader +
+  no-op sleep; asserts a redacted System-owned artifact is written and `result_ref` is its
+  id; no-output → job `configuration_error`; a registered secret in the delta is redacted.
+- **Provider**: fake libvirt domain records the `sendKey` codeset + keycodes for each
+  command; absent domain → `control_failure`.
+- **Teardown**: a System with a `sysrq-diagnostic-*` artifact is reclaimed (object + row)
+  at teardown.
+- Agent-facing surface guards (tool registry snapshot, agent-index/toolset docs) updated so
+  the existing drift guards stay green.
+
+## Rollback
+
+Pure addition. Reverting removes the tool, handler, port method, payload, job kind, and the
+migration's forward-only CHECK widening (a subsequent forward migration would re-narrow it).
+No data backfill; existing Systems are unaffected.
