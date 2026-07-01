@@ -176,12 +176,6 @@
 |----------|-----------|---------|----------|-------|
 | `KDIVE_SECRETS_ROOT` | reconciler, server, worker | `/var/lib/kdive/secrets` | no | Root directory for the file-ref secret backend. |
 
-## ssh
-
-| Variable | Processes | Default | Required | Value |
-|----------|-----------|---------|----------|-------|
-| `KDIVE_SSH_KEY_DIR` | worker | — | no | Override for the managed SSH keypair directory (absolute). Read standalone by the builder's host python; documented here for the contract. |
-
 ## upload
 
 | Variable | Processes | Default | Required | Value |

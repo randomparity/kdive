@@ -1,10 +1,10 @@
 """Unit tests for the rhel FamilyCustomizer argv contract (ADR-0251, #823).
 
 These pin the virt-customize argv the rhel customizer builds without running libguestfs: the
-PROVEN Fedora-44 customization (kdump + sshd enable, NMI-panic sysctl, ssh-inject, kdive-ready
-unit, SELinux permissive) plus the cloud-init first-boot baking (ADR-0288), and the
-EL-major-aware package divergence (#823): EL 8/9 take makedumpfile/kdumpctl from ``kexec-tools``
-and EL 8 enables EPEL for ``drgn``.
+PROVEN Fedora-44 customization (kdump + sshd enable, NMI-panic sysctl, kdive-ready unit, SELinux
+permissive) plus the cloud-init first-boot baking (ADR-0288), and the EL-major-aware package
+divergence (#823): EL 8/9 take makedumpfile/kdumpctl from ``kexec-tools`` and EL 8 enables EPEL
+for ``drgn``. The image bakes no authorized key (ADR-0289, #963).
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ def _ctx(
     return CustomizeContext(
         kind="debug",
         packages=fam.packages("debug", distro, version),
-        authorized_key=tmp_path / "key.pub",
         readiness_unit_path=tmp_path / "u.service",
         is_cloud_image=is_cloud_image,
         cleanup=[],
@@ -116,10 +115,11 @@ def test_el9_and_el10_do_not_enable_epel(tmp_path: Path) -> None:
         assert "dnf -y install epel-release" not in argv, (distro, version)
 
 
-def test_rhel_debug_argv_injects_key_and_readiness_unit(tmp_path: Path) -> None:
+def test_rhel_debug_argv_omits_ssh_inject_and_stages_readiness_unit(tmp_path: Path) -> None:
     argv = RhelFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
     j = " ".join(argv)
-    assert f"root:file:{tmp_path / 'key.pub'}" in j
+    assert "--ssh-inject" not in argv
+    assert "root:file:" not in j
     assert "systemctl enable kdive-ready.service" in argv
     assert any("SELINUX" in a and "permissive" in a for a in argv)
 
@@ -140,11 +140,11 @@ def test_rhel_argv_bakes_cloud_init_and_stops_masking(tmp_path: Path) -> None:
     assert "systemctl mask cloud-init" not in j  # no longer masked
 
 
-def test_rhel_argv_still_injects_key_and_selinux(tmp_path: Path) -> None:
-    # Anti-regression: the --ssh-inject managed key and SELinux permissive edit stay.
+def test_rhel_argv_still_omits_key_inject_and_keeps_selinux(tmp_path: Path) -> None:
+    # Anti-regression: no baked key (ADR-0289, #963); the SELinux permissive edit stays.
     argv = RhelFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
     j = " ".join(argv)
-    assert f"root:file:{tmp_path / 'key.pub'}" in j
+    assert "--ssh-inject" not in argv
     assert "SELINUX=permissive" in j
 
 

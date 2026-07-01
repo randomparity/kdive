@@ -31,10 +31,14 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import libvirt
+import psycopg
 import pytest
 
 from kdive.mcp.responses import ToolResponse
-from kdive.prereqs.managed_ssh_key import managed_private_key_path
+from kdive.prereqs.system_bootstrap_key import (
+    load_system_bootstrap_private_key,
+    materialized_private_key,
+)
 from kdive.providers.shared.libvirt_xml import recorded_ssh_port
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secrets import secrets_root_from_env
@@ -63,10 +67,11 @@ _AGENT_SESSION = "console-parts-sess"
 
 # Shell used by the in-guest workload.
 _SHELL = "/bin/sh"
-# SSH user the rootfs --ssh-injects the managed key to (ADR-0052/0218 §1).
+# SSH user the per-System bootstrap key (ADR-0289, #963) authenticates as (ADR-0218 §1).
 _SSH_USER = "root"
 # Credential ref that opts the loopback SSH transport in (renders hostfwd + NIC). Its file content
-# does not authenticate SSH — the kdive-managed key does — but its presence gates the transport.
+# does not authenticate SSH — the per-System bootstrap key does — but its presence gates the
+# transport.
 _SSH_CREDENTIAL_REF = "drgn-ssh"
 # Lines emitted to the kernel console: ~60 bytes × 5 000 = ~300 KiB, > 4 × 64 KiB threshold.
 _PROOF_LINES = 5_000
@@ -138,21 +143,22 @@ def _build_profile() -> dict[str, object]:
     }
 
 
-def _emit_proof_lines(domain: libvirt.virDomain, proof_marker: str) -> None:
+def _emit_proof_lines(domain: libvirt.virDomain, key_path: Path, proof_marker: str) -> None:
     """Write post-readiness proof lines to the guest kernel console over loopback SSH.
 
     Local-libvirt domains carry no qemu guest-agent channel, so the in-guest workload is driven
     over the same loopback SSH transport drgn-live uses: the SSH ``hostfwd`` port recorded in the
-    live domain XML (ADR-0218) plus the kdive-managed private key. The guest shell loop writes
-    ``_PROOF_LINES`` records to ``/dev/kmsg`` — the kernel printk path, which reaches the
-    ``console=ttyS0`` serial console with proper UART flow control (a direct userspace write to
-    ``/dev/ttyS0`` races the kernel console + getty on the same pty and overflows its buffer, so
-    most bytes are dropped). Output flows through virtlogd to the host console log file the
-    ``console_rotate`` handler reads. ``printk_devkmsg=on`` disables the per-writer kmsg rate limit
-    so every record reaches the console.
+    live domain XML (ADR-0218) plus the System's bootstrap private key (ADR-0289, #963). The guest
+    shell loop writes ``_PROOF_LINES`` records to ``/dev/kmsg`` — the kernel printk path, which
+    reaches the ``console=ttyS0`` serial console with proper UART flow control (a direct userspace
+    write to ``/dev/ttyS0`` races the kernel console + getty on the same pty and overflows its
+    buffer, so most bytes are dropped). Output flows through virtlogd to the host console log file
+    the ``console_rotate`` handler reads. ``printk_devkmsg=on`` disables the per-writer kmsg rate
+    limit so every record reaches the console.
 
     Args:
         domain: The libvirt domain handle for the booted System.
+        key_path: Host path of the System's materialized bootstrap private key.
         proof_marker: A unique string embedded in every emitted line, used to assert presence
             in the console-part artifact and absence from the frozen boot-window evidence.
     """
@@ -162,9 +168,6 @@ def _emit_proof_lines(domain: libvirt.virDomain, proof_marker: str) -> None:
             "no SSH hostfwd port in the domain XML; the provision profile must set "
             "provider.local-libvirt.ssh_credential_ref to render the SSH transport"
         )
-    key_path = managed_private_key_path()
-    if not key_path.is_file():
-        raise AssertionError(f"kdive-managed SSH private key absent at {key_path}")
     # POSIX sh loop: $i is a shell variable, {proof_marker} and {_PROOF_LINES} are
     # Python f-string substitutions (safe: only hex + hyphens / a literal integer). One open of
     # /dev/kmsg for the whole loop; each echo is a single write() = one kernel log record.
@@ -385,14 +388,19 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                 )
                 initial_part_ids = set(_console_part_ids(initial_listing))
 
-            # Emit the post-readiness workload over loopback SSH. The Run is already
-            # `succeeded` (terminal) yet the in-guest process keeps writing to the serial
-            # console — the exact #892 repro scenario.
+            # Emit the post-readiness workload over loopback SSH, authenticated with the
+            # System's bootstrap private key (ADR-0289, #963) — the same key
+            # `authorize_ssh_key`/drgn-live use. The Run is already `succeeded` (terminal) yet
+            # the in-guest process keeps writing to the serial console — the exact #892 repro
+            # scenario.
             async with phase("emit-proof-lines"):
+                async with await psycopg.AsyncConnection.connect(db_url) as key_conn:
+                    private_key = await load_system_bootstrap_private_key(key_conn, UUID(system_id))
                 libvirt_conn = libvirt.open("qemu:///system")
                 try:
                     domain = libvirt_conn.lookupByName(domain_name_for(UUID(system_id)))
-                    await asyncio.to_thread(_emit_proof_lines, domain, proof_marker)
+                    with materialized_private_key(private_key) as key_path:
+                        await asyncio.to_thread(_emit_proof_lines, domain, key_path, proof_marker)
                 finally:
                     libvirt_conn.close()
 

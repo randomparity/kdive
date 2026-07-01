@@ -82,8 +82,7 @@ def test_environ_spread_is_not_matched(tmp_path: Path) -> None:
 
 
 def test_local_variable_get_is_not_matched(tmp_path: Path) -> None:
-    # `environ = os.environ; environ.get(...)` reads through a local, not os.environ;
-    # this is the managed_ssh_key stdlib-only pattern (allowlisted separately).
+    # `environ = os.environ; environ.get(...)` reads through a local, not os.environ.
     f = tmp_path / "local.py"
     f.write_text("import os\nenviron = os.environ\nx = environ.get('KDIVE_X')\n")
     assert find_violations([f], allowlist=set()) == []

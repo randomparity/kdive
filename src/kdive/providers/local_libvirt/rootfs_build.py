@@ -1,22 +1,21 @@
-"""The in-process local-libvirt rootfs build plane (M2.4/2, ADR-0052, ADR-0092, ADR-0251).
+"""The in-process local-libvirt rootfs build plane (M2.4/2, ADR-0092, ADR-0251).
 
 `LocalLibvirtRootfsBuildPlane` builds a kdive-ready rootfs from the declarative rootfs catalog
 (`kdive.images.rootfs_catalog`) plus a per-family customizer seam, recording **pinned-input
 provenance** into the :class:`RootfsBuildOutput`. The pipeline is:
 
-1. resolve the kdive-managed SSH public key (ADR-0052 — the single source of truth shared with
-   the connect-time ``ssh -i`` identity);
-2. resolve the catalog row for ``spec.name`` (its base ``source`` + ``family``);
-3. :func:`kdive.images.base_source.acquire_base` materializes the base into a scratch qcow2 — a
+1. resolve the catalog row for ``spec.name`` (its base ``source`` + ``family``);
+2. :func:`kdive.images.base_source.acquire_base` materializes the base into a scratch qcow2 — a
    ``virt-builder`` template or a sha256-pinned cloud image;
-4. ``virt-customize`` applies the family's argv (``family.customize_argv``): install the package
-   set, enable ``sshd``/``kdump``, inject the authorized key, stage the kdive-ready unit, etc.;
-5. ``virt-tar-out`` + ``virt-make-fs --type=ext4 --format=qcow2`` repack the root tree into a
+3. ``virt-customize`` applies the family's argv (``family.customize_argv``): install the package
+   set, enable ``sshd``/``kdump``, stage the kdive-ready unit, etc. — the image bakes no
+   authorized key (ADR-0289, #963); the per-System bootstrap key is injected at provision time;
+4. ``virt-tar-out`` + ``virt-make-fs --type=ext4 --format=qcow2`` repack the root tree into a
    **no-partition-table whole-disk ext4 qcow2** — the only layout the direct-kernel boot provider
    mounts (``root=/dev/vda``, no initramfs, ADR-0030);
-6. ``family.normalize`` rewrites fstab to a lone ``/``, removes crypttab, and sets the family's
+5. ``family.normalize`` rewrites fstab to a lone ``/``, removes crypttab, and sets the family's
    SELinux policy (rhel: permissive + first-boot relabel) via guestfish;
-7. ``verify_cloud_init`` runs an offline guestfish self-check on the staged image, asserting the
+6. ``verify_cloud_init`` runs an offline guestfish self-check on the staged image, asserting the
    cloud-init first-boot wiring is actually baked in (ADR-0288) — the guard against a silent no-op
    that CI cannot catch by booting.
 
@@ -34,7 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError
 from kdive.images.base_source import Downloader, _real_download, acquire_base
 from kdive.images.families import family_for
 from kdive.images.families._fedora_customize import (
@@ -63,11 +62,6 @@ from kdive.images.rootfs_catalog import (
     RootfsSource,
     resolve_rootfs_entry,
 )
-from kdive.prereqs.managed_ssh_key import (
-    ManagedKeyError,
-    ensure_managed_keypair,
-    managed_public_key_path,
-)
 from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
 
 _log = logging.getLogger(__name__)
@@ -77,19 +71,6 @@ _DEFAULT_IMAGE_SIZE = "6G"
 _ACQUIRE_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 _CUSTOMIZE_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 _REPACK_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
-
-
-def _resolve_managed_public_key() -> Path:
-    """Resolve the kdive-managed SSH public key, generating the keypair if absent (ADR-0052)."""
-    try:
-        ensure_managed_keypair()
-        return managed_public_key_path()
-    except ManagedKeyError as exc:
-        raise CategorizedError(
-            "could not resolve the kdive-managed SSH public key to install into the rootfs",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"error": type(exc).__name__},
-        ) from exc
 
 
 def _run_libguestfs_tool(argv: list[str], *, stage: str, timeout_s: int) -> None:
@@ -146,7 +127,6 @@ def _real_repack_whole_disk_ext4(*, scratch: Path, qcow2: Path, size: str) -> No
         tar_path.unlink(missing_ok=True)
 
 
-type ResolveAuthorizedKey = Callable[[], Path]
 type AcquireBase = Callable[..., None]
 type VirtBuilder = Callable[..., None]
 type Customize = Callable[[Path, list[str]], None]
@@ -194,7 +174,6 @@ def _real_verify_cloud_init(qcow2: Path) -> None:  # pragma: no cover - live_vm
 class RootfsBuildTools:
     """The injectable build seams; default to the real libguestfs/network implementations."""
 
-    resolve_authorized_key: ResolveAuthorizedKey = _resolve_managed_public_key
     acquire_base: AcquireBase = acquire_base
     virt_builder: VirtBuilder = _real_virt_builder
     downloader: Downloader = _real_download
@@ -247,18 +226,11 @@ class LocalLibvirtRootfsBuildPlane:
         """Build the kdive-ready rootfs qcow2 for ``spec``; record pinned-input provenance.
 
         Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` for an unresolvable authorized key, an
-                unknown family, or an unreachable/mismatched base; ``MISSING_DEPENDENCY`` for
-                absent libguestfs tooling; ``PROVISIONING_FAILURE`` for a build-stage failure.
+            CategorizedError: ``CONFIGURATION_ERROR`` for an unknown family or an
+                unreachable/mismatched base; ``MISSING_DEPENDENCY`` for absent libguestfs
+                tooling; ``PROVISIONING_FAILURE`` for a build-stage failure.
         """
         validate_image_name(spec.name)
-        authorized_key = self._tools.resolve_authorized_key()
-        if not authorized_key.is_file():
-            raise CategorizedError(
-                "resolved SSH public key is not a readable file; cannot build the rootfs image",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"authorized_key": str(authorized_key)},
-            )
         entry = _resolve_entry(spec)
         family = self._tools.family_for(entry.family)
         with build_workspace(self._workspace, prefix="rootfs-build-") as work_dir:
@@ -271,7 +243,7 @@ class LocalLibvirtRootfsBuildPlane:
                 virt_builder=self._tools.virt_builder,
                 downloader=self._tools.downloader,
             )
-            self._customize(scratch, family, spec=spec, entry=entry, authorized_key=authorized_key)
+            self._customize(scratch, family, spec=spec, entry=entry)
             staged = work_dir / f"{spec.name}.qcow2"
             self._tools.repack_whole_disk_ext4(scratch=scratch, qcow2=staged, size=self._size)
             family.normalize(staged)
@@ -289,7 +261,6 @@ class LocalLibvirtRootfsBuildPlane:
                 entry,
                 family,
                 size=self._size,
-                authorized_key=authorized_key,
                 package_versions=package_versions,
                 makedumpfile_version=makedumpfile_version,
             ),
@@ -343,7 +314,6 @@ class LocalLibvirtRootfsBuildPlane:
         *,
         spec: RootfsBuildSpec,
         entry: RootfsCatalogEntry,
-        authorized_key: Path,
     ) -> None:
         """Render the kdive-ready unit, build the family argv, and run ``virt-customize``."""
         cleanup: list[Path] = []
@@ -355,7 +325,6 @@ class LocalLibvirtRootfsBuildPlane:
             ctx = CustomizeContext(
                 kind=entry.kind,
                 packages=spec.packages,
-                authorized_key=authorized_key,
                 readiness_unit_path=unit_path,
                 is_cloud_image=isinstance(entry.source, CloudImageSource),
                 cleanup=cleanup,
@@ -374,7 +343,6 @@ def _provenance(
     family: FamilyCustomizer,
     *,
     size: str,
-    authorized_key: Path,
     package_versions: dict[str, str],
     makedumpfile_version: str | None,
 ) -> dict[str, object]:
@@ -401,7 +369,6 @@ def _provenance(
         "capabilities": list(spec.capabilities),
         "arch": spec.arch,
         "image_size": size,
-        "authorized_key_name": authorized_key.name,
         "readiness_marker": _READINESS_MARKER,
         "layout": "whole-disk-ext4-qcow2",
         "guest_mac": family.guest_mac,

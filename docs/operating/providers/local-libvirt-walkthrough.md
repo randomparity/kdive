@@ -289,22 +289,21 @@ one-time pieces of setup arm it:
    through the file-ref secret backend **before** opening the transport, confined to
    `KDIVE_SECRETS_ROOT` (default `/var/lib/kdive/secrets`). The file must exist and be readable by
    the **server** process — drgn-live sessions and `introspect.run` run server-side, not in the
-   worker — or the session fails with a `configuration_error`. The reference's *contents* are not
-   the SSH credential (see below), so stage the managed **public** key, which keeps no new private
-   key at rest; its filename must match the `ssh_credential_ref` above:
+   worker — or the session fails with a `configuration_error`. The reference's *contents* do not
+   authenticate SSH (see below); its presence just gates the session, so any readable file works,
+   and its filename must match the `ssh_credential_ref` above:
 
    ```bash
    sudo install -d -o "$USER" -m 0750 /var/lib/kdive/secrets
-   install -m 0644 ~/.local/share/kdive/ssh/id_kdive_ed25519.pub \
-     /var/lib/kdive/secrets/drgn-ssh
+   install -m 0644 /dev/null /var/lib/kdive/secrets/drgn-ssh
    ```
 
-**What actually authenticates the SSH** is the kdive-**managed** private key
-(`id_kdive_ed25519`, under `~/.local/share/kdive/ssh/` or `KDIVE_SSH_KEY_DIR`), whose public half
-`build-fs` injects into the debug rootfs at image-build time (ADR-0052/0219) — **not** the
-`ssh_credential_ref` contents, which the transport resolves only to gate the session and register
-the value for log redaction. drgn-live therefore works only on a System booted from a catalog
-debug rootfs such as `fedora-kdive-ready-44`; a generic base qcow2 does not carry the managed key.
+**What actually authenticates the SSH** is the System's own bootstrap private key (ADR-0289): a
+unique ed25519 keypair generated at provision, whose public half is injected into that System's
+overlay and whose private half the server loads from `system_bootstrap_keys` for the duration of
+the SSH call — **not** the `ssh_credential_ref` contents, which the transport resolves only to
+gate the session and register the value for log redaction. Catalog images bake no credential;
+every provisioned System carries its own key regardless of which debug rootfs it boots.
 
 The debug rootfs also supplies the two guest-side pieces drgn needs, all automatic for the
 catalog debug image and a from-source build (listed here so a failure is diagnosable): the

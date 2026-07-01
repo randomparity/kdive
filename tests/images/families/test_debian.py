@@ -2,9 +2,9 @@
 
 These pin the virt-customize argv the debian customizer builds without running libguestfs: apt
 install, ``ssh.service``/``kdump-tools.service`` enable, ``USE_KDUMP=1``, the NMI-panic sysctl,
-ssh-inject, the kdive-ready unit, and the shared cloud-init first-boot baking (ADR-0288) — and the
-deliberate Debian divergences from ``rhel``: no ``/etc/selinux/config`` edit, no NetworkManager
-keyfile, ``ssh.service`` not ``sshd.service``.
+the kdive-ready unit, and the shared cloud-init first-boot baking (ADR-0288) — and the deliberate
+Debian divergences from ``rhel``: no ``/etc/selinux/config`` edit, no NetworkManager keyfile,
+``ssh.service`` not ``sshd.service``. The image bakes no authorized key (ADR-0289, #963).
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ def _ctx(
     return CustomizeContext(
         kind=kind,
         packages=fam.packages(kind, distro, version),
-        authorized_key=tmp_path / "key.pub",
         readiness_unit_path=tmp_path / "u.service",
         is_cloud_image=is_cloud_image,
         cleanup=[],
@@ -84,10 +83,11 @@ def test_debug_argv_enables_ssh_and_kdump_tools(tmp_path: Path) -> None:
     assert "99-kdive-kdump.conf" in j and "unknown_nmi_panic=1" in j
 
 
-def test_debug_argv_injects_key_and_readiness_unit(tmp_path: Path) -> None:
+def test_debug_argv_omits_ssh_inject_and_stages_readiness_unit(tmp_path: Path) -> None:
     argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
     j = " ".join(argv)
-    assert f"root:file:{tmp_path / 'key.pub'}" in j
+    assert "--ssh-inject" not in argv
+    assert "root:file:" not in j
     assert "systemctl enable kdive-ready.service" in argv
 
 

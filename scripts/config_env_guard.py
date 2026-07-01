@@ -21,10 +21,6 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[1]
 _SRC = _ROOT / "src" / "kdive"
 _CONFIG_DIR = _SRC / "config"
-# Permanent exception: the managed SSH key module is stdlib-only and invoked by the
-# builder through the host's python3 (outside the venv), so it cannot import
-# kdive.config (ADR-0052). Its KDIVE_SSH_KEY_DIR override is documented in the registry.
-_MANAGED_SSH_KEY = _SRC / "prereqs" / "managed_ssh_key.py"
 # Shrinking allowlist of files not yet migrated. Must reach empty before the guard gates.
 _NOT_YET_MIGRATED: frozenset[str] = frozenset()
 
@@ -184,7 +180,6 @@ def find_violations(files: list[Path], allowlist: set[Path]) -> list[Violation]:
 
 def _allowlist(files: list[Path]) -> set[Path]:
     allow: set[Path] = {p for p in files if _CONFIG_DIR in p.parents}
-    allow.add(_MANAGED_SSH_KEY)
     allow.update(p for p in files if p.name in _NOT_YET_MIGRATED)
     return allow
 

@@ -80,7 +80,6 @@ class _FakeFamily:
 class _Recorder:
     """Stub seams that record the staged build operations in call order."""
 
-    authorized_key: Path
     order: list[str] = field(default_factory=list)
     acquired_sources: list[RootfsSource] = field(default_factory=list)
     customize_argvs: list[list[str]] = field(default_factory=list)
@@ -92,9 +91,6 @@ class _Recorder:
     verify_calls: list[Path] = field(default_factory=list)
     family_kdump_unit: str = "kdump.service"
     payload: bytes = b"qcow2-bytes"
-
-    def resolve_authorized_key(self) -> Path:
-        return self.authorized_key
 
     def acquire_base(
         self,
@@ -143,7 +139,6 @@ def _tools(
     verify_cloud_init: object | None = None,
 ) -> RootfsBuildTools:
     return RootfsBuildTools(
-        resolve_authorized_key=rec.resolve_authorized_key,
         acquire_base=rec.acquire_base,
         customize=rec.customize,
         repack_whole_disk_ext4=rec.repack_whole_disk_ext4,
@@ -166,12 +161,6 @@ def _plane(
     )
 
 
-def _key(tmp_path: Path) -> Path:
-    key = tmp_path / "id.pub"
-    key.write_text("ssh-ed25519 AAAA kdive\n")
-    return key
-
-
 def test_default_workspace_is_the_managed_build_path() -> None:
     # With no workspace override the plane defaults to the managed images path, not a
     # null/derived location; from_env carries that same default through.
@@ -180,7 +169,7 @@ def test_default_workspace_is_the_managed_build_path() -> None:
 
 
 def test_build_produces_qcow2_with_content_digest(tmp_path: Path) -> None:
-    rec = _Recorder(authorized_key=_key(tmp_path), payload=b"the-image-bytes")
+    rec = _Recorder(payload=b"the-image-bytes")
     out = _plane(tmp_path, rec).build(_spec())
 
     assert isinstance(out, RootfsBuildOutput)
@@ -191,7 +180,7 @@ def test_build_produces_qcow2_with_content_digest(tmp_path: Path) -> None:
 
 
 def test_build_drives_acquire_customize_repack_normalize_in_order(tmp_path: Path) -> None:
-    rec = _Recorder(authorized_key=_key(tmp_path))
+    rec = _Recorder()
     out = _plane(tmp_path, rec).build(_spec())
 
     assert rec.order == ["acquire", "customize", "repack", "normalize", "verify"], (
@@ -210,14 +199,14 @@ def test_build_drives_acquire_customize_repack_normalize_in_order(tmp_path: Path
 
 def test_build_runs_cloud_init_self_check_after_normalize(tmp_path: Path) -> None:
     # The plane must run verify_cloud_init on the staged image, after normalize, before publish.
-    rec = _Recorder(authorized_key=_key(tmp_path))
+    rec = _Recorder()
     _plane(tmp_path, rec).build(_spec())
     assert rec.verify_calls, "verify_cloud_init must run on the built image"
     assert rec.order.index("verify") > rec.order.index("normalize")
 
 
 def test_build_fails_when_cloud_init_self_check_rejects(tmp_path: Path) -> None:
-    rec = _Recorder(authorized_key=_key(tmp_path))
+    rec = _Recorder()
 
     def _reject(_qcow2: Path) -> None:
         raise CategorizedError(
@@ -234,16 +223,15 @@ def test_build_fails_when_cloud_init_self_check_rejects(tmp_path: Path) -> None:
     assert err.value.category is ErrorCategory.PROVISIONING_FAILURE
 
 
-def test_customize_context_threads_key_and_cloud_image_flag(tmp_path: Path) -> None:
-    rec = _Recorder(authorized_key=_key(tmp_path))
+def test_customize_context_threads_cloud_image_flag(tmp_path: Path) -> None:
+    rec = _Recorder()
     # fedora-kdive-ready-44 is a cloud-image catalog row; the flag must reach the customizer.
     _plane(tmp_path, rec).build(_spec(name="fedora-kdive-ready-44"))
     ctx = rec.customize_ctxs[0]
     assert ctx.is_cloud_image is True
-    assert ctx.authorized_key == rec.authorized_key
     assert ctx.readiness_unit_path.suffix == ".service"
 
-    rec2 = _Recorder(authorized_key=_key(tmp_path))
+    rec2 = _Recorder()
     _plane(tmp_path, rec2).build(_spec(name="fedora-kdive-ready-43"))
     assert rec2.customize_ctxs[0].is_cloud_image is False, "a virt-builder row is not a cloud image"
 
@@ -253,7 +241,7 @@ def test_readiness_unit_is_rendered_with_the_family_kdump_unit(tmp_path: Path) -
     # kdump_unit so a non-rhel family closes the arm-vs-ready race (ADR-0251 point 6 / #824). This
     # guards the wiring (plane -> family.kdump_unit), which the readiness_unit() unit test alone
     # cannot: a revert to a hardcoded unit would still pass that test.
-    rec = _Recorder(authorized_key=_key(tmp_path), family_kdump_unit="kdump-tools.service")
+    rec = _Recorder(family_kdump_unit="kdump-tools.service")
     _plane(tmp_path, rec).build(_spec())
     assert len(rec.readiness_unit_texts) == 1
     after_lines = [
@@ -266,7 +254,7 @@ def test_readiness_unit_is_rendered_with_the_family_kdump_unit(tmp_path: Path) -
 
 
 def test_provenance_source_digest_for_virt_builder_entry(tmp_path: Path) -> None:
-    rec = _Recorder(authorized_key=_key(tmp_path))
+    rec = _Recorder()
     out = _plane(tmp_path, rec).build(_spec(name="fedora-kdive-ready-43", releasever="42"))
     entry = resolve_rootfs_entry("fedora-kdive-ready-43")
     assert isinstance(entry.source, VirtBuilderSource)
@@ -279,7 +267,6 @@ def test_provenance_source_digest_for_virt_builder_entry(tmp_path: Path) -> None
         "capabilities": ["agent", "kdump", "drgn"],
         "arch": "x86_64",
         "image_size": "6G",
-        "authorized_key_name": "id.pub",
         "readiness_marker": "kdive-ready",
         "layout": "whole-disk-ext4-qcow2",
         "guest_mac": "selinux-permissive",
@@ -288,7 +275,7 @@ def test_provenance_source_digest_for_virt_builder_entry(tmp_path: Path) -> None
 
 
 def test_provenance_source_digest_for_cloud_image_entry(tmp_path: Path) -> None:
-    rec = _Recorder(authorized_key=_key(tmp_path))
+    rec = _Recorder()
     out = _plane(tmp_path, rec).build(_spec(name="fedora-kdive-ready-44", releasever="44"))
     entry = resolve_rootfs_entry("fedora-kdive-ready-44")
     assert isinstance(entry.source, CloudImageSource)
@@ -299,7 +286,7 @@ def test_provenance_source_digest_for_cloud_image_entry(tmp_path: Path) -> None:
 
 def test_provenance_records_package_versions(tmp_path: Path) -> None:
     # The inspector reports a superset; provenance keeps only the requested packages' versions.
-    rec = _Recorder(authorized_key=_key(tmp_path))
+    rec = _Recorder()
     versions = {"openssh-server": "9.6", "drgn": "0.0.28", "glibc": "2.39"}
     out = _plane(tmp_path, rec, inspect_versions=lambda _q: versions).build(_spec())
     assert out.provenance["package_versions"] == {"openssh-server": "9.6", "drgn": "0.0.28"}
@@ -310,14 +297,14 @@ def test_provenance_omits_versions_on_inspector_failure(tmp_path: Path) -> None:
     def _boom(_q: Path) -> dict[str, str]:
         raise CategorizedError("no tool", category=ErrorCategory.MISSING_DEPENDENCY)
 
-    rec = _Recorder(authorized_key=_key(tmp_path))
+    rec = _Recorder()
     out = _plane(tmp_path, rec, inspect_versions=_boom).build(_spec())
     assert "package_versions" not in out.provenance, "a failed capture degrades to an omitted field"
 
 
 def test_provenance_versions_absent_for_unreported_request(tmp_path: Path) -> None:
     # A requested package the inspector does not report is absent from the map (not null/empty).
-    rec = _Recorder(authorized_key=_key(tmp_path))
+    rec = _Recorder()
     out = _plane(tmp_path, rec, inspect_versions=lambda _q: {"drgn": "0.0.28"}).build(_spec())
     assert out.provenance["package_versions"] == {"drgn": "0.0.28"}
     # openssh-server is still requested (in packages), just unversioned (not in the map).
@@ -325,7 +312,7 @@ def test_provenance_versions_absent_for_unreported_request(tmp_path: Path) -> No
 
 
 def test_provenance_records_makedumpfile_version_from_probe(tmp_path: Path) -> None:
-    rec = _Recorder(authorized_key=_key(tmp_path))
+    rec = _Recorder()
     out = _plane(
         tmp_path,
         rec,
@@ -336,7 +323,7 @@ def test_provenance_records_makedumpfile_version_from_probe(tmp_path: Path) -> N
 
 def test_provenance_makedumpfile_falls_back_to_package_versions(tmp_path: Path) -> None:
     # EL-style: the binary probe finds nothing; the standalone-package version is the fallback.
-    rec = _Recorder(authorized_key=_key(tmp_path))
+    rec = _Recorder()
     out = _plane(
         tmp_path,
         rec,
@@ -347,7 +334,7 @@ def test_provenance_makedumpfile_falls_back_to_package_versions(tmp_path: Path) 
 
 
 def test_provenance_omits_makedumpfile_version_when_both_empty(tmp_path: Path) -> None:
-    rec = _Recorder(authorized_key=_key(tmp_path))
+    rec = _Recorder()
     out = _plane(tmp_path, rec).build(_spec())
     assert "makedumpfile_version" not in out.provenance
 
@@ -356,13 +343,13 @@ def test_provenance_omits_makedumpfile_version_on_probe_error(tmp_path: Path) ->
     def _boom(_q: Path) -> str | None:
         raise CategorizedError("no tool", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
 
-    rec = _Recorder(authorized_key=_key(tmp_path))
+    rec = _Recorder()
     out = _plane(tmp_path, rec, probe_makedumpfile=_boom).build(_spec())
     assert "makedumpfile_version" not in out.provenance
 
 
 def test_provenance_omits_makedumpfile_version_on_unparseable_probe(tmp_path: Path) -> None:
-    rec = _Recorder(authorized_key=_key(tmp_path))
+    rec = _Recorder()
     out = _plane(tmp_path, rec, probe_makedumpfile=lambda _q: "garbage output").build(_spec())
     assert "makedumpfile_version" not in out.provenance
 
@@ -370,7 +357,7 @@ def test_provenance_omits_makedumpfile_version_on_unparseable_probe(tmp_path: Pa
 def test_build_rejects_uncataloged_name(tmp_path: Path) -> None:
     # The provider plane no longer synthesizes old-style virt-builder specs. New images must be
     # real catalog entries so build-fs has one contract and catalog provenance stays falsifiable.
-    rec = _Recorder(authorized_key=_key(tmp_path))
+    rec = _Recorder()
     spec = _spec(name="legacy-image-99", distro="fedora", releasever="41")
     with pytest.raises(CategorizedError) as exc:
         _plane(tmp_path, rec).build(spec)
@@ -378,24 +365,11 @@ def test_build_rejects_uncataloged_name(tmp_path: Path) -> None:
     assert rec.acquired_sources == []
 
 
-def test_build_fails_fast_when_authorized_key_unresolved(tmp_path: Path) -> None:
-    key = tmp_path / "missing.pub"  # never created
-    rec = _Recorder(authorized_key=key)
-    with pytest.raises(CategorizedError) as exc:
-        _plane(tmp_path, rec).build(_spec())
-    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert str(exc.value) == (
-        "resolved SSH public key is not a readable file; cannot build the rootfs image"
-    )
-    assert exc.value.details == {"authorized_key": str(key)}
-    assert rec.order == [], "no build stage runs without a resolvable key"
-
-
 @pytest.mark.parametrize("bad_name", ["../escape", "a/b", ".hidden", "-leading", "with space"])
 def test_build_rejects_a_name_that_would_escape_the_workspace(
     tmp_path: Path, bad_name: str
 ) -> None:
-    rec = _Recorder(authorized_key=_key(tmp_path))
+    rec = _Recorder()
     with pytest.raises(CategorizedError) as exc:
         _plane(tmp_path, rec).build(_spec(name=bad_name))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
@@ -422,7 +396,6 @@ def _rhel_argv(
     ctx = CustomizeContext(
         kind="debug",
         packages=packages,
-        authorized_key=tmp_path / "id.pub",
         readiness_unit_path=tmp_path / "kdive-ready.service",
         is_cloud_image=is_cloud_image,
         cleanup=[],
