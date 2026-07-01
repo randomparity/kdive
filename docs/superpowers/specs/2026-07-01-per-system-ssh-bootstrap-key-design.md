@@ -74,17 +74,32 @@ CREATE TABLE system_bootstrap_keys (
 
 Pure stdlib keygen + typed DB accessors:
 
-- `generate_keypair() -> (private_pem: str, public_openssh: str)` — ed25519 via `ssh-keygen` to a
-  `mkdtemp(0o700)` scratch, read both halves, unlink. Mirrors the mode/timeout discipline of the
-  deleted `managed_ssh_key.py`.
-- `async ensure_system_bootstrap_key(conn, system_id) -> str` — returns the **public** key; if no
-  row exists, generate a keypair, `INSERT` the private half, return the public half; if a row
-  exists, re-derive the public half from the stored private key (`ssh-keygen -y`) and return it.
-  Idempotent: a provision retry reuses the stored key, never regenerates one the running disk
-  would not trust.
+- `generate_keypair() -> (private_pem: str, public_openssh: str)` — ed25519 via `ssh-keygen` into a
+  `mkdtemp(0o700)` scratch, read both halves, unlink in a `finally` (guaranteed cleanup on every
+  path). Mirrors the mode/timeout discipline of the deleted `managed_ssh_key.py`.
+- `async ensure_system_bootstrap_key(conn, system_id) -> str` — returns the **public** key.
+  Concurrency-safe by construction: `INSERT ... ON CONFLICT (system_id) DO NOTHING` with a freshly
+  generated keypair, then `SELECT private_key` for the (winning or pre-existing) row and re-derive
+  the public half from it (`ssh-keygen -y` on a 0600 temp file, `finally`-unlinked). Two concurrent
+  provisions therefore converge on **one** row and one pubkey regardless of ordering or whether the
+  caller holds the per-System lock; a retry reuses the stored key, never regenerating one the
+  running disk would not trust. The freshly generated private half of a losing INSERT is simply
+  discarded (never written).
 - `async load_system_bootstrap_private_key(conn, system_id) -> str` — return the stored private
   key (register with `SecretRegistry`); raise `CONFIGURATION_ERROR` if absent.
 - `async delete_system_bootstrap_key(conn, system_id) -> None` — idempotent `DELETE`.
+
+**Commit-ordering invariant (critical).** `ensure_system_bootstrap_key` must run in its **own
+committed transaction, before** the `conn.transaction()` block that drives `provisioner.provision`
+(the provision handler wraps its whole body — including the `to_thread(provision)` call — in one
+transaction under `advisory_xact_lock(SYSTEM)`; systems.py). The overlay (filesystem) and domain
+(libvirt) are non-transactional side effects. If the key row were written in that same transaction
+and a *later* step rolled it back after `provision` had already injected the pubkey into the
+overlay, a retry would find no row, generate a new key, see the overlay already present (so skip
+injection), and leave a running overlay trusting a key the DB no longer records — the exit-255
+mismatch this change exists to remove. Committing the key row first makes the invariant hold:
+**an overlay exists ⇒ the private half of the key it trusts is durably recorded.** The `ON CONFLICT`
+upsert keeps that early commit safe under concurrent provisions.
 
 ### 3. Injection — extensible provision-time overlay-customization seam
 
@@ -111,23 +126,35 @@ type OverlayCustomizer = Callable[[str], None]   # (overlay_path) -> None
 
 ### 4. Handler wiring
 
-- `provision_handler` / `reprovision_handler`: before the `to_thread(provisioner.provision, …)`
-  call, `pubkey = await ensure_system_bootstrap_key(conn, system_id)`, then pass
-  `overlay_customizers=(inject_authorized_key(pubkey),)`. Reprovision wipes+recreates the overlay,
-  so it re-injects the **same** stored key into the fresh overlay (reuse, not rotate).
+- `provision_handler` / `reprovision_handler`: `pubkey = await ensure_system_bootstrap_key(conn,
+  system_id)` runs **and commits before** the handler's `conn.transaction()` /
+  `advisory_xact_lock` block (the commit-ordering invariant above), then the in-transaction
+  `to_thread(provisioner.provision, …)` is passed `overlay_customizers=(inject_authorized_key(
+  pubkey),)`. Reprovision wipes+recreates the overlay, so it re-injects the **same** stored key
+  into the fresh overlay (reuse, not rotate).
 - `teardown_handler`: `await delete_system_bootstrap_key(conn, system_id)` alongside the existing
   `_reclaim_console_artifacts` / `_reclaim_sysrq_artifacts`.
 
 ### 5. Re-sourcing the two SSH consumers
 
+Both consumers materialize the loaded private key to a **0700 dir + 0600 file** (ssh refuses a
+group/world-readable key) via a context manager that guarantees `unlink` on every path (a crash
+between write and use must not leak a per-System private key — a window strictly shorter than
+today's persistent managed-key file, but still closed explicitly).
+
 - `jobs/handlers/ssh_authorize.py`: `build_authorize_argv(port)` →
-  `build_authorize_argv(port, key_path)`; the handler writes the loaded private key to a
-  `mkdtemp(0o700)` file for the `ssh -i` argv and unlinks it after. The remote append script is
-  unchanged.
-- `providers/local_libvirt/debug/introspect.py`: `_live_ssh_argv` takes the per-System key path
-  the same way. The provider seam is connectionless, so the private key is loaded by the
-  introspect **handler** (which has `conn`) and threaded down as a path/secret, mirroring the
-  existing `secret_registry` threading.
+  `build_authorize_argv(port, key_path)`; the handler loads the key
+  (`load_system_bootstrap_private_key`, which it can — it already has `conn`), materializes it to
+  the 0600 temp file for the `ssh -i` argv, and cleans up in a `finally`. The remote append script
+  is unchanged.
+- drgn-live introspection: the **connectionless provider engine** (`introspect.py`
+  `_live_ssh_argv` / `introspect_live` / `run_script`) currently calls `managed_private_key_path()`
+  directly. It cannot load from the DB, so the **MCP tool** `mcp/tools/debug/introspect.py` (which
+  holds `conn`) loads the per-System private key, materializes it to the 0600 temp file, and passes
+  the **path** into the engine method (a new parameter alongside `transport_handle`), replacing the
+  engine's direct `managed_private_key_path()` call; the tool owns the temp-file lifecycle. This is
+  a signature change to the engine's introspect entry points, not an in-place swap — sized
+  accordingly in the plan.
 
 ### 6. Build side — remove the baked key
 
@@ -150,8 +177,13 @@ type OverlayCustomizer = Callable[[str], None]   # (overlay_path) -> None
 
 - Keygen or inject failure at provision → provision fails closed (existing `PROVISIONING_FAILURE`
   path reclaims the overlay).
+- **Post-provision rollback:** because the key row is committed before the provision transaction
+  (commit-ordering invariant), a rollback of the provision transaction after the overlay was
+  injected still leaves the key row intact, so the retry reuses the matching key rather than
+  minting a mismatched one.
 - Missing key row at authorize/drgn time → `CONFIGURATION_ERROR` with `reason`.
-- Teardown delete is idempotent; a crashed teardown re-run is a no-op.
+- Teardown delete is idempotent; a crashed teardown re-run is a no-op. An `authorize`/drgn job
+  cannot race teardown on the same System: both run under `advisory_xact_lock(SYSTEM)`.
 - Recoverability is moot: nothing long-lived to back up — a lost key means tear down and
   reprovision.
 
@@ -165,11 +197,16 @@ type OverlayCustomizer = Callable[[str], None]   # (overlay_path) -> None
 
 ## Testing
 
-- **Unit:** keygen shape/mode; `ensure_*` idempotency (second call returns the same public key, no
-  second row); `load_*` raises on absent row; `delete_*` idempotent; provision runs customizers
-  iff `overlay.created` and skips them on the reuse path; `build_authorize_argv`/`_live_ssh_argv`
-  build from the per-System path; teardown handler deletes the row; families' `customize_argv` no
-  longer emits `--ssh-inject`.
+- **Unit:** keygen shape/mode + guaranteed temp cleanup; `ensure_*` idempotency (second call
+  returns the same public key, no second row) **and concurrency** (two `ensure_*` on one
+  system_id → one row, one pubkey, via the `ON CONFLICT` upsert); `load_*` raises on absent row and
+  registers the secret; `delete_*` idempotent; provision runs customizers iff `overlay.created` and
+  skips them on the reuse path; the per-System key temp file is 0600 and unlinked on the error
+  path; `build_authorize_argv`/the introspect engine build from the passed per-System key path;
+  teardown handler deletes the row; families' `customize_argv` no longer emits `--ssh-inject`.
+- **Ordering invariant:** a test that a provision-transaction rollback *after* the key row is
+  committed leaves the row intact (so a retry reuses the same key), pinning the commit-before-
+  overlay-creation contract.
 - **Migration:** apply/rollback 0056; `ON DELETE CASCADE` removes the key when a `systems` row is
   deleted.
 - **Live e2e (operator-run, behind live-VM markers):** rebuild the two dev images keyless,
