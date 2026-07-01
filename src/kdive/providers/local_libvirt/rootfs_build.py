@@ -15,7 +15,10 @@ provenance** into the :class:`RootfsBuildOutput`. The pipeline is:
    **no-partition-table whole-disk ext4 qcow2** — the only layout the direct-kernel boot provider
    mounts (``root=/dev/vda``, no initramfs, ADR-0030);
 6. ``family.normalize`` rewrites fstab to a lone ``/``, removes crypttab, and sets the family's
-   SELinux policy (rhel: permissive + first-boot relabel) via guestfish.
+   SELinux policy (rhel: permissive + first-boot relabel) via guestfish;
+7. ``verify_cloud_init`` runs an offline guestfish self-check on the staged image, asserting the
+   cloud-init first-boot wiring is actually baked in (ADR-0288) — the guard against a silent no-op
+   that CI cannot catch by booting.
 
 The slow libguestfs/network seams are **injected** (:class:`RootfsBuildTools`) and default to the
 real implementations, so unit tests cover the orchestration/provenance contract without libguestfs,
@@ -149,6 +152,38 @@ type VirtBuilder = Callable[..., None]
 type Customize = Callable[[Path, list[str]], None]
 type RepackWholeDiskExt4 = Callable[..., None]
 type FamilyResolver = Callable[[str], FamilyCustomizer]
+type VerifyCloudInit = Callable[[Path], None]
+
+
+def _real_verify_cloud_init(qcow2: Path) -> None:  # pragma: no cover - live_vm
+    """Assert cloud-init first-boot is correctly baked into the built image (ADR-0288).
+
+    Fails the build if any cloud.cfg.d drop-in still disables cloud-init networking, if the four
+    cloud-init units are not enabled, or if the kdive drop-in / NoCloud seed are missing — the
+    offline guard for silent no-ops CI cannot catch by booting.
+    """
+    from kdive.images.families._fedora_customize import (
+        CLOUD_INIT_UNITS,
+        KDIVE_CLOUD_CFG_PATH,
+        NOCLOUD_SEED_DIR,
+    )
+
+    units = " ".join(f"is-enabled {u}" for u in CLOUD_INIT_UNITS.split())
+    # guestfish reads the offline image; `sh` runs inside it via the appliance.
+    script = (
+        f"exists {KDIVE_CLOUD_CFG_PATH}\n"
+        f"exists {NOCLOUD_SEED_DIR}/meta-data\n"
+        "! sh 'grep -rqs \"config:[[:space:]]*disabled\" /etc/cloud/cloud.cfg.d/'\n"
+        f"sh 'systemctl {units}'\n"
+    )
+    run_guestfs_tool(
+        ["guestfish", "--ro", "-a", str(qcow2), "-i"],
+        stage="cloud-init-self-check",
+        timeout_s=_REPACK_TIMEOUT_S,
+        missing_message="guestfish is not installed; cannot verify cloud-init in the rootfs",
+        failure_message="built image failed the cloud-init first-boot self-check (ADR-0288)",
+        input_text=script,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +199,7 @@ class RootfsBuildTools:
     family_for: FamilyResolver = family_for
     inspect_versions: VersionInspectSeam = DEFAULT_VERSION_INSPECT
     probe_makedumpfile: MakedumpfileProbeSeam = DEFAULT_MAKEDUMPFILE_PROBE
+    verify_cloud_init: VerifyCloudInit = _real_verify_cloud_init
 
 
 def _resolve_entry(spec: RootfsBuildSpec) -> RootfsCatalogEntry:
@@ -235,6 +271,7 @@ class LocalLibvirtRootfsBuildPlane:
             staged = work_dir / f"{spec.name}.qcow2"
             self._tools.repack_whole_disk_ext4(scratch=scratch, qcow2=staged, size=self._size)
             family.normalize(staged)
+            self._tools.verify_cloud_init(staged)
             installed = self._inspect_installed(scratch)
             package_versions = {n: installed[n] for n in spec.packages if n in installed}
             makedumpfile_version = self._capture_makedumpfile(scratch, installed)

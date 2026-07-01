@@ -89,6 +89,7 @@ class _Recorder:
     repack_sizes: list[str] = field(default_factory=list)
     normalize_calls: list[Path] = field(default_factory=list)
     readiness_unit_texts: list[str] = field(default_factory=list)
+    verify_calls: list[Path] = field(default_factory=list)
     family_kdump_unit: str = "kdump.service"
     payload: bytes = b"qcow2-bytes"
 
@@ -122,6 +123,10 @@ class _Recorder:
     def family_for(self, name: str) -> FamilyCustomizer:
         return _FakeFamily(self, kdump_unit=self.family_kdump_unit)
 
+    def verify_cloud_init(self, qcow2: Path) -> None:
+        self.order.append("verify")
+        self.verify_calls.append(qcow2)
+
 
 def _no_versions(_qcow2: Path) -> dict[str, str]:
     return {}
@@ -135,6 +140,7 @@ def _tools(
     rec: _Recorder,
     inspect_versions: VersionInspectSeam = _no_versions,
     probe_makedumpfile: MakedumpfileProbeSeam = _no_makedumpfile,
+    verify_cloud_init: object | None = None,
 ) -> RootfsBuildTools:
     return RootfsBuildTools(
         resolve_authorized_key=rec.resolve_authorized_key,
@@ -144,6 +150,7 @@ def _tools(
         family_for=rec.family_for,
         inspect_versions=inspect_versions,
         probe_makedumpfile=probe_makedumpfile,
+        verify_cloud_init=verify_cloud_init or rec.verify_cloud_init,  # ty: ignore[invalid-argument-type]
     )
 
 
@@ -187,8 +194,9 @@ def test_build_drives_acquire_customize_repack_normalize_in_order(tmp_path: Path
     rec = _Recorder(authorized_key=_key(tmp_path))
     out = _plane(tmp_path, rec).build(_spec())
 
-    assert rec.order == ["acquire", "customize", "repack", "normalize"], (
-        "pipeline is acquire base → virt-customize → repack ext4 → family.normalize"
+    assert rec.order == ["acquire", "customize", "repack", "normalize", "verify"], (
+        "pipeline is acquire base → virt-customize → repack ext4 → family.normalize → "
+        "verify_cloud_init"
     )
     # The family customizer (not a hardcoded SELinux edit) builds the virt-customize argv.
     assert rec.customize_argvs == [["--install", "marker-pkg", "--run-command", "marker-customize"]]
@@ -198,6 +206,32 @@ def test_build_drives_acquire_customize_repack_normalize_in_order(tmp_path: Path
     assert rec.repack_sizes == ["6G"], "the configured size flows to the repack stage"
     assert rec.normalize_calls == [staged_qcow2], "the repacked image is normalized before publish"
     assert out.qcow2_path.name == staged_qcow2.name
+
+
+def test_build_runs_cloud_init_self_check_after_normalize(tmp_path: Path) -> None:
+    # The plane must run verify_cloud_init on the staged image, after normalize, before publish.
+    rec = _Recorder(authorized_key=_key(tmp_path))
+    _plane(tmp_path, rec).build(_spec())
+    assert rec.verify_calls, "verify_cloud_init must run on the built image"
+    assert rec.order.index("verify") > rec.order.index("normalize")
+
+
+def test_build_fails_when_cloud_init_self_check_rejects(tmp_path: Path) -> None:
+    rec = _Recorder(authorized_key=_key(tmp_path))
+
+    def _reject(_qcow2: Path) -> None:
+        raise CategorizedError(
+            "cloud-init self-check failed",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+        )
+
+    plane = LocalLibvirtRootfsBuildPlane(
+        workspace=tmp_path / "work",
+        tools=_tools(rec, verify_cloud_init=_reject),
+    )
+    with pytest.raises(CategorizedError) as err:
+        plane.build(_spec())
+    assert err.value.category is ErrorCategory.PROVISIONING_FAILURE
 
 
 def test_customize_context_threads_key_and_cloud_image_flag(tmp_path: Path) -> None:
