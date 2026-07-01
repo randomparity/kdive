@@ -57,7 +57,7 @@ scoped to the genuinely first-boot, interface-dependent concerns (network, host 
    # partition and only adds boot noise. `growpart: {mode: off}` + `resize_rootfs: false`
    # disable the behavior without rewriting `cloud_config_modules`, which would risk dropping
    # a module the design needs (e.g. `ssh`, which generates host keys).
-   growpart: { mode: off }
+   growpart: { mode: "off" }   # quoted — unquoted `off` is YAML boolean false, not the string
    resize_rootfs: false
    ```
 

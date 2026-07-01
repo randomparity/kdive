@@ -46,7 +46,8 @@ and delete the hand-rolled first-boot fragments.
   `--ssh-inject`'d onto the filesystem), so `disable_root: true` is most likely inert for us.
   The real root-SSH vectors a re-enabled cloud-init can touch (`PermitRootLogin`, `users_groups`
   root lock, `ssh_pwauth`) are verified by the live proof, not assumed. `growpart`/`resizefs`
-  are disabled via the targeted `growpart: {mode: off}` + `resize_rootfs: false` keys — not a
+  are disabled via the targeted `growpart: {mode: "off"}` + `resize_rootfs: false` keys (the
+  `"off"` quoted so YAML does not read it as boolean false) — not a
   module-list override, which could drop a module the design needs (e.g. `ssh`) — quieting
   no-op boot noise on the partitionless whole-disk-ext4 layout (ADR-0030).
 
