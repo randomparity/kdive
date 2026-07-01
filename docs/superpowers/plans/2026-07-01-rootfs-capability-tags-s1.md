@@ -245,12 +245,11 @@ Expected: FAIL — `AttributeError: 'RhelFamily' object has no attribute 'capabi
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `src/kdive/images/families/rhel.py`, import `Capability` and `_mac_tag`, and add the method to `RhelFamily` (after `packages`):
+In `src/kdive/images/families/rhel.py`, make `Capability` and `_mac_tag` importable, then add the method to `RhelFamily` (after `packages`). The module **already** imports `CustomizeContext` from `kdive.images.families.base` (do not add a second import of it) — extend that existing line and add the `Capability` import:
 
-```python
-from kdive.domain.catalog.images import Capability
-from kdive.images.families.base import CustomizeContext, _mac_tag
-```
+- Change the existing `from kdive.images.families.base import CustomizeContext` to
+  `from kdive.images.families.base import CustomizeContext, _mac_tag`.
+- Add `from kdive.domain.catalog.images import Capability`.
 
 ```python
     def capabilities(self, kind: str, distro: str, version: str) -> tuple[Capability, ...]:
@@ -320,12 +319,11 @@ Expected: FAIL — `AttributeError: 'DebianFamily' object has no attribute 'capa
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `src/kdive/images/families/debian.py`, import `Capability` and `_mac_tag`, and add to `DebianFamily`:
+In `src/kdive/images/families/debian.py`, make `Capability` and `_mac_tag` importable, then add to `DebianFamily`. The module **already** imports `CustomizeContext` from `kdive.images.families.base` (do not add a second import of it) — extend that existing line and add the `Capability` import:
 
-```python
-from kdive.domain.catalog.images import Capability
-from kdive.images.families.base import CustomizeContext, _mac_tag
-```
+- Change the existing `from kdive.images.families.base import CustomizeContext` to
+  `from kdive.images.families.base import CustomizeContext, _mac_tag`.
+- Add `from kdive.domain.catalog.images import Capability`.
 
 ```python
     def capabilities(self, kind: str, distro: str, version: str) -> tuple[Capability, ...]:
@@ -453,18 +451,20 @@ from kdive.images.families import _FAMILIES
 from kdive.images.families.base import FamilyCustomizer
 
 _KINDS = ("debug", "build")
-# A representative (distro, version) per family so packages() resolves. Both families are
-# EL-major-invariant in capabilities(); packages() only needs a valid pair.
-_PROBE = {"rhel": ("fedora", "44"), "debian": ("debian", "13")}
+# EVERY (distro, version) pair whose packages() output is distinct, so the evidence check
+# covers the EL-major branch in RhelFamily.packages() (EL8/EL9 vs EL10/Fedora) — not just one
+# representative. A tag declared but unbacked on *any* of these fails the guard.
+_PROBE_PAIRS: dict[str, tuple[tuple[str, str], ...]] = {
+    "rhel": (("fedora", "44"), ("rocky", "8"), ("rocky", "9"), ("rocky", "10")),
+    "debian": (("debian", "12"), ("debian", "13")),
+}
 
 
-def _evidenced(family: FamilyCustomizer, kind: str, tag: Capability) -> bool:
-    name, version = _PROBE[family.family]
-    packages = family.packages(kind, name, version)
+def _evidenced(packages: tuple[str, ...], guest_mac: str, kind: str, tag: Capability) -> bool:
     if tag is Capability.SSH:
         return "openssh-server" in packages
     if tag in (Capability.SELINUX, Capability.APPARMOR):
-        return tag == _mac_tag(family.guest_mac)
+        return tag == _mac_tag(guest_mac)
     if tag is Capability.KDUMP:
         return any(p in packages for p in ("kexec-tools", "kdump-tools"))
     if tag is Capability.DRGN:
@@ -476,10 +476,13 @@ def _evidenced(family: FamilyCustomizer, kind: str, tag: Capability) -> bool:
 
 @pytest.mark.parametrize("family", _FAMILIES.values(), ids=list(_FAMILIES))
 def test_every_declared_tag_is_evidenced(family: FamilyCustomizer) -> None:
-    for kind in _KINDS:
-        name, version = _PROBE[family.family]
-        for tag in family.capabilities(kind, name, version):
-            assert _evidenced(family, kind, tag), f"{family.family}/{kind}: {tag} unbacked"
+    for name, version in _PROBE_PAIRS[family.family]:
+        for kind in _KINDS:
+            packages = family.packages(kind, name, version)
+            for tag in family.capabilities(kind, name, version):
+                assert _evidenced(packages, family.guest_mac, kind, tag), (
+                    f"{family.family}/{name}-{version}/{kind}: {tag} unbacked"
+                )
 
 
 @pytest.mark.parametrize("family", _FAMILIES.values(), ids=list(_FAMILIES))
@@ -490,9 +493,9 @@ def test_guest_mac_maps_to_a_tag(family: FamilyCustomizer) -> None:
 
 def test_no_local_family_declares_agent() -> None:
     for family in _FAMILIES.values():
-        for kind in _KINDS:
-            name, version = _PROBE[family.family]
-            assert Capability.AGENT not in family.capabilities(kind, name, version)
+        for name, version in _PROBE_PAIRS[family.family]:
+            for kind in _KINDS:
+                assert Capability.AGENT not in family.capabilities(kind, name, version)
 ```
 
 - [ ] **Step 2: Run test to verify it fails, then passes**
@@ -538,16 +541,21 @@ Run:
 ```
 Confirm every staged `[[image]]`/fixture entry is a debug rootfs (no `kind = "build"` staged entry). Record the exact lines to edit and any test asserting `["agent", ...]`.
 
-- [ ] **Step 2: Write/adjust the failing test**
+- [ ] **Step 2: Adjust the failing assertion in place**
 
-If `tests/admin/test_default_fixtures.py` (or a fixture-validate test) asserts a specific capability list for a seeded image, update the expectation to the per-distro set, e.g.:
+Do not invent a new test or helper. Take each assertion Step 1's grep surfaced (e.g. in
+`tests/admin/test_default_fixtures.py`, `tests/mcp/catalog/test_fixtures_validate.py`, or
+`tests/inventory/*`) that pins a seeded/staged image's capability list to the old value, and
+edit that exact assertion to the new per-distro set. For a Fedora seed the change is:
 
 ```python
-def test_seeded_local_image_capabilities() -> None:
-    # default_fixtures seeds a Fedora debug rootfs.
-    entry = _seeded_fedora_image()  # existing helper in this test module
-    assert entry.capabilities == ["ssh", "selinux", "kdump", "drgn"]
+# before:  assert <entry>.capabilities == ["agent", "kdump", "drgn"]   (or the prior literal)
+# after:
+assert <entry>.capabilities == ["ssh", "selinux", "kdump", "drgn"]
 ```
+
+using whatever accessor the existing test already uses for `<entry>` (do not introduce a new
+helper). Run the file(s) named by the grep, e.g.:
 
 Run: `.venv/bin/pytest tests/admin/test_default_fixtures.py -q`
 Expected: FAIL — current seed still uses the old set.
