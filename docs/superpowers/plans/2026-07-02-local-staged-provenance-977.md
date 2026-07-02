@@ -33,6 +33,8 @@ keeps the schema constant, path convention, and (de)serialization in one place.
   wrong/missing-schema, or non-object-`provenance` sidecars. Logs a warning for a present-but-invalid
   sidecar (distinct from the silent absent case). The bound is a byte cap + object-shape check,
   **not** a per-key type allowlist, so a future provenance operand flows through unchanged.
+  The cap is a **bounded read**: read at most `_SIDECAR_MAX_BYTES + 1` bytes and reject when the read
+  exceeds `_SIDECAR_MAX_BYTES`, so an oversized sidecar never lands fully in memory.
 
 **Tests (behavior + edges):**
 - round-trip: `write_sidecar` then `read_sidecar` returns the exact provenance dict.
@@ -40,8 +42,8 @@ keeps the schema constant, path convention, and (de)serialization in one place.
 - absent sidecar → `read_sidecar` returns `None`, no warning.
 - malformed JSON, JSON that is not an object, missing/unknown `schema`, `provenance` that is not a
   dict → each returns `None` (and warns for the present-but-invalid cases).
-- over-cap: a sidecar larger than `_SIDECAR_MAX_BYTES` → `None` (+warn), without loading the whole
-  file into a dict first.
+- over-cap: a sidecar larger than `_SIDECAR_MAX_BYTES` → `None` (+warn), rejected via the bounded
+  read without reading the whole file into memory.
 - a sidecar carrying an unknown extra provenance key → round-trips (future-operand freedom).
 - `write_sidecar` is atomic: no `.provenance.json` left containing a partial document on success
   (assert content parses); a pre-existing sidecar is overwritten.
@@ -76,6 +78,10 @@ print or the success log.
 **Files:** edit `src/kdive/inventory/reconcile/images.py`; edit the reconcile-images tests under
 `tests/reconciler/` (or `tests/inventory/reconcile/` — match where the existing image-reconcile
 tests live).
+
+**Prerequisite (resolved):** `tests/inventory/test_layering.py` forbids only `inventory → kdive.mcp`;
+`inventory → kdive.images` is allowed, and `kdive.images` does not import `kdive.inventory` (no
+cycle). The new `staged_provenance` module uses stdlib only, so the import direction is clean.
 
 **Changes:**
 1. `_load_config_rows`: add `provenance` to the SELECT column list.
