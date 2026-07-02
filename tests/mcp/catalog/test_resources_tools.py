@@ -783,15 +783,18 @@ def test_classify_released_is_released_status() -> None:
 
 
 def test_classify_stale_handle_is_skipped_with_status() -> None:
+    # Post-ADR-0293 a `released` grant returns idempotent ok, so the race-only STALE_HANDLE a
+    # drain can still see comes from a grant that reached `expired`/`failed` between scan and
+    # release; use that as the representative current_status.
     item = resources_tools._classify_drain_release(
         "a-2",
         ReleaseOutcome(
-            released=False, category=ErrorCategory.STALE_HANDLE, current_status="released"
+            released=False, category=ErrorCategory.STALE_HANDLE, current_status="expired"
         ),
     )
     assert item.status == "skipped"
     assert item.error_category is None
-    assert item.data["current_status"] == "released"
+    assert item.data["current_status"] == "expired"
 
 
 def test_classify_failed_with_status_carries_current_status() -> None:
