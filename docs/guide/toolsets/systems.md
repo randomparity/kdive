@@ -34,3 +34,8 @@ provisioning-for-debugging notes in the investigation index.
   now (a worker job; poll `jobs.wait` and read `refs.result`).
 - `systems.authorize_ssh_key` — authorize your public key so you can run commands in the
   guest over SSH.
+
+Once authorized you have **root** in the guest, and kdive never holds the private key. The
+guest is yours to customize: the guest package manager is your own — install tracers,
+compilers, and stress tools at runtime (`apt install trace-cmd`) rather than concluding a
+capability is missing. Mind disk headroom, since toolchains and captures consume guest disk.
