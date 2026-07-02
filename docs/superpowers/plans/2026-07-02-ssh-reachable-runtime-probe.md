@@ -24,23 +24,23 @@
 
 - Create `src/kdive/jobs/handlers/ssh_reachable.py` — probe fn (`ReachResult`, `_real_probe`), verdict codec (`serialize_reach_verdict`), `check_ssh_reachable_handler`.
 - Modify `src/kdive/domain/operations/jobs.py` — add `JobKind.CHECK_SSH_REACHABLE`.
-- Create `src/kdive/db/schema/0056_check_ssh_reachable_job_kind.sql` — widen `jobs_kind_check`.
+- Create `src/kdive/db/schema/0057_check_ssh_reachable_job_kind.sql` — widen `jobs_kind_check`.
 - Modify `src/kdive/jobs/payloads.py` — `CheckSshReachablePayload` + PAYLOAD map entry.
 - Modify `src/kdive/jobs/handlers/systems.py` — register the handler in `register_handlers`.
 - Modify `src/kdive/mcp/tools/lifecycle/systems/ssh_access.py` — `check_ssh_reachable` server handler; add `systems.check_ssh_reachable` to `ssh_info`'s next actions.
 - Modify `src/kdive/mcp/tools/lifecycle/systems/registrar.py` — register the `systems.check_ssh_reachable` wrapper.
 - Modify `src/kdive/images/capability_signals.py` — drop the `ssh_reachable` `PlannedSignal`.
 - Modify `docs/guide/toolsets/systems.md` — name the new tool.
-- Tests: `tests/db/test_migration_0056_check_ssh_reachable.py`, `tests/jobs/handlers/test_ssh_reachable.py`, `tests/mcp/lifecycle/test_ssh_access_tools.py` (extend), `tests/images/test_capability_signals.py` (update).
+- Tests: `tests/db/test_migration_0057_check_ssh_reachable.py`, `tests/jobs/handlers/test_ssh_reachable.py`, `tests/mcp/lifecycle/test_ssh_access_tools.py` (extend), `tests/images/test_capability_signals.py` (update).
 
 ---
 
-### Task 1: `JobKind.CHECK_SSH_REACHABLE` + migration 0056
+### Task 1: `JobKind.CHECK_SSH_REACHABLE` + migration 0057
 
 **Files:**
 - Modify: `src/kdive/domain/operations/jobs.py:33`
-- Create: `src/kdive/db/schema/0056_check_ssh_reachable_job_kind.sql`
-- Create: `tests/db/test_migration_0056_check_ssh_reachable.py`
+- Create: `src/kdive/db/schema/0057_check_ssh_reachable_job_kind.sql`
+- Create: `tests/db/test_migration_0057_check_ssh_reachable.py`
 
 **Interfaces:**
 - Produces: `JobKind.CHECK_SSH_REACHABLE = "check_ssh_reachable"`.
@@ -52,10 +52,10 @@
     CHECK_SSH_REACHABLE = "check_ssh_reachable"
 ```
 
-- [ ] **Step 2: Write the migration** (`0056_check_ssh_reachable_job_kind.sql`), mirroring 0055:
+- [ ] **Step 2: Write the migration** (`0057_check_ssh_reachable_job_kind.sql`), mirroring 0055:
 
 ```sql
--- 0056_check_ssh_reachable_job_kind.sql — SSH-reachability probe job kind (#972).
+-- 0057_check_ssh_reachable_job_kind.sql — SSH-reachability probe job kind (#972).
 -- Additive to 0052/0055 (forward-only, ADR-0015). Widens the jobs.kind CHECK to admit the
 -- `check_ssh_reachable` job kind (systems.check_ssh_reachable enqueues one job whose handler opens
 -- a bounded TCP connect to the recorded loopback endpoint and reads the SSH banner, ADR-0298).
@@ -68,25 +68,25 @@ ALTER TABLE jobs ADD CONSTRAINT jobs_kind_check
                     'console_rotate', 'diagnostic_sysrq', 'check_ssh_reachable'));
 ```
 
-- [ ] **Step 3: Write the per-migration test** (`tests/db/test_migration_0056_check_ssh_reachable.py`), copying the 0055 test's `_apply_through`/`_insert_job` helpers verbatim, then:
+- [ ] **Step 3: Write the per-migration test** (`tests/db/test_migration_0057_check_ssh_reachable.py`), copying the 0055 test's `_apply_through`/`_insert_job` helpers verbatim, then:
 
 ```python
-def test_migration_0056_admits_check_ssh_reachable(pg_conn: psycopg.Connection) -> None:
+def test_migration_0057_admits_check_ssh_reachable(pg_conn: psycopg.Connection) -> None:
     _apply_through(pg_conn, "0055")
     with pytest.raises(psycopg.errors.CheckViolation):
-        _insert_job(pg_conn, JobKind.CHECK_SSH_REACHABLE.value, "before-0056")
+        _insert_job(pg_conn, JobKind.CHECK_SSH_REACHABLE.value, "before-0057")
     pg_conn.rollback()
-    _apply_through(pg_conn, "0056")
-    _insert_job(pg_conn, JobKind.CHECK_SSH_REACHABLE.value, "after-0056")  # no raise
+    _apply_through(pg_conn, "0057")
+    _insert_job(pg_conn, JobKind.CHECK_SSH_REACHABLE.value, "after-0057")  # no raise
 ```
 
-The fixture is `pg_conn: psycopg.Connection` (confirmed in `test_migration_0055_diagnostic_sysrq.py`); reuse its exact `_apply_through`/`_insert_job` bodies. Mirror all three 0055 shapes: a `test_pre_migration_0056_rejects_check_ssh_reachable` (raises `CheckViolation` at 0055), the admits-at-0056 test above, and a `test_migration_0056_keeps_all_prior_kinds` that inserts one job of each earlier kind after 0056.
+The fixture is `pg_conn: psycopg.Connection` (confirmed in `test_migration_0055_diagnostic_sysrq.py`); reuse its exact `_apply_through`/`_insert_job` bodies. Mirror all three 0055 shapes: a `test_pre_migration_0057_rejects_check_ssh_reachable` (raises `CheckViolation` at 0055), the admits-at-0057 test above, and a `test_migration_0057_keeps_all_prior_kinds` that inserts one job of each earlier kind after 0057.
 
 - [ ] **Step 4: Update the exact-JobKind-set assertion (required).** `tests/domain/test_models.py:302` asserts `{kind.value for kind in JobKind} == {<explicit set>}`. Add `"check_ssh_reachable"` to that set literal, or Task 1's commit is red. (Grep `check_ssh_reachable` across `tests/` after Task 1 to catch any other exact-set parity assertion.)
 
-- [ ] **Step 5: Run.** `uv run python -m pytest tests/db/test_migration_0056_check_ssh_reachable.py tests/db/test_migrate.py tests/domain/test_models.py -q` (the last two hold the SQL↔enum tie). Expected: PASS.
+- [ ] **Step 5: Run.** `uv run python -m pytest tests/db/test_migration_0057_check_ssh_reachable.py tests/db/test_migrate.py tests/domain/test_models.py -q` (the last two hold the SQL↔enum tie). Expected: PASS.
 
-- [ ] **Step 6: Commit.** `git add -A && git commit` — `feat(972): add check_ssh_reachable job kind + migration 0056`.
+- [ ] **Step 6: Commit.** `git add -A && git commit` — `feat(972): add check_ssh_reachable job kind + migration 0057`.
 
 ---
 
@@ -602,6 +602,6 @@ def test_ssh_reachable_is_not_an_image_signal_after_972() -> None:
 
 ## Self-review notes
 
-- **Spec coverage:** tool + VIEWER + pre-checks (T5) · worker job/handler + state re-check + endpoint None (T4) · bounded retry + deadline + banner classify + redaction + injectable clock (T3/T4) · fresh-nonce dedup (T5) · inline verdict → `refs.result` (T3/T4, surfaced by existing `from_job`) · migration 0056 + enum tie (T1) · payload (T2) · drop PlannedSignal (T6) · toolset doc + no-ADR-leak (T5/T7). All covered.
+- **Spec coverage:** tool + VIEWER + pre-checks (T5) · worker job/handler + state re-check + endpoint None (T4) · bounded retry + deadline + banner classify + redaction + injectable clock (T3/T4) · fresh-nonce dedup (T5) · inline verdict → `refs.result` (T3/T4, surfaced by existing `from_job`) · migration 0057 + enum tie (T1) · payload (T2) · drop PlannedSignal (T6) · toolset doc + no-ADR-leak (T5/T7). All covered.
 - **Type consistency:** `ReachResult(reachable, detail)`, `_real_probe(host, port, *, deadline_s)`, `serialize_reach_verdict(result, host, port, checked_at)`, `check_ssh_reachable_handler(conn, job, *, resolver, probe, clock)` are used identically across tasks.
 - **Coupling note:** Tasks 1–5 share the JobKind→payload→handler→tool chain and touch overlapping files (`systems.py`, `ssh_access.py`); implement sequentially in one session (not parallel subagents on a shared tree).

@@ -31,6 +31,7 @@ class JobKind(StrEnum):
     AUTHORIZE_SSH_KEY = "authorize_ssh_key"
     CONSOLE_ROTATE = "console_rotate"
     DIAGNOSTIC_SYSRQ = "diagnostic_sysrq"
+    CHECK_SSH_REACHABLE = "check_ssh_reachable"
 
 
 DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(

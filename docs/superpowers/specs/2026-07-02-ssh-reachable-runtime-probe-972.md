@@ -149,7 +149,7 @@ the reachable / unreachable / no-banner / retry-then-succeed paths without a liv
 - `checked_at` is deterministic under an injected clock, so the serialized-verdict test
   asserts exact output.
 - The verdict round-trips through `jobs.wait` as `refs.result` (compact JSON).
-- Migration 0056 widens `jobs_kind_check` to admit `check_ssh_reachable`; the SQL↔enum tie
+- Migration 0057 widens `jobs_kind_check` to admit `check_ssh_reachable`; the SQL↔enum tie
   and per-migration tests pass.
 - `docs/guide/toolsets/systems.md` names the new tool (the #940 completeness guard);
   the wrapper docstring + `Field` text carry **no** `ADR-NNNN` reference (#880 guard).

@@ -89,7 +89,7 @@ against it.
    (`reachable` / `connection refused` / `timed out` / `no SSH banner`) and never echoes the
    raw `SSH-2.0-OpenSSH_…` bytes into the persisted verdict.
 
-Migration 0056 widens the `jobs_kind_check` constraint to admit `check_ssh_reachable`
+Migration 0057 widens the `jobs_kind_check` constraint to admit `check_ssh_reachable`
 (forward-only, drop-and-recreate to keep the constraint name stable, per the 0052/0055
 pattern). No other schema, RBAC role, `ErrorCategory`, or config change.
 
