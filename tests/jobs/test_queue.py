@@ -17,13 +17,17 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.payloads import Authorizing, BuildPayload, SystemPayload
+from kdive.jobs.payloads import Authorizing, BuildPayload, InstallPayload, SystemPayload
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 
 
 def _build_payload() -> BuildPayload:
     return BuildPayload(run_id=str(uuid4()), build_host_id=str(WORKER_LOCAL_ID))
+
+
+def _install_payload(run_id: str, cmdline: str | None = None) -> InstallPayload:
+    return InstallPayload(run_id=run_id, cmdline=cmdline)
 
 
 def _system_payload() -> SystemPayload:
@@ -134,7 +138,7 @@ async def _terminal_failed_job(conn: psycopg.AsyncConnection, dedup_key: str) ->
     return failed
 
 
-def test_enqueue_retry_terminal_failed_resets_failed_job(migrated_url: str) -> None:
+def test_enqueue_recycle_terminal_resets_failed_job(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             failed = await _terminal_failed_job(conn, "dk-retry")
@@ -145,7 +149,7 @@ def test_enqueue_retry_terminal_failed_resets_failed_job(migrated_url: str) -> N
                 _build_payload(),
                 _AUTHORIZING,
                 "dk-retry",
-                retry_terminal_failed=True,
+                recycle_terminal=True,
             )
 
             assert recycled.id == failed.id  # reset in place, not replaced
@@ -166,7 +170,7 @@ def test_enqueue_retry_terminal_failed_resets_failed_job(migrated_url: str) -> N
     asyncio.run(_run())
 
 
-def test_enqueue_retry_terminal_failed_preserves_in_flight(migrated_url: str) -> None:
+def test_enqueue_recycle_terminal_preserves_in_flight(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             # A queued in-flight job is deduped, not reset.
@@ -179,7 +183,7 @@ def test_enqueue_retry_terminal_failed_preserves_in_flight(migrated_url: str) ->
                 _build_payload(),
                 _AUTHORIZING,
                 "dk-q",
-                retry_terminal_failed=True,
+                recycle_terminal=True,
             )
             assert again.id == queued.id
             assert again.state is JobState.QUEUED
@@ -193,7 +197,7 @@ def test_enqueue_retry_terminal_failed_preserves_in_flight(migrated_url: str) ->
                 _build_payload(),
                 _AUTHORIZING,
                 "dk-run",
-                retry_terminal_failed=True,
+                recycle_terminal=True,
             )
             assert held.id == running.id
             assert held.state is JobState.RUNNING
@@ -203,7 +207,39 @@ def test_enqueue_retry_terminal_failed_preserves_in_flight(migrated_url: str) ->
     asyncio.run(_run())
 
 
-def test_enqueue_retry_terminal_failed_does_not_resurrect_succeeded(migrated_url: str) -> None:
+def test_enqueue_recycle_terminal_resets_succeeded_job_with_new_payload(migrated_url: str) -> None:
+    # ADR-0299: a re-stage recycles a *succeeded* install job in place, overwriting its payload
+    # (the new cmdline) and clearing result_ref — otherwise the re-run boots the prior cmdline.
+    async def _run() -> None:
+        run_id = str(uuid4())
+        async with await _connect(migrated_url) as conn:
+            first = await queue.enqueue(
+                conn, JobKind.INSTALL, _install_payload(run_id, "a=1"), _AUTHORIZING, "dk-restage"
+            )
+            claimed = await queue.dequeue(conn, "w1")
+            assert claimed is not None
+            done = await queue.complete(conn, claimed.id, "w1", "result-ref")
+            assert done is not None and done.state is JobState.SUCCEEDED
+
+            recycled = await queue.enqueue(
+                conn,
+                JobKind.INSTALL,
+                _install_payload(run_id, "a=2"),
+                _AUTHORIZING,
+                "dk-restage",
+                recycle_terminal=True,
+            )
+            assert recycled.id == first.id  # reset in place
+            assert recycled.state is JobState.QUEUED
+            assert recycled.payload["cmdline"] == "a=2"  # payload overwritten
+            assert recycled.result_ref is None  # success field cleared
+            assert await _count_jobs(conn) == 1
+
+    asyncio.run(_run())
+
+
+def test_enqueue_default_leaves_succeeded_job_untouched(migrated_url: str) -> None:
+    # Without the flag, a succeeded job is never resurrected (no-resurrection default holds).
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             await queue.enqueue(conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-ok")
@@ -213,15 +249,10 @@ def test_enqueue_retry_terminal_failed_does_not_resurrect_succeeded(migrated_url
             assert done is not None and done.state is JobState.SUCCEEDED
 
             again = await queue.enqueue(
-                conn,
-                JobKind.BUILD,
-                _build_payload(),
-                _AUTHORIZING,
-                "dk-ok",
-                retry_terminal_failed=True,
+                conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-ok"
             )
             assert again.id == claimed.id
-            assert again.state is JobState.SUCCEEDED  # not resurrected
+            assert again.state is JobState.SUCCEEDED  # not resurrected without the flag
             assert again.result_ref == "result-ref"
 
     asyncio.run(_run())

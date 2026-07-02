@@ -27,9 +27,9 @@ Attach a ready system to an unbound run before install.
 
 Boot an installed run.
 
-The kernel cmdline is fixed at build time; append extra debug args (e.g.
-`dhash_entries=1`) with the `cmdline` parameter on `runs.build` for server builds,
-or `runs.complete_build` for external builds; do not pass them here.
+To iterate boot parameters (e.g. `dhash_entries=1`), pass `cmdline` to `runs.install`
+against the built kernel — no rebuild — then boot here; `runs.boot` takes no cmdline. Extra
+args can also be bound at build via `runs.build`/`runs.complete_build`.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -228,8 +228,12 @@ source.
 
 Install a built run onto its system.
 
+Pass `cmdline` to iterate boot parameters against the built kernel without a rebuild;
+`runs.get` reports the live variant as `data.installed_cmdline`.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `cmdline` | string (nullable) | no | Kernel debug args applied against the already-built kernel — no rebuild needed. Replaces any build-time extra args. These platform args are always present and cannot be overridden: console=ttyS0, root=/dev/vda, plus crashkernel=256M (kdump) or nokaslr (gdbstub) per the System's capture method. Passing a value different from the currently installed one re-stages the boot; sweep boot-parameter variants (e.g. 'dhash_entries=1' then 'dhash_entries=2') by calling runs.install with a new value then runs.boot, using a distinct (or no) idempotency_key each time. Omit to reuse the build-time cmdline. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `run_id` | string | yes | The Run whose built kernel to install. |
 

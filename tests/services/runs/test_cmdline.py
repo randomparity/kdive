@@ -2,10 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+from typing import cast
+from uuid import uuid4
+
+import pytest
+
 from kdive.domain.capture import CaptureMethod
-from kdive.services.runs.steps import platform_owned_cmdline_token, system_required_cmdline
+from kdive.domain.lifecycle.records import Run
+from kdive.services.runs import steps as steps_mod
+from kdive.services.runs.steps import (
+    BuildStepResult,
+    cmdline_for,
+    platform_owned_cmdline_token,
+    system_required_cmdline,
+)
 
 _LOCAL_ROOT = "root=/dev/vda"
+
+
+def _fake_run() -> Run:
+    """A stand-in Run — only ``.id`` is read, and only on the no-override branch."""
+    return cast(Run, SimpleNamespace(id=uuid4()))
 
 
 def test_local_root_kdump_keeps_root_and_crashkernel() -> None:
@@ -67,3 +86,41 @@ def test_platform_owned_tokens_still_reject_root_on_any_provider() -> None:
     assert platform_owned_cmdline_token("root=/dev/sda1 quiet") == "root="
     assert platform_owned_cmdline_token("console=ttyS0") == "console="
     assert platform_owned_cmdline_token("dhash_entries=1") is None
+
+
+def test_cmdline_for_override_replaces_build_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The install override (ADR-0299) replaces the build-baked extra without reading the ledger.
+    async def _must_not_read(conn: object, run_id: object) -> BuildStepResult | None:
+        raise AssertionError("override path must not read the build ledger")
+
+    monkeypatch.setattr(steps_mod, "existing_build_result", _must_not_read)
+
+    async def _run() -> str:
+        return await cmdline_for(
+            cast("steps_mod.AsyncConnection", None),
+            _fake_run(),
+            CaptureMethod.HOST_DUMP,
+            root_cmdline=_LOCAL_ROOT,
+            override="  dhash_entries=1 ",
+        )
+
+    assert asyncio.run(_run()) == "console=ttyS0 root=/dev/vda dhash_entries=1"
+
+
+def test_cmdline_for_no_override_appends_build_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _build_result(conn: object, run_id: object) -> BuildStepResult | None:
+        return BuildStepResult(
+            kernel_ref=None, debuginfo_ref=None, build_id=None, cmdline="dhash_entries=9"
+        )
+
+    monkeypatch.setattr(steps_mod, "existing_build_result", _build_result)
+
+    async def _run() -> str:
+        return await cmdline_for(
+            cast("steps_mod.AsyncConnection", None),
+            _fake_run(),
+            CaptureMethod.HOST_DUMP,
+            root_cmdline=_LOCAL_ROOT,
+        )
+
+    assert asyncio.run(_run()) == "console=ttyS0 root=/dev/vda dhash_entries=9"

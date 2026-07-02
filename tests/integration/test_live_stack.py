@@ -412,6 +412,94 @@ def test_spine_over_the_wire() -> None:
     asyncio.run(_run())
 
 
+@pytest.mark.live_stack
+def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
+    """#988 acceptance: sweep two boot cmdlines against one built kernel, no rebuild (ADR-0299).
+
+    allocate → provision → build (once) → install(dhash_entries=1) → boot →
+    install(dhash_entries=2) → boot. Asserts each install's ``runs.get`` ``installed_cmdline``
+    reflects the swept value and that the ``build`` step is only ever driven once (install
+    re-stages, boot re-runs — no rebuild). Self-cleans (release).
+    """
+    issuer, base_url, _ = _spine_preflight()
+    operator_token = _token(issuer, role="operator")
+
+    async def _run() -> None:
+        op = LiveStackClient.over_http(base_url, operator_token)
+        allocation_id = ""
+        async with op:
+            async with phase("allocate"):
+                env = ok(
+                    await scalar(
+                        op,
+                        "allocations.request",
+                        project=_PROJECT,
+                        request={
+                            "vcpus": 2,
+                            "memory_gb": 2,
+                            "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+                            "resource": {"mode": "kind"},
+                        },
+                    ),
+                    "allocate",
+                )
+                allocation_id = env.object_id
+            async with phase("provision"):
+                env = ok(
+                    await scalar(
+                        op,
+                        "systems.provision",
+                        allocation_id=allocation_id,
+                        profile=_provision_profile(),
+                    ),
+                    "provision",
+                )
+                system_id = data_str(env, "system_id")
+                await await_system_state(op, "provision", system_id, "ready")
+            async with phase("create-run"):
+                env = ok(
+                    await scalar(op, "investigations.open", project=_PROJECT, title="sweep"),
+                    "create-run",
+                )
+                investigation_id = env.object_id
+                env = ok(
+                    await scalar(
+                        op,
+                        "runs.create",
+                        investigation_id=investigation_id,
+                        system_id=system_id,
+                        build_profile=_build_profile(),
+                    ),
+                    "create-run",
+                )
+                run_id = env.object_id
+            async with phase("build"):
+                env = ok(await scalar(op, "runs.build", run_id=run_id), "build")
+                await drain_job(op, "build", env.object_id)
+
+            for variant in ("dhash_entries=1", "dhash_entries=2"):
+                async with phase(f"install:{variant}"):
+                    env = ok(
+                        await scalar(op, "runs.install", run_id=run_id, cmdline=variant), variant
+                    )
+                    await drain_job(op, "install", env.object_id)
+                async with phase(f"boot:{variant}"):
+                    env = ok(await scalar(op, "runs.boot", run_id=run_id), variant)
+                    await drain_job(op, "boot", env.object_id)
+                got = ok(await scalar(op, "runs.get", run_id=run_id), "read-back")
+                assert data_str(got, "installed_cmdline") == variant, (
+                    f"runs.get installed_cmdline must reflect the swept variant {variant}"
+                )
+                # The build step never re-runs across the sweep (no rebuild).
+                steps = data_mapping(got, "steps")
+                assert steps["build"] == "succeeded"
+
+            async with phase("release"):
+                ok(await scalar(op, "allocations.release", allocation_id=allocation_id), "release")
+
+    asyncio.run(_run())
+
+
 def _require_drgn_ssh_secret() -> None:
     """Skip unless the operator has seeded the drgn-live SSH credential ref (ADR-0240)."""
     secret = secrets_root_from_env() / _DRGN_SSH_CREDENTIAL_REF
