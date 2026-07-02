@@ -3,7 +3,10 @@ from __future__ import annotations
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle.baseline_kernel import select_kernel_and_initrd
+from kdive.providers.local_libvirt.lifecycle.baseline_kernel import (
+    baseline_kernel_names,
+    select_kernel_and_initrd,
+)
 
 _V = "6.19.10-300.fc44.x86_64"
 
@@ -60,3 +63,47 @@ def test_accepts_bare_basenames_too() -> None:
         f"vmlinuz-{_V}",
         f"initramfs-{_V}.img",
     )
+
+
+def test_baseline_kernel_names_filters_rescue_and_non_kernels() -> None:
+    entries = [
+        f"/boot/vmlinuz-{_V}",
+        "/boot/vmlinuz-0-rescue-abc",
+        f"/boot/initramfs-{_V}.img",
+        "/boot/config-x",
+    ]
+    assert baseline_kernel_names(entries) == [f"vmlinuz-{_V}"]
+
+
+def test_baseline_kernel_names_accepts_paths_or_basenames() -> None:
+    assert baseline_kernel_names([f"/boot/vmlinuz-{_V}"]) == baseline_kernel_names(
+        [f"vmlinuz-{_V}"]
+    )
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [f"/boot/vmlinuz-{_V}", f"/boot/initramfs-{_V}.img"],
+        [f"vmlinuz-{_V}"],
+    ],
+)
+def test_baseline_kernel_names_count_one_iff_selection_succeeds(entries: list[str]) -> None:
+    # The recorded count predicts the provision-time selection: exactly one baseline candidate is
+    # the only provisionable case.
+    assert len(baseline_kernel_names(entries)) == 1
+    assert select_kernel_and_initrd(entries)[0].startswith("vmlinuz-")
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [],
+        ["/boot/vmlinuz-0-rescue-abc"],
+        ["/boot/vmlinuz-6.19.10-300.fc44.x86_64", "/boot/vmlinuz-6.18.0-100.fc44.x86_64"],
+    ],
+)
+def test_baseline_kernel_names_count_not_one_iff_selection_fails(entries: list[str]) -> None:
+    assert len(baseline_kernel_names(entries)) != 1
+    with pytest.raises(CategorizedError):
+        select_kernel_and_initrd(entries)

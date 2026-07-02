@@ -32,6 +32,19 @@ type ExtractBaselineKernel = Callable[[Path, Path], BaselineKernel]
 """Seam: extract the baseline kernel+initramfs from ``base`` into ``dest_dir`` (atomic)."""
 
 
+def baseline_kernel_names(boot_entries: list[str]) -> list[str]:
+    """The non-rescue ``vmlinuz-<ver>`` basenames in a ``/boot`` listing — the baseline candidates.
+
+    Accepts full paths or bare basenames (each is reduced to its basename). Non-``vmlinuz`` entries
+    and rescue images are excluded. This is the single classifier both the fail-closed provision
+    selection (:func:`select_kernel_and_initrd`) and the build-time ``boot_kernel_count`` capture
+    use, so the recorded count predicts the provision-time selection outcome: exactly one candidate
+    is the only provisionable case (ADR-0272/0295).
+    """
+    names = [os.path.basename(entry) for entry in boot_entries]
+    return [n for n in names if n.startswith(_VMLINUZ_PREFIX) and "rescue" not in n]
+
+
 def select_kernel_and_initrd(boot_entries: list[str]) -> tuple[str, str | None]:
     """Pick the System's ``vmlinuz-<ver>`` and matching initramfs from a ``/boot`` listing.
 
@@ -45,7 +58,7 @@ def select_kernel_and_initrd(boot_entries: list[str]) -> tuple[str, str | None]:
             one (the kdive-ready build emits exactly one).
     """
     names = [os.path.basename(entry) for entry in boot_entries]
-    kernels = [n for n in names if n.startswith(_VMLINUZ_PREFIX) and "rescue" not in n]
+    kernels = baseline_kernel_names(boot_entries)
     if not kernels:
         raise CategorizedError(
             "rootfs /boot has no bootable kernel; image cannot direct-kernel boot",
