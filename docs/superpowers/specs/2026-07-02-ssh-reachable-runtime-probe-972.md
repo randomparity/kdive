@@ -67,37 +67,61 @@ OPERATOR-vs-VIEWER trade.)
 a **distinct** job: the `dedup_key` carries a fresh nonce
 (`{system_id}:check_ssh_reachable:{uuid4}`). A static dedup_key would pin every future
 probe to the first (succeeded, permanent-UNIQUE) job and report a stale verdict forever.
-The accepted cost is that two genuinely-concurrent identical calls are not coalesced —
-negligible for a single bounded connect.
+
+The cost of fresh-nonce is that probe jobs do **not** coalesce: this is the first
+VIEWER-gated tool that enqueues durable work, so a VIEWER that loops the tool enqueues one
+bounded probe job per call into the shared worker queue (which also serves
+provision/build). That surface is accepted deliberately, not claimed away: each job is
+bounded (short deadline + capped retry, below), the load is observable via `jobs.list`
+depth, and a per-principal rate limit is the named follow-up if probe queue-pressure is
+ever observed. In-flight coalescing is deliberately not built — freshness is the
+requirement and coalescing machinery would be speculative for an authenticated,
+project-scoped role. See ADR-0298 for the honest treatment of this trade.
 
 ### Worker handler (`JobKind.CHECK_SSH_REACHABLE`)
 
-1. Load payload, resolve the System's provider binding, read `recorded_ssh_endpoint`.
-   `None` → `CONFIGURATION_ERROR` `reason="ssh_not_provisioned"` (defensive; the server
-   tool already rejected — a race where the forward vanished between enqueue and run).
-2. Probe `(host, port)`: open a TCP connection under a bounded deadline, read up to one
-   banner line (≤255 bytes, RFC 4253), classify, close. **Send nothing** — sshd sends its
-   banner first; there is no handshake, no auth, no client banner.
-3. Classify into a fixed vocabulary (never echo raw guest bytes — the banner is external
-   output):
+1. Load payload, **re-load the System**. If it is no longer `ready` (torn down / reprovisioning /
+   failed between enqueue and run) → `CONFIGURATION_ERROR` `reason="system_not_ready"`. This
+   is not just defensive: the recorded loopback port can be reallocated to a *different*
+   System's forward after teardown, so probing a stale endpoint could return `reachable=true`
+   and misattribute another guest's liveness. Re-checking `ready` closes that window.
+2. Resolve the System's provider binding, read `recorded_ssh_endpoint`. `None` →
+   `CONFIGURATION_ERROR` `reason="ssh_not_provisioned"` (the server tool already rejected —
+   a race where the forward vanished between enqueue and run).
+3. Probe `(host, port)` with a **bounded, retried** connect. The readiness race is real:
+   local-libvirt declares a System `ready` ~46 ms before the guest sshd binds the forwarded
+   port (`ssh_connect_retry.py`, ADR-0289), so a single connect fired right after `ready`
+   gets an immediate RST and would report a false `reachable=false` — while
+   `authorize_ssh_key`, the op this signal gates, retries connection-level failures for 90 s
+   and would succeed. To avoid being *more pessimistic than the operation it gates*, the
+   probe retries **connection-level** failures (refused / reset) with short backoff up to a
+   total deadline of **`_PROBE_DEADLINE_S = 15.0`** (per-attempt connect timeout ~5 s), well
+   under `jobs.wait`'s 30 s default so one poll observes a terminal result. It returns
+   `reachable=true` as soon as a banner arrives. It **sends nothing** — sshd banners first;
+   no handshake, no auth, no client banner. A far shorter window than `authorize`'s 90 s
+   keeps the probe a *quick* check while still tolerating the bind race.
+4. Read up to one banner line (≤255 bytes, RFC 4253) and classify into a fixed vocabulary
+   (never echo raw guest bytes — the banner is external output):
    - banner received and begins `SSH-` → `reachable=true`, detail `"reachable"`
-   - TCP RST / refused → `reachable=false`, detail `"connection refused"`
-   - deadline exceeded → `reachable=false`, detail `"timed out"`
-   - connected but no/short/non-`SSH-` banner before deadline → `reachable=false`,
+   - no connection accepted before the deadline (refused/reset throughout, or connect
+     timeout) → `reachable=false`, detail `"unreachable"`
+   - connected but no/short/non-`SSH-` banner before the deadline → `reachable=false`,
      detail `"no SSH banner"`
-4. Return the verdict as a compact JSON string in `result_ref` (the ADR-0164 inline-verdict
+5. Return the verdict as a compact JSON string in `result_ref` (the ADR-0164 inline-verdict
    pattern; `result_ref` is already polymorphic across handlers):
    `{"reachable": bool, "checked_at": "<ISO-8601 UTC>", "endpoint": {"host","port"},
-   "detail": "<one of the above>"}`.
+   "detail": "<one of the above>"}`. `checked_at` is stamped from an **injectable clock**
+   (the `tests/clock.py` `FrozenClock` seam standardized after #931) so the serialized
+   verdict is deterministic under test.
 
 The job **succeeds whenever the probe ran** — `reachable=false` is a successful
-measurement, not a job failure. Only an inability to *run* the probe (binding gone, no
-forward) dead-letters the job with an `error_category`. This keeps queue-depth/failed
-metrics honest and lets the caller distinguish "definitively unreachable" from "couldn't
-check".
+measurement, not a job failure. Only an inability to *run* the probe (System no longer
+ready, binding gone, no forward) dead-letters the job with an `error_category`. This keeps
+queue-depth/failed metrics honest and lets the caller distinguish "definitively
+unreachable" from "couldn't check".
 
 The probe function is an injected seam (like `ssh_authorize`'s `ssh_exec`) so tests drive
-it without a live guest.
+the reachable / unreachable / no-banner / retry-then-succeed paths without a live guest.
 
 ## Out of scope / non-goals
 
@@ -113,12 +137,17 @@ it without a live guest.
 - `systems.check_ssh_reachable` enqueues a job and returns `{job_id, status: running}` for
   a ready System with a recorded forward; rejects invalid-uuid / not-found / non-viewer /
   not-ready / no-forward with the categories above, each pre-enqueue.
-- Two successive calls return **different** `job_id`s (freshness).
-- The worker handler returns `reachable=true` for a banner-answering endpoint and
-  `reachable=false` with the correct `detail` for refused / timeout / no-banner, never
-  echoing raw banner bytes.
-- A `None` recorded endpoint at handler time dead-letters with `configuration_error`
-  `reason="ssh_not_provisioned"`.
+- Two successive calls return **different** `job_id`s (freshness / no stale pinning).
+- The worker handler returns `reachable=true` for a banner-answering endpoint (including a
+  refused-then-answers endpoint within the retry window, proving the readiness-race
+  tolerance) and `reachable=false` with `detail="unreachable"` when nothing answers before
+  the deadline and `detail="no SSH banner"` when a connection is accepted but no `SSH-`
+  banner arrives — never echoing raw banner bytes.
+- A System no longer `ready` at handler time dead-letters with `configuration_error`
+  `reason="system_not_ready"`; a `None` recorded endpoint dead-letters with
+  `configuration_error` `reason="ssh_not_provisioned"`.
+- `checked_at` is deterministic under an injected clock, so the serialized-verdict test
+  asserts exact output.
 - The verdict round-trips through `jobs.wait` as `refs.result` (compact JSON).
 - Migration 0056 widens `jobs_kind_check` to admit `check_ssh_reachable`; the SQL↔enum tie
   and per-migration tests pass.
