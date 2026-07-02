@@ -4125,6 +4125,136 @@ def test_install_retries_terminal_failed_step_without_rebuild(migrated_url: str)
     asyncio.run(_run())
 
 
+async def _seed_installed_and_booted(
+    pool: AsyncConnectionPool, run_id: str, *, installed_cmdline: str | None
+) -> None:
+    """Seed a Run whose install + boot steps have succeeded (ADR-0299 re-stage setup).
+
+    Records both ``run_steps`` rows succeeded (install carrying ``installed_cmdline``) and both
+    step jobs succeeded, so a subsequent ``runs.install`` sees a settled, previously-booted Run.
+    """
+    async with pool.connection() as conn:
+        install_result: dict[str, Any] = {"system_id": str(uuid4()), "cmdline": installed_cmdline}
+        await conn.execute(
+            "INSERT INTO run_steps (run_id, step, state, result) "
+            "VALUES (%s, 'install', 'succeeded', %s), (%s, 'boot', 'succeeded', '{}'::jsonb)",
+            (run_id, Jsonb(install_result), run_id),
+        )
+    for kind, step, payload in (
+        (JobKind.INSTALL, "install", InstallPayload(run_id=run_id, cmdline=installed_cmdline)),
+        (JobKind.BOOT, "boot", RunPayload(run_id=run_id)),
+    ):
+        async with pool.connection() as conn:
+            job = await queue.enqueue(
+                conn,
+                kind,
+                payload,
+                {"principal": "user-1", "agent_session": "s", "project": "proj"},
+                f"{run_id}:{step}",
+            )
+            await conn.execute(
+                "UPDATE jobs SET state='succeeded', result_ref='r' WHERE id=%s", (job.id,)
+            )
+
+
+async def _run_step_row_exists(pool: AsyncConnectionPool, run_id: str, step: str) -> bool:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("SELECT 1 FROM run_steps WHERE run_id=%s AND step=%s", (run_id, step))
+        return await cur.fetchone() is not None
+
+
+def test_install_rejects_platform_owned_cmdline(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            resp = await install_run(pool, _ctx(), run_id, cmdline="root=/dev/sda1 quiet")
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "cmdline_overrides_platform_args"
+        assert resp.data["token"] == "root="
+
+    asyncio.run(_run())
+
+
+def test_install_rejects_blank_cmdline(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            resp = await install_run(pool, _ctx(), run_id, cmdline="   ")
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "cmdline_blank"
+
+    asyncio.run(_run())
+
+
+def test_install_enqueues_install_payload_with_cmdline(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            resp = await install_run(pool, _ctx(), run_id, cmdline="dhash_entries=1")
+            assert resp.error_category is None
+            async with pool.connection() as conn:
+                job = await queue.get_by_dedup_key(conn, f"{run_id}:install")
+        assert job is not None
+        assert job.payload["cmdline"] == "dhash_entries=1"
+
+    asyncio.run(_run())
+
+
+def test_install_differing_cmdline_restages_install_and_boot(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            await _seed_installed_and_booted(pool, run_id, installed_cmdline="dhash_entries=1")
+
+            resp = await install_run(pool, _ctx(), run_id, cmdline="dhash_entries=2")
+            assert resp.error_category is None
+            boot_present = await _run_step_row_exists(pool, run_id, "boot")
+            async with pool.connection() as conn:
+                install_job = await queue.get_by_dedup_key(conn, f"{run_id}:install")
+        assert not boot_present  # boot ledger recycled so runs.boot re-runs
+        assert install_job is not None
+        assert install_job.state is JobState.QUEUED  # succeeded job recycled
+        assert install_job.payload["cmdline"] == "dhash_entries=2"  # new cmdline carried
+
+    asyncio.run(_run())
+
+
+def test_install_same_cmdline_is_noop(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            await _seed_installed_and_booted(pool, run_id, installed_cmdline="dhash_entries=1")
+
+            resp = await install_run(pool, _ctx(), run_id, cmdline="dhash_entries=1")
+            assert resp.error_category is None
+            boot_present = await _run_step_row_exists(pool, run_id, "boot")
+            async with pool.connection() as conn:
+                install_job = await queue.get_by_dedup_key(conn, f"{run_id}:install")
+        assert boot_present  # unchanged: no re-stage
+        assert install_job is not None
+        assert install_job.state is JobState.SUCCEEDED  # not recycled
+
+    asyncio.run(_run())
+
+
+def test_install_rejected_while_boot_running(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO run_steps (run_id, step, state, result) "
+                    "VALUES (%s, 'install', 'succeeded', '{}'::jsonb), "
+                    "(%s, 'boot', 'running', NULL)",
+                    (run_id, run_id),
+                )
+            resp = await install_run(pool, _ctx(), run_id, cmdline="dhash_entries=2")
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "step_in_progress"
+
+    asyncio.run(_run())
+
+
 def test_cmdline_default_is_kdump_reserving_for_kdump(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

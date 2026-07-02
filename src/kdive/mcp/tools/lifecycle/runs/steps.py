@@ -8,6 +8,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.idempotency import delete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
@@ -26,6 +27,11 @@ from kdive.mcp.tools.lifecycle.runs.common import run_job_envelope
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.runs.steps import (
+    existing_build_result,
+    platform_owned_cmdline_token,
+    step_progress,
+)
 
 
 async def install_run(
@@ -33,12 +39,26 @@ async def install_run(
     ctx: RequestContext,
     run_id: str,
     *,
+    cmdline: str | None = None,
     idempotency_key: str | None = None,
 ) -> ToolResponse:
-    """Admit an idempotent install for a built, SUCCEEDED Run."""
+    """Admit an idempotent install for a built, SUCCEEDED Run.
+
+    ``cmdline`` (ADR-0299, #988) is an optional boot-cmdline override applied against the
+    already-built kernel: it **replaces** any build-time extra args (platform tokens are always
+    preserved). A value differing from the currently-installed one re-stages the boot without a
+    rebuild; the same value is an idempotent no-op.
+    """
     uid = _as_uuid(run_id)
     if uid is None:
         return _config_error(run_id)
+    owned = platform_owned_cmdline_token(cmdline)
+    if owned is not None:
+        return _config_error(
+            run_id, data={"reason": "cmdline_overrides_platform_args", "token": owned}
+        )
+    if cmdline is not None and not cmdline.strip():
+        return _config_error(run_id, data={"reason": "cmdline_blank"})
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             run = await RUNS.get(conn, uid)
@@ -55,16 +75,56 @@ async def install_run(
                 principal=ctx.principal,
                 project=run.project,
                 kind="runs.install",
-                do_work=lambda: _enqueue_step(
-                    conn,
-                    ctx,
-                    run,
-                    JobKind.INSTALL,
-                    "install",
-                    "runs.install",
-                    payload=InstallPayload(run_id=str(run.id)),
-                ),
+                do_work=lambda: _restage_and_enqueue_install(conn, ctx, run, cmdline),
             )
+
+
+async def _build_extra(conn: AsyncConnection, run: Run) -> str | None:
+    """The build-baked cmdline extra on the ``build`` step (matches the install handler)."""
+    result = await existing_build_result(conn, run.id)
+    return result.cmdline if result is not None else None
+
+
+async def _restage_and_enqueue_install(
+    conn: AsyncConnection, ctx: RequestContext, run: Run, cmdline: str | None
+) -> ToolResponse:
+    """Enqueue install, re-staging when the requested cmdline differs from the installed one.
+
+    The whole decision — read the step ledger, delete the settled ``install``/``boot`` rows on a
+    re-stage, and enqueue — runs inside one per-Run advisory-lock transaction so a concurrent
+    ``runs.install`` cannot interleave read→delete→enqueue (ADR-0299). ``_enqueue_step``'s
+    ledger-driven recycle then carries the new cmdline into the recycled install job.
+    """
+    requested = cmdline.strip() if cmdline is not None else await _build_extra(conn, run)
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
+        progress = await step_progress(conn, run.id)
+        if progress.install == "running" or progress.boot == "running":
+            return _config_error(str(run.id), data={"reason": "step_in_progress"})
+        if progress.install == "succeeded" and progress.installed_cmdline != requested:
+            await delete_run_step(conn, run.id, "install")
+            await delete_run_step(conn, run.id, "boot")
+        recycle = not await _has_step_row(conn, run.id, "install")
+        job = await queue.enqueue(
+            conn,
+            JobKind.INSTALL,
+            InstallPayload(run_id=str(run.id), cmdline=cmdline),
+            job_authorizing(ctx, run.project),
+            f"{run.id}:install",
+            recycle_terminal=recycle,
+        )
+        await audit.record(
+            conn,
+            ctx,
+            audit.AuditEvent(
+                tool="runs.install",
+                object_kind="runs",
+                object_id=run.id,
+                transition="install",
+                args={"run_id": str(run.id)},
+                project=run.project,
+            ),
+        )
+    return run_job_envelope(job, run.id)
 
 
 async def boot_run(

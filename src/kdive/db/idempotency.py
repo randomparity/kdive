@@ -176,3 +176,14 @@ async def abandon_run_step(conn: AsyncConnection, run_id: UUID, step: str) -> No
             "DELETE FROM run_steps WHERE run_id = %s AND step = %s AND state = %s",
             (run_id, step, _RunStepState.RUNNING.value),
         )
+
+
+async def delete_run_step(conn: AsyncConnection, run_id: UUID, step: str) -> None:
+    """Delete a run step row regardless of state, recycling a settled step (ADR-0299).
+
+    Distinct from :func:`abandon_run_step` (RUNNING-only): a re-stage deletes a ``succeeded`` row so
+    the step re-runs. The caller holds the per-Run advisory lock in its own transaction and has
+    verified the step is not RUNNING, so this issues a plain ``DELETE`` without opening a nested
+    transaction of its own.
+    """
+    await conn.execute("DELETE FROM run_steps WHERE run_id = %s AND step = %s", (run_id, step))
