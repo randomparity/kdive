@@ -228,6 +228,33 @@ def test_no_console_output_fails_configuration_error(
     assert excinfo.value.details["reason"] == "no_console_output"
 
 
+def test_disabled_sysrq_fails_configuration_error_and_stores_nothing(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
+    log = tmp_path / "console.log"
+    log.write_bytes(b"boot\n")
+    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    # kernel.sysrq restricted: the op is rejected but the console still grows.
+    control = _FakeControl(log, b"sysrq: This sysrq operation is disabled.\n")
+    store = _FakeStore()
+
+    async def _go() -> list[tuple[str, str, str]]:
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool, SystemState.READY)
+            with pytest.raises(CategorizedError) as excinfo:
+                await _run(pool, store, control, _job(system_id, "show_memory"))
+            assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+            assert excinfo.value.details["reason"] == "sysrq_disabled"
+            return await _artifact_rows(pool, system_id)
+
+    rows = asyncio.run(_go())
+
+    assert rows == []  # rejected op stores no boot-console noise
+    assert store.put_calls == []
+
+
 def test_replayed_handler_run_does_not_duplicate_the_row(
     migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
