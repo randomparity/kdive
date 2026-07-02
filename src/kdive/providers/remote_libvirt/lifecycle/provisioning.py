@@ -340,7 +340,14 @@ class RemoteLibvirtProvisioning:
             )
             ssh_port = self._allocate_ssh_port(used_ssh, domain_name, ssh_forward, ssh_tried)
             xml = self._render(
-                system_id, profile, config, gdb_addr, overlay_name, gdb_port, ssh_forward, ssh_port
+                system_id,
+                profile,
+                config,
+                gdb_addr=gdb_addr,
+                overlay_name=overlay_name,
+                gdb_port=gdb_port,
+                ssh_forward=ssh_forward,
+                ssh_port=ssh_port,
             )
             domain = self._define(conn, xml, system_id)
             try:
@@ -380,6 +387,7 @@ class RemoteLibvirtProvisioning:
         system_id: UUID,
         profile: ProvisioningProfile,
         config: RemoteLibvirtConfig,
+        *,
         gdb_addr: str,
         overlay_name: str,
         gdb_port: int,
