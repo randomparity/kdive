@@ -547,27 +547,28 @@ Run: `uv run python -m pytest tests/providers/remote_libvirt/lifecycle/test_prov
 
 - [ ] **Step 3: Implement.**
   - `__init__`: add `bootstrap_injector: _Injector | None = None`; default `RemoteBootstrapKeyInjector()`. Define a local `_Injector` Protocol with `inject(domain, pubkey) -> None`.
-  - `provision`: **keep** the `del overlay_customizers` line (remote ignores the pre-boot overlay seam — it injects post-agent over guest-agent instead). Accept `bootstrap_pubkey: str | None = None`. Resolve the ssh bind params up front with explicit None-narrowing (ty does not narrow `int | None` through the `ssh_parity_active` property, and `allocate_gdb_port` requires `int`):
+  - `provision`: **keep** the `del overlay_customizers` line (remote ignores the pre-boot overlay seam — it injects post-agent over guest-agent instead). Accept `bootstrap_pubkey: str | None = None`. Build the SSH forward as **one optional bundle** so a single `is not None` check narrows all three fields (ty does not narrow through the `ssh_parity_active` bool property, and `allocate_gdb_port` requires `int`):
 
 ```python
-        ssh_addr = config.ssh_addr
-        ssh_min, ssh_max = config.ssh_port_min, config.ssh_port_max
-        ssh_active = ssh_addr is not None and ssh_min is not None and ssh_max is not None
+        ssh_forward: tuple[str, int, int] | None = None
+        if config.ssh_addr is not None and config.ssh_port_min is not None and config.ssh_port_max is not None:
+            ssh_forward = (config.ssh_addr, config.ssh_port_min, config.ssh_port_max)
 ```
 
-  Then allocate the ssh port **inside** the `_define_and_start` attempt loop (symmetric with the gdb-port advance, per spec §4.1), passing `ssh_addr`, `ssh_min`, `ssh_max`. After `wait_for_agent`, inject:
+  Pass `ssh_forward` into `_define_and_start` (it allocates the port inside the attempt loop). After `wait_for_agent`, inject:
 
 ```python
-        if ssh_active and bootstrap_pubkey is not None:
+        if ssh_forward is not None and bootstrap_pubkey is not None:
             domain = conn.lookupByName(domain_name)
             self._bootstrap_injector.inject(domain, bootstrap_pubkey)
 ```
 
-  - `_define_and_start`: accept `ssh_addr: str | None`, `ssh_min: int | None`, `ssh_max: int | None`. On each attempt, when ssh is active, allocate the ssh port from a **per-attempt ssh `tried` set** (mirror the gdb `tried` set) and thread `ssh_addr`/`ssh_port` into `render_domain_xml`; on a start failure, add **both** the just-tried gdb and ssh ports to their respective `tried` sets so a squatted ssh port advances too (spec §4.1 — do not allocate the ssh port once outside the loop). Keep `_define_and_start` ≤100 lines / complexity ≤8 — extract a `_render(attempt_ports)` helper if needed:
+  - `_define_and_start`: accept `ssh_forward: tuple[str, int, int] | None`. On each attempt, when the bundle is present, unpack it (`ssh_addr, ssh_min, ssh_max = ssh_forward` — this narrows all three to non-optional), allocate the ssh port from a **per-attempt ssh `tried` set** (mirror the gdb `tried` set), and thread `ssh_addr`/`ssh_port` into `render_domain_xml`; on a start failure, add **both** the just-tried gdb and ssh ports to their respective `tried` sets so a squatted ssh port advances too (spec §4.1 — do not allocate the ssh port once outside the loop). Keep `_define_and_start` ≤100 lines / complexity ≤8 — extract a `_render(attempt_ports)` helper if needed:
 
 ```python
             ssh_port = None
-            if ssh_active:
+            if ssh_forward is not None:
+                ssh_addr, ssh_min, ssh_max = ssh_forward  # narrows str,int,int
                 ssh_port = allocate_gdb_port(
                     used_ssh_ports(conn), own_name=domain_name,
                     port_min=ssh_min, port_max=ssh_max, exclude=ssh_tried,
@@ -575,7 +576,6 @@ Run: `uv run python -m pytest tests/providers/remote_libvirt/lifecycle/test_prov
             # ... render with ssh_addr/ssh_port; on start failure: gdb_tried.add(port); ssh_tried.add(ssh_port)
 ```
 
-  (Here `ssh_min`/`ssh_max` are the narrowed non-None locals from `provision`, so `allocate_gdb_port`'s `int` params type-check.)
   - `reprovision`: pass `bootstrap_pubkey` through to `provision` (already does for `overlay_customizers`).
 
 - [ ] **Step 4: Run — expect PASS**, then `just lint && just type`.
