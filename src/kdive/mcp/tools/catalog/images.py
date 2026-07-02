@@ -137,10 +137,12 @@ _DESCRIBE_SQL = """
 
 
 def _capability_signals(entry: ImageCatalogEntry, basis: KernelVersion) -> dict[str, JsonValue]:
-    """The computed capability signals for ``entry`` against ``basis`` (ADR-0286).
+    """The computed capability signals for ``entry`` against ``basis`` (ADR-0286/0295).
 
-    Iterates the registered signals, keying each rendered block by signal name. Today the only
-    member is ``kdump``. Each signal reads a build-recorded provenance operand and degrades to a
+    Iterates the registered signals, keying each rendered block by signal name: ``kdump`` (the
+    makedumpfile-vs-target-kernel capability) and ``direct_kernel`` (whether the image's ``/boot``
+    holds exactly one non-rescue kernel, so a direct-kernel provision can select a baseline
+    unambiguously). Each signal reads a build-recorded provenance operand and degrades to a
     non-confident status when the operand is absent, so a reader never raises on image data.
     """
     return {sig.name: sig.render(entry, basis) for sig in REGISTERED_SIGNALS}
@@ -151,8 +153,9 @@ def _describe_envelope(entry: ImageCatalogEntry, basis: KernelVersion) -> ToolRe
 
     Surfaces ``provenance`` verbatim (build metadata, no secret values), the boot layout, digest,
     capabilities, scope, publish state, and the computed ``capability_signals`` block (each signal
-    keyed by name, computed for ``basis``; today the only signal is ``kdump``). ``expires_at`` is an
-    ISO-8601 string when set (a ``datetime`` is not a ``JsonValue``), ``""`` otherwise.
+    keyed by name, computed for ``basis``; the signals are ``kdump`` and ``direct_kernel``).
+    ``expires_at`` is an ISO-8601 string when set (a ``datetime`` is not a ``JsonValue``), ``""``
+    otherwise.
     """
     return ToolResponse.success(
         str(entry.id),
@@ -267,8 +270,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """Return full detail for one catalog image visible to the caller.
 
         Includes boot layout, digest, capabilities, scope, publish state, build ``provenance``
-        (with captured ``package_versions``/``makedumpfile_version`` when present), and computed
-        ``data.capability_signals`` (each signal keyed by name — today only ``kdump``, the
-        capability for ``target_kernel`` with the kernel basis disclosed).
+        (with captured ``package_versions``/``makedumpfile_version``/``boot_kernel_count`` when
+        present), and computed ``data.capability_signals`` (each signal keyed by name): ``kdump``
+        (the capability for ``target_kernel``, kernel basis disclosed) and ``direct_kernel``
+        (``status`` ``provisionable`` when ``/boot`` holds exactly one non-rescue kernel, else
+        ``not_provisionable``/``unverified`` — read it before a direct-kernel provision so a
+        multi-kernel image does not burn an allocation on a fail-closed selection).
         """
         return await describe_image(pool, current_context(), image_id, target_kernel)

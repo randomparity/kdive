@@ -71,8 +71,46 @@ KDUMP_SIGNAL = CapabilitySignal(
     name="kdump", operand_keys=("makedumpfile_version",), render=render_kdump_signal
 )
 
+
+def render_direct_kernel_signal(
+    entry: ImageCatalogEntry, _target_kernel: KernelVersion
+) -> dict[str, JsonValue]:
+    """The direct-kernel provisionability block for ``entry`` (operand-driven, ADR-0295).
+
+    Reads the build-recorded ``provenance["boot_kernel_count"]`` — the non-rescue ``vmlinuz-*``
+    count in the image's ``/boot`` — and reports whether a direct-kernel provision can select a
+    baseline kernel unambiguously: exactly one is ``provisionable``, zero or more-than-one is
+    ``not_provisionable`` (the fail-closed selection raises at provision, ADR-0272). The answer is a
+    static image property, so ``_target_kernel`` is accepted for the uniform signal signature and
+    ignored. A missing or non-``int`` operand (``bool`` excluded — it is an ``int`` subclass)
+    degrades to ``unverified`` with a ``None`` count, so un-refreshed metadata never lies.
+    """
+    raw = entry.provenance.get("boot_kernel_count")
+    count = raw if isinstance(raw, int) and not isinstance(raw, bool) else None
+    if count is None:
+        return {
+            "boot_kernel_count": None,
+            "status": "unverified",
+            "note": "boot kernel count is not recorded; rebuild the image to characterize "
+            "direct-kernel provisionability",
+        }
+    if count == 1:
+        return {"boot_kernel_count": 1, "status": "provisionable", "note": ""}
+    note = (
+        "rootfs /boot has no bootable non-rescue kernel"
+        if count == 0
+        else f"rootfs /boot has {count} non-rescue kernels; direct-kernel selection is ambiguous "
+        "and fails closed at provision"
+    )
+    return {"boot_kernel_count": count, "status": "not_provisionable", "note": note}
+
+
+DIRECT_KERNEL_SIGNAL = CapabilitySignal(
+    name="direct_kernel", operand_keys=("boot_kernel_count",), render=render_direct_kernel_signal
+)
+
 #: The computed signals an agent reads from ``images.describe`` ``data.capability_signals``.
-REGISTERED_SIGNALS: tuple[CapabilitySignal, ...] = (KDUMP_SIGNAL,)
+REGISTERED_SIGNALS: tuple[CapabilitySignal, ...] = (KDUMP_SIGNAL, DIRECT_KERNEL_SIGNAL)
 
 #: The signals the metadata audit named that are not honestly computable yet — each blocked on a
 #: build operand that does not exist until its tracking issue lands. Documented, guarded to stay
@@ -95,17 +133,14 @@ PLANNED_SIGNALS: tuple[PlannedSignal, ...] = (
         "#762/#697",
         "drgn liveness depends on provider introspection and profile ssh_credential_ref",
     ),
-    PlannedSignal(
-        "direct_kernel_bootable",
-        "#954",
-        "direct-kernel provisionability is discovered only by failure",
-    ),
 )
 
 __all__ = [
+    "DIRECT_KERNEL_SIGNAL",
     "PLANNED_SIGNALS",
     "REGISTERED_SIGNALS",
     "CapabilitySignal",
     "PlannedSignal",
+    "render_direct_kernel_signal",
     "render_kdump_signal",
 ]
