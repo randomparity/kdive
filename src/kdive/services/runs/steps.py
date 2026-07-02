@@ -335,9 +335,23 @@ def platform_owned_cmdline_token(cmdline: str | None) -> str | None:
 
 
 async def cmdline_for(
-    conn: AsyncConnection, run: Run, method: CaptureMethod, *, root_cmdline: str | None
+    conn: AsyncConnection,
+    run: Run,
+    method: CaptureMethod,
+    *,
+    root_cmdline: str | None,
+    override: str | None = None,
 ) -> str:
+    """Compose the boot cmdline (ADR-0183, ADR-0299).
+
+    ``override`` is the ``runs.install`` cmdline (#988): when set it **replaces** the build-baked
+    extra args for this install so an agent can iterate boot-parameter variants without a rebuild;
+    when ``None`` the build step's recorded extra is appended (unchanged). The platform-required
+    tokens (``system_required_cmdline``) always lead and are never modifiable either way.
+    """
     required = system_required_cmdline(method, root_cmdline)
+    if override is not None:
+        return f"{required} {override.strip()}"
     result = await existing_build_result(conn, run.id)
     if result is not None and result.cmdline is not None and result.cmdline.strip():
         return f"{required} {result.cmdline.strip()}"
