@@ -43,6 +43,18 @@ def test_planned_disjoint_from_registered_and_not_capabilities() -> None:
     assert planned.isdisjoint({c.value for c in Capability})
 
 
+def test_ssh_reachable_signal_repointed_off_resolved_956() -> None:
+    """post-#962 (ADR-0288) reachability works; #956 is closed, so the ssh_reachable planned
+
+    signal must not still cite #956 or the stale "broken" blocker — it tracks the #972 follow-up
+    (the static-signal-vs-runtime-probe fork) instead (ADR-0294).
+    """
+    ssh = next(p for p in PLANNED_SIGNALS if p.name == "ssh_reachable")
+    assert "#956" not in ssh.tracking_issue
+    assert "#972" in ssh.tracking_issue
+    assert "broken" not in ssh.rationale.lower()
+
+
 def test_kdump_signal_degrades_to_unverified_when_operand_absent() -> None:
     # kdump tooling present but the makedumpfile_version operand missing -> never "capable".
     block = render_kdump_signal(_entry([Capability.KDUMP], {}), DEFAULT_KERNEL_BASIS)
