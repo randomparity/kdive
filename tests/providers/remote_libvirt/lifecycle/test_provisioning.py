@@ -820,6 +820,82 @@ def test_provision_defines_starts_and_waits_for_agent(tmp_path: Path) -> None:
     assert gdb_args == ["-gdb", "tcp:10.0.0.5:47001"]
 
 
+class _RecordingInjector:
+    """Records inject(domain, pubkey) calls; optionally raises to simulate an injection failure."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[tuple[str, str]] = []
+
+    def inject(self, domain: Any, pubkey: str) -> None:
+        self.calls.append((domain.name(), pubkey))
+        if self.fail:
+            raise CategorizedError(
+                "simulated guest-agent injection failure",
+                category=ErrorCategory.PROVISIONING_FAILURE,
+            )
+
+
+_SSH_CONFIG_KWARGS = {"ssh_addr": "10.0.0.9", "ssh_port_min": 47100, "ssh_port_max": 47102}
+
+
+def test_provision_renders_ssh_hostfwd_and_injects_key_when_parity_active(tmp_path: Path) -> None:
+    conn = _conn_with_base()
+    injector = _RecordingInjector()
+    provisioner, _ = _provisioner(
+        conn, tmp_path, config=_config(**_SSH_CONFIG_KWARGS), bootstrap_injector=injector
+    )
+
+    provisioner.provision(SYSTEM_ID, _remote_profile(), bootstrap_pubkey="ssh-ed25519 AAAA k")
+
+    xml = conn.domains[DOMAIN_NAME].xml
+    port = recorded_ssh_port(xml)
+    assert port is not None and 47100 <= port <= 47102
+    assert "hostfwd=tcp:10.0.0.9:" in xml
+    # The key is injected over the guest agent exactly once, after the agent connects.
+    assert injector.calls == [(DOMAIN_NAME, "ssh-ed25519 AAAA k")]
+
+
+def test_provision_no_ssh_render_or_inject_when_parity_inactive(tmp_path: Path) -> None:
+    conn = _conn_with_base()
+    injector = _RecordingInjector()
+    # Default _config() has no ssh_addr → SSH parity inactive.
+    provisioner, _ = _provisioner(conn, tmp_path, bootstrap_injector=injector)
+
+    provisioner.provision(SYSTEM_ID, _remote_profile(), bootstrap_pubkey="ssh-ed25519 AAAA k")
+
+    assert "kdivessh" not in conn.domains[DOMAIN_NAME].xml
+    assert injector.calls == []
+
+
+def test_provision_renders_forward_but_skips_inject_when_pubkey_none(tmp_path: Path) -> None:
+    conn = _conn_with_base()
+    injector = _RecordingInjector()
+    provisioner, _ = _provisioner(
+        conn, tmp_path, config=_config(**_SSH_CONFIG_KWARGS), bootstrap_injector=injector
+    )
+
+    provisioner.provision(SYSTEM_ID, _remote_profile(), bootstrap_pubkey=None)
+
+    assert recorded_ssh_port(conn.domains[DOMAIN_NAME].xml) is not None
+    assert injector.calls == []
+
+
+def test_provision_injection_failure_propagates_and_leaves_domain(tmp_path: Path) -> None:
+    conn = _conn_with_base()
+    injector = _RecordingInjector(fail=True)
+    provisioner, _ = _provisioner(
+        conn, tmp_path, config=_config(**_SSH_CONFIG_KWARGS), bootstrap_injector=injector
+    )
+
+    with pytest.raises(CategorizedError) as excinfo:
+        provisioner.provision(SYSTEM_ID, _remote_profile(), bootstrap_pubkey="ssh-ed25519 AAAA k")
+
+    assert excinfo.value.category is ErrorCategory.PROVISIONING_FAILURE
+    # The domain is left defined+running (diagnosable; a retry re-injects idempotently).
+    assert conn.domains[DOMAIN_NAME].active
+
+
 def test_provision_renders_configured_network_and_machine(tmp_path: Path) -> None:
     # The per-instance network/machine config flows into the rendered domain XML; a dropped
     # kwarg would silently fall back to the render defaults ("default"/"pc").

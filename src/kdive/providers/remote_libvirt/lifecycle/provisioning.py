@@ -37,10 +37,13 @@ from kdive.providers.remote_libvirt.connection.transport import (
     open_libvirt_protocol,
     remote_libvirt_connections,
 )
+from kdive.providers.remote_libvirt.guest.agent import GuestDomain
+from kdive.providers.remote_libvirt.guest.bootstrap_key import RemoteBootstrapKeyInjector
 from kdive.providers.remote_libvirt.lifecycle.gdb import (
     DOMAIN_PREFIX,
     allocate_gdb_port,
     used_gdb_ports,
+    used_ssh_ports,
 )
 from kdive.providers.remote_libvirt.lifecycle.readiness import Monotonic, Sleep, wait_for_agent
 from kdive.providers.remote_libvirt.lifecycle.storage import (
@@ -106,12 +109,33 @@ class _ProvisionConn(Protocol):
     def close(self) -> None: ...
 
 
+class _BootstrapInjector(Protocol):
+    """The bootstrap-key injection seam provisioning uses (duck-typed for the test fake)."""
+
+    def inject(self, domain: GuestDomain, pubkey: str) -> None: ...
+
+
 type OpenProvisionConnection = Callable[[str], _ProvisionConn]
 
 
 def open_libvirt_provision(uri: str) -> _ProvisionConn:
     """The production opener (live-host path; unit tests inject a fake)."""
     return open_libvirt_protocol(uri)
+
+
+def _ssh_forward(config: RemoteLibvirtConfig) -> tuple[str, int, int] | None:
+    """The SSH forward bundle ``(ssh_addr, ssh_port_min, ssh_port_max)``, or ``None`` if inactive.
+
+    Bundling narrows all three fields with one ``is not None`` check downstream (ADR-0291) so the
+    port allocator receives concrete ``int`` bounds.
+    """
+    if (
+        config.ssh_addr is not None
+        and config.ssh_port_min is not None
+        and config.ssh_port_max is not None
+    ):
+        return config.ssh_addr, config.ssh_port_min, config.ssh_port_max
+    return None
 
 
 class RemoteLibvirtProvisioning:
@@ -133,6 +157,7 @@ class RemoteLibvirtProvisioning:
         monotonic: Monotonic = time.monotonic,
         agent_timeout_s: float = _AGENT_TIMEOUT_S,
         agent_poll_s: float = _AGENT_POLL_S,
+        bootstrap_injector: _BootstrapInjector | None = None,
     ) -> None:
         self._connections = connections or remote_libvirt_connections(
             secret_registry=secret_registry,
@@ -143,6 +168,7 @@ class RemoteLibvirtProvisioning:
         self._monotonic = monotonic
         self._agent_timeout_s = agent_timeout_s
         self._agent_poll_s = agent_poll_s
+        self._bootstrap_injector = bootstrap_injector or RemoteBootstrapKeyInjector()
 
     def provision(
         self,
@@ -159,21 +185,23 @@ class RemoteLibvirtProvisioning:
         overlay is created only when absent, and a retry reuses the System's own
         recorded gdbstub port.
 
-        ``overlay_customizers`` (ADR-0289, #963) is accepted for ``Provisioner`` call-site
-        parity with local-libvirt but not yet wired here: the remote overlay is a storage-pool
-        volume provisioned over TLS, not a local qcow2 file ``virt-customize`` can touch, so a
-        remote-libvirt System's bootstrap key is not yet injected (tracked separately).
+        ``overlay_customizers`` (ADR-0289, #963) is accepted for ``Provisioner`` call-site parity
+        but ignored: the remote overlay is a storage-pool volume over TLS, not a local qcow2 file
+        ``virt-customize`` can touch. Instead, when SSH parity is configured (``ssh_addr`` +
+        ``ssh_range``, ADR-0291), a per-System user-mode SSH forward is rendered and, after the
+        guest agent connects, ``bootstrap_pubkey`` is injected into the guest's authorized_keys
+        over the guest-agent channel. Both are no-ops when SSH parity is inactive.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for a profile without a remote
                 section, missing operator config (incl. the gdbstub listen address),
                 or an absent pool/base volume; ``PROVISIONING_FAILURE`` for overlay
-                creation, define/start, gdbstub-port exhaustion, an agent that never
-                connects, or a domain that exits during boot;
+                creation, define/start, gdbstub-port exhaustion, a bootstrap-key injection
+                failure, an agent that never connects, or a domain that exits during boot;
                 ``INFRASTRUCTURE_FAILURE`` for other provider control-plane faults;
                 ``TRANSPORT_FAILURE`` when the TLS connect fails.
         """
-        del overlay_customizers, bootstrap_pubkey
+        del overlay_customizers
         section = self._remote_section(profile)
         require_concrete_sizing(profile)
         config = self._connections.config()
@@ -185,6 +213,7 @@ class RemoteLibvirtProvisioning:
                 "(ADR-0080)",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
+        ssh_forward = _ssh_forward(config)
         domain_name = domain_name_for(system_id)
         with self._connection(config) as conn:
             pool = lookup_pool(conn, config.storage_pool)
@@ -197,6 +226,7 @@ class RemoteLibvirtProvisioning:
                     config=config,
                     gdb_addr=gdb_addr,
                     overlay_name=overlay.name,
+                    ssh_forward=ssh_forward,
                 )
             except CategorizedError:
                 cleanup_overlay_if_created(pool, overlay)
@@ -212,6 +242,11 @@ class RemoteLibvirtProvisioning:
                 timeout_s=self._agent_timeout_s,
                 poll_s=self._agent_poll_s,
             )
+            # Inject the bootstrap key over the guest agent once the agent answers (ADR-0291):
+            # the pre-SSH channel to a remote guest. No-op when SSH parity is inactive or a
+            # System predates the key. Idempotent, so a provision retry re-runs it harmlessly.
+            if ssh_forward is not None and bootstrap_pubkey is not None:
+                self._bootstrap_injector.inject(conn.lookupByName(domain_name), bootstrap_pubkey)
         return domain_name
 
     def reprovision(
@@ -276,66 +311,114 @@ class RemoteLibvirtProvisioning:
         config: RemoteLibvirtConfig,
         gdb_addr: str,
         overlay_name: str,
+        ssh_forward: tuple[str, int, int] | None,
     ) -> None:
-        """Define+start with a bounded port advance on start failure (ADR-0080 §2).
+        """Define+start with a bounded port advance on start failure (ADR-0080 §2, ADR-0291).
 
-        A start failure undefines the just-defined domain (transactional) and retries
-        with the next free candidate port — unconditionally on the failure's cause,
-        since libvirt does not surface bind-vs-other distinctly; an unrelated fault
-        fails the same way again and the bounded retry stops.
+        A start failure undefines the just-defined domain (transactional) and retries with the
+        next free candidate port(s) — unconditionally on the failure's cause, since libvirt does
+        not surface bind-vs-other distinctly. Both the gdbstub port and (when SSH parity is
+        active) the SSH-forward port are allocated per attempt and advanced together on failure,
+        so a squatted host socket for either forward is skipped; an unrelated fault fails the same
+        way again and the bounded retry stops.
         """
         domain_name = domain_name_for(system_id)
-        used = used_gdb_ports(conn)
-        tried: set[int] = set()
+        used_gdb = used_gdb_ports(conn)
+        used_ssh = used_ssh_ports(conn) if ssh_forward is not None else {}
+        gdb_tried: set[int] = set()
+        ssh_tried: set[int] = set()
         last_error: libvirt.libvirtError | None = None
         for _attempt in range(_START_ATTEMPTS):
-            port = allocate_gdb_port(
-                used,
+            gdb_port = allocate_gdb_port(
+                used_gdb,
                 own_name=domain_name,
                 # Reserve gdb_port_min as the ACL-probe port; Systems start one above it so the
                 # gdbstub_acl diagnostic never attaches to a live guest (ADR-0184).
                 port_min=config.assignable_gdb_port_min,
                 port_max=config.gdb_port_max,
-                exclude=tried,
+                exclude=gdb_tried,
             )
-            xml = render_domain_xml(
-                system_id,
-                profile,
-                pool=config.storage_pool,
-                volume=overlay_name,
-                gdb_addr=gdb_addr,
-                gdb_port=port,
-                network=config.network,
-                machine=config.machine,
+            ssh_port = self._allocate_ssh_port(used_ssh, domain_name, ssh_forward, ssh_tried)
+            xml = self._render(
+                system_id, profile, config, gdb_addr, overlay_name, gdb_port, ssh_forward, ssh_port
             )
-            try:
-                domain = conn.defineXML(xml)
-            except libvirt.libvirtError as exc:
-                raise CategorizedError(
-                    "libvirt failed to define the domain",
-                    category=ErrorCategory.PROVISIONING_FAILURE,
-                    details={"system_id": str(system_id)},
-                ) from exc
+            domain = self._define(conn, xml, system_id)
             try:
                 domain.create()
                 return
             except libvirt.libvirtError as exc:
                 if exc.get_error_code() == libvirt.VIR_ERR_OPERATION_INVALID:
                     return  # already running: the achieved post-state
-                try:
-                    domain.undefine()
-                except libvirt.libvirtError:
-                    _log.warning(
-                        "failed to undefine domain after a failed start; continuing",
-                        exc_info=True,
-                    )
-                tried.add(port)
+                self._undefine_quietly(domain)
+                gdb_tried.add(gdb_port)
+                if ssh_port is not None:
+                    ssh_tried.add(ssh_port)
                 last_error = exc
         raise CategorizedError(
             f"libvirt failed to start the domain after {_START_ATTEMPTS} attempts",
             category=ErrorCategory.PROVISIONING_FAILURE,
             details={"system_id": str(system_id), "attempts": _START_ATTEMPTS},
         ) from last_error
+
+    @staticmethod
+    def _allocate_ssh_port(
+        used_ssh: dict[str, int],
+        domain_name: str,
+        ssh_forward: tuple[str, int, int] | None,
+        ssh_tried: set[int],
+    ) -> int | None:
+        """Allocate this attempt's SSH-forward port, or ``None`` when SSH parity is inactive."""
+        if ssh_forward is None:
+            return None
+        _addr, ssh_min, ssh_max = ssh_forward
+        return allocate_gdb_port(
+            used_ssh, own_name=domain_name, port_min=ssh_min, port_max=ssh_max, exclude=ssh_tried
+        )
+
+    @staticmethod
+    def _render(
+        system_id: UUID,
+        profile: ProvisioningProfile,
+        config: RemoteLibvirtConfig,
+        gdb_addr: str,
+        overlay_name: str,
+        gdb_port: int,
+        ssh_forward: tuple[str, int, int] | None,
+        ssh_port: int | None,
+    ) -> str:
+        ssh_addr = ssh_forward[0] if ssh_forward is not None else None
+        return render_domain_xml(
+            system_id,
+            profile,
+            pool=config.storage_pool,
+            volume=overlay_name,
+            gdb_addr=gdb_addr,
+            gdb_port=gdb_port,
+            network=config.network,
+            machine=config.machine,
+            ssh_addr=ssh_addr,
+            ssh_port=ssh_port,
+        )
+
+    @staticmethod
+    def _define(conn: _ProvisionConn, xml: str, system_id: UUID) -> _Domain:
+        try:
+            return conn.defineXML(xml)
+        except libvirt.libvirtError as exc:
+            raise CategorizedError(
+                "libvirt failed to define the domain",
+                category=ErrorCategory.PROVISIONING_FAILURE,
+                details={"system_id": str(system_id)},
+            ) from exc
+
+    @staticmethod
+    def _undefine_quietly(domain: _Domain) -> None:
+        try:
+            domain.undefine()
+        except libvirt.libvirtError:
+            _log.warning(
+                "failed to undefine domain after a failed start; continuing", exc_info=True
+            )
 
     def _teardown_domain(self, conn: _ProvisionConn, domain_name: str) -> str | None:
         """Destroy+undefine; return the pool the domain's disk recorded, if readable.
