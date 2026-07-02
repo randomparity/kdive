@@ -326,7 +326,9 @@ def build_runtime(
         builder=builder,
         installer=installer,
         booter=installer,
-        connector=RemoteLibvirtConnect.from_env(config_factory=config_factory),
+        connector=RemoteLibvirtConnect.from_env(
+            secret_registry=secret_registry, config_factory=config_factory
+        ),
         controller=RemoteLibvirtControl.from_env(
             secret_registry=secret_registry, config_factory=config_factory
         ),
