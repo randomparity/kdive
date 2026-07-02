@@ -15,13 +15,14 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.runs.common import abandon_run_step_best_effort
-from kdive.jobs.payloads import RunPayload, load_payload
+from kdive.jobs.payloads import InstallPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.security import audit
 from kdive.services.runs.steps import (
     cmdline_for,
+    existing_build_result,
     install_method_for,
     installed_debuginfo_ref,
     installed_initrd_ref,
@@ -37,7 +38,8 @@ async def install_handler(
     resolver: ProviderResolver,
 ) -> str | None:
     """Stage the built kernel for direct-kernel boot, recording the `install` step."""
-    run_id = UUID(load_payload(job, RunPayload).run_id)
+    payload = load_payload(job, InstallPayload)
+    run_id = UUID(payload.run_id)
     run = await RUNS.get(conn, run_id)
     if run is None or run.kernel_ref is None:
         raise CategorizedError(
@@ -59,7 +61,16 @@ async def install_handler(
     installer = runtime.installer
     method = install_method_for(system, runtime.profile_policy)
     kernel_ref = run.kernel_ref
-    cmdline = await cmdline_for(conn, run, method, root_cmdline=runtime.platform_root_cmdline)
+    override = payload.cmdline
+    build_result = await existing_build_result(conn, run_id)
+    build_extra = build_result.cmdline if build_result is not None else None
+    # The applied client extra (ADR-0299): the install override when supplied, else the build-baked
+    # extra. Both are already-normalized (payload/build validators strip), so re-stage's equality
+    # check against this recorded value is exact.
+    applied_extra = override if override is not None else build_extra
+    cmdline = await cmdline_for(
+        conn, run, method, root_cmdline=runtime.platform_root_cmdline, override=override
+    )
     _log.info("install: run %s resolved cmdline %r (method %s)", run_id, cmdline, method.value)
     initrd_ref = await installed_initrd_ref(conn, run_id)
     debuginfo_ref = await installed_debuginfo_ref(conn, run_id)
@@ -84,7 +95,9 @@ async def install_handler(
         await abandon_run_step_best_effort(conn, run_id, "install")
         raise
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
-        await complete_run_step(conn, run_id, "install", {"system_id": str(system_id)})
+        await complete_run_step(
+            conn, run_id, "install", {"system_id": str(system_id), "cmdline": applied_extra}
+        )
         await audit.record(
             conn,
             job_ctx,

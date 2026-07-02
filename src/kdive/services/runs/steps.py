@@ -147,6 +147,7 @@ class StepProgress:
     available_capture: list[str] | None = None
     inert_capture: list[str] | None = None
     matched_line: str | None = None
+    installed_cmdline: str | None = None
 
     def steps_map(self) -> dict[str, str]:
         """The fixed-key `runs.get` `data.steps` map; `build` is `succeeded` by construction."""
@@ -191,7 +192,9 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
     console evidence. ``available_capture`` / ``inert_capture`` are the capture-disclosure lists the
     boot handler recorded for a crash outcome (ADR-0239); ``None`` when the boot result carries
     neither. ``matched_line`` is the console line that matched an ``expected_boot_failure``
-    (ADR-0260); ``None`` when boot recorded no match.
+    (ADR-0260); ``None`` when boot recorded no match. ``installed_cmdline`` is the applied client
+    cmdline extra the install handler recorded (ADR-0299), surfaced for sweep read-back on
+    ``runs.get``; ``None`` when install is unrecorded or applied no extra.
     """
     states = {step: "pending" for step in _PROGRESS_STEPS}
     boot_outcome: str | None = None
@@ -199,6 +202,7 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
     available_capture: list[str] | None = None
     inert_capture: list[str] | None = None
     matched_line: str | None = None
+    installed_cmdline: str | None = None
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT step, state, result FROM run_steps WHERE run_id = %s AND step = ANY(%s)",
@@ -207,6 +211,9 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
         rows = await cur.fetchall()
     for row in rows:
         states[row["step"]] = row["state"]
+        if row["step"] == "install" and isinstance(row["result"], Mapping):
+            install_result = cast("Mapping[str, object]", row["result"])
+            installed_cmdline = _optional_str(install_result.get("cmdline"))
         if row["step"] == "boot" and isinstance(row["result"], Mapping):
             boot_result = cast("Mapping[str, object]", row["result"])
             outcome = boot_result.get("boot_outcome")
@@ -223,6 +230,7 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
         available_capture=available_capture,
         inert_capture=inert_capture,
         matched_line=matched_line,
+        installed_cmdline=installed_cmdline,
     )
 
 

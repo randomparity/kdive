@@ -4367,9 +4367,18 @@ def test_boot_without_operator_raises(migrated_url: str) -> None:
 # --- install_handler / boot_handler (the worker) -------------------------------------
 
 
-async def _enqueue_job(pool: AsyncConnectionPool, kind: JobKind, run_id: str, step: str) -> Job:
+async def _enqueue_job(
+    pool: AsyncConnectionPool,
+    kind: JobKind,
+    run_id: str,
+    step: str,
+    *,
+    cmdline: str | None = None,
+) -> Job:
     payload: RunPayload = (
-        InstallPayload(run_id=run_id) if kind is JobKind.INSTALL else RunPayload(run_id=run_id)
+        InstallPayload(run_id=run_id, cmdline=cmdline)
+        if kind is JobKind.INSTALL
+        else RunPayload(run_id=run_id)
     )
     async with pool.connection() as conn:
         return await queue.enqueue(
@@ -4379,6 +4388,17 @@ async def _enqueue_job(pool: AsyncConnectionPool, kind: JobKind, run_id: str, st
             {"principal": "user-1", "agent_session": "s", "project": "proj"},
             f"{run_id}:{step}",
         )
+
+
+async def _install_step_cmdline(pool: AsyncConnectionPool, run_id: str) -> object:
+    """Read the recorded applied cmdline from the install step ledger row."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT result FROM run_steps WHERE run_id = %s AND step = 'install'", (run_id,)
+        )
+        row = await cur.fetchone()
+        assert row is not None
+        return row[0].get("cmdline")
 
 
 def test_install_handler_records_step_run_stays_succeeded(migrated_url: str) -> None:
@@ -5344,6 +5364,77 @@ def test_install_handler_forwards_default_cmdline_when_ledger_has_none(migrated_
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
                 )
         assert installer.calls[0].cmdline == "console=ttyS0 root=/dev/vda"  # required base only
+
+    asyncio.run(_run())
+
+
+def test_install_handler_payload_cmdline_overrides_ledger(migrated_url: str) -> None:
+    """The install payload cmdline (ADR-0299) replaces the build-baked extra, not appends it."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(
+                pool, build_profile={**_VALID_BUILD, "cmdline": "dhash_entries=9"}
+            )
+            job = await _enqueue_job(
+                pool, JobKind.INSTALL, run_id, "install", cmdline="dhash_entries=1"
+            )
+            installer = _FakeInstaller()
+            async with pool.connection() as conn:
+                await runs_handlers.install_handler(
+                    conn,
+                    job,
+                    resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
+                )
+            applied = installer.calls[0].cmdline
+            # Override replaces the baked extra; the build value never appears.
+            assert applied == "console=ttyS0 root=/dev/vda dhash_entries=1"
+            assert "dhash_entries=9" not in applied
+            assert await _install_step_cmdline(pool, run_id) == "dhash_entries=1"
+
+    asyncio.run(_run())
+
+
+def test_step_progress_reads_installed_cmdline(migrated_url: str) -> None:
+    """step_progress surfaces the applied install cmdline for runs.get read-back (ADR-0299)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool, build_profile=copy.deepcopy(_VALID_BUILD))
+            job = await _enqueue_job(
+                pool, JobKind.INSTALL, run_id, "install", cmdline="dhash_entries=1"
+            )
+            installer = _FakeInstaller()
+            async with pool.connection() as conn:
+                await runs_handlers.install_handler(
+                    conn,
+                    job,
+                    resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
+                )
+            async with pool.connection() as conn:
+                progress = await step_progress(conn, UUID(run_id))
+        assert progress.installed_cmdline == "dhash_entries=1"
+
+    asyncio.run(_run())
+
+
+def test_install_handler_records_build_extra_when_no_override(migrated_url: str) -> None:
+    """With no payload override, the recorded applied cmdline is the build-baked extra."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(
+                pool, build_profile={**_VALID_BUILD, "cmdline": "dhash_entries=9"}
+            )
+            job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
+            installer = _FakeInstaller()
+            async with pool.connection() as conn:
+                await runs_handlers.install_handler(
+                    conn,
+                    job,
+                    resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
+                )
+            assert await _install_step_cmdline(pool, run_id) == "dhash_entries=9"
 
     asyncio.run(_run())
 
