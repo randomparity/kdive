@@ -38,6 +38,9 @@ from kdive.mcp.tools.lifecycle.systems.ssh_access import (
     authorize_ssh_key as _authorize_ssh_key,
 )
 from kdive.mcp.tools.lifecycle.systems.ssh_access import (
+    check_ssh_reachable as _check_ssh_reachable,
+)
+from kdive.mcp.tools.lifecycle.systems.ssh_access import (
     ssh_info as _ssh_info,
 )
 from kdive.mcp.tools.lifecycle.systems.view import (
@@ -109,6 +112,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_systems_teardown(app, pool)
     _register_systems_reprovision(app, pool, resolver)
     _register_systems_ssh_info(app, pool, resolver)
+    _register_systems_check_ssh_reachable(app, pool, resolver)
     _register_systems_authorize_ssh_key(app, pool, resolver)
 
 
@@ -311,6 +315,34 @@ def _register_systems_ssh_info(
         cached value.
         """
         return await _ssh_info(pool, current_context(), system_id, resolver=resolver)
+
+
+def _register_systems_check_ssh_reachable(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
+    @app.tool(
+        name="systems.check_ssh_reachable",
+        annotations=_docmeta.read_only(),
+        meta=_docmeta.maturity_meta("implemented"),
+    )
+    async def systems_check_ssh_reachable(
+        system_id: Annotated[
+            str, Field(description="The ready System whose guest sshd reachability to probe.")
+        ],
+    ) -> ToolResponse:
+        """Probe whether a ready System's guest sshd is answering right now.
+
+        Enqueues a worker job and returns a job handle; poll ``jobs.wait`` until it is
+        ``succeeded``, then read the verdict from ``refs.result`` — a compact JSON object
+        ``{"reachable": bool, "checked_at", "endpoint": {host, port}, "detail"}``.
+        ``reachable=false`` is a normal answer (a successful measurement), not an error. Each call
+        is a fresh point-in-time measurement (a new job), so re-poll rather than reuse an old
+        result. The probe tolerates the brief window after ``ready`` before sshd binds, so a single
+        ``false`` right after provisioning may become ``true`` on a repeat call. Available on any
+        ready System whose provider exposes an SSH forward; reports ``ssh_not_provisioned``
+        otherwise.
+        """
+        return await _check_ssh_reachable(pool, current_context(), system_id, resolver=resolver)
 
 
 def _register_systems_authorize_ssh_key(
