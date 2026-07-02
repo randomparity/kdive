@@ -55,21 +55,24 @@ the authorize job drains succeeded. Does not un-gate any marker.
 
 ## Task 2 — Register the two image env vars in the env reference
 
-**Where it fits:** success criterion; the repo has an env-doc guard
-(`scripts/check_env_documented.py`) that fails CI on an undocumented `KDIVE_*` var read
-by tests, if it scans tests. Verify whether the guard covers test-only vars; if it does,
-register `KDIVE_GUEST_IMAGE_DEBIAN` / `KDIVE_GUEST_IMAGE_RHEL` in the same reference the
-existing live-stack vars (`KDIVE_GUEST_IMAGE`, `KDIVE_KERNEL_SRC`, `KDIVE_STACK_BASE_URL`)
-live in. If the guard does **not** scan these, still document them where the sibling
-vars are documented (runbook / config reference) for operator discoverability.
+**Where it fits:** success criterion. `scripts/check_env_documented.py` sweeps `src/
+tests/ scripts/ deploy/` for `KDIVE_*` tokens (verified) and fails CI on any token that
+is neither a registry setting nor catalogued in `kdive.config.external_env`. The two new
+test-only tokens must therefore be catalogued.
 
-**Files:** the config/env reference doc that lists `KDIVE_GUEST_IMAGE` (discover its
-path), and/or `scripts/check_env_documented.py`'s data if it is a registry.
+**Files:** `src/kdive/config/external_env.py` — add two `ExternalEnvVar` entries in the
+"test-only (gated suites)" block next to `KDIVE_GUEST_IMAGE` (line ~45), scope `"test"`,
+`default=None`, help naming the family and the "unset → that parameter skips" behavior.
 
-**Acceptance:** `just lint`/the env-doc guard green; the two vars appear alongside the
-existing live-stack image var.
+**No generated snapshot to regenerate:** `scripts/gen_config_reference.py` renders from
+`external_env`, but its test (`tests/scripts/test_gen_config_reference.py`) uses synthetic
+fixtures, and no committed doc lists the real live-stack image vars — verified. So this is
+a one-file change; no snapshot invalidation.
 
-**Rollback:** revert the doc/registry hunk.
+**Acceptance:** `uv run python scripts/check_env_documented.py` exits 0; `just test`
+green (the guard has a test wrapper). The two vars sit alongside `KDIVE_GUEST_IMAGE`.
+
+**Rollback:** revert the two `EXTERNAL_ENV_VARS` entries.
 
 ## Task 3 — Correct the stale `debian.py` comment
 
