@@ -65,6 +65,28 @@ record** — read it with `runs.get` (console access) and the `artifacts` tools,
 across the crash. Do not rely on SSH output as your capture of a panic; rely on the console
 artifacts.
 
+## Decide before you provision
+
+Several choices are bound at `systems.provision` and expensive to change — altering any of them
+means `systems.reprovision`, which rebuilds and reboots the system. Run down this list before
+your first provision so every irreversible choice is made up front:
+
+- **Base image** — pick it with `images.describe` and check its `kdump` and `direct_kernel`
+  `capability_signals` first (see the images guide). A wrong image can burn the allocation.
+- **Shape and disk** — size vCPUs, memory, and disk for the work; toolchains, reproducer
+  builds, and captures all consume guest disk (see "The guest is yours").
+- **Kernel config** — the config is baked into the kernel you build and upload; enable the
+  debug options you need (KASAN / KCSAN / FAULT_INJECTION / …) before uploading (see the
+  external-build-upload doc).
+- **`debug.gdbstub: true`** — set it if you may want a live GDB session; without it
+  `debug.start_session` fails.
+- **`debug.preserve_on_crash: true`** — set it to hold a crashed guest (vCPUs stopped) for
+  post-panic inspection.
+- **`ssh_credential_ref`** — set it if you need drgn-over-SSH live introspection
+  (`introspect.run`); it also needs a drgn-capable image and an SSH-reachable guest.
+
+The three debug/live-introspection knobs are detailed next.
+
 ## Provisioning for debugging and live introspection
 
 Some debugging and live-introspection capabilities are bound at `systems.provision` and
