@@ -20,6 +20,12 @@ from kdive.providers.shared.libvirt_xml import (
 from kdive.providers.shared.libvirt_xml import (
     recorded_gdb_port as recorded_gdb_port,  # re-exported facade for remote provisioning + tests
 )
+from kdive.providers.shared.libvirt_xml import (
+    recorded_ssh_port as recorded_ssh_port,  # re-exported facade for remote provisioning + tests
+)
+from kdive.providers.shared.libvirt_xml import (
+    recorded_ssh_port_from_root as recorded_ssh_port_from_root,
+)
 from kdive.providers.shared.runtime_paths import domain_name_for
 
 _DEFAULT_NETWORK = "default"
@@ -60,8 +66,15 @@ def render_domain_xml(
     gdb_port: int,
     network: str = _DEFAULT_NETWORK,
     machine: str = "pc",
+    ssh_addr: str | None = None,
+    ssh_port: int | None = None,
 ) -> str:
-    """Render the tagged remote domain XML (ADR-0080 §2/§4)."""
+    """Render the tagged remote domain XML (ADR-0080 §2/§4).
+
+    When both ``ssh_addr`` and ``ssh_port`` are given, a per-System user-mode SSH forward NIC is
+    appended (ADR-0291): ``-netdev user,...restrict=on,hostfwd=tcp:<ssh_addr>:<ssh_port>-:22`` +
+    a ``virtio-net-pci`` device. Omitted (either ``None``) → no forward NIC (guest-agent-only).
+    """
     _ensure_namespaces_registered()
     if profile.provider.remote_libvirt_section is None:
         raise CategorizedError(
@@ -100,7 +113,26 @@ def render_domain_xml(
     commandline = ET.SubElement(domain, f"{{{QEMU_NS}}}commandline")
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-gdb")
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=f"tcp:{gdb_addr}:{gdb_port}")
+    if ssh_addr is not None and ssh_port is not None:
+        _append_ssh_forward(commandline, ssh_addr, ssh_port)
     return ET.tostring(domain, encoding="unicode")
+
+
+def _append_ssh_forward(commandline: ET.Element, ssh_addr: str, ssh_port: int) -> None:
+    """Append the per-System user-mode SSH forward NIC to ``<qemu:commandline>`` (ADR-0291).
+
+    ``restrict=on`` isolates the slirp NIC to the inbound forward only (no guest-initiated
+    outbound on it); ``hostfwd`` forwards ``ssh_addr:ssh_port`` to the guest sshd on ``:22``.
+    Mirrors local-libvirt's loopback forward (ADR-0218), differing only in the routable ACL'd
+    bind address. ``addr=0x10`` pins the PCI slot so it does not collide with the disk/bridge/
+    agent virtio devices.
+    """
+    netdev = f"user,id=kdivessh,restrict=on,hostfwd=tcp:{ssh_addr}:{ssh_port}-:22"
+    device = "virtio-net-pci,netdev=kdivessh,addr=0x10"
+    ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-netdev")
+    ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=netdev)
+    ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-device")
+    ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=device)
 
 
 def _parse_domain_xml_strict(domain_xml: str, *, operation: str, domain: str) -> ET.Element:
@@ -118,6 +150,12 @@ def recorded_gdb_port_strict(domain_xml: str, *, operation: str, domain: str) ->
     """The gdbstub port a domain's XML records; malformed XML is an infrastructure fault."""
     root = _parse_domain_xml_strict(domain_xml, operation=operation, domain=domain)
     return recorded_gdb_port_from_root(root)
+
+
+def recorded_ssh_port_strict(domain_xml: str, *, operation: str, domain: str) -> int | None:
+    """The SSH hostfwd port a domain's XML records; malformed XML is an infrastructure fault."""
+    root = _parse_domain_xml_strict(domain_xml, operation=operation, domain=domain)
+    return recorded_ssh_port_from_root(root)
 
 
 def _agent_channel_connected(root: ET.Element) -> bool:

@@ -81,20 +81,23 @@ def recorded_gdb_port(domain_xml: str) -> int | None:
     return recorded_gdb_port_from_root(root)
 
 
-# The loopback SSH forward local-libvirt renders into a `-netdev user,...hostfwd=...` arg
-# (ADR-0218 §2): a host loopback port forwarded to the guest's sshd on port 22. Anchored on the
-# `127.0.0.1` host literal and the guest port `22` so a non-kdive forward is not mistaken for one.
-_SSH_HOSTFWD_RE = re.compile(r"hostfwd=tcp:127\.0\.0\.1:(\d+)-:22")
+# The SSH forward kdive renders into a `-netdev user,...hostfwd=...` arg: a host port forwarded
+# to the guest's sshd on port 22. local-libvirt binds `127.0.0.1` (ADR-0218 §2); remote-libvirt
+# binds the operator-ACL'd `ssh_addr` (ADR-0291). The bind host is captured non-greedily (any
+# IPv4/hostname literal — an IPv6 bracket form is a known follow-up) and anchored on the guest
+# port `22` so a non-kdive forward is not mistaken for one.
+_SSH_HOSTFWD_RE = re.compile(r"hostfwd=tcp:[^:]+:(\d+)-:22")
 
 
 def recorded_ssh_port_from_root(root: ET.Element) -> int | None:
-    """The forwarded loopback SSH port a parsed domain element records, or ``None``.
+    """The forwarded SSH host port a parsed domain element records, or ``None``.
 
     Walks the ``<qemu:commandline>`` args for a ``-netdev`` flag immediately followed by a
-    ``user,...hostfwd=tcp:127.0.0.1:<port>-:22`` value and returns the forwarded host port; the
+    ``user,...hostfwd=tcp:<bind_addr>:<port>-:22`` value and returns the forwarded host port; the
     first matching ``-netdev`` value wins (kdive renders exactly one SSH forward). ``None`` when
-    absent or the port text is non-integer. Mirrors :func:`recorded_gdb_port_from_root` for the
-    SSH transport (ADR-0218 §6, ADR-0039).
+    absent or the port text is non-integer. Shared by local-libvirt (loopback bind, ADR-0218 §6)
+    and remote-libvirt (ACL'd ``ssh_addr`` bind, ADR-0291); mirrors
+    :func:`recorded_gdb_port_from_root`.
     """
     args = [
         arg.get("value") for arg in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")

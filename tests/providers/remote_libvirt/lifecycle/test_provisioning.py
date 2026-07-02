@@ -32,6 +32,7 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     agent_channel_connected,
     disk_pool,
     recorded_gdb_port_strict,
+    recorded_ssh_port,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error
@@ -189,6 +190,45 @@ def test_recorded_gdb_port_roundtrip() -> None:
         gdb_port=47007,
     )
     assert recorded_gdb_port(xml) == 47007
+
+
+def test_render_appends_ssh_hostfwd_when_both_set() -> None:
+    xml = render_domain_xml(
+        SYSTEM_ID,
+        _remote_profile(),
+        pool="p",
+        volume="v",
+        gdb_addr="10.0.0.5",
+        gdb_port=47007,
+        ssh_addr="10.0.0.9",
+        ssh_port=47101,
+    )
+    args = [
+        arg.get("value")
+        for arg in fromstring(xml).findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
+    ]
+    assert "-netdev" in args
+    assert "user,id=kdivessh,restrict=on,hostfwd=tcp:10.0.0.9:47101-:22" in args
+    assert "virtio-net-pci,netdev=kdivessh,addr=0x10" in args
+    assert recorded_ssh_port(xml) == 47101
+
+
+@pytest.mark.parametrize("ssh_addr,ssh_port", [(None, None), ("10.0.0.9", None), (None, 47101)])
+def test_render_omits_ssh_hostfwd_unless_both_set(
+    ssh_addr: str | None, ssh_port: int | None
+) -> None:
+    xml = render_domain_xml(
+        SYSTEM_ID,
+        _remote_profile(),
+        pool="p",
+        volume="v",
+        gdb_addr="10.0.0.5",
+        gdb_port=47007,
+        ssh_addr=ssh_addr,
+        ssh_port=ssh_port,
+    )
+    assert "kdivessh" not in xml
+    assert recorded_ssh_port(xml) is None
 
 
 @pytest.mark.parametrize(

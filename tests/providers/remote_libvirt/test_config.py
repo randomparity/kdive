@@ -31,7 +31,9 @@ from kdive.providers.remote_libvirt.lifecycle.gdb import (
     Domain,
     allocate_gdb_port,
     used_gdb_ports,
+    used_ssh_ports,
 )
+from kdive.providers.remote_libvirt.lifecycle.xml import recorded_ssh_port
 
 _RESOURCE = "ub24-big"
 
@@ -555,6 +557,47 @@ def _gdb_domain_xml(port: int) -> str:
         f'<qemu:arg value="tcp:10.0.0.5:{port}"/>'
         "</qemu:commandline></domain>"
     )
+
+
+def _ssh_domain_xml(port: int, *, addr: str = "10.0.0.5") -> str:
+    return (
+        "<domain><qemu:commandline "
+        'xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">'
+        '<qemu:arg value="-netdev"/>'
+        f'<qemu:arg value="user,id=kdivessh,restrict=on,hostfwd=tcp:{addr}:{port}-:22"/>'
+        "</qemu:commandline></domain>"
+    )
+
+
+class _FakeSshDomain:
+    def __init__(self, name: str, port: int | None) -> None:
+        self._name = name
+        self._port = port
+
+    def name(self) -> str:
+        return self._name
+
+    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - libvirt API name
+        # A domain with no forward records no -netdev hostfwd (guest-agent-only System).
+        return _ssh_domain_xml(self._port) if self._port is not None else "<domain/>"
+
+
+def test_recorded_ssh_port_parses_nonloopback_bind_addr() -> None:
+    # The shared regex is generalized (ADR-0291): it captures the port for any bind address,
+    # not only local's 127.0.0.1.
+    assert recorded_ssh_port(_ssh_domain_xml(47101, addr="10.0.0.9")) == 47101
+    assert recorded_ssh_port(_ssh_domain_xml(2222, addr="127.0.0.1")) == 2222
+
+
+def test_used_ssh_ports_maps_kdive_domains_to_recorded_forwards() -> None:
+    conn = _FakeConn(
+        [
+            _FakeSshDomain(f"{DOMAIN_PREFIX}a", 47110),
+            _FakeSshDomain(f"{DOMAIN_PREFIX}b", None),  # no forward → omitted
+            _FakeSshDomain("other-vm", 47112),  # non-kdive → skipped
+        ]
+    )
+    assert used_ssh_ports(conn) == {f"{DOMAIN_PREFIX}a": 47110}
 
 
 class _FakeDomain:
