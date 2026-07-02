@@ -26,6 +26,28 @@ the first tool to call.
 Long steps (provision, build, install, boot, capture) return a job handle; poll it with
 `jobs.wait`.
 
+## Provisioning for debugging and live introspection
+
+Some debugging and live-introspection capabilities are bound at `systems.provision` and
+**cannot be turned on afterward** — a ready system has no knob to flip. If you decide to
+debug only after the run boots, the only remedy is `systems.reprovision`, which rebuilds
+and reboots the system (an expensive cycle). Decide these before you provision:
+
+- `provider.local-libvirt.debug.gdbstub: true` — provisions the QEMU gdb stub a live GDB
+  session attaches to. Without it, `debug.start_session` fails and you must reprovision.
+- `provider.local-libvirt.debug.preserve_on_crash: true` — holds a crashed guest (vCPUs
+  stopped) instead of destroying it, so you can attach and inspect the halted kernel after
+  a panic.
+- `provider.local-libvirt.ssh_credential_ref` — the guest credential the drgn-over-SSH
+  live-introspection transport (`introspect.run`) resolves to reach the guest. It is
+  necessary but not sufficient: live introspection also needs a drgn-capable guest image
+  and a guest that is reachable over SSH.
+
+These flags default off, so a plain profile provisions a system you can build, boot, and
+observe on but not live-debug. `systems.profile_examples` returns starting-point profiles;
+add the `debug` section and credential above before provisioning if the investigation
+needs them.
+
 ## Toolset guides
 
 | Toolset | What it is for | Guide |
