@@ -137,6 +137,21 @@ def test_render_carries_name_memory_vcpu_machine_and_rootfs() -> None:
     assert source.get("file") == "/var/lib/kdive/rootfs/fedora-40.qcow2"
 
 
+def test_render_pins_host_passthrough_cpu_for_el9_baseline() -> None:
+    """The domain must pin a host-passthrough CPU so EL9 guests meet x86-64-v2 (#956).
+
+    The QEMU/KVM default model (``qemu64``) is x86-64-v1; EL9/RHEL-family glibc requires
+    x86-64-v2, so an EL9 guest's ``ld.so`` aborts PID 1 ("Fatal glibc error: CPU does not
+    support x86-64-v2") and the domain never reaches userspace — sshd is unreachable over the
+    always-rendered forward. host-passthrough gives the guest the host CPU (>= v2 on any modern
+    host); Debian's v1 baseline booted regardless, which masked this until the live per-family
+    reachability test.
+    """
+    cpu = _safe_fromstring(_render()).find("cpu")
+    assert cpu is not None, "domain XML must carry a <cpu> element"
+    assert cpu.get("mode") == "host-passthrough"
+
+
 def test_render_returns_a_unicode_string() -> None:
     # encoding="unicode" yields a str; a byte-string would break the defineXML seam that expects
     # text and the test parsers that call _safe_fromstring on a str.

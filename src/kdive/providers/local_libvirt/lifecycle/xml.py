@@ -81,6 +81,13 @@ def render_domain_xml(
     ET.SubElement(domain, "uuid").text = str(system_id)
     ET.SubElement(domain, "memory", unit="MiB").text = str(profile.memory_mb)
     ET.SubElement(domain, "vcpu").text = str(profile.vcpu)
+    # Pin the guest CPU to the host's (ADR-0294, #956). The QEMU/KVM default model (``qemu64``)
+    # is x86-64-v1; EL9/RHEL-family glibc requires x86-64-v2, so an EL9 guest's ``ld.so`` aborts
+    # PID 1 ("Fatal glibc error: CPU does not support x86-64-v2") and the domain never reaches
+    # userspace — sshd is unreachable over the always-rendered forward (the #956 symptom). Debian's
+    # v1 baseline booted regardless, which masked this. host-passthrough gives the guest the host
+    # CPU (>= v2 on any modern KVM host) and matches the debug/introspection intent of a local VM.
+    ET.SubElement(domain, "cpu", mode="host-passthrough")
     os_el = ET.SubElement(domain, "os")
     ET.SubElement(os_el, "type", arch=profile.arch, machine=machine).text = "hvm"
     _append_direct_kernel(os_el, kernel_path, initrd_path)
