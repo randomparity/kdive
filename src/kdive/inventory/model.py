@@ -147,6 +147,12 @@ class RemoteLibvirtInstance(_Instance):
     vcpus: int = Field(gt=0)
     memory_mb: int = Field(gt=0)
     shapes: list[str] = Field(default_factory=list)
+    # Optional SSH forward (ADR-0291): both set → provisioning renders a per-System user-mode
+    # hostfwd on ``ssh_addr`` (the ACL'd bind address, sibling of ``gdb_addr``) and the bootstrap
+    # key is injected, so ``ssh_info``/``authorize_ssh_key`` work on remote Systems. Both unset
+    # keeps guest-agent-only behavior; exactly one set is a config error.
+    ssh_addr: str | None = None
+    ssh_range: str | None = None
 
 
 class LocalLibvirtInstance(_Instance):

@@ -161,12 +161,21 @@ def test_malformed_inventory_is_configuration_error(
     assert str(excinfo.value).startswith("systems.toml is present but invalid:")
 
 
-def _instance(name: str, uri: str) -> RemoteLibvirtInstance:
+def _instance(
+    name: str,
+    uri: str,
+    *,
+    gdb_addr: str = "192.168.10.20",
+    ssh_addr: str | None = None,
+    ssh_range: str | None = None,
+) -> RemoteLibvirtInstance:
     return RemoteLibvirtInstance(
         name=name,
         uri=uri,
-        gdb_addr="192.168.10.20",
+        gdb_addr=gdb_addr,
         gdbstub_range="47000:47099",
+        ssh_addr=ssh_addr,
+        ssh_range=ssh_range,
         client_cert_ref="remote/clientcert.pem",
         client_key_ref="remote/clientkey.pem",  # pragma: allowlist secret
         ca_cert_ref="remote/cacert.pem",
@@ -175,6 +184,77 @@ def _instance(name: str, uri: str) -> RemoteLibvirtInstance:
         vcpus=16,
         memory_mb=65536,
     )
+
+
+def test_ssh_parity_inactive_when_unset() -> None:
+    cfg = config_module._build_config(_instance("rl", "qemu+tls://h/system"))
+    assert cfg.ssh_parity_active is False
+    assert cfg.ssh_addr is None
+    assert (cfg.ssh_port_min, cfg.ssh_port_max) == (None, None)
+
+
+def test_ssh_parity_active_parses_range() -> None:
+    cfg = config_module._build_config(
+        _instance("rl", "qemu+tls://h/system", ssh_addr="10.0.0.9", ssh_range="47100:47199")
+    )
+    assert cfg.ssh_parity_active is True
+    assert cfg.ssh_addr == "10.0.0.9"
+    assert (cfg.ssh_port_min, cfg.ssh_port_max) == (47100, 47199)
+
+
+def test_ssh_range_single_port_is_valid() -> None:
+    # Unlike gdbstub (which reserves the lowest for the ACL probe), a one-port SSH range is fine.
+    cfg = config_module._build_config(
+        _instance("rl", "qemu+tls://h/system", ssh_addr="10.0.0.9", ssh_range="47100:47100")
+    )
+    assert (cfg.ssh_port_min, cfg.ssh_port_max) == (47100, 47100)
+
+
+def test_half_configured_ssh_addr_only_is_error() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        config_module._build_config(_instance("rl", "qemu+tls://h/system", ssh_addr="10.0.0.9"))
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_half_configured_ssh_range_only_is_error() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        config_module._build_config(_instance("rl", "qemu+tls://h/system", ssh_range="47100:47199"))
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_ssh_range_inverted_is_error() -> None:
+    with pytest.raises(CategorizedError):
+        config_module._build_config(
+            _instance("rl", "qemu+tls://h/system", ssh_addr="10.0.0.9", ssh_range="500:400")
+        )
+
+
+def test_ssh_range_overlap_on_shared_gdb_addr_is_error() -> None:
+    # ssh_addr == gdb_addr and the ranges overlap → they would contend for one host socket.
+    with pytest.raises(CategorizedError) as excinfo:
+        config_module._build_config(
+            _instance(
+                "rl",
+                "qemu+tls://h/system",
+                gdb_addr="10.0.0.1",
+                ssh_addr="10.0.0.1",
+                ssh_range="47050:47150",
+            )
+        )
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_ssh_range_overlap_allowed_on_distinct_addr() -> None:
+    cfg = config_module._build_config(
+        _instance(
+            "rl",
+            "qemu+tls://h/system",
+            gdb_addr="10.0.0.1",
+            ssh_addr="10.0.0.2",
+            ssh_range="47050:47150",
+        )
+    )
+    assert cfg.ssh_parity_active is True
 
 
 def _two_instances() -> list[RemoteLibvirtInstance]:

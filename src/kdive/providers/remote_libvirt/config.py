@@ -71,6 +71,23 @@ class RemoteLibvirtConfig:
     gdb_addr: str | None = None
     gdb_port_min: int = 47000
     gdb_port_max: int = 47099
+    ssh_addr: str | None = None
+    ssh_port_min: int | None = None
+    ssh_port_max: int | None = None
+
+    @property
+    def ssh_parity_active(self) -> bool:
+        """True when the operator declared an SSH forward (``ssh_addr`` + a parsed port range).
+
+        Gates the ADR-0291 SSH-parity path: rendering the per-System user-mode hostfwd NIC,
+        injecting the bootstrap key, and disclosing a ``recorded_ssh_endpoint``. When False,
+        remote-libvirt stays guest-agent-only.
+        """
+        return (
+            self.ssh_addr is not None
+            and self.ssh_port_min is not None
+            and self.ssh_port_max is not None
+        )
 
     @property
     def acl_probe_port(self) -> int:
@@ -232,6 +249,75 @@ def _parse_gdbstub_range(instance: RemoteLibvirtInstance) -> tuple[int, int]:
     return low, high
 
 
+def _parse_ssh_range(instance: RemoteLibvirtInstance) -> tuple[int, int]:
+    """Parse the instance ``ssh_range`` (``"min:max"``) into a validated ``(min, max)``.
+
+    Unlike the gdbstub range, a one-port range is valid — there is no reserved ACL-probe port for
+    the SSH forward.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when the range is not ``min:max`` of integers, a
+            port is outside 1..65535, or the range is inverted.
+    """
+    raw = instance.ssh_range or ""
+    parts = raw.split(":")
+    if len(parts) != 2:
+        raise CategorizedError(
+            f"remote_libvirt[{instance.name}].ssh_range={raw!r} is not 'min:max'",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    try:
+        low, high = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise CategorizedError(
+            f"remote_libvirt[{instance.name}].ssh_range={raw!r} has non-integer ports",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        ) from None
+    for port in (low, high):
+        if port < 1 or port > 65535:
+            raise CategorizedError(
+                f"remote_libvirt[{instance.name}].ssh_range port {port} is outside 1..65535",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+    if low > high:
+        raise CategorizedError(
+            f"remote_libvirt[{instance.name}].ssh_range={raw!r} is inverted",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    return low, high
+
+
+def _resolve_ssh_forward(
+    instance: RemoteLibvirtInstance, gdb_port_min: int, gdb_port_max: int
+) -> tuple[str | None, int | None, int | None]:
+    """Resolve the optional SSH forward as ``(ssh_addr, ssh_port_min, ssh_port_max)`` (ADR-0291).
+
+    Returns all-``None`` when neither ``ssh_addr`` nor ``ssh_range`` is declared (the
+    guest-agent-only default).
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` for a half-configured pair (only one set), a
+            malformed/inverted range, or a range that overlaps ``gdbstub_range`` when the SSH and
+            gdbstub bind addresses are equal (they would then contend for one host socket).
+    """
+    if instance.ssh_addr is None and instance.ssh_range is None:
+        return None, None, None
+    if instance.ssh_addr is None or instance.ssh_range is None:
+        raise CategorizedError(
+            f"remote_libvirt[{instance.name}] sets only one of ssh_addr/ssh_range; both are "
+            "required to expose an SSH forward",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    low, high = _parse_ssh_range(instance)
+    if instance.ssh_addr == instance.gdb_addr and low <= gdb_port_max and gdb_port_min <= high:
+        raise CategorizedError(
+            f"remote_libvirt[{instance.name}].ssh_range {low}:{high} overlaps gdbstub_range "
+            f"{gdb_port_min}:{gdb_port_max} on the shared bind address {instance.ssh_addr!r}",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    return instance.ssh_addr, low, high
+
+
 def _build_config(instance: RemoteLibvirtInstance) -> RemoteLibvirtConfig:
     """Map one validated ``[[remote_libvirt]]`` instance onto :class:`RemoteLibvirtConfig`.
 
@@ -246,6 +332,9 @@ def _build_config(instance: RemoteLibvirtInstance) -> RemoteLibvirtConfig:
     """
     validate_remote_uri(instance.uri)
     gdb_port_min, gdb_port_max = _parse_gdbstub_range(instance)
+    ssh_addr, ssh_port_min, ssh_port_max = _resolve_ssh_forward(
+        instance, gdb_port_min, gdb_port_max
+    )
     return RemoteLibvirtConfig(
         uri=instance.uri,
         cert_refs=TlsCertRefs(
@@ -260,6 +349,9 @@ def _build_config(instance: RemoteLibvirtInstance) -> RemoteLibvirtConfig:
         gdb_addr=instance.gdb_addr,
         gdb_port_min=gdb_port_min,
         gdb_port_max=gdb_port_max,
+        ssh_addr=ssh_addr,
+        ssh_port_min=ssh_port_min,
+        ssh_port_max=ssh_port_max,
     )
 
 
