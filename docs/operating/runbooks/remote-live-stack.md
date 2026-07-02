@@ -45,6 +45,8 @@ name = "host"
 uri = "qemu+tls://host.example/system"          # control transport
 gdb_addr = "10.0.0.5"                            # ACL'd gdbstub listen address (see §2)
 gdbstub_range = "47000:47099"                    # per-System port range
+ssh_addr = "10.0.0.5"                            # optional: ACL'd SSH-forward addr (see §2.1)
+ssh_range = "47200:47299"                        # optional: per-System SSH-forward port range
 client_cert_ref = "clientcert.pem"               # mutual-TLS client cert (SecretBackend ref)
 client_key_ref = "clientkey.pem"                 # mutual-TLS client key  <!-- pragma: allowlist secret -->
 ca_cert_ref = "cacert.pem"                       # CA to verify the libvirtd server cert
@@ -82,6 +84,22 @@ are required instance fields.
 preflight requires it — an unset address skips the suite rather than letting it fail at the
 provision phase. Restrict the address + port range to the worker pool's source at the host
 firewall; this is a security boundary, not a convenience note.
+
+## 2.1 The SSH-forward ACL (optional agent SSH parity, ADR-0291)
+
+Setting **both** `ssh_addr` and `ssh_range` turns on agent SSH parity with local-libvirt: each
+provisioned System gets a per-System QEMU user-mode `hostfwd` bound to `ssh_addr`, its port
+allocated from `ssh_range` and recorded in the domain XML. The worker injects the per-System
+bootstrap key over the guest agent at provision, so `systems.ssh_info` returns a reachable
+`(ssh_addr, port)` and `systems.authorize_ssh_key` appends an agent's key over that forward.
+
+- Both fields are optional; leaving them unset keeps remote at guest-agent-only (no SSH forward,
+  no key injected). Setting exactly one is a `configuration_error`. When `ssh_addr == gdb_addr`,
+  `ssh_range` must not overlap `gdbstub_range` (they would contend for one host socket).
+- `ssh_addr` is a security boundary exactly like `gdb_addr`: restrict `ssh_addr:ssh_range` to the
+  worker pool (and any agent host that must SSH in) at the host firewall. The worker→guest SSH does
+  not verify the guest host key (`StrictHostKeyChecking=no`), so the ACL is the trust boundary —
+  see ADR-0291.
 
 ## 3. Object-store reachability for the presigned PUT
 
