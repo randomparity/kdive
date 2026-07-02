@@ -128,6 +128,12 @@ async def _has_succeeded_step(conn: AsyncConnection, run_id: UUID, step: str) ->
         return await cur.fetchone() is not None
 
 
+async def _has_step_row(conn: AsyncConnection, run_id: UUID, step: str) -> bool:
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT 1 FROM run_steps WHERE run_id = %s AND step = %s", (run_id, step))
+        return await cur.fetchone() is not None
+
+
 async def _enqueue_step(
     conn: AsyncConnection,
     ctx: RequestContext,
@@ -138,17 +144,22 @@ async def _enqueue_step(
     *,
     payload: RunPayload,
 ) -> ToolResponse:
-    """Enqueue an install/boot step job under the per-Run lock."""
+    """Enqueue an install/boot step job under the per-Run lock.
+
+    The recycle decision is ledger-driven (ADR-0299): a terminal job is recycled iff the step's
+    ``run_steps`` row is absent. A present ``succeeded`` row is an idempotent no-op (the existing
+    job is returned); a ``failed`` step's row was deleted by ``abandon_run_step`` so a retry
+    recycles it; a re-stage (which deletes the row) likewise recycles, carrying the new payload.
+    """
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
+        recycle = not await _has_step_row(conn, run.id, step)
         job = await queue.enqueue(
             conn,
             kind,
             payload,
             job_authorizing(ctx, run.project),
             f"{run.id}:{step}",
-            # A terminally-failed step is recycled to a fresh attempt so a transient blip can be
-            # retried in place without a rebuild; the per-Run lock serializes retries (ADR-0185).
-            retry_terminal_failed=True,
+            recycle_terminal=recycle,
         )
         await audit.record(
             conn,

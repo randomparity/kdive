@@ -41,7 +41,7 @@ async def enqueue(
     dedup_key: str,
     *,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-    retry_terminal_failed: bool = False,
+    recycle_terminal: bool = False,
 ) -> Job:
     """Admit a job, returning the existing one on a ``dedup_key`` conflict.
 
@@ -50,13 +50,18 @@ async def enqueue(
     **same** job (in whatever state it has since reached) and never enqueues a
     duplicate. ``DO NOTHING RETURNING`` is avoided — it returns no row on conflict.
 
-    When ``retry_terminal_failed`` is set, a dead-lettered (``failed``) job for ``dedup_key``
-    is reset in place to a fresh ``queued`` attempt (``attempt = 0``, lease/worker/failure
-    cleared) before the fetch — so a transient install/boot step failure can be retried without
-    a rebuild (ADR-0185). The ``state = 'failed'`` fence leaves a freshly-inserted ``queued`` row,
-    an in-flight ``queued``/``running`` job, and a ``succeeded``/``canceled`` job untouched, so
-    in-flight dedup and no-resurrection hold. It is opt-in: the default off keeps a failed
-    ``provision`` job ``failed`` so admission can surface its original reason (ADR-0149).
+    When ``recycle_terminal`` is set, a **terminal** (``failed`` or ``succeeded``) job for
+    ``dedup_key`` is reset in place to a fresh ``queued`` attempt before the fetch:
+    ``attempt = 0``, lease/worker/failure cleared, ``result_ref`` cleared, **and the payload
+    overwritten with the newly-supplied one**. Overwriting the payload matters for a re-stage
+    (ADR-0299): the new ``runs.install`` cmdline must reach the recycled job, otherwise it re-runs
+    the prior cmdline. The failed case is the transient install/boot retry (ADR-0185); the succeeded
+    case is the ledger-driven re-stage (the caller deletes the ``run_steps`` row first, so an absent
+    row is what selects ``recycle_terminal``). The ``state IN ('failed','succeeded')`` fence leaves
+    an in-flight ``queued``/``running`` job and a ``canceled`` job untouched, so in-flight dedup and
+    no-resurrection-of-canceled hold. It is opt-in: the default off keeps a failed ``provision`` job
+    ``failed`` so admission can surface its original reason (ADR-0149), and never resurrects a
+    succeeded job.
 
     Raises:
         ValueError: ``max_attempts < 1`` (a job that ``dequeue`` could never claim).
@@ -79,13 +84,18 @@ async def enqueue(
                 dedup_key,
             ),
         )
-        if retry_terminal_failed:
+        if recycle_terminal:
             await cur.execute(
-                "UPDATE jobs SET state = %s, attempt = 0, worker_id = NULL, "
+                "UPDATE jobs SET state = %s, payload = %s, attempt = 0, worker_id = NULL, "
                 "    lease_expires_at = NULL, heartbeat_at = NULL, error_category = NULL, "
-                "    failure_context = '{}'::jsonb "
-                "WHERE dedup_key = %s AND state = %s",
-                (JobState.QUEUED.value, dedup_key, JobState.FAILED.value),
+                "    result_ref = NULL, failure_context = '{}'::jsonb "
+                "WHERE dedup_key = %s AND state = ANY(%s)",
+                (
+                    JobState.QUEUED.value,
+                    Jsonb(payload_json),
+                    dedup_key,
+                    [JobState.FAILED.value, JobState.SUCCEEDED.value],
+                ),
             )
         await cur.execute("SELECT * FROM jobs WHERE dedup_key = %s", (dedup_key,))
         row = await cur.fetchone()

@@ -25,7 +25,7 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.payloads import Authorizing, BuildPayload, RunPayload
+from kdive.jobs.payloads import Authorizing, BuildPayload, InstallPayload
 from tests.adversarial.conftest import count_rows, open_conn, open_conns
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
@@ -35,8 +35,8 @@ def _build_payload() -> BuildPayload:
     return BuildPayload(run_id=str(uuid4()), build_host_id=str(WORKER_LOCAL_ID))
 
 
-def _run_payload() -> RunPayload:
-    return RunPayload(run_id=str(uuid4()))
+def _install_payload() -> InstallPayload:
+    return InstallPayload(run_id=str(uuid4()))
 
 
 async def _expire_lease(conn: psycopg.AsyncConnection, job_id: object) -> None:
@@ -166,10 +166,10 @@ def test_concurrent_retry_terminal_failed_resets_once(migrated_url: str, racers:
                     queue.enqueue(
                         c,
                         JobKind.INSTALL,
-                        _run_payload(),
+                        _install_payload(),
                         _AUTHORIZING,
                         "dk-failed",
-                        retry_terminal_failed=True,
+                        recycle_terminal=True,
                     )
                     for c in conns
                 )
