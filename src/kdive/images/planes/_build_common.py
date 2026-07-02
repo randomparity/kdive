@@ -265,3 +265,53 @@ def probe_makedumpfile_marker(qcow2_path: Path) -> str | None:  # pragma: no cov
 
 
 DEFAULT_MAKEDUMPFILE_PROBE: MakedumpfileProbeSeam = probe_makedumpfile_marker
+
+type BootEntriesProbeSeam = Callable[[Path], list[str] | None]
+
+
+def probe_boot_entries(qcow2_path: Path) -> list[str] | None:  # pragma: no cover - live_vm
+    """List the ``/boot`` entry basenames in ``qcow2_path``, read-only via ``guestfish`` (ADR-0295).
+
+    The build-time operand of the ``direct_kernel`` capability signal: the caller classifies the
+    listing with the same non-rescue ``vmlinuz-*`` rule provisioning uses, so the recorded
+    ``boot_kernel_count`` predicts the fail-closed baseline-kernel selection. Reads with a read-only
+    ``guestfish -i ls /boot`` so the count is the built image's own ``/boot``.
+
+    Returns:
+        The ``/boot`` basenames (empty list when ``/boot`` is empty), or ``None`` when the listing
+        could not be produced (a non-zero ``guestfish`` exit — e.g. an unmountable image). Never
+        raises for a merely-empty or unreadable ``/boot``; the caller treats ``None`` as "operand
+        absent" and omits it from provenance.
+
+    Raises:
+        CategorizedError: ``MISSING_DEPENDENCY`` if ``guestfish`` is absent;
+            ``INFRASTRUCTURE_FAILURE`` on timeout. Both are caught by the advisory caller and
+            degrade to an omitted operand, so a probe failure never fails a build.
+    """
+    argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "ls", "/boot"]
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; image path is a data arg
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=_GUESTFISH_TIMEOUT_S,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise CategorizedError(
+            "guestfish is not installed; cannot list /boot to count baseline kernels",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+            details={"tool": "guestfish"},
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise CategorizedError(
+            "guestfish exceeded its timeout listing /boot",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"timeout_s": _GUESTFISH_TIMEOUT_S},
+        ) from exc
+    if result.returncode != 0:
+        return None  # an unmountable/absent /boot is not an error; caller omits the operand
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+DEFAULT_BOOT_ENTRIES_PROBE: BootEntriesProbeSeam = probe_boot_entries

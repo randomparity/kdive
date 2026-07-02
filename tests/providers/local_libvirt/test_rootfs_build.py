@@ -20,7 +20,11 @@ from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.families.rhel import RhelFamily
-from kdive.images.planes._build_common import MakedumpfileProbeSeam, VersionInspectSeam
+from kdive.images.planes._build_common import (
+    BootEntriesProbeSeam,
+    MakedumpfileProbeSeam,
+    VersionInspectSeam,
+)
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
 from kdive.images.rootfs_catalog import (
     CloudImageSource,
@@ -132,11 +136,18 @@ def _no_makedumpfile(_qcow2: Path) -> str | None:
     return None
 
 
+def _no_boot_entries(_qcow2: Path) -> list[str] | None:
+    # Hermetic default: no listing, so the default build path omits boot_kernel_count and never
+    # shells out to the real guestfish probe (ADR-0295).
+    return None
+
+
 def _tools(
     rec: _Recorder,
     inspect_versions: VersionInspectSeam = _no_versions,
     probe_makedumpfile: MakedumpfileProbeSeam = _no_makedumpfile,
     verify_cloud_init: object | None = None,
+    probe_boot_entries: BootEntriesProbeSeam = _no_boot_entries,
 ) -> RootfsBuildTools:
     return RootfsBuildTools(
         acquire_base=rec.acquire_base,
@@ -145,6 +156,7 @@ def _tools(
         family_for=rec.family_for,
         inspect_versions=inspect_versions,
         probe_makedumpfile=probe_makedumpfile,
+        probe_boot_entries=probe_boot_entries,
         verify_cloud_init=verify_cloud_init or rec.verify_cloud_init,  # ty: ignore[invalid-argument-type]
     )
 
@@ -154,10 +166,13 @@ def _plane(
     rec: _Recorder,
     inspect_versions: VersionInspectSeam = _no_versions,
     probe_makedumpfile: MakedumpfileProbeSeam = _no_makedumpfile,
+    probe_boot_entries: BootEntriesProbeSeam = _no_boot_entries,
 ) -> LocalLibvirtRootfsBuildPlane:
     return LocalLibvirtRootfsBuildPlane(
         workspace=tmp_path / "work",
-        tools=_tools(rec, inspect_versions, probe_makedumpfile),
+        tools=_tools(
+            rec, inspect_versions, probe_makedumpfile, probe_boot_entries=probe_boot_entries
+        ),
     )
 
 
@@ -352,6 +367,53 @@ def test_provenance_omits_makedumpfile_version_on_unparseable_probe(tmp_path: Pa
     rec = _Recorder()
     out = _plane(tmp_path, rec, probe_makedumpfile=lambda _q: "garbage output").build(_spec())
     assert "makedumpfile_version" not in out.provenance
+
+
+_ONE_KERNEL = ["vmlinuz-6.19.10-300.fc44.x86_64", "initramfs-6.19.10-300.fc44.x86_64.img"]
+_TWO_KERNELS = ["vmlinuz-6.19.10-300.fc44.x86_64", "vmlinuz-6.18.0-100.fc44.x86_64"]
+_RESCUE_AND_ONE = ["vmlinuz-6.19.10-300.fc44.x86_64", "vmlinuz-0-rescue-abc"]
+
+
+def test_provenance_records_boot_kernel_count_multiple(tmp_path: Path) -> None:
+    # A multi-kernel /boot records the true count so images.describe can report not_provisionable.
+    rec = _Recorder()
+    out = _plane(tmp_path, rec, probe_boot_entries=lambda _q: list(_TWO_KERNELS)).build(_spec())
+    assert out.provenance["boot_kernel_count"] == 2
+
+
+def test_provenance_records_boot_kernel_count_one_excluding_rescue(tmp_path: Path) -> None:
+    rec = _Recorder()
+    single = _plane(tmp_path, rec, probe_boot_entries=lambda _q: list(_ONE_KERNEL)).build(_spec())
+    assert single.provenance["boot_kernel_count"] == 1
+
+    rec2 = _Recorder()
+    with_rescue = _plane(tmp_path, rec2, probe_boot_entries=lambda _q: list(_RESCUE_AND_ONE)).build(
+        _spec()
+    )
+    assert with_rescue.provenance["boot_kernel_count"] == 1, "the rescue kernel is not counted"
+
+
+def test_provenance_records_boot_kernel_count_zero_and_keeps_the_key(tmp_path: Path) -> None:
+    # A kernel-less /boot is a meaningful "not provisionable" operand: 0 is recorded, not dropped.
+    rec = _Recorder()
+    out = _plane(tmp_path, rec, probe_boot_entries=lambda _q: ["config-x", "grub2"]).build(_spec())
+    assert out.provenance["boot_kernel_count"] == 0
+
+
+def test_provenance_omits_boot_kernel_count_when_probe_returns_none(tmp_path: Path) -> None:
+    # The hermetic default (_no_boot_entries -> None) is the omitted-operand path.
+    rec = _Recorder()
+    out = _plane(tmp_path, rec).build(_spec())
+    assert "boot_kernel_count" not in out.provenance
+
+
+def test_provenance_omits_boot_kernel_count_on_probe_error(tmp_path: Path) -> None:
+    def _boom(_q: Path) -> list[str] | None:
+        raise CategorizedError("no tool", category=ErrorCategory.MISSING_DEPENDENCY)
+
+    rec = _Recorder()
+    out = _plane(tmp_path, rec, probe_boot_entries=_boom).build(_spec())
+    assert "boot_kernel_count" not in out.provenance
 
 
 def test_build_rejects_uncataloged_name(tmp_path: Path) -> None:
