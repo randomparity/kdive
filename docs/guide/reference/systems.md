@@ -243,6 +243,12 @@ use `systems.provision` instead. Requires operator and opt-in.
 
 Return SSH connection coordinates (user, host, port, jump_host) for a ready System.
 
+Available on any ready System whose provider exposes an SSH forward: local-libvirt always,
+and remote-libvirt only when the host is configured for SSH parity. Reports
+``ssh_not_provisioned`` when there is no forward. For a remote System the endpoint is read
+live from the host, so an unreachable host surfaces as a transport failure rather than a
+cached value.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `system_id` | string | yes | The ready System to return SSH coordinates for. |
