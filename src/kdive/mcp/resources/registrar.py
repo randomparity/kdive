@@ -184,6 +184,17 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
             "or drive target power."
         ),
     ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/images.md",
+        source="docs/guide/toolsets/images.md",
+        content_file="toolsets-images.md",
+        name="toolset-images",
+        title="images toolset",
+        description=(
+            "How each images.* tool helps: pick a base image and read its capability_signals "
+            "(kdump, direct-kernel) before provisioning."
+        ),
+    ),
 )
 
 
