@@ -107,7 +107,8 @@ class DebianFamily:
             ]
         argv += cloud_init_first_boot_args(ctx)  # cloud-init owns network + host keys now
         # The debug image carries the reviewed kdive-drgn helper (the live introspection contract);
-        # Debian needs no NetworkManager keyfile (cloud-init's cloud-ifupdown-helper DHCPs the NIC).
+        # Debian needs no NetworkManager keyfile — cloud-init's baked cloud.cfg dhcp4/NoCloud config
+        # (above, ADR-0288) DHCPs the NIC on first boot.
         if ctx.kind == "debug":
             argv += drgn_helper_args()
             argv += makedumpfile_version_marker_args()

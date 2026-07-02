@@ -65,6 +65,16 @@ _PROJECT = "spine-proj"
 _AGENT_SESSION = "spine-sess"
 _ARTIFACT_NAME = "accounting-report.json"
 
+# Per-family *-kdive-ready rootfs images for the SSH-reachability proof (#956, ADR-0294). Each is a
+# distinct artifact; a host with only one family's image proves that family and skips the other.
+_FAMILY_IMAGE_ENV = {"debian": "KDIVE_GUEST_IMAGE_DEBIAN", "rhel": "KDIVE_GUEST_IMAGE_RHEL"}
+# A throwaway ed25519 public key (public half only; KDIVE never needs the private key to append it).
+# Fixed is fine: authorize_ssh_key dedups on the key fingerprint, so a re-run is idempotent.
+_REACHABILITY_PUBKEY = (
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINEaCXYW3lMCAliMtbmJIW1X7VbPd51hhXaFT5VOBwSU "
+    "kdive-956-reachability-e2e"
+)
+
 # The drgn-live opt-in credential: a filename the operator seeds under KDIVE_SECRETS_ROOT. Setting
 # `ssh_credential_ref` renders the SSH loopback hostfwd + virtio NIC and is the credential the
 # start_session gate resolves (ADR-0085/0240). The ref's content does not authenticate SSH (the
@@ -525,6 +535,140 @@ def test_spine_live_script_over_the_wire() -> None:
                     await scalar(op, "allocations.release", allocation_id=allocation_id),
                     "release",
                 )
+
+    asyncio.run(_run())
+
+
+# --- per-family SSH-reachability proof (#956, ADR-0294) -------------------------------------
+
+
+def _reachability_preflight(family: str) -> tuple[OidcIssuer, str, str, str]:
+    """Resolve issuer + stack + db + the per-family ready image, or skip with the exact fix.
+
+    Reuses the spine's stack/issuer/db + kernel-tree skip idiom (ADR-0035 §4) and adds the
+    per-family image env var, so a host that lacks this family's image (or the kernel tree) skips
+    *this parameter* cleanly rather than erroring at provision-time.
+    """
+    image_env = _FAMILY_IMAGE_ENV[family]
+    image = os.environ.get(image_env)
+    if not image or not Path(image).exists():
+        pytest.skip(
+            f"{image_env} unset or points at a missing file; build a {family}-family "
+            f"*-kdive-ready rootfs with `python -m kdive build-fs` and set {image_env} to its "
+            "--dest path (see docs/operating/runbooks/image-lifecycle.md)"
+        )
+    tree = os.environ.get(_KERNEL_TREE_ENV)
+    if not tree or not Path(tree).exists():
+        pytest.skip(
+            f"{_KERNEL_TREE_ENV} unset or missing; run the fetch-kernel-tree fixture script"
+        )
+    db_url = os.environ.get(_DATABASE_URL_ENV)
+    if not db_url:
+        pytest.skip(f"{_DATABASE_URL_ENV} unset; bring up the stack (see the live-stack runbook)")
+    issuer = require_issuer()  # skips if the OIDC issuer is unset/unreachable
+    base_url = require_stack()  # skips if KDIVE_STACK_BASE_URL is unset
+    return issuer, base_url, db_url, image
+
+
+def _reachability_provision_profile(image: str) -> dict[str, object]:
+    """A minimal direct-kernel profile for the reachability proof: no ssh_credential_ref.
+
+    The loopback SSH forward + virtio NIC render on *every* local-libvirt provision (ADR-0281),
+    so ``ssh_credential_ref`` is deliberately omitted — it would buy nothing here and would import
+    the drgn-live secret-seeding gate. No ``force_crash`` (no destructive op needed).
+    """
+    return {
+        "schema_version": 1,
+        "arch": "x86_64",
+        "vcpu": 2,
+        "memory_mb": 2048,
+        "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+        "boot_method": "direct-kernel",
+        "kernel_source_ref": os.environ[_KERNEL_TREE_ENV],
+        "provider": {
+            "local-libvirt": {
+                "rootfs": {"kind": "local", "path": image},
+                "crashkernel": "256M",
+            }
+        },
+    }
+
+
+@pytest.mark.live_stack
+@pytest.mark.parametrize("family", ["debian", "rhel"])
+def test_family_guest_is_ssh_reachable_over_the_wire(family: str) -> None:
+    """Prove the always-rendered loopback SSH forward reaches a per-family guest sshd (#956).
+
+    allocate → provision (no build/install/boot; the baseline kernel boots to ``ready`` and the
+    forward renders at provision) → ``systems.ssh_info`` returns a ``worker_loopback`` endpoint →
+    ``systems.authorize_ssh_key`` drains to a *succeeded* job. The drained success is the
+    load-bearing proof: the worker SSHes into the guest over the per-System managed key, which only
+    succeeds if the NIC leased, the forward bridged, and sshd answered — the exact contract #956
+    said was proven per family only by assumption. Self-cleans (release) on exit.
+    """
+    issuer, base_url, db_url, image = _reachability_preflight(family)
+    operator_token = _token(issuer, role="operator")
+
+    async def _run() -> None:
+        op = LiveStackClient.over_http(base_url, operator_token)
+        allocation_id = ""
+        async with op:
+            await seed_metering(db_url, _PROJECT)
+            try:
+                async with phase(f"{family}:allocate"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "allocations.request",
+                            project=_PROJECT,
+                            request={
+                                "vcpus": 2,
+                                "memory_gb": 2,
+                                "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+                                "resource": {"mode": "kind"},
+                            },
+                        ),
+                        f"{family}:allocate",
+                    )
+                    allocation_id = env.object_id
+                async with phase(f"{family}:provision"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "systems.provision",
+                            allocation_id=allocation_id,
+                            profile=_reachability_provision_profile(image),
+                        ),
+                        f"{family}:provision",
+                    )
+                    system_id = data_str(env, "system_id")
+                    await await_system_state(op, f"{family}:provision", system_id, "ready")
+                async with phase(f"{family}:ssh_info"):
+                    info = ok(
+                        await scalar(op, "systems.ssh_info", system_id=system_id),
+                        f"{family}:ssh_info",
+                    )
+                    ssh = data_mapping(info, "ssh")
+                    assert ssh["host_scope"] == "worker_loopback", f"unexpected ssh_info: {ssh!r}"
+                    assert ssh["host"] and isinstance(ssh["port"], int), (
+                        f"ssh_info returned no endpoint on a ready System: {ssh!r}"
+                    )
+                async with phase(f"{family}:authorize_ssh_key"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "systems.authorize_ssh_key",
+                            system_id=system_id,
+                            public_key=_REACHABILITY_PUBKEY,
+                        ),
+                        f"{family}:authorize_ssh_key",
+                    )
+                    # A *succeeded* drain is the reachability proof: a non-succeeded drain raises a
+                    # SpinePhaseError naming this family + the job's error_category.
+                    await drain_job(op, f"{family}:authorize_ssh_key", env.object_id)
+            finally:
+                if allocation_id:
+                    await scalar(op, "allocations.release", allocation_id=allocation_id)
 
     asyncio.run(_run())
 

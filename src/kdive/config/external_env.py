@@ -49,6 +49,20 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "unset → the live_stack suite skips.",
     ),
     ExternalEnvVar(
+        "KDIVE_GUEST_IMAGE_DEBIAN",
+        "test",
+        None,
+        "Path to a debian-family *-kdive-ready qcow2 for the per-family SSH-reachability "
+        "live_stack test (#956, ADR-0294); unset → the debian parameter of that test skips.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_GUEST_IMAGE_RHEL",
+        "test",
+        None,
+        "Path to a rhel-family (rocky/centos/fedora) *-kdive-ready qcow2 for the per-family "
+        "SSH-reachability live_stack test (#956, ADR-0294); unset → the rhel parameter skips.",
+    ),
+    ExternalEnvVar(
         "KDIVE_TEST_BUILD_CONFIG",
         "test",
         None,

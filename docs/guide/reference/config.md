@@ -194,6 +194,8 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 |----------|---------|-------------|
 | `KDIVE_ARTIFACT_DIR` | — | Directory the live_stack spine writes run artifacts to (default: an out-of-tree temp dir). |
 | `KDIVE_GUEST_IMAGE` | — | Path to the operator-built local-libvirt guest rootfs qcow2 the live_stack spine boots; unset → the live_stack suite skips. |
+| `KDIVE_GUEST_IMAGE_DEBIAN` | — | Path to a debian-family *-kdive-ready qcow2 for the per-family SSH-reachability live_stack test (#956, ADR-0294); unset → the debian parameter of that test skips. |
+| `KDIVE_GUEST_IMAGE_RHEL` | — | Path to a rhel-family (rocky/centos/fedora) *-kdive-ready qcow2 for the per-family SSH-reachability live_stack test (#956, ADR-0294); unset → the rhel parameter skips. |
 | `KDIVE_IMAGE` | — | Container image ref under test for the image smoke test; unset → the smoke test skips. |
 | `KDIVE_LIVE_SSH_TARGET` | — | SSH target gating the criterion-5 live_stack tier; unset → the live_stack suite skips. |
 | `KDIVE_LIVE_VM_BZIMAGE` | — | Path to a kernel image that panics early in boot (no usable rootfs) for the gated local-libvirt preserve-crash live-attach test (#747); unset → that test skips. |

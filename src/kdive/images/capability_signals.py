@@ -85,8 +85,10 @@ PLANNED_SIGNALS: tuple[PlannedSignal, ...] = (
     ),
     PlannedSignal(
         "ssh_reachable",
-        "#956",
-        "sshd/keygen liveness is broken; not an honest per-image fact yet",
+        "#972",
+        "guest SSH now works (ADR-0288/#962 cloud-init DHCP + network-online-ordered "
+        "readiness, proven per family in ADR-0294); the open question is whether to surface it "
+        "as a runtime probe on systems.ssh_info or a static image-capability signal",
     ),
     PlannedSignal(
         "live_drgn",
