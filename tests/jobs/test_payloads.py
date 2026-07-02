@@ -342,3 +342,11 @@ def test_authorize_ssh_key_payload_roundtrips() -> None:
     assert payload.system_id == "11111111-2222-3333-4444-555555555555"
     assert payload.public_key == "ssh-ed25519 AAAAC3Nz agent@host"
     assert _PAYLOAD_MODELS[JobKind.AUTHORIZE_SSH_KEY] is AuthorizeSshKeyPayload
+
+
+def test_check_ssh_reachable_payload_roundtrips() -> None:
+    from kdive.jobs.payloads import _PAYLOAD_MODELS, CheckSshReachablePayload
+
+    payload = CheckSshReachablePayload(system_id="11111111-2222-3333-4444-555555555555")
+    assert payload.system_id == "11111111-2222-3333-4444-555555555555"
+    assert _PAYLOAD_MODELS[JobKind.CHECK_SSH_REACHABLE] is CheckSshReachablePayload
