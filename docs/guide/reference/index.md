@@ -130,6 +130,7 @@
 | [`shapes.list`](shapes.md#shapeslist) | `implemented` |
 | [`shapes.set`](shapes.md#shapesset) | `implemented` |
 | [`systems.authorize_ssh_key`](systems.md#systemsauthorize_ssh_key) | `implemented` |
+| [`systems.check_ssh_reachable`](systems.md#systemscheck_ssh_reachable) | `implemented` |
 | [`systems.define`](systems.md#systemsdefine) | `implemented` |
 | [`systems.get`](systems.md#systemsget) | `implemented` |
 | [`systems.list`](systems.md#systemslist) | `implemented` |

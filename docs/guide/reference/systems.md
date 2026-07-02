@@ -13,6 +13,26 @@ Authorize an agent SSH public key in a ready System's guest root account.
 | `public_key` | string | yes | The agent SSH public key to authorize in the guest root account. |
 | `system_id` | string | yes | The ready System to authorize the key on. |
 
+## `systems.check_ssh_reachable`
+
+`implemented` · `read-only`
+
+Probe whether a ready System's guest sshd is answering right now.
+
+Enqueues a worker job and returns a job handle; poll ``jobs.wait`` until it is
+``succeeded``, then read the verdict from ``refs.result`` — a compact JSON object
+``{"reachable": bool, "checked_at", "endpoint": {host, port}, "detail"}``.
+``reachable=false`` is a normal answer (a successful measurement), not an error. Each call
+is a fresh point-in-time measurement (a new job), so re-poll rather than reuse an old
+result. The probe tolerates the brief window after ``ready`` before sshd binds, so a single
+``false`` right after provisioning may become ``true`` on a repeat call. Available on any
+ready System whose provider exposes an SSH forward; reports ``ssh_not_provisioned``
+otherwise.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `system_id` | string | yes | The ready System whose guest sshd reachability to probe. |
+
 ## `systems.define`
 
 `implemented`
