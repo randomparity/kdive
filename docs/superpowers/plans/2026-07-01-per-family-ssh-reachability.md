@@ -133,7 +133,7 @@ real. Feed the returned number into Task 4.
 ## Overall ordering
 
 1. Task 6 (file follow-up issue → get number).
-2. Task 4 (uses the number) + Task 3 (independent) — docs/code housekeeping.
+2. Task 4 (uses the number) + Task 3 (independent) — doc + code housekeeping.
 3. Task 1 (the test) + Task 2 (env docs).
 4. Guardrails green after each commit.
 5. Task 5 (live-prove) once the test compiles + skips cleanly.
