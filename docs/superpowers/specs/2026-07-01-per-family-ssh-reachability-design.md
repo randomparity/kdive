@@ -49,8 +49,10 @@ re-implement any networking fix (there is no current defect) and do **not** prom
      the guest NIC leased and sshd answers).
    The test releases the allocation on exit (success or failure).
 2. The test **skips cleanly** (never fails, never errors) when its per-family ready
-   image / stack / issuer is absent, mirroring the existing `_spine_preflight` idiom.
-   It does not un-gate or widen any existing marker.
+   image, the kernel tree (`KDIVE_KERNEL_SRC`), the stack, the issuer, or the database
+   URL is absent, mirroring the existing `_spine_preflight` idiom. It does not un-gate or
+   widen any existing marker, and it does **not** require the drgn-live secret
+   (`ssh_credential_ref` is unset).
 3. The test is parametrized over `{debian, rhel}` so each family is proven
    independently; a family with no configured image skips only that parameter.
 4. The debian family customizer comment near `debian.py:110` no longer claims
@@ -76,12 +78,21 @@ the live MCP HTTP transport with the shared spine helpers (`allocate`, `provisio
 `scalar`, `ok`, `drain_job`, `await_system_state`). The reachability test reuses those
 helpers rather than a new harness.
 
-The provision profile sets `ssh_credential_ref` (as `_live_script_provision_profile`
-already does) so the loopback forward + virtio NIC render, and omits `force_crash` (no
-destructive op needed). It does **not** need a build/install/boot: `systems.provision`
-alone brings the System to `ready` on its baseline kernel (ADR-0272), and the forward is
-rendered at provision. So the test is short: allocate → provision → ready → ssh_info →
-authorize_ssh_key(drain) → release.
+The provision profile is deliberately minimal: `boot_method: direct-kernel` with a
+`kernel_source_ref` (the baseline kernel the System boots to `ready` on), and **no**
+`ssh_credential_ref` and no `force_crash`. Post-ADR-0281 (#937) the loopback forward +
+virtio NIC render on **every** domain (`render_domain_xml` always appends them;
+`provisioning.py` allocates `ssh_port` unconditionally) — the forward is plumbing, no
+longer gated on `ssh_credential_ref`, which now controls only the drgn-live
+introspection credential. So the test must **not** set `ssh_credential_ref`: it buys
+nothing for reachability and would import the drgn-live secret-seeding skip gate
+(`_require_drgn_ssh_secret`), which would skip the test on hosts that have the per-family
+images but have not seeded the drgn secret — the very hosts the test targets.
+
+The test needs no build/install/boot: `systems.provision` alone brings the System to
+`ready` on its baseline kernel (ADR-0272), and the forward renders at provision. So the
+test is short: allocate → provision → ready → ssh_info → authorize_ssh_key(drain) →
+release.
 
 ### Per-family image selection
 
@@ -95,9 +106,13 @@ env vars read only by this test:
 
 The test is `pytest.mark.parametrize`d over `("debian", <env>)` / `("rhel", <env>)`.
 Each parameter's preflight skips only that parameter when its image env var is
-unset/missing. This keeps a single-family host able to prove the family it has without
-failing on the family it lacks. The env vars are registered in the config/env reference
-(the repo has an env-doc guard, `scripts/check_env_documented.py`).
+unset/missing. It also reuses the existing spine skip conditions — `KDIVE_KERNEL_SRC`
+(the direct-kernel `kernel_source_ref` the profile validator makes **required**), the
+stack URL, the issuer, and the database URL — so a host that lacks the kernel tree skips
+cleanly rather than erroring at provision-time with a `CONFIGURATION_ERROR`. This keeps a
+single-family host able to prove the family it has without failing on the family it
+lacks. The two image env vars are registered in the config/env reference (the repo has an
+env-doc guard, `scripts/check_env_documented.py`).
 
 ### The authorize_ssh_key success is the reachability assertion
 
@@ -111,6 +126,13 @@ both, and `authorize_ssh_key` is the load-bearing one.
 The agent public key is a throwaway ed25519 public key generated in-test (only the
 public half; KDIVE never needs the private half for the append). Validation
 (`validate_authorized_public_key`) requires a well-formed key.
+
+On a **non-succeeded** `authorize_ssh_key` drain the test raises with the family
+parameter id and the job's `error_category` / `failure_detail` in the message (matching
+the spine's phase-named `SpinePhaseError` pattern), so a per-family reachability
+regression names which family failed and surfaces the guest-side detail (e.g.
+`failure_detail_exit_status 255`) without a re-run. `ssh_info` returning no endpoint on a
+`ready` System is likewise a named failure, not a skip.
 
 ### Housekeeping (docs only, no behavior change)
 
@@ -150,3 +172,8 @@ choice to the maintainer; reference #956.
   reachability property.
 - **Promote `ssh_reachable` here.** Rejected per orchestrator scope: the static-vs-runtime
   design is unsettled and belongs in its own issue.
+- **Set `ssh_credential_ref` on the profile (as the drgn-live spine test does).** Rejected:
+  post-ADR-0281 the forward + NIC render on every provision regardless, so it buys nothing
+  for reachability, and it would import the drgn-live secret-seeding skip gate
+  (`_require_drgn_ssh_secret`), skipping the test on hosts that have the images but no
+  seeded drgn secret — under-proving the very contract the test exists to prove.

@@ -47,14 +47,17 @@ Close #956 by proving the reachability contract per family and clearing the stal
 without re-implementing any networking fix (there is none to make).
 
 1. **Add a `live_stack`-marked per-family reachability test** in the local live-stack
-   spine module. It provisions a `*-kdive-ready` image with `ssh_credential_ref` set (so
-   the forward + virtio NIC render, ADR-0281/0240), waits for `ready`, asserts
-   `systems.ssh_info` returns a `worker_loopback` endpoint, and asserts
-   `systems.authorize_ssh_key` drains to a **succeeded** job. The drained success is the
-   load-bearing proof: the worker SSHes into the guest over the per-System managed key,
-   which only succeeds if the NIC leased, the forward bridged, and sshd answered. The
-   test releases the allocation on exit and needs no build/install/boot (the forward
-   renders at provision and the baseline kernel boots to `ready`, ADR-0272).
+   spine module. It provisions a `*-kdive-ready` image (a minimal `direct-kernel`
+   profile, **no** `ssh_credential_ref` — the forward + virtio NIC render on every domain
+   post-ADR-0281, so setting the ref buys nothing and would import the drgn-live
+   secret-seeding skip gate), waits for `ready`, asserts `systems.ssh_info` returns a
+   `worker_loopback` endpoint, and asserts `systems.authorize_ssh_key` drains to a
+   **succeeded** job. The drained success is the load-bearing proof: the worker SSHes
+   into the guest over the per-System managed key, which only succeeds if the NIC leased,
+   the forward bridged, and sshd answered. A non-succeeded drain raises with the family id
+   and the job's `error_category`/`failure_detail`. The test releases the allocation on
+   exit and needs no build/install/boot (the forward renders at provision and the baseline
+   kernel boots to `ready`, ADR-0272).
 
 2. **Parametrize over `{debian, rhel}`** via two new test-only env vars,
    `KDIVE_GUEST_IMAGE_DEBIAN` and `KDIVE_GUEST_IMAGE_RHEL`, each skipping only its own
@@ -111,6 +114,12 @@ RBAC, error-category, or config change.
 - **Add a build → install → boot before the check.** Rejected as unnecessary: the forward
   renders at provision and the baseline kernel reaches `ready` (ADR-0272); adding the
   build spine only lengthens the test without exercising the reachability property.
+
+- **Set `ssh_credential_ref` on the profile (as the drgn-live spine test does).** Rejected:
+  post-ADR-0281 the forward renders on every provision regardless, so it buys nothing for
+  reachability, and it would import the drgn-live secret-seeding skip gate
+  (`_require_drgn_ssh_secret`) — skipping the test on hosts that have the images but no
+  seeded drgn secret, under-proving the contract the test exists to prove.
 
 - **Promote `ssh_reachable` to a registered signal now.** Rejected per scope: the
   static-image-signal vs runtime-probe design is unsettled and belongs in its own issue,
