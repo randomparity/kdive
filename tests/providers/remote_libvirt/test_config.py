@@ -31,7 +31,9 @@ from kdive.providers.remote_libvirt.lifecycle.gdb import (
     Domain,
     allocate_gdb_port,
     used_gdb_ports,
+    used_ssh_ports,
 )
+from kdive.providers.remote_libvirt.lifecycle.xml import recorded_ssh_port
 
 _RESOURCE = "ub24-big"
 
@@ -161,12 +163,21 @@ def test_malformed_inventory_is_configuration_error(
     assert str(excinfo.value).startswith("systems.toml is present but invalid:")
 
 
-def _instance(name: str, uri: str) -> RemoteLibvirtInstance:
+def _instance(
+    name: str,
+    uri: str,
+    *,
+    gdb_addr: str = "192.168.10.20",
+    ssh_addr: str | None = None,
+    ssh_range: str | None = None,
+) -> RemoteLibvirtInstance:
     return RemoteLibvirtInstance(
         name=name,
         uri=uri,
-        gdb_addr="192.168.10.20",
+        gdb_addr=gdb_addr,
         gdbstub_range="47000:47099",
+        ssh_addr=ssh_addr,
+        ssh_range=ssh_range,
         client_cert_ref="remote/clientcert.pem",
         client_key_ref="remote/clientkey.pem",  # pragma: allowlist secret
         ca_cert_ref="remote/cacert.pem",
@@ -175,6 +186,77 @@ def _instance(name: str, uri: str) -> RemoteLibvirtInstance:
         vcpus=16,
         memory_mb=65536,
     )
+
+
+def test_ssh_parity_inactive_when_unset() -> None:
+    cfg = config_module._build_config(_instance("rl", "qemu+tls://h/system"))
+    assert cfg.ssh_parity_active is False
+    assert cfg.ssh_addr is None
+    assert (cfg.ssh_port_min, cfg.ssh_port_max) == (None, None)
+
+
+def test_ssh_parity_active_parses_range() -> None:
+    cfg = config_module._build_config(
+        _instance("rl", "qemu+tls://h/system", ssh_addr="10.0.0.9", ssh_range="47100:47199")
+    )
+    assert cfg.ssh_parity_active is True
+    assert cfg.ssh_addr == "10.0.0.9"
+    assert (cfg.ssh_port_min, cfg.ssh_port_max) == (47100, 47199)
+
+
+def test_ssh_range_single_port_is_valid() -> None:
+    # Unlike gdbstub (which reserves the lowest for the ACL probe), a one-port SSH range is fine.
+    cfg = config_module._build_config(
+        _instance("rl", "qemu+tls://h/system", ssh_addr="10.0.0.9", ssh_range="47100:47100")
+    )
+    assert (cfg.ssh_port_min, cfg.ssh_port_max) == (47100, 47100)
+
+
+def test_half_configured_ssh_addr_only_is_error() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        config_module._build_config(_instance("rl", "qemu+tls://h/system", ssh_addr="10.0.0.9"))
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_half_configured_ssh_range_only_is_error() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        config_module._build_config(_instance("rl", "qemu+tls://h/system", ssh_range="47100:47199"))
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_ssh_range_inverted_is_error() -> None:
+    with pytest.raises(CategorizedError):
+        config_module._build_config(
+            _instance("rl", "qemu+tls://h/system", ssh_addr="10.0.0.9", ssh_range="500:400")
+        )
+
+
+def test_ssh_range_overlap_on_shared_gdb_addr_is_error() -> None:
+    # ssh_addr == gdb_addr and the ranges overlap → they would contend for one host socket.
+    with pytest.raises(CategorizedError) as excinfo:
+        config_module._build_config(
+            _instance(
+                "rl",
+                "qemu+tls://h/system",
+                gdb_addr="10.0.0.1",
+                ssh_addr="10.0.0.1",
+                ssh_range="47050:47150",
+            )
+        )
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_ssh_range_overlap_allowed_on_distinct_addr() -> None:
+    cfg = config_module._build_config(
+        _instance(
+            "rl",
+            "qemu+tls://h/system",
+            gdb_addr="10.0.0.1",
+            ssh_addr="10.0.0.2",
+            ssh_range="47050:47150",
+        )
+    )
+    assert cfg.ssh_parity_active is True
 
 
 def _two_instances() -> list[RemoteLibvirtInstance]:
@@ -475,6 +557,47 @@ def _gdb_domain_xml(port: int) -> str:
         f'<qemu:arg value="tcp:10.0.0.5:{port}"/>'
         "</qemu:commandline></domain>"
     )
+
+
+def _ssh_domain_xml(port: int, *, addr: str = "10.0.0.5") -> str:
+    return (
+        "<domain><qemu:commandline "
+        'xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">'
+        '<qemu:arg value="-netdev"/>'
+        f'<qemu:arg value="user,id=kdivessh,restrict=on,hostfwd=tcp:{addr}:{port}-:22"/>'
+        "</qemu:commandline></domain>"
+    )
+
+
+class _FakeSshDomain:
+    def __init__(self, name: str, port: int | None) -> None:
+        self._name = name
+        self._port = port
+
+    def name(self) -> str:
+        return self._name
+
+    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - libvirt API name
+        # A domain with no forward records no -netdev hostfwd (guest-agent-only System).
+        return _ssh_domain_xml(self._port) if self._port is not None else "<domain/>"
+
+
+def test_recorded_ssh_port_parses_nonloopback_bind_addr() -> None:
+    # The shared regex is generalized (ADR-0291): it captures the port for any bind address,
+    # not only local's 127.0.0.1.
+    assert recorded_ssh_port(_ssh_domain_xml(47101, addr="10.0.0.9")) == 47101
+    assert recorded_ssh_port(_ssh_domain_xml(2222, addr="127.0.0.1")) == 2222
+
+
+def test_used_ssh_ports_maps_kdive_domains_to_recorded_forwards() -> None:
+    conn = _FakeConn(
+        [
+            _FakeSshDomain(f"{DOMAIN_PREFIX}a", 47110),
+            _FakeSshDomain(f"{DOMAIN_PREFIX}b", None),  # no forward → omitted
+            _FakeSshDomain("other-vm", 47112),  # non-kdive → skipped
+        ]
+    )
+    assert used_ssh_ports(conn) == {f"{DOMAIN_PREFIX}a": 47110}
 
 
 class _FakeDomain:

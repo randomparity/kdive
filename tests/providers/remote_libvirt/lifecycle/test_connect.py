@@ -6,6 +6,9 @@ fakes (config, domain-XML port reader, RSP probe); no libvirt host, no real sock
 
 from __future__ import annotations
 
+from typing import cast
+
+import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -16,16 +19,29 @@ from kdive.providers.ports.handles import (
 from kdive.providers.ports.lifecycle import TransportHandleData
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.lifecycle.connect import RemoteLibvirtConnect
+from kdive.providers.shared.libvirt_xml import QEMU_NS as _QEMU_NS
+from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.secrets import SecretBackend
+from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error
 
 _REFS = TlsCertRefs(client_cert_ref="c", client_key_ref="k", ca_cert_ref="a")
 
 
-def _config(*, gdb_addr: str | None = "10.0.0.5") -> RemoteLibvirtConfig:
+def _config(
+    *,
+    gdb_addr: str | None = "10.0.0.5",
+    ssh_addr: str | None = None,
+    ssh_port_min: int | None = None,
+    ssh_port_max: int | None = None,
+) -> RemoteLibvirtConfig:
     return RemoteLibvirtConfig(
         uri="qemu+tls://h/system",
         cert_refs=_REFS,
         concurrent_allocation_cap=1,
         gdb_addr=gdb_addr,
+        ssh_addr=ssh_addr,
+        ssh_port_min=ssh_port_min,
+        ssh_port_max=ssh_port_max,
     )
 
 
@@ -69,9 +85,80 @@ def test_open_gdbstub_resolves_port_and_probes_with_composed_endpoint():
 
 def test_from_env_threads_passed_config_factory():
     factory = lambda: _config()  # noqa: E731 - terse fixture factory
-    c = RemoteLibvirtConnect.from_env(config_factory=factory)
+    c = RemoteLibvirtConnect.from_env(secret_registry=SecretRegistry(), config_factory=factory)
     # from_env must pass the caller's factory through, not drop it.
     assert c._config_factory is factory
+
+
+def _domain_xml(ssh_port: int, *, ssh_addr: str = "10.0.0.9") -> str:
+    return (
+        f"<domain xmlns:qemu='{_QEMU_NS}'><qemu:commandline>"
+        "<qemu:arg value='-netdev'/>"
+        f"<qemu:arg value='user,id=kdivessh,restrict=on,hostfwd=tcp:{ssh_addr}:{ssh_port}-:22'/>"
+        "</qemu:commandline></domain>"
+    )
+
+
+class _SshReadDomain:
+    def __init__(self, xml: str) -> None:
+        self._xml = xml
+
+    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - libvirt API name
+        return self._xml
+
+
+class _SshReadConn:
+    """A minimal connection returning a canned domain XML for one lookupByName."""
+
+    def __init__(self, xml_by_name: dict[str, str]) -> None:
+        self._xml_by_name = xml_by_name
+
+    def lookupByName(self, name: str) -> _SshReadDomain:  # noqa: N802 - libvirt API name
+        if name not in self._xml_by_name:
+            raise libvirt_error(libvirt.VIR_ERR_NO_DOMAIN)
+        return _SshReadDomain(self._xml_by_name[name])
+
+    def close(self) -> None:
+        pass
+
+
+def _ssh_connect(xml_by_name: dict[str, str], config: RemoteLibvirtConfig) -> RemoteLibvirtConnect:
+    return RemoteLibvirtConnect(
+        config_factory=lambda: config,
+        open_connection=lambda uri: _SshReadConn(xml_by_name),
+        secret_backend_factory=lambda: cast(SecretBackend, RecordingBackend()),
+    )
+
+
+_DOMAIN = "kdive-00000000-0000-0000-0000-0000000000aa"
+
+
+def test_recorded_ssh_endpoint_reads_port_from_live_xml() -> None:
+    config = _config(ssh_addr="10.0.0.9", ssh_port_min=47100, ssh_port_max=47199)
+    connect = _ssh_connect({_DOMAIN: _domain_xml(47101)}, config)
+
+    endpoint = connect.recorded_ssh_endpoint(SystemHandle(_DOMAIN))
+
+    assert endpoint == ("10.0.0.9", 47101)
+
+
+def test_recorded_ssh_endpoint_none_when_parity_inactive() -> None:
+    connect = RemoteLibvirtConnect(config_factory=_config)  # no ssh_addr
+    assert connect.recorded_ssh_endpoint(SystemHandle("kdive-x")) is None
+
+
+def test_recorded_ssh_endpoint_is_a_real_read_not_missing_dependency() -> None:
+    # Regression for the challenge finding: recorded_ssh_endpoint must NOT copy the gdb
+    # resolve_port stub that raises MISSING_DEPENDENCY — it runs on the live worker.
+    config = _config(ssh_addr="10.0.0.9", ssh_port_min=47100, ssh_port_max=47199)
+    connect = _ssh_connect({_DOMAIN: _domain_xml(47101)}, config)
+    assert connect.recorded_ssh_endpoint(SystemHandle(_DOMAIN)) is not None
+
+
+def test_recorded_ssh_endpoint_none_for_absent_domain() -> None:
+    config = _config(ssh_addr="10.0.0.9", ssh_port_min=47100, ssh_port_max=47199)
+    connect = _ssh_connect({}, config)  # no such domain
+    assert connect.recorded_ssh_endpoint(SystemHandle("kdive-missing")) is None
 
 
 def test_open_gdbstub_unset_gdb_addr_is_configuration_error():

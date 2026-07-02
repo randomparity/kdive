@@ -75,9 +75,15 @@ class FaultedProvisioning:
         profile: ProvisioningProfile,
         *,
         overlay_customizers: tuple[Callable[[str], None], ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
         self._draw(system_id, FaultPlane.PROVISION)
-        return self._inner.provision(system_id, profile, overlay_customizers=overlay_customizers)
+        return self._inner.provision(
+            system_id,
+            profile,
+            overlay_customizers=overlay_customizers,
+            bootstrap_pubkey=bootstrap_pubkey,
+        )
 
     def reprovision(
         self,
@@ -85,9 +91,15 @@ class FaultedProvisioning:
         profile: ProvisioningProfile,
         *,
         overlay_customizers: tuple[Callable[[str], None], ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
         self._draw(system_id, FaultPlane.PROVISION)
-        return self._inner.reprovision(system_id, profile, overlay_customizers=overlay_customizers)
+        return self._inner.reprovision(
+            system_id,
+            profile,
+            overlay_customizers=overlay_customizers,
+            bootstrap_pubkey=bootstrap_pubkey,
+        )
 
     def teardown(self, domain_name: str) -> None:
         # Teardown is compensation, not a perturbed op — it must always reap, so no draw.

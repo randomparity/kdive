@@ -53,7 +53,7 @@ def _resolver(endpoint: tuple[str, int] | None) -> MagicMock:
 
 
 def test_argv_is_fixed_and_excludes_the_key() -> None:
-    argv = build_authorize_argv(22022, "/tmp/kdive-bootkey-use-x/id")
+    argv = build_authorize_argv("127.0.0.1", 22022, "/tmp/kdive-bootkey-use-x/id")
     assert argv[0] == "ssh"
     assert "root@127.0.0.1" in argv
     assert "22022" in argv
@@ -65,6 +65,14 @@ def test_argv_is_fixed_and_excludes_the_key() -> None:
     assert "flock" in script and "grep -qxF" in script
     assert "key=$(cat)" in script
     assert argv[argv.index("-i") + 1] == "/tmp/kdive-bootkey-use-x/id"
+
+
+def test_argv_targets_the_given_host_for_remote_endpoint() -> None:
+    # ADR-0291: a remote System's recorded endpoint host is its ACL'd ssh_addr, not loopback.
+    argv = build_authorize_argv("10.0.0.9", 47101, "/tmp/k")
+    assert "root@10.0.0.9" in argv
+    assert "root@127.0.0.1" not in argv
+    assert "47101" in argv
 
 
 def test_handler_unprovisioned_is_configuration_error() -> None:

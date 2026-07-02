@@ -12,6 +12,9 @@ unit-tested with fakes. ``close_transport`` validates the handle and no-ops (con
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
+
+import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.handles import (
@@ -23,14 +26,19 @@ from kdive.providers.ports.lifecycle import (
     TransportHandleData,
 )
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
+from kdive.providers.remote_libvirt.connection.transport import remote_connection
+from kdive.providers.remote_libvirt.lifecycle.xml import recorded_ssh_port_strict
 from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote
 from kdive.providers.shared.debug_common.rsp import rsp_reachable
+from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 
 _GDBSTUB: DebugTransportKind = "gdbstub"
 _DRGN_LIVE: DebugTransportKind = "drgn-live"
 
 type _ResolvePort = Callable[[SystemHandle], int]
 type _Probe = Callable[[str, int], bool]
+type _OpenConnection = Callable[[str], Any]
 
 
 def _config_error(message: str) -> CategorizedError:
@@ -46,19 +54,34 @@ class RemoteLibvirtConnect:
         config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
         resolve_port: _ResolvePort | None = None,
         probe: _Probe | None = None,
+        open_connection: _OpenConnection | None = None,
+        secret_backend_factory: Callable[[], SecretBackend] | None = None,
     ) -> None:
         self._config_factory = config_factory
         self._resolve_port = resolve_port if resolve_port is not None else _real_resolve_port
         self._probe = probe if probe is not None else _real_probe
+        self._open_connection = open_connection if open_connection is not None else _open_libvirt
+        self._secret_backend_factory = secret_backend_factory or (
+            lambda: secret_backend_from_env(registry=SecretRegistry())
+        )
 
     @classmethod
     def from_env(
         cls,
         *,
+        secret_registry: SecretRegistry,
         config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
     ) -> RemoteLibvirtConnect:
-        """Build with the real ``live_vm``-gated domain-XML reader + socket probe."""
-        return cls(config_factory=config_factory)
+        """Build with the real domain-XML readers + socket probe.
+
+        The gdbstub port read stays a ``live_vm``-gated stub (remote gdbstub is not in the shipped
+        proof set); the SSH endpoint read (ADR-0291) is a real production read — ``ssh_info`` /
+        ``authorize_ssh_key`` call it on the live worker — using the mutual-TLS connection.
+        """
+        return cls(
+            config_factory=config_factory,
+            secret_backend_factory=lambda: secret_backend_from_env(registry=secret_registry),
+        )
 
     def open_transport(self, system: SystemHandle, kind: DebugTransportKind) -> TransportHandle:
         """Open the gdbstub or drgn-live transport for ``system``; raise for any other kind.
@@ -106,8 +129,46 @@ class RemoteLibvirtConnect:
             TransportHandleData.decode(handle)
 
     def recorded_ssh_endpoint(self, system: SystemHandle) -> tuple[str, int] | None:
-        """Remote-libvirt discloses no local SSH endpoint (ADR-0271); agent SSH is a follow-up."""
-        return None
+        """Return the recorded ``(ssh_addr, ssh_port)``, or ``None`` when SSH parity is inactive.
+
+        Reads the per-System hostfwd port from the live domain XML over the mutual-TLS connection
+        (ADR-0291) — a real worker read (``ssh_info`` / ``authorize_ssh_key`` call this on the live
+        path), **not** a ``live_vm`` stub. Only the socket ``open`` is the live seam; parsing and
+        orchestration are unit-tested with an injected connection.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` for missing operator config;
+                ``INFRASTRUCTURE_FAILURE`` for a libvirt fault reading the domain (other than the
+                domain being absent, which is ``None``); ``TRANSPORT_FAILURE`` when the TLS connect
+                fails.
+        """
+        config = self._config_factory()
+        if config.ssh_addr is None or config.ssh_port_min is None:
+            return None
+        port = self._read_ssh_port(config, str(system))
+        return None if port is None else (config.ssh_addr, port)
+
+    def _read_ssh_port(self, config: RemoteLibvirtConfig, domain_name: str) -> int | None:
+        with remote_connection(
+            config, self._secret_backend_factory(), open_connection=self._open_connection
+        ) as conn:
+            try:
+                domain = conn.lookupByName(domain_name)
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                    return None
+                raise CategorizedError(
+                    "libvirt error looking up the domain for its SSH endpoint",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={"domain": domain_name},
+                ) from exc
+            return recorded_ssh_port_strict(
+                domain.XMLDesc(), operation="reading ssh endpoint", domain=domain_name
+            )
+
+
+def _open_libvirt(uri: str) -> Any:  # pragma: no cover - live_vm
+    return libvirt.open(uri)
 
 
 def _real_resolve_port(system: SystemHandle) -> int:  # pragma: no cover - live_vm

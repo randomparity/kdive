@@ -89,6 +89,7 @@ class Provisioner(Protocol):
         profile: ProvisioningProfile,
         *,
         overlay_customizers: tuple[Callable[[str], None], ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
         """Create and start a System, returning the provider domain name.
 
@@ -96,6 +97,12 @@ class Provisioner(Protocol):
         freshly-created overlay only — never on a provision retry that reuses an existing one. A
         provider without a local overlay to customize (e.g. a synthetic or remote-volume-backed
         plane) accepts and ignores this argument.
+
+        ``bootstrap_pubkey`` (ADR-0291, #966) is the System's ensured bootstrap **public** key.
+        local-libvirt ignores it (its injection is the pre-boot ``overlay_customizers`` path);
+        remote-libvirt injects it into the running guest over the guest agent when its SSH-parity
+        forward is configured. The two carriers coexist because the injection phases differ
+        (overlay file before boot vs. running guest after agent-ready).
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for invalid provider-specific profile
@@ -123,10 +130,12 @@ class Provisioner(Protocol):
         profile: ProvisioningProfile,
         *,
         overlay_customizers: tuple[Callable[[str], None], ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
         """Replace a System's provider state, returning the new provider domain name.
 
-        ``overlay_customizers`` (ADR-0289, #963) is forwarded the same as :meth:`provision`.
+        ``overlay_customizers`` (ADR-0289, #963) and ``bootstrap_pubkey`` (ADR-0291, #966) are
+        forwarded the same as :meth:`provision`.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for invalid provider-specific profile

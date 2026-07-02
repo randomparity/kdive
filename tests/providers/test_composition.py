@@ -137,18 +137,28 @@ class _BuildProvider:
 
 class _ProvisionProvider:
     def provision(
-        self, system_id: UUID, profile: object, *, overlay_customizers: tuple[object, ...] = ()
+        self,
+        system_id: UUID,
+        profile: object,
+        *,
+        overlay_customizers: tuple[object, ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
-        del overlay_customizers
+        del overlay_customizers, bootstrap_pubkey
         return f"domain-{system_id}"
 
     def teardown(self, domain_name: str) -> None:
         self.torn_down = domain_name
 
     def reprovision(
-        self, system_id: UUID, profile: object, *, overlay_customizers: tuple[object, ...] = ()
+        self,
+        system_id: UUID,
+        profile: object,
+        *,
+        overlay_customizers: tuple[object, ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
-        del overlay_customizers
+        del overlay_customizers, bootstrap_pubkey
         return f"domain-{system_id}"
 
 

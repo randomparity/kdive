@@ -493,15 +493,25 @@ class _FakeProvisioner:
     """A Provisioner stand-in: provision/teardown return a domain name and record nothing."""
 
     def provision(
-        self, system_id: UUID, profile: object, *, overlay_customizers: tuple[object, ...] = ()
+        self,
+        system_id: UUID,
+        profile: object,
+        *,
+        overlay_customizers: tuple[object, ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
-        del overlay_customizers
+        del overlay_customizers, bootstrap_pubkey
         return domain_name_for(system_id)
 
     def reprovision(
-        self, system_id: UUID, profile: object, *, overlay_customizers: tuple[object, ...] = ()
+        self,
+        system_id: UUID,
+        profile: object,
+        *,
+        overlay_customizers: tuple[object, ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
-        del overlay_customizers
+        del overlay_customizers, bootstrap_pubkey
         return domain_name_for(system_id)
 
     def teardown(self, domain_name: str) -> None:
@@ -1056,15 +1066,25 @@ class _RecordingProvisioner:
         self.reprovisioned: list[UUID] = []
 
     def provision(
-        self, system_id: UUID, profile: object, *, overlay_customizers: tuple[object, ...] = ()
+        self,
+        system_id: UUID,
+        profile: object,
+        *,
+        overlay_customizers: tuple[object, ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
-        del overlay_customizers
+        del overlay_customizers, bootstrap_pubkey
         return domain_name_for(system_id)
 
     def reprovision(
-        self, system_id: UUID, profile: object, *, overlay_customizers: tuple[object, ...] = ()
+        self,
+        system_id: UUID,
+        profile: object,
+        *,
+        overlay_customizers: tuple[object, ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
-        del overlay_customizers
+        del overlay_customizers, bootstrap_pubkey
         self.reprovisioned.append(system_id)
         return domain_name_for(system_id)
 

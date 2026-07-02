@@ -29,7 +29,6 @@ from kdive.providers.shared.ssh_connect_retry import SshRetryPolicy, run_ssh_wit
 
 type SshExec = Callable[[list[str], str], None]
 
-_LOOPBACK_HOST = "127.0.0.1"
 _SSH_USER = "root"
 _SSH_CONNECT_TIMEOUT_S = 10
 _SSH_RUN_TIMEOUT_S = 30
@@ -59,8 +58,14 @@ _REMOTE_SCRIPT = (
 )
 
 
-def build_authorize_argv(port: int, key_path: str) -> list[str]:
-    """Build the fixed loopback SSH argv that runs the append script (key arrives on stdin)."""
+def build_authorize_argv(host: str, port: int, key_path: str) -> list[str]:
+    """Build the fixed SSH argv that runs the append script (key arrives on stdin).
+
+    ``host`` is the recorded SSH endpoint host: ``127.0.0.1`` for local-libvirt's loopback
+    forward, or the operator-ACL'd ``ssh_addr`` for a remote-libvirt System (ADR-0291). The
+    remote path is unspoofable-loopback no longer, so ``StrictHostKeyChecking=no`` is an accepted,
+    ACL-mitigated risk (ADR-0291); host-key pinning is a named future hardening.
+    """
     return [
         "ssh",
         "-i",
@@ -75,7 +80,7 @@ def build_authorize_argv(port: int, key_path: str) -> list[str]:
         f"ConnectTimeout={_SSH_CONNECT_TIMEOUT_S}",
         "-p",
         str(port),
-        f"{_SSH_USER}@{_LOOPBACK_HOST}",
+        f"{_SSH_USER}@{host}",
         # Exactly one post-host argument: ssh sends it verbatim; the remote login shell runs it as a
         # single `-c` script. Adding more argv here would be space-joined and re-parsed remotely.
         _REMOTE_SCRIPT,
@@ -138,8 +143,8 @@ async def authorize_ssh_key_handler(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "ssh_not_provisioned"},
         )
-    _host, port = endpoint
+    host, port = endpoint
     private_key = await load_system_bootstrap_private_key(conn, system_id)
     with materialized_private_key(private_key) as key_path:
-        ssh_exec(build_authorize_argv(port, str(key_path)), payload.public_key)
+        ssh_exec(build_authorize_argv(host, port, str(key_path)), payload.public_key)
     return None

@@ -256,14 +256,21 @@ class FakeProvisioning:
         self.torn_down: list[str] = []
         self.reprovisioned: list[UUID] = []
         self.overlay_customizers: list[tuple[Any, ...]] = []
+        self.bootstrap_pubkeys: list[str | None] = []
         self._provision_error = provision_error
         self._reprovision_error = reprovision_error
 
     def provision(
-        self, system_id: UUID, profile: Any, *, overlay_customizers: tuple[Any, ...] = ()
+        self,
+        system_id: UUID,
+        profile: Any,
+        *,
+        overlay_customizers: tuple[Any, ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
         self.provisioned.append(system_id)
         self.overlay_customizers.append(overlay_customizers)
+        self.bootstrap_pubkeys.append(bootstrap_pubkey)
         if self._provision_error:
             raise CategorizedError("boom", category=ErrorCategory.PROVISIONING_FAILURE)
         return f"kdive-{system_id}"
@@ -272,10 +279,16 @@ class FakeProvisioning:
         self.torn_down.append(domain_name)
 
     def reprovision(
-        self, system_id: UUID, profile: Any, *, overlay_customizers: tuple[Any, ...] = ()
+        self,
+        system_id: UUID,
+        profile: Any,
+        *,
+        overlay_customizers: tuple[Any, ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
         self.reprovisioned.append(system_id)
         self.overlay_customizers.append(overlay_customizers)
+        self.bootstrap_pubkeys.append(bootstrap_pubkey)
         if self._reprovision_error:
             raise CategorizedError("boom", category=ErrorCategory.PROVISIONING_FAILURE)
         return f"kdive-{system_id}"

@@ -8,7 +8,10 @@ from typing import Protocol
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.lifecycle.xml import recorded_gdb_port_strict
+from kdive.providers.remote_libvirt.lifecycle.xml import (
+    recorded_gdb_port_strict,
+    recorded_ssh_port_strict,
+)
 
 DOMAIN_PREFIX = "kdive-"
 
@@ -85,6 +88,36 @@ def used_gdb_ports(conn: GdbPortConn) -> dict[str, int]:
             if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
                 continue
             raise _infra("enumerating gdbstub ports") from exc
+        if port is not None:
+            used[name] = port
+    return used
+
+
+def used_ssh_ports(conn: GdbPortConn) -> dict[str, int]:
+    """SSH hostfwd ports recorded by defined kdive domains; a domain vanishing mid-walk is skipped.
+
+    Sibling of :func:`used_gdb_ports` for the per-System SSH forward (ADR-0291); the allocator
+    (:func:`allocate_gdb_port`, a generic lowest-free-in-range helper) is shared.
+    """
+    used: dict[str, int] = {}
+    try:
+        domains = conn.listAllDomains()
+    except libvirt.libvirtError as exc:
+        raise _infra("listing domains for ssh port enumeration") from exc
+    for domain in domains:
+        try:
+            name = domain.name()
+            if not name.startswith(DOMAIN_PREFIX):
+                continue
+            port = recorded_ssh_port_strict(
+                domain.XMLDesc(),
+                operation="enumerating ssh ports",
+                domain=name,
+            )
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                continue
+            raise _infra("enumerating ssh ports") from exc
         if port is not None:
             used[name] = port
     return used

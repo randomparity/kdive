@@ -195,8 +195,13 @@ class LocalLibvirtProvisioning:
         profile: ProvisioningProfile,
         *,
         overlay_customizers: tuple[OverlayCustomizer, ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
         """Define and start the tagged domain; return its name.
+
+        ``bootstrap_pubkey`` (ADR-0291) is ignored here: local-libvirt injects the bootstrap key
+        pre-boot via ``overlay_customizers`` (the ``virt-customize`` path), not into the running
+        guest. It is accepted only to satisfy the ``Provisioner`` port.
 
         Idempotent: ``defineXML`` redefines an existing domain, and a ``create`` that reports
         the domain is **already running** (``VIR_ERR_OPERATION_INVALID``) is the desired
@@ -216,6 +221,7 @@ class LocalLibvirtProvisioning:
                 ``PROVISIONING_FAILURE`` for domain/rootfs creation failures, or
                 ``INFRASTRUCTURE_FAILURE`` for provider control-plane or overlay IO faults.
         """
+        del bootstrap_pubkey  # local injects pre-boot via overlay_customizers (ADR-0291)
         section = profile.provider.local_libvirt
         base = self._materialize_rootfs(section.rootfs, system_id, profile.arch)
         baseline = self._prepare_baseline_kernel(system_id, base)
@@ -377,6 +383,7 @@ class LocalLibvirtProvisioning:
         profile: ProvisioningProfile,
         *,
         overlay_customizers: tuple[OverlayCustomizer, ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
         """Wipe the System's current install and define+start the new profile in place.
 
@@ -395,6 +402,7 @@ class LocalLibvirtProvisioning:
             CategorizedError: ``PROVISIONING_FAILURE`` if the new domain cannot be
                 defined/started; ``INFRASTRUCTURE_FAILURE`` if the wipe cannot be completed.
         """
+        del bootstrap_pubkey  # local injects pre-boot via overlay_customizers (ADR-0291)
         self.teardown(domain_name_for(system_id))
         return self.provision(system_id, profile, overlay_customizers=overlay_customizers)
 

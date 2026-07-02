@@ -32,6 +32,7 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     agent_channel_connected,
     disk_pool,
     recorded_gdb_port_strict,
+    recorded_ssh_port,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error
@@ -189,6 +190,45 @@ def test_recorded_gdb_port_roundtrip() -> None:
         gdb_port=47007,
     )
     assert recorded_gdb_port(xml) == 47007
+
+
+def test_render_appends_ssh_hostfwd_when_both_set() -> None:
+    xml = render_domain_xml(
+        SYSTEM_ID,
+        _remote_profile(),
+        pool="p",
+        volume="v",
+        gdb_addr="10.0.0.5",
+        gdb_port=47007,
+        ssh_addr="10.0.0.9",
+        ssh_port=47101,
+    )
+    args = [
+        arg.get("value")
+        for arg in fromstring(xml).findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
+    ]
+    assert "-netdev" in args
+    assert "user,id=kdivessh,restrict=on,hostfwd=tcp:10.0.0.9:47101-:22" in args
+    assert "virtio-net-pci,netdev=kdivessh,addr=0x10" in args
+    assert recorded_ssh_port(xml) == 47101
+
+
+@pytest.mark.parametrize("ssh_addr,ssh_port", [(None, None), ("10.0.0.9", None), (None, 47101)])
+def test_render_omits_ssh_hostfwd_unless_both_set(
+    ssh_addr: str | None, ssh_port: int | None
+) -> None:
+    xml = render_domain_xml(
+        SYSTEM_ID,
+        _remote_profile(),
+        pool="p",
+        volume="v",
+        gdb_addr="10.0.0.5",
+        gdb_port=47007,
+        ssh_addr=ssh_addr,
+        ssh_port=ssh_port,
+    )
+    assert "kdivessh" not in xml
+    assert recorded_ssh_port(xml) is None
 
 
 @pytest.mark.parametrize(
@@ -778,6 +818,82 @@ def test_provision_defines_starts_and_waits_for_agent(tmp_path: Path) -> None:
         for arg in fromstring(domain.xml).findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
     ]
     assert gdb_args == ["-gdb", "tcp:10.0.0.5:47001"]
+
+
+class _RecordingInjector:
+    """Records inject(domain, pubkey) calls; optionally raises to simulate an injection failure."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[tuple[str, str]] = []
+
+    def inject(self, domain: Any, pubkey: str) -> None:
+        self.calls.append((domain.name(), pubkey))
+        if self.fail:
+            raise CategorizedError(
+                "simulated guest-agent injection failure",
+                category=ErrorCategory.PROVISIONING_FAILURE,
+            )
+
+
+_SSH_CONFIG_KWARGS = {"ssh_addr": "10.0.0.9", "ssh_port_min": 47100, "ssh_port_max": 47102}
+
+
+def test_provision_renders_ssh_hostfwd_and_injects_key_when_parity_active(tmp_path: Path) -> None:
+    conn = _conn_with_base()
+    injector = _RecordingInjector()
+    provisioner, _ = _provisioner(
+        conn, tmp_path, config=_config(**_SSH_CONFIG_KWARGS), bootstrap_injector=injector
+    )
+
+    provisioner.provision(SYSTEM_ID, _remote_profile(), bootstrap_pubkey="ssh-ed25519 AAAA k")
+
+    xml = conn.domains[DOMAIN_NAME].xml
+    port = recorded_ssh_port(xml)
+    assert port is not None and 47100 <= port <= 47102
+    assert "hostfwd=tcp:10.0.0.9:" in xml
+    # The key is injected over the guest agent exactly once, after the agent connects.
+    assert injector.calls == [(DOMAIN_NAME, "ssh-ed25519 AAAA k")]
+
+
+def test_provision_no_ssh_render_or_inject_when_parity_inactive(tmp_path: Path) -> None:
+    conn = _conn_with_base()
+    injector = _RecordingInjector()
+    # Default _config() has no ssh_addr → SSH parity inactive.
+    provisioner, _ = _provisioner(conn, tmp_path, bootstrap_injector=injector)
+
+    provisioner.provision(SYSTEM_ID, _remote_profile(), bootstrap_pubkey="ssh-ed25519 AAAA k")
+
+    assert "kdivessh" not in conn.domains[DOMAIN_NAME].xml
+    assert injector.calls == []
+
+
+def test_provision_renders_forward_but_skips_inject_when_pubkey_none(tmp_path: Path) -> None:
+    conn = _conn_with_base()
+    injector = _RecordingInjector()
+    provisioner, _ = _provisioner(
+        conn, tmp_path, config=_config(**_SSH_CONFIG_KWARGS), bootstrap_injector=injector
+    )
+
+    provisioner.provision(SYSTEM_ID, _remote_profile(), bootstrap_pubkey=None)
+
+    assert recorded_ssh_port(conn.domains[DOMAIN_NAME].xml) is not None
+    assert injector.calls == []
+
+
+def test_provision_injection_failure_propagates_and_leaves_domain(tmp_path: Path) -> None:
+    conn = _conn_with_base()
+    injector = _RecordingInjector(fail=True)
+    provisioner, _ = _provisioner(
+        conn, tmp_path, config=_config(**_SSH_CONFIG_KWARGS), bootstrap_injector=injector
+    )
+
+    with pytest.raises(CategorizedError) as excinfo:
+        provisioner.provision(SYSTEM_ID, _remote_profile(), bootstrap_pubkey="ssh-ed25519 AAAA k")
+
+    assert excinfo.value.category is ErrorCategory.PROVISIONING_FAILURE
+    # The domain is left defined+running (diagnosable; a retry re-injects idempotently).
+    assert conn.domains[DOMAIN_NAME].active
 
 
 def test_provision_renders_configured_network_and_machine(tmp_path: Path) -> None:

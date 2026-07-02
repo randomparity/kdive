@@ -74,8 +74,15 @@ class _TrackingProvisioner:
         self.reprovisioned: list[UUID] = []
         self.torn_down: list[str] = []
 
-    def provision(self, system_id: UUID, profile: Any, *, overlay_customizers: Any = ()) -> str:
-        del overlay_customizers
+    def provision(
+        self,
+        system_id: UUID,
+        profile: Any,
+        *,
+        overlay_customizers: Any = (),
+        bootstrap_pubkey: str | None = None,
+    ) -> str:
+        del overlay_customizers, bootstrap_pubkey
         name = f"kdive-{system_id}"
         self.provisioned.append(system_id)
         self.live.add(name)
@@ -85,8 +92,15 @@ class _TrackingProvisioner:
         self.torn_down.append(domain_name)
         self.live.discard(domain_name)
 
-    def reprovision(self, system_id: UUID, profile: Any, *, overlay_customizers: Any = ()) -> str:
-        del overlay_customizers
+    def reprovision(
+        self,
+        system_id: UUID,
+        profile: Any,
+        *,
+        overlay_customizers: Any = (),
+        bootstrap_pubkey: str | None = None,
+    ) -> str:
+        del overlay_customizers, bootstrap_pubkey
         name = f"kdive-{system_id}"
         self.reprovisioned.append(system_id)
         self.live.add(name)
@@ -190,8 +204,15 @@ def test_provision_failure_marks_system_failed_and_raises_terminally(migrated_ur
     # (job `succeeded` while the System is `failed`). The handler re-raises the categorized error
     # marked `terminal` so the worker dead-letters at once and the real reason reaches the agent.
     class _FailingProvisioner(_TrackingProvisioner):
-        def provision(self, system_id: UUID, profile: Any, *, overlay_customizers: Any = ()) -> str:
-            del overlay_customizers
+        def provision(
+            self,
+            system_id: UUID,
+            profile: Any,
+            *,
+            overlay_customizers: Any = (),
+            bootstrap_pubkey: str | None = None,
+        ) -> str:
+            del overlay_customizers, bootstrap_pubkey
             raise CategorizedError(
                 "base image volume not staged",
                 category=ErrorCategory.CONFIGURATION_ERROR,

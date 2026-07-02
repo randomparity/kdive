@@ -205,6 +205,8 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_REQUIRE_DOCKER` | `0` | Set to 1 to fail (not skip) the disposable-Postgres/MinIO fixtures when Docker is absent. |
 | `KDIVE_SEAM_DOMAIN` | — | libvirt domain name for the in-target guest-agent seam live test. |
 | `KDIVE_SEAM_URI` | — | libvirt connection URI for the in-target guest-agent seam live test. |
+| `KDIVE_SSH_PARITY_DOMAIN` | — | Running, agent-ready remote-libvirt domain name for the SSH-parity bootstrap-key injection live test (#966); unset → that test skips. |
+| `KDIVE_SSH_PARITY_URI` | — | libvirt qemu+tls connection URI for the SSH-parity injection live test (#966). |
 | `KDIVE_STACK_BASE_URL` | — | Base URL of a running kdive server for the live_stack HTTP tier; unset → that tier skips. |
 | `KDIVE_TEST_BUILD_CONFIG` | — | Path or file:// URL to a kernel .config (kdump + debuginfo) for the live_vm real-make build-id test; unset → that test skips. |
 

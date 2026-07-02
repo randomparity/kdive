@@ -302,7 +302,14 @@ def _register_systems_ssh_info(
             str, Field(description="The ready System to return SSH coordinates for.")
         ],
     ) -> ToolResponse:
-        """Return SSH connection coordinates (user, host, port, jump_host) for a ready System."""
+        """Return SSH connection coordinates (user, host, port, jump_host) for a ready System.
+
+        Available on any ready System whose provider exposes an SSH forward: local-libvirt always,
+        and remote-libvirt only when the host is configured for SSH parity. Reports
+        ``ssh_not_provisioned`` when there is no forward. For a remote System the endpoint is read
+        live from the host, so an unreachable host surfaces as a transport failure rather than a
+        cached value.
+        """
         return await _ssh_info(pool, current_context(), system_id, resolver=resolver)
 
 
