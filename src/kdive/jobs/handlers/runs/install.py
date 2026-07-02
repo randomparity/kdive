@@ -12,10 +12,10 @@ from kdive.db.idempotency import claim_run_step, complete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.operations.jobs import Job
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.runs.common import abandon_run_step_best_effort
-from kdive.jobs.payloads import InstallPayload, load_payload
+from kdive.jobs.payloads import InstallPayload, RunPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.lifecycle import InstallRequest
@@ -37,9 +37,21 @@ async def install_handler(
     *,
     resolver: ProviderResolver,
 ) -> str | None:
-    """Stage the built kernel for direct-kernel boot, recording the `install` step."""
-    payload = load_payload(job, InstallPayload)
-    run_id = UUID(payload.run_id)
+    """Stage the built kernel for direct-kernel boot, recording the `install` step.
+
+    Serves two callers: a standalone ``JobKind.INSTALL`` job (which may carry a ``cmdline``
+    override, ADR-0299) and the composite ``build_install_boot`` install phase (a
+    ``JobKind.BUILD_INSTALL_BOOT`` job whose ``run_only`` payload bakes its cmdline at build, so it
+    carries no install-time override). The override is read only for a genuine ``INSTALL`` job;
+    ``load_payload`` cannot decode an ``InstallPayload`` from the composite's other-kinded job.
+    """
+    if job.kind is JobKind.INSTALL:
+        install_payload = load_payload(job, InstallPayload)
+        run_id = UUID(install_payload.run_id)
+        override = install_payload.cmdline
+    else:
+        run_id = UUID(load_payload(job, RunPayload).run_id)
+        override = None
     run = await RUNS.get(conn, run_id)
     if run is None or run.kernel_ref is None:
         raise CategorizedError(
@@ -61,7 +73,6 @@ async def install_handler(
     installer = runtime.installer
     method = install_method_for(system, runtime.profile_policy)
     kernel_ref = run.kernel_ref
-    override = payload.cmdline
     build_result = await existing_build_result(conn, run_id)
     build_extra = build_result.cmdline if build_result is not None else None
     # The applied client extra (ADR-0299): the install override when supplied, else the build-baked

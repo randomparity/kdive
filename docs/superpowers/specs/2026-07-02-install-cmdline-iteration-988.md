@@ -198,7 +198,9 @@ row was deleted, `runs.boot`'s enqueue sees an absent ledger row and recycles th
 ## Out of scope
 
 - Per-boot cmdline history / an audit of every variant booted (the ledger holds the current
-  install only; the audit log records each `runs.install`).
+  install only; `runs.get` `data.installed_cmdline` shows the live variant; each `runs.install`
+  is audited with the cmdline in its one-way `args_digest`, distinguishing variants as distinct
+  operations without retaining the readable strings).
 - A `cmdline` on `runs.boot` (iteration is an install-plane concern; boot power-cycles whatever
   install defined).
 - Capping cmdline length beyond the existing non-blank validation (parity with the build path,

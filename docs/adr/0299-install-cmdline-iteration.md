@@ -82,9 +82,11 @@ ledger as the authoritative state and the job dedup subordinate to it.
 - The `run_steps` ledger becomes the explicit source of truth for step completion; the job dedup
   key is a subordinate cache of the current attempt. This is a small conceptual shift but matches
   what the code already does (a failed step deletes its ledger row to force a retry).
-- The ledger holds only the **current** install/boot; there is no per-variant boot history. Each
-  `runs.install` is still audited, so the sequence of variants is recoverable from the audit log,
-  not the ledger.
+- The ledger holds only the **current** install/boot; there is no per-variant boot history. The
+  live variant is observable via `runs.get` `data.installed_cmdline`. Each `runs.install` is
+  audited with the cmdline folded into its (one-way) `args_digest`, so distinct variants are
+  distinguishable as distinct operations, but the audit does not retain the readable cmdline
+  strings — per-variant history is out of scope (see the spec).
 - Re-staging is rejected while a step is `running`; a sweeping agent must let the prior
   install/boot settle (poll to terminal) before the next variant. This trades a small amount of
   concurrency for freedom from mid-flight ledger/job races.

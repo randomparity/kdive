@@ -5579,6 +5579,74 @@ def test_step_progress_reads_installed_cmdline(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_install_handler_accepts_composite_phase_job(migrated_url: str) -> None:
+    """The composite build_install_boot install phase passes a BUILD_INSTALL_BOOT-kind job.
+
+    Its run_only payload bakes cmdline at build (no install-time override), so the handler must
+    decode it and apply the build-ledger cmdline — regression for the InstallPayload dispatch that
+    load_payload(InstallPayload) would otherwise reject on the composite's differently-kinded job.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(
+                pool, build_profile={**_VALID_BUILD, "cmdline": "dhash_entries=9"}
+            )
+            # Exactly what composite._phase_job(job, RunPayload(run_id)) produces: kind carried
+            # from the composite job, payload a bare {run_id}.
+            phase_job = Job(
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                kind=JobKind.BUILD_INSTALL_BOOT,
+                payload={"run_id": run_id},
+                state=JobState.RUNNING,
+                max_attempts=3,
+                authorizing={"principal": "user-1", "agent_session": "s", "project": "proj"},
+                dedup_key=f"{run_id}:composite",
+            )
+            installer = _FakeInstaller()
+            async with pool.connection() as conn:
+                await runs_handlers.install_handler(
+                    conn,
+                    phase_job,
+                    resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
+                )
+            # No override on the composite path: the build-ledger cmdline is applied and recorded.
+            assert installer.calls[0].cmdline == "console=ttyS0 root=/dev/vda dhash_entries=9"
+            assert await _install_step_cmdline(pool, run_id) == "dhash_entries=9"
+
+    asyncio.run(_run())
+
+
+def test_install_cmdline_distinguishes_audit_digest(migrated_url: str) -> None:
+    """Different install cmdlines produce different audit args_digests (audit integrity).
+
+    The audit stores a one-way args_digest, so the cmdline is not reverse-readable; including it
+    ensures a re-stage to a new cmdline is not audited identically to the prior install.
+    """
+
+    async def _digest(pool: AsyncConnectionPool, run_id: str, cmdline: str | None) -> str:
+        await install_run(pool, _ctx(), run_id, cmdline=cmdline)
+        async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT args_digest FROM audit_log WHERE tool='runs.install' AND object_id=%s",
+                (run_id,),
+            )
+            row = await cur.fetchone()
+        assert row is not None
+        return row["args_digest"]
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            base = await _digest(pool, await _seed_succeeded_run(pool), None)
+            one = await _digest(pool, await _seed_succeeded_run(pool), "dhash_entries=1")
+            two = await _digest(pool, await _seed_succeeded_run(pool), "dhash_entries=2")
+        assert base != one and one != two and base != two  # distinct digest per cmdline
+
+    asyncio.run(_run())
+
+
 def test_install_handler_records_build_extra_when_no_override(migrated_url: str) -> None:
     """With no payload override, the recorded applied cmdline is the build-baked extra."""
 

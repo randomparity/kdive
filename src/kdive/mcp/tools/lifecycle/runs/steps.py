@@ -112,6 +112,12 @@ async def _restage_and_enqueue_install(
             f"{run.id}:install",
             recycle_terminal=recycle,
         )
+        # Include the cmdline in the audit args so a re-stage to a new cmdline is not audited
+        # identically to the prior install (the args_digest is one-way, so this distinguishes the
+        # operations without making the cmdline reverse-readable). Omitted when no override.
+        audit_args: dict[str, str] = {"run_id": str(run.id)}
+        if cmdline is not None:
+            audit_args["cmdline"] = cmdline.strip()
         await audit.record(
             conn,
             ctx,
@@ -120,7 +126,7 @@ async def _restage_and_enqueue_install(
                 object_kind="runs",
                 object_id=run.id,
                 transition="install",
-                args={"run_id": str(run.id)},
+                args=audit_args,
                 project=run.project,
             ),
         )
