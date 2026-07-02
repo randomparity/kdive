@@ -193,6 +193,8 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `KDIVE_ARTIFACT_DIR` | — | Directory the live_stack spine writes run artifacts to (default: an out-of-tree temp dir). |
+| `KDIVE_EL9_REACHABILITY_DOMAIN` | — | Running, agent-ready EL9/RHEL-family remote-libvirt domain name for the host-model CPU reachability live test (#975, ADR-0297); unset → that test skips. |
+| `KDIVE_EL9_REACHABILITY_URI` | — | libvirt qemu+tls connection URI for the EL9 host-model CPU reachability live test (#975, ADR-0297). |
 | `KDIVE_GUEST_IMAGE` | — | Path to the operator-built local-libvirt guest rootfs qcow2 the live_stack spine boots; unset → the live_stack suite skips. |
 | `KDIVE_GUEST_IMAGE_DEBIAN` | — | Path to a debian-family *-kdive-ready qcow2 for the per-family SSH-reachability live_stack test (#956, ADR-0294); unset → the debian parameter of that test skips. |
 | `KDIVE_GUEST_IMAGE_RHEL` | — | Path to a rhel-family (rocky/centos/fedora) *-kdive-ready qcow2 for the per-family SSH-reachability live_stack test (#956, ADR-0294); unset → the rhel parameter skips. |

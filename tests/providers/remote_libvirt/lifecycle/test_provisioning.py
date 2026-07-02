@@ -125,6 +125,33 @@ def test_render_domain_xml_carries_agent_channel_gdb_and_metadata() -> None:
     assert os_type.get("machine") == "pc"
 
 
+def test_render_domain_xml_pins_host_model_cpu_for_el9_baseline() -> None:
+    """The System domain must carry a host-model CPU so EL9 guests meet x86-64-v2 (#975).
+
+    Without a ``<cpu>`` element QEMU defaults to ``qemu64`` (x86-64-v1); EL9/RHEL-family glibc
+    requires x86-64-v2, so the guest's ``ld.so`` aborts PID 1 before userspace and the
+    guest-agent never answers (unreachable). host-model synthesizes a portable, migratable
+    baseline that is >= v2 on any modern host, chosen over host-passthrough (ADR-0294's local
+    fix) because a remote fleet may span heterogeneous hosts (ADR-0297). The element sits
+    after ``<vcpu>`` and before ``<os>``, matching the local renderer's ordering.
+    """
+    xml = render_domain_xml(
+        SYSTEM_ID,
+        _remote_profile(),
+        pool="kdive-pool",
+        volume=overlay_volume_name(SYSTEM_ID),
+        gdb_addr="10.0.0.5",
+        gdb_port=47001,
+    )
+    root = fromstring(xml)
+    cpu = root.find("./cpu")
+    assert cpu is not None, "domain XML must carry a <cpu> element"
+    assert cpu.get("mode") == "host-model"
+    children = [child.tag for child in root]
+    assert children.index("cpu") == children.index("vcpu") + 1
+    assert children.index("cpu") < children.index("os")
+
+
 def test_render_domain_xml_uses_configured_machine() -> None:
     xml = render_domain_xml(
         SYSTEM_ID,
