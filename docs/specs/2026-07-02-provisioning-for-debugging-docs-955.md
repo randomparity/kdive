@@ -35,6 +35,12 @@ The provision-bound knobs, verified against source:
   the guest credential through this profile reference (`.../profile_policy.py`,
   `src/kdive/images/capability_signals.py`). A profile that does not opt into live
   introspection leaves it `None`, and the transport has no credential to reach the guest.
+  This reference is **necessary but not sufficient**: live drgn introspection SSH-execs
+  `kdive-drgn` *inside the guest* (`.../debug/introspect.py`; ADR-0218/0219), so it also
+  needs a drgn-capable guest image and an SSH-reachable guest at runtime (loopback
+  hostfwd, #697). The guide frames `ssh_credential_ref` as the provision-time knob without
+  which the transport cannot reach the guest at all — not as a standalone switch that
+  turns live introspection on.
 
 ## Goals
 
@@ -68,8 +74,11 @@ Reinforce it at the two points an agent lands when it hits the trap:
 
 - **`docs/guide/toolsets/debug.md`** — a short note that a live GDB session requires the
   System to have been provisioned with the profile's `debug` section `gdbstub: true`;
-  otherwise `debug.start_session` fails `configuration_error` and the only remedy is
-  reprovision. Points back to the index section.
+  otherwise `debug.start_session` fails with a `configuration_error` telling you to
+  reprovision with gdbstub set, and the only remedy is reprovision. The note **paraphrases**
+  this behavior rather than quoting the verbatim source error string: no guard ties a
+  served doc's prose to a source string, so an embedded quote would rot silently if the
+  message changes. Points back to the index section.
 - **`docs/guide/toolsets/systems.md`** — a short note in the provisioning subsection that
   the `debug` flags and live-ssh credential are bound at provision and cannot be added to
   a ready System, cross-referencing the index section.
