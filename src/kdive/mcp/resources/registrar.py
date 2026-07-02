@@ -151,6 +151,39 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
             "How each systems.* tool helps: provision, reprovision, and reach the target over SSH."
         ),
     ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/introspect.md",
+        source="docs/guide/toolsets/introspect.md",
+        content_file="toolsets-introspect.md",
+        name="toolset-introspect",
+        title="introspect toolset",
+        description=(
+            "How each introspect.* tool helps: programmable, non-halting drgn introspection of a "
+            "live guest or a captured vmcore."
+        ),
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/postmortem.md",
+        source="docs/guide/toolsets/postmortem.md",
+        content_file="toolsets-postmortem.md",
+        name="toolset-postmortem",
+        title="postmortem toolset",
+        description=(
+            "How each vmcore.* and postmortem.* tool helps: capture a crashed kernel's vmcore, "
+            "then triage or analyze it with crash(8)."
+        ),
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/toolsets/control.md",
+        source="docs/guide/toolsets/control.md",
+        content_file="toolsets-control.md",
+        name="toolset-control",
+        title="control toolset",
+        description=(
+            "How each control.* tool helps: deliberately induce a crash, send a diagnostic SysRq, "
+            "or drive target power."
+        ),
+    ),
 )
 
 

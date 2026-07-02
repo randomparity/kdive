@@ -22,8 +22,10 @@ the first tool to call.
    most investigation time goes; see the reproduce-and-capture loop below.
 7. **Observe evidence** — `runs.get` for status and console access, `artifacts.list` and
    `artifacts.get` for logs and other files.
-8. **Debug live** — `debug.start_session`, then breakpoints, memory, and stack tools.
-9. **Triage a crash** — `vmcore.fetch`, then `postmortem.triage`.
+8. **Debug live** — `debug.start_session`, then breakpoints, memory, and stack tools; or
+   `introspect.run` for non-halting drgn introspection. See the debug and introspect guides.
+9. **Triage a crash** — induce one deliberately with `control.force_crash` if needed, then
+   `vmcore.fetch` and `postmortem.triage`. See the control and postmortem guides.
 10. **Release** — `allocations.release` when done.
 
 Long steps (provision, build, install, boot, capture) return a job handle; poll it with
@@ -92,6 +94,9 @@ needs them.
 | artifacts | Fetch run evidence (logs, console, vmlinux) and upload builds | resource://kdive/docs/guide/toolsets/artifacts.md |
 | debug | Live GDB kernel debugging — breakpoints, memory, registers, stacks | resource://kdive/docs/guide/toolsets/debug.md |
 | systems | Provision, reprovision, and reach the target system over SSH | resource://kdive/docs/guide/toolsets/systems.md |
+| introspect | Non-halting drgn introspection of a live guest or a captured vmcore | resource://kdive/docs/guide/toolsets/introspect.md |
+| control | Deliberately induce a crash, send a diagnostic SysRq, drive power | resource://kdive/docs/guide/toolsets/control.md |
+| postmortem | Capture a crashed kernel's vmcore, then triage or analyze it | resource://kdive/docs/guide/toolsets/postmortem.md |
 
 For the shape every tool result returns, read
 resource://kdive/docs/guide/response-envelope.md. Clients that list MCP prompts also have
