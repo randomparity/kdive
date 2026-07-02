@@ -25,7 +25,13 @@ from kdive.health.heartbeat import Heartbeat
 from kdive.jobs import queue
 from kdive.jobs import worker as worker_module
 from kdive.jobs.models import HandlerRegistry
-from kdive.jobs.payloads import Authorizing, BuildPayload, RunPayload, load_payload
+from kdive.jobs.payloads import (
+    Authorizing,
+    BuildPayload,
+    InstallPayload,
+    RunPayload,
+    load_payload,
+)
 from kdive.jobs.worker import Worker, WorkerConfig
 from kdive.jobs.worker_telemetry import WorkerTelemetry
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -281,10 +287,10 @@ def test_terminal_run_job_failure_marks_owning_run_failed(migrated_url: str, kin
             reg = HandlerRegistry()
             reg.register(kind, raises_uncategorized)
             worker = _worker(pool, reg, worker_id="w1")
-            payload = (
+            payload: RunPayload = (
                 BuildPayload(run_id=run_id, build_host_id=str(WORKER_LOCAL_ID))
                 if kind is JobKind.BUILD
-                else RunPayload(run_id=run_id)
+                else InstallPayload(run_id=run_id)
             )
             async with pool.connection() as conn:
                 job = await queue.enqueue(
