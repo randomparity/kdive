@@ -13,6 +13,7 @@ from pathlib import Path
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildPlane, RootfsBuildSpec
 from kdive.images.rootfs_specs import catalog_rootfs_build
+from kdive.images.staged_provenance import write_sidecar
 from kdive.providers.assembly.composition import build_local_rootfs_build_plane
 
 _log = logging.getLogger(__name__)
@@ -130,6 +131,7 @@ def run_build_fs(args: argparse.Namespace) -> None:
     output: RootfsBuildOutput = plane.build(params.spec)
     dest = Path(params.dest).resolve()
     _publish_rootfs(output, dest)
+    _write_provenance_sidecar(dest, output)
     _log.info(
         "built %s rootfs %s digest=%s; set KDIVE_GUEST_IMAGE to this path",
         params.kind,
@@ -137,6 +139,19 @@ def run_build_fs(args: argparse.Namespace) -> None:
         output.digest,
     )
     print(f"export KDIVE_GUEST_IMAGE={shlex.quote(str(dest))}")
+
+
+def _write_provenance_sidecar(dest: Path, output: RootfsBuildOutput) -> None:
+    """Record the build's provenance beside the published qcow2 for the reconcile (#977, ADR-0296).
+
+    Advisory: the qcow2 is the primary artifact, so a sidecar-write failure is logged and swallowed
+    rather than failing the build — the row simply reads ``unverified`` until the next build, as it
+    does today.
+    """
+    try:
+        write_sidecar(dest, provenance=output.provenance)
+    except OSError:
+        _log.warning("could not write provenance sidecar for %s; skipping", dest, exc_info=True)
 
 
 def _kind_for_capabilities(capabilities: tuple[str, ...]) -> str:
