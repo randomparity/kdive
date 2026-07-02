@@ -12,34 +12,43 @@ cloud-init and staged no NIC-up config, while a follow-up comment reported the r
 family failing identically (banner-exchange timeout) even with its NetworkManager
 DHCP keyfile present.
 
-**The primary defect no longer reproduces at HEAD.** PR#964 (ADR-0288, #962), merged
-after both #956 comments were written, resolved both root causes uniformly:
+**The debian defect was fixed by #962; the rhel/EL9 defect was not, and a new
+per-family live test proved it still reproduces at HEAD.** PR#964 (ADR-0288, #962),
+merged after both #956 comments, routed both families' first-boot through
+`cloud_init_first_boot_args(ctx)` (baked NoCloud seed + `99-kdive.cfg` `dhcp4` drop-in;
+`kdive-ready` ordered `After=network-online.target`) and was live-proven on **debian** —
+but never live-proved rhel. Building the per-family test (below) and running it on a KVM
+host showed `rocky-kdive-ready-9` still fails `transport_failure` on a from-scratch
+current-HEAD image.
 
-- Both families now route first-boot through `cloud_init_first_boot_args(ctx)`
-  (`rhel.py`, `debian.py`), which bakes a NoCloud seed plus a `99-kdive.cfg` drop-in
-  declaring `dhcp4: true` / `match: {name: "e*"}`, strips any base network-disable
-  drop-in, and removes `/etc/cloud/cloud-init.disabled`. The hand-rolled
-  NetworkManager SSH-NIC keyfile was deleted entirely.
-- `readiness_unit()` now orders `kdive-ready` `After=network-online.target`
-  (+ `Wants=`), so the serial `ready` marker implies the cloud-init DHCP lease is up —
-  closing the exact race (`authorize_ssh_key` at `ready` races the lease →
-  `transport_failure`) the rhel-family comment hit.
+The guest serial console shows why: the rhel/EL9 guest never reaches userspace —
+`ld.so` aborts PID 1 with `Fatal glibc error: CPU does not support x86-64-v2`, with the
+CPU reported as `x86_64-v1 (QEMU Virtual CPU version 2.5+)`. Root cause:
+`render_domain_xml` (`local_libvirt/lifecycle/xml.py`) emitted **no `<cpu>` element**, so
+libvirt/QEMU defaulted to `qemu64` (x86-64-v1). EL9/RHEL-family glibc requires
+x86-64-v2, so init is killed before any NIC or sshd exists — the always-rendered forward
+TCP-connects but gets no banner (the #956 symptom). Debian 13's baseline is x86-64-v1, so
+it booted regardless, masking the defect. Confirmed by a controlled boot of the same
+image: default CPU → glibc panic; `-cpu host` → `systemd[1]` boots.
 
-So the substantive residual is bullet 2 of the issue's own suggested fix: **there is no
-automated test that proves the always-rendered loopback SSH forward reaches a guest
-sshd per family.** The reachability contract is proven only by assumption plus a
-one-off operator run; a per-family regression (a family reintroducing a network-disable
-drop-in, or a base image change) would not be caught.
+So there are two residuals: **(a) a real rhel/EL9 provider defect** (the guest CPU model
+does not meet EL9's baseline), and **(b) no automated per-family test** proving the
+forward reaches a guest sshd — the assumption that let the rhel regression ship unnoticed.
 
 ## Goal
 
-Add a gated live test that proves the reachability contract **per family** (debian and
-rhel), and clear the two documentation artifacts left stale by the #962 fix. Do **not**
-re-implement any networking fix (there is no current defect) and do **not** promote the
-`ssh_reachable` capability signal (deferred — see Non-goals).
+Fix the rhel/EL9 defect by pinning a v2-capable guest CPU
+(`<cpu mode='host-passthrough'/>`) in the local-libvirt domain XML, and add a gated
+`live_stack` test that proves the reachability contract **per family** (debian and rhel)
+so a re-breakage is caught. Also clear two documentation artifacts left stale by #962. Do
+**not** promote the `ssh_reachable` capability signal (deferred — see Non-goals).
 
 ## Success criteria (falsifiable)
 
+0. `render_domain_xml` emits `<cpu mode='host-passthrough'/>` (unit-asserted), and the
+   per-family live test's **rhel** parameter drains `authorize_ssh_key` to *succeeded* on
+   a current-recipe `rocky-kdive-ready-9` — i.e. the EL9 guest boots past its glibc
+   x86-64-v2 check and answers sshd, where before it panicked at init.
 1. A `live_stack`-marked test provisions a `*-kdive-ready` image per family, waits for
    `ready`, and asserts:
    - `systems.ssh_info` returns a `worker_loopback` endpoint (host+port, status `ok`),

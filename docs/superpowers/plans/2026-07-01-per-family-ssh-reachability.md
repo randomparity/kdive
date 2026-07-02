@@ -5,10 +5,38 @@ and [ADR-0294](../../adr/0294-per-family-ssh-reachability-proof.md). Small, self
 implemented directly (not subagent-dispatched). Guardrails: `just lint`, `just type`
 (whole-tree), `just test` (deselects `live_stack`), run individually as CI does.
 
+## Task 0 — Fix the rhel/EL9 guest CPU model (TDD)
+
+**Where it fits:** the substantive fix for #956. The per-family test (Task 1) surfaced
+that `rocky-kdive-ready-9` still fails `transport_failure` at HEAD because the EL9 guest
+kernel-panics at init (`Fatal glibc error: CPU does not support x86-64-v2`): the
+local-libvirt domain XML set no `<cpu>`, so QEMU defaulted to `qemu64` (x86-64-v1) and
+EL9 glibc needs v2. Debian's v1 baseline masked it.
+
+**Files:**
+- `src/kdive/providers/local_libvirt/lifecycle/xml.py` — add
+  `ET.SubElement(domain, "cpu", mode="host-passthrough")` after `<vcpu>`.
+- `tests/providers/local_libvirt/test_provisioning.py` — assert the rendered domain
+  carries `<cpu mode='host-passthrough'>`.
+
+**TDD sequence:**
+1. Add the failing unit test asserting `<cpu mode='host-passthrough'>`; confirm it fails
+   ("domain XML must carry a `<cpu>` element") on current code.
+2. Add the one `SubElement` line; confirm the test + the adversarial XML tests pass.
+3. LIVE-PROVE (Task 5): with the stack restarted on the branch, the rhel leg of the
+   per-family test drains `authorize_ssh_key` to *succeeded* (guest boots past the glibc
+   check, sshd answers).
+
+**Acceptance:** `render_domain_xml` emits the host-passthrough CPU; local provisioning +
+adversarial XML tests green; rhel reachability live-proven.
+
+**Rollback:** remove the single `SubElement` line + its test.
+
 ## Task 1 — Add the gated per-family reachability test (TDD)
 
-**Where it fits:** the substantive close for #956 — proves the always-rendered SSH
-forward reaches a guest sshd per family, rather than by assumption.
+**Where it fits:** the per-family regression gate — proves the always-rendered SSH
+forward reaches a guest sshd per family (and is what surfaced the Task 0 defect), rather
+than leaving it to assumption.
 
 **Files:**
 - `tests/integration/test_live_stack.py` — add the parametrized test + a per-family
