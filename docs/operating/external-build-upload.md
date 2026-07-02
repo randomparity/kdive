@@ -14,6 +14,34 @@ The validator rejects a malformed upload with a precise message, but only **afte
 upload round-trip — so the cost of getting the shape wrong is a wasted upload, not just an
 error. Each rule below names the rejection it prevents.
 
+## Choosing your kernel config
+
+**The kernel config is yours to choose.** Because you build the kernel locally on this lane,
+you decide which Kconfig symbols are enabled before you upload — a debug kernel is one you
+built with the debug options turned on. The validator constrains the artifacts' **structure**
+(bzImage magic, gzip layout, a `lib/modules` member, and — only if the Run's profile carries
+config requirements — that those *required* symbols are present); it never disallows a symbol
+you enabled. There is no allowed-config allowlist: enable what the investigation needs.
+
+Do not read the `buildconfig.set` platform-admin gate as "a project agent can't get a KASAN
+kernel." That gate only governs operator config fragments on the single-host **server**-build
+convenience lane; on this default external lane you supply the config yourself.
+
+A useful debug set to start from:
+
+```
+CONFIG_KASAN=y            # slab/stack out-of-bounds and use-after-free detector
+CONFIG_KASAN_INLINE=y
+CONFIG_KCSAN=y            # data-race detector
+CONFIG_FAULT_INJECTION=y  # failslab / fail_page_alloc via debugfs
+CONFIG_FAILSLAB=y
+CONFIG_FAIL_PAGE_ALLOC=y
+CONFIG_DEBUG_INFO_DWARF5=y  # DWARF for the optional vmlinux upload (see below)
+CONFIG_PROVE_LOCKING=y    # lockdep
+```
+
+Enable `CONFIG_DEBUG_INFO_*` if you also plan to upload `vmlinux` for DWARF introspection.
+
 ## The `kernel` artifact: one combined gzip tar
 
 There is **one required artifact, named `kernel`**: a single gzip-compressed tar holding the
