@@ -85,6 +85,17 @@ would exist — and `authorize_ssh_key` still rejects).
 - kdive still custodies only its own ephemeral per-System infra key (ADR-0289); the agent
   key is never held. The stdin-delivered key never appears in argv, the command string, or
   a captured transcript.
+- Host-key trust changes relative to local. `authorize_ssh_key` keeps
+  `StrictHostKeyChecking=no`, which is harmless on local's unspoofable loopback but, on
+  remote's routable path to `ssh_addr`, means the worker does not verify the guest sshd's
+  identity. Pubkey auth never discloses the bootstrap private key, so the residual risk is
+  a path-local impostor accepting the agent's (non-secret) public key and reporting a
+  success the real guest never received — a functional failure, not credential theft.
+  This is the same "operator ACL on the bind address is the security boundary" model the
+  remote gdbstub already relies on (RSP has no auth), so it is **accepted here, mitigated
+  by the operator ACL on `ssh_addr:ssh_range`**. Host-key pinning via a guest-agent-read
+  `known_hosts` is a named future hardening, deferred to avoid a guest-agent round-trip on
+  every authorize.
 
 ## Considered & rejected
 

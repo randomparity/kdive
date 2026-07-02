@@ -75,10 +75,15 @@ the System with the existing `ssh_not_provisioned` error. This keeps the new off
 network exposure a conscious operator opt-in and leaves every existing inventory and
 test path unchanged.
 
-Both fields are optional on `RemoteLibvirtInstance` and `RemoteLibvirtConfig`. When one
-is set and the other is not, config resolution raises `CONFIGURATION_ERROR` (a
-half-configured forward is an operator error, surfaced fail-closed at op time — the same
-posture as the gdbstub range).
+Both fields are optional on `RemoteLibvirtInstance` and `RemoteLibvirtConfig`. Config
+resolution raises `CONFIGURATION_ERROR`, fail-closed at op time (the same posture as the
+gdbstub range), when:
+
+- exactly one of `ssh_addr` / `ssh_range` is set (a half-configured forward);
+- `ssh_range` is malformed / inverted / out of `1..65535`;
+- `ssh_addr == gdb_addr` **and** the `ssh_range` overlaps `gdbstub_range` — the two
+  forwards would then contend for the same host socket namespace, so the ranges must be
+  disjoint on a shared bind address. (Distinct addresses may reuse a port number.)
 
 ## 4. Design
 
@@ -115,17 +120,31 @@ The define/start retry loop (`_define_and_start`) already advances the gdbstub p
 bounded set of start failures (a squatted port / define-start race, indistinguishable
 from other faults at the libvirt layer). It now allocates **both** the gdb and ssh ports
 per attempt and advances **both** candidates on failure (each into its own `tried` set),
-keeping the same `_START_ATTEMPTS` bound. The gdb and ssh ranges are expected disjoint
-(operator config); a within-range collision is handled by the enumerate-used logic.
+keeping the same `_START_ATTEMPTS` bound. A within-range collision is handled by the
+enumerate-used logic. The gdb and ssh ranges must not overlap **when `ssh_addr ==
+gdb_addr`** (the same socket namespace) — config resolution rejects that with a
+`CONFIGURATION_ERROR` naming both ranges (§3). When the addresses differ, an identical
+port number is two distinct sockets and is allowed.
 
 ### 4.2 Connect plane: `recorded_ssh_endpoint`
 
 `RemoteLibvirtConnect.recorded_ssh_endpoint(system)` returns `(ssh_addr, ssh_port)` when
-SSH parity is active: `ssh_addr` from config, `ssh_port` read from the domain XML over
-TLS (the same injected `resolve_port` seam shape the gdbstub endpoint uses,
-`live_vm`-gated for the real read). It returns `None` when `ssh_addr`/`ssh_range` are
-unset (unchanged behavior). No RSP probe (that is gdbstub-specific); reachability is
-proven by the `authorize_ssh_key` SSH itself.
+SSH parity is active, else `None` (unchanged behavior). `ssh_addr` comes from config;
+`ssh_port` is read from the domain's live XML **on the worker** — this must be a concrete
+production read, **not** a `live_vm`-gated stub. Note that the gdbstub Connect path's
+default `_real_resolve_port` (`connect.py:113`) *raises* `MISSING_DEPENDENCY` and
+`from_env` injects no reader, so remote gdbstub port resolution is effectively injected
+only under the `live_vm` gate. `recorded_ssh_endpoint` **must not** copy that shape: it is
+called by the live worker's `authorize_ssh_key_handler` and by the `ssh_info` tool, so it
+opens the TLS connection, calls `XMLDesc`, and parses via `recorded_ssh_port_strict`
+directly (the connection open is the only live seam, injected for unit tests). A
+service-level test asserts it returns the port — not `MISSING_DEPENDENCY` — against a fake
+connection. No RSP probe (that is gdbstub-specific): `ssh_info` returns the recorded
+endpoint **without** probing, exactly as local-libvirt does (ADR-0281) — reachability is
+proven by the `authorize_ssh_key` SSH itself. The consequence for remote (a guest that has
+not brought up the slirp NIC yields a syntactically-valid but dead endpoint) is the
+second-NIC risk of §4.1, validated by the live-proof, not papered over with a provision
+gate (see §7).
 
 `systems.ssh_info` (VIEWER) and `systems.authorize_ssh_key` (OPERATOR) are already
 provider-agnostic — they read `recorded_ssh_endpoint` — so they light up for remote with
@@ -205,12 +224,28 @@ and currently discards the host (`_host, port = endpoint`). Use the host:
   `(ssh_addr, ssh_port)`, and appends the agent's key. This is the genuine consumer of
   the injected bootstrap key and makes the parity real.
 
-`StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null` (already set) tolerate the
-remote host key; the endpoint is operator-ACL'd. The existing connection-refused retry
-window (`_AUTHORIZE_SSH_RETRY`) covers a freshly-`ready` guest whose sshd is still
-binding. The worker must be able to reach `ssh_addr:ssh_port`; it already reaches the
-remote host over qemu+tls, and the operator ACL governs the SSH port (documented in the
-ADR).
+**Host-key trust (a real change from local).** local's SSH runs over `127.0.0.1`, which
+cannot be spoofed, so `StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null` are
+harmless there. On remote the worker→guest SSH traverses a routable path to `ssh_addr`,
+where a host on that path could impersonate the guest sshd. Pubkey auth never discloses
+the bootstrap **private** key (the signature is session-bound), so an impostor cannot
+steal the key; the residual exposure is that an impostor could accept the agent's
+**public** key (not secret) and return success while the real guest never receives it —
+`authorize_ssh_key` reports success against an impostor and the agent's later SSH to the
+real endpoint fails. This is the same "operator ACL on the bind address is the security
+boundary" trust model the remote gdbstub already relies on (ADR-0079; RSP has no auth
+either), so it is an **accepted, ACL-mitigated risk documented in ADR-0291** rather than a
+blocker. Host-key pinning (read `/etc/ssh/ssh_host_*.pub` via the already-open guest-agent
+channel and hand the worker a `known_hosts`) is named as a future hardening, not
+implemented here, to avoid coupling every authorize to a guest-agent round-trip; the
+security-review step re-evaluates this.
+
+**Reachability + retry.** The worker must be able to reach `ssh_addr:ssh_port`; it already
+reaches the remote host over qemu+tls, and the operator ACL governs the port. The existing
+connection-refused retry (`_AUTHORIZE_SSH_RETRY`) covers a freshly-`ready` guest whose sshd
+is still binding — but remote's path is slower (slirp DHCP + route + sshd bind) than
+local's ~46 ms, so the implementation reviews the retry window's total budget against the
+remote path and states the chosen bound (rather than silently reusing the local default).
 
 ## 5. Files touched (indicative)
 
@@ -255,7 +290,10 @@ ADR).
 - Injector: composes `[/bin/sh, -c, <script>]` with the key on stdin; idempotent-append
   script shape; non-zero exit → raise; error categories from `GuestAgentExec`.
 - Connect: `recorded_ssh_endpoint` returns `(ssh_addr, ssh_port)` when active, `None`
-  otherwise.
+  otherwise — and returns the port (not `MISSING_DEPENDENCY`) against a fake TLS
+  connection, proving it is a real production read, not a `live_vm` stub.
+- Config: `ssh_addr == gdb_addr` with overlapping `ssh_range`/`gdbstub_range` →
+  `CONFIGURATION_ERROR`; distinct addresses with the same port number → accepted.
 - Handler: `bootstrap_pubkey` threaded to provision/reprovision; local ignores it;
   key ensured before provision (existing invariant preserved).
 - `authorize_ssh_key`: `build_authorize_argv` uses the endpoint host; local argv
@@ -281,6 +319,14 @@ above.
   reachability depends on the bridge network being routable to worker + agent, and it
   breaks the "endpoint recorded in XML, read over TLS" invariant the Connect plane relies
   on. Rejected for architectural inconsistency with the gdbstub design.
+- **A provision-time SSH reachability gate** (worker SSHes with the bootstrap key as a
+  readiness check so a dead slirp NIC fails provision). Rejected: local declares a System
+  `ready` on its boot marker **before** the guest sshd binds (ADR-0289 consequences) and
+  does **not** gate provision on SSH reachability; adding such a gate to remote would
+  diverge from local, couple provision success to sshd/DHCP timing, and make provision
+  flakier — the opposite of parity. The dead-NIC risk is instead owned by the `live_vm`
+  proof (which is precisely there to validate the image brings up the forward NIC), and
+  `ssh_info` returns the recorded endpoint unprobed exactly as local does (§4.2).
 - **`virt-customize --ssh-inject` over the remote libvirt connection.** The ADR-0289
   obstacle: the worker cannot run libguestfs/virt-customize against a disk on a remote
   host without a host-access channel kdive deliberately does not have (it speaks only
