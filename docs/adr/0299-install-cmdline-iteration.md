@@ -54,12 +54,20 @@ ledger as the authoritative state and the job dedup subordinate to it.
   install handler records the applied extra (`X`, else the build-baked extra) in the `install` step
   result under `cmdline`.
 
-- **Ledger-absent recycles the terminal job.** The install/boot enqueue recycles a terminal
-  (`succeeded` **or** `failed`) job when the step's `run_steps` row is absent, generalizing the
-  current failed-only `retry_terminal_failed`. This is the single mechanism that both preserves the
-  existing failed-retry path (a failed step's row is already deleted by `abandon_run_step`) and,
-  after a re-stage, lets `runs.boot` recycle the stale `succeeded` boot job so it re-power-cycles
-  into the new cmdline.
+- **Ledger-absent recycles the terminal job, payload and all.** The install/boot enqueue recycles
+  a terminal (`succeeded` **or** `failed`) job when the step's `run_steps` row is absent,
+  generalizing the current failed-only `retry_terminal_failed`. This is the single mechanism that
+  both preserves the existing failed-retry path (a failed step's row is already deleted by
+  `abandon_run_step`) and, after a re-stage, lets `runs.boot` recycle the stale `succeeded` boot
+  job so it re-power-cycles into the new cmdline. The recycle **overwrites the job payload** on the
+  reset, not only its state: today's recycle `UPDATE` touches state fields only (harmless when the
+  retried payload is byte-identical), but a re-stage supplies a new cmdline, so the recycled
+  `INSTALL` job must carry it — otherwise it re-runs the prior cmdline and silently boots the wrong
+  variant. `canceled` jobs stay untouched.
+
+- **`runs.get` surfaces the installed cmdline.** The applied client extra recorded on the `install`
+  step is surfaced as `data.installed_cmdline` beside the existing `data.required_cmdline`, so the
+  sweep loop can confirm which variant is live rather than being write-only.
 
 - **`InstallPayload(RunPayload)`** carries `cmdline: str | None` (non-blank validator, mirroring
   `BuildPayload`); `runs.boot` keeps the bare `RunPayload`. `cmdline_for` gains an `override`

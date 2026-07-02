@@ -81,11 +81,23 @@ path, no generation counter, no schema change. Detail in
   (standard replay-idempotency semantics).
 - `runs.boot`'s docstring is updated: iteration now happens on `runs.install`; the "fixed at
   build time" wording is removed. `runs.boot` itself still takes no `cmdline`.
+- **Read-back.** `runs.get` already advertises `data.required_cmdline` (the platform tokens). It
+  additionally surfaces `data.installed_cmdline` — the applied client extra recorded on the
+  `install` step (`null` before the first install, or when install baked no extra). Without this
+  the sweep loop is write-only: an agent has no API-level confirmation of which variant is live
+  after a re-stage, so a mis-apply (or the payload-recycle bug above) would be undetectable
+  through the tool surface.
 
 ## Re-stage state machine
 
 `runs.install(cmdline=X)` resolves the **requested effective extra**:
 `normalize(X)` if `X` is given, else the build-baked extra recorded on the `build` step.
+
+**Normalization is pinned.** `normalize` is a single leading/trailing whitespace strip (the same
+transform `BuildPayload._nonblank_cmdline` applies). The applied extra is stored
+**already-normalized** on the `install` step, and the re-stage test compares the
+identically-normalized requested value, so equality is exact — a whitespace-only difference is
+neither a spurious re-stage nor a missed one.
 
 Under the per-Run advisory lock:
 
@@ -93,7 +105,7 @@ Under the per-Run advisory lock:
 |---|---|---|
 | absent (`pending`) | — | first install: enqueue `INSTALL` carrying `X` |
 | `succeeded`, recorded **==** requested | equal | idempotent no-op (replay existing envelope) |
-| `succeeded`, recorded **!=** requested | differ | **re-stage**: delete `install` + `boot` ledger rows, enqueue fresh `INSTALL` carrying `X` |
+| `succeeded`, recorded **!=** requested | differ | **re-stage**: delete `install` + `boot` ledger rows, enqueue a fresh `INSTALL` carrying `X` (the terminal job is recycled **payload-and-all**, see Plumbing) |
 | `running` | — | reject `CONFIGURATION_ERROR`, `data.reason = "step_in_progress"` |
 
 If the `boot` step is `running`, `runs.install` also rejects `step_in_progress` — re-staging
@@ -115,16 +127,29 @@ row was deleted, `runs.boot`'s enqueue sees an absent ledger row and recycles th
 - **`InstallPayload(RunPayload)`** — new payload with `cmdline: str | None = None` and the same
   non-blank validator as `BuildPayload`. `runs.install` enqueues `InstallPayload`; `runs.boot`
   keeps `RunPayload` (boot needs no cmdline).
-- **Ledger-driven recycle.** The install/boot enqueue recycles a terminal (`succeeded` **or**
-  `failed`) job when the step's `run_steps` row is absent, replacing the current
-  `retry_terminal_failed=True` (failed-only). This subsumes the existing failed-retry path (a
-  failed step's row is deleted by `abandon_run_step`, so the row is already absent when a retry
-  re-enqueues).
+- **Ledger-driven, payload-carrying recycle.** The install/boot enqueue recycles a terminal
+  (`succeeded` **or** `failed`) job when the step's `run_steps` row is absent, replacing the
+  current `retry_terminal_failed=True` (failed-only). This subsumes the existing failed-retry
+  path (a failed step's row is deleted by `abandon_run_step`, so the row is already absent when a
+  retry re-enqueues).
+
+  **The recycle must overwrite the job payload**, not only reset its state. Today
+  `queue.enqueue`'s recycle is `INSERT … ON CONFLICT DO NOTHING` (the new payload is discarded on
+  conflict) followed by an `UPDATE … SET state='queued', attempt=0, …` that touches state fields
+  **only**. That was invisible for the failed-retry case because the retried payload is
+  byte-identical, but a re-stage supplies a **new cmdline** — so the broadened recycle `UPDATE`
+  must also `SET payload = <new>` on the `succeeded|failed → queued` transition. Otherwise the
+  recycled `INSTALL` job re-runs with the **prior** cmdline and the sweep silently boots the wrong
+  variant. `canceled` jobs stay untouched (no resurrection). The flag has one caller today
+  (`_enqueue_step`), so broadening its semantics is contained.
 - **`cmdline_for(conn, run, method, *, root_cmdline, override=None)`** — when `override` is set,
   return `f"{required} {override}"` (replace build extras); else today's build-baked append. The
   install handler passes `override=payload.cmdline`.
 - **Install handler** records the applied client extra (`override` if given, else the build-baked
-  extra) into the `install` step result under `cmdline`.
+  extra), already-normalized, into the `install` step result under `cmdline`.
+- **`runs.get` read-back.** The `runs.get` view reads the `install` step result's recorded
+  `cmdline` and surfaces it as `data.installed_cmdline` (`null` when absent). `StepProgress`
+  (the ledger reader) gains the field.
 - **Composite `runs.build_install_boot` is unchanged**: build-time cmdline stays valid there; its
   single `BUILD_INSTALL_BOOT` job drives install internally and does not use the standalone
   `runs.install` override path.
@@ -151,8 +176,13 @@ row was deleted, `runs.boot`'s enqueue sees an absent ledger row and recycles th
   enqueued; ledger-absent recycles a `succeeded` job to `queued`.
 - **Unit — `cmdline_for` override:** override replaces the build-baked extra; platform tokens
   preserved and ordered first; omitted override falls back to build-baked.
-- **Unit — install handler:** passes `payload.cmdline` as override; records the applied extra in
-  the `install` step result.
+- **Unit — install handler:** passes `payload.cmdline` as override; records the applied extra
+  (already-normalized) in the `install` step result.
+- **Unit — recycle carries payload:** the broadened enqueue recycle resets a `succeeded`/`failed`
+  job to `queued` **and overwrites its payload** — a re-staged `INSTALL` job carries the new
+  cmdline, not the prior one (this is the finding-1 regression guard).
+- **Unit — `runs.get` read-back:** `data.installed_cmdline` reflects the last install's applied
+  extra; `null` before the first install and when no extra was applied.
 - **Unit — XML:** the redefined domain `<cmdline>` carries the platform tokens + the override
   and none of the build-baked extra (replace semantics) — extends `tests/.../install`/`xml`.
 - **Agent-doc/schema guards:** the `runs.install` `Field` text enumerates the platform tokens
