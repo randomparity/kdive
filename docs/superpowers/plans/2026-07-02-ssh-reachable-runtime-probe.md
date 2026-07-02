@@ -14,6 +14,7 @@
 - Guardrails before every commit: `just lint && just type && uv run python -m pytest <focused> -q`. Full `just ci` before push.
 - Google-style docstrings on non-trivial public APIs. Absolute imports only.
 - **The `@app.tool` wrapper docstring + `Field` text is the agent-facing contract** and must carry **no** `ADR-NNNN` reference (#880 guard `tests/mcp/core/test_no_adr_leak.py`). ADR citations live only on module/handler docstrings.
+- **Clock injection convention:** stamp wall-clock reads from the module-level `datetime` (`from datetime import UTC, datetime`; call `datetime.now(UTC)`) and, in tests, `monkeypatch.setattr(<module>, "datetime", FrozenClock(instant))` — the repo's standardized idiom (post-#931; e.g. `tests/mcp/lifecycle/test_allocations_renew.py:262`). Do **not** thread a clock parameter; `FrozenClock` is an instance, not a `type[datetime]`, so a param would fail `just type`.
 - New tool in the `systems` namespace must be named in `docs/guide/toolsets/systems.md` (#940 guard).
 - Reuse the most specific existing `ErrorCategory`; do not invent strings. No new `ErrorCategory`.
 - Never echo raw guest banner bytes into a persisted verdict.
@@ -79,7 +80,7 @@ def test_migration_0056_admits_check_ssh_reachable(pg_conn: psycopg.Connection) 
     _insert_job(pg_conn, JobKind.CHECK_SSH_REACHABLE.value, "after-0056")  # no raise
 ```
 
-(Match the existing fixture name/signature in `tests/db/test_migration_0055_diagnostic_sysrq.py` — reuse its `pg_conn`/`db_conn` fixture and its exact `_apply_through`/`_insert_job` bodies.)
+The fixture is `pg_conn: psycopg.Connection` (confirmed in `test_migration_0055_diagnostic_sysrq.py`); reuse its exact `_apply_through`/`_insert_job` bodies. Mirror all three 0055 shapes: a `test_pre_migration_0056_rejects_check_ssh_reachable` (raises `CheckViolation` at 0055), the admits-at-0056 test above, and a `test_migration_0056_keeps_all_prior_kinds` that inserts one job of each earlier kind after 0056.
 
 - [ ] **Step 4: Run.** `uv run python -m pytest tests/db/test_migration_0056_check_ssh_reachable.py tests/db/test_migrate.py tests/domain/test_models.py -q` (the last two hold the SQL↔enum tie). Expected: PASS. If a whole-enum-vs-CHECK parity test names the members explicitly, add `check_ssh_reachable`.
 
@@ -310,25 +311,25 @@ def serialize_reach_verdict(result: ReachResult, host: str, port: int, checked_a
 
 **Interfaces:**
 - Consumes: `ReachResult`, `ProbeFn`, `serialize_reach_verdict`; `CheckSshReachablePayload` (Task 2); `JobKind.CHECK_SSH_REACHABLE` (Task 1).
-- Produces: `async def check_ssh_reachable_handler(conn, job, *, resolver, probe=_real_probe, clock=datetime) -> str | None`.
+- Produces: `async def check_ssh_reachable_handler(conn, job, *, resolver, probe=_real_probe) -> str | None` (reads module-level `datetime.now(UTC)`; tests monkeypatch it).
 
-- [ ] **Step 1: Write failing handler tests.** Use a fake resolver/binding returning a fixed endpoint (mirror the `authorize_ssh_key_handler` tests in the repo — find them with `rg -l authorize_ssh_key_handler tests`), a stub `probe`, and a `FrozenClock` for `checked_at`:
+- [ ] **Step 1: Write failing handler tests.** Use a fake resolver/binding returning a fixed endpoint (mirror the `authorize_ssh_key_handler` tests in the repo — find them with `rg -l authorize_ssh_key_handler tests`), a stub `probe`, and `monkeypatch` the handler module's `datetime` with `FrozenClock` for a deterministic `checked_at` (the repo convention — do **not** pass a clock param):
 
 ```python
 from datetime import UTC, datetime
 from tests.clock import FrozenClock
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.jobs.handlers import ssh_reachable
 from kdive.jobs.handlers.ssh_reachable import check_ssh_reachable_handler, ReachResult
 
 _FROZEN = datetime(2026, 7, 2, 0, 0, tzinfo=UTC)
 
 @pytest.mark.asyncio
-async def test_handler_serializes_reachable_verdict(...) -> None:
+async def test_handler_serializes_reachable_verdict(..., monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ssh_reachable, "datetime", FrozenClock(_FROZEN))
     async def probe(host: str, port: int) -> ReachResult:
         return ReachResult(True, "reachable")
-    raw = await check_ssh_reachable_handler(
-        conn, job, resolver=resolver, probe=probe, clock=FrozenClock(_FROZEN)
-    )
+    raw = await check_ssh_reachable_handler(conn, job, resolver=resolver, probe=probe)
     assert raw == (
         '{"reachable":true,"checked_at":"2026-07-02T00:00:00+00:00",'
         '"endpoint":{"host":"127.0.0.1","port":22001},"detail":"reachable"}'
@@ -354,7 +355,7 @@ async def test_handler_dead_letters_when_no_forward(...) -> None:
 
 - [ ] **Step 2: Run to verify failure.** `uv run python -m pytest tests/jobs/handlers/test_ssh_reachable.py -q`. Expected: FAIL (`check_ssh_reachable_handler` missing).
 
-- [ ] **Step 3: Implement the handler** (append to `ssh_reachable.py`; add imports `from datetime import UTC, datetime`, `from uuid import UUID`, psycopg/domain imports mirroring `ssh_authorize.py`):
+- [ ] **Step 3: Implement the handler** (append to `ssh_reachable.py`; add module-level imports `from datetime import UTC, datetime`, `from uuid import UUID`, plus `load_payload`/`CheckSshReachablePayload`, `SYSTEMS`, `SystemState`, `CategorizedError`/`ErrorCategory`, `Job`, `AsyncConnection`, `ProviderResolver`, `SystemHandle`, `domain_name_for` — mirroring `ssh_authorize.py` + `systems.py`). `checked_at` reads the module-level `datetime.now(UTC)` (monkeypatched in tests), **not** a param:
 
 ```python
 async def check_ssh_reachable_handler(
@@ -363,7 +364,6 @@ async def check_ssh_reachable_handler(
     *,
     resolver: ProviderResolver,
     probe: ProbeFn = _real_probe,
-    clock: type[datetime] = datetime,
 ) -> str | None:
     """Probe a ready System's guest sshd and return the compact-JSON reachability verdict.
 
@@ -397,7 +397,7 @@ async def check_ssh_reachable_handler(
         )
     host, port = endpoint
     result = await probe(host, port)
-    return serialize_reach_verdict(result, host, port, clock.now(UTC).isoformat())
+    return serialize_reach_verdict(result, host, port, datetime.now(UTC).isoformat())
 ```
 
 - [ ] **Step 4: Register the handler** in `systems.py` `register_handlers` (import `check_ssh_reachable_handler` at top), after the `AUTHORIZE_SSH_KEY` registration:
@@ -448,7 +448,7 @@ async def test_check_ssh_reachable_no_forward_is_ssh_not_provisioned(...) -> Non
     assert resp.data["reason"] == "ssh_not_provisioned"
 ```
 
-Also assert a non-member ctx gets `_not_found`-shaped output and a member-without-viewer gets `authorization_denied` (mirror the `ssh_info` authz tests).
+Also assert a non-member ctx gets `_not_found`-shaped output. For the authz path, mirror **exactly** how the `ssh_info` tests handle a member-without-viewer: `require_role` **raises** `RoleDenied`/`AuthorizationError` rather than returning an envelope, so that case is `pytest.raises(...)`, not an `error_category` assertion — unlike the not-ready/no-forward cases above, which *do* return failure envelopes. Check the `ssh_info` test module for the precise exception type before writing this assertion.
 
 - [ ] **Step 2: Run to verify failure.** Expected: FAIL (`check_ssh_reachable` missing).
 
