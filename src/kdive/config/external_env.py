@@ -165,6 +165,20 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         None,
         "libvirt qemu+tls connection URI for the SSH-parity injection live test (#966).",
     ),
+    ExternalEnvVar(
+        "KDIVE_EL9_REACHABILITY_DOMAIN",
+        "test",
+        None,
+        "Running, agent-ready EL9/RHEL-family remote-libvirt domain name for the host-model CPU "
+        "reachability live test (#975, ADR-0297); unset → that test skips.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_EL9_REACHABILITY_URI",
+        "test",
+        None,
+        "libvirt qemu+tls connection URI for the EL9 host-model CPU reachability live test "
+        "(#975, ADR-0297).",
+    ),
     # --- operator shell scripts -----------------------------------------------------------
     ExternalEnvVar(
         "KDIVE_KVM_NODE",

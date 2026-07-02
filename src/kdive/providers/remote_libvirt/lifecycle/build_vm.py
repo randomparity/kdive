@@ -176,6 +176,10 @@ def render_build_domain_xml(
     ET.SubElement(domain, "uuid").text = str(run_id)
     ET.SubElement(domain, "memory", unit="MiB").text = str(memory_mib)
     ET.SubElement(domain, "vcpu").text = str(vcpus)
+    # host-model CPU (ADR-0297, #975): an EL9-based build image hits the same missing-<cpu>
+    # x86-64-v2 init panic as the System domain (glibc aborts PID 1 before the guest-agent
+    # answers, so wait_for_agent times out). Portable >= v2 baseline; see render_domain_xml.
+    ET.SubElement(domain, "cpu", mode="host-model")
     os_el = ET.SubElement(domain, "os")
     ET.SubElement(os_el, "type", arch=arch, machine=machine).text = "hvm"
     ET.SubElement(os_el, "boot", dev="hd")

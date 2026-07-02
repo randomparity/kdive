@@ -247,6 +247,28 @@ def test_render_build_domain_xml_has_agent_channel_and_no_gdbstub() -> None:
     assert recorded_gdb_port(xml) is None
 
 
+def test_render_build_domain_xml_pins_host_model_cpu_for_el9_baseline() -> None:
+    """The build VM must carry a host-model CPU so EL9 build images meet x86-64-v2 (#975).
+
+    An EL9-based build image hits the identical missing-``<cpu>`` init panic as the System
+    domain: QEMU defaults to x86-64-v1 and glibc aborts PID 1 before the guest-agent answers,
+    so ``wait_for_agent`` times out. host-model gives a portable >= v2 baseline (ADR-0297),
+    placed after ``<vcpu>`` and before ``<os>``.
+    """
+    from defusedxml.ElementTree import fromstring as _fromstring
+
+    xml = render_build_domain_xml(
+        RUN_ID, pool="default", volume=OVERLAY, network="default", machine="pc"
+    )
+    root = _fromstring(xml)
+    cpu = root.find("./cpu")
+    assert cpu is not None, "build domain XML must carry a <cpu> element"
+    assert cpu.get("mode") == "host-model"
+    children = [child.tag for child in root]
+    assert children.index("cpu") == children.index("vcpu") + 1
+    assert children.index("cpu") < children.index("os")
+
+
 def test_render_build_domain_xml_full_structure() -> None:
     # Distinct, non-default values for every parameter so a wrong attribute name or a swapped
     # value cannot pass by coinciding with a default.

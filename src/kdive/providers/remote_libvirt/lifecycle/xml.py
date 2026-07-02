@@ -88,6 +88,13 @@ def render_domain_xml(
     ET.SubElement(domain, "uuid").text = str(system_id)
     ET.SubElement(domain, "memory", unit="MiB").text = str(profile.memory_mb)
     ET.SubElement(domain, "vcpu").text = str(profile.vcpu)
+    # Pin a host-model CPU (ADR-0297, #975 — remote parity of ADR-0294/#956). With no <cpu>,
+    # QEMU/KVM defaults to ``qemu64`` = x86-64-v1; EL9/RHEL-family glibc requires x86-64-v2, so an
+    # EL9 guest's ``ld.so`` aborts PID 1 ("Fatal glibc error: CPU does not support x86-64-v2")
+    # before the guest-agent answers — the domain is unreachable. host-model synthesizes a
+    # portable, migratable baseline (>= v2 on any modern host) rather than local-libvirt's
+    # host-passthrough, because a remote fleet may span heterogeneous hosts.
+    ET.SubElement(domain, "cpu", mode="host-model")
     os_el = ET.SubElement(domain, "os")
     ET.SubElement(os_el, "type", arch=profile.arch, machine=machine).text = "hvm"
     ET.SubElement(os_el, "boot", dev="hd")
