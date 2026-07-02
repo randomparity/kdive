@@ -150,6 +150,7 @@ class RemoteLibvirtProvisioning:
         profile: ProvisioningProfile,
         *,
         overlay_customizers: tuple[Callable[[str], None], ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
         """Define and start the System's disk-image domain; wait for its guest agent.
 
@@ -172,7 +173,7 @@ class RemoteLibvirtProvisioning:
                 ``INFRASTRUCTURE_FAILURE`` for other provider control-plane faults;
                 ``TRANSPORT_FAILURE`` when the TLS connect fails.
         """
-        del overlay_customizers
+        del overlay_customizers, bootstrap_pubkey
         section = self._remote_section(profile)
         require_concrete_sizing(profile)
         config = self._connections.config()
@@ -219,6 +220,7 @@ class RemoteLibvirtProvisioning:
         profile: ProvisioningProfile,
         *,
         overlay_customizers: tuple[Callable[[str], None], ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
         """Wipe the System's domain + overlay and provision the new profile in place.
 
@@ -226,7 +228,12 @@ class RemoteLibvirtProvisioning:
             CategorizedError: as :meth:`teardown` and :meth:`provision`.
         """
         self.teardown(domain_name_for(system_id))
-        return self.provision(system_id, profile, overlay_customizers=overlay_customizers)
+        return self.provision(
+            system_id,
+            profile,
+            overlay_customizers=overlay_customizers,
+            bootstrap_pubkey=bootstrap_pubkey,
+        )
 
     def teardown(self, domain_name: str) -> None:
         """Destroy+undefine the domain and delete its overlay volume; idempotent.

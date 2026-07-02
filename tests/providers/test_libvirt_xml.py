@@ -93,8 +93,9 @@ def test_recorded_ssh_port_is_none_without_a_netdev_arg() -> None:
     assert recorded_ssh_port("<domain/>") is None
 
 
-def test_recorded_ssh_port_is_none_for_a_different_host_or_guest_port() -> None:
-    # A -netdev hostfwd that is not the kdive loopback-to-guest:22 shape is not a kdive SSH forward.
+def test_recorded_ssh_port_matches_any_bind_host_to_guest_22() -> None:
+    # ADR-0291 generalized the regex: any bind host forwarded to guest :22 is a kdive SSH forward
+    # (local binds 127.0.0.1, remote binds the ACL'd ssh_addr). Only a non-:22 guest port is not.
     other_host = (
         f"<domain xmlns:qemu='{QEMU_NS}'><qemu:commandline>"
         "<qemu:arg value='-netdev'/>"
@@ -107,7 +108,7 @@ def test_recorded_ssh_port_is_none_for_a_different_host_or_guest_port() -> None:
         "<qemu:arg value='user,id=x,hostfwd=tcp:127.0.0.1:40022-:80'/>"
         "</qemu:commandline></domain>"
     )
-    assert recorded_ssh_port(other_host) is None
+    assert recorded_ssh_port(other_host) == 40022
     assert recorded_ssh_port(other_guest) is None
 
 

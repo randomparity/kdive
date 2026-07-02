@@ -60,16 +60,26 @@ class _SpyProvisioningInner:
         self.teardown_calls: list[str] = []
 
     def provision(
-        self, system_id: UUID, profile: object, *, overlay_customizers: tuple[object, ...] = ()
+        self,
+        system_id: UUID,
+        profile: object,
+        *,
+        overlay_customizers: tuple[object, ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
-        del overlay_customizers
+        del overlay_customizers, bootstrap_pubkey
         self.provision_calls.append((system_id, profile))
         return "spy-domain"
 
     def reprovision(
-        self, system_id: UUID, profile: object, *, overlay_customizers: tuple[object, ...] = ()
+        self,
+        system_id: UUID,
+        profile: object,
+        *,
+        overlay_customizers: tuple[object, ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
-        del overlay_customizers
+        del overlay_customizers, bootstrap_pubkey
         self.reprovision_calls.append((system_id, profile))
         return "spy-domain"
 

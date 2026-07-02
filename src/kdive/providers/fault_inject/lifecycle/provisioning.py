@@ -25,10 +25,11 @@ class FaultInjectProvisioning:
         profile: ProvisioningProfile,
         *,
         overlay_customizers: tuple[Callable[[str], None], ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
-        # No real overlay exists for a synthetic domain (ADR-0289, #963): the customizers accepted
-        # here for Provisioner-call-site parity are never invoked.
-        del profile, overlay_customizers
+        # No real overlay or guest exists for a synthetic domain (ADR-0289, #963; ADR-0291): the
+        # customizers and bootstrap key accepted for Provisioner-call-site parity are never used.
+        del profile, overlay_customizers, bootstrap_pubkey
         domain = domain_name(system_id)
         self._inventory.record(system_id, domain)
         return domain
@@ -42,6 +43,12 @@ class FaultInjectProvisioning:
         profile: ProvisioningProfile,
         *,
         overlay_customizers: tuple[Callable[[str], None], ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
         self._inventory.forget(domain_name(system_id))
-        return self.provision(system_id, profile, overlay_customizers=overlay_customizers)
+        return self.provision(
+            system_id,
+            profile,
+            overlay_customizers=overlay_customizers,
+            bootstrap_pubkey=bootstrap_pubkey,
+        )
