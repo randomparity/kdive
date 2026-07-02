@@ -39,7 +39,11 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import ObjectListing
+from kdive.domain.catalog.images import ImageCatalogEntry
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.capability_signals import render_direct_kernel_signal
+from kdive.images.kdump_support import KernelVersion
+from kdive.images.staged_provenance import sidecar_path, write_sidecar
 from kdive.inventory.loader import load_inventory
 from kdive.inventory.model import InventoryDoc
 from kdive.inventory.reconcile.coefficients import reconcile_coefficients
@@ -2706,5 +2710,168 @@ def test_runtime_added_remote_libvirt_survives_reconcile_passes(
             assert not await _ledger_exists(
                 check, source_kind="resource", resource_kind="remote-libvirt", name="rt-survivor"
             )
+
+    asyncio.run(_run())
+
+
+# --- staged-path provenance sidecar (#977, ADR-0296) ---------------------------------
+
+_ANY_KERNEL = KernelVersion(6, 11)
+
+
+def _staged_path_body(path: str, *, name: str = "local-rootfs") -> str:
+    return (
+        "schema_version = 2\n"
+        "[[image]]\n"
+        'provider = "local-libvirt"\n'
+        f'name = "{name}"\n'
+        'arch = "x86_64"\n'
+        'format = "qcow2"\n'
+        'root_device = "/dev/vda"\n'
+        'visibility = "public"\n'
+        "[image.source]\n"
+        'kind = "staged-path"\n'
+        f'path = "{path}"\n'
+    )
+
+
+async def _reconcile(url: str, doc: InventoryDoc, store: _FakeImageStore) -> ReconcileDiff:
+    async with (
+        AsyncConnectionPool(url, min_size=1, max_size=2) as pool,
+        pool.connection() as conn,
+    ):
+        return await reconcile_images(conn, doc, store)
+
+
+async def _set_provenance(
+    conn: psycopg.AsyncConnection, name: str, prov: dict[str, object]
+) -> None:
+    await conn.execute(
+        "UPDATE image_catalog SET provenance = %s WHERE name = %s", (Jsonb(prov), name)
+    )
+
+
+def test_staged_path_persists_sidecar_provenance(migrated_url: str, tmp_path: Path) -> None:
+    """A staged-path row with a valid sidecar carries the sidecar provenance (crit 2/3)."""
+
+    async def _run() -> None:
+        qcow2 = tmp_path / "img.qcow2"
+        provenance: dict[str, object] = {
+            "plane": "local-libvirt",
+            "boot_kernel_count": 1,
+            "makedumpfile_version": "1.7.7",
+        }
+        write_sidecar(qcow2, provenance=provenance)
+        doc = load_inventory(_write_toml(tmp_path, _staged_path_body(str(qcow2))))
+        await _reconcile(migrated_url, doc, _FakeImageStore())
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "local-rootfs")
+        assert row["provenance"] == provenance
+        entry = ImageCatalogEntry.model_validate(row)
+        assert render_direct_kernel_signal(entry, _ANY_KERNEL)["status"] == "provisionable"
+
+    asyncio.run(_run())
+
+
+def test_staged_path_without_sidecar_stays_unverified(migrated_url: str, tmp_path: Path) -> None:
+    """No sidecar → row provenance stays {} and the signal reads unverified (crit 4)."""
+
+    async def _run() -> None:
+        qcow2 = tmp_path / "img.qcow2"  # no sidecar written
+        doc = load_inventory(_write_toml(tmp_path, _staged_path_body(str(qcow2))))
+        await _reconcile(migrated_url, doc, _FakeImageStore())
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "local-rootfs")
+        assert row["provenance"] == {}
+        entry = ImageCatalogEntry.model_validate(row)
+        assert render_direct_kernel_signal(entry, _ANY_KERNEL)["status"] == "unverified"
+
+    asyncio.run(_run())
+
+
+def test_staged_path_absent_sidecar_preserves_existing_provenance(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    """An absent sidecar preserves a populated row and reports no spurious update (crit 4/6)."""
+
+    async def _run() -> None:
+        qcow2 = tmp_path / "img.qcow2"
+        provenance: dict[str, object] = {"boot_kernel_count": 1}
+        write_sidecar(qcow2, provenance=provenance)
+        doc = load_inventory(_write_toml(tmp_path, _staged_path_body(str(qcow2))))
+        await _reconcile(migrated_url, doc, _FakeImageStore())  # first pass persists it
+        sidecar_path(qcow2).unlink()  # sidecar removed out-of-band
+        diff = await _reconcile(migrated_url, doc, _FakeImageStore())
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "local-rootfs")
+        assert row["provenance"] == provenance  # preserved, not wiped
+        assert "local-rootfs" not in {r.name for r in diff.updated}  # no phantom drift
+
+    asyncio.run(_run())
+
+
+def test_staged_path_rebuild_refreshes_provenance(migrated_url: str, tmp_path: Path) -> None:
+    """A rebuild that changes the sidecar refreshes the row on the next reconcile (crit 6)."""
+
+    async def _run() -> None:
+        qcow2 = tmp_path / "img.qcow2"
+        write_sidecar(qcow2, provenance={"boot_kernel_count": 2})
+        doc = load_inventory(_write_toml(tmp_path, _staged_path_body(str(qcow2))))
+        await _reconcile(migrated_url, doc, _FakeImageStore())
+        write_sidecar(qcow2, provenance={"boot_kernel_count": 1})  # rebuilt: now single-kernel
+        diff = await _reconcile(migrated_url, doc, _FakeImageStore())
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "local-rootfs")
+        assert row["provenance"] == {"boot_kernel_count": 1}
+        assert "local-rootfs" in {r.name for r in diff.updated}
+
+    asyncio.run(_run())
+
+
+def test_staged_path_steady_state_is_clean_no_op(migrated_url: str, tmp_path: Path) -> None:
+    """An unchanged sidecar makes a second pass a clean no-op (crit 6)."""
+
+    async def _run() -> None:
+        qcow2 = tmp_path / "img.qcow2"
+        write_sidecar(qcow2, provenance={"boot_kernel_count": 1})
+        doc = load_inventory(_write_toml(tmp_path, _staged_path_body(str(qcow2))))
+        await _reconcile(migrated_url, doc, _FakeImageStore())
+        diff = await _reconcile(migrated_url, doc, _FakeImageStore())
+        assert diff.updated == []
+        assert diff.created == []
+
+    asyncio.run(_run())
+
+
+def test_reconcile_never_overwrites_build_row_provenance(migrated_url: str, tmp_path: Path) -> None:
+    """A build/s3 row's publish-written provenance is left untouched by reconcile (crit 5)."""
+
+    async def _run() -> None:
+        publish_prov: dict[str, object] = {"boot_kernel_count": 1, "source": "publish"}
+        async with await _connect(migrated_url) as seed:
+            await _insert_registered_build_row(
+                seed, name="built-img", object_key="images/x.qcow2", digest="sha256:built"
+            )
+            await _set_provenance(seed, "built-img", publish_prov)
+        doc = load_inventory(
+            _write_toml(
+                tmp_path,
+                "schema_version = 2\n"
+                "[[image]]\n"
+                'provider = "local-libvirt"\n'
+                'name = "built-img"\n'
+                'arch = "x86_64"\n'
+                'format = "qcow2"\n'
+                'root_device = "/dev/vda"\n'
+                'visibility = "public"\n'
+                "[image.source]\n"
+                'kind = "build"\n'
+                'base = "some-base"\n',
+            )
+        )
+        await _reconcile(migrated_url, doc, _FakeImageStore())
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "built-img")
+        assert row["provenance"] == publish_prov  # unchanged
 
     asyncio.run(_run())

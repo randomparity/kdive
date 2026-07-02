@@ -28,15 +28,19 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Literal, Protocol, runtime_checkable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from kdive.domain.catalog.images import ImageState
 from kdive.domain.errors import CategorizedError
+from kdive.images.staged_provenance import read_sidecar
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import (
     BuildSource,
@@ -167,7 +171,7 @@ async def _load_config_rows(
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id, provider, name, arch, format, root_device, visibility, capabilities, "
-            "       object_key, digest, volume, state "
+            "       object_key, digest, volume, path, provenance, state "
             "FROM image_catalog WHERE managed_by = %s",
             (CONFIG_MANAGED_BY,),
         )
@@ -197,12 +201,13 @@ async def _create_entry(
 ) -> None:
     """Insert a new config row, realizing it per its source kind."""
     head = await _resolve_s3_head(entry, None, store)
-    state, object_key, volume, path, digest, warning = _realize(entry, None, head)
+    provenance = await _resolve_staged_provenance(entry, None)
+    realized, warning = _realize(entry, None, head, provenance)
     await conn.execute(
         "INSERT INTO image_catalog "
         "(provider, name, arch, format, root_device, visibility, capabilities, "
-        " object_key, volume, path, digest, state, managed_by) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        " object_key, volume, path, digest, provenance, state, managed_by) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             entry.provider,
             entry.name,
@@ -211,11 +216,12 @@ async def _create_entry(
             entry.root_device,
             entry.visibility.value,
             entry.capabilities,
-            object_key,
-            volume,
-            path,
-            digest,
-            state,
+            realized.object_key,
+            realized.volume,
+            realized.path,
+            realized.digest,
+            Jsonb(realized.provenance),
+            realized.state,
             CONFIG_MANAGED_BY,
         ),
     )
@@ -239,13 +245,15 @@ async def _update_entry(
         "capabilities": list(entry.capabilities),
     }
     head = await _resolve_s3_head(entry, row, store)
-    state, object_key, volume, path, digest, warning = _realize(entry, row, head)
+    provenance = await _resolve_staged_provenance(entry, row)
+    realized_image, warning = _realize(entry, row, head, provenance)
     realized = {
-        "object_key": object_key,
-        "volume": volume,
-        "path": path,
-        "digest": digest,
-        "state": state,
+        "object_key": realized_image.object_key,
+        "volume": realized_image.volume,
+        "path": realized_image.path,
+        "digest": realized_image.digest,
+        "provenance": realized_image.provenance,
+        "state": realized_image.state,
     }
 
     config_changed = any(row.get(k) != v for k, v in desired.items())
@@ -253,18 +261,19 @@ async def _update_entry(
     if config_changed or realized_changed:
         await conn.execute(
             "UPDATE image_catalog SET format = %s, root_device = %s, visibility = %s, "
-            "capabilities = %s, object_key = %s, volume = %s, path = %s, digest = %s, state = %s "
-            "WHERE id = %s",
+            "capabilities = %s, object_key = %s, volume = %s, path = %s, digest = %s, "
+            "provenance = %s, state = %s WHERE id = %s",
             (
                 desired["format"],
                 desired["root_device"],
                 desired["visibility"],
                 desired["capabilities"],
-                object_key,
-                volume,
-                path,
-                digest,
-                state,
+                realized_image.object_key,
+                realized_image.volume,
+                realized_image.path,
+                realized_image.digest,
+                Jsonb(realized_image.provenance),
+                realized_image.state,
                 row["id"],
             ),
         )
@@ -273,28 +282,73 @@ async def _update_entry(
         diff.warned.append(_record(entry, warning))
 
 
+@dataclass(frozen=True, slots=True)
+class _RealizedImage:
+    """The realized row fields for an entry (the diagnostic ``warning`` is returned separately)."""
+
+    state: str
+    object_key: str | None
+    volume: str | None
+    path: str | None
+    digest: str | None
+    provenance: dict[str, object]
+
+
+def _row_provenance(row: dict[str, object] | None) -> dict[str, object]:
+    """The row's stored provenance as a dict (``{}`` for a new row or a non-dict column)."""
+    if row is None:
+        return {}
+    value = row.get("provenance")
+    return cast("dict[str, object]", value) if isinstance(value, dict) else {}
+
+
+async def _resolve_staged_provenance(
+    entry: ImageEntry, row: dict[str, object] | None
+) -> dict[str, object]:
+    """The provenance to persist for ``entry``: a staged-path sidecar, else the existing row value.
+
+    A ``staged-path`` source reads its ``<path>.provenance.json`` sidecar off the event loop (#977,
+    ADR-0296); a valid sidecar's provenance is adopted, and its absence preserves the row's existing
+    provenance (so an absent sidecar never wipes a populated row) and is debug-logged. Every other
+    source kind keeps the row's existing provenance unchanged — ``build``/``s3`` provenance is owned
+    by ``publish_image`` and must never be clobbered; ``staged`` (volume) has no sidecar location.
+    """
+    existing = _row_provenance(row)
+    source = entry.source
+    if isinstance(source, StagedPathSource):
+        sidecar = await asyncio.to_thread(read_sidecar, Path(source.path))
+        if sidecar is not None:
+            return sidecar
+        _log.debug("inventory: staged-path image %s has no provenance sidecar", entry.name)
+    return existing
+
+
 def _realize(
-    entry: ImageEntry, row: dict[str, object] | None, head: _S3Head
-) -> tuple[str, str | None, str | None, str | None, str | None, str | None]:
-    """Compute ``(state, object_key, volume, path, digest, warning)`` for an entry.
+    entry: ImageEntry,
+    row: dict[str, object] | None,
+    head: _S3Head,
+    provenance: dict[str, object],
+) -> tuple[_RealizedImage, str | None]:
+    """Compute the :class:`_RealizedImage` and an optional warning for an entry.
 
     Never downgrades a row already ``registered`` from a build/upload: a ``build`` (or an
     ``s3`` whose object/digest is not yet confirmed) leaves a realized row exactly as it is,
     so the runtime-owned object_key/digest/state are preserved (invariant 1). A ``staged-path``
     source seeds ``registered`` with ``path`` set and the others NULL (ADR-0228); it is declared,
-    not probed — resolution at provision time is the gate.
+    not probed — resolution at provision time is the gate. ``provenance`` is resolved by
+    :func:`_resolve_staged_provenance` and carried onto the row unchanged.
     """
     source = entry.source
     if isinstance(source, StagedPathSource):
-        return (_REGISTERED, None, None, source.path, None, None)
+        return _RealizedImage(_REGISTERED, None, None, source.path, None, provenance), None
     if isinstance(source, StagedSource):
-        return (_REGISTERED, None, source.volume, None, None, None)
+        return _RealizedImage(_REGISTERED, None, source.volume, None, None, provenance), None
     if isinstance(source, BuildSource):
         state, object_key, volume, digest, warning = _realize_build(entry, row)
-        return (state, object_key, volume, None, digest, warning)
+        return _RealizedImage(state, object_key, volume, None, digest, provenance), warning
     if isinstance(source, S3Source):
         state, object_key, volume, digest, warning = _realize_s3(entry, row, source, head)
-        return (state, object_key, volume, None, digest, warning)
+        return _RealizedImage(state, object_key, volume, None, digest, provenance), warning
     raise AssertionError(f"unhandled image source kind: {source!r}")  # pragma: no cover
 
 
