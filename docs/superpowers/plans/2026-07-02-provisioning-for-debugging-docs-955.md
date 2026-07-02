@@ -81,13 +81,33 @@ teardown → reprovision → rebuild → reboot cycle when it discovers the need
 - **Acceptance:** `test_each_served_toolset_doc_names_exactly_its_namespace_tools` passes
   for `systems` (only live `systems.*` tokens; already-named tools unchanged).
 
-### Task 4 — Regenerate snapshots and run guardrails
+### Task 4 — Add a content-presence guard (TDD)
 
-- [ ] `just resources-docs` to regenerate `_content/*` snapshots; review the diff.
+The completeness and snapshot guards prove tool-name and snapshot-vs-canonical sync only —
+neither asserts the provisioning-for-debugging guidance exists. Without a guard, a later
+edit can silently delete the issue's whole deliverable and CI stays green. Add a focused
+test asserting the served `agent-index.md` snapshot carries the section and its knobs.
+
+- [ ] Write the failing test first (in a new
+  `tests/mcp/resources/test_provisioning_for_debugging_docs.py` or alongside the
+  completeness test): read the served `agent-index` snapshot via the `DOC_RESOURCES`
+  entry (not a hard-coded path) and assert it contains a provisioning-for-debugging
+  heading and names `gdbstub`, `preserve_on_crash`, and `ssh_credential_ref`. Confirm it
+  fails before Task 1's content lands (or reordered: run it after edits and confirm it was
+  red on the pre-edit snapshot).
+- [ ] Keep the assertion behavioral (keywords the agent must see), not brittle
+  (no exact-sentence match).
+- **Acceptance:** the new test passes on the edited snapshot; `ty`/`ruff` clean on it.
+
+### Task 5 — Regenerate snapshots and run guardrails
+
+- [ ] `just resources-docs` to regenerate `_content/*` snapshots; review the diff (it
+  writes every allowlisted snapshot — confirm only the three intended files changed).
 - [ ] `just resources-docs-check` → clean.
 - [ ] `./scripts/check-doc-links.sh` and `./scripts/check-doc-paths.sh` → clean.
-- [ ] Focused tests: `uv run python -m pytest tests/mcp/resources/test_toolset_doc_completeness.py tests/mcp/core/test_no_adr_leak.py -q`.
-- [ ] Commit canonical docs + regenerated snapshots together (one logical change).
+- [ ] Focused tests: `uv run python -m pytest tests/mcp/resources/test_toolset_doc_completeness.py tests/mcp/resources/test_provisioning_for_debugging_docs.py tests/mcp/core/test_no_adr_leak.py -q`.
+- [ ] `just lint` and `just type` (whole tree) clean.
+- [ ] Commit canonical docs + regenerated snapshots + the new test together (one logical change).
 
 ## Rollback
 
@@ -96,7 +116,9 @@ Revert the branch. No migration, schema, or config to unwind; docs-only.
 ## Verification the change works
 
 The served docs are read over MCP as `resource://kdive/docs/guide/agent-index.md` etc.
-The completeness and snapshot guards are the automated proof the content is well-formed and
-in sync. A human reading the rendered index sees the provisioning-for-debugging section
-before the debug stage — the discovery gap the issue names is closed at the workflow-map
-level and reinforced in the two toolset guides the agent lands on.
+The completeness and snapshot guards prove tool-name and snapshot-vs-canonical sync; the
+Task 4 content-presence guard is the automated proof the provisioning-for-debugging
+guidance is actually present in the served index. A human reading the rendered index sees
+the provisioning-for-debugging section before the debug stage — the discovery gap the
+issue names is closed at the workflow-map level and reinforced in the two toolset guides
+the agent lands on.
