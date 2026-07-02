@@ -325,6 +325,9 @@ def test_job_kind_covers_the_async_tool_surface() -> None:
         # control.diagnostic_sysrq enqueues this to inject one allowlisted magic-SysRq
         # keystroke into a ready local-libvirt guest and capture the console dump (ADR-0285, #925).
         "diagnostic_sysrq",
+        # systems.check_ssh_reachable enqueues this to probe a ready System's guest sshd over the
+        # recorded loopback forward and return a compact reachability verdict (ADR-0298, #972).
+        "check_ssh_reachable",
     }
 
 

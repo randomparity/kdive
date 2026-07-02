@@ -220,6 +220,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "systems.reprovision": _OPERATOR,
     "systems.teardown": _ADMIN,
     "systems.ssh_info": _VIEWER,
+    "systems.check_ssh_reachable": _VIEWER,
     "systems.authorize_ssh_key": _OPERATOR,
     # vmcore
     "vmcore.list": _VIEWER,

@@ -9,6 +9,7 @@ private key.
 from __future__ import annotations
 
 import hashlib
+from uuid import uuid4
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -18,7 +19,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.context import authorizing as job_authorizing
-from kdive.jobs.payloads import AuthorizeSshKeyPayload
+from kdive.jobs.payloads import AuthorizeSshKeyPayload, CheckSshReachablePayload
 from kdive.log import bind_context
 from kdive.mcp.exposure import visible_next_actions
 from kdive.mcp.responses import ToolResponse
@@ -79,7 +80,9 @@ async def ssh_info(
         )
     host, port = recorded
     actions = visible_next_actions(
-        ["systems.authorize_ssh_key", "systems.get"], ctx, system.project
+        ["systems.check_ssh_reachable", "systems.authorize_ssh_key", "systems.get"],
+        ctx,
+        system.project,
     )
     return ToolResponse.success(
         system_id,
@@ -147,5 +150,54 @@ async def authorize_ssh_key(
                 AuthorizeSshKeyPayload(system_id=system_id, public_key=normalized),
                 job_authorizing(ctx, system.project),
                 f"{system_id}:authorize_ssh_key:{fingerprint}",
+            )
+    return ToolResponse.from_job(job)
+
+
+async def check_ssh_reachable(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    system_id: str,
+    *,
+    resolver: ProviderResolver,
+) -> ToolResponse:
+    """Enqueue a runtime SSH-reachability probe for a ready System (read-only, VIEWER)."""
+    uid = _as_uuid(system_id)
+    if uid is None:
+        return _invalid_uuid_error("system_id", system_id)
+    with bind_context(principal=ctx.principal):
+        async with pool.connection() as conn:
+            system = await SYSTEMS.get(conn, uid)
+            if system is None or system.project not in ctx.projects:
+                return _not_found(system_id)
+            require_role(ctx, system.project, Role.VIEWER)
+            if system.state is not SystemState.READY:
+                return ToolResponse.failure(
+                    system_id, ErrorCategory.READINESS_FAILURE, detail=_NOT_READY_DETAIL
+                )
+            try:
+                binding = await resolver.binding_for_system(conn, uid)
+                recorded = binding.runtime.connector.recorded_ssh_endpoint(
+                    SystemHandle(system.domain_name or str(system.id))
+                )
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(system_id, exc)
+            if recorded is None:
+                return ToolResponse.failure(
+                    system_id,
+                    ErrorCategory.CONFIGURATION_ERROR,
+                    detail=_UNPROVISIONED_DETAIL,
+                    data={"reason": "ssh_not_provisioned"},
+                )
+            # A liveness probe is a fresh measurement each call: a nonce dedup_key mints a distinct
+            # job so a re-issue never returns a prior (succeeded, permanent-UNIQUE) job's stale
+            # verdict. authorize_ssh_key keys on the key fingerprint for the opposite, idempotent,
+            # reason.
+            job = await queue.enqueue(
+                conn,
+                JobKind.CHECK_SSH_REACHABLE,
+                CheckSshReachablePayload(system_id=system_id),
+                job_authorizing(ctx, system.project),
+                f"{system_id}:check_ssh_reachable:{uuid4().hex}",
             )
     return ToolResponse.from_job(job)

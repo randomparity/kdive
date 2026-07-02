@@ -55,6 +55,10 @@ class AuthorizeSshKeyPayload(SystemPayload):
     public_key: str
 
 
+class CheckSshReachablePayload(SystemPayload):
+    """A request to probe a ready System's guest sshd reachability (ADR-0298, #972)."""
+
+
 class ConsoleRotatePayload(SystemPayload):
     """A request to rotate a live System's growing console into redacted parts (#892).
 
@@ -209,6 +213,7 @@ _PAYLOAD_MODELS: dict[JobKind, _PayloadModel] = {
     JobKind.DIAGNOSTICS_WORKER_CHECK: DiagnosticsWorkerCheckPayload,
     JobKind.BUILD_INSTALL_BOOT: BuildInstallBootPayload,
     JobKind.AUTHORIZE_SSH_KEY: AuthorizeSshKeyPayload,
+    JobKind.CHECK_SSH_REACHABLE: CheckSshReachablePayload,
     JobKind.CONSOLE_ROTATE: ConsoleRotatePayload,
 }
 _RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {

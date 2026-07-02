@@ -11,7 +11,11 @@ from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import System
-from kdive.mcp.tools.lifecycle.systems.ssh_access import authorize_ssh_key, ssh_info
+from kdive.mcp.tools.lifecycle.systems.ssh_access import (
+    authorize_ssh_key,
+    check_ssh_reachable,
+    ssh_info,
+)
 from kdive.security.authz.rbac import AuthorizationError, Role
 from tests.mcp.systems_support import TEST_DT as _DT
 from tests.mcp.systems_support import ctx as _ctx
@@ -209,5 +213,85 @@ def test_authorize_ssh_key_distinct_keys_enqueue_distinct_jobs(migrated_url: str
             replay = await authorize_ssh_key(pool, _ctx(), sys_id, key_a, resolver=resolver)
         assert first.object_id != second.object_id  # distinct keys -> distinct jobs
         assert replay.object_id == first.object_id  # same key -> same job (idempotent)
+
+    asyncio.run(_run())
+
+
+def test_check_ssh_reachable_ready_enqueues_job(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(("127.0.0.1", 22022)))
+            resp = await check_ssh_reachable(pool, _ctx(), sys_id, resolver=resolver)
+        assert resp.status == "queued"
+        assert resp.data["kind"] == "check_ssh_reachable"
+
+    asyncio.run(_run())
+
+
+def test_check_ssh_reachable_viewer_can_enqueue(migrated_url: str) -> None:
+    # Unlike authorize_ssh_key (OPERATOR), the probe is read-only observability gated at VIEWER.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(("127.0.0.1", 22022)))
+            resp = await check_ssh_reachable(
+                pool, _ctx(role=Role.VIEWER), sys_id, resolver=resolver
+            )
+        assert resp.status == "queued"
+
+    asyncio.run(_run())
+
+
+def test_check_ssh_reachable_fresh_job_each_call(migrated_url: str) -> None:
+    # A liveness probe is a fresh measurement each call: the nonce dedup_key mints a distinct job,
+    # so a re-issue is never pinned to a prior (terminal) job's stale verdict (ADR-0298).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(("127.0.0.1", 22022)))
+            first = await check_ssh_reachable(pool, _ctx(), sys_id, resolver=resolver)
+            second = await check_ssh_reachable(pool, _ctx(), sys_id, resolver=resolver)
+        assert first.object_id != second.object_id
+
+    asyncio.run(_run())
+
+
+def test_check_ssh_reachable_not_ready_is_readiness_failure(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
+            resolver = _provider_resolver(connector=_FakeConnector(("127.0.0.1", 22022)))
+            resp = await check_ssh_reachable(pool, _ctx(), sys_id, resolver=resolver)
+        assert resp.error_category == ErrorCategory.READINESS_FAILURE.value
+
+    asyncio.run(_run())
+
+
+def test_check_ssh_reachable_unprovisioned_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(None))
+            resp = await check_ssh_reachable(pool, _ctx(), sys_id, resolver=resolver)
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert resp.data["reason"] == "ssh_not_provisioned"
+
+    asyncio.run(_run())
+
+
+def test_ssh_info_suggests_check_ssh_reachable(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(("127.0.0.1", 22022)))
+            resp = await ssh_info(pool, _ctx(), sys_id, resolver=resolver)
+        assert "systems.check_ssh_reachable" in resp.suggested_next_actions
 
     asyncio.run(_run())

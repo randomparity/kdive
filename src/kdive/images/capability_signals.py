@@ -122,13 +122,6 @@ PLANNED_SIGNALS: tuple[PlannedSignal, ...] = (
         "SysRq availability can report false success; needs a build-recorded operand",
     ),
     PlannedSignal(
-        "ssh_reachable",
-        "#972",
-        "guest SSH now works (ADR-0288/#962 cloud-init DHCP + network-online-ordered "
-        "readiness, proven per family in ADR-0294); the open question is whether to surface it "
-        "as a runtime probe on systems.ssh_info or a static image-capability signal",
-    ),
-    PlannedSignal(
         "live_drgn",
         "#762/#697",
         "drgn liveness depends on provider introspection and profile ssh_credential_ref",
