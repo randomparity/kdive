@@ -69,6 +69,36 @@ captures (`package_versions`, `makedumpfile_version`):
    operand and must be recorded, not dropped). A degraded build's row stays byte-identical to a
    pre-feature one.
 
+### Where the operand lands (precondition — read this before believing the value claim)
+
+`boot_kernel_count` is only useful once it reaches the `image_catalog.provenance` column an
+`images.describe` reader sees. There are two catalog-population paths, and **only one carries
+provenance**:
+
+- **`publish_image` (S3-backed) — carries provenance.** `jobs/handlers/image_build.py` (the
+  `IMAGE_BUILD` job) and the private-upload path (`services/images/upload.py`) call
+  `services/images/publish.py:publish_image` with `RootfsBuildOutput.provenance`, so the operand
+  lands. This is where the `kdump` signal's `makedumpfile_version` already lands and computes a
+  confident answer.
+- **Inventory reconcile (local staged path) — drops provenance.** Local-libvirt fixtures such as
+  `fedora-kdive-ready-43` are staged qcow2s registered from `systems.toml` by
+  `inventory/reconcile/images.py`; `_create_entry`/`_update_entry` set
+  `capabilities`/`object_key`/`volume`/`path`/`digest`/`state` but **not** `provenance`, so the row
+  keeps the default `{}`. Separately, the operator CLI `images/rootfs_command.py:run_build_fs`
+  computes `output.provenance` and then discards it — it moves the qcow2 to a path and prints
+  `KDIVE_GUEST_IMAGE`, never persisting provenance.
+
+**Consequence:** for a locally-staged image, `boot_kernel_count` is absent and `direct_kernel`
+reads `unverified` — permanently, regardless of rebuilds. This is **identical to the existing
+`kdump` signal**, which is `unverified` on the same rows for the same reason (its
+`makedumpfile_version` operand also only lands on the publish/upload path). Persisting build
+provenance on the local staged/reconcile path is a larger, separate change that would also refresh
+`kdump`; it is out of scope here (see Considered & rejected) and worth a follow-up. This spec does
+not claim to make the motivating local fixture confident today — it registers the signal and its
+operand honestly, so that any provenance-carrying row (and the local path once a follow-up
+persists provenance) reports a confident answer, and every other row degrades to `unverified`
+rather than lying.
+
 ### Anti-drift: one classifier
 
 `baseline_kernel.py` grows a pure `baseline_kernel_names(boot_entries) -> list[str]` — the
@@ -109,22 +139,40 @@ the new block appears automatically. The `images_describe` wrapper docstring and
 
 ## Honesty tradeoff
 
-Every catalog row built before this feature lacks `boot_kernel_count`, so `direct_kernel` reads
-`unverified` until the image is rebuilt — identical to how `kdump` reads `unverified` on rows
-predating `makedumpfile_version`. This is the ADR-0286 invariant: an un-refreshed signal is
-honestly non-confident, never confidently wrong. A freshly built image reports a confident
-`provisionable` / `not_provisionable`, which is what lets an agent pick a valid fixture up front.
+`direct_kernel` reads `unverified` on any row whose `provenance` lacks `boot_kernel_count` —
+identical to how `kdump` reads `unverified` on rows lacking `makedumpfile_version`. This is the
+ADR-0286 invariant: an un-refreshed signal is honestly non-confident, never confidently wrong. A
+provenance-carrying row (built through the `publish_image` / upload path — see "Where the operand
+lands") reports a confident `provisionable` / `not_provisionable`, which is what lets an agent pick
+a valid fixture up front on that path. A locally-staged row reads `unverified` until a follow-up
+persists build provenance on the reconcile path (the same gap `kdump` has today) — so on the local
+provider this ships the honest `unverified`-not-a-lie behavior now and the confident answer when
+that follow-up lands, not a false confident answer in the interim.
 
 ## Success criteria
+
+Render-level (given a row's `provenance`):
 
 - `images.describe` on an image whose `provenance` records `boot_kernel_count: 1` returns
   `data.capability_signals["direct_kernel"].status == "provisionable"`.
 - `boot_kernel_count: 2` (or `0`) returns `not_provisionable` with an actionable note.
-- A row without the operand returns `unverified` with `boot_kernel_count: null`.
+- A row without the operand (which is **every local-libvirt staged row today**, and any row not
+  built through the publish/upload path) returns `unverified` with `boot_kernel_count: null` — the
+  honest, non-lying observable the motivating local fixture reports until the reconcile-path
+  follow-up lands.
+
+Build-level (operand capture):
+
 - A build given a `/boot` probe seam yielding two non-rescue kernels records
-  `provenance["boot_kernel_count"] == 2`; a seam raising `CategorizedError` omits the key.
+  `provenance["boot_kernel_count"] == 2`; a seam yielding one records `1`; a seam raising
+  `CategorizedError` omits the key entirely (byte-identical to a pre-feature row).
 - `baseline_kernel_names` and `select_kernel_and_initrd` agree on the same `/boot` listing (the
-  recorded count equals the number of provision-time baseline candidates).
+  recorded count equals the number of provision-time baseline candidates), so a recorded
+  `provisionable` predicts a successful `select_kernel_and_initrd`.
+
+Non-goal (explicitly not a criterion): making the locally-staged `fedora-kdive-ready-43` row report
+a confident answer — that requires persisting provenance on the reconcile/build-fs path (a separate
+change that also refreshes `kdump`).
 
 ## Considered & rejected
 
@@ -144,3 +192,16 @@ honestly non-confident, never confidently wrong. A freshly built image reports a
   copies `/boot` verbatim, so the scratch and published kernel sets are identical, and the scratch
   is the disk the existing `makedumpfile`/package captures already inspect — one inspection point,
   one proven code path.
+- **Persist build provenance on the local staged/reconcile path in this change** (so the local
+  fixture reports a confident answer immediately). Deferred, not done here: the reconcile INSERT
+  (`inventory/reconcile/images.py`) and the `build-fs` CLI (`run_build_fs`) both drop provenance
+  today, and closing that gap must also carry `makedumpfile_version` (else `kdump` and
+  `direct_kernel` would diverge on the same rows) and decide where the operand is computed for a
+  staged qcow2 the server never built. That is a larger, provider-registration change of its own;
+  this spec keeps to #954's "annotate `images.describe`" ask and ships the honest `unverified`
+  degrade for local rows until that follow-up lands.
+- **Compute `boot_kernel_count` at reconcile time by probing the staged qcow2.** Rejected here:
+  it couples the server-side reconcile loop to libguestfs and re-derives an operand at
+  registration rather than at build — the same objection as the static-column alternative, one
+  layer up. It belongs in the deferred reconcile-provenance follow-up, evaluated against the
+  publish path, not bolted onto this signal.

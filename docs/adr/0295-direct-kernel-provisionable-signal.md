@@ -65,12 +65,20 @@ No new MCP tool, RBAC change, schema/migration, or config change. Tool visibilit
 ## Consequences
 
 - An agent can read `images.describe` `data.capability_signals["direct_kernel"]` to pick a
-  direct-kernel-provisionable fixture up front instead of burning an Allocation to discover the
-  failure.
-- Every image built before this feature reads `unverified` (no operand) until rebuilt — identical
-  to how `kdump` degraded before `makedumpfile_version` was recorded. Un-refreshed metadata is
-  honestly non-confident, never confidently wrong (the ADR-0286 invariant). The catalog's staged
-  fixtures gain a confident answer as they are rebuilt.
+  direct-kernel-provisionable fixture up front, for any row whose `provenance` carries the operand,
+  instead of burning an Allocation to discover the failure.
+- **The operand lands only on the provenance-carrying publish path.** `jobs/handlers/image_build.py`
+  (`IMAGE_BUILD`) and the private-upload path persist `RootfsBuildOutput.provenance` via
+  `publish_image`, so the signal is confident there. The local-libvirt staged path does **not**:
+  `inventory/reconcile/images.py` (`_create_entry`/`_update_entry`) omits the `provenance` column,
+  and the `build-fs` CLI (`run_build_fs`) discards `output.provenance`. So a locally-staged fixture
+  (the `fedora-kdive-ready-43` motivating case) reads `unverified` regardless of rebuilds —
+  **exactly the gap the `kdump` signal already has** (`makedumpfile_version` lands on the same path
+  only). This ADR ships the honest `unverified`-not-a-lie behavior for those rows now; making the
+  local path confident is a follow-up that persists provenance on reconcile/build-fs and refreshes
+  both signals at once.
+- Un-refreshed metadata is honestly non-confident, never confidently wrong (the ADR-0286
+  invariant): a row lacking the operand reads `unverified`, not a stale confident answer.
 - The build gains one advisory libguestfs read; it degrades to omitting the operand on any
   failure, so it never fails a build. Unit tests inject the seam and cover the
   orchestration/provenance contract; a live build recording the operand end-to-end is the
