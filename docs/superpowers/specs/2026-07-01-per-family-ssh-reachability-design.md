@@ -1,0 +1,152 @@
+# Per-family live SSH reachability proof (#956)
+
+- Status: Draft
+- ADR: [ADR-0294](../../adr/0294-per-family-ssh-reachability-proof.md)
+- Issue: [#956](https://github.com/randomparity/kdive/issues/956)
+
+## Problem
+
+Issue #956 was filed (from `BLACK_BOX_REVIEW.md` Finding 1) claiming
+`debian-kdive-ready-*` guests are SSH-unreachable because the debian family disabled
+cloud-init and staged no NIC-up config, while a follow-up comment reported the rhel
+family failing identically (banner-exchange timeout) even with its NetworkManager
+DHCP keyfile present.
+
+**The primary defect no longer reproduces at HEAD.** PR#964 (ADR-0288, #962), merged
+after both #956 comments were written, resolved both root causes uniformly:
+
+- Both families now route first-boot through `cloud_init_first_boot_args(ctx)`
+  (`rhel.py`, `debian.py`), which bakes a NoCloud seed plus a `99-kdive.cfg` drop-in
+  declaring `dhcp4: true` / `match: {name: "e*"}`, strips any base network-disable
+  drop-in, and removes `/etc/cloud/cloud-init.disabled`. The hand-rolled
+  NetworkManager SSH-NIC keyfile was deleted entirely.
+- `readiness_unit()` now orders `kdive-ready` `After=network-online.target`
+  (+ `Wants=`), so the serial `ready` marker implies the cloud-init DHCP lease is up —
+  closing the exact race (`authorize_ssh_key` at `ready` races the lease →
+  `transport_failure`) the rhel-family comment hit.
+
+So the substantive residual is bullet 2 of the issue's own suggested fix: **there is no
+automated test that proves the always-rendered loopback SSH forward reaches a guest
+sshd per family.** The reachability contract is proven only by assumption plus a
+one-off operator run; a per-family regression (a family reintroducing a network-disable
+drop-in, or a base image change) would not be caught.
+
+## Goal
+
+Add a gated live test that proves the reachability contract **per family** (debian and
+rhel), and clear the two documentation artifacts left stale by the #962 fix. Do **not**
+re-implement any networking fix (there is no current defect) and do **not** promote the
+`ssh_reachable` capability signal (deferred — see Non-goals).
+
+## Success criteria (falsifiable)
+
+1. A `live_stack`-marked test provisions a `*-kdive-ready` image per family, waits for
+   `ready`, and asserts:
+   - `systems.ssh_info` returns a `worker_loopback` endpoint (host+port, status `ok`),
+     **and**
+   - `systems.authorize_ssh_key` drains to a **succeeded** job (the worker SSHes into
+     the guest over the managed key and appends the agent key — this only succeeds if
+     the guest NIC leased and sshd answers).
+   The test releases the allocation on exit (success or failure).
+2. The test **skips cleanly** (never fails, never errors) when its per-family ready
+   image / stack / issuer is absent, mirroring the existing `_spine_preflight` idiom.
+   It does not un-gate or widen any existing marker.
+3. The test is parametrized over `{debian, rhel}` so each family is proven
+   independently; a family with no configured image skips only that parameter.
+4. The debian family customizer comment near `debian.py:110` no longer claims
+   "cloud-init's cloud-ifupdown-helper DHCPs the NIC" (false on two counts post-#962);
+   it states the cloud.cfg `dhcp4`/NoCloud reality.
+5. `PLANNED_SIGNALS`' `ssh_reachable` entry no longer claims "sshd/keygen liveness is
+   broken"; its rationale reflects that reachability now works and the open question is
+   static-signal-vs-runtime-probe, and its `tracking_issue` points at the new
+   follow-up issue (not #956, which this change closes).
+6. A follow-up GitHub issue exists capturing "surface `ssh_reachable` on
+   `systems.get`/`ssh_info`", stating the static-vs-runtime design fork and referencing
+   #956.
+7. `just lint`, `just type`, `just test` are green (the new test is deselected by
+   `just test`; the CI-runnable guards over the customizer comment and the signal
+   rationale, if any, pass).
+
+## Design
+
+### The test lives in the local live-stack spine module
+
+`tests/integration/test_live_stack.py` already drives allocate → provision → ready over
+the live MCP HTTP transport with the shared spine helpers (`allocate`, `provision_to_ready`,
+`scalar`, `ok`, `drain_job`, `await_system_state`). The reachability test reuses those
+helpers rather than a new harness.
+
+The provision profile sets `ssh_credential_ref` (as `_live_script_provision_profile`
+already does) so the loopback forward + virtio NIC render, and omits `force_crash` (no
+destructive op needed). It does **not** need a build/install/boot: `systems.provision`
+alone brings the System to `ready` on its baseline kernel (ADR-0272), and the forward is
+rendered at provision. So the test is short: allocate → provision → ready → ssh_info →
+authorize_ssh_key(drain) → release.
+
+### Per-family image selection
+
+The existing spine reads one `KDIVE_GUEST_IMAGE`. Proving reachability *per family*
+needs a debian ready image and a rhel ready image, which are distinct artifacts. Add two
+env vars read only by this test:
+
+- `KDIVE_GUEST_IMAGE_DEBIAN` — path to a `debian-kdive-ready-*` qcow2.
+- `KDIVE_GUEST_IMAGE_RHEL` — path to a rhel-family (`rocky`/`centos`/`fedora`)
+  `*-kdive-ready-*` qcow2.
+
+The test is `pytest.mark.parametrize`d over `("debian", <env>)` / `("rhel", <env>)`.
+Each parameter's preflight skips only that parameter when its image env var is
+unset/missing. This keeps a single-family host able to prove the family it has without
+failing on the family it lacks. The env vars are registered in the config/env reference
+(the repo has an env-doc guard, `scripts/check_env_documented.py`).
+
+### The authorize_ssh_key success is the reachability assertion
+
+`systems.authorize_ssh_key` enqueues a worker job that SSHes into the guest over the
+per-System managed key and appends the agent's public key. A drained **succeeded** job
+is end-to-end proof that: the NIC leased, the loopback forward bridged, and sshd
+answered — i.e. the exact contract #956 says is unproven. `ssh_info` returning an
+endpoint alone is not sufficient (it reads recorded XML, ADR-0281), so the test asserts
+both, and `authorize_ssh_key` is the load-bearing one.
+
+The agent public key is a throwaway ed25519 public key generated in-test (only the
+public half; KDIVE never needs the private half for the append). Validation
+(`validate_authorized_public_key`) requires a well-formed key.
+
+### Housekeeping (docs only, no behavior change)
+
+- `debian.py:110` comment: replace the cloud-ifupdown-helper claim with the cloud.cfg
+  `dhcp4`/NoCloud reality (matches ADR-0288). No code change on that line.
+- `capability_signals.py` `PLANNED_SIGNALS` `ssh_reachable`: repoint `tracking_issue`
+  to the follow-up issue and rewrite the rationale.
+
+### Follow-up issue (B, deferred)
+
+File a fresh issue: "surface `ssh_reachable` on `systems.get`/`ssh_info`", stating the
+fork — the issue text asks for a **runtime** probe on `ssh_info` (a live TCP/banner
+check with its own failure modes), while the existing `PlannedSignal` is the **static**
+image-capability layer (computed over build provenance, `images.describe`). Leave the
+choice to the maintainer; reference #956.
+
+## Non-goals
+
+- Promoting `ssh_reachable` to a registered signal or adding any runtime probe (deferred
+  to the follow-up issue).
+- Any change to the cloud-init / family networking implementation (no current defect).
+- A `live_vm`-only (non-stack) reachability test: reachability is a spine-level,
+  over-the-wire property (provision + worker job), so it belongs in `live_stack`.
+
+## Considered & rejected
+
+- **One `KDIVE_GUEST_IMAGE` reused for both families.** Rejected: it cannot prove *per
+  family*; a host would prove whichever single family its image happens to be and the
+  issue's "per family, not assumed" ask would be unmet.
+- **Assert reachability via a raw host-side `ssh` banner probe in-test.** Rejected:
+  duplicates the worker's SSH path with a second, differently-configured client; the
+  `authorize_ssh_key` job is the product's own reachability path and asserting it proves
+  the contract agents actually use.
+- **Add a build → install → boot before the reachability check.** Rejected as
+  unnecessary: the forward renders at provision and the baseline kernel boots to `ready`
+  (ADR-0272); adding the build spine only lengthens the test without touching the
+  reachability property.
+- **Promote `ssh_reachable` here.** Rejected per orchestrator scope: the static-vs-runtime
+  design is unsettled and belongs in its own issue.
