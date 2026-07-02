@@ -133,6 +133,15 @@ def test_build_argv_omits_kdump_nmi_and_drgn_helper(tmp_path: Path) -> None:
     assert "kdive-drgn" not in j
 
 
+def test_ssh_enable_is_coupled_to_the_debug_kind(tmp_path: Path) -> None:
+    # sshd enablement mirrors the SSH capability, which capabilities() ties to kind: a debug image
+    # enables ssh.service, a build-host image (which declares no SSH) never does.
+    debug = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True, kind="debug"))
+    build = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True, kind="build"))
+    assert "systemctl enable ssh.service" in debug
+    assert "systemctl enable ssh.service" not in build
+
+
 def test_normalize_writes_fstab_removes_crypttab_no_selinux(tmp_path: Path) -> None:
     # The debian normalize rewrites fstab + drops crypttab; AppArmor needs no relabel and there is
     # no /etc/selinux/config to touch (#824). Capture the guestfish script via an injected runner.

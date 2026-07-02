@@ -93,12 +93,14 @@ class RhelFamily:
         argv: list[str] = []
         if _el_major(ctx.distro, ctx.version) == 8 and "drgn" in ctx.packages:
             argv += ["--run-command", _ENABLE_EPEL_CMD]
-        argv += [
-            "--install",
-            ",".join(ctx.packages),
-            "--run-command",
-            "systemctl enable sshd.service",
-        ]
+        argv += ["--install", ",".join(ctx.packages)]
+        # Enable sshd exactly when this image declares the SSH capability, which ``capabilities()``
+        # ties to ``kind`` (every debug image, never a build-host image). Gating on ``kind`` (not
+        # package membership) keeps the declaration and the enable from diverging: a debug image
+        # that somehow lacks openssh-server fails the build loudly here rather than shipping an
+        # ``ssh``-tagged image with no sshd.
+        if ctx.kind == "debug":
+            argv += ["--run-command", "systemctl enable sshd.service"]
         # Gate on ``kexec-tools`` (in every debug set, absent from the build set), not the
         # Fedora-only ``kdump-utils`` — EL 8/9 get kdump from ``kexec-tools`` (#823).
         if "kexec-tools" in ctx.packages:
