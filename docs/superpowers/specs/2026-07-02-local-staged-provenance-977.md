@@ -41,18 +41,20 @@ but the filesystem. Bridge them with a **provenance sidecar file** written besid
 
 1. **`build-fs` writes the sidecar.** After `_publish_rootfs` moves the built qcow2 to `--dest`,
    `run_build_fs` writes `<dest>.provenance.json` — a small JSON document carrying the build's
-   `RootfsBuildOutput.provenance` dict verbatim plus the output content `digest` and a schema
-   version. Written atomically (temp file + `os.replace`) so a concurrent reconcile never reads a
-   half-written file. Advisory: a sidecar-write failure logs a warning and does **not** fail the
-   build (the qcow2 is the primary artifact; consistent with the makedumpfile/boot-count captures
-   that omit an operand rather than fail a build).
+   `RootfsBuildOutput.provenance` dict verbatim and a schema version. Written atomically (temp file
+   + `os.replace`) so a concurrent reconcile never reads a half-written file. Advisory: a
+   sidecar-write failure logs a warning and does **not** fail the build (the qcow2 is the primary
+   artifact; consistent with the makedumpfile/boot-count captures that omit an operand rather than
+   fail a build).
 
 2. **Reconcile reads the sidecar when realizing a `staged-path` row.** For a `staged-path` source,
-   reconcile reads `<path>.provenance.json` (off the event loop, like the existing s3 HEAD), and
-   persists the inner `provenance` dict into the row's `provenance` column. A missing, unreadable,
-   malformed, or wrong-schema sidecar degrades to "no sidecar" and reconcile **preserves** the
-   row's existing provenance (so an absent sidecar never wipes a previously-populated row back to
-   `unverified`, and an empty row stays `{}`).
+   reconcile reads `<path>.provenance.json` (off the event loop, like the existing s3 HEAD) as a
+   **validated boundary, not a trusted input** (see below), and persists the inner `provenance`
+   dict into the row's `provenance` column. A missing, unreadable, over-cap, malformed, or
+   wrong-schema sidecar degrades to "no sidecar" and reconcile **preserves** the row's existing
+   provenance (so an absent sidecar never wipes a previously-populated row back to `unverified`, and
+   an empty row stays `{}`). A `staged-path` row that gets no sidecar is logged at debug so an
+   operator can tell "not built / wrong path" from a legitimately pre-feature row.
 
 Because the sidecar carries the **entire** `RootfsBuildOutput.provenance` dict, both operands
 (`boot_kernel_count`, `makedumpfile_version`) — and any future operand the build records — reach
@@ -83,7 +85,6 @@ unambiguously bound to a specific qcow2 filename). Content:
 ```json
 {
   "schema": "kdive.staged-provenance.v1",
-  "digest": "sha256:<hex>",
   "provenance": { "...": "the RootfsBuildOutput.provenance dict, verbatim" }
 }
 ```
@@ -91,12 +92,17 @@ unambiguously bound to a specific qcow2 filename). Content:
 - `schema` is a version discriminator. Reconcile rejects an unrecognized `schema` (degrade to "no
   sidecar"), so a future format change is a detectable break, not a silent misparse. This is a
   cross-process on-disk wire format, so versioning it is warranted (not speculative).
-- `digest` is the built qcow2's content digest (`output.digest`), recorded for human/audit
-  inspection of which build the provenance describes. Reconcile does **not** re-hash the qcow2
-  (hashing a multi-GiB file every reconcile pass is unacceptable, and `staged-path` images are
-  declared-not-probed by ADR-0228 — provision-time resolution is the content gate). The digest is
-  provenance, not a verification gate reconcile enforces.
 - `provenance` is `RootfsBuildOutput.provenance` unchanged.
+
+**The sidecar is a validated boundary.** Unlike the publish path, whose provenance is computed
+server-side inside the build plane, the sidecar is a file on disk, and `images.describe` echoes a
+row's `provenance` **verbatim** to agents (`mcp/tools/catalog/images.py`). So reconcile bounds it on
+read: it reads at most `_SIDECAR_MAX_BYTES` (64 KiB — provenance is a dozen keys plus a package map,
+far under that), and requires the parsed document to be a JSON object with a recognized `schema` and
+a `provenance` that is itself a JSON object; anything else degrades to "no sidecar". The bound is a
+**byte cap plus object-shape check, deliberately not a per-key type allowlist** — so a future
+provenance operand still flows through without a reconcile change, while an unbounded or junk payload
+cannot bloat the row or the agent-facing `images.describe` response.
 
 ### Reconcile persistence
 
@@ -119,18 +125,28 @@ migration 0023.
 
 ## Acceptance criteria
 
-1. `build-fs` writes `<dest>.provenance.json` (schema `kdive.staged-provenance.v1`, the output
-   digest, and the full provenance dict) after publishing the qcow2; a write failure warns and
-   does not fail the build.
+1. `build-fs` writes `<dest>.provenance.json` (schema `kdive.staged-provenance.v1` and the full
+   provenance dict) after publishing the qcow2; a write failure warns and does not fail the build.
 2. Reconciling a `staged-path` row whose qcow2 has a valid sidecar persists the sidecar's
    provenance into the row's `provenance` column.
 3. `images.describe` for that row renders `direct_kernel` and `kdump` with a confident status
    (`provisionable`/`not_provisionable`; the kdump status per operand) instead of `unverified`.
-4. A `staged-path` row with **no** sidecar (or a malformed/wrong-schema one) keeps `{}` (or its
-   existing provenance) and reads `unverified` — the honesty invariant holds; no regression.
+4. A `staged-path` row with **no** sidecar (or a malformed/over-cap/wrong-schema one) keeps `{}`
+   (or its existing provenance) and reads `unverified` — the honesty invariant holds; no regression.
 5. Reconcile never overwrites the `provenance` of a `build`/`s3` row that `publish_image` populated.
 6. A rebuild that changes the sidecar refreshes the row's provenance on the next reconcile; a
    steady state is a clean no-op (no phantom drift).
+
+## Assumptions
+
+- **The sidecar is path-bound.** It sits next to the qcow2 at `<path>.provenance.json`, where
+  `path` is the `staged-path` source path reconcile registers. `build-fs` writes it next to
+  `--dest`, and the documented flow builds to the same path `systems.toml` declares (the `--dest`
+  default is the local rootfs dir the example inventory points at). A custom `--dest` that differs
+  from the declared path, or moving/copying the qcow2 without its sidecar, yields no sidecar and the
+  row stays `unverified` — honest, but silent except for the debug log above. This matches the
+  ADR-0228 declared-not-probed contract: the operator owns keeping the staged path and its sidecar
+  together, exactly as they own keeping the path pointing at a bootable image.
 
 ## Out of scope
 

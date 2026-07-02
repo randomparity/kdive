@@ -20,15 +20,19 @@ keeps the schema constant, path convention, and (de)serialization in one place.
 `tests/images/test_staged_provenance.py`.
 
 **Public API:**
-- `SIDECAR_SCHEMA = "kdive.staged-provenance.v1"`.
+- `SIDECAR_SCHEMA = "kdive.staged-provenance.v1"`; `_SIDECAR_MAX_BYTES = 64 * 1024`.
 - `sidecar_path(qcow2: Path) -> Path` → `Path(str(qcow2) + ".provenance.json")`.
-- `write_sidecar(qcow2: Path, *, digest: str, provenance: dict[str, object]) -> None` — atomic
-  write (`NamedTemporaryFile` in the same dir + `os.replace`) of `{"schema", "digest",
-  "provenance"}`. Raises `OSError` on I/O failure (the caller decides whether to degrade).
-- `read_sidecar(qcow2: Path) -> dict[str, object] | None` — returns the inner `provenance` dict for
-  a present, valid, correct-schema sidecar; returns `None` (never raises) for absent, unreadable,
-  non-JSON, non-object, wrong-schema, or non-dict-`provenance` sidecars. Logs a warning for a
-  present-but-invalid sidecar (distinct from the silent absent case).
+- `write_sidecar(qcow2: Path, *, provenance: dict[str, object]) -> None` — atomic write
+  (`NamedTemporaryFile` in the same dir + `os.replace`) of `{"schema", "provenance"}`. Raises
+  `OSError` on I/O failure (the caller decides whether to degrade). No `digest` field (dropped —
+  no in-system consumer; `staged-path` rows carry no digest per ADR-0228).
+- `read_sidecar(qcow2: Path) -> dict[str, object] | None` — a **validated boundary**: returns the
+  inner `provenance` dict only for a present sidecar that is ≤ `_SIDECAR_MAX_BYTES`, parses as a
+  JSON object, has `schema == SIDECAR_SCHEMA`, and whose `provenance` is itself a JSON object.
+  Returns `None` (never raises) for absent, unreadable, over-cap, non-JSON, non-object,
+  wrong/missing-schema, or non-object-`provenance` sidecars. Logs a warning for a present-but-invalid
+  sidecar (distinct from the silent absent case). The bound is a byte cap + object-shape check,
+  **not** a per-key type allowlist, so a future provenance operand flows through unchanged.
 
 **Tests (behavior + edges):**
 - round-trip: `write_sidecar` then `read_sidecar` returns the exact provenance dict.
@@ -36,11 +40,14 @@ keeps the schema constant, path convention, and (de)serialization in one place.
 - absent sidecar → `read_sidecar` returns `None`, no warning.
 - malformed JSON, JSON that is not an object, missing/unknown `schema`, `provenance` that is not a
   dict → each returns `None` (and warns for the present-but-invalid cases).
+- over-cap: a sidecar larger than `_SIDECAR_MAX_BYTES` → `None` (+warn), without loading the whole
+  file into a dict first.
+- a sidecar carrying an unknown extra provenance key → round-trips (future-operand freedom).
 - `write_sidecar` is atomic: no `.provenance.json` left containing a partial document on success
   (assert content parses); a pre-existing sidecar is overwritten.
 
-**Acceptance:** the module round-trips, every invalid-input branch returns `None` without raising,
-and the writer is atomic. `just lint type` clean.
+**Acceptance:** the module round-trips, every invalid-input branch (including over-cap) returns
+`None` without raising, the writer is atomic, and an unknown extra key survives. `just lint type` clean.
 
 ## Task 2 — `build-fs` writes the sidecar
 
@@ -50,14 +57,13 @@ and the writer is atomic. `just lint type` clean.
 
 **Change:** in `run_build_fs`, after `_publish_rootfs(output, dest)`, call a new
 `_write_provenance_sidecar(dest, output)` that calls
-`staged_provenance.write_sidecar(dest, digest=output.digest, provenance=output.provenance)` inside a
-`try/except OSError`, logging a warning (path + error) on failure and continuing. Do not change the
-`KDIVE_GUEST_IMAGE` print or the success log.
+`staged_provenance.write_sidecar(dest, provenance=output.provenance)` inside a `try/except OSError`,
+logging a warning (path + error) on failure and continuing. Do not change the `KDIVE_GUEST_IMAGE`
+print or the success log.
 
 **Tests:**
 - happy path: `run_build_fs` with a stubbed plane (returns a known `RootfsBuildOutput`) writes
-  `<dest>.provenance.json` whose inner `provenance` equals `output.provenance` and whose `digest`
-  equals `output.digest`.
+  `<dest>.provenance.json` whose inner `provenance` equals `output.provenance`.
 - sidecar-write failure (patch `write_sidecar` to raise `OSError`) → `run_build_fs` still returns
   normally, still prints `KDIVE_GUEST_IMAGE`, logs a warning (assert via `caplog`).
 
@@ -75,8 +81,9 @@ tests live).
 1. `_load_config_rows`: add `provenance` to the SELECT column list.
 2. New `_resolve_staged_provenance(entry, row) -> dict[str, object]` (async, off-thread read via
    `asyncio.to_thread`): for a `StagedPathSource`, `read_sidecar(Path(source.path))` → the dict if
-   not `None`, else the existing row provenance; for every other source kind, the existing row
-   provenance (`row["provenance"]` narrowed to a dict, or `{}` when `row is None`).
+   not `None`, else the existing row provenance (and log at debug that the staged-path row got no
+   sidecar); for every other source kind, the existing row provenance (`row["provenance"]` narrowed
+   to a dict, or `{}` when `row is None`).
 3. Thread the resolved provenance into realization. Return it alongside the realized fields — prefer
    a small `RealizedImage` dataclass replacing the current 6-tuple return of `_realize` (state,
    object_key, volume, path, digest, **provenance**), keeping `warning` as a separate return, so the

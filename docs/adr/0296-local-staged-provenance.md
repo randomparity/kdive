@@ -37,18 +37,28 @@ already persists.
 
 - **`build-fs` writes `<dest>.provenance.json`.** After `_publish_rootfs` moves the built qcow2 to
   `--dest`, `run_build_fs` writes a sidecar JSON beside it: `{"schema":
-  "kdive.staged-provenance.v1", "digest": <output.digest>, "provenance": <output.provenance>}`.
-  The `provenance` payload is `RootfsBuildOutput.provenance` verbatim. Written atomically (temp file
-  + `os.replace`) so a concurrent reconcile never reads a partial file. **Advisory:** a sidecar-write
-  failure logs a warning and does not fail the build — the qcow2 is the primary artifact, matching
-  the "advisory capture never fails a build" stance of the makedumpfile/boot-count captures.
+  "kdive.staged-provenance.v1", "provenance": <output.provenance>}`. The `provenance` payload is
+  `RootfsBuildOutput.provenance` verbatim. Written atomically (temp file + `os.replace`) so a
+  concurrent reconcile never reads a partial file. **Advisory:** a sidecar-write failure logs a
+  warning and does not fail the build — the qcow2 is the primary artifact, matching the "advisory
+  capture never fails a build" stance of the makedumpfile/boot-count captures.
 
 - **Reconcile persists the sidecar on a `staged-path` row.** `reconcile_images` resolves the
   sidecar off the event loop (like the existing s3 HEAD) via a `_resolve_staged_provenance` step
   and threads the result into realization. The `provenance` column is written by `_create_entry`
   and change-detected + written by `_update_entry`. Per source kind: `staged-path` adopts a valid
   sidecar's inner dict (else preserves the existing row provenance); `staged`/`build`/`s3` preserve
-  the existing row provenance unchanged (a new row seeds `{}`).
+  the existing row provenance unchanged (a new row seeds `{}`). A `staged-path` row that gets no
+  sidecar is logged at debug (so "not built / wrong path" is distinguishable from a pre-feature row).
+
+- **The sidecar is a validated boundary, not a trusted input.** The publish path's provenance is
+  computed server-side; the sidecar is a file on disk, and `images.describe` echoes a row's
+  `provenance` verbatim to agents. Reconcile therefore bounds the read: at most `_SIDECAR_MAX_BYTES`
+  (64 KiB), and the parsed document must be a JSON object with a recognized `schema` and a
+  `provenance` that is itself a JSON object; anything else degrades to "no sidecar". The bound is a
+  byte cap plus object-shape check, **not** a per-key type allowlist, so a future operand still flows
+  through without a reconcile change while a junk/oversized payload cannot bloat the row or the
+  agent-facing response.
 
 - **Both operands travel together.** The sidecar carries the whole provenance dict, so
   `boot_kernel_count` and `makedumpfile_version` — and any future operand — reach the row together;
@@ -59,10 +69,10 @@ already persists.
   malformed/unknown-schema one, keeps its existing provenance (`{}` for a new row) and reads
   `unverified` — never a stale confident answer. An absent sidecar never wipes a populated row.
 
-- **No re-hash, no content gate.** Reconcile does not re-hash the qcow2 against the sidecar's
-  `digest` (hashing a multi-GiB file every pass is unacceptable; `staged-path` is declared-not-probed
-  by ADR-0228 — provision-time resolution is the content gate). The recorded `digest` is provenance
-  for audit, not a gate reconcile enforces.
+- **No re-hash, no content gate.** Reconcile does not hash the qcow2 to check the sidecar against
+  it (hashing a multi-GiB file every pass is unacceptable; `staged-path` is declared-not-probed by
+  ADR-0228 — provision-time resolution is the content gate). Content trust stays exactly where
+  ADR-0228 put it.
 
 No schema/migration (the `provenance jsonb NOT NULL DEFAULT '{}'` column exists since 0023), no
 tool, RBAC, or config change. Tool visibility is unchanged.
@@ -79,8 +89,9 @@ tool, RBAC, or config change. Tool visibility is unchanged.
   close it.
 - An operator who replaces a staged qcow2 out-of-band without rewriting the sidecar carries the old
   provenance until the next `build-fs`; this is bounded by the same declared-not-probed contract
-  that already governs staged-path content (ADR-0228), and the recorded `digest` lets a manual audit
-  detect it.
+  that already governs staged-path content (ADR-0228) — the operator owns keeping the path, the
+  image, and the sidecar consistent. A `--dest` that differs from the declared `systems.toml` path,
+  or a moved qcow2, yields no sidecar and the row stays `unverified` (honest; debug-logged).
 - The build gains one small advisory write; a write failure degrades to an omitted sidecar, so it
   never fails a build. Unit tests drive the sidecar write, the read/degrade paths, and the reconcile
   persistence/change-detection with real temp files; an end-to-end local build+reconcile recording
@@ -96,9 +107,11 @@ tool, RBAC, or config change. Tool visibility is unchanged.
 - **Write provenance to the DB directly from `build-fs`.** Rejected: `build-fs` is a local CLI that
   does not talk to Postgres; coupling it to the DB breaks the build/reconcile decoupling the sidecar
   respects. The sidecar bridges the two over the filesystem they already share.
-- **Re-hash the qcow2 in reconcile to gate on the sidecar `digest`.** Rejected: hashing a multi-GiB
-  file every reconcile pass is unacceptable and duplicates the declared-not-probed contract
-  (ADR-0228); a stale sidecar is bounded by that same contract.
+- **Record the qcow2 digest in the sidecar (for a staleness gate or audit).** Rejected: reconcile
+  cannot cheaply verify it — the `staged-path` row carries no digest (ADR-0228) and re-hashing a
+  multi-GiB file every pass is unacceptable — so the field would have no consumer. A stale sidecar
+  is bounded by the same declared-not-probed contract (ADR-0228); the sidecar stays
+  `{schema, provenance}`.
 - **Adopt the sidecar authoritatively (wipe provenance when the sidecar disappears).** Rejected: a
   transiently-unreadable or removed sidecar would regress a good row to `unverified`. Preserve on
   absence instead; only a present, valid sidecar changes the row.
