@@ -174,9 +174,21 @@ def _run_step_data(
 def _required_cmdline_data(required_cmdline: str | None) -> dict[str, JsonValue]:
     if required_cmdline is None:
         return {}
-    # The platform-owned boot args (#748). Extra kernel debug args are appended via
-    # runs.build.cmdline, or runs.complete_build.cmdline for external builds.
+    # The platform-owned boot args (#748). Extra kernel debug args are set via runs.install.cmdline
+    # (per-boot, no rebuild), runs.build.cmdline, or runs.complete_build.cmdline (external builds).
     return {"required_cmdline": required_cmdline}
+
+
+def _installed_cmdline_data(step_progress: StepProgress | None) -> dict[str, JsonValue]:
+    """The applied install cmdline extra, for sweep read-back (ADR-0299, #988).
+
+    Emitted whenever step progress exists (a built Run): the value is the client extra the last
+    install applied, or ``None`` before any install / when none was applied. Omitted on a Run with
+    no progress (created/running/failed), so an absent key is never read as "nothing installed".
+    """
+    if step_progress is None:
+        return {}
+    return {"installed_cmdline": step_progress.installed_cmdline}
 
 
 def _expected_boot_failure_data(
@@ -303,6 +315,7 @@ def envelope_for_run(
         "active_debug_session_ids": list(active_debug_session_ids or []),
         **_run_step_data(run, step_progress, boot_readiness),
         **_required_cmdline_data(required_cmdline),
+        **_installed_cmdline_data(step_progress),
         **_expected_boot_failure_data(run, step_progress),
         **_capture_data(step_progress),
         **_build_provenance_data(build_provenance),

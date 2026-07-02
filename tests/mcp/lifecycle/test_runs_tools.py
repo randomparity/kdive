@@ -652,6 +652,37 @@ def test_envelope_for_run_matched_line_absent_when_progress_has_none() -> None:
     assert "expected_boot_failure_matched_line" not in resp.data
 
 
+def test_envelope_for_run_surfaces_installed_cmdline() -> None:
+    # runs.get read-back of the applied install cmdline (ADR-0299): confirms the live variant.
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(
+            install="succeeded",
+            boot="succeeded",
+            boot_outcome="ready",
+            installed_cmdline="dhash_entries=1",
+        ),
+    )
+
+    assert resp.data["installed_cmdline"] == "dhash_entries=1"
+
+
+def test_envelope_for_run_installed_cmdline_null_before_install() -> None:
+    # A built-but-not-installed Run reports installed_cmdline null (nothing applied yet).
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(install="pending", boot="pending", boot_outcome=None),
+    )
+
+    assert resp.data["installed_cmdline"] is None
+
+
+def test_envelope_for_run_omits_installed_cmdline_without_progress() -> None:
+    # A created/running Run has no step progress, so the key is omitted (not a null claim).
+    resp = runs_common.envelope_for_run(_run_model(RunState.RUNNING))
+    assert "installed_cmdline" not in resp.data
+
+
 _CONSOLE_ACCESS_EXPECTED = {
     "ref": "console",
     "search": "artifacts.get",
