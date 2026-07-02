@@ -23,10 +23,10 @@
 ## File structure
 
 - `src/kdive/jobs/payloads.py` — add `InstallPayload(RunPayload)`; map `JobKind.INSTALL → InstallPayload` in `_PAYLOAD_MODELS`, `_RUN_PAYLOAD_MODELS`, and the `_PayloadModel` union. (Task 1)
-- `src/kdive/services/runs/steps.py` — `cmdline_for` gains `override`; `StepProgress` gains `installed_cmdline`; `step_progress` reads the `install` result; add `delete_run_step` reader helpers. (Tasks 2, 5, 7)
-- `src/kdive/jobs/queue.py` — generalize `retry_terminal_failed` → `recycle_terminal` (succeeded-or-failed, overwrite payload, clear `result_ref`). (Task 3)
-- `src/kdive/mcp/tools/lifecycle/runs/steps.py` — `install_run` gains `cmdline`, guards, and the re-stage decision; `_enqueue_step` gains `payload`/`recycle`. (Task 4)
-- `src/kdive/jobs/handlers/runs/install.py` — load `InstallPayload`, pass `override`, record applied extra. (Task 5)
+- `src/kdive/services/runs/steps.py` — `cmdline_for` gains `override` (Task 2); `StepProgress` gains `installed_cmdline` + `step_progress` reads the `install` result (Task 4); `delete_run_step` helper (Task 5).
+- `src/kdive/jobs/queue.py` — generalize `retry_terminal_failed` → `recycle_terminal` (succeeded-or-failed, overwrite payload, clear `result_ref`); make `_enqueue_step` ledger-driven. (Task 3)
+- `src/kdive/jobs/handlers/runs/install.py` — load `InstallPayload`, pass `override`, record applied extra; `StepProgress.installed_cmdline`. (Task 4)
+- `src/kdive/mcp/tools/lifecycle/runs/steps.py` — `install_run` gains `cmdline`, guards, and the re-stage decision under one lock scope; `delete_run_step`. (Task 5)
 - `src/kdive/mcp/tools/lifecycle/runs/common.py` + `.../runs/view.py` — surface `data.installed_cmdline`. (Task 6)
 - `src/kdive/mcp/tools/lifecycle/runs/registrar.py` — `runs.install` `cmdline` Field; `runs.boot` docstring. (Task 7)
 - `tests/…` — one test module per task (paths named inline).
@@ -192,11 +192,14 @@ git commit -m "feat(988): cmdline_for override replaces the build-baked extra"
 
 **Files:**
 - Modify: `src/kdive/jobs/queue.py:36-94` (`enqueue`)
-- Modify caller: `src/kdive/mcp/tools/lifecycle/runs/steps.py:135` (flag rename only; behavior in Task 4)
-- Test: `tests/jobs/test_queue.py`
+- Modify caller: `src/kdive/mcp/tools/lifecycle/runs/steps.py` (`_enqueue_step` — make the recycle **ledger-driven in this task**, not deferred, so behavior is preserved and every commit stays green)
+- Test: `tests/jobs/test_queue.py`, `tests/mcp/lifecycle/test_runs_tools.py`
 
 **Interfaces:**
 - Produces: `enqueue(..., *, recycle_terminal: bool = False)` replacing `retry_terminal_failed`. When set, a `failed` **or** `succeeded` job for `dedup_key` is reset to `queued` with `attempt=0`, `worker_id/lease/heartbeat/error_category/failure_context` cleared, **`payload` overwritten with the new payload**, and **`result_ref = NULL`**. `queued`/`running`/`canceled` untouched.
+- Produces: `_has_step_row(conn, run_id, step) -> bool`; `_enqueue_step` passes `recycle_terminal = not await _has_step_row(...)`.
+
+**Why the caller must change here, not later:** broadening the fence to include `succeeded` while the sole caller still passes `recycle_terminal=True` unconditionally would recycle a succeeded install/boot job on every repeat call — regressing repeat-step idempotency and leaving `test_runs_tools.py` red until a later task. Making `_enqueue_step` pass `recycle_terminal = <step row absent>` preserves today's behavior exactly (a `succeeded` step's row is present → no recycle → idempotent no-op; a `failed` step's row was deleted by `abandon_run_step` → absent → recycle), and it is the ledger-driven rule the re-stage task then leans on.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -252,40 +255,128 @@ Expected: FAIL — `enqueue() got an unexpected keyword argument 'recycle_termin
             )
 ```
 
-Update the docstring: the fence now recycles `failed`/`succeeded` in place, overwriting the payload and clearing `result_ref`, so a re-staged install carries its new cmdline (ADR-0299); `queued`/`running`/`canceled` stay untouched. In `mcp/tools/lifecycle/runs/steps.py:135`, rename the kwarg to `recycle_terminal=True` for now (Task 4 makes it ledger-driven).
+Update the docstring: the fence now recycles `failed`/`succeeded` in place, overwriting the payload and clearing `result_ref`, so a re-staged install carries its new cmdline (ADR-0299); `queued`/`running`/`canceled` stay untouched.
+
+**Make `_enqueue_step` ledger-driven in this same commit** so behavior is preserved (do not pass `recycle_terminal=True` unconditionally):
+
+```python
+# src/kdive/mcp/tools/lifecycle/runs/steps.py
+async def _has_step_row(conn: AsyncConnection, run_id: UUID, step: str) -> bool:
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT 1 FROM run_steps WHERE run_id = %s AND step = %s", (run_id, step))
+        return await cur.fetchone() is not None
+
+# inside _enqueue_step, under the held lock:
+        recycle = not await _has_step_row(conn, run.id, step)
+        job = await queue.enqueue(conn, kind, RunPayload(run_id=str(run.id)), job_authorizing(ctx, run.project),
+                                  f"{run.id}:{step}", recycle_terminal=recycle)
+```
+
+Read the row-presence inside the same `advisory_xact_lock(RUN, run.id)` transaction the enqueue already holds, so presence and enqueue are atomic.
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `uv run python -m pytest tests/jobs/test_queue.py tests/adversarial/test_queue_concurrency.py -q`
-Expected: PASS (existing failed-retry tests still green — a failed job is a subset of the new fence).
+Run: `uv run python -m pytest tests/jobs/test_queue.py tests/adversarial/test_queue_concurrency.py tests/mcp/lifecycle/test_runs_tools.py -q`
+Expected: PASS — including the existing repeat-install/repeat-boot idempotency tests (a `succeeded` step's row is present → `recycle=False` → no-op), proving the fence broadening did not regress them.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/kdive/jobs/queue.py src/kdive/mcp/tools/lifecycle/runs/steps.py tests/jobs/test_queue.py
-git commit -m "feat(988): recycle terminal jobs payload-and-all, clearing result_ref"
+git commit -m "feat(988): recycle terminal jobs payload-and-all; ledger-driven caller"
 ```
 
 ---
 
-## Task 4: Re-stage decision in `runs.install` (tool boundary)
+## Task 4: Install handler applies the override and records the applied extra
+
+> **Ordering:** this task lands **before** the tool re-stage decision (Task 5), because Task 5's
+> equality test reads the recorded `install` cmdline and `StepProgress.installed_cmdline` this task
+> introduces.
+
+**Files:**
+- Modify: `src/kdive/jobs/handlers/runs/install.py:33-100`
+- Modify: `src/kdive/services/runs/steps.py` (`StepProgress` + `step_progress` read the `install` result's `cmdline`)
+- Test: `tests/jobs/handlers/test_runs_install.py`, `tests/services/runs/test_steps.py`
+
+**Interfaces:**
+- Consumes: `InstallPayload` (Task 1), `cmdline_for(override=…)` (Task 2).
+- Produces: install step result gains `cmdline` (the applied client extra, already-normalized). `StepProgress.installed_cmdline: str | None` (read by Task 5's decision and Task 6's read-back).
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/jobs/handlers/test_runs_install.py — extend
+@pytest.mark.asyncio
+async def test_install_handler_uses_payload_cmdline_override(install_env):
+    job = _install_job(run_id, cmdline="dhash_entries=1")
+    await install_handler(conn, job, resolver=resolver)
+    assert install_env.captured_request.cmdline.endswith("dhash_entries=1")
+    assert install_env.captured_request.cmdline.count("dhash_entries") == 1  # replaced, not appended
+    row = await _install_step_result(conn, run_id)
+    assert row["cmdline"] == "dhash_entries=1"  # recorded applied extra
+
+@pytest.mark.asyncio
+async def test_install_handler_no_override_records_build_extra(install_env_build_extra):
+    # build baked cmdline "dhash_entries=9", install job carries no cmdline
+    job = _install_job(run_id)
+    await install_handler(conn, job, resolver=resolver)
+    row = await _install_step_result(conn, run_id)
+    assert row["cmdline"] == "dhash_entries=9"  # falls back to build-baked, recorded
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `uv run python -m pytest tests/jobs/handlers/test_runs_install.py::test_install_handler_uses_payload_cmdline_override -q`
+Expected: FAIL — handler loads `RunPayload` (no `cmdline`) / result has no `cmdline`.
+
+- [ ] **Step 3: Implement**
+
+In `install_handler`: `payload = load_payload(job, InstallPayload)`; `override = payload.cmdline`; `cmdline = await cmdline_for(conn, run, method, root_cmdline=runtime.platform_root_cmdline, override=override)`; record the applied extra in the completed step. Compute the recorded extra once (reused for both the request and the ledger):
+
+```python
+build_result = await existing_build_result(conn, run_id)
+build_extra = build_result.cmdline if build_result is not None else None
+applied_extra = override if override is not None else build_extra  # already-normalized
+await complete_run_step(conn, run_id, "install", {"system_id": str(system_id), "cmdline": applied_extra})
+```
+
+(`InstallPayload` strips `override`; the build-baked extra is stored stripped.) Add `installed_cmdline: str | None = None` to `StepProgress` and read it in `step_progress` from the `install` row's `result["cmdline"]` (mirror how the `boot` row's result is read at steps.py:208-217).
+
+- [ ] **Step 4: Run to verify pass**
+
+Run: `uv run python -m pytest tests/jobs/handlers/test_runs_install.py tests/services/runs/test_steps.py -q`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/kdive/jobs/handlers/runs/install.py src/kdive/services/runs/steps.py tests/jobs/handlers/test_runs_install.py tests/services/runs/test_steps.py
+git commit -m "feat(988): install handler applies the cmdline override and records it"
+```
+
+---
+
+## Task 5: Re-stage decision in `runs.install` (tool boundary)
 
 **Files:**
 - Modify: `src/kdive/mcp/tools/lifecycle/runs/steps.py` (`install_run`, `_enqueue_step`)
-- Add reader/deleter: `src/kdive/services/runs/steps.py` (`installed_cmdline`, `delete_run_step`) — or reuse `step_progress` (Task 5 adds `installed_cmdline` to it)
+- Add deleter: `src/kdive/services/runs/steps.py` or `src/kdive/db/idempotency.py` (`delete_run_step`)
 - Test: `tests/mcp/lifecycle/test_runs_tools.py`
 
 **Interfaces:**
-- Consumes: `platform_owned_cmdline_token` (steps.py), `step_progress` (install/boot state + `installed_cmdline`, Task 5), `queue.enqueue(recycle_terminal=…)` (Task 3), `InstallPayload` (Task 1).
-- Produces: `async def install_run(pool, ctx, run_id, *, cmdline: str | None = None, idempotency_key=None)`. Enqueues `InstallPayload(run_id, cmdline)`. `_enqueue_step(conn, ctx, run, kind, step, tool, *, payload, recycle: bool)`.
+- Consumes: `platform_owned_cmdline_token` (steps.py), `step_progress` (install/boot state + `installed_cmdline`, Task 4), `existing_build_result` (build-baked extra), `queue.enqueue(recycle_terminal=…)` (Task 3), `InstallPayload` (Task 1), `delete_run_step`.
+- Produces: `async def install_run(pool, ctx, run_id, *, cmdline: str | None = None, idempotency_key=None)`. Enqueues `InstallPayload(run_id, cmdline)`. `_enqueue_step(conn, ctx, run, kind, step, tool, *, payload)` (recycle is derived inside from step-row presence, per Task 3).
 
-**Decision (under the per-Run advisory lock), from `step_progress(conn, run.id)`:**
+**Single lock scope (Finding C).** The `step_progress` read, the re-stage `delete_run_step` calls, and the enqueue MUST run inside **one** `conn.transaction()` + `advisory_xact_lock(RUN, run.id)` block, so a concurrent `runs.install` cannot interleave read→delete→enqueue (TOCTOU: both read `succeeded`, both re-stage). `delete_run_step` therefore issues a plain `DELETE` on the held connection and does **not** open its own nested transaction. The `keyed_mutation` wrapper (idempotency replay) stays outside/around the lock as today.
+
+**Decision, from `step_progress(conn, run.id)`, under the lock:**
 1. `cmdline` guards run first (before the lock): platform-owned token → `cmdline_overrides_platform_args`; blank → `cmdline_blank`.
-2. `requested = cmdline.strip() if cmdline else installed_extra_from_build` — but the compare uses the **install-recorded** extra; simplest: `requested_norm = cmdline.strip() if cmdline else <build-baked extra>`. Compute the build-baked extra via `existing_build_result`.
+2. `requested_norm = cmdline.strip() if cmdline else (existing_build_result(run).cmdline or None)` — the same value the handler records (Task 4), so equality is exact.
 3. install step `running` **or** boot step `running` → `step_in_progress`.
-4. install step `succeeded` and `installed_cmdline == requested_norm` → no-op: enqueue with `recycle=False` (returns the existing succeeded job envelope).
-5. install step `succeeded` and differs → re-stage: `delete_run_step(install)`, `delete_run_step(boot)`, enqueue with `recycle=True`.
-6. install step `pending` → first install: enqueue with `recycle=False` (no prior job) — a plain insert.
+4. install step `succeeded` and `progress.installed_cmdline == requested_norm` → no-op: enqueue (no delete); the step row is present → `_enqueue_step` derives `recycle=False` → returns the existing succeeded job envelope.
+5. install step `succeeded` and differs → re-stage: `delete_run_step(install)`, `delete_run_step(boot)`, then enqueue; both rows now absent → `_enqueue_step` derives `recycle=True` → the install job is recycled payload-and-all with the new cmdline.
+6. install step `pending` → first install: enqueue (row absent, no prior job → plain insert).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -311,18 +402,17 @@ async def test_install_enqueues_install_payload_with_cmdline(runs_env):
 
 @pytest.mark.asyncio
 async def test_install_differing_cmdline_restages_install_and_boot(runs_env_installed_booted):
-    # install step succeeded with recorded cmdline "dhash_entries=1"; boot succeeded
+    # install step succeeded with recorded cmdline "dhash_entries=1" (via Task 4); boot succeeded
     resp = await install_run(pool, ctx, run_id, cmdline="dhash_entries=2")
     assert resp.error_category is None
-    # install + boot ledger rows deleted, fresh install job queued with new payload
-    assert await _row_absent(conn, run_id, "boot")
+    assert await _row_absent(conn, run_id, "boot")          # boot ledger deleted
     job = await queue.get_by_dedup_key(conn, f"{run_id}:install")
     assert job.state is JobState.QUEUED and job.payload["cmdline"] == "dhash_entries=2"
 
 @pytest.mark.asyncio
 async def test_install_same_cmdline_is_noop(runs_env_installed_booted):
     resp = await install_run(pool, ctx, run_id, cmdline="dhash_entries=1")  # equals recorded
-    assert await _row_present(conn, run_id, "boot")  # boot NOT recycled
+    assert await _row_present(conn, run_id, "boot")          # boot NOT recycled
 
 @pytest.mark.asyncio
 async def test_install_rejected_while_boot_running(runs_env_boot_running):
@@ -337,21 +427,25 @@ Expected: FAIL — `install_run() got an unexpected keyword argument 'cmdline'`.
 
 - [ ] **Step 3: Implement**
 
-Add `delete_run_step` to `services/runs/steps.py` (or `db/idempotency.py` beside `abandon_run_step`):
+Add `delete_run_step` (no nested transaction — the caller holds the lock/transaction):
 
 ```python
 async def delete_run_step(conn: AsyncConnection, run_id: UUID, step: str) -> None:
     """Delete a run step row regardless of state, to recycle a settled step (ADR-0299).
 
     Distinct from ``abandon_run_step`` (RUNNING-only): re-stage deletes a ``succeeded`` row so the
-    step re-runs. The caller holds the per-Run advisory lock and has already verified the step is
-    not RUNNING, so no worker is mid-flight on it.
+    step re-runs. The caller holds the per-Run advisory lock/transaction and has verified the step
+    is not RUNNING, so this issues a plain DELETE without opening its own transaction.
     """
-    async with conn.transaction():
-        await conn.execute("DELETE FROM run_steps WHERE run_id = %s AND step = %s", (run_id, step))
+    await conn.execute("DELETE FROM run_steps WHERE run_id = %s AND step = %s", (run_id, step))
 ```
 
-Rewrite `install_run` to add `cmdline`, run the guards, compute `requested_norm`, take the lock, read `step_progress`, apply the decision table, and enqueue `InstallPayload` via a `_enqueue_step` that now takes `payload` and `recycle`. `boot_run` keeps `RunPayload` and passes `recycle = (boot ledger row absent)`. Guard helper (reuse the build path's):
+Rewrite `install_run` to add `cmdline`, run the guards (below), then inside a single
+`conn.transaction()` + `advisory_xact_lock(RUN, run.id)` block: read `step_progress`, apply the
+decision table, `delete_run_step` on the re-stage branch, and enqueue the `InstallPayload`.
+`_enqueue_step` builds the payload passed in and derives `recycle_terminal` from step-row presence
+(added in Task 3), so it needs no explicit recycle flag. `boot_run` is unchanged (Task 3 already
+made its enqueue ledger-driven). Guards (reuse the build path's token guard):
 
 ```python
 owned = platform_owned_cmdline_token(cmdline)
@@ -361,8 +455,6 @@ if cmdline is not None and not cmdline.strip():
     return _config_error(run_id, data={"reason": "cmdline_blank"})
 ```
 
-`_enqueue_step` builds the payload passed in and calls `queue.enqueue(..., recycle_terminal=recycle)`. For install, `recycle` is `True` on the re-stage branch (after deleting the rows) and `False` otherwise; for boot, `recycle = not await _has_step_row(conn, run_id, "boot")`.
-
 - [ ] **Step 4: Run to verify pass**
 
 Run: `uv run python -m pytest tests/mcp/lifecycle/test_runs_tools.py -q`
@@ -371,65 +463,8 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/kdive/mcp/tools/lifecycle/runs/steps.py src/kdive/services/runs/steps.py tests/mcp/lifecycle/test_runs_tools.py
-git commit -m "feat(988): re-stage install on a differing cmdline; guards + boot recycle"
-```
-
----
-
-## Task 5: Install handler applies the override and records the applied extra
-
-**Files:**
-- Modify: `src/kdive/jobs/handlers/runs/install.py:33-100`
-- Modify: `src/kdive/services/runs/steps.py` (`StepProgress` + `step_progress` read the `install` result's `cmdline`)
-- Test: `tests/jobs/handlers/test_runs_install.py`, `tests/services/runs/test_steps.py`
-
-**Interfaces:**
-- Consumes: `InstallPayload` (Task 1), `cmdline_for(override=…)` (Task 2).
-- Produces: install step result gains `cmdline` (the applied client extra, already-normalized). `StepProgress.installed_cmdline: str | None`.
-
-- [ ] **Step 1: Write the failing test**
-
-```python
-# tests/jobs/handlers/test_runs_install.py — extend
-@pytest.mark.asyncio
-async def test_install_handler_uses_payload_cmdline_override(install_env):
-    job = _install_job(run_id, cmdline="dhash_entries=1")
-    await install_handler(conn, job, resolver=resolver)
-    assert install_env.captured_request.cmdline.endswith("dhash_entries=1")
-    assert install_env.captured_request.cmdline.count("dhash_entries") == 1  # replaced, not appended
-    row = await _install_step_result(conn, run_id)
-    assert row["cmdline"] == "dhash_entries=1"  # recorded applied extra
-```
-
-- [ ] **Step 2: Run to verify it fails**
-
-Run: `uv run python -m pytest tests/jobs/handlers/test_runs_install.py::test_install_handler_uses_payload_cmdline_override -q`
-Expected: FAIL — handler loads `RunPayload` (no `cmdline`) / result has no `cmdline`.
-
-- [ ] **Step 3: Implement**
-
-In `install_handler`: `payload = load_payload(job, InstallPayload)`; `override = payload.cmdline`; `cmdline = await cmdline_for(conn, run, method, root_cmdline=runtime.platform_root_cmdline, override=override)`; record the applied extra in the completed step:
-
-```python
-applied_extra = override if override is not None else (
-    (await existing_build_result(conn, run_id)).cmdline if ... else None
-)
-await complete_run_step(conn, run_id, "install", {"system_id": str(system_id), "cmdline": applied_extra})
-```
-
-(Keep `applied_extra` already-normalized; `InstallPayload` strips `override`, and the build-baked extra is stored stripped.) Add `installed_cmdline` to `StepProgress` and read it in `step_progress` from the `install` row's `result["cmdline"]` (mirror how the `boot` row is read at steps.py:208-217).
-
-- [ ] **Step 4: Run to verify pass**
-
-Run: `uv run python -m pytest tests/jobs/handlers/test_runs_install.py tests/services/runs/test_steps.py -q`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/kdive/jobs/handlers/runs/install.py src/kdive/services/runs/steps.py tests/jobs/handlers/test_runs_install.py tests/services/runs/test_steps.py
-git commit -m "feat(988): install handler applies the cmdline override and records it"
+git add src/kdive/mcp/tools/lifecycle/runs/steps.py src/kdive/services/runs/steps.py src/kdive/db/idempotency.py tests/mcp/lifecycle/test_runs_tools.py
+git commit -m "feat(988): re-stage install on a differing cmdline under one lock scope"
 ```
 
 ---
@@ -442,7 +477,7 @@ git commit -m "feat(988): install handler applies the cmdline override and recor
 - Test: `tests/mcp/lifecycle/test_runs_tools.py`
 
 **Interfaces:**
-- Consumes: `StepProgress.installed_cmdline` (Task 5).
+- Consumes: `StepProgress.installed_cmdline` (Task 4).
 - Produces: `runs.get` `data.installed_cmdline` (`str | None`).
 
 - [ ] **Step 1: Write the failing test**
@@ -590,5 +625,6 @@ git commit -m "test(988): gated live sweep — two cmdlines, one build"
 
 ## Self-review notes (spec coverage)
 
-- Replace semantics → Task 2. Re-stage state machine (equal/differ/running/first) → Task 4. Payload-carrying recycle + `result_ref` clear → Task 3. Read-back → Tasks 5–6. Field enumeration of platform tokens → Task 7. Guards (`cmdline_overrides_platform_args`/`cmdline_blank`/`step_in_progress`) → Task 4. Normalization pinned (strip) → Tasks 1, 2, 5. Composite/remote untouched → no task needed (verified in spec). Acceptance sweep → Task 8.
-- Type consistency: `InstallPayload.cmdline` (Task 1) ↔ `cmdline_for(override=...)` (Task 2) ↔ `install_handler` override (Task 5) ↔ `StepProgress.installed_cmdline` (Task 5) ↔ `envelope_for_run(installed_cmdline=...)` (Task 6). `recycle_terminal` kwarg (Task 3) ↔ `_enqueue_step(recycle=...)` caller (Task 4).
+- Replace semantics → Task 2. Payload-carrying recycle + `result_ref` clear + ledger-driven caller → Task 3. Applied-extra recording + `StepProgress.installed_cmdline` → Task 4. Re-stage state machine (equal/differ/running/first) + guards (`cmdline_overrides_platform_args`/`cmdline_blank`/`step_in_progress`) + single lock scope → Task 5. Read-back on `runs.get` → Task 6. Field enumeration of platform tokens + `runs.boot` doc → Task 7. Normalization pinned (strip) → Tasks 1, 2, 4. Composite/remote untouched → no task needed (verified in spec). Acceptance sweep → Task 8.
+- Ordering rationale: Task 4 (recording + `StepProgress.installed_cmdline`) precedes Task 5 (the tool decision that reads them); Task 3 makes `_enqueue_step` ledger-driven in the same commit it broadens the recycle fence, so every commit stays green.
+- Type consistency: `InstallPayload.cmdline` (Task 1) ↔ `cmdline_for(override=...)` (Task 2) ↔ `install_handler` override + recorded `cmdline` (Task 4) ↔ `StepProgress.installed_cmdline` (Task 4) ↔ `install_run(cmdline=...)` decision (Task 5) ↔ `envelope_for_run(installed_cmdline=...)` (Task 6). `recycle_terminal` kwarg on `queue.enqueue` + ledger-driven `_enqueue_step` (Task 3).
