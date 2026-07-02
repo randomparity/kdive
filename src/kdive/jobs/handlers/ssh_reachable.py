@@ -15,7 +15,19 @@ import json
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from uuid import UUID
 
+from psycopg import AsyncConnection
+
+from kdive.db.repositories import SYSTEMS
+from kdive.domain.capacity.state import SystemState
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.operations.jobs import Job
+from kdive.jobs.payloads import CheckSshReachablePayload, load_payload
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.ports.handles import SystemHandle
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.serialization import JsonValue
 
 _PROBE_DEADLINE_S = 15.0
@@ -84,3 +96,46 @@ def serialize_reach_verdict(result: ReachResult, host: str, port: int, checked_a
         "detail": result.detail,
     }
     return json.dumps(verdict, separators=(",", ":"))
+
+
+async def check_ssh_reachable_handler(
+    conn: AsyncConnection,
+    job: Job,
+    *,
+    resolver: ProviderResolver,
+    probe: ProbeFn = _real_probe,
+) -> str | None:
+    """Probe a ready System's guest sshd and return the compact-JSON reachability verdict.
+
+    Re-checks the System is still ``ready`` before probing: a torn-down System's loopback port can
+    be reused by another System's forward, so probing a stale endpoint could misattribute another
+    guest's liveness. A probe that *ran* — reachable or not — is a success; only an inability to run
+    raises. ``checked_at`` is read from the module-level ``datetime`` (tests monkeypatch it).
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` ``reason="system_not_ready"`` when the System is
+            no longer ready, or ``reason="ssh_not_provisioned"`` when it has no loopback forward.
+    """
+    payload = load_payload(job, CheckSshReachablePayload)
+    system_id = UUID(payload.system_id)
+    system = await SYSTEMS.get(conn, system_id)
+    if system is None or system.state is not SystemState.READY:
+        raise CategorizedError(
+            "system is no longer ready; cannot probe SSH reachability",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"reason": "system_not_ready"},
+        )
+    binding = await resolver.binding_for_system(conn, system_id)
+    endpoint = binding.runtime.connector.recorded_ssh_endpoint(
+        SystemHandle(system.domain_name or domain_name_for(system_id))
+    )
+    if endpoint is None:
+        raise CategorizedError(
+            "This System's provider exposes no loopback SSH forward; direct SSH to a System is a "
+            "local-libvirt capability",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"reason": "ssh_not_provisioned"},
+        )
+    host, port = endpoint
+    result = await probe(host, port)
+    return serialize_reach_verdict(result, host, port, datetime.now(UTC).isoformat())
