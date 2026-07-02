@@ -26,6 +26,19 @@ the first tool to call.
 Long steps (provision, build, install, boot, capture) return a job handle; poll it with
 `jobs.wait`.
 
+## The guest is yours — you have root
+
+Once a system is ready, authorize your public key with `systems.authorize_ssh_key` and you
+have **root SSH into the guest** — kdive never holds the private key. From there the guest is
+yours to shape:
+
+- **The guest package manager is yours.** Install whatever the investigation needs at
+  runtime — `apt install trace-cmd`, a compiler toolchain, `stress-ng`, `bpftrace`. Do not
+  assume a capability is missing because a tool is absent; install it. Most "the platform
+  can't do that" conclusions are one package (or one config symbol) away.
+- **Mind disk headroom.** Installing toolchains, building reproducers, and capturing traces
+  all consume guest disk; size the shape for the work or clean up as you go.
+
 ## Provisioning for debugging and live introspection
 
 Some debugging and live-introspection capabilities are bound at `systems.provision` and
