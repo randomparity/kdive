@@ -138,6 +138,19 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "Name of the prebuilt remote-libvirt base-image storage volume for the remote live_stack "
         "test; unset → that test skips.",
     ),
+    ExternalEnvVar(
+        "KDIVE_SSH_PARITY_DOMAIN",
+        "test",
+        None,
+        "Running, agent-ready remote-libvirt domain name for the SSH-parity bootstrap-key "
+        "injection live test (#966); unset → that test skips.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_SSH_PARITY_URI",
+        "test",
+        None,
+        "libvirt qemu+tls connection URI for the SSH-parity injection live test (#966).",
+    ),
     # --- operator shell scripts -----------------------------------------------------------
     ExternalEnvVar(
         "KDIVE_KVM_NODE",
