@@ -12,7 +12,8 @@ the first tool to call.
 
 1. **Orient** — `investigations.open` to group the runs of one investigation.
 2. **Acquire capacity** — `allocations.request`, then `allocations.wait` until granted.
-3. **Define and provision a system** — `systems.define`, then `systems.provision`.
+3. **Define and provision a system** — `images.describe` to pick a base image and check its
+   capabilities first, then `systems.define` and `systems.provision`. See the images guide.
 4. **Build** — upload a prebuilt kernel (`runs.create` on the default external lane) or
    build on a host. See the runs guide.
 5. **Install and boot** — `runs.install` then `runs.boot`, or `runs.build_install_boot` as
@@ -94,6 +95,7 @@ needs them.
 | artifacts | Fetch run evidence (logs, console, vmlinux) and upload builds | resource://kdive/docs/guide/toolsets/artifacts.md |
 | debug | Live GDB kernel debugging — breakpoints, memory, registers, stacks | resource://kdive/docs/guide/toolsets/debug.md |
 | systems | Provision, reprovision, and reach the target system over SSH | resource://kdive/docs/guide/toolsets/systems.md |
+| images | Pick a base image and read its capabilities before provisioning | resource://kdive/docs/guide/toolsets/images.md |
 | introspect | Non-halting drgn introspection of a live guest or a captured vmcore | resource://kdive/docs/guide/toolsets/introspect.md |
 | control | Deliberately induce a crash, send a diagnostic SysRq, drive power | resource://kdive/docs/guide/toolsets/control.md |
 | postmortem | Capture a crashed kernel's vmcore, then triage or analyze it | resource://kdive/docs/guide/toolsets/postmortem.md |
