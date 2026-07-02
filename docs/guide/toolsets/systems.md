@@ -16,6 +16,12 @@ description.
   refresh a local-libvirt rootfs).
 - `systems.teardown` — destroy a system and release its host resources.
 
+Some debug and live-introspection capabilities are bound at provision: the profile's
+`debug` flags (the gdb stub and crash-preserve) and the live-ssh credential cannot be
+added to a ready system. Set them in the profile before `systems.provision`, or use
+`systems.reprovision` (which rebuilds and reboots) to change them later. See the
+provisioning-for-debugging notes in the investigation index.
+
 ## Inspecting
 
 - `systems.get` — read a system's status and connection details.

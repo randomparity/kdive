@@ -5,6 +5,13 @@ them to halt the kernel, inspect state, and step through code. Start a session, 
 inspection, then end it. For exact parameters, types, and return schema, read each tool's
 own description.
 
+**Provisioning prerequisite.** A live session needs the system to have been provisioned
+with the profile's `debug` section `gdbstub: true`. This is bound at provision — you
+cannot enable it on a ready system. If the system was not provisioned for it,
+`debug.start_session` fails with a configuration error telling you to reprovision with
+gdbstub set, and reprovisioning rebuilds and reboots the system. See the
+provisioning-for-debugging notes in the investigation index and decide up front.
+
 ## Session lifecycle
 
 - `debug.start_session` — attach a GDB session to a booted system's stub.
