@@ -48,14 +48,22 @@ Files: `tests/mcp/ops/test_breakglass.py`.
 
 Steps:
 
-1. Find the existing force-release success test as a template. Add
-   `test_force_release_already_released_is_idempotent_ok`: seed a `RELEASED` allocation, call
-   the force-release handler as a platform admin, assert `status == "released"`. Also assert a
-   platform accountability audit row was written (the break-glass path records it before
-   release), matching the existing force-release test's audit assertion pattern.
+1. **Rewrite** the existing `test_force_release_terminal_allocation_stale_but_audited`
+   (`tests/mcp/ops/test_breakglass.py:333-344`) — it seeds `RELEASED` and asserts
+   `stale_handle`, which the source change breaks. Split it into two:
+   - `test_force_release_released_is_idempotent_ok`: seed `RELEASED`, `force_release` as
+     platform admin, assert `resp.status == "released"` and `resp.error_category is None`, and
+     that the platform accountability audit row is still written
+     (`_count_platform_audit == 1` — break-glass records it before release).
+   - `test_force_release_terminal_expired_stale_but_audited`: seed `EXPIRED` (or `FAILED`),
+     assert `stale_handle` + `_count_platform_audit == 1` (unchanged behavior). This keeps the
+     "terminal-but-audited" coverage the original test carried.
+   Reuse the `_alloc(pool, state=...)`, `_admin_ctx()`, `_count_platform_audit` helpers already
+   in the file.
 
-Acceptance: test fails under current code (`stale_handle`), passes after Task 3. Run the file:
-`uv run python -m pytest tests/mcp/ops/test_breakglass.py -q -k idempotent`.
+Acceptance: the idempotent test fails under current code (`stale_handle` != `released`), passes
+after Task 3; the expired/failed test passes throughout (regression guard). Run the file:
+`uv run python -m pytest tests/mcp/ops/test_breakglass.py -q -k "released or terminal"`.
 
 Rollback: revert the test edit.
 
@@ -82,7 +90,11 @@ Steps:
 
 Acceptance: all tests from Tasks 1-2 green; existing `test_release_granted_allocation`,
 `test_release_active_allocation`, `test_release_requested_allocation_cancels_with_no_credit`,
-`test_release_illegal_transition_backstop_returns_failure` still green. Run:
+`test_release_illegal_transition_backstop_returns_failure`, and the break-glass
+`test_force_release_active_writes_two_guard_exempt_audit_rows` /
+`test_force_release_granted_writes_two_audit_rows` /
+`test_force_release_from_releasing_writes_one_audit_row` still green (only the two rewritten
+`RELEASED`-seeding tests change expectation). Run:
 `uv run python -m pytest tests/mcp/lifecycle/test_allocations_tools.py tests/mcp/ops/test_breakglass.py -q`.
 
 Rollback: `git checkout src/kdive/services/allocation/release.py`.
@@ -127,9 +139,13 @@ Rollback: revert the docstring + regenerated docs.
 
 ## Commit sequence
 
-- (done) `docs(allocation): ADR-0293 idempotent release on released grant`
-- `test(allocation): pin idempotent release + expired/failed stale_handle` (Tasks 1-2, red)
-- `fix(allocation): idempotent allocations.release on released grant` (Task 3, green) — Closes-
-  adjacent; the fix commit.
-- `docs(allocation): document idempotent release on the tool wrapper` (Task 4) — fold the
-  regenerated reference doc here if any.
+Observe the red locally (run the Task 1-2 focused tests, confirm the idempotent assertions
+fail for the right reason), but do **not** commit a red state — the repo forbids committing
+with red guardrails. Fold the tests and the source fix into one green commit:
+
+- (done) `docs(allocation): ADR-0293 idempotent release on released grant` (spec + ADR)
+- (done) `docs(allocation): plan for idempotent release on released grant`
+- `fix(allocation): idempotent allocations.release on released grant` — Tasks 1-3 together
+  (the rewritten/added tests + the `_release_locked` branch split), landing green.
+- `docs(allocation): document idempotent release on the tool wrapper` — Task 4: wrapper
+  docstring + regenerated `docs/guide/reference/allocations.md` + doc-resource snapshots.
