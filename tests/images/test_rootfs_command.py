@@ -202,3 +202,32 @@ def test_build_fs_sidecar_write_failure_is_advisory(
         run_build_fs(args)  # does not raise
     assert f"export KDIVE_GUEST_IMAGE={dest}" in capsys.readouterr().out
     assert any("sidecar" in r.getMessage() for r in caplog.records)
+
+
+def test_build_fs_non_serializable_provenance_is_advisory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A non-JSON-serializable provenance warns and does not fail the build (advisory)."""
+    import logging
+
+    produced = tmp_path / "plane" / "img.qcow2"
+    produced.parent.mkdir(parents=True)
+    produced.write_bytes(b"image-bytes")
+    # A set is not JSON-serializable, so write_sidecar's json.dumps raises TypeError.
+    _patch_plane_provenance(monkeypatch, produced, {"packages": {"a", "b"}})
+    dest = tmp_path / "out.qcow2"
+    args = build_parser().parse_args(
+        [
+            "build-fs",
+            "--image",
+            "fedora-kdive-ready-44",
+            "--workspace",
+            str(tmp_path / "ws"),
+            "--dest",
+            str(dest),
+        ]
+    )
+    with caplog.at_level(logging.WARNING):
+        run_build_fs(args)  # does not raise
+    assert dest.exists()  # the qcow2 was still published
+    assert any("sidecar" in r.getMessage() for r in caplog.records)

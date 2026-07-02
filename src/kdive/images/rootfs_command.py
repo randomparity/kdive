@@ -144,13 +144,14 @@ def run_build_fs(args: argparse.Namespace) -> None:
 def _write_provenance_sidecar(dest: Path, output: RootfsBuildOutput) -> None:
     """Record the build's provenance beside the published qcow2 for the reconcile (#977, ADR-0296).
 
-    Advisory: the qcow2 is the primary artifact, so a sidecar-write failure is logged and swallowed
-    rather than failing the build — the row simply reads ``unverified`` until the next build, as it
-    does today.
+    Advisory: the qcow2 is the primary artifact, so a sidecar failure is logged and swallowed rather
+    than failing the build — the row simply reads ``unverified`` until the next build, as it does
+    today. Both an I/O failure (``OSError``) and a non-JSON-serializable provenance
+    (``TypeError``/``ValueError`` from ``json.dumps``) are treated as advisory.
     """
     try:
         write_sidecar(dest, provenance=output.provenance)
-    except OSError:
+    except OSError, TypeError, ValueError:
         _log.warning("could not write provenance sidecar for %s; skipping", dest, exc_info=True)
 
 
