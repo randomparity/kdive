@@ -237,7 +237,18 @@ async def _release_locked(
         current = await ALLOCATIONS.get(conn, uid)
         if current is None:
             return ReleaseOutcome(released=False, category=ErrorCategory.CONFIGURATION_ERROR)
-        if current.state in _TERMINAL:
+        if current.state is AllocationState.RELEASED:
+            # ADR-0293: `release` is a "drive this to done" intent, and an already-`released`
+            # grant is done. After a completed teardown the orphaned-active reaper (ADR-0109)
+            # auto-releases the grant, so a documented step-9 release finds it terminal.
+            # Return idempotent `ok` with NO transition, NO audit row, and NO ledger touch: the
+            # single ADR-0040 §4 reconciliation was written by whoever first drove the terminal
+            # transition, and re-crediting would mint a spurious delta (ADR-0007 §2 hazard).
+            return ReleaseOutcome(released=True)
+        if current.state in (AllocationState.EXPIRED, AllocationState.FAILED):
+            # ADR-0293: `expired` (lease lapsed) / `failed` (provision failed) are terminal
+            # outcomes the caller did NOT request. Keep `stale_handle` so the agent learns the
+            # real state via `allocations.get` rather than believing a clean release happened.
             return ReleaseOutcome(
                 released=False,
                 category=ErrorCategory.STALE_HANDLE,
