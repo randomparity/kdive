@@ -63,7 +63,7 @@ from kdive.services.images.retention import repair_expired_private_images
 from kdive.services.images.upload import PrivateUploadRequest, register_private_upload
 from tests.reconciler.conftest import connect, run_repair, seed_system
 
-_REQUIRED = ("agent", "kdump", "drgn", "helpers")
+_REQUIRED = ("kdump", "drgn")
 _GRACE = timedelta(hours=1)
 _PROJECT = "proj"
 _PRINCIPAL = "alice"
@@ -411,13 +411,13 @@ def test_non_conforming_upload_is_rejected_with_named_reason(migrated_url: str) 
 
     async def _run() -> None:
         store = _FakeImageStore()
-        _quarantine(store, "uploads/q/proj/rootfs.qcow2", b"missing-agent-rootfs")
+        _quarantine(store, "uploads/q/proj/rootfs.qcow2", b"missing-drgn-rootfs")
         async with await connect(migrated_url) as conn:
             with pytest.raises(CategorizedError) as err:
-                await _register(conn, store, inspect=_missing("agent"))
+                await _register(conn, store, inspect=_missing("drgn"))
             assert err.value.category is ErrorCategory.CONFIGURATION_ERROR
-            assert "agent" in str(err.value)
-            assert err.value.details.get("missing") == "agent"  # the named reason
+            assert "drgn" in str(err.value)
+            assert err.value.details.get("missing") == "drgn"  # the named reason
             assert await IMAGE_CATALOG.list_all(conn) == []  # never registered
             assert store.puts == []  # never left quarantine
 

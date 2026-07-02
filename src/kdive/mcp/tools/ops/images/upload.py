@@ -23,7 +23,7 @@ from kdive.services.images.upload import (
     register_private_upload,
 )
 
-DEFAULT_REQUIRED_CONTRACT = ("agent", "kdump", "drgn")
+DEFAULT_REQUIRED_CONTRACT = ("kdump", "drgn")
 # The published catalog object prefix. A quarantine key under it would let an operator
 # re-ingest another project's already-published (owner-scoped) private image into their own
 # catalog, so it is rejected: an upload sources only a freshly-quarantined object.

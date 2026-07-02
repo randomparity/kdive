@@ -33,7 +33,7 @@ from kdive.images.catalog import resolve_rootfs
 from kdive.images.validation import GUEST_CONTRACT_PATHS, InspectSeam
 from kdive.services.images.upload import PrivateUploadRequest, register_private_upload
 
-_REQUIRED = ("agent", "kdump", "drgn", "helpers")
+_REQUIRED = ("kdump", "drgn")
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
 
@@ -203,15 +203,15 @@ def test_non_conforming_image_rejected_while_quarantined(
 ) -> None:
     from kdive.db.repositories import IMAGE_CATALOG
 
-    store = _quarantine(b"missing-agent-rootfs")
+    store = _quarantine(b"missing-drgn-rootfs")
 
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             with pytest.raises(CategorizedError) as err:
-                await _register(conn, store, inspect=_missing("agent"))
+                await _register(conn, store, inspect=_missing("drgn"))
             assert err.value.category is ErrorCategory.CONFIGURATION_ERROR
-            assert "agent" in str(err.value)
-            assert err.value.details.get("missing") == "agent"
+            assert "drgn" in str(err.value)
+            assert err.value.details.get("missing") == "drgn"
             # Never registered: no catalog row, the object never left quarantine (no put).
             assert await IMAGE_CATALOG.list_all(conn) == []
             assert store.puts == []
