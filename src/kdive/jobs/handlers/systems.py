@@ -65,21 +65,23 @@ _SELECT_PART_KEYS_SQL: LiteralString = (
 _SYSRQ_DIAGNOSTIC_LIKE: LiteralString = "%sysrq-diagnostic-%"
 
 
-async def _bootstrap_key_customizers(
+async def _bootstrap_key_material(
     conn: AsyncConnection, system_id: UUID, runtime: ProviderRuntime
-) -> tuple[Callable[[str], None], ...]:
-    """Ensure the System's bootstrap key (committed) and build its overlay customizer, if any.
+) -> tuple[tuple[Callable[[str], None], ...], str]:
+    """Ensure the System's bootstrap key (committed) and return ``(overlay_customizers, pubkey)``.
 
     The ``ensure`` commits in its own transaction BEFORE this returns (ADR-0289, #963): the
     overlay is created and the key injected into it strictly after this call, so a later
     rollback in the caller's transaction never un-records a key the overlay may already trust.
     A provider runtime with no ``bootstrap_key_customizer`` factory (no local overlay to
-    customize) yields no customizers.
+    customize) yields no customizers; the returned ``pubkey`` is still passed to the provider as
+    ``bootstrap_pubkey`` so remote-libvirt can inject it over the guest agent (ADR-0291, #966).
     """
     async with conn.transaction():
         pubkey = await ensure_system_bootstrap_key(conn, system_id)
     factory = runtime.bootstrap_key_customizer
-    return (factory(pubkey),) if factory is not None else ()
+    customizers = (factory(pubkey),) if factory is not None else ()
+    return customizers, pubkey
 
 
 async def audit_transition(
@@ -247,11 +249,15 @@ async def provision_handler(
             )
         return str(system_id)
     profile = ProvisioningProfile.parse(system.provisioning_profile)
-    customizers = await _bootstrap_key_customizers(conn, system_id, runtime)
+    customizers, pubkey = await _bootstrap_key_material(conn, system_id, runtime)
     try:
         domain_name = await asyncio.to_thread(
             functools.partial(
-                provisioner.provision, system_id, profile, overlay_customizers=customizers
+                provisioner.provision,
+                system_id,
+                profile,
+                overlay_customizers=customizers,
+                bootstrap_pubkey=pubkey,
             )
         )
     except CategorizedError as exc:
@@ -301,11 +307,15 @@ async def reprovision_handler(
     # Same commit-before-overlay ordering as provision_handler (ADR-0289, #963): reprovision wipes
     # and recreates the overlay, so it must re-inject the SAME stored key — ensure_ returns the
     # existing key on reuse, and this commits before the overlay is ever touched.
-    customizers = await _bootstrap_key_customizers(conn, system_id, binding.runtime)
+    customizers, pubkey = await _bootstrap_key_material(conn, system_id, binding.runtime)
     try:
         domain_name = await asyncio.to_thread(
             functools.partial(
-                provisioner.reprovision, system_id, profile, overlay_customizers=customizers
+                provisioner.reprovision,
+                system_id,
+                profile,
+                overlay_customizers=customizers,
+                bootstrap_pubkey=pubkey,
             )
         )
     except CategorizedError as exc:

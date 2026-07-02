@@ -41,16 +41,22 @@ _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 class _RecordingProvisioner:
-    """Records the ``overlay_customizers`` kwarg passed to ``provision``/``reprovision``."""
+    """Records the ``overlay_customizers`` and ``bootstrap_pubkey`` kwargs passed to provision."""
 
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
         self.recorded: dict[str, Any] = {}
 
     def provision(
-        self, system_id: UUID, profile: Any, *, overlay_customizers: tuple[Any, ...] = ()
+        self,
+        system_id: UUID,
+        profile: Any,
+        *,
+        overlay_customizers: tuple[Any, ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
         self.recorded["overlay_customizers"] = overlay_customizers
+        self.recorded["bootstrap_pubkey"] = bootstrap_pubkey
         if self.fail:
             raise CategorizedError(
                 "simulated provision failure",
@@ -59,9 +65,15 @@ class _RecordingProvisioner:
         return f"kdive-{system_id}"
 
     def reprovision(
-        self, system_id: UUID, profile: Any, *, overlay_customizers: tuple[Any, ...] = ()
+        self,
+        system_id: UUID,
+        profile: Any,
+        *,
+        overlay_customizers: tuple[Any, ...] = (),
+        bootstrap_pubkey: str | None = None,
     ) -> str:
         self.recorded["overlay_customizers"] = overlay_customizers
+        self.recorded["bootstrap_pubkey"] = bootstrap_pubkey
         if self.fail:
             raise CategorizedError(
                 "simulated reprovision failure",
@@ -141,7 +153,7 @@ async def _key_row_count(pool: AsyncConnectionPool, system_id: UUID) -> int:
 
 
 def test_provision_handler_ensures_key_and_passes_one_customizer(migrated_url: str) -> None:
-    async def _run() -> tuple[int, int, str]:
+    async def _run() -> tuple[int, int, str, str | None]:
         async with _pool(migrated_url) as pool:
             system_id = await _seed_system(
                 pool, SystemState.PROVISIONING, provisioning_profile=PROVISIONING_PROFILE
@@ -161,12 +173,20 @@ def test_provision_handler_ensures_key_and_passes_one_customizer(migrated_url: s
             count = await _key_row_count(pool, system_id)
             async with pool.connection() as conn:
                 pubkey = await ensure_system_bootstrap_key(conn, system_id)
-            return len(prov.recorded["overlay_customizers"]), count, pubkey
+            return (
+                len(prov.recorded["overlay_customizers"]),
+                count,
+                pubkey,
+                prov.recorded["bootstrap_pubkey"],
+            )
 
-    n_customizers, count, pubkey = asyncio.run(_run())
+    n_customizers, count, pubkey, threaded_pubkey = asyncio.run(_run())
     assert n_customizers == 1
     assert count == 1
     assert pubkey.startswith("ssh-ed25519 ")
+    # The ensured public key is threaded to the provider as bootstrap_pubkey (ADR-0291): remote
+    # injects it over the guest agent; local ignores it (uses the overlay customizer).
+    assert threaded_pubkey == pubkey
 
 
 def test_key_row_survives_provision_transaction_rollback(migrated_url: str) -> None:
