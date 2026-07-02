@@ -82,9 +82,11 @@ def test_migration_0056_admits_check_ssh_reachable(pg_conn: psycopg.Connection) 
 
 The fixture is `pg_conn: psycopg.Connection` (confirmed in `test_migration_0055_diagnostic_sysrq.py`); reuse its exact `_apply_through`/`_insert_job` bodies. Mirror all three 0055 shapes: a `test_pre_migration_0056_rejects_check_ssh_reachable` (raises `CheckViolation` at 0055), the admits-at-0056 test above, and a `test_migration_0056_keeps_all_prior_kinds` that inserts one job of each earlier kind after 0056.
 
-- [ ] **Step 4: Run.** `uv run python -m pytest tests/db/test_migration_0056_check_ssh_reachable.py tests/db/test_migrate.py tests/domain/test_models.py -q` (the last two hold the SQL↔enum tie). Expected: PASS. If a whole-enum-vs-CHECK parity test names the members explicitly, add `check_ssh_reachable`.
+- [ ] **Step 4: Update the exact-JobKind-set assertion (required).** `tests/domain/test_models.py:302` asserts `{kind.value for kind in JobKind} == {<explicit set>}`. Add `"check_ssh_reachable"` to that set literal, or Task 1's commit is red. (Grep `check_ssh_reachable` across `tests/` after Task 1 to catch any other exact-set parity assertion.)
 
-- [ ] **Step 5: Commit.** `git add -A && git commit` — `feat(972): add check_ssh_reachable job kind + migration 0056`.
+- [ ] **Step 5: Run.** `uv run python -m pytest tests/db/test_migration_0056_check_ssh_reachable.py tests/db/test_migrate.py tests/domain/test_models.py -q` (the last two hold the SQL↔enum tie). Expected: PASS.
+
+- [ ] **Step 6: Commit.** `git add -A && git commit` — `feat(972): add check_ssh_reachable job kind + migration 0056`.
 
 ---
 
@@ -544,9 +546,16 @@ def _register_systems_check_ssh_reachable(
         return await _check_ssh_reachable(pool, current_context(), system_id, resolver=resolver)
 ```
 
-- [ ] **Step 6: Run** `uv run python -m pytest tests/mcp/lifecycle/ -q -k "ssh or reachable" && just lint && just type && uv run python -m pytest tests/mcp/core/test_no_adr_leak.py tests/mcp/test_tool_index.py -q`. Expected: PASS. If `test_tool_index` snapshots the tool set, regenerate/extend it to include `systems.check_ssh_reachable`.
+- [ ] **Step 6: Name the tool in the toolset doc (same commit).** Registering the tool trips the #940 completeness guard until `docs/guide/toolsets/systems.md` names it, so this lands in Task 5's commit, not a later one. After the `systems.authorize_ssh_key` bullet (around line 27) add:
 
-- [ ] **Step 7: Commit** — `feat(972): add systems.check_ssh_reachable tool`.
+```markdown
+- `systems.check_ssh_reachable` — probe whether a ready system's guest sshd is answering
+  now (a worker job; poll `jobs.wait` and read `refs.result`).
+```
+
+- [ ] **Step 7: Run** `uv run python -m pytest tests/mcp/lifecycle/ -q -k "ssh or reachable" && just lint && just type && uv run python -m pytest tests/mcp/core/test_no_adr_leak.py tests/mcp/test_tool_index.py tests/mcp/resources/test_toolset_doc_completeness.py -q`. Expected: PASS. If `test_tool_index` snapshots the tool set, regenerate/extend it to include `systems.check_ssh_reachable`.
+
+- [ ] **Step 8: Commit** — `feat(972): add systems.check_ssh_reachable tool` (tool + registrar + ssh_info next-action + toolset doc together, so no commit is red on the completeness guard).
 
 ---
 
@@ -580,21 +589,9 @@ def test_ssh_reachable_is_not_an_image_signal_after_972() -> None:
 
 ---
 
-### Task 7: Toolset doc
-
-**Files:**
-- Modify: `docs/guide/toolsets/systems.md:26-27`
-
-- [ ] **Step 1:** After the `systems.authorize_ssh_key` bullet, add:
-
-```markdown
-- `systems.check_ssh_reachable` — probe whether a ready system's guest sshd is answering
-  now (a worker job; poll `jobs.wait` and read `refs.result`).
-```
-
-- [ ] **Step 2: Run the completeness guard.** `uv run python -m pytest tests/mcp/resources/test_toolset_doc_completeness.py -q`. Expected: PASS.
-
-- [ ] **Step 3: Commit** — `docs(972): name systems.check_ssh_reachable in the systems toolset guide`.
+> **Note:** The `docs/guide/toolsets/systems.md` update was folded into **Task 5, Step 6** so
+> the tool registration and its documenting line land in one commit — `test_toolset_doc_completeness`
+> (the #940 guard) is red for any commit where the tool is registered but undocumented.
 
 ---
 
