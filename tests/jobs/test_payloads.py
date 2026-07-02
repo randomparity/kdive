@@ -19,6 +19,7 @@ from kdive.jobs.payloads import (
     BuildPayload,
     CaptureVmcorePayload,
     DiagnosticsWorkerCheckPayload,
+    InstallPayload,
     PayloadValidationError,
     PowerPayload,
     ReprovisionPayload,
@@ -67,6 +68,43 @@ def test_build_payload_round_trips_with_optional_cmdline() -> None:
 def test_build_payload_requires_build_host_id() -> None:
     with pytest.raises(PayloadValidationError, match="build_host_id"):
         dump_payload(JobKind.BUILD, {"run_id": str(uuid4())})
+
+
+def test_install_payload_round_trips_and_strips_cmdline() -> None:
+    run_id = uuid4()
+    payload = dump_payload(JobKind.INSTALL, InstallPayload(run_id=str(run_id), cmdline="  a=1 "))
+    assert payload == {"run_id": str(run_id), "cmdline": "a=1"}
+
+
+def test_install_payload_omits_absent_cmdline() -> None:
+    run_id = uuid4()
+    payload = dump_payload(JobKind.INSTALL, InstallPayload(run_id=str(run_id)))
+    assert payload == {"run_id": str(run_id)}
+
+
+def test_install_payload_rejects_blank_cmdline() -> None:
+    with pytest.raises(ValueError, match="cmdline must not be blank"):
+        InstallPayload(run_id=str(uuid4()), cmdline="   ")
+
+
+def test_install_payload_decodes_legacy_run_only_payload() -> None:
+    """A pre-#988 install job serialized as bare {run_id} decodes with cmdline=None."""
+    now = datetime.now(UTC)
+    run_id = uuid4()
+    job = Job(
+        id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        kind=JobKind.INSTALL,
+        payload={"run_id": str(run_id)},
+        state=JobState.QUEUED,
+        max_attempts=3,
+        authorizing={"principal": "alice", "agent_session": None, "project": "kernel-team"},
+        dedup_key=f"{run_id}:install",
+    )
+    decoded = load_payload(job, InstallPayload)
+    assert decoded.run_id == str(run_id)
+    assert decoded.cmdline is None
 
 
 def test_dump_payload_omits_unset_optional_fields() -> None:

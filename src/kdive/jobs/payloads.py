@@ -112,6 +112,28 @@ class BuildInstallBootPayload(BuildPayload):
     """
 
 
+class InstallPayload(RunPayload):
+    """Payload for a `runs.install` step: the Run plus an optional cmdline override (ADR-0299).
+
+    ``cmdline`` **replaces** the build-baked extra args for this install so an agent can iterate
+    boot-parameter variants against an already-built kernel without a rebuild; ``None`` reuses the
+    build-baked extra. A blank value is rejected (a caller mistake, distinct from omitting it). A
+    pre-#988 install job serialized as bare ``{run_id}`` decodes here with ``cmdline=None``.
+    """
+
+    cmdline: str | None = None
+
+    @field_validator("cmdline")
+    @classmethod
+    def _nonblank_cmdline(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("cmdline must not be blank")
+        return stripped
+
+
 class PowerPayload(SystemPayload):
     action: PowerAction
 
@@ -203,7 +225,7 @@ _PAYLOAD_MODELS: dict[JobKind, _PayloadModel] = {
     JobKind.REPROVISION: ReprovisionPayload,
     JobKind.TEARDOWN: SystemPayload,
     JobKind.BUILD: BuildPayload,
-    JobKind.INSTALL: RunPayload,
+    JobKind.INSTALL: InstallPayload,
     JobKind.BOOT: RunPayload,
     JobKind.FORCE_CRASH: SystemPayload,
     JobKind.POWER: PowerPayload,
@@ -218,7 +240,7 @@ _PAYLOAD_MODELS: dict[JobKind, _PayloadModel] = {
 }
 _RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.BUILD: BuildPayload,
-    JobKind.INSTALL: RunPayload,
+    JobKind.INSTALL: InstallPayload,
     JobKind.BOOT: RunPayload,
     JobKind.CAPTURE_VMCORE: CaptureVmcorePayload,
     JobKind.BUILD_INSTALL_BOOT: BuildInstallBootPayload,

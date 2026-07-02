@@ -3493,7 +3493,7 @@ def test_build_backstop_rejects_when_host_kind_flips_after_create(migrated_url: 
 from kdive.build_artifacts.results import BuildOutput  # noqa: E402
 from kdive.jobs import queue  # noqa: E402
 from kdive.jobs.models import HandlerRegistry  # noqa: E402
-from kdive.jobs.payloads import BuildPayload, RunPayload  # noqa: E402
+from kdive.jobs.payloads import BuildPayload, InstallPayload, RunPayload  # noqa: E402
 
 
 class _FakeBuilder:
@@ -4368,11 +4368,14 @@ def test_boot_without_operator_raises(migrated_url: str) -> None:
 
 
 async def _enqueue_job(pool: AsyncConnectionPool, kind: JobKind, run_id: str, step: str) -> Job:
+    payload: RunPayload = (
+        InstallPayload(run_id=run_id) if kind is JobKind.INSTALL else RunPayload(run_id=run_id)
+    )
     async with pool.connection() as conn:
         return await queue.enqueue(
             conn,
             kind,
-            RunPayload(run_id=run_id),
+            payload,
             {"principal": "user-1", "agent_session": "s", "project": "proj"},
             f"{run_id}:{step}",
         )

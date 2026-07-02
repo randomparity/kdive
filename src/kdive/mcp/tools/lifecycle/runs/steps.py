@@ -15,7 +15,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.payloads import RunPayload
+from kdive.jobs.payloads import InstallPayload, RunPayload
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -56,7 +56,13 @@ async def install_run(
                 project=run.project,
                 kind="runs.install",
                 do_work=lambda: _enqueue_step(
-                    conn, ctx, run, JobKind.INSTALL, "install", "runs.install"
+                    conn,
+                    ctx,
+                    run,
+                    JobKind.INSTALL,
+                    "install",
+                    "runs.install",
+                    payload=InstallPayload(run_id=str(run.id)),
                 ),
             )
 
@@ -90,7 +96,15 @@ async def boot_run(
                 principal=ctx.principal,
                 project=run.project,
                 kind="runs.boot",
-                do_work=lambda: _enqueue_step(conn, ctx, run, JobKind.BOOT, "boot", "runs.boot"),
+                do_work=lambda: _enqueue_step(
+                    conn,
+                    ctx,
+                    run,
+                    JobKind.BOOT,
+                    "boot",
+                    "runs.boot",
+                    payload=RunPayload(run_id=str(run.id)),
+                ),
             )
 
 
@@ -121,13 +135,15 @@ async def _enqueue_step(
     kind: JobKind,
     step: str,
     tool: str,
+    *,
+    payload: RunPayload,
 ) -> ToolResponse:
     """Enqueue an install/boot step job under the per-Run lock."""
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
         job = await queue.enqueue(
             conn,
             kind,
-            RunPayload(run_id=str(run.id)),
+            payload,
             job_authorizing(ctx, run.project),
             f"{run.id}:{step}",
             # A terminally-failed step is recycled to a fresh attempt so a transient blip can be
