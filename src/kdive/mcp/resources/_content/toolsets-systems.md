@@ -24,5 +24,7 @@ description.
 ## Reaching the guest over SSH
 
 - `systems.ssh_info` — get the SSH connection descriptor for a ready system.
+- `systems.check_ssh_reachable` — probe whether a ready system's guest sshd is answering
+  now (a worker job; poll `jobs.wait` and read `refs.result`).
 - `systems.authorize_ssh_key` — authorize your public key so you can run commands in the
   guest over SSH.
