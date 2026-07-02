@@ -1,10 +1,10 @@
 """Guest-contract validation for a rootfs image (ADR-0092, ADR-0093).
 
-A bootable kdive rootfs must carry the provider's guest contract: a guest agent (for the
-in-target exec channel), kdump (crash capture), drgn (live introspection), and the allowlisted
-in-guest helpers. ``validate_guest_contract`` libguestfs-inspects the image and raises a
-``CategorizedError(CONFIGURATION_ERROR)`` **naming the first missing element**, so a build or
-upload that lacks the contract is rejected before it is registered — never published as bootable.
+A bootable kdive rootfs must carry the file-verifiable half of its declared capabilities: kdump
+(crash capture) and drgn (live introspection). ``validate_guest_contract`` libguestfs-inspects the
+image and raises a ``CategorizedError(CONFIGURATION_ERROR)`` **naming the first missing element**,
+so a build or upload that lacks the contract is rejected before it is registered — never published
+as bootable.
 
 The slow libguestfs probe is an **injected seam** (``inspect``) defaulting to a real
 ``guestfish``-based existence check. Callers offload this synchronous, environment-bound call via
@@ -19,17 +19,20 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.families._fedora_customize import DRGN_HELPER_GUEST_PATH, KDUMP_SYSCTL_PATH
 
 # Each contract element maps to a canonical in-guest path whose presence proves the element is
 # installed. The keys are the file-verifiable subset of the closed ``Capability`` vocabulary
-# (ADR-0286) — ``build`` has no in-guest marker — enforced by a guard test so the guest-contract
-# and capability vocabularies cannot drift. A guest agent, the kdump service unit, the drgn
-# module, and the allowlisted-helper marker installed by the build plane.
+# (ADR-0286) — ``build``/``ssh``/``selinux``/``apparmor`` have no build-written in-guest marker —
+# enforced by two guard tests: one that the keys are a Capability subset, and one
+# (``test_guest_contract_markers_are_baked_by_declaring_families``) that every path here is
+# actually written by a declaring family's ``customize_argv``, so the probe cannot drift onto a
+# phantom marker. The values are the SAME constants the families bake: the family-neutral kdump
+# NMI-panic sysctl (written on every kdump image, gated identically to kdump enablement) and the
+# staged ``kdive-drgn`` helper.
 GUEST_CONTRACT_PATHS: dict[str, str] = {
-    "agent": "/usr/sbin/qemu-ga",
-    "kdump": "/usr/lib/systemd/system/kdump.service",
-    "drgn": "/usr/lib/kdive/drgn-ready",
-    "helpers": "/usr/lib/kdive/allowlisted-helpers",
+    "kdump": KDUMP_SYSCTL_PATH,
+    "drgn": DRGN_HELPER_GUEST_PATH,
 }
 
 _GUESTFISH_TIMEOUT_S = 5 * 60
@@ -96,7 +99,7 @@ def validate_guest_contract(
     Args:
         qcow2_path: The local path to the rootfs qcow2 to inspect.
         required: The guest-contract element tags the image must satisfy (a subset of
-            :data:`GUEST_CONTRACT_PATHS` — e.g. ``agent``, ``kdump``, ``drgn``, ``helpers``).
+            :data:`GUEST_CONTRACT_PATHS` — ``kdump`` and/or ``drgn``).
         inspect: The libguestfs inspection seam; defaults to a real ``guestfish`` probe. Tests
             inject a stub so they need no libguestfs.
 

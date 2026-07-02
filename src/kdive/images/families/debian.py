@@ -86,12 +86,14 @@ class DebianFamily:
 
     def customize_argv(self, ctx: CustomizeContext) -> list[str]:
         """Build the virt-customize argv that turns the Debian base into a kdive-ready rootfs."""
-        argv: list[str] = [
-            "--install",
-            ",".join(ctx.packages),
-            "--run-command",
-            "systemctl enable ssh.service",
-        ]
+        argv: list[str] = ["--install", ",".join(ctx.packages)]
+        # Enable ssh exactly when this image declares the SSH capability, which ``capabilities()``
+        # ties to ``kind`` (every debug image, never a build-host image). Gating on ``kind`` (not
+        # package membership) keeps the declaration and the enable from diverging: a debug image
+        # that somehow lacks openssh-server fails the build loudly here rather than shipping an
+        # ``ssh``-tagged image with no sshd.
+        if ctx.kind == "debug":
+            argv += ["--run-command", "systemctl enable ssh.service"]
         # Gate kdump enable + the NMI-panic sysctl on the kdump package (in every debug set, absent
         # from the build set) so a build-host image never panics on a stray NMI.
         if "kdump-tools" in ctx.packages:

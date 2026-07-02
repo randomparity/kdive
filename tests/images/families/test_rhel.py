@@ -84,6 +84,15 @@ def test_build_argv_omits_makedumpfile_version_marker(tmp_path: Path) -> None:
     assert MAKEDUMPFILE_MARKER_GUEST_PATH not in " ".join(RhelFamily().customize_argv(build_ctx))
 
 
+def test_sshd_enable_is_coupled_to_the_debug_kind(tmp_path: Path) -> None:
+    # sshd enablement mirrors the SSH capability, which capabilities() ties to kind: a debug image
+    # enables sshd.service, a build-host image (which declares no SSH) never does.
+    ctx = _ctx(tmp_path, is_cloud_image=True)
+    build_ctx = replace(ctx, kind="build", packages=RhelFamily().packages("build", "fedora", "44"))
+    assert "systemctl enable sshd.service" in RhelFamily().customize_argv(ctx)
+    assert "systemctl enable sshd.service" not in RhelFamily().customize_argv(build_ctx)
+
+
 def test_el9_debug_argv_enables_kdump_without_kdump_utils(tmp_path: Path) -> None:
     """EL9 has no kdump-utils pkg; kdump-enable must gate on kexec-tools, not kdump-utils."""
     argv = RhelFamily().customize_argv(

@@ -35,7 +35,7 @@ def _present(*paths: str) -> InspectSeam:
 def test_passes_when_every_required_element_is_present(tmp_path: Path) -> None:
     image = tmp_path / "img.qcow2"
     image.write_bytes(b"")
-    required = ["agent", "kdump", "drgn"]
+    required = ["kdump", "drgn"]
     present = _present(*[GUEST_CONTRACT_PATHS[r] for r in required])
     # Does not raise.
     validate_guest_contract(image, required=required, inspect=present)
@@ -44,16 +44,16 @@ def test_passes_when_every_required_element_is_present(tmp_path: Path) -> None:
 def test_names_the_missing_element(tmp_path: Path) -> None:
     image = tmp_path / "img.qcow2"
     image.write_bytes(b"")
-    # kdump is present; the guest agent and drgn are absent.
+    # kdump is present; drgn is absent.
     present = _present(GUEST_CONTRACT_PATHS["kdump"])
 
     with pytest.raises(CategorizedError) as err:
-        validate_guest_contract(image, required=["agent", "kdump", "drgn"], inspect=present)
+        validate_guest_contract(image, required=["drgn", "kdump"], inspect=present)
 
     assert err.value.category is ErrorCategory.CONFIGURATION_ERROR
     # The error names the missing element (the first one), not a generic failure.
-    assert "agent" in str(err.value)
-    assert err.value.details == {"missing": "agent", "path": GUEST_CONTRACT_PATHS["agent"]}
+    assert "drgn" in str(err.value)
+    assert err.value.details == {"missing": "drgn", "path": GUEST_CONTRACT_PATHS["drgn"]}
 
 
 def test_probe_receives_the_image_path(tmp_path: Path) -> None:
@@ -66,8 +66,21 @@ def test_probe_receives_the_image_path(tmp_path: Path) -> None:
         seen.append(qcow2_path)
         return set(candidates)
 
-    validate_guest_contract(image, required=["agent"], inspect=_probe)
+    validate_guest_contract(image, required=["drgn"], inspect=_probe)
     assert seen == [image]
+
+
+@pytest.mark.parametrize("retired", ["agent", "helpers"])
+def test_retired_contract_elements_are_now_unknown(tmp_path: Path, retired: str) -> None:
+    # `agent` (qemu-ga) and `helpers` named guest-contract markers no local family bakes; they
+    # were dropped from the vocabulary, so requiring one is now a configuration error, not a
+    # silent pass against a phantom path.
+    image = tmp_path / "img.qcow2"
+    image.write_bytes(b"")
+    with pytest.raises(CategorizedError) as err:
+        validate_guest_contract(image, required=[retired], inspect=_present())
+    assert err.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert retired in str(err.value)
 
 
 def test_unknown_required_element_is_a_configuration_error(tmp_path: Path) -> None:
