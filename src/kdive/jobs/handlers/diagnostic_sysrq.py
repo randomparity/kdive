@@ -1,4 +1,4 @@
-"""Worker handler for the `diagnostic_sysrq` job (ADR-0285, #925).
+"""Worker handler for the `diagnostic_sysrq` job (ADR-0285, #925; ADR-0292, #952).
 
 Injects one allowlisted magic-SysRq keystroke into a ready local-libvirt guest and captures
 the console dump the kernel prints as a redacted System-owned artifact. The provider Control
@@ -66,13 +66,18 @@ MAX_POLLS = 10
 SETTLE_POLLS = 2
 """Consecutive no-growth reads (after growth past the mark) that end the poll as `stabilized`."""
 
+DISABLED_MARKER = b"This sysrq operation is disabled."
+"""Substring the kernel prints (under the ``sysrq: `` prefix, `drivers/tty/sysrq.c`) when
+``kernel.sysrq`` restricts the requested operation. Matched on the distinctive text because the
+prefix is synthesized from ``KBUILD_MODNAME`` at build time (ADR-0292, #952)."""
+
 
 @dataclass(frozen=True, slots=True)
 class CaptureResult:
     """The redacted-input console slice and why the capture poll ended."""
 
     raw: bytes
-    exit_reason: str  # "stabilized" | "hit_bound" | "no_output"
+    exit_reason: str  # "stabilized" | "hit_bound" | "no_output" | "disabled"
 
 
 async def capture_console_delta(
@@ -92,7 +97,10 @@ async def capture_console_delta(
     ``settle_polls`` consecutive reads. Returns the console bytes from ``mark - seam_overlap``
     to the end (the overlap keeps a boundary-straddling secret intact for redaction), plus an
     exit reason: ``stabilized`` (settled), ``hit_bound`` (still growing at ``max_polls`` — a
-    possible truncation), or ``no_output`` (no growth past ``mark``).
+    possible truncation), ``no_output`` (no growth past ``mark``), or ``disabled`` (the guest
+    rejected the SysRq: the post-injection growth carries the kernel's ``kernel.sysrq``-disabled
+    marker; ADR-0292, #952). ``disabled`` is decided against the post-``mark`` slice only, so a
+    stale marker already in the retained boot log cannot trigger a false failure.
     """
     before = await read_console()
     mark = len(before)
@@ -116,6 +124,8 @@ async def capture_console_delta(
 
     if len(body) <= mark:
         return CaptureResult(raw=b"", exit_reason="no_output")
+    if DISABLED_MARKER in body[mark:]:
+        return CaptureResult(raw=b"", exit_reason="disabled")
     overlap_start = max(0, mark - seam_overlap)
     return CaptureResult(raw=body[overlap_start:], exit_reason=exit_reason)
 
@@ -241,9 +251,10 @@ async def diagnostic_sysrq_handler(
     """Inject one allowlisted SysRq and store the redacted console dump; return its artifact id.
 
     Outcomes are observable via the worker's per-kind job telemetry: a captured dump completes
-    the job (result_ref = artifact id); ``no_console_output`` and ``control_failure`` fail it
-    with those categories, so a rising failure rate for ``kind=diagnostic_sysrq`` surfaces a
-    silently-broken mechanism (guest lacks the keyboard driver, ``kernel.sysrq`` disabled).
+    the job (result_ref = artifact id); ``no_console_output``, ``sysrq_disabled``, and
+    ``control_failure`` fail it as ``configuration_error``, so a rising failure rate for
+    ``kind=diagnostic_sysrq`` surfaces a silently-broken mechanism (guest lacks the keyboard
+    driver, or ``kernel.sysrq`` restricts the requested operation, ADR-0292).
     """
     if artifact_store is None:
         raise CategorizedError(
@@ -282,6 +293,18 @@ async def diagnostic_sysrq_handler(
                 "remediation": (
                     "enable magic SysRq in the guest (kernel.sysrq) for this command and build "
                     "the guest kernel with a PS/2 keyboard driver (i8042/atkbd)"
+                ),
+            },
+        )
+    if result.exit_reason == "disabled":
+        raise CategorizedError(
+            "the guest rejected the SysRq (kernel.sysrq restricts this operation)",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={
+                "reason": "sysrq_disabled",
+                "remediation": (
+                    "permit this SysRq in the guest's kernel.sysrq bitmask "
+                    "(e.g. sysctl kernel.sysrq=1 or set the bit for this command)"
                 ),
             },
         )
