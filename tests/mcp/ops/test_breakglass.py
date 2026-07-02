@@ -330,10 +330,30 @@ def test_force_release_no_persisted_size_typed_failure_but_audited(migrated_url:
     asyncio.run(_run())
 
 
-def test_force_release_terminal_allocation_stale_but_audited(migrated_url: str) -> None:
+def test_force_release_released_is_idempotent_ok(migrated_url: str) -> None:
+    # ADR-0293: break-glass shares _release_locked, so it inherits the idempotent `released`
+    # outcome — force-releasing an already-released grant returns `ok`. The platform
+    # accountability row is still written (recorded before the release mechanic), so the
+    # idempotent no-op is auditable.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _alloc(pool, state=AllocationState.RELEASED)
+            resp = await breakglass.force_release(
+                pool, _admin_ctx(), allocation_id=str(alloc_id), reason="retry"
+            )
+        assert resp.status == "released"
+        assert resp.error_category is None
+        assert await _count_platform_audit(migrated_url) == 1
+
+    asyncio.run(_run())
+
+
+def test_force_release_expired_stale_but_audited(migrated_url: str) -> None:
+    # ADR-0293: a terminal `expired`/`failed` grant (an outcome the caller did not request)
+    # still returns stale_handle; the platform accountability row is still committed first.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _alloc(pool, state=AllocationState.EXPIRED)
             resp = await breakglass.force_release(
                 pool, _admin_ctx(), allocation_id=str(alloc_id), reason="retry"
             )

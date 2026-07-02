@@ -3,8 +3,9 @@
 A metered allocation (one with a budget row and a reserved ledger row) is reconciled when
 released: release stamps active_ended_at on the active->releasing edge, then writes the
 reconciled credit under PROJECT->ALLOCATION so it nets to rate*active_hours and leaves
-spent_kcu == ledger Σ. Release on a terminal allocation is a stale_handle (already
-reconciled). Double-release writes exactly one reconciled row.
+spent_kcu == ledger Σ. Re-releasing an already-released allocation is an idempotent ok that
+writes no second credit (ADR-0293); an expired/failed allocation is a stale_handle. Either
+way double-release writes exactly one reconciled row.
 """
 
 from __future__ import annotations
@@ -169,7 +170,8 @@ def test_release_from_granted_is_full_credit(migrated_url: str) -> None:
 
 
 def test_double_release_writes_one_reconciled_row(migrated_url: str) -> None:
-    # Re-releasing a released allocation is a stale_handle and writes no second credit.
+    # ADR-0293: re-releasing an already-released allocation is an idempotent `ok` (no second
+    # transition), and — the load-bearing invariant — writes NO second credit.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             res_id = await _seed_resource(pool)
@@ -183,8 +185,8 @@ def test_double_release_writes_one_reconciled_row(migrated_url: str) -> None:
             first = await release_allocation(pool, _ctx(), str(alloc_id))
             assert first.status == "released"
             second = await release_allocation(pool, _ctx(), str(alloc_id))
-            assert second.status == "error"
-            assert second.error_category == "stale_handle"
+            assert second.status == "released"  # idempotent no-op, not an error
+            assert second.error_category is None
             reconciled = [r for r in await _ledger_rows(pool, alloc_id) if r[0] == "reconciled"]
             assert len(reconciled) == 1  # exactly one credit despite two releases
             assert await _spent(pool) == Decimal("0.0000")

@@ -822,17 +822,60 @@ def test_release_malformed_allocation_is_config_error(migrated_url: str) -> None
     asyncio.run(_run())
 
 
-def test_release_terminal_allocation_is_stale_handle(migrated_url: str) -> None:
-    # A terminal allocation was already reconciled (by a prior release or the ->expired
-    # sweep); re-releasing it is a stale handle, not a config error (ADR-0040 §4).
+def test_release_released_allocation_is_idempotent_ok(migrated_url: str) -> None:
+    # ADR-0293: after a completed teardown the orphaned-active reaper auto-releases the grant,
+    # so a documented step-9 release finds it already `released`. Releasing an already-released
+    # grant returns idempotent `ok` — no transition, no audit row, no ledger credit (the single
+    # ADR-0040 §4 reconciliation was written by whoever first drove the terminal transition).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool, cap=2)
             alloc_id = await _seed_alloc(pool, res_id, AllocationState.RELEASED)
             resp = await release_allocation(pool, _ctx(), alloc_id)
+            assert resp.status == "released"
+            assert resp.error_category is None
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT count(*) FROM audit_log WHERE object_id = %s", (alloc_id,)
+                )
+                audit = await cur.fetchone()
+                await cur.execute(
+                    "SELECT count(*) FROM ledger WHERE allocation_id = %s", (alloc_id,)
+                )
+                ledger = await cur.fetchone()
+            # The no-op writes nothing: the row was seeded directly in `released` with no
+            # release audit/ledger, and the idempotent branch adds neither.
+            assert audit is not None and audit[0] == 0
+            assert ledger is not None and ledger[0] == 0
+
+    asyncio.run(_run())
+
+
+def test_release_expired_allocation_is_stale_handle(migrated_url: str) -> None:
+    # ADR-0293: `expired` is a terminal outcome the caller did NOT ask for (the lease lapsed),
+    # so it keeps `stale_handle` — the agent must learn the real state via `allocations.get`.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool, cap=2)
+            alloc_id = await _seed_alloc(pool, res_id, AllocationState.EXPIRED)
+            resp = await release_allocation(pool, _ctx(), alloc_id)
         assert resp.status == "error"
         assert resp.error_category == "stale_handle"
-        assert resp.data["current_status"] == "released"
+        assert resp.data["current_status"] == "expired"
+
+    asyncio.run(_run())
+
+
+def test_release_failed_allocation_is_stale_handle(migrated_url: str) -> None:
+    # ADR-0293: `failed` (provisioning failed) is likewise not the caller's requested outcome.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool, cap=2)
+            alloc_id = await _seed_alloc(pool, res_id, AllocationState.FAILED)
+            resp = await release_allocation(pool, _ctx(), alloc_id)
+        assert resp.status == "error"
+        assert resp.error_category == "stale_handle"
+        assert resp.data["current_status"] == "failed"
 
     asyncio.run(_run())
 

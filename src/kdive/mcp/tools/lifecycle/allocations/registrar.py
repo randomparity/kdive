@@ -127,7 +127,15 @@ def _register_allocations_release(app: FastMCP, pool: AsyncConnectionPool) -> No
     async def allocations_release(
         allocation_id: Annotated[str, Field(description="The Allocation to release.")],
     ) -> ToolResponse:
-        """Release an active allocation."""
+        """Release an allocation when done.
+
+        Idempotent on an already-released grant: releasing one returns `ok` (a no-op), so this
+        is safe to call as a final cleanup step. A completed `systems.teardown` does not itself
+        release the allocation, but the reconciler auto-releases the now-orphaned grant after a
+        short grace, so a release call after teardown may find it already released and return
+        `ok`. An `expired` (lease lapsed) or `failed` (provision failed) grant instead returns
+        `stale_handle`; read `allocations.get` to see its real state.
+        """
         return await _release_allocation(pool, current_context(), allocation_id)
 
 
