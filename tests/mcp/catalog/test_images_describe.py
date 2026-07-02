@@ -288,6 +288,63 @@ def test_describe_kdump_block_unverified_when_version_absent(migrated_url: str) 
     asyncio.run(_run())
 
 
+def _direct_kernel(resp: ToolResponse) -> dict[str, JsonValue]:
+    signals = resp.data["capability_signals"]
+    assert isinstance(signals, dict)
+    block = signals["direct_kernel"]
+    assert isinstance(block, dict)
+    return block
+
+
+def test_describe_direct_kernel_provisionable_for_single_kernel(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            iid = await _insert(
+                pool,
+                name="single-kernel",
+                visibility="public",
+                owner=None,
+                provenance='{"boot_kernel_count": 1}',
+            )
+            resp = await catalog_images.describe_image(pool, _ctx(), iid)
+        block = _direct_kernel(resp)
+        assert set(block) == {"boot_kernel_count", "status", "note"}
+        assert block["boot_kernel_count"] == 1
+        assert block["status"] == "provisionable"
+
+    asyncio.run(_run())
+
+
+def test_describe_direct_kernel_not_provisionable_for_multiple(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            iid = await _insert(
+                pool,
+                name="multi-kernel",
+                visibility="public",
+                owner=None,
+                provenance='{"boot_kernel_count": 2}',
+            )
+            resp = await catalog_images.describe_image(pool, _ctx(), iid)
+        block = _direct_kernel(resp)
+        assert block["status"] == "not_provisionable"
+        assert block["note"]
+
+    asyncio.run(_run())
+
+
+def test_describe_direct_kernel_unverified_when_operand_absent(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            iid = await _insert(pool, name="no-provenance", visibility="public", owner=None)
+            resp = await catalog_images.describe_image(pool, _ctx(), iid)
+        block = _direct_kernel(resp)
+        assert block["status"] == "unverified"
+        assert block["boot_kernel_count"] is None
+
+    asyncio.run(_run())
+
+
 def test_describe_kdump_not_applicable_for_build_image(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

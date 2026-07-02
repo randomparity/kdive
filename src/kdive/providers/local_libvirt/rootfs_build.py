@@ -45,8 +45,10 @@ from kdive.images.families._fedora_customize import (
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.kdump_support import MakedumpfileVersion
 from kdive.images.planes._build_common import (
+    DEFAULT_BOOT_ENTRIES_PROBE,
     DEFAULT_MAKEDUMPFILE_PROBE,
     DEFAULT_VERSION_INSPECT,
+    BootEntriesProbeSeam,
     MakedumpfileProbeSeam,
     VersionInspectSeam,
     build_workspace,
@@ -62,6 +64,7 @@ from kdive.images.rootfs_catalog import (
     RootfsSource,
     resolve_rootfs_entry,
 )
+from kdive.providers.local_libvirt.lifecycle.baseline_kernel import baseline_kernel_names
 from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
 
 _log = logging.getLogger(__name__)
@@ -182,6 +185,7 @@ class RootfsBuildTools:
     family_for: FamilyResolver = family_for
     inspect_versions: VersionInspectSeam = DEFAULT_VERSION_INSPECT
     probe_makedumpfile: MakedumpfileProbeSeam = DEFAULT_MAKEDUMPFILE_PROBE
+    probe_boot_entries: BootEntriesProbeSeam = DEFAULT_BOOT_ENTRIES_PROBE
     verify_cloud_init: VerifyCloudInit = _real_verify_cloud_init
 
 
@@ -251,6 +255,7 @@ class LocalLibvirtRootfsBuildPlane:
             installed = self._inspect_installed(scratch)
             package_versions = {n: installed[n] for n in spec.packages if n in installed}
             makedumpfile_version = self._capture_makedumpfile(scratch, installed)
+            boot_kernel_count = self._capture_boot_kernel_count(scratch)
             qcow2 = publish_qcow2(self._workspace, image_name=spec.name, scratch=staged)
         digest = digest_file(qcow2)
         return RootfsBuildOutput(
@@ -263,6 +268,7 @@ class LocalLibvirtRootfsBuildPlane:
                 size=self._size,
                 package_versions=package_versions,
                 makedumpfile_version=makedumpfile_version,
+                boot_kernel_count=boot_kernel_count,
             ),
         )
 
@@ -307,6 +313,26 @@ class LocalLibvirtRootfsBuildPlane:
                 _log.warning("makedumpfile version %r did not parse; skipping", candidate)
         return None
 
+    def _capture_boot_kernel_count(self, scratch: Path) -> int | None:
+        """The number of non-rescue ``vmlinuz-*`` kernels in the built image's ``/boot`` (ADR-0295).
+
+        Lists ``/boot`` via the injected probe and classifies with ``baseline_kernel_names`` — the
+        same rule the fail-closed provision selection uses — so the recorded count predicts whether
+        a direct-kernel provision will succeed (exactly one is provisionable). Advisory like the
+        makedumpfile capture: any probe failure (``CategorizedError``) or an unproduceable listing
+        (``None``) degrades to ``None`` so the build still publishes and the operand is simply
+        omitted. Returns ``0`` for a kernel-less ``/boot`` (a meaningful "not provisionable"
+        operand), distinct from ``None`` (unknown).
+        """
+        try:
+            entries = self._tools.probe_boot_entries(scratch)
+        except CategorizedError:
+            _log.warning("boot-kernel count probe failed; provenance omits boot_kernel_count")
+            return None
+        if entries is None:
+            return None
+        return len(baseline_kernel_names(entries))
+
     def _customize(
         self,
         scratch: Path,
@@ -345,6 +371,7 @@ def _provenance(
     size: str,
     package_versions: dict[str, str],
     makedumpfile_version: str | None,
+    boot_kernel_count: int | None,
 ) -> dict[str, object]:
     """Record the pinned inputs and build args that produced the image (falsifiable contract).
 
@@ -359,6 +386,10 @@ def _provenance(
     ``makedumpfile_version`` (the installed makedumpfile binary's version) is the per-image operand
     of the computed kdump-capability predicate; added only when captured, omitted otherwise so a
     degraded build's row stays byte-identical to a pre-feature one (ADR-0253).
+    ``boot_kernel_count`` (the non-rescue ``vmlinuz-*`` count in ``/boot``) is the operand of the
+    computed ``direct_kernel`` provisionability signal; added when the count is known — including
+    ``0`` — and omitted only when the probe could not produce a listing (``None``), so a degraded
+    build's row stays byte-identical to a pre-feature one (ADR-0295).
     """
     record: dict[str, object] = {
         "plane": "local-libvirt",
@@ -377,4 +408,6 @@ def _provenance(
         record["package_versions"] = package_versions
     if makedumpfile_version:
         record["makedumpfile_version"] = makedumpfile_version
+    if boot_kernel_count is not None:
+        record["boot_kernel_count"] = boot_kernel_count
     return record

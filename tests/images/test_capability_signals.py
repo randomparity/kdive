@@ -6,6 +6,7 @@ from kdive.domain.catalog.images import Capability, ImageCatalogEntry, ImageVisi
 from kdive.images.capability_signals import (
     PLANNED_SIGNALS,
     REGISTERED_SIGNALS,
+    render_direct_kernel_signal,
     render_kdump_signal,
 )
 from kdive.images.kdump_support import DEFAULT_KERNEL_BASIS
@@ -72,3 +73,44 @@ def test_kdump_signal_capable_with_operand_and_tooling() -> None:
         _entry([Capability.KDUMP], {"makedumpfile_version": "1.7.9"}), DEFAULT_KERNEL_BASIS
     )
     assert block["capability"] == "capable"
+
+
+def test_direct_kernel_registered_and_off_the_planned_list() -> None:
+    assert "direct_kernel" in {s.name for s in REGISTERED_SIGNALS}
+    assert "direct_kernel_bootable" not in {p.name for p in PLANNED_SIGNALS}
+    assert "direct_kernel" not in {p.name for p in PLANNED_SIGNALS}
+
+
+def test_direct_kernel_provisionable_for_single_kernel() -> None:
+    block = render_direct_kernel_signal(_entry([], {"boot_kernel_count": 1}), DEFAULT_KERNEL_BASIS)
+    assert set(block) == {"boot_kernel_count", "status", "note"}
+    assert block["boot_kernel_count"] == 1
+    assert block["status"] == "provisionable"
+    assert block["note"] == ""
+
+
+def test_direct_kernel_not_provisionable_for_multiple_kernels() -> None:
+    block = render_direct_kernel_signal(_entry([], {"boot_kernel_count": 2}), DEFAULT_KERNEL_BASIS)
+    assert block["status"] == "not_provisionable"
+    assert block["note"]  # an actionable note
+
+
+def test_direct_kernel_not_provisionable_for_zero_kernels() -> None:
+    block = render_direct_kernel_signal(_entry([], {"boot_kernel_count": 0}), DEFAULT_KERNEL_BASIS)
+    assert block["boot_kernel_count"] == 0
+    assert block["status"] == "not_provisionable"
+
+
+def test_direct_kernel_unverified_when_operand_absent() -> None:
+    block = render_direct_kernel_signal(_entry([], {}), DEFAULT_KERNEL_BASIS)
+    assert block["boot_kernel_count"] is None
+    assert block["status"] == "unverified"
+
+
+def test_direct_kernel_treats_bool_operand_as_absent() -> None:
+    # bool is an int subclass; True must not be read as a count of 1.
+    block = render_direct_kernel_signal(
+        _entry([], {"boot_kernel_count": True}), DEFAULT_KERNEL_BASIS
+    )
+    assert block["status"] == "unverified"
+    assert block["boot_kernel_count"] is None

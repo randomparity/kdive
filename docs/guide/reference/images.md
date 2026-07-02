@@ -35,9 +35,12 @@ Delete an image catalog entry.
 Return full detail for one catalog image visible to the caller.
 
 Includes boot layout, digest, capabilities, scope, publish state, build ``provenance``
-(with captured ``package_versions``/``makedumpfile_version`` when present), and computed
-``data.capability_signals`` (each signal keyed by name — today only ``kdump``, the
-capability for ``target_kernel`` with the kernel basis disclosed).
+(with captured ``package_versions``/``makedumpfile_version``/``boot_kernel_count`` when
+present), and computed ``data.capability_signals`` (each signal keyed by name): ``kdump``
+(the capability for ``target_kernel``, kernel basis disclosed) and ``direct_kernel``
+(``status`` ``provisionable`` when ``/boot`` holds exactly one non-rescue kernel, else
+``not_provisionable``/``unverified`` — read it before a direct-kernel provision so a
+multi-kernel image does not burn an allocation on a fail-closed selection).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
