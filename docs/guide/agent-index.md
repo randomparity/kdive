@@ -17,11 +17,14 @@ the first tool to call.
    build on a host. See the runs guide.
 5. **Install and boot** — `runs.install` then `runs.boot`, or `runs.build_install_boot` as
    one pollable job on the single-host server-build lane.
-6. **Observe evidence** — `runs.get` for status and console access, `artifacts.list` and
+6. **Reproduce in the guest** — `systems.authorize_ssh_key`, then drive the reproducer over
+   SSH (compile in-guest or cross-compile and `scp`, then run or stress it). This is where
+   most investigation time goes; see the reproduce-and-capture loop below.
+7. **Observe evidence** — `runs.get` for status and console access, `artifacts.list` and
    `artifacts.get` for logs and other files.
-7. **Debug live** — `debug.start_session`, then breakpoints, memory, and stack tools.
-8. **Triage a crash** — `vmcore.fetch`, then `postmortem.triage`.
-9. **Release** — `allocations.release` when done.
+8. **Debug live** — `debug.start_session`, then breakpoints, memory, and stack tools.
+9. **Triage a crash** — `vmcore.fetch`, then `postmortem.triage`.
+10. **Release** — `allocations.release` when done.
 
 Long steps (provision, build, install, boot, capture) return a job handle; poll it with
 `jobs.wait`.
@@ -38,6 +41,26 @@ yours to shape:
   can't do that" conclusions are one package (or one config symbol) away.
 - **Mind disk headroom.** Installing toolchains, building reproducers, and capturing traces
   all consume guest disk; size the shape for the work or clean up as you go.
+
+## The reproduce-and-capture loop
+
+Most real investigation time is spent here, not in the setup stages. After
+`systems.authorize_ssh_key`:
+
+1. **Get the reproducer into the guest.** Compile it in-guest with the toolchain you
+   installed, or cross-compile on the host and `scp` the binary in.
+2. **Run or stress it** over SSH — the reproducer itself, `stress-ng`, a fuzzer, whatever
+   provokes the bug.
+3. **Steer the kernel into the failure.** Fault injection (`failslab` / `fail_page_alloc`
+   via debugfs, if you built the kernel with `CONFIG_FAULT_INJECTION`), tracing (`ftrace`,
+   `bpftrace`), and stress are all in-guest-over-SSH activities using tools you installed
+   (see "The guest is yours" above).
+
+**A panic drops your SSH channel.** When the kernel crashes, the SSH session dies with it, so
+whatever you were watching over SSH is gone. The **serial-console sidecar is the durable
+record** — read it with `runs.get` (console access) and the `artifacts` tools, which persist
+across the crash. Do not rely on SSH output as your capture of a panic; rely on the console
+artifacts.
 
 ## Provisioning for debugging and live introspection
 
