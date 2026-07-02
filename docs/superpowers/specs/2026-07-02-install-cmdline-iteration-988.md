@@ -140,7 +140,10 @@ row was deleted, `runs.boot`'s enqueue sees an absent ledger row and recycles th
   byte-identical, but a re-stage supplies a **new cmdline** — so the broadened recycle `UPDATE`
   must also `SET payload = <new>` on the `succeeded|failed → queued` transition. Otherwise the
   recycled `INSTALL` job re-runs with the **prior** cmdline and the sweep silently boots the wrong
-  variant. `canceled` jobs stay untouched (no resurrection). The flag has one caller today
+  variant. Recycling a `succeeded` job (new to this change — the old flag only touched `failed`)
+  must additionally clear its success-only fields — `result_ref = NULL` — alongside the
+  state/attempt/lease reset, so the re-queued job is not observed carrying the prior run's result.
+  `canceled` jobs stay untouched (no resurrection). The flag has one caller today
   (`_enqueue_step`), so broadening its semantics is contained.
 - **`cmdline_for(conn, run, method, *, root_cmdline, override=None)`** — when `override` is set,
   return `f"{required} {override}"` (replace build extras); else today's build-baked append. The
