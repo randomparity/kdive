@@ -74,3 +74,22 @@ def test_seam_overlap_keeps_a_secret_straddling_the_mark_contiguous() -> None:
     # The pre-mark overlap is included so the whole secret token is contiguous for redaction.
     assert b"SECRET=abc" in result.raw
     assert result.raw == grown[len(before) - 8 :]
+
+
+def test_disabled_marker_in_growth_reports_disabled() -> None:
+    disabled = b"sysrq: This sysrq operation is disabled.\n"
+    frames = [b"boot\n", b"boot\n" + disabled, b"boot\n" + disabled, b"boot\n" + disabled]
+    result, injected = asyncio.run(_capture(frames))
+    assert result.exit_reason == "disabled"
+    assert injected == ["inject"]
+
+
+def test_disabled_marker_present_before_mark_does_not_report_disabled() -> None:
+    # The marker sits in the retained boot log (before the injection mark); a fresh, real
+    # dump grows after it. Only the post-mark growth is inspected, so this is not `disabled`.
+    before = b"boot\nsysrq: This sysrq operation is disabled.\n"
+    grown = before + b"SysRq : Show Memory\n dump\n"
+    result, _ = asyncio.run(_capture([before, grown, grown, grown], seam_overlap=64))
+    assert result.exit_reason == "stabilized"
+    # The overlap still carries the old marker into the stored slice, but it did not fail.
+    assert b"This sysrq operation is disabled." in result.raw

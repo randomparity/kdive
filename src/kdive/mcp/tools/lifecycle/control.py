@@ -374,10 +374,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
         """Inject one non-destructive diagnostic SysRq into a ready local-libvirt guest and
         capture the kernel's console dump. Requires contributor (no destructive gate); enqueues
         a job and returns `{job_id, status: queued}` — poll `jobs.wait`. On success the job's
-        `refs.result` is the redacted console-dump artifact id; read it with `artifacts.get`. No
-        console output (guest SysRq disabled or no keyboard driver) fails with a
-        `configuration_error`; an unknown/destructive `command`, a non-local-libvirt System, or
-        a non-ready System is a `configuration_error`."""
+        `refs.result` is the redacted console-dump artifact id; read it with `artifacts.get`. A
+        guest that rejected the SysRq (`kernel.sysrq` restricts the operation) fails with a
+        `configuration_error`, as does no console output at all (no keyboard driver); an
+        unknown/destructive `command`, a non-local-libvirt System, or a non-ready System is also
+        a `configuration_error`."""
         return await diagnostic_sysrq_system(
             pool,
             current_context(),
