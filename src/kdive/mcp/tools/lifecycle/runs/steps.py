@@ -14,7 +14,7 @@ from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Run
-from kdive.domain.operations.jobs import JobKind
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import InstallPayload, RunPayload
 from kdive.log import bind_context
@@ -28,7 +28,7 @@ from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.runs.steps import (
-    existing_build_result,
+    build_baked_cmdline_extra,
     platform_owned_cmdline_token,
     step_progress,
 )
@@ -79,12 +79,6 @@ async def install_run(
             )
 
 
-async def _build_extra(conn: AsyncConnection, run: Run) -> str | None:
-    """The build-baked cmdline extra on the ``build`` step (matches the install handler)."""
-    result = await existing_build_result(conn, run.id)
-    return result.cmdline if result is not None else None
-
-
 async def _restage_and_enqueue_install(
     conn: AsyncConnection, ctx: RequestContext, run: Run, cmdline: str | None
 ) -> ToolResponse:
@@ -92,10 +86,18 @@ async def _restage_and_enqueue_install(
 
     The whole decision — read the step ledger, delete the settled ``install``/``boot`` rows on a
     re-stage, and enqueue — runs inside one per-Run advisory-lock transaction so a concurrent
-    ``runs.install`` cannot interleave read→delete→enqueue (ADR-0299). ``_enqueue_step``'s
-    ledger-driven recycle then carries the new cmdline into the recycled install job.
+    ``runs.install`` cannot interleave read→delete→enqueue (ADR-0299). The shared ledger-driven
+    recycle (``_locked_enqueue``) then carries the new cmdline into the recycled install job.
     """
-    requested = cmdline.strip() if cmdline is not None else await _build_extra(conn, run)
+    requested = (
+        cmdline.strip() if cmdline is not None else await build_baked_cmdline_extra(conn, run.id)
+    )
+    # Include the cmdline in the audit args so a re-stage to a new cmdline is not audited the same
+    # as the prior install (the args_digest is one-way, so this distinguishes the operations without
+    # making the cmdline reverse-readable). Omitted when no override.
+    audit_args = {"run_id": str(run.id)}
+    if cmdline is not None:
+        audit_args["cmdline"] = cmdline.strip()
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
         progress = await step_progress(conn, run.id)
         if progress.install == "running" or progress.boot == "running":
@@ -103,32 +105,15 @@ async def _restage_and_enqueue_install(
         if progress.install == "succeeded" and progress.installed_cmdline != requested:
             await delete_run_step(conn, run.id, "install")
             await delete_run_step(conn, run.id, "boot")
-        recycle = not await _has_step_row(conn, run.id, "install")
-        job = await queue.enqueue(
-            conn,
-            JobKind.INSTALL,
-            InstallPayload(run_id=str(run.id), cmdline=cmdline),
-            job_authorizing(ctx, run.project),
-            f"{run.id}:install",
-            recycle_terminal=recycle,
-        )
-        # Include the cmdline in the audit args so a re-stage to a new cmdline is not audited
-        # identically to the prior install (the args_digest is one-way, so this distinguishes the
-        # operations without making the cmdline reverse-readable). Omitted when no override.
-        audit_args: dict[str, str] = {"run_id": str(run.id)}
-        if cmdline is not None:
-            audit_args["cmdline"] = cmdline.strip()
-        await audit.record(
+        job = await _locked_enqueue(
             conn,
             ctx,
-            audit.AuditEvent(
-                tool="runs.install",
-                object_kind="runs",
-                object_id=run.id,
-                transition="install",
-                args=audit_args,
-                project=run.project,
-            ),
+            run,
+            JobKind.INSTALL,
+            "install",
+            "runs.install",
+            InstallPayload(run_id=str(run.id), cmdline=cmdline),
+            audit_args,
         )
     return run_job_envelope(job, run.id)
 
@@ -200,6 +185,47 @@ async def _has_step_row(conn: AsyncConnection, run_id: UUID, step: str) -> bool:
         return await cur.fetchone() is not None
 
 
+async def _locked_enqueue(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    run: Run,
+    kind: JobKind,
+    step: str,
+    tool: str,
+    payload: RunPayload,
+    audit_args: dict[str, str],
+) -> Job:
+    """Enqueue a step job + record its audit, assuming the caller holds the per-Run lock.
+
+    The recycle decision is ledger-driven (ADR-0299): a terminal job is recycled iff the step's
+    ``run_steps`` row is absent. A present ``succeeded`` row is an idempotent no-op (the existing
+    job is returned); a ``failed`` step's row was deleted by ``abandon_run_step`` so a retry
+    recycles it; a re-stage (which deletes the row) likewise recycles, carrying the new payload.
+    """
+    recycle = not await _has_step_row(conn, run.id, step)
+    job = await queue.enqueue(
+        conn,
+        kind,
+        payload,
+        job_authorizing(ctx, run.project),
+        f"{run.id}:{step}",
+        recycle_terminal=recycle,
+    )
+    await audit.record(
+        conn,
+        ctx,
+        audit.AuditEvent(
+            tool=tool,
+            object_kind="runs",
+            object_id=run.id,
+            transition=step,
+            args=audit_args,
+            project=run.project,
+        ),
+    )
+    return job
+
+
 async def _enqueue_step(
     conn: AsyncConnection,
     ctx: RequestContext,
@@ -210,33 +236,9 @@ async def _enqueue_step(
     *,
     payload: RunPayload,
 ) -> ToolResponse:
-    """Enqueue an install/boot step job under the per-Run lock.
-
-    The recycle decision is ledger-driven (ADR-0299): a terminal job is recycled iff the step's
-    ``run_steps`` row is absent. A present ``succeeded`` row is an idempotent no-op (the existing
-    job is returned); a ``failed`` step's row was deleted by ``abandon_run_step`` so a retry
-    recycles it; a re-stage (which deletes the row) likewise recycles, carrying the new payload.
-    """
+    """Enqueue a boot step job under the per-Run lock (the install path re-stages separately)."""
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
-        recycle = not await _has_step_row(conn, run.id, step)
-        job = await queue.enqueue(
-            conn,
-            kind,
-            payload,
-            job_authorizing(ctx, run.project),
-            f"{run.id}:{step}",
-            recycle_terminal=recycle,
-        )
-        await audit.record(
-            conn,
-            ctx,
-            audit.AuditEvent(
-                tool=tool,
-                object_kind="runs",
-                object_id=run.id,
-                transition=step,
-                args={"run_id": str(run.id)},
-                project=run.project,
-            ),
+        job = await _locked_enqueue(
+            conn, ctx, run, kind, step, tool, payload, {"run_id": str(run.id)}
         )
     return run_job_envelope(job, run.id)

@@ -24,8 +24,6 @@ from kdive.services.runs.steps import (
     cmdline_for,
     existing_build_result,
     install_method_for,
-    installed_debuginfo_ref,
-    installed_initrd_ref,
 )
 
 _log = logging.getLogger(__name__)
@@ -73,18 +71,20 @@ async def install_handler(
     installer = runtime.installer
     method = install_method_for(system, runtime.profile_policy)
     kernel_ref = run.kernel_ref
+    # One read of the build step result feeds the cmdline, initrd, and debuginfo below.
     build_result = await existing_build_result(conn, run_id)
     build_extra = build_result.cmdline if build_result is not None else None
     # The applied client extra (ADR-0299): the install override when supplied, else the build-baked
     # extra. Both are already-normalized (payload/build validators strip), so re-stage's equality
-    # check against this recorded value is exact.
+    # check against this recorded value is exact. Passing it as the override composes the boot
+    # cmdline without cmdline_for re-reading the build result.
     applied_extra = override if override is not None else build_extra
     cmdline = await cmdline_for(
-        conn, run, method, root_cmdline=runtime.platform_root_cmdline, override=override
+        conn, run, method, root_cmdline=runtime.platform_root_cmdline, override=applied_extra
     )
     _log.info("install: run %s resolved cmdline %r (method %s)", run_id, cmdline, method.value)
-    initrd_ref = await installed_initrd_ref(conn, run_id)
-    debuginfo_ref = await installed_debuginfo_ref(conn, run_id)
+    initrd_ref = build_result.initrd_ref if build_result is not None else None
+    debuginfo_ref = build_result.debuginfo_ref if build_result is not None else None
     job_ctx = job_context_from_job(job, run.project)
     claim = await claim_run_step(conn, run_id, "install")
     if not claim.claimed:

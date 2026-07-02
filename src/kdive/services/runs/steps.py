@@ -302,6 +302,17 @@ async def installed_initrd_ref(conn: AsyncConnection, run_id: UUID) -> str | Non
     return result.initrd_ref
 
 
+async def build_baked_cmdline_extra(conn: AsyncConnection, run_id: UUID) -> str | None:
+    """The extra cmdline args recorded on the Run's ``build`` step, or ``None`` (ADR-0299).
+
+    This is the value ``runs.install`` compares a requested override against, and what the install
+    handler records when no override is supplied. Matches the extra ``cmdline_for`` appends when
+    ``override is None``.
+    """
+    result = await existing_build_result(conn, run_id)
+    return result.cmdline if result is not None else None
+
+
 async def installed_debuginfo_ref(conn: AsyncConnection, run_id: UUID) -> str | None:
     """The Run's published DWARF vmlinux ref (ADR-0221), or ``None`` if it built none.
 
