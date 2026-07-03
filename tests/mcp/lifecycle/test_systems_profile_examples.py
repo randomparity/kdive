@@ -312,6 +312,29 @@ def test_examples_carry_sizing_note_and_concrete_size() -> None:
         assert "shape" in sizing_note.lower()
 
 
+def test_local_example_carries_debug_block_and_note() -> None:
+    # #1014 (BLACK_BOX_REVIEW.md Finding 3(a)): the local-libvirt example must surface the
+    # provision-bound debug flags and tell the caller they cannot be added after provisioning.
+    examples = _examples(None)
+    local = _profile_of(examples["local-libvirt"])
+    debug = local["provider"]["local-libvirt"]["debug"]
+    assert debug == {"gdbstub": False, "preserve_on_crash": False}
+    note = examples["local-libvirt"]["note"].lower()
+    assert "debug" in note
+    assert "gdbstub" in note
+    assert "provision" in note
+
+
+def test_remote_and_fault_examples_carry_no_debug_block() -> None:
+    # remote-libvirt's gdbstub is unconditional (no flag to set) and fault-inject owns no
+    # crash-capture flags at all, so neither profile section declares a `debug` key.
+    examples = _examples(None)
+    remote = _profile_of(examples["remote-libvirt"])["provider"]["remote-libvirt"]
+    fault = _profile_of(examples["fault-inject"])["provider"]["fault-inject"]
+    assert "debug" not in remote
+    assert "debug" not in fault
+
+
 def test_collection_and_item_status_are_ok() -> None:
     # The collection and each item report the literal "ok" status (a read-only discovery success).
     resp = build_profile_examples(None, frozenset(ResourceKind))
