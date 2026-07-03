@@ -1,20 +1,41 @@
 """Append-only per-call usage analytics writer (ADR-0148, #506).
 
 `record_usage` writes one `tool_invocation` row recording a dispatched tool call's
-dimensions. This is operational analytics, not an audit trail: no membership guard and no
-``args_digest`` (distinct from :mod:`kdive.security.audit`). The recorder
-(``UsageTrackingMiddleware``) calls it best-effort, so a write failure never affects the
-tool call.
+dimensions. This is operational analytics, not an audit trail: no membership guard. The
+recorder (``UsageTrackingMiddleware``) calls it best-effort, so a write failure never
+affects the tool call.
+
+``args_digest`` (ADR-0304, #1010) is a stable SHA-256 hex over the call's *redacted*
+arguments — a secret-free correlation key, not recoverable args, so the table stays
+analytics rather than an audit trail. :func:`digest_args` computes it over the same
+:class:`~kdive.security.secrets.redaction.Redactor` the log/telemetry boundaries use.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from kdive.security.audit import args_digest as _canonical_digest
+
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
+
+    from kdive.security.secrets.redaction import Redactor
+
+
+def digest_args(redactor: Redactor, arguments: Mapping[str, object] | None) -> str:
+    """Return a stable SHA-256 hex digest over ``arguments`` after redaction (ADR-0304).
+
+    The mapping is redacted through ``redactor`` (dropping registered secret values and
+    ``key=value`` secret patterns) so no secret value reaches the hash, then hashed with
+    the same canonical encoder the audit trail uses (:func:`kdive.security.audit.args_digest`)
+    so the two tables' digests share one source of truth. A call with no arguments digests
+    the empty mapping, so the result is always a non-empty hex string.
+    """
+    return _canonical_digest(redactor.redact_mapping(arguments or {}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,7 +45,8 @@ class UsageEvent:
     ``project`` is nullable: a list-time or object-resolving call may carry no resolvable
     project at the dispatch boundary. ``outcome`` is one of ``ok`` / ``error`` / ``denied``
     (CHECK-constrained at the DB). ``actor`` reuses the operator-cli / agent / unknown
-    classification (ADR-0089).
+    classification (ADR-0089). ``args_digest`` is the redacted-args digest (ADR-0304);
+    ``None`` only for a caller that records no arguments dimension.
     """
 
     principal: str
@@ -34,6 +56,7 @@ class UsageEvent:
     outcome: str
     actor: str
     client_id: str | None
+    args_digest: str | None = None
 
 
 async def record_usage(conn: AsyncConnection, event: UsageEvent) -> UUID:
@@ -45,8 +68,8 @@ async def record_usage(conn: AsyncConnection, event: UsageEvent) -> UUID:
     async with conn.cursor() as cur:
         await cur.execute(
             "INSERT INTO tool_invocation "
-            "(principal, agent_session, project, tool, outcome, actor, client_id) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            "(principal, agent_session, project, tool, outcome, actor, client_id, args_digest) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (
                 event.principal,
                 event.agent_session,
@@ -55,6 +78,7 @@ async def record_usage(conn: AsyncConnection, event: UsageEvent) -> UUID:
                 event.outcome,
                 event.actor,
                 event.client_id,
+                event.args_digest,
             ),
         )
         row = await cur.fetchone()

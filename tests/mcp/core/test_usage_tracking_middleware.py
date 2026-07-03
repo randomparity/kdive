@@ -24,6 +24,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOpDenied
 from kdive.security.authz.rbac import Role
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 
 def _ctx() -> RequestContext:
@@ -52,7 +53,7 @@ def _drive(
     async def _run() -> list[tuple[Any, ...]]:
         async with AsyncConnectionPool(migrated_url, open=False) as pool:
             await pool.open()
-            mw = UsageTrackingMiddleware(pool)
+            mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry())
             with contextlib.suppress(Exception):
                 await mw.on_call_tool(_Ctx(tool), behavior)
             async with pool.connection() as conn:
@@ -62,6 +63,32 @@ def _drive(
                 return await cur.fetchall()
 
     return asyncio.run(_run())
+
+
+def test_args_digest_present_on_recorded_row(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every recorded row carries a redacted-args digest, computed on the success path too.
+    monkeypatch.setattr("kdive.mcp.middleware.shared.current_context", _ctx)
+    monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "cli-x")
+
+    async def ok(_c: Any) -> ToolResult:
+        envelope = ToolResponse.success("jobs.get", "ok")
+        return ToolResult(structured_content=envelope.model_dump(mode="json"))
+
+    async def _run() -> str | None:
+        async with AsyncConnectionPool(migrated_url, open=False) as pool:
+            await pool.open()
+            mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry())
+            await mw.on_call_tool(_Ctx("jobs.get"), ok)
+            async with pool.connection() as conn:
+                cur = await conn.execute("SELECT args_digest FROM tool_invocation")
+                row = await cur.fetchone()
+        assert row is not None
+        return row[0]
+
+    digest = asyncio.run(_run())
+    assert isinstance(digest, str) and len(digest) == 64
 
 
 def test_ok_outcome_from_toolresult(migrated_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -127,7 +154,7 @@ def test_recording_failure_is_swallowed(monkeypatch: pytest.MonkeyPatch) -> None
 
     async def _run() -> Any:
         pool = AsyncConnectionPool("postgresql://unused", open=False)
-        mw = UsageTrackingMiddleware(pool, acquire_timeout=0.05)
+        mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry(), acquire_timeout=0.05)
 
         async def ok(_c: Any) -> ToolResult:
             envelope = ToolResponse.success("jobs.get", "ok")
