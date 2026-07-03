@@ -24,10 +24,12 @@ from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
+from kdive.jobs.handlers.console_evidence import redacted_console_tail
 from kdive.jobs.payloads import CheckSshReachablePayload, load_payload
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.shared.runtime_paths import domain_name_for
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
 
 _PROBE_DEADLINE_S = 15.0
@@ -119,11 +121,19 @@ def _layer_breakdown(detail: str) -> tuple[str | None, list[JsonValue]]:
     return failed, checks
 
 
-def serialize_reach_verdict(result: ReachResult, host: str, port: int, checked_at: str) -> str:
+def serialize_reach_verdict(
+    result: ReachResult,
+    host: str,
+    port: int,
+    checked_at: str,
+    console_tail: str | None = None,
+) -> str:
     """Compact-JSON reachability verdict carried inline in ``result_ref`` (the ADR-0164 pattern).
 
     ``layer``/``checks`` name the lowest failing probe layer (ADR-0303); they are additive and
-    derived from ``detail``, which remains the top-level back-compat field.
+    derived from ``detail``, which remains the top-level back-compat field. ``console_tail`` — a
+    bounded, redacted guest console tail — is added only when the guest is unreachable (ADR-0306),
+    so a reachable verdict stays byte-for-byte back-compatible.
     """
     layer, checks = _layer_breakdown(result.detail)
     verdict: dict[str, JsonValue] = {
@@ -134,6 +144,8 @@ def serialize_reach_verdict(result: ReachResult, host: str, port: int, checked_a
         "layer": layer,
         "checks": checks,
     }
+    if console_tail is not None:
+        verdict["console_tail"] = console_tail
     return json.dumps(verdict, separators=(",", ":"))
 
 
@@ -142,6 +154,7 @@ async def check_ssh_reachable_handler(
     job: Job,
     *,
     resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
     probe: ProbeFn = _real_probe,
 ) -> str | None:
     """Probe a ready System's guest sshd and return the compact-JSON reachability verdict.
@@ -149,7 +162,9 @@ async def check_ssh_reachable_handler(
     Re-checks the System is still ``ready`` before probing: a torn-down System's loopback port can
     be reused by another System's forward, so probing a stale endpoint could misattribute another
     guest's liveness. A probe that *ran* — reachable or not — is a success; only an inability to run
-    raises. ``checked_at`` is read from the module-level ``datetime`` (tests monkeypatch it).
+    raises. ``checked_at`` is read from the module-level ``datetime`` (tests monkeypatch it). An
+    unreachable verdict carries a bounded, redacted guest console tail so "did sshd start?" is
+    answerable from the verdict alone (ADR-0306).
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` ``reason="system_not_ready"`` when the System is
@@ -177,4 +192,7 @@ async def check_ssh_reachable_handler(
         )
     host, port = endpoint
     result = await probe(host, port)
-    return serialize_reach_verdict(result, host, port, datetime.now(UTC).isoformat())
+    console_tail = (
+        None if result.reachable else await redacted_console_tail(system_id, secret_registry)
+    )
+    return serialize_reach_verdict(result, host, port, datetime.now(UTC).isoformat(), console_tail)

@@ -47,6 +47,7 @@ from kdive.providers.local_libvirt.lifecycle.materialize import (
 )
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, Role
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore, artifact_key
 from tests.mcp.systems_support import (
     SYSTEM_ADMIN_HANDLERS as _SYSTEM_ADMIN_HANDLERS,
@@ -1994,7 +1995,9 @@ def test_reprovision_handler_superseded_midflight_tears_down_domain(
 def test_register_handlers_binds_provision_teardown_and_reprovision() -> None:
     registry = HandlerRegistry()
     systems_handlers.register_handlers(
-        registry, resolver=_provider_resolver(provisioner=_FakeProvisioning())
+        registry,
+        resolver=_provider_resolver(provisioner=_FakeProvisioning()),
+        secret_registry=SecretRegistry(),
     )
     assert registry.get(JobKind.PROVISION) is not None
     assert registry.get(JobKind.TEARDOWN) is not None
