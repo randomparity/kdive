@@ -71,6 +71,12 @@ validator is the backstop the tool boundary cannot be trusted to be the only enf
   `\s`); rejects a value beginning with `crashkernel=` (case-insensitive). Returns the stripped
   value. (These are safety guards, not range validation — a size *or* a range like
   `1G-2G:128M,2G-:256M` must pass.)
+- **Keep this validator independent — do not share a helper with the Task 5 boundary check.** The
+  payload validator only rejects (`ValueError`), while the boundary must distinguish
+  `crashkernel_blank` vs `crashkernel_malformed` to set `data.reason` — different outputs. Sharing a
+  helper would also force `jobs/payloads.py` (a low-level module) to import from `services`,
+  inverting the layering. The rules are ~3 lines; duplicating them in the two call sites is aligned
+  with the repo's no-premature-abstraction rule and avoids the import cycle.
 
 **Tests (write first):**
 - Accepts `"512M"`, `"1G"`, and a range `"1G-2G:128M,2G-:256M"` (returns stripped).
@@ -143,7 +149,12 @@ green.
 **Do:**
 - `_register_runs_install(app, pool, resolver)` — thread the `resolver` (available in
   `register_runs_tools`, already passed to sibling registrars). Add a `crashkernel` `Annotated[str
-  | None, Field(...)]` parameter. `Field` text: sets the kdump `crashkernel=` reservation size;
+  | None, Field(...)]` parameter.
+- **Signature ripple:** `install_run` gains `resolver` (pass it as a keyword with **no default** so
+  a missing thread is a loud type error). Before finishing, grep for every `install_run(` /
+  `_install_run(` caller in **production and tests** (at least `registrar.py` and
+  `tests/mcp/lifecycle/test_runs_tools.py`) and thread `resolver` (+ `crashkernel=None`) through
+  each; leaving one un-threaded keeps `just type` / `just test` red. `Field` text: sets the kdump `crashkernel=` reservation size;
   default `256M`; applies only to kdump-capture Systems; iterate without a rebuild; **each install
   fully specifies both `cmdline` and `crashkernel` — omitting either reverts it to its default**
   (see spec §Agent-facing contract). No ADR-NNNN in the text.
@@ -173,6 +184,10 @@ green.
 - Re-stage: same crashkernel → no-op (no row delete, no new job); differing crashkernel with
   unchanged cmdline → both ledger rows deleted + fresh install job carrying the new value;
   install(`512M`) then install() [omit] → re-stage back to default.
+- **Coupling (pin the documented revert):** install(`cmdline="X"`) then install(`crashkernel="512M"`,
+  cmdline omitted) reverts the cmdline to the build-baked extra while applying 512M; and the
+  symmetric case (omit crashkernel, set cmdline) reverts crashkernel to default. Assert both so the
+  documented cmdline↔crashkernel coupling can't silently change.
 - `step_in_progress` still rejected while a step is `running`.
 - `crashkernel=None` install path enqueues without any System fetch (unchanged behavior — assert no
   regression on the existing install tests).
