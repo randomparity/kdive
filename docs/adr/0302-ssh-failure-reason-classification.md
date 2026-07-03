@@ -2,12 +2,12 @@
 
 - Status: Accepted
 - Date: 2026-07-02
-- Builds on [ADR-0271](0271-direct-ssh-to-system.md) (`authorize_ssh_key`, the direct-SSH
-  handler), [ADR-0289](0289-per-system-bootstrap-key.md) (the per-System bootstrap key and the
+- Builds on [ADR-0271](0271-system-direct-ssh-access.md) (`authorize_ssh_key`, the direct-SSH
+  handler), [ADR-0289](0289-per-system-ssh-bootstrap-key.md) (the per-System bootstrap key and the
   bounded connect-retry it motivated), [ADR-0240](0240-live-drgn-script-introspection.md) (the
-  drgn-live SSH path), and [ADR-0027](0027-redaction.md) (the `Redactor` that the failure-context
-  path already applies). Sibling of the fast-fail work (#1012) and the reachability-verdict work
-  (#1011).
+  drgn-live SSH path), and [ADR-0027](0027-safety-modules-secret-backend-impl.md) (the `Redactor`
+  that the failure-context path already applies). Sibling of the fast-fail work (#1012) and the
+  reachability-verdict work (#1011).
 
 ## Context
 
