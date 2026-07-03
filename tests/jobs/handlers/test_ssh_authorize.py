@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,11 +23,24 @@ from kdive.jobs.handlers.ssh_authorize import (
     authorize_ssh_key_handler,
     build_authorize_argv,
 )
+from kdive.jobs.handlers.ssh_reachable import ReachResult
 from kdive.prereqs.system_bootstrap_key import ensure_system_bootstrap_key
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _NOW = datetime(2025, 1, 1)
 _KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 agent@host"
+
+
+async def _reachable(_host: str, _port: int) -> ReachResult:
+    """A pre-flight probe that reports the guest sshd is reachable (the healthy path)."""
+    return ReachResult(True, "reachable")
+
+
+def _probe_returning(result: ReachResult) -> Callable[[str, int], Awaitable[ReachResult]]:
+    async def _probe(_host: str, _port: int) -> ReachResult:
+        return result
+
+    return _probe
 
 
 def _job(public_key: str = _KEY) -> Job:
@@ -95,6 +109,62 @@ def test_handler_unprovisioned_is_configuration_error() -> None:
     assert "reprovision" not in str(excinfo.value).lower()
 
 
+# --- Fast-fail pre-flight (#1012): an unreachable guest fails in seconds, terminally, not a
+# multi-minute `running`. The pre-flight runs before the bootstrap-key load and the append retry,
+# so these need no DB — a MagicMock conn is never read. ---
+
+
+@pytest.mark.parametrize(
+    ("detail", "reason"),
+    [("unreachable", "unreachable"), ("no SSH banner", "banner_timeout")],
+)
+def test_handler_unreachable_preflight_fails_fast_terminal(detail: str, reason: str) -> None:
+    resolver = _resolver(("127.0.0.1", 22022))
+    ssh_calls: list[int] = []
+
+    def _ssh(_argv: list[str], _key: str) -> None:
+        ssh_calls.append(1)
+
+    with pytest.raises(CategorizedError) as excinfo:
+        asyncio.run(
+            authorize_ssh_key_handler(
+                MagicMock(),
+                _job(),
+                resolver=resolver,
+                ssh_exec=_ssh,
+                probe=_probe_returning(ReachResult(False, detail)),
+            )
+        )
+    exc = excinfo.value
+    # Named reason from the shared #1008 vocabulary, not a bare 255…
+    assert exc.category is ErrorCategory.TRANSPORT_FAILURE
+    assert exc.details["reason"] == reason
+    assert exc.details["detail"] == detail
+    # …terminal so the worker dead-letters instead of requeuing the doomed window (the ~230 s
+    # overrun was max_attempts requeues, each burning the ~90 s append window)…
+    assert exc.terminal is True
+    # …and the append SSH is never attempted on an unreachable guest.
+    assert ssh_calls == []
+
+
+def test_handler_preflight_reason_survives_failure_context() -> None:
+    # The acceptance shape: an unreachable pre-flight surfaces `failure_detail_reason` through the
+    # same _failure_context path jobs.get/jobs.wait read — a named reason in seconds, not `running`.
+    resolver = _resolver(("127.0.0.1", 22022))
+    with pytest.raises(CategorizedError) as excinfo:
+        asyncio.run(
+            authorize_ssh_key_handler(
+                MagicMock(),
+                _job(),
+                resolver=resolver,
+                ssh_exec=lambda _argv, _key: None,
+                probe=_probe_returning(ReachResult(False, "no SSH banner")),
+            )
+        )
+    context = worker._failure_context(excinfo.value, SecretRegistry())
+    assert context["failure_detail_reason"] == "banner_timeout"
+
+
 # Async-DB tests follow the PROVEN in-repo pattern in
 # tests/jobs/handlers/test_boot_evidence_run_id.py: a SYNC `def test_(migrated_url)` with an
 # inner `async def _run()` driven by `asyncio.run(_run())`. The handler now loads the per-System
@@ -147,7 +217,7 @@ def test_handler_authorizes_via_per_system_key_and_cleans_up_temp_key(
                     seen_key_existed = seen_key_path.exists()
 
                 result = await authorize_ssh_key_handler(
-                    conn, job, resolver=resolver, ssh_exec=_capture
+                    conn, job, resolver=resolver, ssh_exec=_capture, probe=_reachable
                 )
                 assert result is None
                 return recorded, seen_key_path, seen_key_existed
@@ -177,7 +247,11 @@ def test_handler_resolves_endpoint_by_domain_name(migrated_url: str) -> None:
                 connector = resolver.binding_for_system.return_value.runtime.connector
 
                 await authorize_ssh_key_handler(
-                    conn, job, resolver=resolver, ssh_exec=lambda _argv, _key: None
+                    conn,
+                    job,
+                    resolver=resolver,
+                    ssh_exec=lambda _argv, _key: None,
+                    probe=_reachable,
                 )
                 handle = connector.recorded_ssh_endpoint.call_args.args[0]
                 return str(handle), system_id
@@ -199,7 +273,9 @@ def test_handler_ssh_failure_propagates_transport_failure(migrated_url: str) -> 
                 job = _job_for(system_id)
                 resolver = _resolver(("127.0.0.1", 22022))
                 with pytest.raises(CategorizedError) as excinfo:
-                    await authorize_ssh_key_handler(conn, job, resolver=resolver, ssh_exec=_boom)
+                    await authorize_ssh_key_handler(
+                        conn, job, resolver=resolver, ssh_exec=_boom, probe=_reachable
+                    )
                 assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
 
     asyncio.run(_run())
@@ -262,7 +338,11 @@ def test_handler_no_bootstrap_key_is_configuration_error(migrated_url: str) -> N
                 resolver = _resolver(("127.0.0.1", 22022))
                 with pytest.raises(CategorizedError) as excinfo:
                     await authorize_ssh_key_handler(
-                        conn, job, resolver=resolver, ssh_exec=lambda _argv, _key: None
+                        conn,
+                        job,
+                        resolver=resolver,
+                        ssh_exec=lambda _argv, _key: None,
+                        probe=_reachable,
                     )
                 assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
 

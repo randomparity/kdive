@@ -17,6 +17,7 @@ from psycopg import AsyncConnection
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
+from kdive.jobs.handlers.ssh_reachable import ProbeFn, _real_probe
 from kdive.jobs.payloads import AuthorizeSshKeyPayload, load_payload
 from kdive.prereqs.system_bootstrap_key import (
     load_system_bootstrap_private_key,
@@ -26,6 +27,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.providers.shared.ssh_connect_retry import (
+    SshFailureReason,
     SshRetryPolicy,
     run_ssh_with_retry,
     ssh_failure_details,
@@ -41,6 +43,13 @@ _LOCK = "/root/.ssh/.kdive-authz.lock"
 # ~46 ms before sshd binds — ADR-0289 live proof), so the first authorize SSH is refused. Retry
 # connection-level failures over this window; auth/host-key errors still fail fast.
 _AUTHORIZE_SSH_RETRY = SshRetryPolicy()
+
+# The reachability pre-flight (ADR-0305, #1012) maps the probe's fixed unreachable verdicts onto the
+# shared #1008 reason vocabulary so a fast-fail names *why* in the same terms as the append path.
+_PREFLIGHT_REASON: dict[str, SshFailureReason] = {
+    "unreachable": "unreachable",
+    "no SSH banner": "banner_timeout",
+}
 
 # The remote append script (ADR-0271). The key is **never** in this string: `ssh host CMD` joins
 # any post-host argv into one string the remote login shell re-parses, so an argv-positioned key
@@ -127,19 +136,45 @@ def _real_ssh_exec(argv: list[str], key: str) -> None:  # pragma: no cover - liv
     _raise_on_authorize_failure(run_ssh_with_retry(run_once, policy=_AUTHORIZE_SSH_RETRY))
 
 
+async def _preflight_reachable(probe: ProbeFn, host: str, port: int) -> None:
+    """Fast-fail before the append retry when the guest SSH endpoint is unreachable (ADR-0305).
+
+    Reuses the ``check_ssh_reachable`` banner probe (ADR-0298, #972) as an authoritative pre-flight:
+    it already retries the ~46 ms sshd-bind race (ADR-0289) internally for up to its ~15 s deadline,
+    so a still-unreachable verdict is definitive, not a race. The raised error is ``terminal`` so
+    the worker dead-letters it instead of requeuing — a doomed authorize must not re-run the append
+    window once per attempt (the observed ~230 s overrun was ``max_attempts`` requeues, each burning
+    the ~90 s in-handler window; #1012). The ``reason`` comes from the shared #1008 vocabulary.
+    """
+    result = await probe(host, port)
+    if result.reachable:
+        return
+    raise CategorizedError(
+        "guest SSH endpoint is unreachable; not attempting the authorized-keys append",
+        category=ErrorCategory.TRANSPORT_FAILURE,
+        details={"reason": _PREFLIGHT_REASON[result.detail], "detail": result.detail},
+        terminal=True,
+    )
+
+
 async def authorize_ssh_key_handler(
     conn: AsyncConnection,
     job: Job,
     *,
     resolver: ProviderResolver,
     ssh_exec: SshExec = _real_ssh_exec,
+    probe: ProbeFn = _real_probe,
 ) -> str | None:
     """Append the agent public key to the guest root authorized_keys over the bootstrap-key SSH.
 
+    Pre-flights the recorded SSH endpoint with the reachability probe (ADR-0305, #1012) before the
+    long append retry: an unreachable guest fails in seconds with a named reason instead of a
+    multi-minute ``running``.
+
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` when the System has no recorded SSH forward or
-            no bootstrap key; ``TRANSPORT_FAILURE`` when the guest sshd is unreachable or the
-            append fails.
+            no bootstrap key; ``TRANSPORT_FAILURE`` when the guest sshd is unreachable (a terminal
+            fast-fail from the pre-flight) or the append itself fails.
     """
     payload = load_payload(job, AuthorizeSshKeyPayload)
     system_id = UUID(payload.system_id)
@@ -158,6 +193,7 @@ async def authorize_ssh_key_handler(
             details={"reason": "ssh_not_provisioned"},
         )
     host, port = endpoint
+    await _preflight_reachable(probe, host, port)
     private_key = await load_system_bootstrap_private_key(conn, system_id)
     with materialized_private_key(private_key) as key_path:
         ssh_exec(build_authorize_argv(host, port, str(key_path)), payload.public_key)
