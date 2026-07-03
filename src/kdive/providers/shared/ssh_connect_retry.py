@@ -60,7 +60,15 @@ _STDERR_TAIL_MAX = 512
 
 @dataclass(frozen=True, slots=True)
 class SshRetryPolicy:
-    """How long to keep retrying a starting sshd, and the backoff between attempts."""
+    """How long to keep retrying a starting sshd, and the backoff between attempts.
+
+    ``deadline_s`` bounds when a *new* attempt may start, not when an in-flight one completes, so
+    the true single-call wall-clock ceiling is ``deadline_s`` plus one final ``run_once`` (up to the
+    caller's own per-attempt subprocess timeout). It does **not** bound cross-attempt wall-clock: a
+    non-terminal failure is requeued by the worker (up to ``max_attempts``), running this whole
+    window once per attempt — the authorize pre-flight (ADR-0305) fails the doomed case terminally
+    before this window to keep that total bounded.
+    """
 
     deadline_s: float = 90.0
     initial_backoff_s: float = 1.0

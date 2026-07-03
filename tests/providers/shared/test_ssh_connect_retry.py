@@ -134,6 +134,32 @@ def test_retry_stops_at_deadline() -> None:
     assert sum(clock.sleeps) <= 5.0  # never sleeps past the deadline
 
 
+def test_retry_total_wall_clock_bounded_when_attempts_consume_time() -> None:
+    # ADR-0305 audit: model each attempt consuming real wall-clock (like an ssh subprocess running
+    # up to its own timeout). The deadline gates only when a NEW attempt may START, so the ceiling
+    # is deadline_s plus one final in-flight attempt — assert the loop can never exceed that even
+    # when every attempt is retryable and slow, and that it terminates (no unbounded accumulation).
+    clock = _FakeClock()
+    per_attempt_s = 30.0
+    deadline_s = 90.0
+    attempts = 0
+
+    def run_once() -> subprocess.CompletedProcess[object]:
+        nonlocal attempts
+        attempts += 1
+        clock.now += per_attempt_s  # the attempt itself burns wall-clock before it returns
+        return _proc(255, "Connection refused")  # always retryable → keeps the loop going
+
+    policy = SshRetryPolicy(deadline_s=deadline_s, initial_backoff_s=1.0, max_backoff_s=5.0)
+    result = run_ssh_with_retry(
+        run_once, policy=policy, sleep=clock.sleep, monotonic=clock.monotonic
+    )
+    assert result.returncode == 255  # gave up and returned the last failed attempt
+    # bounded: deadline_s plus one final in-flight attempt, never more
+    assert clock.now <= deadline_s + per_attempt_s
+    assert attempts <= deadline_s / per_attempt_s + 1  # bounded attempt count, no runaway retry
+
+
 # --- Failure classification (#1008): drive each stderr shape → closed reason vocabulary. ---
 
 
