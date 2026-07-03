@@ -476,6 +476,13 @@ def test_retryable_derived_on_failure() -> None:
     assert terminal.retryable is False
 
 
+def test_symbol_not_found_is_not_retryable() -> None:
+    # A resolver symbol miss (ADR-0307) will not appear on a bare re-invocation.
+    resp = ToolResponse.failure("id", ErrorCategory.SYMBOL_NOT_FOUND)
+    assert resp.error_category == "symbol_not_found"
+    assert resp.retryable is False
+
+
 def test_retryable_is_never_caller_set() -> None:
     # A caller-supplied value is overwritten by the derived one.
     forced = ToolResponse(
@@ -508,6 +515,7 @@ def test_every_category_has_an_explicit_expected_bool() -> None:
         ErrorCategory.LEASE_EXPIRED: False,
         ErrorCategory.NOT_IMPLEMENTED: False,
         ErrorCategory.NOT_FOUND: False,
+        ErrorCategory.SYMBOL_NOT_FOUND: False,
         ErrorCategory.CONFLICT: False,
         ErrorCategory.AUTHORIZATION_DENIED: False,
         ErrorCategory.QUOTA_EXCEEDED: False,

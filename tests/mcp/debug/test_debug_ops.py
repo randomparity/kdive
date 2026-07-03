@@ -486,6 +486,40 @@ def test_resolve_symbol_bad_name_rejected_without_command(migrated_url: str) -> 
     asyncio.run(_run())
 
 
+def test_resolve_symbol_inlined_is_symbol_not_found(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-data-evaluate-expression &inlined_helper": [
+                        {
+                            "type": "result",
+                            "message": "error",
+                            "payload": {"msg": 'No symbol "inlined_helper" in current context.'},
+                        }
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for("resolve_symbol", runtime, session_id, name="inlined_helper"),
+            )
+        # An inlined / optimized-away symbol is a non-retryable symbol_not_found with the inline
+        # hint — the attach is fine, so retrying is pointless (ADR-0307).
+        assert resp.status == "error"
+        assert resp.error_category == "symbol_not_found"
+        assert resp.retryable is False
+        assert resp.data["code"] == "symbol_not_found"
+        assert "inlined or optimized away" in str(resp.data["hint"])
+
+    asyncio.run(_run())
+
+
 def test_backtrace_returns_walked(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

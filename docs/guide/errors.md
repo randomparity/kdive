@@ -25,6 +25,7 @@ errors.
 | `boot_timeout` | The system did not reach a ready state within the allowed boot window. |
 | `readiness_failure` | A readiness preflight check failed after boot. |
 | `debug_attach_failure` | The debug transport could not be attached. |
+| `symbol_not_found` | `debug.resolve_symbol` could not resolve the name to an address — the symbol is inlined / optimized away, or is an addressless enum/macro constant. The attach is fine and retrying will not help; `data.hint` suggests disassembling the caller. |
 | `infrastructure_failure` | An unclassified failure in the underlying infrastructure layer. The fallback when no more specific category applies. |
 | `stale_handle` | The referenced object (System, DebugSession) no longer exists or has been torn down. The handle is invalid; create a new object. |
 | `transport_conflict` | Two attaches contended for the same debug transport simultaneously. |

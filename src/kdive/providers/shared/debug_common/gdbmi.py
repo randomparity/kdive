@@ -166,6 +166,17 @@ _NO_MEMORY_RE = re.compile(r"cannot access memory", re.IGNORECASE)
 _NO_WATCHPOINT_RE = re.compile(
     r"does not support\b.*watchpoint|cannot set hardware watchpoint", re.IGNORECASE
 )
+# gdb's ^error when `-data-evaluate-expression &<name>` cannot resolve a name to an address: an
+# unknown / inlined / optimized-away symbol answers `No symbol "<name>" in current context.`, and an
+# addressless enum/macro constant answers `Attempt to take address of value not located in memory.`.
+# Anchored to `in current context` (not a bare `No symbol`) so `No symbol table is loaded` —
+# debuginfo never loaded, a genuine attach-level fault — stays `debug_attach_failure`, not a
+# per-symbol miss (ADR-0307).
+_SYMBOL_NOT_FOUND_RE = re.compile(
+    r"No symbol .* in current context|address of value not located in memory", re.IGNORECASE
+)
+# Surfaced on a `symbol_not_found` so an agent pivots instead of retrying the doomed resolution.
+_SYMBOL_INLINE_HINT = "symbol may be inlined or optimized away; try disassembling its caller."
 
 
 def _config_error(
@@ -437,10 +448,11 @@ class GdbMiEngine:
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_symbol_name`` for a non-identifier
-                name (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` for a gdb error
-                (an unknown or addressless symbol — e.g. an enum/macro constant — yields a gdb
-                ``^error`` mapped by ``execute_mi_command``) or a present-but-unparseable address
-                value (``bad_symbol_value``, with the value redacted).
+                name (raised before any MI command); ``SYMBOL_NOT_FOUND`` (non-retryable, with the
+                inline hint) when gdb cannot resolve the name to an address — an unknown / inlined /
+                optimized-away symbol or an addressless enum/macro constant (ADR-0307);
+                ``DEBUG_ATTACH_FAILURE`` for any other gdb error (e.g. debuginfo never loaded) or a
+                present-but-unparseable address value (``bad_symbol_value``, value redacted).
         """
         if not _SYMBOL_NAME_RE.match(name):
             raise _config_error(
@@ -448,9 +460,7 @@ class GdbMiEngine:
                 code="bad_symbol_name",
                 details={"name": name},
             )
-        value = evaluate_value(
-            self.execute_mi_command(attachment, f"-data-evaluate-expression &{name}")
-        )
+        value = evaluate_value(self._evaluate_symbol(attachment, name))
         match = _SYMBOL_ADDR_RE.search(value) if isinstance(value, str) else None
         if match is None:
             raise CategorizedError(
@@ -463,6 +473,34 @@ class GdbMiEngine:
                 },
             )
         return int(match.group(0), 16)
+
+    def _evaluate_symbol(self, attachment: GdbMiAttachment, name: str) -> list[MiRecord]:
+        """Evaluate ``&name``, narrowing a resolution ``^error`` to ``SYMBOL_NOT_FOUND`` (ADR-0307).
+
+        ``execute_mi_command`` maps every gdb ``^error`` generically to ``DEBUG_ATTACH_FAILURE``, so
+        this catches that and — only when the (already-redacted) gdb ``msg`` matches
+        ``_SYMBOL_NOT_FOUND_RE`` (an inlined / optimized-away symbol or an addressless enum/macro
+        constant) — re-raises the precise, non-retryable ``SYMBOL_NOT_FOUND`` with the inline hint.
+        Any other gdb error (e.g. debuginfo never loaded) passes through as an attach failure. This
+        mirrors ``_stack_command``'s per-op reclassification, keeping the shared write path generic.
+        """
+        try:
+            return self.execute_mi_command(attachment, f"-data-evaluate-expression &{name}")
+        except CategorizedError as exc:
+            if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE:
+                payload = exc.details.get("payload")
+                msg = payload.get("msg") if isinstance(payload, dict) else None
+                if isinstance(msg, str) and _SYMBOL_NOT_FOUND_RE.search(msg):
+                    raise CategorizedError(
+                        f"symbol {name!r} not found",
+                        category=ErrorCategory.SYMBOL_NOT_FOUND,
+                        details={
+                            "code": "symbol_not_found",
+                            "name": name,
+                            "hint": _SYMBOL_INLINE_HINT,
+                        },
+                    ) from exc
+            raise
 
     # --- stack walking (ADR-0275) ---------------------------------------------------------
 

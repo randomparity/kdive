@@ -1107,16 +1107,62 @@ def test_resolve_symbol_rejects_empty_name(tmp_path: Path) -> None:
     assert controller.written == []
 
 
-def test_resolve_symbol_maps_gdb_error_to_attach_failure(tmp_path: Path) -> None:
+def test_resolve_symbol_unknown_symbol_is_symbol_not_found(tmp_path: Path) -> None:
     controller = _FakeMiController(
         responses={
             "-data-evaluate-expression &nope": [
-                {"type": "result", "message": "error", "payload": {"msg": 'No symbol "nope"'}}
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": 'No symbol "nope" in current context.'},
+                }
             ]
         }
     )
-    # An unknown symbol surfaces as DEBUG_ATTACH_FAILURE via execute_mi_command, the same
-    # contract set_breakpoint has for a bad symbol today.
+    # An inlined / optimized-away / unknown symbol is a clean not-found (ADR-0307), not an attach
+    # failure: the session is fine, so it is non-retryable and carries the inline hint.
+    with pytest.raises(CategorizedError) as exc:
+        _engine().resolve_symbol(_attachment(controller, tmp_path), "nope")
+    assert exc.value.category is ErrorCategory.SYMBOL_NOT_FOUND
+    assert exc.value.details["code"] == "symbol_not_found"
+    assert exc.value.details["name"] == "nope"
+    assert "inlined or optimized away" in str(exc.value.details["hint"])
+
+
+def test_resolve_symbol_addressless_enum_is_symbol_not_found(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-data-evaluate-expression &FOO": [
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": "Attempt to take address of value not located in memory."},
+                }
+            ]
+        }
+    )
+    # An addressless enum/macro constant has no address either — same clean not-found (ADR-0307).
+    with pytest.raises(CategorizedError) as exc:
+        _engine().resolve_symbol(_attachment(controller, tmp_path), "FOO")
+    assert exc.value.category is ErrorCategory.SYMBOL_NOT_FOUND
+    assert exc.value.details["name"] == "FOO"
+
+
+def test_resolve_symbol_other_gdb_error_stays_attach_failure(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-data-evaluate-expression &nope": [
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": 'No symbol table is loaded.  Use the "file" command.'},
+                }
+            ]
+        }
+    )
+    # A genuine attach-level fault (debuginfo never loaded) is NOT a per-symbol miss — it stays
+    # DEBUG_ATTACH_FAILURE (retryable), proving the reclassification is anchored, not a bare
+    # "No symbol" substring match.
     with pytest.raises(CategorizedError) as exc:
         _engine().resolve_symbol(_attachment(controller, tmp_path), "nope")
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE

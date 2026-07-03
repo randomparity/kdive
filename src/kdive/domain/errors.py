@@ -53,6 +53,12 @@ class ErrorCategory(StrEnum):
     # `quota_exceeded` (per-project concurrency cap) and `allocation_denied` (over-budget).
     CAPACITY_EXHAUSTED = "capacity_exhausted"
 
+    # Debug-plane symbol resolution (#1013, ADR-0307). `debug.resolve_symbol` on a symbol gdb cannot
+    # resolve to an address — inlined / optimized away, or an addressless enum/macro constant — is a
+    # clean not-found, distinct from `debug_attach_failure` (the session is fine) and non-retryable
+    # (the symbol will not appear on a bare re-invocation).
+    SYMBOL_NOT_FOUND = "symbol_not_found"
+
 
 # Categories whose human-readable reason must never reach a client (ADR-0123): a denial or a
 # by-id lookup miss carries a fixed constant so no raise site — even one whose message embeds a
