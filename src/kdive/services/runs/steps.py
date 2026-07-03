@@ -21,7 +21,7 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.serialization import JsonValue
 
 _REQUIRED_CONSOLE = "console=ttyS0"
-_KDUMP_CRASHKERNEL = "crashkernel=256M"
+DEFAULT_CRASHKERNEL = "256M"
 # Disable KASLR on a gdbstub-debug boot so the running kernel's base matches the fetched
 # vmlinux's link-time symbol addresses. With CONFIG_RANDOMIZE_BASE=y (the kdump fragment
 # default) the kernel relocates to a random base, so a breakpoint set by symbol resolves to the
@@ -148,6 +148,7 @@ class StepProgress:
     inert_capture: list[str] | None = None
     matched_line: str | None = None
     installed_cmdline: str | None = None
+    installed_crashkernel: str | None = None
 
     def steps_map(self) -> dict[str, str]:
         """The fixed-key `runs.get` `data.steps` map; `build` is `succeeded` by construction."""
@@ -194,7 +195,9 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
     neither. ``matched_line`` is the console line that matched an ``expected_boot_failure``
     (ADR-0260); ``None`` when boot recorded no match. ``installed_cmdline`` is the applied client
     cmdline extra the install handler recorded (ADR-0299), surfaced for sweep read-back on
-    ``runs.get``; ``None`` when install is unrecorded or applied no extra.
+    ``runs.get``; ``None`` when install is unrecorded or applied no extra. ``installed_crashkernel``
+    is the applied kdump reservation the install handler recorded (ADR-0300, #989); ``None`` when
+    install is unrecorded or the default 256M was in force.
     """
     states = {step: "pending" for step in _PROGRESS_STEPS}
     boot_outcome: str | None = None
@@ -203,6 +206,7 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
     inert_capture: list[str] | None = None
     matched_line: str | None = None
     installed_cmdline: str | None = None
+    installed_crashkernel: str | None = None
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT step, state, result FROM run_steps WHERE run_id = %s AND step = ANY(%s)",
@@ -214,6 +218,7 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
         if row["step"] == "install" and isinstance(row["result"], Mapping):
             install_result = cast("Mapping[str, object]", row["result"])
             installed_cmdline = _optional_str(install_result.get("cmdline"))
+            installed_crashkernel = _optional_str(install_result.get("crashkernel"))
         if row["step"] == "boot" and isinstance(row["result"], Mapping):
             boot_result = cast("Mapping[str, object]", row["result"])
             outcome = boot_result.get("boot_outcome")
@@ -231,6 +236,7 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
         inert_capture=inert_capture,
         matched_line=matched_line,
         installed_cmdline=installed_cmdline,
+        installed_crashkernel=installed_crashkernel,
     )
 
 
@@ -325,8 +331,10 @@ async def installed_debuginfo_ref(conn: AsyncConnection, run_id: UUID) -> str | 
     return result.debuginfo_ref
 
 
-def system_required_cmdline(method: CaptureMethod, root_cmdline: str | None) -> str:
-    """Compose the platform-owned kernel cmdline (ADR-0183).
+def system_required_cmdline(
+    method: CaptureMethod, root_cmdline: str | None, *, crashkernel: str | None = None
+) -> str:
+    """Compose the platform-owned kernel cmdline (ADR-0183, ADR-0300).
 
     ``console=ttyS0`` (serial console capture parity) leads; ``root_cmdline`` follows when the
     provider owns the root device (``"root=/dev/vda"`` for local-libvirt's direct-kernel boot,
@@ -336,12 +344,17 @@ def system_required_cmdline(method: CaptureMethod, root_cmdline: str | None) -> 
     ``debug.gdbstub`` resolves to ``KDUMP`` (crashkernel wins in ``capture_method``) and gets
     crashkernel, not ``nokaslr`` — a live gdb symbol breakpoint over such a System would still miss
     the running KASLR base. Tokens are emitted in this fixed order, dropping ``None``.
+
+    ``crashkernel`` is the per-install reservation size (ADR-0300, #989): when set it replaces the
+    default ``256M`` in the ``crashkernel=<size>`` token. It is honored **only** on the ``KDUMP``
+    path — a non-kdump method never emits the token, so a supplied value there is inert (the tool
+    boundary rejects that request; this stays a pure composition function).
     """
     tokens = [_REQUIRED_CONSOLE]
     if root_cmdline:
         tokens.append(root_cmdline)
     if method is CaptureMethod.KDUMP:
-        tokens.append(_KDUMP_CRASHKERNEL)
+        tokens.append(f"crashkernel={crashkernel or DEFAULT_CRASHKERNEL}")
     elif method is CaptureMethod.GDBSTUB:
         tokens.append(_GDBSTUB_NOKASLR)
     return " ".join(tokens)
@@ -360,15 +373,18 @@ async def cmdline_for(
     *,
     root_cmdline: str | None,
     override: str | None = None,
+    crashkernel: str | None = None,
 ) -> str:
-    """Compose the boot cmdline (ADR-0183, ADR-0299).
+    """Compose the boot cmdline (ADR-0183, ADR-0299, ADR-0300).
 
     ``override`` is the ``runs.install`` cmdline (#988): when set it **replaces** the build-baked
     extra args for this install so an agent can iterate boot-parameter variants without a rebuild;
-    when ``None`` the build step's recorded extra is appended (unchanged). The platform-required
-    tokens (``system_required_cmdline``) always lead and are never modifiable either way.
+    when ``None`` the build step's recorded extra is appended (unchanged). ``crashkernel`` is the
+    per-install kdump reservation size (#989): it tunes the platform ``crashkernel=<size>`` token
+    and is orthogonal to ``override`` (both may be set). The platform-required tokens
+    (``system_required_cmdline``) always lead and are never modifiable either way.
     """
-    required = system_required_cmdline(method, root_cmdline)
+    required = system_required_cmdline(method, root_cmdline, crashkernel=crashkernel)
     if override is not None:
         return f"{required} {override.strip()}"
     result = await existing_build_result(conn, run.id)

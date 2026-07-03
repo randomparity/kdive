@@ -113,15 +113,25 @@ class BuildInstallBootPayload(BuildPayload):
 
 
 class InstallPayload(RunPayload):
-    """Payload for a `runs.install` step: the Run plus an optional cmdline override (ADR-0299).
+    """Payload for a `runs.install` step: the Run plus optional overrides (ADR-0299, ADR-0300).
 
     ``cmdline`` **replaces** the build-baked extra args for this install so an agent can iterate
     boot-parameter variants against an already-built kernel without a rebuild; ``None`` reuses the
     build-baked extra. A blank value is rejected (a caller mistake, distinct from omitting it). A
     pre-#988 install job serialized as bare ``{run_id}`` decodes here with ``cmdline=None``.
+
+    ``crashkernel`` (#989) is the per-install kdump reservation size that replaces the default
+    ``256M`` in the platform ``crashkernel=<size>`` token; ``None`` uses the default. The token is
+    opaque (a size, or a multi-range like ``1G-2G:128M,2G-:256M``), but injection-safe: a blank
+    value, internal whitespace (which would inject an extra kernel token into the space-joined
+    cmdline), a non-printable character (which would fail XML rendering of the domain
+    ``<cmdline>``), or a leading ``crashkernel=`` prefix is rejected. This validator is the
+    worker-side backstop; the tool boundary rejects the same set with per-reason
+    ``configuration_error`` codes.
     """
 
     cmdline: str | None = None
+    crashkernel: str | None = None
 
     @field_validator("cmdline")
     @classmethod
@@ -131,6 +141,22 @@ class InstallPayload(RunPayload):
         stripped = value.strip()
         if not stripped:
             raise ValueError("cmdline must not be blank")
+        return stripped
+
+    @field_validator("crashkernel")
+    @classmethod
+    def _safe_crashkernel(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("crashkernel must not be blank")
+        if stripped.split() != [stripped]:
+            raise ValueError("crashkernel must be a single token with no internal whitespace")
+        if not stripped.isprintable():
+            raise ValueError("crashkernel must be a single printable token")
+        if stripped.lower().startswith("crashkernel="):
+            raise ValueError("crashkernel must not include the 'crashkernel=' prefix")
         return stripped
 
 

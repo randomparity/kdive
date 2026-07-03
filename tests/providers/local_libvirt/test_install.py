@@ -347,6 +347,21 @@ def test_install_does_not_inject_xml_from_cmdline(tmp_path: Path) -> None:
     assert cmdline is not None and cmdline.text == hostile  # carried verbatim
 
 
+def test_install_renders_tuned_crashkernel_into_domain_cmdline(tmp_path: Path) -> None:
+    # Acceptance (#989, ADR-0300): a per-install crashkernel=512M composed upstream by cmdline_for
+    # reaches the domain <cmdline> verbatim — the installer renders whatever cmdline it is handed.
+    tuned = "console=ttyS0 root=/dev/vda crashkernel=512M"
+    conn = _conn_with_existing()
+    inst = _install(conn=conn, staging_root=tmp_path)
+    inst.install(_request(cmdline=tuned))
+    domain = ET.fromstring(conn.defined_xml[0])  # noqa: S314 - self-rendered, trusted
+    os_el = domain.find("os")
+    assert os_el is not None
+    cmdline = os_el.find("cmdline")
+    assert cmdline is not None and cmdline.text == tuned
+    assert "crashkernel=512M" in (cmdline.text or "")
+
+
 def test_install_preserves_the_gdbstub_qemu_commandline(tmp_path: Path) -> None:
     # A gdbstub-provisioned domain's <qemu:commandline> must survive the install os-edit
     # round-trip with its qemu: prefix — otherwise ElementTree re-prefixes it (ns0:) and libvirt

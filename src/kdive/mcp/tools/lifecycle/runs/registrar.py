@@ -56,6 +56,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security.artifacts.artifact_search import MAX_PATTERN_CHARS, MAX_TERMS
 from kdive.security.authz.rbac import Role
+from kdive.services.runs.steps import DEFAULT_CRASHKERNEL
 
 
 class _RunsCreatePayload(ToolPayload):
@@ -194,7 +195,7 @@ def register(
     _register_runs_build(app, pool, resolver)
     _register_runs_build_install_boot(app, pool, resolver)
     _register_runs_complete_build(app, pool, resolver)
-    _register_runs_install(app, pool)
+    _register_runs_install(app, pool, resolver)
     _register_runs_boot(app, pool)
     _register_runs_profile_examples(app, pool)
     _register_runs_validate_profile(app, pool)
@@ -442,6 +443,10 @@ def _register_runs_build_install_boot(
         Performs build-host admission (same as runs.build) then enqueues one
         BUILD_INSTALL_BOOT job. Requires operator role — the composite includes install
         and boot, whose gate is operator. Poll the returned job handle with jobs.wait.
+
+        This one-shot uses the default kdump crash-capture reservation. For a larger
+        reservation (a KASAN kernel or a large guest), use the granular path instead —
+        runs.build, then runs.install with a crashkernel size, then runs.boot.
         """
         ctx = current_context()
         return await with_runtime_for_run_target_kind(
@@ -527,7 +532,9 @@ def _register_runs_complete_build(
         )
 
 
-def _register_runs_install(app: FastMCP, pool: AsyncConnectionPool) -> None:
+def _register_runs_install(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="runs.install",
         annotations=_docmeta.mutating(),
@@ -551,6 +558,22 @@ def _register_runs_install(app: FastMCP, pool: AsyncConnectionPool) -> None:
                 )
             ),
         ] = None,
+        crashkernel: Annotated[
+            str | None,
+            Field(
+                description=(
+                    f"kdump crash-capture reservation size, replacing the default "
+                    f"{DEFAULT_CRASHKERNEL} in the platform crashkernel= token (e.g. '512M' for a "
+                    "KASAN kernel or a large guest). Pass only the reservation argument, not the "
+                    "whole token; a size or a kernel range is accepted. Applies only to "
+                    "kdump-capture Systems — a value on a non-kdump System is rejected. Each "
+                    "install fully specifies both cmdline and crashkernel: omitting either reverts "
+                    f"that one to its default (cmdline to the build-time args, crashkernel to "
+                    f"{DEFAULT_CRASHKERNEL}), so on an already-installed Run, restate both to keep "
+                    "them. The live value is reported by runs.get as data.installed_crashkernel."
+                )
+            ),
+        ] = None,
         idempotency_key: Annotated[
             str | None,
             Field(description="Replay-safe key; a repeated key returns the prior envelope."),
@@ -558,11 +581,18 @@ def _register_runs_install(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         """Install a built run onto its system.
 
-        Pass `cmdline` to iterate boot parameters against the built kernel without a rebuild;
-        `runs.get` reports the live variant as `data.installed_cmdline`.
+        Pass `cmdline` and/or `crashkernel` to iterate boot parameters against the built kernel
+        without a rebuild; `runs.get` reports the live variant as `data.installed_cmdline` and
+        `data.installed_crashkernel`.
         """
         return await _install_run(
-            pool, current_context(), run_id, cmdline=cmdline, idempotency_key=idempotency_key
+            pool,
+            current_context(),
+            run_id,
+            cmdline=cmdline,
+            crashkernel=crashkernel,
+            resolver=resolver,
+            idempotency_key=idempotency_key,
         )
 
 
