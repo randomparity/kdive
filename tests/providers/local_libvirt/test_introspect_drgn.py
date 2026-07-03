@@ -7,6 +7,7 @@ and injected seams — never importing drgn.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -19,6 +20,7 @@ from kdive.providers.local_libvirt.debug.introspect import (
     LocalLibvirtLiveIntrospect,
     LocalLibvirtVmcoreIntrospect,
     VmcoreIntrospector,
+    _raise_on_live_ssh_failure,
 )
 from kdive.providers.ports.retrieve import LiveScriptOutput
 from kdive.providers.shared.debug_common.introspect import (
@@ -796,3 +798,33 @@ def test_run_script_byte_caps_and_sets_truncated() -> None:
 def test_run_script_from_env_wires_the_real_seam() -> None:
     introspector = LocalLibvirtLiveIntrospect.from_env(secret_registry=SecretRegistry())
     assert introspector._run_live_script is not None
+
+
+# --- Drgn-live SSH failure diagnosability (#1008): the shared classifier is reused here too. ---
+
+
+def _live_proc(returncode: int, stderr: bytes) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.CompletedProcess(
+        args=["ssh"], returncode=returncode, stdout=b"", stderr=stderr
+    )
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stderr", "reason"),
+    [
+        (255, b"ssh: connect to host 127.0.0.1 port 22: Connection refused", "connection_refused"),
+        (255, b"kex_exchange_identification: Connection reset by peer", "banner_timeout"),
+        (255, b"root@127.0.0.1: Permission denied (publickey).", "auth_rejected"),
+        (1, b"drgn: could not attach to the live kernel", "remote_command_failed"),
+    ],
+)
+def test_live_ssh_failure_classifies_reason(returncode: int, stderr: bytes, reason: str) -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        _raise_on_live_ssh_failure(_live_proc(returncode, stderr), "in-guest drgn helper failed")
+    assert excinfo.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert excinfo.value.details["reason"] == reason
+    assert excinfo.value.details["exit_status"] == returncode
+
+
+def test_live_ssh_success_does_not_raise() -> None:
+    _raise_on_live_ssh_failure(_live_proc(0, b""), "in-guest drgn helper failed")  # no error

@@ -46,7 +46,11 @@ from kdive.providers.shared.debug_common.introspect import (
     assemble_report,
     assemble_script_output,
 )
-from kdive.providers.shared.ssh_connect_retry import SshRetryPolicy, run_ssh_with_retry
+from kdive.providers.shared.ssh_connect_retry import (
+    SshRetryPolicy,
+    run_ssh_with_retry,
+    ssh_failure_details,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 # The fixed live-helper set (ADR-0033 §2 / ADR-0085): the same three in-tree helpers as the
@@ -433,6 +437,21 @@ def _real_run_live_helper(
     return _exec_live_helper(argv)
 
 
+def _raise_on_live_ssh_failure(proc: subprocess.CompletedProcess[bytes], message: str) -> None:
+    """Raise a diagnosable ``DEBUG_ATTACH_FAILURE`` when a drgn-live ssh exited non-zero (#1008).
+
+    Reuses the shared ssh-stderr classifier so a drgn-live transport/attach failure names *why*
+    (a closed ``reason`` plus a redacted, length-capped ``stderr_tail``), not just the exit status.
+    Split out from the ``live_vm``-only exec functions so the classify-and-raise path is tested.
+    """
+    if proc.returncode != 0:
+        raise CategorizedError(
+            message,
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            details=ssh_failure_details(proc.returncode, proc.stderr),
+        )
+
+
 def _exec_live_helper(argv: list[str]) -> dict[str, object]:  # pragma: no cover - live_vm
     """Run the fixed ssh argv and decode the in-guest helper's one JSON section object.
 
@@ -462,12 +481,9 @@ def _exec_live_helper(argv: list[str]) -> dict[str, object]:  # pragma: no cover
             ) from exc
 
     proc = run_ssh_with_retry(run_once, policy=_LIVE_SSH_RETRY)
-    if proc.returncode != 0:
-        raise CategorizedError(
-            "in-guest drgn helper exited non-zero (could not attach to the live kernel)",
-            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-            details={"exit_status": proc.returncode},
-        )
+    _raise_on_live_ssh_failure(
+        proc, "in-guest drgn helper exited non-zero (could not attach to the live kernel)"
+    )
     try:
         decoded = json.loads(proc.stdout.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
@@ -548,12 +564,9 @@ def _exec_live_script(  # pragma: no cover - live_vm
             ) from exc
 
     proc = run_ssh_with_retry(run_once, policy=_LIVE_SSH_RETRY)
-    if proc.returncode != 0:
-        raise CategorizedError(
-            "in-guest drgn script exited non-zero (script error or could not attach)",
-            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-            details={"exit_status": proc.returncode},
-        )
+    _raise_on_live_ssh_failure(
+        proc, "in-guest drgn script exited non-zero (script error or could not attach)"
+    )
     return proc.stdout.decode("utf-8", "replace")
 
 
