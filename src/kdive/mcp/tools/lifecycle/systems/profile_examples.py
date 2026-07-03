@@ -14,6 +14,11 @@ provider name and a ``PUBLIC``-visibility ``[[image]]`` name (for remote, the in
 wire. The examples are schema-and-policy valid as emitted (they parse and pass provider policy), but
 not necessarily provisionable as-is: a placeholder reference must be replaced with a real one for
 the caller's host.
+
+The local-libvirt example also carries the profile's ``debug`` block (``gdbstub``/
+``preserve_on_crash``, both non-sensitive booleans defaulting off) so an agent learns these
+provision-bound knobs exist from the example shape itself, not just from the guides (#1014,
+BLACK_BOX_REVIEW.md Finding 3(a)).
 """
 
 from __future__ import annotations
@@ -69,7 +74,10 @@ _REPLACE_NOTE = (
     'address: a git build needs the structured {"git": {"remote": ..., "ref": ...}} form at '
     "runs.create — any bare string (even one that looks scheme-prefixed) is treated as a warm-tree "
     "label. The disk-image example needs no kernel_source_ref: it boots the operator-staged base "
-    "image's own kernel."
+    "image's own kernel. The local-libvirt example's provider.local-libvirt.debug block "
+    "(gdbstub/preserve_on_crash) is bound at systems.provision: set it here if you intend to debug "
+    "or triage this System, since it cannot be added to a System that is already provisioned "
+    "without reprovisioning."
 )
 
 # Sizing guidance (#461): the example carries concrete vcpu/memory_mb/disk_gb so it parses alone
@@ -158,6 +166,13 @@ def _local_profile(doc: InventoryDoc | None) -> tuple[dict[str, JsonValue], bool
     A placeholder ``catalog`` name would fail ``validate_rootfs_reference`` when an inventory file
     is present (an undeclared catalog name raises), so the fallback uses a ``local`` rootfs (which
     is not inventory-checked) to keep every emitted example policy-valid.
+
+    Carries an explicit ``debug`` block (``gdbstub``/``preserve_on_crash``, both off) so an agent
+    reading this example learns the knobs exist without having to find them elsewhere;
+    ``_REPLACE_NOTE`` tells the caller they are provision-time-only (#1014, BLACK_BOX_REVIEW.md
+    Finding 3(a)). Neither ``remote-libvirt`` nor ``fault-inject`` has a ``debug`` field
+    (``RemoteLibvirtProfile``'s gdbstub is unconditional; ``FaultInjectProfile`` owns no
+    crash-capture flags), so only this example carries the block.
     """
     image = _public_image(doc, _LOCAL)
     rootfs: JsonValue
@@ -167,7 +182,8 @@ def _local_profile(doc: InventoryDoc | None) -> tuple[dict[str, JsonValue], bool
     else:
         rootfs = {"kind": "local", "path": _PLACEHOLDER_ROOTFS_PATH}
         placeholder = True
-    provider: JsonValue = {_LOCAL: {"rootfs": rootfs}}
+    debug: JsonValue = {"gdbstub": False, "preserve_on_crash": False}
+    provider: JsonValue = {_LOCAL: {"rootfs": rootfs, "debug": debug}}
     profile: dict[str, JsonValue] = {
         **_CORE,
         "boot_method": "direct-kernel",
