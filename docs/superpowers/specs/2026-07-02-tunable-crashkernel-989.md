@@ -58,7 +58,12 @@ Two forks were confirmed with the issue owner before design:
   `KDUMP`. Supplying `crashkernel` for a non-kdump System is **rejected** (see failure contract) —
   never silently ignored.
 - **The `Field` description** states: sets the kdump `crashkernel=` reservation size; default 256M;
-  applies only to kdump-capture Systems; iterate without a rebuild; omit to use the default.
+  applies only to kdump-capture Systems; iterate without a rebuild. **Each `runs.install` fully
+  specifies both `cmdline` and `crashkernel`**: omitting either reverts *that* parameter to its
+  default anchor (`cmdline` → the build-baked extra; `crashkernel` → 256M), so on an
+  already-installed Run, omitting a previously-applied value re-stages it back to the default rather
+  than preserving it. When iterating one dimension, restate the other to keep it, and confirm both
+  via `runs.get`.
 - **Read-back.** `runs.get` surfaces `data.installed_crashkernel` — the reservation recorded on the
   last install (`null` when the default 256M is in force), beside `data.installed_cmdline`.
 - **Sweep note:** to sweep reservations, omit `idempotency_key` or vary it per variant (standard
@@ -81,10 +86,16 @@ the range enforcement the issue declined.
 
 ## Method resolution & re-stage state machine
 
-`runs.install(crashkernel=Y)` first resolves the System's capture method at the boundary via
-`resolver.binding_for_system` + `install_method_for` (a cheap `(kind, name)` DB lookup plus
-in-process runtime construction — no libvirt round-trip). If `Y` is supplied and the method is not
-`KDUMP`, reject before any ledger work.
+`runs.install(crashkernel=Y)` resolves the System's capture method at the boundary **only when `Y`
+is supplied** — via `SYSTEMS.get` (the `install_run` boundary fetches only the Run today, so it
+must also load the System) then `resolver.binding_for_system` + `install_method_for` (a cheap
+`(kind, name)` DB lookup plus in-process runtime construction — no libvirt round-trip). If the
+method is not `KDUMP`, reject before any ledger work. When `Y` is omitted the boundary does **no**
+new System fetch, binding call, or method resolution, so the no-crashkernel install path is
+byte-unchanged and gains no new failure surface. A boundary resolution failure (e.g. a missing
+provider-kind row for the System) maps to `CONFIGURATION_ERROR`, not an unhandled 500. The handler
+backstop (below) still catches an accept-then-reprovision skew, where the method changes between
+the boundary check and job execution.
 
 The requested **effective reservation** is `normalize(Y)` when supplied, else the default (recorded
 as absent / `null`) — mirroring ADR-0299's "omit → build-baked": each install fully specifies its
@@ -129,7 +140,13 @@ Recording: the install handler records the applied reservation on the `install` 
   `install` result.
 - **`runs.get` view** surfaces `data.installed_crashkernel` from `StepProgress`. The
   `data.required_cmdline` advertisement (pre-install, System-level) keeps the default 256M.
-- **Composite `runs.build_install_boot`** unchanged (default 256M), consistent with ADR-0299.
+- **Composite `runs.build_install_boot`** does not gain a `crashkernel` and always boots the
+  default 256M (see the note below — its `cmdline` is baked at build, but `crashkernel` is a
+  method-conditional install-time token with no build-baking, and threading it through the composite
+  would reopen ADR-0299's "the install phase reads no override" contract). Its tool doc gains a
+  discoverable pointer: the one-shot uses the default 256M reservation, and a larger reservation for
+  a KASAN/large-guest kernel requires the granular `runs.build → runs.install(crashkernel=…) →
+  runs.boot` path.
 - **Remote-libvirt** rides along free (`InstallRequest.cmdline` already threaded).
 
 ## Failure contract
@@ -175,5 +192,7 @@ Recording: the install handler records the applied reservation on the `install` 
   value; audit folds the value into a one-way digest).
 - Honoring the profile `crashkernel` field's value (the granularity decision keeps it a signal).
 - A size range / bounds check (the validation decision keeps the token opaque).
-- `crashkernel` on `runs.build_install_boot` or `runs.boot` (iteration is an install-plane concern,
-  consistent with ADR-0299).
+- `crashkernel` on `runs.build_install_boot` (deferred, **not silently**: the one-shot's default-256M
+  behavior is documented in its tool doc with a pointer to the granular path; threading it through
+  the composite would reopen ADR-0299's install-phase-reads-no-override contract) or on `runs.boot`
+  (iteration is an install-plane concern, consistent with ADR-0299).

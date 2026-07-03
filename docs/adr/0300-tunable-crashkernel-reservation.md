@@ -51,7 +51,10 @@ one boot token the free-form override may not touch.
   `data.method = "<resolved>"` — rather than silently dropped. Accepting the field while not
   emitting it would recreate exactly the phantom this ADR removes. The boundary resolves the method
   via `resolver.binding_for_system` + `install_method_for`, which is a cheap `(kind, name)` lookup
-  plus in-process runtime construction (no libvirt round-trip), so the check is synchronous.
+  plus in-process runtime construction (no libvirt round-trip), so the check is synchronous. This
+  resolution runs **only when `crashkernel` is supplied**: the no-crashkernel install path fetches
+  no System, makes no binding call, and gains no new failure surface; a resolution failure on the
+  crashkernel path maps to `CONFIGURATION_ERROR`, not an unhandled 500.
 
 - **Injection-safe validation, not range validation.** The value is stripped and must be non-empty;
   it must contain **no internal whitespace** (the token is space-joined into the cmdline that is
@@ -74,9 +77,12 @@ one boot token the free-form override may not touch.
 - **`InstallPayload` carries `crashkernel: str | None`** with the injection-safe validator, beside
   its `cmdline` field. `cmdline_for` and `system_required_cmdline` gain a `crashkernel` keyword that
   threads to the token: `crashkernel=<value or 256M>`. `runs.boot` keeps the bare `RunPayload`. The
-  composite `runs.build_install_boot` path is untouched (it uses the default 256M, consistent with
-  ADR-0299's treatment of the cmdline override), and remote-libvirt install rides along for free —
-  the cmdline is composed upstream by `cmdline_for` and threaded via `InstallRequest.cmdline`.
+  composite `runs.build_install_boot` path does not gain a `crashkernel` and always boots the default
+  256M — documented, not silent: its tool doc points a KASAN/large-guest caller at the granular
+  `runs.build → runs.install(crashkernel=…) → runs.boot` path. (Threading crashkernel through the
+  composite would reopen ADR-0299's contract that the composite install phase reads no install-time
+  override; the granular path fully satisfies the acceptance.) Remote-libvirt install rides along for
+  free — the cmdline is composed upstream by `cmdline_for` and threaded via `InstallRequest.cmdline`.
 
 - **`runs.get` surfaces the applied reservation** as `data.installed_crashkernel` (the value
   recorded on the `install` step; `null` when the default is in force), beside the ADR-0299
