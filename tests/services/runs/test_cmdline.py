@@ -88,6 +88,62 @@ def test_platform_owned_tokens_still_reject_root_on_any_provider() -> None:
     assert platform_owned_cmdline_token("dhash_entries=1") is None
 
 
+def test_kdump_crashkernel_override_replaces_default_size() -> None:
+    # A per-install crashkernel reservation (ADR-0300, #989) replaces the default 256M.
+    assert (
+        system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT, crashkernel="512M")
+        == "console=ttyS0 root=/dev/vda crashkernel=512M"
+    )
+
+
+def test_kdump_crashkernel_accepts_a_range_token() -> None:
+    # The token is opaque (the booted kernel is the grammar arbiter): a multi-range value rides.
+    assert (
+        system_required_cmdline(CaptureMethod.KDUMP, None, crashkernel="1G-2G:128M,2G-:256M")
+        == "console=ttyS0 crashkernel=1G-2G:128M,2G-:256M"
+    )
+
+
+def test_kdump_crashkernel_none_falls_back_to_default() -> None:
+    assert (
+        system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT, crashkernel=None)
+        == "console=ttyS0 root=/dev/vda crashkernel=256M"
+    )
+
+
+def test_non_kdump_ignores_crashkernel_override() -> None:
+    # crashkernel is a kdump-only token: a non-kdump method never emits it, even when supplied.
+    assert (
+        system_required_cmdline(CaptureMethod.CONSOLE, _LOCAL_ROOT, crashkernel="512M")
+        == "console=ttyS0 root=/dev/vda"
+    )
+    assert "crashkernel" not in system_required_cmdline(
+        CaptureMethod.GDBSTUB, _LOCAL_ROOT, crashkernel="512M"
+    )
+
+
+def test_cmdline_for_threads_crashkernel_orthogonal_to_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # crashkernel and the ADR-0299 cmdline override are independent: both apply, platform-first.
+    async def _must_not_read(conn: object, run_id: object) -> BuildStepResult | None:
+        raise AssertionError("override path must not read the build ledger")
+
+    monkeypatch.setattr(steps_mod, "existing_build_result", _must_not_read)
+
+    async def _run() -> str:
+        return await cmdline_for(
+            cast("steps_mod.AsyncConnection", None),
+            _fake_run(),
+            CaptureMethod.KDUMP,
+            root_cmdline=_LOCAL_ROOT,
+            override="dhash_entries=1",
+            crashkernel="512M",
+        )
+
+    assert asyncio.run(_run()) == "console=ttyS0 root=/dev/vda crashkernel=512M dhash_entries=1"
+
+
 def test_cmdline_for_override_replaces_build_extra(monkeypatch: pytest.MonkeyPatch) -> None:
     # The install override (ADR-0299) replaces the build-baked extra without reading the ledger.
     async def _must_not_read(conn: object, run_id: object) -> BuildStepResult | None:
