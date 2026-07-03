@@ -56,7 +56,13 @@ LOOKUP_ADDED = {
 BUILD_HOST_ADDED = {
     "capacity_exhausted",
 }
-M0_ALL = M0_PORTED | M0_DISTRIBUTED | M1_ADDED | LOOKUP_ADDED | BUILD_HOST_ADDED
+# Debug-plane symbol resolution (#1013, ADR-0307): a `debug.resolve_symbol` miss (inlined /
+# optimized-away symbol or an addressless enum/macro constant), distinct from `debug_attach_failure`
+# (the session is fine) and non-retryable.
+DEBUG_ADDED = {
+    "symbol_not_found",
+}
+M0_ALL = M0_PORTED | M0_DISTRIBUTED | M1_ADDED | LOOKUP_ADDED | BUILD_HOST_ADDED | DEBUG_ADDED
 
 
 def test_taxonomy_is_exactly_the_m0_set() -> None:

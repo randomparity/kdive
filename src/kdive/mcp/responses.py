@@ -55,6 +55,7 @@ _RETRYABLE_BY_CATEGORY: dict[ErrorCategory, bool] = {
     ErrorCategory.LEASE_EXPIRED: False,
     ErrorCategory.NOT_IMPLEMENTED: False,
     ErrorCategory.NOT_FOUND: False,
+    ErrorCategory.SYMBOL_NOT_FOUND: False,
     ErrorCategory.CONFLICT: False,
     ErrorCategory.AUTHORIZATION_DENIED: False,
     ErrorCategory.QUOTA_EXCEEDED: False,
