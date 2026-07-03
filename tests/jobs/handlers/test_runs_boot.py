@@ -17,6 +17,7 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import Job, JobKind
+from kdive.jobs.handlers import console_evidence
 from kdive.jobs.handlers.runs import boot as runs_boot
 from kdive.jobs.handlers.runs import boot_evidence
 from kdive.jobs.handlers.runs import registrar as runs
@@ -38,8 +39,8 @@ from kdive.store.objectstore import ObjectStore
 
 def test_boot_handler_facade_and_leaf_console_patch_surface() -> None:
     assert runs.boot_handler is runs_boot.boot_handler
-    assert boot_evidence.console_log_path is not None
-    assert boot_evidence.read_console_log is not None
+    assert console_evidence.console_log_path is not None
+    assert console_evidence.read_console_log is not None
 
 
 class _FakeRun:
@@ -569,7 +570,7 @@ def test_mark_boot_window_local_is_zero_regardless_of_log_size(tmp_path, monkeyp
     system_id = uuid4()
     log = tmp_path / f"{system_id}.log"
     log.write_bytes(b"prior boot bytes\n")
-    monkeypatch.setattr(boot_evidence, "console_log_path", lambda sid: log)
+    monkeypatch.setattr(console_evidence, "console_log_path", lambda sid: log)
 
     assert asyncio.run(boot_evidence.mark_boot_window(system_id, None)) == 0
 
@@ -597,21 +598,10 @@ def test_mark_boot_window_degrades_to_zero_on_failure() -> None:
     assert asyncio.run(boot_evidence.mark_boot_window(uuid4(), _Boom())) == 0
 
 
-def test_read_redacted_console_reads_whole_log(tmp_path, monkeypatch) -> None:
-    system_id = uuid4()
-    log = tmp_path / f"{system_id}.log"
-    log.write_bytes(b"line one\nthis boot panic\n")
-    monkeypatch.setattr(boot_evidence, "console_log_path", lambda sid: log)
-
-    redacted = asyncio.run(boot_evidence.read_redacted_console(system_id, SecretRegistry()))
-
-    assert redacted == b"line one\nthis boot panic\n"
-
-
 def test_local_capture_excludes_prior_boot_panic_via_truncation(tmp_path, monkeypatch) -> None:
     system_id = uuid4()
     log = tmp_path / f"{system_id}.log"
-    monkeypatch.setattr(boot_evidence, "console_log_path", lambda sid: log)
+    monkeypatch.setattr(console_evidence, "console_log_path", lambda sid: log)
 
     # Run B power-cycles the domain; libvirt's append='off' serial <log> truncates on start
     # (ADR-0258), so by capture time the per-System log holds ONLY this boot's bytes — Run A's

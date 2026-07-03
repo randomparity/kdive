@@ -22,20 +22,16 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.crash_signatures import CONSOLE_CRASH_KINDS
 from kdive.domain.lifecycle.records import Run
+from kdive.jobs.handlers.console_evidence import read_redacted_console
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.ports.console import ConsoleSnapshotter
 from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.ports.lifecycle import Connector
-from kdive.providers.shared.runtime_paths import (
-    console_log_path,
-    domain_name_for,
-    read_console_log,
-)
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.security.artifacts.artifact_search import ArtifactSearchInputError, search_text
 from kdive.security.authz.context import RequestContext
-from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
 
@@ -142,21 +138,6 @@ async def mark_boot_window(system_id: UUID, snapshotter: ConsoleSnapshotter | No
             exc_info=True,
         )
         return 0
-
-
-async def read_redacted_console(system_id: UUID, secret_registry: SecretRegistry) -> bytes | None:
-    raw = await asyncio.to_thread(read_console_log, console_log_path(system_id))
-    if not raw:
-        _log.warning(
-            "console log for system %s is empty or unreadable; registering no console artifact",
-            system_id,
-        )
-        return None
-    return (
-        Redactor(registry=secret_registry)
-        .redact_text(raw.decode("utf-8", "replace"))
-        .encode("utf-8")
-    )
 
 
 async def _store_console_artifact(
