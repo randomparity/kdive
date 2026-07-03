@@ -109,6 +109,13 @@ def test_install_payload_rejects_crashkernel_with_internal_whitespace() -> None:
         InstallPayload(run_id=str(uuid4()), crashkernel="512M panic=1")
 
 
+def test_install_payload_rejects_crashkernel_with_control_character() -> None:
+    # A control char (e.g. NUL) is not ASCII whitespace, so it slips the token check; it would
+    # reach the domain <cmdline> and fail XML serialization as an infrastructure error. Reject it.
+    with pytest.raises(ValueError, match="crashkernel must be a single printable token"):
+        InstallPayload(run_id=str(uuid4()), crashkernel="512M\x00panic")
+
+
 def test_install_payload_rejects_crashkernel_with_token_prefix() -> None:
     # The caller passes the reservation argument, not the whole crashkernel= token.
     with pytest.raises(ValueError, match="crashkernel must not include the 'crashkernel=' prefix"):

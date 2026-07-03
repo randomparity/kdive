@@ -4459,7 +4459,8 @@ def test_install_rejects_blank_crashkernel(migrated_url: str) -> None:
 
 
 def test_install_rejects_malformed_crashkernel(migrated_url: str) -> None:
-    # Internal whitespace (cmdline injection) and a leading crashkernel= prefix both → malformed.
+    # Internal whitespace (cmdline injection), a control char (fails XML render), and a leading
+    # crashkernel= prefix all → malformed, synchronously at the boundary.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _kdump_run(pool)
@@ -4467,10 +4468,14 @@ def test_install_rejects_malformed_crashkernel(migrated_url: str) -> None:
             spaced = await install_run(
                 pool, _ctx(), run_id, crashkernel="512M panic=1", resolver=resolver
             )
+            control = await install_run(
+                pool, _ctx(), run_id, crashkernel="512M\x00panic", resolver=resolver
+            )
             prefixed = await install_run(
                 pool, _ctx(), run_id, crashkernel="crashkernel=512M", resolver=resolver
             )
         assert spaced.data["reason"] == "crashkernel_malformed"
+        assert control.data["reason"] == "crashkernel_malformed"
         assert prefixed.data["reason"] == "crashkernel_malformed"
 
     asyncio.run(_run())

@@ -42,7 +42,8 @@ def _crashkernel_error(run_id: str, crashkernel: str | None) -> ToolResponse | N
 
     Injection-safe, not range-validating: the token is opaque (a size or a multi-range), but a
     blank value, internal whitespace (which would inject an extra kernel token into the space-joined
-    cmdline), or a leading ``crashkernel=`` prefix is rejected. Mirrors the ``InstallPayload``
+    cmdline), a non-printable character (which would fail XML rendering of the domain
+    ``<cmdline>``), or a leading ``crashkernel=`` prefix is rejected. Mirrors the ``InstallPayload``
     validator with per-reason codes for the synchronous tool response.
     """
     if crashkernel is None:
@@ -50,7 +51,11 @@ def _crashkernel_error(run_id: str, crashkernel: str | None) -> ToolResponse | N
     stripped = crashkernel.strip()
     if not stripped:
         return _config_error(run_id, data={"reason": "crashkernel_blank"})
-    if stripped.split() != [stripped] or stripped.lower().startswith("crashkernel="):
+    if (
+        stripped.split() != [stripped]
+        or not stripped.isprintable()
+        or stripped.lower().startswith("crashkernel=")
+    ):
         return _config_error(run_id, data={"reason": "crashkernel_malformed"})
     return None
 

@@ -124,8 +124,10 @@ class InstallPayload(RunPayload):
     ``256M`` in the platform ``crashkernel=<size>`` token; ``None`` uses the default. The token is
     opaque (a size, or a multi-range like ``1G-2G:128M,2G-:256M``), but injection-safe: a blank
     value, internal whitespace (which would inject an extra kernel token into the space-joined
-    cmdline), or a leading ``crashkernel=`` prefix is rejected. This validator is the worker-side
-    backstop; the tool boundary rejects the same set with per-reason ``configuration_error`` codes.
+    cmdline), a non-printable character (which would fail XML rendering of the domain
+    ``<cmdline>``), or a leading ``crashkernel=`` prefix is rejected. This validator is the
+    worker-side backstop; the tool boundary rejects the same set with per-reason
+    ``configuration_error`` codes.
     """
 
     cmdline: str | None = None
@@ -151,6 +153,8 @@ class InstallPayload(RunPayload):
             raise ValueError("crashkernel must not be blank")
         if stripped.split() != [stripped]:
             raise ValueError("crashkernel must be a single token with no internal whitespace")
+        if not stripped.isprintable():
+            raise ValueError("crashkernel must be a single printable token")
         if stripped.lower().startswith("crashkernel="):
             raise ValueError("crashkernel must not include the 'crashkernel=' prefix")
         return stripped
