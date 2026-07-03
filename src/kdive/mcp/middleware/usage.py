@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from fastmcp.server.middleware import Middleware
@@ -17,15 +17,23 @@ from kdive.mcp.middleware.shared import (
 )
 from kdive.mcp.tools._platform_auth import actor_for
 from kdive.security.authz.rbac import AuthorizationError
-from kdive.security.usage import UsageEvent, record_usage
+from kdive.security.secrets.redaction import Redactor
+from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.usage import UsageEvent, digest_args, record_usage
 
 _log = logging.getLogger(__name__)
 
 
+def _call_arguments(context: Any) -> Mapping[str, object] | None:
+    """The call's argument mapping, if the transport carried one."""
+    arguments = getattr(context.message, "arguments", None)
+    return arguments if isinstance(arguments, Mapping) else None
+
+
 def _call_project(context: Any) -> str | None:
     """The call's ``project`` argument, if present as a non-empty string."""
-    arguments = getattr(context.message, "arguments", None)
-    if isinstance(arguments, dict):
+    arguments = _call_arguments(context)
+    if arguments is not None:
         value = arguments.get("project")
         if isinstance(value, str) and value:
             return value
@@ -33,11 +41,29 @@ def _call_project(context: Any) -> str | None:
 
 
 class UsageTrackingMiddleware(Middleware):
-    """Record one best-effort ``tool_invocation`` row per call."""
+    """Record one best-effort ``tool_invocation`` row per call.
 
-    def __init__(self, pool: Any, *, acquire_timeout: float = 1.0) -> None:
+    Each row carries an ``args_digest`` (ADR-0304): a stable SHA-256 over the call's
+    *redacted* arguments, computed through the app-owned ``SecretRegistry`` so the digest
+    can never diverge from the log/telemetry redaction contract. The ``Redactor`` is
+    cached and rebuilt only when the registry version changes.
+    """
+
+    def __init__(
+        self, pool: Any, *, secret_registry: SecretRegistry, acquire_timeout: float = 1.0
+    ) -> None:
         self._pool = pool
         self._acquire_timeout = acquire_timeout
+        self._registry = secret_registry
+        self._cached_version = -1
+        self._redactor = Redactor(registry=secret_registry)
+
+    def _current_redactor(self) -> Redactor:
+        version = self._registry.version()
+        if version != self._cached_version:
+            self._redactor = Redactor(registry=self._registry)
+            self._cached_version = version
+        return self._redactor
 
     async def on_call_tool(
         self,
@@ -79,6 +105,7 @@ class UsageTrackingMiddleware(Middleware):
                 outcome=outcome.value,
                 actor=actor_for(ctx),
                 client_id=ctx.client_id,
+                args_digest=digest_args(self._current_redactor(), _call_arguments(context)),
             )
             async with (
                 self._pool.connection(timeout=self._acquire_timeout) as conn,

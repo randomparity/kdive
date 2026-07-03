@@ -44,7 +44,7 @@ def build_app(
     )
     composition = provider_composition or ProviderComposition(secret_registry=secret_registry)
     resolver = composition.build_provider_resolver()
-    app.add_middleware(UsageTrackingMiddleware(pool))
+    app.add_middleware(UsageTrackingMiddleware(pool, secret_registry=composition.secret_registry))
     app.add_middleware(ToolExposureMiddleware(resolver))
     app.add_middleware(DocExposureMiddleware())
     app.add_middleware(DenialAuditMiddleware(pool))

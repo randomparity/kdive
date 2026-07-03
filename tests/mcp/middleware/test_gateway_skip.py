@@ -30,6 +30,7 @@ from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, RoleDenied
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 # ============================================================
 # Shared helpers
@@ -113,7 +114,7 @@ def test_meta_tools_contains_invoke_and_search() -> None:
 
 def _spy_usage() -> tuple[UsageTrackingMiddleware, list[Any]]:
     """UsageTrackingMiddleware with _record replaced by a spy."""
-    mw = UsageTrackingMiddleware(pool=object())
+    mw = UsageTrackingMiddleware(pool=object(), secret_registry=SecretRegistry())
     recorded: list[Any] = []
 
     async def _record(ctx: Any, outcome: Any) -> None:
@@ -326,7 +327,7 @@ def test_invoke_writes_one_usage_row_keyed_to_inner(
     async def _run() -> list[tuple[Any, ...]]:
         async with AsyncConnectionPool(migrated_url, open=False) as pool:
             await pool.open()
-            mw = UsageTrackingMiddleware(pool)
+            mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry())
 
             inner_ctx = _Ctx("session.whoami")
             outer_ctx = _Ctx("tools.invoke")
@@ -365,7 +366,7 @@ def test_denied_invoke_writes_one_denial_row_keyed_to_inner(
     async def _run() -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
         async with AsyncConnectionPool(migrated_url, open=False) as pool:
             await pool.open()
-            usage_mw = UsageTrackingMiddleware(pool)
+            usage_mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry())
             denial_mw = DenialAuditMiddleware(pool, agent_session=lambda: "sess-1")
 
             inner_ctx = _Ctx("control.force_crash")
