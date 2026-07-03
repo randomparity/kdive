@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,11 +16,14 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind, JobState
+from kdive.jobs import worker
 from kdive.jobs.handlers.ssh_authorize import (
+    _raise_on_authorize_failure,
     authorize_ssh_key_handler,
     build_authorize_argv,
 )
 from kdive.prereqs.system_bootstrap_key import ensure_system_bootstrap_key
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 _NOW = datetime(2025, 1, 1)
 _KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 agent@host"
@@ -199,6 +203,51 @@ def test_handler_ssh_failure_propagates_transport_failure(migrated_url: str) -> 
                 assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
 
     asyncio.run(_run())
+
+
+# --- Failure diagnosability (#1008): the authorize failure names *why*, not just exit 255. ---
+
+
+def _failed_proc(returncode: int, stderr: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=["ssh"], returncode=returncode, stdout="", stderr=stderr
+    )
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stderr", "reason"),
+    [
+        (255, "kex_exchange_identification: Connection reset by peer", "banner_timeout"),
+        (255, "ssh: connect to host 127.0.0.1 port 22: Connection refused", "connection_refused"),
+        (255, "root@127.0.0.1: Permission denied (publickey).", "auth_rejected"),
+        (255, "Host key verification failed.", "host_key_mismatch"),
+        (1, "grep: authorized_keys: No such file or directory", "remote_command_failed"),
+    ],
+)
+def test_authorize_failure_classifies_reason(returncode: int, stderr: str, reason: str) -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        _raise_on_authorize_failure(_failed_proc(returncode, stderr))
+    assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert excinfo.value.details["reason"] == reason
+    assert excinfo.value.details["exit_status"] == returncode
+
+
+def test_authorize_success_does_not_raise() -> None:
+    _raise_on_authorize_failure(_failed_proc(0, ""))  # returncode 0 → no error
+
+
+def test_authorize_banner_timeout_reason_survives_failure_context() -> None:
+    # The acceptance case: a forced banner-timeout authorize failure surfaces
+    # `failure_detail_reason: banner_timeout` (not just 255) through the same _failure_context
+    # path that feeds jobs.get/jobs.wait.
+    with pytest.raises(CategorizedError) as excinfo:
+        _raise_on_authorize_failure(
+            _failed_proc(255, "kex_exchange_identification: Connection reset by peer")
+        )
+    context = worker._failure_context(excinfo.value, SecretRegistry())
+    assert context["failure_detail_reason"] == "banner_timeout"
+    assert context["failure_detail_exit_status"] == "255"
+    assert "Connection reset by peer" in context["failure_detail_stderr_tail"]
 
 
 def test_handler_no_bootstrap_key_is_configuration_error(migrated_url: str) -> None:

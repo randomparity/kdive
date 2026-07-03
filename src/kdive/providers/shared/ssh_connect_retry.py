@@ -15,25 +15,47 @@ import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 
-# stderr phrases that mean the guest sshd is not accepting yet — transient during the
-# provision→ready→authorize window, so retryable.
-_STARTING_MARKERS = (
-    "connection refused",
-    "connection reset",
-    "connection closed",
-    "closed by remote host",
-    "connection timed out",
-    "no route to host",
-    "network is unreachable",
+# Closed, fixed vocabulary for a non-zero ssh exit. Never free-form, so a reason can never leak a
+# secret or a hostname into the failure record (#1008).
+type SshFailureReason = Literal[
+    "connection_refused",
+    "banner_timeout",
+    "unreachable",
+    "auth_rejected",
+    "host_key_mismatch",
+    "remote_command_failed",
+    "unknown",
+]
+
+# Single ordered stderr-phrase → reason table (first match wins). It is the one source of truth for
+# both classification and retryability, so no phrase list is duplicated. Fatal auth/host-key
+# phrases are listed first so they win over any co-occurring transient phrase (a rejected key must
+# never be retried, even if the same stderr also mentions a reset connection).
+_REASON_MARKERS: tuple[tuple[str, SshFailureReason], ...] = (
+    ("host key verification failed", "host_key_mismatch"),
+    ("permission denied", "auth_rejected"),
+    ("too many authentication failures", "auth_rejected"),
+    ("no such identity", "auth_rejected"),
+    ("connection refused", "connection_refused"),
+    ("connection reset", "banner_timeout"),
+    ("connection closed", "banner_timeout"),
+    ("closed by remote host", "banner_timeout"),
+    ("connection timed out", "unreachable"),
+    ("no route to host", "unreachable"),
+    ("network is unreachable", "unreachable"),
 )
-# stderr phrases that mean a real, non-transient failure — never retried.
-_FATAL_MARKERS = (
-    "permission denied",
-    "host key verification failed",
-    "too many authentication failures",
-    "no such identity",
+
+# Reasons that mean the guest sshd is not accepting yet — transient during the
+# provision→ready→authorize window, so retryable. Everything else fails fast.
+_RETRYABLE_REASONS: frozenset[SshFailureReason] = frozenset(
+    {"connection_refused", "banner_timeout", "unreachable"}
 )
+
+# The stderr tail is length-capped at the source before it is stored (and redacted downstream by
+# the worker's failure-context Redactor path, ADR-0027).
+_STDERR_TAIL_MAX = 512
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,21 +78,48 @@ def _stderr_text(stderr: object) -> str:
     return stderr if isinstance(stderr, str) else ""
 
 
+def classify_ssh_failure(returncode: int, stderr: str | bytes) -> SshFailureReason:
+    """Map a non-zero ssh exit to the closed :data:`SshFailureReason` vocabulary (#1008).
+
+    A non-``255`` exit means ssh connected and the remote command itself exited non-zero, so it is
+    always ``remote_command_failed`` regardless of stderr (ssh's own connect/auth phrases only
+    appear on ``255``). A ``255`` exit is classified by the first matching stderr phrase — fatal
+    auth/host-key phrases first — and falls back to ``unknown`` when nothing matches. Callers only
+    invoke this on a failure; a ``0`` exit yields ``remote_command_failed`` and is not meaningful.
+    """
+    if returncode != 255:
+        return "remote_command_failed"
+    low = _stderr_text(stderr).lower()
+    for phrase, reason in _REASON_MARKERS:
+        if phrase in low:
+            return reason
+    return "unknown"
+
+
 def is_sshd_starting(returncode: int, stderr: str | bytes) -> bool:
     """True when a non-zero ssh exit looks like the guest sshd is still starting (retryable).
 
     ssh reports both a refused connection and a rejected key as exit 255, so the two are told
     apart by stderr: a fatal-marker phrase (auth/host-key) is never retried, and a non-255 exit
-    is the *remote command's* own failure (the connection succeeded) — also never retried.
+    is the *remote command's* own failure (the connection succeeded) — also never retried. Derived
+    from :func:`classify_ssh_failure` so the phrase table is the single source of truth.
     """
-    if returncode == 0:
-        return False
-    low = _stderr_text(stderr).lower()
-    if any(marker in low for marker in _FATAL_MARKERS):
-        return False
-    if returncode != 255:
-        return False
-    return any(marker in low for marker in _STARTING_MARKERS)
+    return classify_ssh_failure(returncode, stderr) in _RETRYABLE_REASONS
+
+
+def ssh_failure_details(returncode: int, stderr: str | bytes) -> dict[str, object]:
+    """Leak-safe, diagnosable failure details for a non-zero ssh exit (#1008).
+
+    ``reason`` is drawn from the closed :data:`SshFailureReason` vocabulary, so it can never leak a
+    secret or a hostname. ``stderr_tail`` is the last ``_STDERR_TAIL_MAX`` chars of ssh's stderr,
+    length-capped here and redacted downstream by the worker's failure-context Redactor path
+    (ADR-0027). ``exit_status`` is retained unchanged.
+    """
+    return {
+        "exit_status": returncode,
+        "reason": classify_ssh_failure(returncode, stderr),
+        "stderr_tail": _stderr_text(stderr).strip()[-_STDERR_TAIL_MAX:],
+    }
 
 
 def run_ssh_with_retry[T](

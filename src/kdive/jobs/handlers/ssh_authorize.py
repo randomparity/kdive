@@ -25,7 +25,11 @@ from kdive.prereqs.system_bootstrap_key import (
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.shared.runtime_paths import domain_name_for
-from kdive.providers.shared.ssh_connect_retry import SshRetryPolicy, run_ssh_with_retry
+from kdive.providers.shared.ssh_connect_retry import (
+    SshRetryPolicy,
+    run_ssh_with_retry,
+    ssh_failure_details,
+)
 
 type SshExec = Callable[[list[str], str], None]
 
@@ -87,6 +91,22 @@ def build_authorize_argv(host: str, port: int, key_path: str) -> list[str]:
     ]
 
 
+def _raise_on_authorize_failure(proc: subprocess.CompletedProcess[str]) -> None:
+    """Raise a diagnosable ``TRANSPORT_FAILURE`` when the authorize ssh exited non-zero (#1008).
+
+    Classifies ssh's stderr into a closed reason vocabulary and attaches a length-capped,
+    downstream-redacted stderr tail so ``jobs.get``/``jobs.wait`` report *why* it failed, not just
+    exit ``255``. Split out from :func:`_real_ssh_exec` (whose ssh subprocess is ``live_vm``-only)
+    so the classify-and-raise path is unit-tested.
+    """
+    if proc.returncode != 0:
+        raise CategorizedError(
+            "ssh authorize-key command failed in the guest",
+            category=ErrorCategory.TRANSPORT_FAILURE,
+            details=ssh_failure_details(proc.returncode, proc.stderr),
+        )
+
+
 def _real_ssh_exec(argv: list[str], key: str) -> None:  # pragma: no cover - live_vm
     def run_once() -> subprocess.CompletedProcess[str]:
         try:
@@ -104,13 +124,7 @@ def _real_ssh_exec(argv: list[str], key: str) -> None:  # pragma: no cover - liv
                 category=ErrorCategory.TRANSPORT_FAILURE,
             ) from exc
 
-    proc = run_ssh_with_retry(run_once, policy=_AUTHORIZE_SSH_RETRY)
-    if proc.returncode != 0:
-        raise CategorizedError(
-            "ssh authorize-key command failed in the guest",
-            category=ErrorCategory.TRANSPORT_FAILURE,
-            details={"exit_status": proc.returncode},
-        )
+    _raise_on_authorize_failure(run_ssh_with_retry(run_once, policy=_AUTHORIZE_SSH_RETRY))
 
 
 async def authorize_ssh_key_handler(
