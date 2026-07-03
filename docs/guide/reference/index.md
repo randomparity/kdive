@@ -95,6 +95,7 @@
 | [`ops.reconcile_systems`](ops.md#opsreconcile_systems) | `implemented` |
 | [`ops.set_cost_class_coeff`](ops.md#opsset_cost_class_coeff) | `implemented` |
 | [`ops.set_host_capacity`](ops.md#opsset_host_capacity) | `implemented` |
+| [`ops.tool_trail`](ops.md#opstool_trail) | `implemented` |
 | [`postmortem.crash`](postmortem.md#postmortemcrash) | `implemented` |
 | [`postmortem.triage`](postmortem.md#postmortemtriage) | `implemented` |
 | [`projects.list`](projects.md#projectslist) | `implemented` |

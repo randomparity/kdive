@@ -115,3 +115,28 @@ Set a host's concurrent allocation cap. Blocks new placement; no eviction. Opera
 |---|---|---|---|
 | `concurrent_allocation_cap` | integer | yes | Maximum concurrent allocations on the host (>= 0). |
 | `resource_id` | string | yes | Host (resource) id to set the cap for. |
+
+## `ops.tool_trail`
+
+`implemented` · `read-only`
+
+Page the per-call tool-invocation trail. Requires platform auditor.
+
+Reconstructs an agent session's ordered tool calls — each row carries ``tool``,
+``outcome``, ``args_digest``, and ``ts``. Returns the most recent matching rows,
+newest first, keyset-paginated: when ``data.truncated`` is ``true``, pass
+``data.next_cursor`` back as ``cursor`` for the next page. Omitting the window
+start bounds the read to the last 24h.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
+| `limit` | integer | no | Maximum rows returned (capped at 200). |
+| `request` | object (nullable) | no | Trail filters (agent_session / principal / tool / window). |
+
+`request` fields:
+
+- `agent_session` (`string (nullable)`, optional) — Filter to one agent session's calls.
+- `principal` (`string (nullable)`, optional) — Filter by acting principal.
+- `tool` (`string (nullable)`, optional) — Filter by tool name (e.g. 'runs.build').
+- `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit start to default to the last 24h.

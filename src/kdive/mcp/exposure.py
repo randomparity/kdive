@@ -179,6 +179,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "ops.reconcile_now": _PLAT_OP,
     "ops.set_cost_class_coeff": _PLAT_OP,
     "ops.set_host_capacity": _PLAT_OP,
+    "ops.tool_trail": _PLAT_AUDITOR,  # cross-tenant per-call trail read (ADR-0304)
     "ops.force_release": _PLAT_ADMIN,
     "ops.force_teardown": _PLAT_ADMIN,
     "ops.reconcile_systems": _PLAT_ADMIN,

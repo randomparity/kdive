@@ -45,6 +45,7 @@ from kdive.mcp.tools.ops import queue as ops_queue_tools
 from kdive.mcp.tools.ops import reconcile as ops_reconcile_tools
 from kdive.mcp.tools.ops import reconcile_systems as ops_reconcile_systems_tools
 from kdive.mcp.tools.ops import secrets as ops_secrets_tools
+from kdive.mcp.tools.ops import tool_trail as ops_tool_trail_tools
 from kdive.mcp.tools.ops import tuning as ops_tuning_tools
 from kdive.mcp.tools.ops.build_hosts import registrar as ops_build_hosts_tools
 from kdive.mcp.tools.ops.images import registrar as ops_images_tools
@@ -272,6 +273,7 @@ PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _pool_only_plane_registrar(ops_queue_tools.register),
     _pool_only_plane_registrar(ops_tuning_tools.register),
     _pool_only_plane_registrar(ops_inventory_export_tools.register),
+    _pool_only_plane_registrar(ops_tool_trail_tools.register),
     _pool_only_plane_registrar(audit_tools.register),
     _register_diagnostics_tools,
     _pool_only_plane_registrar(inventory_tools.register),
