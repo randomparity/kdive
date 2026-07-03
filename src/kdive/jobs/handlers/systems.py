@@ -40,6 +40,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore, artifact_key
 
 _log = logging.getLogger(__name__)
@@ -458,6 +459,7 @@ def register_handlers(
     registry: HandlerRegistry,
     *,
     resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
     artifact_store: ObjectStore | None = None,
 ) -> None:
     """Bind the provision/teardown/reprovision/authorize_ssh_key/check_ssh_reachable handlers."""
@@ -479,9 +481,13 @@ def register_handlers(
     )
     registry.register(
         JobKind.AUTHORIZE_SSH_KEY,
-        lambda conn, job: authorize_ssh_key_handler(conn, job, resolver=resolver),
+        lambda conn, job: authorize_ssh_key_handler(
+            conn, job, resolver=resolver, secret_registry=secret_registry
+        ),
     )
     registry.register(
         JobKind.CHECK_SSH_REACHABLE,
-        lambda conn, job: check_ssh_reachable_handler(conn, job, resolver=resolver),
+        lambda conn, job: check_ssh_reachable_handler(
+            conn, job, resolver=resolver, secret_registry=secret_registry
+        ),
     )

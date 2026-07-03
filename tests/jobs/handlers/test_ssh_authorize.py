@@ -18,7 +18,9 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind, JobState
 from kdive.jobs import worker
+from kdive.jobs.handlers import ssh_authorize
 from kdive.jobs.handlers.ssh_authorize import (
+    _attach_console_tail,
     _raise_on_authorize_failure,
     authorize_ssh_key_handler,
     build_authorize_argv,
@@ -98,7 +100,11 @@ def test_handler_unprovisioned_is_configuration_error() -> None:
     with pytest.raises(CategorizedError) as excinfo:
         asyncio.run(
             authorize_ssh_key_handler(
-                MagicMock(), _job(), resolver=resolver, ssh_exec=lambda _argv, _key: None
+                MagicMock(),
+                _job(),
+                resolver=resolver,
+                secret_registry=SecretRegistry(),
+                ssh_exec=lambda _argv, _key: None,
             )
         )
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
@@ -131,6 +137,7 @@ def test_handler_unreachable_preflight_fails_fast_terminal(detail: str, reason: 
                 MagicMock(),
                 _job(),
                 resolver=resolver,
+                secret_registry=SecretRegistry(),
                 ssh_exec=_ssh,
                 probe=_probe_returning(ReachResult(False, detail)),
             )
@@ -157,6 +164,7 @@ def test_handler_preflight_reason_survives_failure_context() -> None:
                 MagicMock(),
                 _job(),
                 resolver=resolver,
+                secret_registry=SecretRegistry(),
                 ssh_exec=lambda _argv, _key: None,
                 probe=_probe_returning(ReachResult(False, "no SSH banner")),
             )
@@ -217,7 +225,12 @@ def test_handler_authorizes_via_per_system_key_and_cleans_up_temp_key(
                     seen_key_existed = seen_key_path.exists()
 
                 result = await authorize_ssh_key_handler(
-                    conn, job, resolver=resolver, ssh_exec=_capture, probe=_reachable
+                    conn,
+                    job,
+                    resolver=resolver,
+                    secret_registry=SecretRegistry(),
+                    ssh_exec=_capture,
+                    probe=_reachable,
                 )
                 assert result is None
                 return recorded, seen_key_path, seen_key_existed
@@ -250,6 +263,7 @@ def test_handler_resolves_endpoint_by_domain_name(migrated_url: str) -> None:
                     conn,
                     job,
                     resolver=resolver,
+                    secret_registry=SecretRegistry(),
                     ssh_exec=lambda _argv, _key: None,
                     probe=_reachable,
                 )
@@ -274,7 +288,12 @@ def test_handler_ssh_failure_propagates_transport_failure(migrated_url: str) -> 
                 resolver = _resolver(("127.0.0.1", 22022))
                 with pytest.raises(CategorizedError) as excinfo:
                     await authorize_ssh_key_handler(
-                        conn, job, resolver=resolver, ssh_exec=_boom, probe=_reachable
+                        conn,
+                        job,
+                        resolver=resolver,
+                        secret_registry=SecretRegistry(),
+                        ssh_exec=_boom,
+                        probe=_reachable,
                     )
                 assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
 
@@ -326,6 +345,77 @@ def test_authorize_banner_timeout_reason_survives_failure_context() -> None:
     assert "Connection reset by peer" in context["failure_detail_stderr_tail"]
 
 
+# --- Guest console evidence (#1009, ADR-0306): a guest TRANSPORT_FAILURE carries a bounded,
+# redacted console tail so "did sshd start?" is answerable from the failed job alone. ---
+
+
+def _transport_error() -> CategorizedError:
+    return CategorizedError("ssh down", category=ErrorCategory.TRANSPORT_FAILURE)
+
+
+def test_attach_console_tail_enriches_transport_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _tail(_sid: UUID, _reg: SecretRegistry) -> str:
+        return "systemd[1]: Started OpenSSH server daemon.\n"
+
+    monkeypatch.setattr(ssh_authorize, "redacted_console_tail", _tail)
+    exc = _transport_error()
+
+    asyncio.run(_attach_console_tail(exc, uuid4(), SecretRegistry()))
+
+    assert exc.details["console_tail"] == "systemd[1]: Started OpenSSH server daemon.\n"
+
+
+def test_attach_console_tail_skips_non_transport_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _must_not_run(_sid: UUID, _reg: SecretRegistry) -> str:
+        raise AssertionError("console tail must not be read for a non-transport failure")
+
+    monkeypatch.setattr(ssh_authorize, "redacted_console_tail", _must_not_run)
+    exc = CategorizedError("no key", category=ErrorCategory.CONFIGURATION_ERROR)
+
+    asyncio.run(_attach_console_tail(exc, uuid4(), SecretRegistry()))
+
+    assert "console_tail" not in exc.details
+
+
+def test_attach_console_tail_best_effort_when_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _none(_sid: UUID, _reg: SecretRegistry) -> None:
+        return None
+
+    monkeypatch.setattr(ssh_authorize, "redacted_console_tail", _none)
+    exc = _transport_error()
+
+    asyncio.run(_attach_console_tail(exc, uuid4(), SecretRegistry()))
+
+    assert "console_tail" not in exc.details
+
+
+def test_unreachable_preflight_failure_context_carries_console_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The acceptance shape: an unreachable authorize surfaces the guest console tail via the same
+    # _failure_context path jobs.get/jobs.wait read — beside the #1008 reason — so an agent can
+    # answer "did sshd start?" from the failed job alone, without a second session.
+    async def _tail(_sid: UUID, _reg: SecretRegistry) -> str:
+        return "kdive-guest login:  (sshd never Started)\n"
+
+    monkeypatch.setattr(ssh_authorize, "redacted_console_tail", _tail)
+    resolver = _resolver(("127.0.0.1", 22022))
+    with pytest.raises(CategorizedError) as excinfo:
+        asyncio.run(
+            authorize_ssh_key_handler(
+                MagicMock(),
+                _job(),
+                resolver=resolver,
+                secret_registry=SecretRegistry(),
+                ssh_exec=lambda _argv, _key: None,
+                probe=_probe_returning(ReachResult(False, "no SSH banner")),
+            )
+        )
+    context = worker._failure_context(excinfo.value, SecretRegistry())
+    assert context["failure_detail_reason"] == "banner_timeout"
+    assert context["failure_detail_console_tail"] == "kdive-guest login:  (sshd never Started)\n"
+
+
 def test_handler_no_bootstrap_key_is_configuration_error(migrated_url: str) -> None:
     """No key row (System predates ADR-0289 or was never provisioned) fails closed."""
 
@@ -341,6 +431,7 @@ def test_handler_no_bootstrap_key_is_configuration_error(migrated_url: str) -> N
                         conn,
                         job,
                         resolver=resolver,
+                        secret_registry=SecretRegistry(),
                         ssh_exec=lambda _argv, _key: None,
                         probe=_reachable,
                     )

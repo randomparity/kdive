@@ -23,6 +23,7 @@ from kdive.jobs.handlers.ssh_reachable import (
     check_ssh_reachable_handler,
     serialize_reach_verdict,
 )
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.clock import FrozenClock
 
 _FROZEN = datetime(2026, 7, 2, 0, 0, tzinfo=UTC)
@@ -141,6 +142,26 @@ def test_serialize_verdict_unreachable_names_tcp_connect_layer() -> None:
     assert '"checks":[{"layer":"tcp_connect","ok":false}]' in raw
 
 
+def test_serialize_verdict_embeds_console_tail_when_given() -> None:
+    # ADR-0306: an unreachable verdict carries a bounded, redacted guest console tail.
+    raw = serialize_reach_verdict(
+        ReachResult(False, "no SSH banner"),
+        "127.0.0.1",
+        22001,
+        "2026-07-02T00:00:00+00:00",
+        console_tail="login:  (sshd absent)\n",
+    )
+    assert '"console_tail":"login:  (sshd absent)\\n"' in raw
+
+
+def test_serialize_verdict_omits_console_tail_when_none() -> None:
+    # A reachable verdict needs no guest diagnostics, so the field stays absent (back-compatible).
+    raw = serialize_reach_verdict(
+        ReachResult(True, "reachable"), "127.0.0.1", 22001, "2026-07-02T00:00:00+00:00"
+    )
+    assert "console_tail" not in raw
+
+
 def test_every_probe_detail_maps_to_a_layer() -> None:
     # Drift guard: any detail value the probe can emit must name its failing layer, or the
     # verdict would raise at serialization time.
@@ -213,7 +234,11 @@ def test_handler_serializes_reachable_verdict(
                 system_id = await _seed_system(conn)
                 job = _job_for(system_id)
                 return await check_ssh_reachable_handler(
-                    conn, job, resolver=_resolver(("127.0.0.1", 22001)), probe=probe
+                    conn,
+                    job,
+                    resolver=_resolver(("127.0.0.1", 22001)),
+                    secret_registry=SecretRegistry(),
+                    probe=probe,
                 )
 
     assert asyncio.run(_run()) == (
@@ -239,11 +264,81 @@ def test_handler_serializes_unreachable_verdict_as_success(
                 system_id = await _seed_system(conn)
                 job = _job_for(system_id)
                 return await check_ssh_reachable_handler(
-                    conn, job, resolver=_resolver(("127.0.0.1", 22001)), probe=probe
+                    conn,
+                    job,
+                    resolver=_resolver(("127.0.0.1", 22001)),
+                    secret_registry=SecretRegistry(),
+                    probe=probe,
                 )
 
     raw = asyncio.run(_run())
     assert raw is not None and '"reachable":false' in raw and '"detail":"unreachable"' in raw
+
+
+def test_unreachable_verdict_carries_console_tail(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ADR-0306: an unreachable verdict embeds the guest console tail so "did sshd start?" is
+    # answerable from the verdict alone.
+    monkeypatch.setattr(ssh_reachable, "datetime", FrozenClock(_FROZEN))
+
+    async def _tail(_sid: UUID, _reg: SecretRegistry) -> str:
+        return "kdive-guest login:  (sshd never Started)\n"
+
+    monkeypatch.setattr(ssh_reachable, "redacted_console_tail", _tail)
+
+    async def probe(_host: str, _port: int) -> ReachResult:
+        return ReachResult(False, "no SSH banner")
+
+    async def _run() -> str | None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            async with pool.connection() as conn:
+                system_id = await _seed_system(conn)
+                job = _job_for(system_id)
+                return await check_ssh_reachable_handler(
+                    conn,
+                    job,
+                    resolver=_resolver(("127.0.0.1", 22001)),
+                    secret_registry=SecretRegistry(),
+                    probe=probe,
+                )
+
+    raw = asyncio.run(_run())
+    assert raw is not None
+    assert '"console_tail":"kdive-guest login:  (sshd never Started)\\n"' in raw
+
+
+def test_reachable_verdict_omits_console_tail(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A reachable guest needs no diagnostics: the handler does not even read the console.
+    monkeypatch.setattr(ssh_reachable, "datetime", FrozenClock(_FROZEN))
+
+    async def _must_not_run(_sid: UUID, _reg: SecretRegistry) -> str:
+        raise AssertionError("console must not be read for a reachable verdict")
+
+    monkeypatch.setattr(ssh_reachable, "redacted_console_tail", _must_not_run)
+
+    async def probe(_host: str, _port: int) -> ReachResult:
+        return ReachResult(True, "reachable")
+
+    async def _run() -> str | None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            async with pool.connection() as conn:
+                system_id = await _seed_system(conn)
+                job = _job_for(system_id)
+                return await check_ssh_reachable_handler(
+                    conn,
+                    job,
+                    resolver=_resolver(("127.0.0.1", 22001)),
+                    secret_registry=SecretRegistry(),
+                    probe=probe,
+                )
+
+    raw = asyncio.run(_run())
+    assert raw is not None and "console_tail" not in raw
 
 
 def test_handler_dead_letters_when_system_not_ready(migrated_url: str) -> None:
@@ -258,7 +353,11 @@ def test_handler_dead_letters_when_system_not_ready(migrated_url: str) -> None:
                 job = _job_for(system_id)
                 with pytest.raises(CategorizedError) as excinfo:
                     await check_ssh_reachable_handler(
-                        conn, job, resolver=_resolver(("127.0.0.1", 22001)), probe=probe
+                        conn,
+                        job,
+                        resolver=_resolver(("127.0.0.1", 22001)),
+                        secret_registry=SecretRegistry(),
+                        probe=probe,
                     )
                 assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
                 assert excinfo.value.details["reason"] == "system_not_ready"
@@ -278,7 +377,11 @@ def test_handler_dead_letters_when_no_forward(migrated_url: str) -> None:
                 job = _job_for(system_id)
                 with pytest.raises(CategorizedError) as excinfo:
                     await check_ssh_reachable_handler(
-                        conn, job, resolver=_resolver(None), probe=probe
+                        conn,
+                        job,
+                        resolver=_resolver(None),
+                        secret_registry=SecretRegistry(),
+                        probe=probe,
                     )
                 assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
                 assert excinfo.value.details["reason"] == "ssh_not_provisioned"

@@ -40,6 +40,7 @@ def _register_system_handlers(
     systems.register_handlers(
         registry,
         resolver=assembly.resolver,
+        secret_registry=assembly.secret_registry,
         artifact_store=assembly.object_stores.optional_upload_store,
     )
 

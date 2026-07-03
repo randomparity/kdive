@@ -17,6 +17,7 @@ from psycopg import AsyncConnection
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
+from kdive.jobs.handlers.console_evidence import redacted_console_tail
 from kdive.jobs.handlers.ssh_reachable import ProbeFn, _real_probe
 from kdive.jobs.payloads import AuthorizeSshKeyPayload, load_payload
 from kdive.prereqs.system_bootstrap_key import (
@@ -32,6 +33,7 @@ from kdive.providers.shared.ssh_connect_retry import (
     run_ssh_with_retry,
     ssh_failure_details,
 )
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 type SshExec = Callable[[list[str], str], None]
 
@@ -157,11 +159,31 @@ async def _preflight_reachable(probe: ProbeFn, host: str, port: int) -> None:
     )
 
 
+async def _attach_console_tail(
+    exc: CategorizedError, system_id: UUID, secret_registry: SecretRegistry
+) -> None:
+    """Enrich a guest transport failure with a bounded, redacted console tail (ADR-0306).
+
+    Only a ``TRANSPORT_FAILURE`` gets the tail: a ``CONFIGURATION_ERROR`` (e.g. no bootstrap key) is
+    not a "what was the guest doing" question. Best-effort — :func:`redacted_console_tail` never
+    raises, so a missing or unreadable console cannot mask the transport failure. The tail rides
+    ``CategorizedError.details`` as ``console_tail``, which the worker's ``_failure_context``
+    projects into ``failure_detail_console_tail`` on ``jobs.get``/``jobs.wait`` (beside #1008's
+    ``reason``/``stderr_tail``).
+    """
+    if exc.category is not ErrorCategory.TRANSPORT_FAILURE:
+        return
+    tail = await redacted_console_tail(system_id, secret_registry)
+    if tail is not None:
+        exc.details["console_tail"] = tail
+
+
 async def authorize_ssh_key_handler(
     conn: AsyncConnection,
     job: Job,
     *,
     resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
     ssh_exec: SshExec = _real_ssh_exec,
     probe: ProbeFn = _real_probe,
 ) -> str | None:
@@ -169,7 +191,9 @@ async def authorize_ssh_key_handler(
 
     Pre-flights the recorded SSH endpoint with the reachability probe (ADR-0305, #1012) before the
     long append retry: an unreachable guest fails in seconds with a named reason instead of a
-    multi-minute ``running``.
+    multi-minute ``running``. On a guest ``TRANSPORT_FAILURE`` — the pre-flight fast-fail or the
+    append itself — attaches a bounded, redacted console tail so "did sshd start?" is answerable
+    from the failed job alone (ADR-0306).
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` when the System has no recorded SSH forward or
@@ -193,8 +217,12 @@ async def authorize_ssh_key_handler(
             details={"reason": "ssh_not_provisioned"},
         )
     host, port = endpoint
-    await _preflight_reachable(probe, host, port)
-    private_key = await load_system_bootstrap_private_key(conn, system_id)
-    with materialized_private_key(private_key) as key_path:
-        ssh_exec(build_authorize_argv(host, port, str(key_path)), payload.public_key)
+    try:
+        await _preflight_reachable(probe, host, port)
+        private_key = await load_system_bootstrap_private_key(conn, system_id)
+        with materialized_private_key(private_key) as key_path:
+            ssh_exec(build_authorize_argv(host, port, str(key_path)), payload.public_key)
+    except CategorizedError as exc:
+        await _attach_console_tail(exc, system_id, secret_registry)
+        raise
     return None
