@@ -10,9 +10,10 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.idempotency import delete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import RUNS
+from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import RunState
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.capture import CaptureMethod
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
@@ -24,14 +25,34 @@ from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._idempotency import keyed_mutation
 from kdive.mcp.tools.lifecycle.runs.common import run_job_envelope
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.runs.steps import (
     build_baked_cmdline_extra,
+    install_method_for,
     platform_owned_cmdline_token,
     step_progress,
 )
+
+
+def _crashkernel_error(run_id: str, crashkernel: str | None) -> ToolResponse | None:
+    """Reject a malformed crashkernel reservation at the tool boundary (ADR-0300), else ``None``.
+
+    Injection-safe, not range-validating: the token is opaque (a size or a multi-range), but a
+    blank value, internal whitespace (which would inject an extra kernel token into the space-joined
+    cmdline), or a leading ``crashkernel=`` prefix is rejected. Mirrors the ``InstallPayload``
+    validator with per-reason codes for the synchronous tool response.
+    """
+    if crashkernel is None:
+        return None
+    stripped = crashkernel.strip()
+    if not stripped:
+        return _config_error(run_id, data={"reason": "crashkernel_blank"})
+    if stripped.split() != [stripped] or stripped.lower().startswith("crashkernel="):
+        return _config_error(run_id, data={"reason": "crashkernel_malformed"})
+    return None
 
 
 async def install_run(
@@ -40,14 +61,18 @@ async def install_run(
     run_id: str,
     *,
     cmdline: str | None = None,
+    crashkernel: str | None = None,
+    resolver: ProviderResolver,
     idempotency_key: str | None = None,
 ) -> ToolResponse:
     """Admit an idempotent install for a built, SUCCEEDED Run.
 
     ``cmdline`` (ADR-0299, #988) is an optional boot-cmdline override applied against the
     already-built kernel: it **replaces** any build-time extra args (platform tokens are always
-    preserved). A value differing from the currently-installed one re-stages the boot without a
-    rebuild; the same value is an idempotent no-op.
+    preserved). ``crashkernel`` (ADR-0300, #989) is the optional kdump reservation size that tunes
+    the platform ``crashkernel=<size>`` token (default 256M); it applies only to kdump-capture
+    Systems. A value differing from the currently-installed one (either field) re-stages the boot
+    without a rebuild; the same values are an idempotent no-op.
     """
     uid = _as_uuid(run_id)
     if uid is None:
@@ -59,6 +84,9 @@ async def install_run(
         )
     if cmdline is not None and not cmdline.strip():
         return _config_error(run_id, data={"reason": "cmdline_blank"})
+    crashkernel_error = _crashkernel_error(run_id, crashkernel)
+    if crashkernel_error is not None:
+        return crashkernel_error
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             run = await RUNS.get(conn, uid)
@@ -69,40 +97,85 @@ async def install_run(
                 return _config_error(run_id, data={"current_status": run.state.value})
             if run.system_id is None:
                 return _not_bound(run_id)
+            # The method gate is on the crashkernel path only: an install without a reservation is
+            # byte-unchanged (no System fetch, no binding call, no new failure surface, ADR-0300).
+            if crashkernel is not None:
+                gate = await _reject_crashkernel_off_kdump(conn, run, resolver)
+                if gate is not None:
+                    return gate
             return await keyed_mutation(
                 conn,
                 idempotency_key=idempotency_key,
                 principal=ctx.principal,
                 project=run.project,
                 kind="runs.install",
-                do_work=lambda: _restage_and_enqueue_install(conn, ctx, run, cmdline),
+                do_work=lambda: _restage_and_enqueue_install(conn, ctx, run, cmdline, crashkernel),
             )
 
 
+async def _reject_crashkernel_off_kdump(
+    conn: AsyncConnection, run: Run, resolver: ProviderResolver
+) -> ToolResponse | None:
+    """Reject a crashkernel reservation on a non-kdump System, else ``None`` (ADR-0300).
+
+    Resolves the System's capture method (a cheap ``(kind, name)`` lookup plus in-process runtime
+    construction — no libvirt round-trip). A resolution failure is mapped to ``configuration_error``
+    rather than escaping as a 500. The install handler carries the same guard as a backstop for a
+    hand-crafted payload or an accept-then-reprovision skew.
+    """
+    system_id = run.require_system_id()
+    system = await SYSTEMS.get(conn, system_id)
+    if system is None:
+        return _config_error(str(run.id))
+    try:
+        binding = await resolver.binding_for_system(conn, system_id)
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(str(run.id), exc)
+    method = install_method_for(system, binding.runtime.profile_policy)
+    if method is not CaptureMethod.KDUMP:
+        return _config_error(
+            str(run.id), data={"reason": "crashkernel_requires_kdump", "method": method.value}
+        )
+    return None
+
+
 async def _restage_and_enqueue_install(
-    conn: AsyncConnection, ctx: RequestContext, run: Run, cmdline: str | None
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    run: Run,
+    cmdline: str | None,
+    crashkernel: str | None,
 ) -> ToolResponse:
-    """Enqueue install, re-staging when the requested cmdline differs from the installed one.
+    """Enqueue install, re-staging when the requested cmdline or crashkernel differs from installed.
 
     The whole decision — read the step ledger, delete the settled ``install``/``boot`` rows on a
     re-stage, and enqueue — runs inside one per-Run advisory-lock transaction so a concurrent
-    ``runs.install`` cannot interleave read→delete→enqueue (ADR-0299). The shared ledger-driven
-    recycle (``_locked_enqueue``) then carries the new cmdline into the recycled install job.
+    ``runs.install`` cannot interleave read→delete→enqueue (ADR-0299/0300). The shared ledger-driven
+    recycle (``_locked_enqueue``) then carries the new cmdline + crashkernel into the recycled job.
     """
-    requested = (
+    requested_cmdline = (
         cmdline.strip() if cmdline is not None else await build_baked_cmdline_extra(conn, run.id)
     )
-    # Include the cmdline in the audit args so a re-stage to a new cmdline is not audited the same
-    # as the prior install (the args_digest is one-way, so this distinguishes the operations without
-    # making the cmdline reverse-readable). Omitted when no override.
+    # Omit → default 256M (recorded as ``None``): each install fully specifies its variant, so an
+    # omitted reservation reverts to the platform default, like the cmdline's build-baked anchor.
+    requested_crashkernel = crashkernel.strip() if crashkernel is not None else None
+    # Fold both fields into the audit args so a re-stage to a new variant is not audited the same as
+    # the prior install (the args_digest is one-way — this distinguishes the operations without
+    # making the values reverse-readable). Omitted when the field was not supplied.
     audit_args = {"run_id": str(run.id)}
     if cmdline is not None:
         audit_args["cmdline"] = cmdline.strip()
+    if crashkernel is not None:
+        audit_args["crashkernel"] = requested_crashkernel or ""
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
         progress = await step_progress(conn, run.id)
         if progress.install == "running" or progress.boot == "running":
             return _config_error(str(run.id), data={"reason": "step_in_progress"})
-        if progress.install == "succeeded" and progress.installed_cmdline != requested:
+        variant_changed = (
+            progress.installed_cmdline != requested_cmdline
+            or progress.installed_crashkernel != requested_crashkernel
+        )
+        if progress.install == "succeeded" and variant_changed:
             await delete_run_step(conn, run.id, "install")
             await delete_run_step(conn, run.id, "boot")
         job = await _locked_enqueue(
@@ -112,7 +185,7 @@ async def _restage_and_enqueue_install(
             JobKind.INSTALL,
             "install",
             "runs.install",
-            InstallPayload(run_id=str(run.id), cmdline=cmdline),
+            InstallPayload(run_id=str(run.id), cmdline=cmdline, crashkernel=crashkernel),
             audit_args,
         )
     return run_job_envelope(job, run.id)

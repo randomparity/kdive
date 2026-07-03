@@ -396,7 +396,9 @@ def test_install_unbound_run_is_not_bound(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_unbound_run(pool, state=RunState.SUCCEEDED)
-            resp = await install_run(pool, _ctx(), run_id)
+            resp = await install_run(
+                pool, _ctx(), run_id, resolver=provider_resolver(profile_policy=_LOCAL_POLICY)
+            )
             n_jobs = await _count(pool, "SELECT count(*) AS n FROM jobs", ())
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert resp.data["reason"] == "run_not_bound"
@@ -681,6 +683,37 @@ def test_envelope_for_run_omits_installed_cmdline_without_progress() -> None:
     # A created/running Run has no step progress, so the key is omitted (not a null claim).
     resp = runs_common.envelope_for_run(_run_model(RunState.RUNNING))
     assert "installed_cmdline" not in resp.data
+
+
+def test_envelope_for_run_surfaces_installed_crashkernel() -> None:
+    # runs.get read-back of the applied kdump reservation (ADR-0300): confirms the live value.
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(
+            install="succeeded",
+            boot="succeeded",
+            boot_outcome="ready",
+            installed_crashkernel="512M",
+        ),
+    )
+
+    assert resp.data["installed_crashkernel"] == "512M"
+
+
+def test_envelope_for_run_installed_crashkernel_null_when_default() -> None:
+    # A Run on the default reservation reports installed_crashkernel null (256M default in force).
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(install="succeeded", boot="pending", boot_outcome=None),
+    )
+
+    assert resp.data["installed_crashkernel"] is None
+
+
+def test_envelope_for_run_omits_installed_crashkernel_without_progress() -> None:
+    # A created/running Run has no step progress, so the key is omitted (not a null claim).
+    resp = runs_common.envelope_for_run(_run_model(RunState.RUNNING))
+    assert "installed_crashkernel" not in resp.data
 
 
 _CONSOLE_ACCESS_EXPECTED = {
@@ -4066,7 +4099,9 @@ async def _seed_build_ledger(
 
 
 async def _install(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) -> Any:
-    return await install_run(pool, ctx, run_id)
+    return await install_run(
+        pool, ctx, run_id, resolver=provider_resolver(profile_policy=_LOCAL_POLICY)
+    )
 
 
 async def _boot(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) -> Any:
@@ -4157,22 +4192,37 @@ def test_install_retries_terminal_failed_step_without_rebuild(migrated_url: str)
 
 
 async def _seed_installed_and_booted(
-    pool: AsyncConnectionPool, run_id: str, *, installed_cmdline: str | None
+    pool: AsyncConnectionPool,
+    run_id: str,
+    *,
+    installed_cmdline: str | None,
+    installed_crashkernel: str | None = None,
 ) -> None:
-    """Seed a Run whose install + boot steps have succeeded (ADR-0299 re-stage setup).
+    """Seed a Run whose install + boot steps have succeeded (ADR-0299/0300 re-stage setup).
 
-    Records both ``run_steps`` rows succeeded (install carrying ``installed_cmdline``) and both
-    step jobs succeeded, so a subsequent ``runs.install`` sees a settled, previously-booted Run.
+    Records both ``run_steps`` rows succeeded (install carrying ``installed_cmdline`` +
+    ``installed_crashkernel``) and both step jobs succeeded, so a subsequent ``runs.install`` sees a
+    settled, previously-booted Run.
     """
     async with pool.connection() as conn:
-        install_result: dict[str, Any] = {"system_id": str(uuid4()), "cmdline": installed_cmdline}
+        install_result: dict[str, Any] = {
+            "system_id": str(uuid4()),
+            "cmdline": installed_cmdline,
+            "crashkernel": installed_crashkernel,
+        }
         await conn.execute(
             "INSERT INTO run_steps (run_id, step, state, result) "
             "VALUES (%s, 'install', 'succeeded', %s), (%s, 'boot', 'succeeded', '{}'::jsonb)",
             (run_id, Jsonb(install_result), run_id),
         )
     for kind, step, payload in (
-        (JobKind.INSTALL, "install", InstallPayload(run_id=run_id, cmdline=installed_cmdline)),
+        (
+            JobKind.INSTALL,
+            "install",
+            InstallPayload(
+                run_id=run_id, cmdline=installed_cmdline, crashkernel=installed_crashkernel
+            ),
+        ),
         (JobKind.BOOT, "boot", RunPayload(run_id=run_id)),
     ):
         async with pool.connection() as conn:
@@ -4188,6 +4238,23 @@ async def _seed_installed_and_booted(
             )
 
 
+def test_runs_get_reads_installed_crashkernel_from_ledger(migrated_url: str) -> None:
+    # End-to-end: step_progress reads the recorded crashkernel off the install row and runs.get
+    # surfaces it (ADR-0300). Proves the DB read path, not just the synthetic StepProgress mapping.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(
+                pool, provisioning_profile=_profile_dump(crashkernel="256M")
+            )
+            await _seed_installed_and_booted(
+                pool, run_id, installed_cmdline=None, installed_crashkernel="512M"
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["installed_crashkernel"] == "512M"
+
+    asyncio.run(_run())
+
+
 async def _run_step_row_exists(pool: AsyncConnectionPool, run_id: str, step: str) -> bool:
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute("SELECT 1 FROM run_steps WHERE run_id=%s AND step=%s", (run_id, step))
@@ -4198,7 +4265,13 @@ def test_install_rejects_platform_owned_cmdline(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_succeeded_run(pool)
-            resp = await install_run(pool, _ctx(), run_id, cmdline="root=/dev/sda1 quiet")
+            resp = await install_run(
+                pool,
+                _ctx(),
+                run_id,
+                cmdline="root=/dev/sda1 quiet",
+                resolver=provider_resolver(profile_policy=_LOCAL_POLICY),
+            )
         assert resp.error_category == "configuration_error"
         assert resp.data["reason"] == "cmdline_overrides_platform_args"
         assert resp.data["token"] == "root="
@@ -4210,7 +4283,13 @@ def test_install_rejects_blank_cmdline(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_succeeded_run(pool)
-            resp = await install_run(pool, _ctx(), run_id, cmdline="   ")
+            resp = await install_run(
+                pool,
+                _ctx(),
+                run_id,
+                cmdline="   ",
+                resolver=provider_resolver(profile_policy=_LOCAL_POLICY),
+            )
         assert resp.error_category == "configuration_error"
         assert resp.data["reason"] == "cmdline_blank"
 
@@ -4221,7 +4300,13 @@ def test_install_enqueues_install_payload_with_cmdline(migrated_url: str) -> Non
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_succeeded_run(pool)
-            resp = await install_run(pool, _ctx(), run_id, cmdline="dhash_entries=1")
+            resp = await install_run(
+                pool,
+                _ctx(),
+                run_id,
+                cmdline="dhash_entries=1",
+                resolver=provider_resolver(profile_policy=_LOCAL_POLICY),
+            )
             assert resp.error_category is None
             async with pool.connection() as conn:
                 job = await queue.get_by_dedup_key(conn, f"{run_id}:install")
@@ -4237,7 +4322,13 @@ def test_install_differing_cmdline_restages_install_and_boot(migrated_url: str) 
             run_id = await _seed_succeeded_run(pool)
             await _seed_installed_and_booted(pool, run_id, installed_cmdline="dhash_entries=1")
 
-            resp = await install_run(pool, _ctx(), run_id, cmdline="dhash_entries=2")
+            resp = await install_run(
+                pool,
+                _ctx(),
+                run_id,
+                cmdline="dhash_entries=2",
+                resolver=provider_resolver(profile_policy=_LOCAL_POLICY),
+            )
             assert resp.error_category is None
             boot_present = await _run_step_row_exists(pool, run_id, "boot")
             async with pool.connection() as conn:
@@ -4256,7 +4347,13 @@ def test_install_same_cmdline_is_noop(migrated_url: str) -> None:
             run_id = await _seed_succeeded_run(pool)
             await _seed_installed_and_booted(pool, run_id, installed_cmdline="dhash_entries=1")
 
-            resp = await install_run(pool, _ctx(), run_id, cmdline="dhash_entries=1")
+            resp = await install_run(
+                pool,
+                _ctx(),
+                run_id,
+                cmdline="dhash_entries=1",
+                resolver=provider_resolver(profile_policy=_LOCAL_POLICY),
+            )
             assert resp.error_category is None
             boot_present = await _run_step_row_exists(pool, run_id, "boot")
             async with pool.connection() as conn:
@@ -4279,9 +4376,210 @@ def test_install_rejected_while_boot_running(migrated_url: str) -> None:
                     "(%s, 'boot', 'running', NULL)",
                     (run_id, run_id),
                 )
-            resp = await install_run(pool, _ctx(), run_id, cmdline="dhash_entries=2")
+            resp = await install_run(
+                pool,
+                _ctx(),
+                run_id,
+                cmdline="dhash_entries=2",
+                resolver=provider_resolver(profile_policy=_LOCAL_POLICY),
+            )
         assert resp.error_category == "configuration_error"
         assert resp.data["reason"] == "step_in_progress"
+
+    asyncio.run(_run())
+
+
+def _kdump_run(pool: AsyncConnectionPool) -> Any:
+    """A built, kdump-provisioned Run with no build-baked cmdline (isolates crashkernel restage)."""
+    return _seed_succeeded_run(
+        pool,
+        build_profile={"schema_version": 1},
+        provisioning_profile=_profile_dump(crashkernel="256M"),
+    )
+
+
+def test_install_accepts_crashkernel_and_enqueues_payload(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _kdump_run(pool)
+            resp = await install_run(
+                pool,
+                _ctx(),
+                run_id,
+                crashkernel="512M",
+                resolver=provider_resolver(profile_policy=_LOCAL_POLICY),
+            )
+            assert resp.error_category is None
+            async with pool.connection() as conn:
+                job = await queue.get_by_dedup_key(conn, f"{run_id}:install")
+        assert job is not None
+        assert job.payload["crashkernel"] == "512M"
+
+    asyncio.run(_run())
+
+
+def test_install_rejects_crashkernel_on_non_kdump_system(migrated_url: str) -> None:
+    # A crashkernel on a console-capture System is rejected synchronously at the boundary (#989).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)  # default profile → CONSOLE, not KDUMP
+            resp = await install_run(
+                pool,
+                _ctx(),
+                run_id,
+                crashkernel="512M",
+                resolver=provider_resolver(profile_policy=_LOCAL_POLICY),
+            )
+            njobs = await _count(
+                pool, "SELECT count(*) AS n FROM jobs WHERE dedup_key=%s", (f"{run_id}:install",)
+            )
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "crashkernel_requires_kdump"
+        assert resp.data["method"] == "console"
+        assert njobs == 0  # rejected before any enqueue
+
+    asyncio.run(_run())
+
+
+def test_install_rejects_blank_crashkernel(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _kdump_run(pool)
+            resp = await install_run(
+                pool,
+                _ctx(),
+                run_id,
+                crashkernel="   ",
+                resolver=provider_resolver(profile_policy=_LOCAL_POLICY),
+            )
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "crashkernel_blank"
+
+    asyncio.run(_run())
+
+
+def test_install_rejects_malformed_crashkernel(migrated_url: str) -> None:
+    # Internal whitespace (cmdline injection) and a leading crashkernel= prefix both → malformed.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _kdump_run(pool)
+            resolver = provider_resolver(profile_policy=_LOCAL_POLICY)
+            spaced = await install_run(
+                pool, _ctx(), run_id, crashkernel="512M panic=1", resolver=resolver
+            )
+            prefixed = await install_run(
+                pool, _ctx(), run_id, crashkernel="crashkernel=512M", resolver=resolver
+            )
+        assert spaced.data["reason"] == "crashkernel_malformed"
+        assert prefixed.data["reason"] == "crashkernel_malformed"
+
+    asyncio.run(_run())
+
+
+def test_install_differing_crashkernel_restages_install_and_boot(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _kdump_run(pool)
+            # cmdline matches (both build-baked None), so only the crashkernel drives the re-stage.
+            await _seed_installed_and_booted(
+                pool, run_id, installed_cmdline=None, installed_crashkernel="256M"
+            )
+            resp = await install_run(
+                pool,
+                _ctx(),
+                run_id,
+                crashkernel="512M",
+                resolver=provider_resolver(profile_policy=_LOCAL_POLICY),
+            )
+            assert resp.error_category is None
+            boot_present = await _run_step_row_exists(pool, run_id, "boot")
+            async with pool.connection() as conn:
+                install_job = await queue.get_by_dedup_key(conn, f"{run_id}:install")
+        assert not boot_present  # boot ledger recycled so runs.boot re-runs
+        assert install_job is not None
+        assert install_job.state is JobState.QUEUED  # succeeded job recycled
+        assert install_job.payload["crashkernel"] == "512M"  # new reservation carried
+
+    asyncio.run(_run())
+
+
+def test_install_same_crashkernel_is_noop(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _kdump_run(pool)
+            await _seed_installed_and_booted(
+                pool, run_id, installed_cmdline=None, installed_crashkernel="512M"
+            )
+            resp = await install_run(
+                pool,
+                _ctx(),
+                run_id,
+                crashkernel="512M",
+                resolver=provider_resolver(profile_policy=_LOCAL_POLICY),
+            )
+            assert resp.error_category is None
+            boot_present = await _run_step_row_exists(pool, run_id, "boot")
+            async with pool.connection() as conn:
+                install_job = await queue.get_by_dedup_key(conn, f"{run_id}:install")
+        assert boot_present  # unchanged: no re-stage
+        assert install_job is not None
+        assert install_job.state is JobState.SUCCEEDED  # not recycled
+
+    asyncio.run(_run())
+
+
+def test_install_omit_crashkernel_reverts_to_default(migrated_url: str) -> None:
+    # Omitting crashkernel on an already-512M Run reverts the reservation to the default 256M
+    # (ADR-0300: each install fully specifies its variant; omit → default anchor).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _kdump_run(pool)
+            await _seed_installed_and_booted(
+                pool, run_id, installed_cmdline=None, installed_crashkernel="512M"
+            )
+            resp = await install_run(
+                pool, _ctx(), run_id, resolver=provider_resolver(profile_policy=_LOCAL_POLICY)
+            )
+            assert resp.error_category is None
+            boot_present = await _run_step_row_exists(pool, run_id, "boot")
+            async with pool.connection() as conn:
+                install_job = await queue.get_by_dedup_key(conn, f"{run_id}:install")
+        assert not boot_present  # re-staged back to default
+        assert install_job is not None
+        assert install_job.state is JobState.QUEUED
+        assert "crashkernel" not in install_job.payload  # None → default 256M
+
+    asyncio.run(_run())
+
+
+def test_install_crashkernel_change_reverts_omitted_cmdline(migrated_url: str) -> None:
+    # The documented cmdline<->crashkernel coupling (ADR-0300): setting crashkernel while omitting
+    # cmdline reverts the cmdline to the build-baked extra as it re-stages.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(
+                pool,
+                build_profile={**_VALID_BUILD, "cmdline": "baked=1"},
+                provisioning_profile=_profile_dump(crashkernel="256M"),
+            )
+            # Installed with a non-baked cmdline; a later crashkernel-only install reverts it.
+            await _seed_installed_and_booted(
+                pool, run_id, installed_cmdline="dhash_entries=9", installed_crashkernel="256M"
+            )
+            resp = await install_run(
+                pool,
+                _ctx(),
+                run_id,
+                crashkernel="512M",
+                resolver=provider_resolver(profile_policy=_LOCAL_POLICY),
+            )
+            assert resp.error_category is None
+            async with pool.connection() as conn:
+                install_job = await queue.get_by_dedup_key(conn, f"{run_id}:install")
+        assert install_job is not None
+        assert install_job.state is JobState.QUEUED  # re-staged
+        assert install_job.payload["crashkernel"] == "512M"
+        assert "cmdline" not in install_job.payload  # omitted → reverts to build-baked "baked=1"
 
     asyncio.run(_run())
 
@@ -4535,9 +4833,10 @@ async def _enqueue_job(
     step: str,
     *,
     cmdline: str | None = None,
+    crashkernel: str | None = None,
 ) -> Job:
     payload: RunPayload = (
-        InstallPayload(run_id=run_id, cmdline=cmdline)
+        InstallPayload(run_id=run_id, cmdline=cmdline, crashkernel=crashkernel)
         if kind is JobKind.INSTALL
         else RunPayload(run_id=run_id)
     )
@@ -4560,6 +4859,90 @@ async def _install_step_cmdline(pool: AsyncConnectionPool, run_id: str) -> objec
         row = await cur.fetchone()
         assert row is not None
         return row[0].get("cmdline")
+
+
+async def _install_step_crashkernel(pool: AsyncConnectionPool, run_id: str) -> object:
+    """Read the recorded applied crashkernel reservation from the install step ledger row (#989)."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT result FROM run_steps WHERE run_id = %s AND step = 'install'", (run_id,)
+        )
+        row = await cur.fetchone()
+        assert row is not None
+        return row[0].get("crashkernel")
+
+
+def test_install_handler_applies_and_records_crashkernel(migrated_url: str) -> None:
+    # A kdump System's install honors the per-install crashkernel (ADR-0300): the composed cmdline
+    # carries crashkernel=512M (not the default 256M) and the value is recorded on the install step.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(
+                pool,
+                build_profile={**_VALID_BUILD, "cmdline": "dhash_entries=1"},
+                provisioning_profile=_profile_dump(crashkernel="256M"),
+            )
+            job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install", crashkernel="512M")
+            installer = _FakeInstaller()
+            async with pool.connection() as conn:
+                await runs_handlers.install_handler(
+                    conn,
+                    job,
+                    resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
+                )
+            assert "crashkernel=512M" in installer.calls[0].cmdline
+            assert "crashkernel=256M" not in installer.calls[0].cmdline
+            assert await _install_step_crashkernel(pool, run_id) == "512M"
+
+    asyncio.run(_run())
+
+
+def test_install_handler_records_no_crashkernel_when_default(migrated_url: str) -> None:
+    # Omitting crashkernel boots the default 256M and records null (the default is in force).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(
+                pool,
+                build_profile={**_VALID_BUILD, "cmdline": "dhash_entries=1"},
+                provisioning_profile=_profile_dump(crashkernel="256M"),
+            )
+            job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
+            installer = _FakeInstaller()
+            async with pool.connection() as conn:
+                await runs_handlers.install_handler(
+                    conn,
+                    job,
+                    resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
+                )
+            assert "crashkernel=256M" in installer.calls[0].cmdline
+            assert await _install_step_crashkernel(pool, run_id) is None
+
+    asyncio.run(_run())
+
+
+def test_install_handler_rejects_crashkernel_on_non_kdump_system(migrated_url: str) -> None:
+    # Backstop (ADR-0300): a crashkernel payload on a non-kdump System fails the job loudly rather
+    # than silently dropping the reservation. The tool boundary rejects this earlier; the handler
+    # covers a hand-crafted payload or an accept-then-reprovision skew.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)  # default profile → CONSOLE, not KDUMP
+            job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install", crashkernel="512M")
+            installer = _FakeInstaller()
+            with pytest.raises(CategorizedError) as exc:
+                async with pool.connection() as conn:
+                    await runs_handlers.install_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(
+                            installer=installer, profile_policy=_LOCAL_POLICY
+                        ),
+                    )
+            assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+            assert exc.value.details["reason"] == "crashkernel_requires_kdump"
+            assert len(installer.calls) == 0  # never staged
+
+    asyncio.run(_run())
 
 
 def test_install_handler_records_step_run_stays_succeeded(migrated_url: str) -> None:
@@ -5627,7 +6010,13 @@ def test_install_cmdline_distinguishes_audit_digest(migrated_url: str) -> None:
     """
 
     async def _digest(pool: AsyncConnectionPool, run_id: str, cmdline: str | None) -> str:
-        await install_run(pool, _ctx(), run_id, cmdline=cmdline)
+        await install_run(
+            pool,
+            _ctx(),
+            run_id,
+            cmdline=cmdline,
+            resolver=provider_resolver(profile_policy=_LOCAL_POLICY),
+        )
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT args_digest FROM audit_log WHERE tool='runs.install' AND object_id=%s",

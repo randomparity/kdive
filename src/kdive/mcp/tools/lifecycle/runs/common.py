@@ -179,16 +179,21 @@ def _required_cmdline_data(required_cmdline: str | None) -> dict[str, JsonValue]
     return {"required_cmdline": required_cmdline}
 
 
-def _installed_cmdline_data(step_progress: StepProgress | None) -> dict[str, JsonValue]:
-    """The applied install cmdline extra, for sweep read-back (ADR-0299, #988).
+def _installed_variant_data(step_progress: StepProgress | None) -> dict[str, JsonValue]:
+    """The applied install variant, for sweep read-back (ADR-0299 #988, ADR-0300 #989).
 
-    Emitted whenever step progress exists (a built Run): the value is the client extra the last
-    install applied, or ``None`` before any install / when none was applied. Omitted on a Run with
-    no progress (created/running/failed), so an absent key is never read as "nothing installed".
+    Emitted whenever step progress exists (a built Run): ``installed_cmdline`` is the client extra
+    the last install applied and ``installed_crashkernel`` is the kdump reservation it applied —
+    each ``None`` before any install, or when the default was in force (no extra / default 256M).
+    Both keys are omitted together on a Run with no progress (created/running/failed), so an absent
+    key is never read as "nothing installed".
     """
     if step_progress is None:
         return {}
-    return {"installed_cmdline": step_progress.installed_cmdline}
+    return {
+        "installed_cmdline": step_progress.installed_cmdline,
+        "installed_crashkernel": step_progress.installed_crashkernel,
+    }
 
 
 def _expected_boot_failure_data(
@@ -315,7 +320,7 @@ def envelope_for_run(
         "active_debug_session_ids": list(active_debug_session_ids or []),
         **_run_step_data(run, step_progress, boot_readiness),
         **_required_cmdline_data(required_cmdline),
-        **_installed_cmdline_data(step_progress),
+        **_installed_variant_data(step_progress),
         **_expected_boot_failure_data(run, step_progress),
         **_capture_data(step_progress),
         **_build_provenance_data(build_provenance),

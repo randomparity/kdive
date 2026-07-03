@@ -11,6 +11,7 @@ from psycopg import AsyncConnection
 from kdive.db.idempotency import claim_run_step, complete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
+from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
@@ -47,9 +48,11 @@ async def install_handler(
         install_payload = load_payload(job, InstallPayload)
         run_id = UUID(install_payload.run_id)
         override = install_payload.cmdline
+        crashkernel = install_payload.crashkernel
     else:
         run_id = UUID(load_payload(job, RunPayload).run_id)
         override = None
+        crashkernel = None
     run = await RUNS.get(conn, run_id)
     if run is None or run.kernel_ref is None:
         raise CategorizedError(
@@ -70,6 +73,15 @@ async def install_handler(
     runtime = binding.runtime
     installer = runtime.installer
     method = install_method_for(system, runtime.profile_policy)
+    if crashkernel is not None and method is not CaptureMethod.KDUMP:
+        # Backstop for the tool-boundary gate (ADR-0300): a crashkernel reservation is a kdump-only
+        # token. Fail loudly rather than compose a cmdline that silently drops it — this covers a
+        # hand-crafted payload or an accept-then-reprovision skew after the boundary accepted it.
+        raise CategorizedError(
+            "crashkernel reservation requires a kdump-capture system",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"reason": "crashkernel_requires_kdump", "method": method.value},
+        )
     kernel_ref = run.kernel_ref
     # One read of the build step result feeds the cmdline, initrd, and debuginfo below.
     build_result = await existing_build_result(conn, run_id)
@@ -80,7 +92,12 @@ async def install_handler(
     # cmdline without cmdline_for re-reading the build result.
     applied_extra = override if override is not None else build_extra
     cmdline = await cmdline_for(
-        conn, run, method, root_cmdline=runtime.platform_root_cmdline, override=applied_extra
+        conn,
+        run,
+        method,
+        root_cmdline=runtime.platform_root_cmdline,
+        override=applied_extra,
+        crashkernel=crashkernel,
     )
     _log.info("install: run %s resolved cmdline %r (method %s)", run_id, cmdline, method.value)
     initrd_ref = build_result.initrd_ref if build_result is not None else None
@@ -107,7 +124,10 @@ async def install_handler(
         raise
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
         await complete_run_step(
-            conn, run_id, "install", {"system_id": str(system_id), "cmdline": applied_extra}
+            conn,
+            run_id,
+            "install",
+            {"system_id": str(system_id), "cmdline": applied_extra, "crashkernel": crashkernel},
         )
         await audit.record(
             conn,

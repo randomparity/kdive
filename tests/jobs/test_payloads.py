@@ -87,6 +87,34 @@ def test_install_payload_rejects_blank_cmdline() -> None:
         InstallPayload(run_id=str(uuid4()), cmdline="   ")
 
 
+def test_install_payload_round_trips_crashkernel_size_and_range() -> None:
+    # The crashkernel reservation (ADR-0300) is an opaque token: a size and a multi-range both ride.
+    run_id = uuid4()
+    payload = dump_payload(
+        JobKind.INSTALL, InstallPayload(run_id=str(run_id), crashkernel="  512M ")
+    )
+    assert payload == {"run_id": str(run_id), "crashkernel": "512M"}
+    ranged = InstallPayload(run_id=str(run_id), crashkernel="1G-2G:128M,2G-:256M")
+    assert ranged.crashkernel == "1G-2G:128M,2G-:256M"
+
+
+def test_install_payload_rejects_blank_crashkernel() -> None:
+    with pytest.raises(ValueError, match="crashkernel must not be blank"):
+        InstallPayload(run_id=str(uuid4()), crashkernel="   ")
+
+
+def test_install_payload_rejects_crashkernel_with_internal_whitespace() -> None:
+    # A space would inject an arbitrary extra kernel token into the space-joined cmdline.
+    with pytest.raises(ValueError, match="crashkernel must be a single token"):
+        InstallPayload(run_id=str(uuid4()), crashkernel="512M panic=1")
+
+
+def test_install_payload_rejects_crashkernel_with_token_prefix() -> None:
+    # The caller passes the reservation argument, not the whole crashkernel= token.
+    with pytest.raises(ValueError, match="crashkernel must not include the 'crashkernel=' prefix"):
+        InstallPayload(run_id=str(uuid4()), crashkernel="crashkernel=512M")
+
+
 def test_install_payload_decodes_legacy_run_only_payload() -> None:
     """A pre-#988 install job serialized as bare {run_id} decodes with cmdline=None."""
     now = datetime.now(UTC)
