@@ -198,7 +198,7 @@ Resolve a kernel symbol to its address on a live DebugSession. Requires contribu
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `name` | string | yes | Bare C global or function symbol name to resolve to its address (e.g. 'd_hash_shift'). Read its value with debug.read_memory. |
+| `name` | string | yes | Bare C global or function symbol name to resolve to its address (e.g. 'd_hash_shift'). Read its value with debug.read_memory. This resolves an address only; to read a struct field or array member by name (some_struct->field[3].member), use the drgn path introspect.script instead. |
 | `session_id` | string | yes | The live DebugSession to resolve the symbol on. |
 
 ## `debug.set_breakpoint`

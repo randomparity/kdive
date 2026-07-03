@@ -672,7 +672,9 @@ def _register_debug_resolve_symbol(
             str,
             Field(
                 description="Bare C global or function symbol name to resolve to its address "
-                "(e.g. 'd_hash_shift'). Read its value with debug.read_memory."
+                "(e.g. 'd_hash_shift'). Read its value with debug.read_memory. This resolves an "
+                "address only; to read a struct field or array member by name "
+                "(some_struct->field[3].member), use the drgn path introspect.script instead."
             ),
         ],
     ) -> ToolResponse:

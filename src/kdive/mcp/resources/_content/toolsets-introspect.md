@@ -20,7 +20,10 @@ provisioning-for-debugging notes in the investigation index. `introspect.run` an
 - `introspect.run` — run an in-tree drgn helper (`tasks`, `modules`, `sysinfo`) against a
   live drgn-live session. Start here for common questions.
 - `introspect.script` — run your own drgn script against a live session when a helper does not
-  cover what you need.
+  cover what you need. This is the supported way to read a **struct field or array member by
+  name** (e.g. `some_struct->field[3].member`) on a live guest: drgn resolves typed kernel
+  objects by name — `prog["some_struct"].field[3].member` — which the halting `debug` gdbstub
+  path (`debug.resolve_symbol` resolves an address only) cannot.
 
 ## Offline introspection
 
