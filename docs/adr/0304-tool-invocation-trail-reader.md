@@ -64,7 +64,11 @@ Keyset-paginated newest-first on `(ts, id)` via the ADR-0192 cursor helpers, mir
 
 **Bounded by default.** When the caller supplies no window start, the read defaults the
 lower bound to `now - 24h`, so a default call never scans the whole table. An explicit
-start (even older) is honored — the default only fills an absent bound.
+start (even older) is honored — the default only fills an absent bound. The default lower
+bound is relative to the call time, so paging the default window near its 24h edge can
+drop rows that age past the bound between pages; an exhaustive/deep read pins both bounds
+by passing an explicit window (real session trails sit far inside 24h, so this is a
+convenience-vs-exhaustiveness trade, not a correctness gap for the acceptance).
 
 ### 3. Docs
 

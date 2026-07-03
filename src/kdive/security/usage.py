@@ -13,12 +13,12 @@ analytics rather than an audit trail. :func:`digest_args` computes it over the s
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
+
+from kdive.security.audit import args_digest as _canonical_digest
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
@@ -30,14 +30,12 @@ def digest_args(redactor: Redactor, arguments: Mapping[str, object] | None) -> s
     """Return a stable SHA-256 hex digest over ``arguments`` after redaction (ADR-0304).
 
     The mapping is redacted through ``redactor`` (dropping registered secret values and
-    ``key=value`` secret patterns) and serialized canonically (sorted keys, compact
-    separators) so identical redacted args always yield the same digest and no secret
-    value reaches the hash. A call with no arguments digests the empty mapping, so the
-    result is always a non-empty hex string.
+    ``key=value`` secret patterns) so no secret value reaches the hash, then hashed with
+    the same canonical encoder the audit trail uses (:func:`kdive.security.audit.args_digest`)
+    so the two tables' digests share one source of truth. A call with no arguments digests
+    the empty mapping, so the result is always a non-empty hex string.
     """
-    redacted = redactor.redact_mapping(arguments or {})
-    canonical = json.dumps(redacted, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return _canonical_digest(redactor.redact_mapping(arguments or {}))
 
 
 @dataclass(frozen=True, slots=True)

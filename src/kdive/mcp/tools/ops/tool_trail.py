@@ -296,7 +296,9 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         ``outcome``, ``args_digest``, and ``ts``. Returns the most recent matching rows,
         newest first, keyset-paginated: when ``data.truncated`` is ``true``, pass
         ``data.next_cursor`` back as ``cursor`` for the next page. Omitting the window
-        start bounds the read to the last 24h.
+        start bounds the read to the last 24h; that default lower bound is relative to the
+        call time, so for an exhaustive read that pages near the 24h edge, pass an explicit
+        window to pin both bounds.
         """
         return await tool_trail(
             pool,
