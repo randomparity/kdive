@@ -157,6 +157,26 @@ def test_crashkernel_is_present() -> None:
     assert profile.provider.local_libvirt.crashkernel == "256M"
 
 
+def test_baseline_kernel_defaults_to_none() -> None:
+    # The single-kernel common case carries no hint (ADR-0310); selection stays fail-closed.
+    profile = ProvisioningProfile.parse(_valid())
+    assert profile.provider.local_libvirt.baseline_kernel is None
+
+
+def test_baseline_kernel_parses_when_present() -> None:
+    data = _valid()
+    data["provider"]["local-libvirt"]["baseline_kernel"] = "vmlinuz-6.18.0-100.fc44.x86_64"
+    profile = ProvisioningProfile.parse(data)
+    assert profile.provider.local_libvirt.baseline_kernel == "vmlinuz-6.18.0-100.fc44.x86_64"
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_baseline_kernel_rejects_blank(value: str) -> None:
+    data = _valid()
+    data["provider"]["local-libvirt"]["baseline_kernel"] = value
+    _expect_configuration_error(data)
+
+
 def test_ssh_credential_ref_defaults_to_none() -> None:
     # A profile that opts out of live ssh introspection carries no credential reference.
     profile = ProvisioningProfile.parse(_valid())

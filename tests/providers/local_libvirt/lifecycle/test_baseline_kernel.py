@@ -65,6 +65,54 @@ def test_accepts_bare_basenames_too() -> None:
     )
 
 
+def test_hint_selects_named_kernel_from_multiple_by_filename() -> None:
+    a, b = "vmlinuz-6.19.10-300.fc44.x86_64", "vmlinuz-6.18.0-100.fc44.x86_64"
+    entries = [f"/boot/{a}", f"/boot/{b}", "/boot/initramfs-6.18.0-100.fc44.x86_64.img"]
+    assert select_kernel_and_initrd(entries, hint=b) == (b, "initramfs-6.18.0-100.fc44.x86_64.img")
+
+
+def test_hint_selects_named_kernel_from_multiple_by_bare_version() -> None:
+    a, b = "vmlinuz-6.19.10-300.fc44.x86_64", "vmlinuz-6.18.0-100.fc44.x86_64"
+    entries = [f"/boot/{a}", f"/boot/{b}"]
+    assert select_kernel_and_initrd(entries, hint="6.18.0-100.fc44.x86_64") == (b, None)
+
+
+def test_hint_naming_no_kernel_raises_and_lists_candidates() -> None:
+    a, b = "vmlinuz-6.19.10-300.fc44.x86_64", "vmlinuz-6.18.0-100.fc44.x86_64"
+    with pytest.raises(CategorizedError) as exc:
+        select_kernel_and_initrd([f"/boot/{a}", f"/boot/{b}"], hint="vmlinuz-9.9.9")
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["hint"] == "vmlinuz-9.9.9"
+    candidates = exc.value.details["candidates"]
+    assert isinstance(candidates, list)
+    assert set(candidates) == {a, b}
+
+
+def test_hint_on_empty_boot_still_raises_no_bootable() -> None:
+    # A hint cannot resurrect an image with no non-rescue kernel to name.
+    with pytest.raises(CategorizedError) as exc:
+        select_kernel_and_initrd(["/boot/vmlinuz-0-rescue-abc"], hint="vmlinuz-0-rescue-abc")
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "no bootable kernel" in str(exc.value)
+
+
+def test_hint_validated_against_single_kernel() -> None:
+    # A stale hint against a single-kernel image fails loudly rather than being ignored.
+    with pytest.raises(CategorizedError) as exc:
+        select_kernel_and_initrd([f"/boot/vmlinuz-{_V}"], hint="vmlinuz-9.9.9")
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    candidates = exc.value.details["candidates"]
+    assert isinstance(candidates, list)
+    assert candidates == [f"vmlinuz-{_V}"]
+
+
+def test_hint_matching_single_kernel_selects_it() -> None:
+    assert select_kernel_and_initrd([f"/boot/vmlinuz-{_V}"], hint=f"vmlinuz-{_V}") == (
+        f"vmlinuz-{_V}",
+        None,
+    )
+
+
 def test_baseline_kernel_names_filters_rescue_and_non_kernels() -> None:
     entries = [
         f"/boot/vmlinuz-{_V}",
