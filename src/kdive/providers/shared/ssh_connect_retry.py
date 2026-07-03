@@ -107,22 +107,18 @@ def is_sshd_starting(returncode: int, stderr: str | bytes) -> bool:
     return classify_ssh_failure(returncode, stderr) in _RETRYABLE_REASONS
 
 
-def ssh_failure_tail(stderr: str | bytes) -> str:
-    """Return the length-capped tail of ssh's stderr (redacted later by ``_failure_context``)."""
-    return _stderr_text(stderr).strip()[-_STDERR_TAIL_MAX:]
-
-
 def ssh_failure_details(returncode: int, stderr: str | bytes) -> dict[str, object]:
     """Leak-safe, diagnosable failure details for a non-zero ssh exit (#1008).
 
     ``reason`` is drawn from the closed :data:`SshFailureReason` vocabulary, so it can never leak a
-    secret or a hostname. ``stderr_tail`` is length-capped here and redacted downstream by the
-    worker's failure-context Redactor path (ADR-0027). ``exit_status`` is retained unchanged.
+    secret or a hostname. ``stderr_tail`` is the last ``_STDERR_TAIL_MAX`` chars of ssh's stderr,
+    length-capped here and redacted downstream by the worker's failure-context Redactor path
+    (ADR-0027). ``exit_status`` is retained unchanged.
     """
     return {
         "exit_status": returncode,
         "reason": classify_ssh_failure(returncode, stderr),
-        "stderr_tail": ssh_failure_tail(stderr),
+        "stderr_tail": _stderr_text(stderr).strip()[-_STDERR_TAIL_MAX:],
     }
 
 
