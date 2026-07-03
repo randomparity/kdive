@@ -35,6 +35,22 @@ _CONNECT_TIMEOUT_S = 5.0
 _BANNER_MAX_BYTES = 255
 _BACKOFF_S = 0.5
 
+# Ordered lowest → highest: the only two layers the banner-only probe can observe (ADR-0303).
+# "tcp_connect" = a connection to the recorded loopback SSH forward was accepted; "ssh_banner"
+# = the server sent an ``SSH-`` identification string. "forward bound" is not a separate layer
+# because a pure TCP connect cannot distinguish it from "connected but guest refused".
+_LAYER_TCP_CONNECT = "tcp_connect"
+_LAYER_SSH_BANNER = "ssh_banner"
+_PROBE_LAYERS = (_LAYER_TCP_CONNECT, _LAYER_SSH_BANNER)
+
+# The fixed ``detail`` vocabulary maps one-to-one onto the lowest failing layer (``None`` ⇒ every
+# layer passed). ``detail`` stays the single source of truth; ``layer``/``checks`` project it.
+_DETAIL_FAILED_LAYER: dict[str, str | None] = {
+    "reachable": None,
+    "unreachable": _LAYER_TCP_CONNECT,
+    "no SSH banner": _LAYER_SSH_BANNER,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ReachResult:
@@ -87,13 +103,36 @@ async def _real_probe(
         return ReachResult(False, "no SSH banner")
 
 
+def _layer_breakdown(detail: str) -> tuple[str | None, list[JsonValue]]:
+    """Project ``detail`` onto its lowest failing layer and the ordered pass/fail breakdown.
+
+    ``checks`` lists layers in order up to and including the first failure; a higher layer the
+    probe never reached (because a lower one failed) is omitted rather than reported as tested.
+    """
+    failed = _DETAIL_FAILED_LAYER[detail]
+    checks: list[JsonValue] = []
+    for name in _PROBE_LAYERS:
+        if name == failed:
+            checks.append({"layer": name, "ok": False})
+            break
+        checks.append({"layer": name, "ok": True})
+    return failed, checks
+
+
 def serialize_reach_verdict(result: ReachResult, host: str, port: int, checked_at: str) -> str:
-    """Compact-JSON reachability verdict carried inline in ``result_ref`` (the ADR-0164 pattern)."""
+    """Compact-JSON reachability verdict carried inline in ``result_ref`` (the ADR-0164 pattern).
+
+    ``layer``/``checks`` name the lowest failing probe layer (ADR-0303); they are additive and
+    derived from ``detail``, which remains the top-level back-compat field.
+    """
+    layer, checks = _layer_breakdown(result.detail)
     verdict: dict[str, JsonValue] = {
         "reachable": result.reachable,
         "checked_at": checked_at,
         "endpoint": {"host": host, "port": port},
         "detail": result.detail,
+        "layer": layer,
+        "checks": checks,
     }
     return json.dumps(verdict, separators=(",", ":"))
 
