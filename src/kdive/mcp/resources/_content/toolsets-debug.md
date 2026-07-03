@@ -42,6 +42,11 @@ provisioning-for-debugging notes in the investigation index and decide up front.
 - `debug.read_frame` — select and read a single stack frame.
 - `debug.disassemble` — disassemble instructions around an address.
 
+`debug.resolve_symbol` yields a symbol's **address** only — the gdbstub path evaluates no
+member, array, or type-aware expressions. To read a **struct field or array member by name**
+(e.g. `some_struct->field[3].member`) on a live guest, use the drgn path — `introspect.script`
+in the introspect toolset — which reads typed kernel objects by name without halting the CPU.
+
 ## Modules
 
 - `debug.list_modules` — list the loaded kernel modules and their base addresses.
