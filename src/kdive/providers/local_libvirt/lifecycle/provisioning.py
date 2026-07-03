@@ -224,7 +224,7 @@ class LocalLibvirtProvisioning:
         del bootstrap_pubkey  # local injects pre-boot via overlay_customizers (ADR-0291)
         section = profile.provider.local_libvirt
         base = self._materialize_rootfs(section.rootfs, system_id, profile.arch)
-        baseline = self._prepare_baseline_kernel(system_id, base)
+        baseline = self._prepare_baseline_kernel(system_id, base, section.baseline_kernel)
         overlay = self._files.prepare_overlay(system_id, base=base)
         gdb_port = self._gdb_port_for(system_id) if section.debug.gdbstub else None
         # The SSH forward is rendered on every domain (ADR-0281, #937), so the port is always
@@ -251,20 +251,26 @@ class LocalLibvirtProvisioning:
             raise
         return domain_name_for(system_id)
 
-    def _prepare_baseline_kernel(self, system_id: UUID, base: str) -> BaselineKernel:
+    def _prepare_baseline_kernel(
+        self, system_id: UUID, base: str, baseline_kernel: str | None
+    ) -> BaselineKernel:
         """Extract the rootfs's baseline kernel once; reuse an already-extracted directory.
 
         Mirrors the overlay's create-only-when-absent contract (ADR-0060/0272): a present baseline
         directory (the atomic all-or-nothing marker) is reused so a provision retry never re-mounts
         the base. Presence is checked through the injected ``baseline_exists`` seam (like
         ``overlay_exists``), so the reuse path is unit-testable without touching the real FS.
+
+        ``baseline_kernel`` is the optional profile hint (ADR-0310) that disambiguates a
+        multi-kernel ``/boot``; it is consulted only on a fresh extraction — a reused directory
+        already holds the resolved kernel, so an idempotent retry stays stable.
         """
         dest = Path(baseline_dir(system_id))
         if self._files.baseline_exists(str(dest)):
             initrd = dest / "initrd"
             present_initrd = initrd if self._files.baseline_exists(str(initrd)) else None
             return BaselineKernel(kernel=dest / "kernel", initrd=present_initrd)
-        return self._extract_baseline_kernel(Path(base), dest)
+        return self._extract_baseline_kernel(Path(base), dest, baseline_kernel)
 
     def _gdb_port_for(self, system_id: UUID) -> int:
         """Reuse the System's recorded gdbstub port if its domain already records one; else a

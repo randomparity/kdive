@@ -525,7 +525,7 @@ class _ProvConn:
         return 0
 
 
-def _fake_extract(_base: Path, dest: Path) -> BaselineKernel:
+def _fake_extract(_base: Path, dest: Path, _hint: str | None = None) -> BaselineKernel:
     """A no-op baseline extractor for unit tests — never touches libguestfs or the host FS."""
     return BaselineKernel(kernel=dest / "kernel", initrd=None)
 
@@ -544,7 +544,7 @@ def _prov(
     overlay_exists: Callable[[str], bool] = lambda _overlay: False,
     remove_baseline: Callable[[str], None] = lambda _baseline: None,
     baseline_exists: Callable[[str], bool] = lambda _path: False,
-    extract_baseline_kernel: Callable[[Path, Path], BaselineKernel] = _fake_extract,
+    extract_baseline_kernel: Callable[[Path, Path, str | None], BaselineKernel] = _fake_extract,
     free_port: Callable[[], int] = lambda: next(_FREE_PORTS),
 ) -> LocalLibvirtProvisioning:
     # The overlay seams default to no-ops so the libvirt-only tests never spawn qemu-img; the
@@ -628,7 +628,7 @@ def test_provision_extracts_baseline_and_renders_kernel() -> None:
     conn = _ProvConn()
     calls: list[tuple[Path, Path]] = []
 
-    def fake_extract(base: Path, dest: Path) -> BaselineKernel:
+    def fake_extract(base: Path, dest: Path, _hint: str | None = None) -> BaselineKernel:
         calls.append((base, dest))
         return BaselineKernel(kernel=dest / "kernel", initrd=dest / "initrd")
 
@@ -643,11 +643,40 @@ def test_provision_extracts_baseline_and_renders_kernel() -> None:
     assert root.findtext("os/cmdline") == "root=/dev/vda console=ttyS0 rw"
 
 
+def test_provision_threads_baseline_kernel_hint_to_extractor() -> None:
+    # The profile's optional baseline_kernel hint (ADR-0310, #1016) reaches the extraction seam so
+    # a multi-kernel /boot can be disambiguated.
+    conn = _ProvConn()
+    seen: list[str | None] = []
+
+    def fake_extract(_base: Path, dest: Path, hint: str | None = None) -> BaselineKernel:
+        seen.append(hint)
+        return BaselineKernel(kernel=dest / "kernel", initrd=None)
+
+    _prov(conn, extract_baseline_kernel=fake_extract).provision(
+        _SYS, _profile(baseline_kernel="vmlinuz-6.18.0-100.fc44.x86_64")
+    )
+    assert seen == ["vmlinuz-6.18.0-100.fc44.x86_64"]
+
+
+def test_provision_defaults_baseline_kernel_hint_to_none() -> None:
+    # A profile without the hint threads None, preserving fail-closed selection.
+    conn = _ProvConn()
+    seen: list[str | None] = []
+
+    def fake_extract(_base: Path, dest: Path, hint: str | None = None) -> BaselineKernel:
+        seen.append(hint)
+        return BaselineKernel(kernel=dest / "kernel", initrd=None)
+
+    _prov(conn, extract_baseline_kernel=fake_extract).provision(_SYS, _profile())
+    assert seen == [None]
+
+
 def test_provision_reuses_present_baseline_dir_without_re_extracting() -> None:
     # An idempotent retry with the baseline dir already present must not re-mount the base.
     conn = _ProvConn()
 
-    def fail_extract(_base: Path, _dest: Path) -> BaselineKernel:
+    def fail_extract(_base: Path, _dest: Path, _hint: str | None = None) -> BaselineKernel:
         raise AssertionError("must reuse the present baseline dir, not re-extract")
 
     prov = _prov(
@@ -669,7 +698,7 @@ def test_provision_omits_initrd_when_baseline_dir_has_no_initrd() -> None:
     prov = _prov(
         conn,
         baseline_exists=lambda path: path.endswith("-baseline"),  # dir present, initrd absent
-        extract_baseline_kernel=lambda _b, _d: (_ for _ in ()).throw(
+        extract_baseline_kernel=lambda _b, _d, _h=None: (_ for _ in ()).throw(
             AssertionError("dir present: must not extract")
         ),
     )

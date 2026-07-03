@@ -109,6 +109,9 @@ class LibvirtProfile(_ProfileBase):
     at provisioning. ``crashkernel`` is an
     optional opaque non-empty token (the kdump prerequisite — the booted kernel is the
     arbiter of its grammar); ``None`` when the System is not provisioned for kdump.
+    ``baseline_kernel`` is an optional hint naming the baseline kernel to boot when the
+    rootfs ``/boot`` holds more than one kernel; ``None`` (the common single-kernel case) keeps
+    fail-closed selection.
     ``destructive_ops`` is the optionally-empty list of destructive op kinds this profile
     opts in (e.g. ``["force_crash"]``); the control plane's gate resolves the opt-in
     factor from it (deny-by-default — an absent or empty list refuses every destructive
@@ -122,6 +125,19 @@ class LibvirtProfile(_ProfileBase):
     domain_xml_params: dict[NonEmptyStr, NonEmptyStr] = Field(default_factory=dict)
     rootfs: RootfsSource
     crashkernel: NonEmptyStr | None = None
+    baseline_kernel: NonEmptyStr | None = Field(
+        default=None,
+        # Provenance: ADR-0310, #1016.
+        description=(
+            "Optional hint naming the baseline kernel to boot when the rootfs /boot holds more "
+            "than one kernel. A direct-kernel provision extracts the rootfs's own kernel and fails "
+            "closed on an ambiguous multi-kernel /boot rather than guessing a version order; this "
+            "hint is the explicit escape hatch. Give either the full 'vmlinuz-<ver>' filename or "
+            "the bare '<ver>' (copy a value from the 'candidates' list in the ambiguous-selection "
+            "error). A hint naming no present kernel is rejected. Omit it for a single-kernel "
+            "image (the common case) — selection is then unambiguous."
+        ),
+    )
     destructive_ops: list[NonEmptyStr] = Field(default_factory=list)
     ssh_credential_ref: NonEmptyStr | None = None
     debug: LibvirtDebugOptions = Field(default_factory=LibvirtDebugOptions)
