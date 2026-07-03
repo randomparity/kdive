@@ -12,10 +12,14 @@ from __future__ import annotations
 
 import subprocess
 
+import pytest
+
 from kdive.providers.shared.ssh_connect_retry import (
     SshRetryPolicy,
+    classify_ssh_failure,
     is_sshd_starting,
     run_ssh_with_retry,
+    ssh_failure_details,
 )
 
 
@@ -128,3 +132,64 @@ def test_retry_stops_at_deadline() -> None:
     assert clock.now >= 5.0  # ran until the deadline
     assert len(calls) >= 2  # retried at least once before giving up
     assert sum(clock.sleeps) <= 5.0  # never sleeps past the deadline
+
+
+# --- Failure classification (#1008): drive each stderr shape → closed reason vocabulary. ---
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stderr", "expected"),
+    [
+        (255, "ssh: connect to host 127.0.0.1 port 3: Connection refused", "connection_refused"),
+        (255, "kex_exchange_identification: Connection reset by peer", "banner_timeout"),
+        (255, "kex_exchange_identification: Connection closed by remote host", "banner_timeout"),
+        (255, "ssh: connect to host 127.0.0.1 port 22: Connection timed out", "unreachable"),
+        (255, "ssh: connect to host 10.0.0.9 port 22: No route to host", "unreachable"),
+        (255, "ssh: connect to host 10.0.0.9 port 22: Network is unreachable", "unreachable"),
+        (255, "root@127.0.0.1: Permission denied (publickey).", "auth_rejected"),
+        (255, "Received disconnect: Too many authentication failures", "auth_rejected"),
+        (255, "Warning: Identity file /tmp/id not accessible: No such identity", "auth_rejected"),
+        (255, "Host key verification failed.", "host_key_mismatch"),
+        (255, "some ssh chatter with no known marker", "unknown"),
+        (1, "grep: /root/.ssh/authorized_keys: No such file or directory", "remote_command_failed"),
+        (2, "", "remote_command_failed"),
+    ],
+)
+def test_classify_ssh_failure_maps_each_stderr_shape(
+    returncode: int, stderr: str, expected: str
+) -> None:
+    assert classify_ssh_failure(returncode, stderr) == expected
+
+
+def test_classify_ssh_failure_is_fatal_first_when_markers_collide() -> None:
+    # A 255 whose stderr names both a transient reset AND a rejected key must classify as the
+    # fatal auth failure — else a real key mismatch is reported as retryable banner noise.
+    stderr = "Connection reset by peer\nroot@127.0.0.1: Permission denied (publickey)."
+    assert classify_ssh_failure(255, stderr) == "auth_rejected"
+
+
+def test_classify_ssh_failure_coerces_bytes_stderr() -> None:
+    assert classify_ssh_failure(255, b"ssh: connect: Connection refused") == "connection_refused"
+
+
+def test_ssh_failure_details_carries_reason_exit_status_and_tail() -> None:
+    details = ssh_failure_details(255, "ssh: connect to host: Connection refused")
+    assert details["exit_status"] == 255
+    assert details["reason"] == "connection_refused"
+    tail = details["stderr_tail"]
+    assert isinstance(tail, str) and "Connection refused" in tail
+
+
+def test_ssh_failure_details_caps_the_stderr_tail() -> None:
+    tail = ssh_failure_details(1, "x" * 5000)["stderr_tail"]
+    assert isinstance(tail, str)
+    assert len(tail) == 512  # last 512 chars only
+
+
+def test_ssh_failure_details_values_are_leak_safe_scalars() -> None:
+    # exit_status is int, reason/tail are str — all pass the worker's _safe_detail scalar gate,
+    # so they survive _failure_context into the persisted job record.
+    details = ssh_failure_details(255, "Host key verification failed.")
+    assert isinstance(details["exit_status"], int)
+    assert isinstance(details["reason"], str)
+    assert isinstance(details["stderr_tail"], str)
