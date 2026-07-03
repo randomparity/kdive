@@ -171,7 +171,7 @@ async def _restage_and_enqueue_install(
     if cmdline is not None:
         audit_args["cmdline"] = cmdline.strip()
     if crashkernel is not None:
-        audit_args["crashkernel"] = requested_crashkernel or ""
+        audit_args["crashkernel"] = crashkernel.strip()
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
         progress = await step_progress(conn, run.id)
         if progress.install == "running" or progress.boot == "running":
