@@ -21,7 +21,7 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.serialization import JsonValue
 
 _REQUIRED_CONSOLE = "console=ttyS0"
-_DEFAULT_CRASHKERNEL = "256M"
+DEFAULT_CRASHKERNEL = "256M"
 # Disable KASLR on a gdbstub-debug boot so the running kernel's base matches the fetched
 # vmlinux's link-time symbol addresses. With CONFIG_RANDOMIZE_BASE=y (the kdump fragment
 # default) the kernel relocates to a random base, so a breakpoint set by symbol resolves to the
@@ -354,7 +354,7 @@ def system_required_cmdline(
     if root_cmdline:
         tokens.append(root_cmdline)
     if method is CaptureMethod.KDUMP:
-        tokens.append(f"crashkernel={crashkernel or _DEFAULT_CRASHKERNEL}")
+        tokens.append(f"crashkernel={crashkernel or DEFAULT_CRASHKERNEL}")
     elif method is CaptureMethod.GDBSTUB:
         tokens.append(_GDBSTUB_NOKASLR)
     return " ".join(tokens)

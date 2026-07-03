@@ -58,6 +58,10 @@ Performs build-host admission (same as runs.build) then enqueues one
 BUILD_INSTALL_BOOT job. Requires operator role — the composite includes install
 and boot, whose gate is operator. Poll the returned job handle with jobs.wait.
 
+This one-shot uses the default kdump crash-capture reservation. For a larger
+reservation (a KASAN kernel or a large guest), use the granular path instead —
+runs.build, then runs.install with a crashkernel size, then runs.boot.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `cmdline` | string (nullable) | no | Kernel debug args appended to the platform-required boot args (e.g. 'dhash_entries=1'). Bound at build time and applied through install and boot. Omit for no extra debug args. |
@@ -228,12 +232,14 @@ source.
 
 Install a built run onto its system.
 
-Pass `cmdline` to iterate boot parameters against the built kernel without a rebuild;
-`runs.get` reports the live variant as `data.installed_cmdline`.
+Pass `cmdline` and/or `crashkernel` to iterate boot parameters against the built kernel
+without a rebuild; `runs.get` reports the live variant as `data.installed_cmdline` and
+`data.installed_crashkernel`.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `cmdline` | string (nullable) | no | Kernel debug args applied against the already-built kernel — no rebuild needed. Replaces any build-time extra args. These platform args are always present and cannot be overridden: console=ttyS0, root=/dev/vda, plus crashkernel=256M (kdump) or nokaslr (gdbstub) per the System's capture method. Passing a value different from the currently installed one re-stages the boot; sweep boot-parameter variants (e.g. 'dhash_entries=1' then 'dhash_entries=2') by calling runs.install with a new value then runs.boot, using a distinct (or no) idempotency_key each time. Omit to reuse the build-time cmdline. |
+| `crashkernel` | string (nullable) | no | kdump crash-capture reservation size, replacing the default 256M in the platform crashkernel= token (e.g. '512M' for a KASAN kernel or a large guest). Pass only the reservation argument, not the whole token; a size or a kernel range is accepted. Applies only to kdump-capture Systems — a value on a non-kdump System is rejected. Each install fully specifies both cmdline and crashkernel: omitting either reverts that one to its default (cmdline to the build-time args, crashkernel to 256M), so on an already-installed Run, restate both to keep them. The live value is reported by runs.get as data.installed_crashkernel. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `run_id` | string | yes | The Run whose built kernel to install. |
 
