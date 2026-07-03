@@ -17,6 +17,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind, JobState
 from kdive.jobs.handlers import ssh_reachable
 from kdive.jobs.handlers.ssh_reachable import (
+    _DETAIL_FAILED_LAYER,
     ReachResult,
     _real_probe,
     check_ssh_reachable_handler,
@@ -116,8 +117,35 @@ def test_serialize_verdict_is_compact_and_redacted() -> None:
     )
     assert raw == (
         '{"reachable":false,"checked_at":"2026-07-02T00:00:00+00:00",'
-        '"endpoint":{"host":"127.0.0.1","port":22001},"detail":"no SSH banner"}'
+        '"endpoint":{"host":"127.0.0.1","port":22001},"detail":"no SSH banner",'
+        '"layer":"ssh_banner",'
+        '"checks":[{"layer":"tcp_connect","ok":true},{"layer":"ssh_banner","ok":false}]}'
     )
+
+
+def test_serialize_verdict_reachable_names_no_failing_layer() -> None:
+    raw = serialize_reach_verdict(
+        ReachResult(True, "reachable"), "127.0.0.1", 22001, "2026-07-02T00:00:00+00:00"
+    )
+    assert '"layer":null' in raw
+    assert '"checks":[{"layer":"tcp_connect","ok":true},{"layer":"ssh_banner","ok":true}]' in raw
+
+
+def test_serialize_verdict_unreachable_names_tcp_connect_layer() -> None:
+    # No connection was ever accepted, so the lowest failing layer is tcp_connect and the
+    # higher, un-evaluated ssh_banner layer is not claimed as tested.
+    raw = serialize_reach_verdict(
+        ReachResult(False, "unreachable"), "127.0.0.1", 22001, "2026-07-02T00:00:00+00:00"
+    )
+    assert '"layer":"tcp_connect"' in raw
+    assert '"checks":[{"layer":"tcp_connect","ok":false}]' in raw
+
+
+def test_every_probe_detail_maps_to_a_layer() -> None:
+    # Drift guard: any detail value the probe can emit must name its failing layer, or the
+    # verdict would raise at serialization time.
+    for detail in ("reachable", "unreachable", "no SSH banner"):
+        assert detail in _DETAIL_FAILED_LAYER
 
 
 # --- worker handler ---------------------------------------------------------------------------
@@ -190,7 +218,8 @@ def test_handler_serializes_reachable_verdict(
 
     assert asyncio.run(_run()) == (
         '{"reachable":true,"checked_at":"2026-07-02T00:00:00+00:00",'
-        '"endpoint":{"host":"127.0.0.1","port":22001},"detail":"reachable"}'
+        '"endpoint":{"host":"127.0.0.1","port":22001},"detail":"reachable","layer":null,'
+        '"checks":[{"layer":"tcp_connect","ok":true},{"layer":"ssh_banner","ok":true}]}'
     )
 
 
