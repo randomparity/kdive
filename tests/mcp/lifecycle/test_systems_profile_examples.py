@@ -229,6 +229,75 @@ host_uri = "qemu:///system"
     _validate("local-libvirt", local)
 
 
+_MULTI_IMAGE_INVENTORY = """
+schema_version = 2
+
+[[image]]
+provider = "local-libvirt"
+name = "fedora-first"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda1"
+visibility = "public"
+description = "RHEL-family debug host, my SLES crash setup"
+[image.source]
+kind = "staged-path"
+path = "/var/lib/kdive/rootfs/fedora-first.qcow2"
+
+[[image]]
+provider = "local-libvirt"
+name = "debian-second"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda1"
+visibility = "public"
+[image.source]
+kind = "staged-path"
+path = "/var/lib/kdive/rootfs/debian-second.qcow2"
+"""
+
+
+def test_local_example_discloses_declaration_order_pick_when_many(tmp_path: Path) -> None:
+    # >1 public image: the example must disclose it was chosen by declaration order and point the
+    # agent to images.list, plus echo the chosen (first-declared) image's operator description.
+    path = _write_inventory(tmp_path, _MULTI_IMAGE_INVENTORY)
+    doc = load_inventory_optional(path)
+    assert doc is not None
+    data = _examples(doc)["local-libvirt"]
+    assert data["available_images"] == 2
+    note = data["selection_note"]
+    assert "declaration order" in note and "images.list" in note
+    rootfs = _profile_of(data)["provider"]["local-libvirt"]["rootfs"]
+    assert rootfs["name"] == "fedora-first"  # first-declared
+    assert data["description"] == "RHEL-family debug host, my SLES crash setup"
+
+
+def test_local_example_names_only_image_when_one(tmp_path: Path) -> None:
+    path = _write_inventory(tmp_path, _STAGED_PATH_INVENTORY)
+    doc = load_inventory_optional(path)
+    assert doc is not None
+    data = _examples(doc)["local-libvirt"]
+    assert data["available_images"] == 1
+    assert "only public" in data["selection_note"]
+    assert "images.list" not in data["selection_note"]  # no choice to steer toward
+    assert data["description"] == ""  # this image has no operator description
+
+
+def test_local_example_placeholder_note_has_no_list_steer_when_zero(tmp_path: Path) -> None:
+    body = """
+schema_version = 2
+[[local_libvirt]]
+name = "local-host"
+cost_class = "local"
+host_uri = "qemu:///system"
+"""
+    path = _write_inventory(tmp_path, body)
+    doc = load_inventory_optional(path)
+    data = _examples(doc)["local-libvirt"]
+    assert data["available_images"] == 0
+    assert "images.list" not in data["selection_note"]
+
+
 def test_no_inventory_file_yields_default_placeholder_set() -> None:
     examples = _examples(None)
     assert set(examples) == {"local-libvirt", "remote-libvirt", "fault-inject"}
@@ -345,16 +414,14 @@ def test_collection_and_item_status_are_ok() -> None:
 
 def test_each_item_carries_the_exact_data_keys_and_object_id() -> None:
     resp = build_profile_examples(None, frozenset(ResourceKind))
+    base_keys = {"provider", "profile", "note", "sizing_note", "uses_real_reference"}
+    # The local example additionally carries the image-selection disclosure (#1017).
+    local_keys = base_keys | {"available_images", "selection_note", "description"}
     for item in resp.items:
         # The item object_id is the provider name, and its data carries exactly these keys.
         assert item.object_id in {"local-libvirt", "remote-libvirt", "fault-inject"}
-        assert set(cast(dict[str, Any], item.data)) == {
-            "provider",
-            "profile",
-            "note",
-            "sizing_note",
-            "uses_real_reference",
-        }
+        expected = local_keys if item.object_id == "local-libvirt" else base_keys
+        assert set(cast(dict[str, Any], item.data)) == expected
         assert cast(dict[str, Any], item.data)["provider"] == item.object_id
 
 
