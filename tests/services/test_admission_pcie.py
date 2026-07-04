@@ -80,6 +80,7 @@ async def _seed_resource(conn: psycopg.AsyncConnection, devices: list[PCIeDescri
                 CONCURRENT_ALLOCATION_CAP_KEY: 1000,
                 "vcpus": 64,
                 "memory_mb": 65536,
+                "disk_gb": 500,
                 PCIE_DEVICES_KEY: [dict(d) for d in devices],
             },
             pool="local-libvirt",

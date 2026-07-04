@@ -80,18 +80,22 @@ size honest in the operator report. Four parts.
    grows its virtual disk but leaves free space unformatted (a documented
    operator action, not a silent runtime failure).
 
-3. **A host-advertised `disk_gb` ceiling bounds the request.** Resource
-   capabilities gain a `disk_gb` key alongside `vcpus`/`memory_mb`; admission's
-   `≤ resource-caps` check rejects `disk_gb > ceiling` as a `configuration_error`
-   naming the requested value and the ceiling, exactly like the vcpus/memory
-   over-cap path. local-libvirt advertises the ceiling from a **live source** —
+3. **A host-advertised `disk_gb` ceiling bounds the request, enforced where
+   advertised.** Resource capabilities gain a `disk_gb` key alongside
+   `vcpus`/`memory_mb`; admission's `≤ resource-caps` check rejects
+   `disk_gb > ceiling` as a `configuration_error` naming the requested value and
+   the ceiling, exactly like the vcpus/memory over-cap path. local-libvirt
+   advertises the ceiling from a **live source** —
    `shutil.disk_usage("/var/lib/kdive/rootfs").total` — so it is always present
-   like the vcpus/memory ceilings from `getInfo()`, and adding the check does not
-   break an existing local deployment on upgrade (no new required env). An
-   un-stat-able rootfs path is a host `infrastructure_failure` at discovery.
-   remote-libvirt and fault-inject declare the ceiling in `systems.toml` like the
-   existing size keys; a host that advertises none fails closed with a
-   host-registration-gap message, matching `require_size_ceiling`.
+   (like the vcpus/memory ceilings from `getInfo()`) and a local request is always
+   bounded; adding the check does not break an existing local deployment on
+   upgrade (no new required env). An un-stat-able rootfs path is a host
+   `infrastructure_failure` at discovery. Unlike vcpus/memory, an **absent** disk
+   ceiling is not a registration gap: remote-libvirt sizes a `disk-image` (not the
+   overlay) and fault-inject is a fake, so neither advertises a disk ceiling and
+   the check simply skips the bound for them (enforce-when-advertised). This needs
+   no `disk_gb` field on the remote/fault inventory model and breaks no existing
+   `systems.toml`.
 
 4. **The operator report shows real per-System size.** The `inventory` section
    reads the authoritative stamped `requested_vcpus`/`requested_memory_gb`/
@@ -114,9 +118,9 @@ documented, so the common debug case is one name rather than a computed triple.
 - disk is bounded per-request by a host-advertised ceiling; an over-ceiling
   request fails closed at admission with a diagnostic. The local ceiling is
   live-derived and always advertised, so upgrade is non-breaking — only a request
-  exceeding host storage is newly denied. remote/fault-inject hosts declare the
-  ceiling in `systems.toml` (existing discipline); one missing it fails closed
-  rather than admitting an unbounded disk.
+  exceeding host storage is newly denied. remote-libvirt/fault-inject advertise no
+  disk ceiling (they allocate no host disk from `disk_gb`) and are unbounded here;
+  no existing `systems.toml` changes.
 - the operator report keeps its existing `vcpus`/`memory_mb`/`disk_gb` column
   names and units; stamped `requested_*` is authoritative, with the shape catalog
   retained only as a `COALESCE` fallback for legacy allocations whose `requested_*`
@@ -147,6 +151,14 @@ documented, so the common debug case is one name rather than a computed triple.
   source of truth for image first-boot behavior (ADR-0288); a rebuild is the
   operator's existing image-lifecycle action. Rejected in favor of the build-time
   flip plus the self-check guard.
+- **Fail closed when a host advertises no disk ceiling (mirroring
+  `require_size_ceiling`).** disk_gb sizing is meaningful only where the provider
+  allocates a disk from host storage (local-libvirt). Fail-closing everywhere
+  would force a required `disk_gb` field onto the remote-libvirt and fault-inject
+  inventory model + serialize round-trip and every fixture, for a value those
+  providers never use, and would break existing `systems.toml`. Rejected in favor
+  of enforce-when-advertised: local always advertises (so is always bounded);
+  providers that size no host disk advertise none and are not bounded.
 - **A fixed global `MAX_REQUESTABLE_DISK_GB` constant instead of a host ceiling.**
   Not host-aware — over-commits a small host and under-serves a large one, and
   diverges from the existing per-host `≤ resource-caps` model. Rejected.

@@ -82,26 +82,21 @@ def test_disk_ceiling_reads_non_negative_int() -> None:
     caps = ResourceCapabilities.from_mapping({DISK_GB_KEY: 100})
 
     assert caps.disk_ceiling() == 100
-    assert caps.require_disk_ceiling(resource_id=uuid4(), resource_name="h1") == 100
 
 
 @pytest.mark.parametrize("bad", [None, "100", -1, True])
 def test_disk_ceiling_none_when_absent_or_invalid(bad: object) -> None:
+    # An unadvertised or invalid ceiling reads as None (unbounded — the provider does not
+    # size a disk from host storage); admission skips the bound rather than failing closed.
     caps = ResourceCapabilities.from_mapping({DISK_GB_KEY: bad})
 
     assert caps.disk_ceiling() is None
-    with pytest.raises(CategorizedError) as exc:
-        caps.require_disk_ceiling(resource_id=uuid4(), resource_name="h1")
-
-    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert exc.value.details["key"] == DISK_GB_KEY
 
 
 def test_disk_ceiling_accepts_zero() -> None:
     caps = ResourceCapabilities.from_mapping({DISK_GB_KEY: 0})
 
     assert caps.disk_ceiling() == 0
-    assert caps.require_disk_ceiling(resource_id=uuid4(), resource_name=None) == 0
 
 
 def test_disk_gb_key_not_in_extras() -> None:

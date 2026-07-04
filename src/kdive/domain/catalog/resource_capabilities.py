@@ -98,26 +98,14 @@ class ResourceCapabilities:
         return ceiling
 
     def disk_ceiling(self) -> int | None:
-        return _non_negative_int(self._values.get(DISK_GB_KEY))
+        """The largest requestable ``disk_gb`` on this host, or ``None`` if unadvertised.
 
-    def require_disk_ceiling(self, *, resource_id: UUID, resource_name: str | None) -> int:
-        ceiling = self.disk_ceiling()
-        if ceiling is None:
-            label = resource_name or str(resource_id)
-            raise CategorizedError(
-                f"host {label} advertises no {DISK_GB_KEY} size ceiling; this is a "
-                "host-registration gap, not a problem with your request. Re-register the host "
-                f"with a {DISK_GB_KEY} value (remote-libvirt/fault-inject declare it in "
-                "systems.toml or resources.register_*; local-libvirt derives it from host "
-                "storage at discovery).",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={
-                    "resource_id": str(resource_id),
-                    "resource_name": resource_name,
-                    "key": DISK_GB_KEY,
-                },
-            )
-        return ceiling
+        ``None`` means the provider does not size a disk from host storage (remote-libvirt
+        provisions a disk-image; fault-inject is a fake), so a disk request to it is not
+        bounded. local-libvirt always advertises this (live-derived at discovery, ADR-0312),
+        so a local host is always bounded.
+        """
+        return _non_negative_int(self._values.get(DISK_GB_KEY))
 
     def pcie_descriptors(self) -> list[PCIeDescriptor]:
         raw = self._values.get(PCIE_DEVICES_KEY)

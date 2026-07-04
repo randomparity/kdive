@@ -44,6 +44,7 @@ from kdive.domain.accounting.cost import (
     rate,
     resolve_coeff,
     validate_against_resource,
+    validate_disk_against_resource,
     validate_size,
 )
 from kdive.domain.capacity.state import AllocationState
@@ -229,6 +230,7 @@ async def price_window_and_estimate(
     window_hours = resolve_window_hours(request.window, bounds=configured_lease_bounds())
     validate_size(request.selector)
     validate_against_resource(request.selector, request.resource)
+    validate_disk_against_resource(request.disk_gb, request.resource)
     coeff = await resolve_coeff(conn, request.resource.cost_class)
     estimate = quantize_kcu(
         cost(

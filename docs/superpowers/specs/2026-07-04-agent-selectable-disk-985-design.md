@@ -112,18 +112,27 @@ standing regression guard for it.
 
 ### Part 3 — Host-advertised disk ceiling
 
-`domain/catalog/resource_capabilities.py` gains `DISK_GB_KEY = "disk_gb"`, a
-`disk_ceiling()` reader (reusing `_non_negative_int`), and a
-`require_disk_ceiling(resource_id, resource_name)` that fails closed with the same
-host-registration-gap message as `require_size_ceiling` when absent.
+`domain/catalog/resource_capabilities.py` gains `DISK_GB_KEY = "disk_gb"` and a
+`disk_ceiling() -> int | None` reader (reusing `_non_negative_int`).
 
 `domain/accounting/cost.py` gains `validate_disk_against_resource(disk_gb,
 resource)` (kept off the pricing `Selector`, since disk is not a kcu input): it
-reads the ceiling and raises `configuration_error` (reusing `_caps_error`) when
-`disk_gb > ceiling`. Admission (`services/allocation/admission/core.py`) calls it
-right after `validate_against_resource`, using the resolved `disk_gb`. A request
-with no `disk_gb` (impossible after ADR-0067's XOR rule, but defended) skips the
-check.
+reads `disk_ceiling()` and raises `configuration_error` (reusing `_caps_error`)
+when `disk_gb > ceiling`. Admission (`services/allocation/admission/core.py`)
+calls it right after `validate_against_resource`, using the resolved `disk_gb`.
+
+**Enforce-when-advertised, not fail-closed-when-absent.** Unlike vcpus/memory
+(which bound the VM on every provider and are required host facts), a `disk_gb`
+ceiling is meaningful only where the provider allocates a disk from host storage.
+local-libvirt does (the per-System overlay) and **always** advertises a
+live-derived ceiling, so a local request is always bounded — identical to
+fail-closed for local. remote-libvirt provisions a `disk-image` (it does not size
+disk from `disk_gb`, a spec non-goal) and fault-inject is a fake; neither
+advertises a disk ceiling, so `validate_disk_against_resource` skips the bound for
+them rather than treating the absence as a registration gap. This keeps the check
+non-breaking for those providers and needs no `disk_gb` field on their inventory
+model. A request with no `disk_gb` (impossible after ADR-0067's XOR rule, but
+defended) also skips the check.
 
 Ceiling sources:
 - **local-libvirt** — `discovery.py` advertises `disk_gb` from a **live source**:
@@ -133,17 +142,15 @@ Ceiling sources:
   deployment keeps working on upgrade with no new operator action. A `ROOTFS_DIR`
   that cannot be stat-ed is a genuine host fault (`infrastructure_failure` at
   discovery), not a routine unset. **No new required env is introduced.**
-- **remote-libvirt / fault-inject** — declared in `systems.toml` capabilities
-  beside `vcpus`/`memory_mb`.
+- **remote-libvirt / fault-inject** — advertise **no** disk ceiling (they size no
+  disk from host storage), so disk requests to them are unbounded here. No
+  inventory-model or `systems.toml` change is required for those providers.
 
-**Upgrade contract (non-breaking).** Because the local ceiling is live-derived
-and always advertised, adding the fail-closed check does not turn a
-previously-working local `allocations.request` into a hard failure on upgrade —
-only a request whose `disk_gb` genuinely exceeds host storage is denied. For
-remote/fault-inject, the ceiling is a `systems.toml` key the operator adds like
-the existing `vcpus`/`memory_mb` keys; a host missing it fails closed with the
-host-registration-gap message (matching `require_size_ceiling`), which is the
-pre-existing discipline for those providers, called out in the operator docs.
+**Upgrade contract (non-breaking).** The local ceiling is live-derived and always
+advertised, so a previously-working local `allocations.request` keeps working —
+only a request whose `disk_gb` genuinely exceeds host storage is denied.
+remote-libvirt and fault-inject advertise no ceiling and are unaffected. No
+existing `systems.toml` needs editing.
 
 ### Part 4 — Honest per-System size in the report
 

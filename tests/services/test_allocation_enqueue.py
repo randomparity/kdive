@@ -74,6 +74,7 @@ async def _seed_resource(
         CONCURRENT_ALLOCATION_CAP_KEY: cap,
         "vcpus": 64,
         "memory_mb": 65536,
+        "disk_gb": 500,
     }
     if pcie is not None:
         capabilities[PCIE_DEVICES_KEY] = pcie

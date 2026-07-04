@@ -58,6 +58,7 @@ async def _resource(conn: psycopg.AsyncConnection, *, pool: str = "local-libvirt
                 CONCURRENT_ALLOCATION_CAP_KEY: 1,
                 "vcpus": 64,
                 "memory_mb": 65536,
+                "disk_gb": 500,
             },
             pool=pool,
             cost_class="local",
