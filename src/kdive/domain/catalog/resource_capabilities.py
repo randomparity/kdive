@@ -22,9 +22,14 @@ PCIE_DEVICES_KEY = "pcie_devices"
 VCPUS_KEY = "vcpus"
 MEMORY_MB_KEY = "memory_mb"
 
+# The per-request disk ceiling (ADR-0312): the largest disk_gb an allocation may request on
+# this host. local-libvirt derives it from host storage at discovery; remote/fault-inject
+# declare it in systems.toml. A selector's disk_gb may not exceed it.
+DISK_GB_KEY = "disk_gb"
+
 _DESCRIPTOR_FIELDS = ("bdf", "vendor_id", "device_id", "class_code", "label")
 _KNOWN_KEYS = frozenset(
-    {CONCURRENT_ALLOCATION_CAP_KEY, MEMORY_MB_KEY, PCIE_DEVICES_KEY, VCPUS_KEY, "arch"}
+    {CONCURRENT_ALLOCATION_CAP_KEY, DISK_GB_KEY, MEMORY_MB_KEY, PCIE_DEVICES_KEY, VCPUS_KEY, "arch"}
 )
 
 
@@ -88,6 +93,28 @@ class ResourceCapabilities:
                     "resource_id": str(resource_id),
                     "resource_name": resource_name,
                     "key": missing_key,
+                },
+            )
+        return ceiling
+
+    def disk_ceiling(self) -> int | None:
+        return _non_negative_int(self._values.get(DISK_GB_KEY))
+
+    def require_disk_ceiling(self, *, resource_id: UUID, resource_name: str | None) -> int:
+        ceiling = self.disk_ceiling()
+        if ceiling is None:
+            label = resource_name or str(resource_id)
+            raise CategorizedError(
+                f"host {label} advertises no {DISK_GB_KEY} size ceiling; this is a "
+                "host-registration gap, not a problem with your request. Re-register the host "
+                f"with a {DISK_GB_KEY} value (remote-libvirt/fault-inject declare it in "
+                "systems.toml or resources.register_*; local-libvirt derives it from host "
+                "storage at discovery).",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={
+                    "resource_id": str(resource_id),
+                    "resource_name": resource_name,
+                    "key": DISK_GB_KEY,
                 },
             )
         return ceiling
