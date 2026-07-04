@@ -452,6 +452,12 @@ def test_parse_os_release_missing_id_returns_none() -> None:
     assert _parse_os_release('PRETTY_NAME="X"\nVERSION_ID=1\n') is None
 
 
+def test_parse_os_release_blank_id_returns_none() -> None:
+    # A present-but-empty ID is not a usable identity; do not record os_release={"id": ""}.
+    assert _parse_os_release("ID=\n") is None
+    assert _parse_os_release('ID=""\nVERSION_ID=43\n') is None
+
+
 def test_parse_os_release_skips_comments_and_blanks() -> None:
     assert _parse_os_release("# a comment\n\nID=rocky\n") == {"id": "rocky"}
 

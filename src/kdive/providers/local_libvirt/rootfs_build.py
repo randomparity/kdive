@@ -403,7 +403,7 @@ def _parse_os_release(text: str) -> dict[str, str] | None:
         mapped = _OS_RELEASE_KEYS.get(key.strip())
         if mapped is not None:
             record[mapped] = value.strip().strip("\"'")
-    return record if "id" in record else None
+    return record if record.get("id") else None
 
 
 def _provenance(
