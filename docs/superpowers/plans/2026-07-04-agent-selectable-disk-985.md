@@ -23,7 +23,7 @@
 
 ### Task 0: Live spike — verify cc_resizefs grows a whole-disk ext4 (evidence gate)
 
-This is a manual verification, not a code task, but it gates the rest of the build (spec "Load-bearing assumption").
+This is a manual verification needing a KVM host, not a code task. It gates **Task 6** (the cloud-init flip) and the final merge — it verifies the guest-side assumption in the spec's "Load-bearing assumption". **Tasks 1-5, 7, and 8 are host-independent code and proceed in parallel without waiting on Task 0**; only Task 6's merge and the feature's done-declaration require Task 0's evidence. If Task 0 disproves the assumption, stop and rework the guest-side design before merging Task 6.
 
 **Files:**
 - Modify (evidence only): `docs/superpowers/specs/2026-07-04-agent-selectable-disk-985-design.md`
@@ -148,6 +148,8 @@ Add `validate_disk_against_resource` and call it in the shared admission pricing
 - Consumes: `Resource.capability_view.require_disk_ceiling(...)` (Task 1), `_caps_error(field, requested, ceiling, resource)` (existing in cost.py).
 - Produces: `validate_disk_against_resource(disk_gb: int | None, resource: Resource) -> None`.
 
+- [ ] **Step 0 (PREREQUISITE — do before wiring): make every admission-path test resource advertise `disk_gb`.** Wiring the fail-closed ceiling into the shared `price_window_and_estimate` (Step 4) turns any Resource lacking a `disk_gb` capability into a `configuration_error` on a previously-passing path, so the fixtures MUST advertise it first or the whole admission/allocation/integration suite goes red. Find every Resource-capabilities construction reachable from admission: `rg -n "memory_mb" tests src/kdive/providers/fault_inject **/systems.toml` and any shared builder (`rg -n "def .*resource|capabilities=" tests/services/allocation tests/integration tests/conftest.py`). Add a `disk_gb` value beside each `vcpus`/`memory_mb` (a generous value, e.g. `disk_gb=500`, so existing sized requests stay under it). This includes: repo/test `systems.toml` inventories, fault-inject discovery fixtures, remote-libvirt fixtures, and any inline `ResourceCapabilities.from_mapping`/capabilities dict in admission tests. Run `just test` (or the allocation+integration subset) BEFORE Step 4 to confirm the sweep is complete and the suite is still green with the check un-wired; then run it again AFTER Step 4.
+
 - [ ] **Step 1: Write failing tests.**
 
 ```python
@@ -213,9 +215,11 @@ Add `validate_disk_against_resource` to the existing import from `kdive.domain.a
 - [ ] **Step 7: Commit.**
 
 ```bash
-git add src/kdive/domain/accounting/cost.py src/kdive/services/allocation/admission/core.py tests/
+git add src/kdive/domain/accounting/cost.py src/kdive/services/allocation/admission/core.py tests/ **/systems.toml src/kdive/providers/fault_inject
 git commit -m "feat(985): enforce disk_gb ceiling at admission"
 ```
+
+The commit includes the Step 0 fixture sweep so the wiring and the fixtures that keep it green land together (bisect-safe — no commit leaves the suite red).
 
 ---
 
@@ -235,10 +239,13 @@ git commit -m "feat(985): enforce disk_gb ceiling at admission"
 # tests/providers/local_libvirt/test_discovery.py (add)
 def test_discovery_advertises_disk_ceiling_from_host_storage(monkeypatch):
     import shutil
+    import types
     from kdive.domain.catalog.resource_capabilities import DISK_GB_KEY
+    # discovery reads only `.total`, so a SimpleNamespace suffices (avoid the private
+    # shutil._ntuple_diskusage).
     monkeypatch.setattr(
         shutil, "disk_usage",
-        lambda p: shutil._ntuple_diskusage(total=200 * 1024**3, used=0, free=200 * 1024**3),
+        lambda p: types.SimpleNamespace(total=200 * 1024**3, used=0, free=200 * 1024**3),
     )
     disco = _discovery_with_fake_conn(vcpus=8, memory_mb=16384)  # existing test helper
     (record,) = disco.list_resources()
@@ -283,12 +290,10 @@ Then in `list_resources` capabilities dict add: `DISK_GB_KEY: _host_disk_ceiling
 
 - [ ] **Step 4: Run tests.** `uv run python -m pytest tests/providers/local_libvirt/test_discovery.py -q` → PASS. Add a test that an un-stat-able `ROOTFS_DIR` (monkeypatch `shutil.disk_usage` to raise `OSError`) raises `INFRASTRUCTURE_FAILURE`.
 
-- [ ] **Step 5: Update the repo/test `systems.toml` and fixtures for remote/fault-inject** so hosts advertise `disk_gb` (Part 3 upgrade contract). Find inventory + fixtures: `rg -l "memory_mb" tests **/systems.toml src/kdive/providers/fault_inject`. Add `disk_gb` beside every `vcpus`/`memory_mb` capability declaration used by tests, so admission's fail-closed ceiling does not break existing suites. Run `just test` scoped to the affected provider suites to confirm.
-
-- [ ] **Step 6: Commit.**
+- [ ] **Step 5: Commit.** (The repo/test `systems.toml` and fault-inject/remote fixtures already advertise `disk_gb` from Task 2 Step 0; this task only adds the local-libvirt live-derived source.)
 
 ```bash
-git add src/kdive/providers/local_libvirt/discovery.py tests/ **/systems.toml
+git add src/kdive/providers/local_libvirt/discovery.py tests/
 git commit -m "feat(985): advertise live-derived disk_gb host ceiling"
 ```
 
@@ -504,9 +509,9 @@ git commit -m "test(985): assert stamped disk_gb reaches overlay resize"
 
 - [ ] **Step 2: Flip the config.** In `_fedora_customize.py` `KDIVE_CLOUD_CFG_CONTENT`, change `resize_rootfs: false` → `resize_rootfs: true`. Leave `growpart: { mode: "off" }` unchanged, and update the nearby comment to say cloud-init grows the whole-disk ext4 to fill the disk sized at provision (ADR-0312), growpart stays off (no partition table).
 
-- [ ] **Step 3: Extend the build self-check.** In `_real_verify_cloud_init` (`rootfs_build.py`), add an assertion that the baked drop-in contains `resize_rootfs: true`. It runs guestfish read-only against the built image; add a check on `KDIVE_CLOUD_CFG_PATH` content (mirror the existing `test -e`/`grep` style checks in that function). Update the docstring to state the resize guarantee.
+- [ ] **Step 3: Extend the build self-check.** In `_real_verify_cloud_init` (`rootfs_build.py`, `# pragma: no cover - live_vm`), add an assertion that the baked drop-in contains `resize_rootfs: true` (mirror the existing `test -e`/`grep` guestfish checks in that function) and update the docstring to state the resize guarantee. This is a **live-build** defense; the **default-gate** guard for the flip is the config-content test in Step 1 (do not assume a self-check unit test exists — the function is not unit-covered).
 
-- [ ] **Step 4: Run tests.** `uv run python -m pytest tests/images tests/providers/local_libvirt/test_rootfs_build.py -q` → PASS. Update any self-check unit test that stubs guestfish output to include a `resize_rootfs: true` line so the new assertion passes.
+- [ ] **Step 4: Run tests.** `uv run python -m pytest tests/images tests/providers/local_libvirt/test_rootfs_build.py -q` → PASS.
 
 - [ ] **Step 5: Commit.**
 
