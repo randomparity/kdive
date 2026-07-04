@@ -81,6 +81,34 @@ def test_image_accepts_known_capability_tokens() -> None:
     assert [str(c) for c in doc.image[0].capabilities] == ["agent", "kdump", "drgn", "build"]
 
 
+def test_image_description_defaults_empty() -> None:
+    doc = InventoryDoc.parse(_doc())
+    assert doc.image[0].description == ""
+
+
+def test_image_accepts_description() -> None:
+    d = _doc()
+    d["image"][0]["description"] = "RHEL debug host with my SLES crash setup"
+    doc = InventoryDoc.parse(d)
+    assert doc.image[0].description == "RHEL debug host with my SLES crash setup"
+
+
+def test_image_accepts_max_length_description() -> None:
+    d = _doc()
+    d["image"][0]["description"] = "z" * 280
+    doc = InventoryDoc.parse(d)
+    assert len(doc.image[0].description) == 280
+
+
+def test_image_rejects_overlong_description() -> None:
+    # A freeform operator hint is echoed on every images.list row, so it is capped for token
+    # safety; an over-long value is a hard parse error naming the image and the limit.
+    d = _doc()
+    d["image"][0]["description"] = "z" * 281
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(d)
+
+
 def test_remote_libvirt_requires_size_ceiling() -> None:
     # vcpus/memory_mb are the admission ≤-resource-caps ceiling; remote-libvirt is config-owned,
     # so omitting either is a hard parse error (no host without a grantable ceiling).

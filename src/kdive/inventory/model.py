@@ -83,6 +83,11 @@ ImageSource = Annotated[
 """Discriminated union of image realization sources, keyed on the ``kind`` literal."""
 
 
+# Operator ``description`` is echoed on every ``images.list`` row (ADR-0311), so it is capped to
+# a one-line hint for token safety — well under the worker's 1000-char value cap.
+_MAX_IMAGE_DESCRIPTION = 280
+
+
 class ImageEntry(BaseModel):
     """A single ``[[image]]`` declaration."""
 
@@ -94,11 +99,27 @@ class ImageEntry(BaseModel):
     visibility: ImageVisibility
     capabilities: list[Capability] = Field(default_factory=list)
     source: ImageSource
+    description: str = ""
 
     @property
     def identity(self) -> tuple[str, str, str]:
         """The stable identity tuple ``(provider, name, arch)``."""
         return (self.provider, self.name, self.arch)
+
+    @model_validator(mode="after")
+    def _description_within_cap(self) -> Self:
+        """Reject an over-long operator description, naming the image and the limit (ADR-0311).
+
+        The hint is surfaced on every ``images.list`` row, so an unbounded value would multiply
+        across a page and blow an agent's context budget. The cap is enforced at load, not silently
+        truncated, so the operator sees the problem.
+        """
+        if len(self.description) > _MAX_IMAGE_DESCRIPTION:
+            raise ValueError(
+                f"image {self.name!r} description exceeds {_MAX_IMAGE_DESCRIPTION} characters "
+                f"({len(self.description)}); keep it to a one-line operator hint"
+            )
+        return self
 
     @model_validator(mode="after")
     def _staged_path_is_public(self) -> Self:
