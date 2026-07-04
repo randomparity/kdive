@@ -37,6 +37,14 @@ psycopg3, PostgreSQL, guestfish (offline image probe), FastMCP tools, pytest.
   advisory-locked `apply_migrations` step (ADR-0015) before write traffic.
 - Migration numbering: **0060** (highest existing is 0059). ADR **0311**.
 - Line length ≤100; absolute imports; Google-style docstrings on public APIs.
+- **Generated-doc rule:** the tool reference (`just docs`) is rendered from tool
+  **input schemas and docstrings**, not runtime `data` keys — so a data-only
+  envelope change needs no regen. But any task that edits a tool **docstring or
+  `Field`** text must run `just docs` and commit the regenerated reference in the
+  **same commit**, and add `just docs-check` to that task's guardrails, so no
+  intermediate commit leaves `docs-check` red. Keep the surfacing tasks
+  (5/6/7) data-only; do all docstring/`Field`/guide edits + regen together
+  (Task 8/9).
 - Commit trailer: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
 
 ---
@@ -144,7 +152,10 @@ Add `_MAX_IMAGE_DESCRIPTION = 280` near the top of the module.
   - `test_reconcile_updates_description_on_edit`: reconcile with a description,
     then reconcile again with a changed one; assert the row updates.
   - `test_reconcile_clears_description_when_removed`: description set, then
-    absent → row `description == ""` (or NULL).
+    absent → row `description` NULL.
+  - `test_reconcile_of_descriptionless_image_is_idempotent`: reconcile an
+    `[[image]]` with no description twice; the second pass reports **no config
+    change** (guards the NULL-vs-`""` churn below).
   - `test_publish_does_not_clobber_description`: create a row via reconcile with
     a description, run a `publish_image` for the same identity, assert the
     description is unchanged.
@@ -152,10 +163,16 @@ Add `_MAX_IMAGE_DESCRIPTION = 280` near the top of the module.
 - [ ] **Step 2: Run — expect FAIL.**
 
 - [ ] **Step 3: Implement.** Add `description` to the `_load_config_rows` SELECT
-  column list; add `entry.description` to the `_create_entry` INSERT column list
-  and params; add `description` to the `_update_entry` `desired`/UPDATE set
-  (mirror how `capabilities` is handled at `images.py:245,264-270`). Do **not**
-  touch `services/images/publish.py`.
+  column list; add `entry.description or None` to the `_create_entry` INSERT
+  column list and params (store NULL for empty); add `description` to the
+  `_update_entry` `desired` set as `entry.description or None` and to the UPDATE
+  set (mirror `capabilities` at `images.py:245,264-270`). **Normalize the
+  change-detection**: `config_changed` compares `desired` against `row`
+  (`images.py:259`), and the DB stores NULL for an unset description while
+  `entry.description` defaults to `""` — so store/compare the normalized
+  `entry.description or None` on **both** sides to avoid a spurious
+  `config_changed` (and redundant UPDATE) on every reconcile of a
+  description-less image. Do **not** touch `services/images/publish.py`.
 
 - [ ] **Step 4: Run — expect PASS.** Also full `uv run pytest tests/inventory -q`.
 
@@ -166,15 +183,21 @@ Add `_MAX_IMAGE_DESCRIPTION = 280` near the top of the module.
 ### Task 4: Build-time `/etc/os-release` capture
 
 **Files:**
-- Modify: `src/kdive/providers/local_libvirt/rootfs_build.py`
-  (`_capture_os_release`, `_provenance` param, call site) and the build-tools
-  seam that defines `probe_boot_entries` (add `probe_os_release`)
+- Modify: `src/kdive/images/planes/_build_common.py` — add `probe_os_release`
+  (next to `probe_boot_entries`, `:272`), an `OsReleaseProbeSeam` type alias, and
+  `DEFAULT_OS_RELEASE_PROBE = probe_os_release` (mirror `DEFAULT_BOOT_ENTRIES_PROBE`,
+  `:317`).
+- Modify: `src/kdive/providers/local_libvirt/rootfs_build.py` — add the
+  `probe_os_release: OsReleaseProbeSeam = DEFAULT_OS_RELEASE_PROBE` seam field to
+  `RootfsBuildTools` (`:177-188`); add `_parse_os_release`, `_capture_os_release`,
+  the `_provenance` param + call site.
 - Test: `tests/providers/local_libvirt/test_rootfs_build.py` (parser + provenance)
 
 **Interfaces:**
 - Consumes: `self._tools.probe_os_release(scratch) -> str | None` (raw file text).
 - Produces: `provenance["os_release"] = {"id", ["version_id"], ["pretty_name"]}`
-  when `ID` present, else key omitted.
+  when `ID` present, else key omitted. Tests inject a fake by constructing
+  `RootfsBuildTools(probe_os_release=<callable>)` — there is no separate double.
 
 - [ ] **Step 1: Write failing unit tests for the parser** (`_parse_os_release`):
 ```python
@@ -213,9 +236,12 @@ def test_parse_os_release_malformed_returns_none_or_partial():
   `boot_kernel_count`, lines 411-412). Pass `self._capture_os_release(scratch)`
   at the `_provenance(...)` call site.
 
-- [ ] **Step 6: Add `probe_os_release` to the build-tools protocol/impl**
-  (`_real_*` seam and the test double) reading `/etc/os-release` (falling back to
-  `/usr/lib/os-release`) via the same guestfish mechanism as `probe_boot_entries`.
+- [ ] **Step 6: Add the seam.** In `_build_common.py`, define
+  `probe_os_release(qcow2_path) -> str | None` (read `/etc/os-release`, falling
+  back to `/usr/lib/os-release`, via the same guestfish mechanism as
+  `probe_boot_entries`, `# pragma: no cover - live_vm`), an `OsReleaseProbeSeam`
+  alias, and `DEFAULT_OS_RELEASE_PROBE`. Add the `probe_os_release` field to
+  `RootfsBuildTools`.
 
 - [ ] **Step 7: Write a provenance test**: a fake tools double returning a known
   os-release yields `provenance["os_release"] == {...}`; a `None` probe omits the
