@@ -252,6 +252,85 @@ def _remote_base_volume_profile(volume: str) -> dict[str, object]:
 # --- tests ---------------------------------------------------------------------------
 
 
+_STAGED_PATH_HEAD = (
+    "schema_version = 2\n"
+    "[[image]]\n"
+    'provider = "local-libvirt"\n'
+    'name = "local-rootfs"\n'
+    'arch = "x86_64"\n'
+    'format = "qcow2"\n'
+    'root_device = "/dev/vda"\n'
+    'visibility = "public"\n'
+)
+_STAGED_PATH_SOURCE = (
+    '[image.source]\nkind = "staged-path"\npath = "/var/lib/kdive/rootfs/local-rootfs.qcow2"\n'
+)
+
+
+def _staged_path_toml(description: str | None = None) -> str:
+    body = _STAGED_PATH_HEAD
+    if description is not None:
+        body += f'description = "{description}"\n'
+    return body + _STAGED_PATH_SOURCE
+
+
+def test_reconcile_creates_row_with_description(migrated_url: str, tmp_path: Path) -> None:
+    async def _run() -> None:
+        doc = load_inventory(_write_toml(tmp_path, _staged_path_toml("RHEL debug + SLES setup")))
+        store = _FakeImageStore()
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await reconcile_images(conn, doc, store)
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "local-rootfs")
+        assert row["description"] == "RHEL debug + SLES setup"
+
+    asyncio.run(_run())
+
+
+def test_reconcile_updates_then_clears_description(migrated_url: str, tmp_path: Path) -> None:
+    async def _reconcile(store: _FakeImageStore, description: str | None) -> None:
+        doc = load_inventory(_write_toml(tmp_path, _staged_path_toml(description)))
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await reconcile_images(conn, doc, store)
+
+    async def _description() -> object:
+        async with await _connect(migrated_url) as check:
+            return (await _one(check, "local-rootfs"))["description"]
+
+    async def _run() -> None:
+        store = _FakeImageStore()
+        await _reconcile(store, "first")
+        await _reconcile(store, "second")
+        assert await _description() == "second"
+        await _reconcile(store, None)
+        assert await _description() is None
+
+    asyncio.run(_run())
+
+
+def test_reconcile_descriptionless_image_is_idempotent(migrated_url: str, tmp_path: Path) -> None:
+    # A description-less image stores NULL while entry.description defaults to ""; without
+    # normalization the change-detector would report config_changed on every pass (NULL != "").
+    async def _run() -> None:
+        doc = load_inventory(_write_toml(tmp_path, _staged_path_toml(None)))
+        store = _FakeImageStore()
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await reconcile_images(conn, doc, store)
+            second = await reconcile_images(conn, doc, store)
+        assert "local-rootfs" not in {u.name for u in second.updated}
+
+    asyncio.run(_run())
+
+
 def test_staged_path_image_seeds_registered_with_path(migrated_url: str, tmp_path: Path) -> None:
     async def _run() -> None:
         doc = load_inventory(
