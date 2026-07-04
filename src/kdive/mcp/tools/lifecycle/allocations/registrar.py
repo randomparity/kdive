@@ -90,7 +90,15 @@ def _register_allocations_request(
             Field(description="Replay-safe key; a repeated key returns the prior grant."),
         ] = None,
     ) -> ToolResponse:
-        """Request capacity and create an allocation grant."""
+        """Request capacity and create an allocation grant.
+
+        Size with a named ``shape`` XOR a full custom ``{vcpus, memory_gb, disk_gb}`` triple.
+        ``disk_gb`` sizes the guest's usable disk (the guest filesystem grows to fill it on
+        first boot), so pick a value with headroom for runtime tool installs plus build
+        artifacts plus a captured vmcore — the ``debug`` shape (`shapes.list`) is pre-sized
+        for that. ``disk_gb`` is bounded by the host disk ceiling; an over-ceiling request is
+        a ``configuration_error`` naming the ceiling.
+        """
         try:
             _guard_resource_kind(request, resolver)  # ADR-0269: on the shared handler path
         except CategorizedError as exc:

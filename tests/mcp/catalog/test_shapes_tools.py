@@ -37,7 +37,7 @@ from kdive.mcp.tools.catalog import shapes
 from kdive.security.authz.rbac import PlatformRole, Role
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
-_SEED_NAMES = ["large", "max", "medium", "small"]  # sorted by name
+_SEED_NAMES = ["debug", "large", "max", "medium", "small"]  # sorted by name (debug: mig 0061)
 
 
 _OPERATOR = RequestContext(
@@ -158,7 +158,7 @@ def test_list_returns_seed_sorted(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             resp = await shapes.list_shapes(pool, _VIEWER)
         assert resp.status == "ok"
-        assert resp.data["count"] == 4
+        assert resp.data["count"] == 5
         assert [item.object_id for item in resp.items] == _SEED_NAMES
         small = next(item for item in resp.items if item.object_id == "small")
         assert small.data["vcpus"] == 1

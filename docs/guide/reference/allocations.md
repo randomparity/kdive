@@ -67,6 +67,13 @@ Extend an allocation lease window.
 
 Request capacity and create an allocation grant.
 
+Size with a named ``shape`` XOR a full custom ``{vcpus, memory_gb, disk_gb}`` triple.
+``disk_gb`` sizes the guest's usable disk (the guest filesystem grows to fill it on
+first boot), so pick a value with headroom for runtime tool installs plus build
+artifacts plus a captured vmcore — the ``debug`` shape (`shapes.list`) is pre-sized
+for that. ``disk_gb`` is bounded by the host disk ceiling; an over-ceiling request is
+a ``configuration_error`` naming the ceiling.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior grant. |
@@ -79,7 +86,7 @@ Request capacity and create an allocation grant.
 - `memory_gb` (`integer (nullable)`, optional)
 - `window` (`number \| string \| null`, optional) — Lease window length in hours, e.g. 24.
 - `shape` (`string (nullable)`, optional) — Named size from `shapes.list`; mutually exclusive with vcpus/memory_gb/disk_gb (supply exactly one sizing source).
-- `disk_gb` (`integer (nullable)`, optional)
+- `disk_gb` (`integer (nullable)`, optional) — Guest disk in GB (part of the custom triple; omit when using a shape). Sizes the guest's usable disk — the filesystem grows to fill it on first boot — so allow headroom for tool installs + build artifacts + a vmcore. Bounded by the host disk ceiling (over-ceiling is a configuration_error).
 - `resource` (`object(mode=id) \| object(mode=kind) \| object(mode=pool)`, optional)
   - _variant object(mode=id):_
     - `mode` (``=id``, required)

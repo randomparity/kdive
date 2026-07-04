@@ -51,6 +51,18 @@ provenance. On success it prints exactly one line to **stdout** — the `KDIVE_G
 for the live spine — while the human summary (the destination path and the `sha256:` content
 digest) goes to **stderr** (the logger). That split makes the command's stdout `eval`-safe.
 
+> **Agent-selectable disk requires a rebuilt image (ADR-0312, #985).** An `allocations.request`
+> may size the guest disk via `disk_gb` (a custom triple or the `debug` shape). The platform grows
+> the per-System overlay to that size at provision, and cloud-init's `resize_rootfs` grows the
+> guest filesystem to fill it on first boot. That growth only happens on an image built with
+> `resize_rootfs` enabled — **rebuild each rootfs with `build-fs` to gain it**. The build
+> self-check refuses an image whose baked cloud-init drop-in has `resize_rootfs` off, so a freshly
+> built image always has it; an older on-disk image grows its virtual disk but leaves the extra
+> space unformatted until rebuilt. The per-request disk ceiling is derived live from the free
+> capacity of `/var/lib/kdive/rootfs` (no operator env); a request over it is a
+> `configuration_error`. remote-libvirt and fault-inject do not size disk this way and are not
+> bounded.
+
 Flags that shape the build:
 
 - `--image NAME` is required. It selects a row from
