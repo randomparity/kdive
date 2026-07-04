@@ -9,8 +9,10 @@ the per-host concurrent-Allocation cap.
 from __future__ import annotations
 
 import logging
+import shutil
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any, Protocol
 
 import libvirt
@@ -19,10 +21,11 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 import kdive.config as config
 from kdive.domain.capacity.state import ResourceStatus
 from kdive.domain.catalog.discovery import ResourceRecord
-from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY, DISK_GB_KEY
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeDescriptor
+from kdive.providers.local_libvirt.lifecycle.storage import ROOTFS_DIR
 from kdive.providers.local_libvirt.settings import LIBVIRT_ALLOCATION_CAP, LIBVIRT_URI
 from kdive.providers.ports.handles import OwnedInfra
 from kdive.providers.shared.libvirt_xml import (
@@ -33,6 +36,32 @@ from kdive.providers.shared.libvirt_xml import (
 from kdive.providers.shared.runtime_paths import system_id_from_domain_name
 
 _log = logging.getLogger(__name__)
+
+_BYTES_PER_GB = 1024**3
+
+
+def _host_disk_ceiling_gb() -> int:
+    """Total capacity (GB) of the filesystem backing per-System overlays (ADR-0312).
+
+    The disk-request ceiling admission enforces for a local-libvirt allocation. Walks up to
+    the nearest existing ancestor of :data:`ROOTFS_DIR` so discovery works before the rootfs
+    directory is created (a fresh host / CI runner): the overlay lands on that same
+    filesystem, so its capacity is the honest bound.
+
+    Raises:
+        CategorizedError: ``INFRASTRUCTURE_FAILURE`` if even the ancestor cannot be stat-ed.
+    """
+    path = Path(ROOTFS_DIR)
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    try:
+        return shutil.disk_usage(path).total // _BYTES_PER_GB
+    except OSError as exc:
+        raise CategorizedError(
+            f"cannot stat {path} to advertise the host disk ceiling",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"path": str(path), "error": type(exc).__name__},
+        ) from exc
 
 
 class _LibvirtDomain(Protocol):
@@ -156,6 +185,7 @@ class LocalLibvirtDiscovery:
             "arch": parse_capabilities_arch(conn.getCapabilities()),
             "vcpus": int(info[2]),
             "memory_mb": int(info[1]),
+            DISK_GB_KEY: _host_disk_ceiling_gb(),
             "transports": ["gdbstub"],
             CONCURRENT_ALLOCATION_CAP_KEY: self.concurrent_allocation_cap,
             PCIE_DEVICES_KEY: self._list_pcie_descriptors(conn),

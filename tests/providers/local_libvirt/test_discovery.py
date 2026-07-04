@@ -8,10 +8,11 @@ import libvirt
 import pytest
 
 from kdive.domain.capacity.state import ResourceStatus
-from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY, DISK_GB_KEY
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.pcie import PCIE_DEVICES_KEY
+from kdive.providers.local_libvirt import discovery as discovery_module
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from tests.providers.local_libvirt.fakes import (
     FakeDomain,
@@ -38,6 +39,33 @@ def test_list_resources_advertises_host_capabilities() -> None:
     assert caps["memory_mb"] == 16384
     assert caps["transports"] == ["gdbstub"]
     assert caps[CONCURRENT_ALLOCATION_CAP_KEY] == 3
+
+
+def test_list_resources_advertises_disk_ceiling_from_host_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import types
+
+    # discovery reads only `.total`; a SimpleNamespace suffices (avoid private shutil types).
+    monkeypatch.setattr(
+        discovery_module.shutil,
+        "disk_usage",
+        lambda _path: types.SimpleNamespace(total=200 * 1024**3, used=0, free=200 * 1024**3),
+    )
+    caps = _discovery(FakeLibvirtConn()).list_resources()[0]["capabilities"]
+    assert caps[DISK_GB_KEY] == 200
+
+
+def test_disk_ceiling_unstattable_is_infrastructure_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise(_path: object) -> object:
+        raise OSError("no such path")
+
+    monkeypatch.setattr(discovery_module.shutil, "disk_usage", _raise)
+    with pytest.raises(CategorizedError) as exc:
+        _discovery(FakeLibvirtConn()).list_resources()
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_list_resources_arch_unknown_when_absent() -> None:
