@@ -1035,6 +1035,28 @@ def test_prepare_overlay_none_disk_never_resizes() -> None:
     assert calls == []
 
 
+def test_prepare_overlay_resize_failure_removes_the_created_overlay() -> None:
+    # A resize failure must reclaim the just-created overlay so a retry re-creates and re-grows
+    # it — never reusing an un-grown overlay, which would silently boot the guest at the base
+    # size (the phantom-knob regression). The failure propagates as the original error.
+    removed: list[str] = []
+
+    def _boom(_overlay: str, _gb: int) -> None:
+        raise CategorizedError("resize failed", category=ErrorCategory.PROVISIONING_FAILURE)
+
+    files = ProvisioningFiles(
+        make_overlay=lambda _base, _overlay: None,
+        overlay_exists=lambda _overlay: False,
+        overlay_virtual_size=lambda _overlay: _BASE_BYTES,
+        resize_overlay=_boom,
+        remove_overlay=removed.append,
+    )
+    with pytest.raises(CategorizedError) as exc:
+        files.prepare_overlay(_SYS, base="/base.qcow2", disk_gb=60)
+    assert exc.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert removed == [overlay_path(_SYS)]
+
+
 def test_cleanup_overlay_if_created_removes_only_created_overlay() -> None:
     removed: list[str] = []
     files = ProvisioningFiles(remove_overlay=removed.append)

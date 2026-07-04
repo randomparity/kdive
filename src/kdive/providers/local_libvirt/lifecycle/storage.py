@@ -233,7 +233,14 @@ class ProvisioningFiles:
         created = not self.overlay_exists(overlay)
         if created:
             self.make_overlay(base, overlay)
-            self._grow_if_requested(overlay, disk_gb)
+            try:
+                self._grow_if_requested(overlay, disk_gb)
+            except CategorizedError:
+                # A resize failure after creating the overlay must reclaim it, so a retry
+                # re-creates and re-grows cleanly — never reusing an un-grown overlay, which
+                # would silently boot the guest at the base size (the phantom-knob regression).
+                self.remove_overlay(overlay)
+                raise
         return PreparedOverlay(path=overlay, created=created)
 
     def _grow_if_requested(self, overlay: str, disk_gb: int | None) -> None:
