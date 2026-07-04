@@ -315,3 +315,54 @@ def probe_boot_entries(qcow2_path: Path) -> list[str] | None:  # pragma: no cove
 
 
 DEFAULT_BOOT_ENTRIES_PROBE: BootEntriesProbeSeam = probe_boot_entries
+
+type OsReleaseProbeSeam = Callable[[Path], str | None]
+
+
+def probe_os_release(qcow2_path: Path) -> str | None:  # pragma: no cover - live_vm
+    """Read ``/etc/os-release`` from ``qcow2_path`` (``/usr/lib`` fallback), read-only (ADR-0311).
+
+    The build-time operand of the verified OS-identity provenance: the caller parses
+    ``ID``/``VERSION_ID``/``PRETTY_NAME`` into ``provenance["os_release"]``, so the record carries
+    the built image's own release rather than the operator-assigned catalog name. Tries
+    ``/etc/os-release`` first (a guest symlink to ``/usr/lib/os-release`` is followed inside the
+    image), then ``/usr/lib/os-release`` for a distro that ships only the vendor copy.
+
+    Returns:
+        The raw os-release file text, or ``None`` when neither path could be read (a non-zero
+        ``guestfish`` exit for both, or an empty body). Never raises for a merely-absent file; the
+        caller treats ``None`` as "operand absent" and omits it from provenance.
+
+    Raises:
+        CategorizedError: ``MISSING_DEPENDENCY`` if ``guestfish`` is absent;
+            ``INFRASTRUCTURE_FAILURE`` on timeout. Both are caught by the advisory caller and
+            degrade to an omitted operand, so a probe failure never fails a build.
+    """
+    for guest_path in ("/etc/os-release", "/usr/lib/os-release"):
+        argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "cat", guest_path]
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed guestfish argv; image path is a data arg
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=_GUESTFISH_TIMEOUT_S,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            raise CategorizedError(
+                "guestfish is not installed; cannot read /etc/os-release",
+                category=ErrorCategory.MISSING_DEPENDENCY,
+                details={"tool": "guestfish"},
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise CategorizedError(
+                "guestfish exceeded its timeout reading os-release",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"timeout_s": _GUESTFISH_TIMEOUT_S},
+            ) from exc
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout
+    return None  # neither path present; caller omits the operand
+
+
+DEFAULT_OS_RELEASE_PROBE: OsReleaseProbeSeam = probe_os_release

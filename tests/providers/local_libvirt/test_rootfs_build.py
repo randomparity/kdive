@@ -23,6 +23,7 @@ from kdive.images.families.rhel import RhelFamily
 from kdive.images.planes._build_common import (
     BootEntriesProbeSeam,
     MakedumpfileProbeSeam,
+    OsReleaseProbeSeam,
     VersionInspectSeam,
 )
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
@@ -35,6 +36,7 @@ from kdive.images.rootfs_catalog import (
 from kdive.providers.local_libvirt.rootfs_build import (
     LocalLibvirtRootfsBuildPlane,
     RootfsBuildTools,
+    _parse_os_release,
     family_for,
 )
 
@@ -142,12 +144,18 @@ def _no_boot_entries(_qcow2: Path) -> list[str] | None:
     return None
 
 
+def _no_os_release(_qcow2: Path) -> str | None:
+    # Hermetic default: no os-release text, so the default build path omits os_release (ADR-0311).
+    return None
+
+
 def _tools(
     rec: _Recorder,
     inspect_versions: VersionInspectSeam = _no_versions,
     probe_makedumpfile: MakedumpfileProbeSeam = _no_makedumpfile,
     verify_cloud_init: object | None = None,
     probe_boot_entries: BootEntriesProbeSeam = _no_boot_entries,
+    probe_os_release: OsReleaseProbeSeam = _no_os_release,
 ) -> RootfsBuildTools:
     return RootfsBuildTools(
         acquire_base=rec.acquire_base,
@@ -157,6 +165,7 @@ def _tools(
         inspect_versions=inspect_versions,
         probe_makedumpfile=probe_makedumpfile,
         probe_boot_entries=probe_boot_entries,
+        probe_os_release=probe_os_release,
         verify_cloud_init=verify_cloud_init or rec.verify_cloud_init,  # ty: ignore[invalid-argument-type]
     )
 
@@ -167,11 +176,16 @@ def _plane(
     inspect_versions: VersionInspectSeam = _no_versions,
     probe_makedumpfile: MakedumpfileProbeSeam = _no_makedumpfile,
     probe_boot_entries: BootEntriesProbeSeam = _no_boot_entries,
+    probe_os_release: OsReleaseProbeSeam = _no_os_release,
 ) -> LocalLibvirtRootfsBuildPlane:
     return LocalLibvirtRootfsBuildPlane(
         workspace=tmp_path / "work",
         tools=_tools(
-            rec, inspect_versions, probe_makedumpfile, probe_boot_entries=probe_boot_entries
+            rec,
+            inspect_versions,
+            probe_makedumpfile,
+            probe_boot_entries=probe_boot_entries,
+            probe_os_release=probe_os_release,
         ),
     )
 
@@ -414,6 +428,67 @@ def test_provenance_omits_boot_kernel_count_on_probe_error(tmp_path: Path) -> No
     rec = _Recorder()
     out = _plane(tmp_path, rec, probe_boot_entries=_boom).build(_spec())
     assert "boot_kernel_count" not in out.provenance
+
+
+def test_parse_os_release_quoted_and_unquoted() -> None:
+    text = 'ID=fedora\nVERSION_ID=43\nPRETTY_NAME="Fedora Linux 43"\n'
+    assert _parse_os_release(text) == {
+        "id": "fedora",
+        "version_id": "43",
+        "pretty_name": "Fedora Linux 43",
+    }
+
+
+def test_parse_os_release_single_quotes() -> None:
+    assert _parse_os_release("ID='sles'\nVERSION_ID='15'\n") == {"id": "sles", "version_id": "15"}
+
+
+def test_parse_os_release_id_only_partial() -> None:
+    # A rolling distro (e.g. Debian testing) may ship ID with no VERSION_ID — a valid record.
+    assert _parse_os_release("ID=debian\n") == {"id": "debian"}
+
+
+def test_parse_os_release_missing_id_returns_none() -> None:
+    assert _parse_os_release('PRETTY_NAME="X"\nVERSION_ID=1\n') is None
+
+
+def test_parse_os_release_skips_comments_and_blanks() -> None:
+    assert _parse_os_release("# a comment\n\nID=rocky\n") == {"id": "rocky"}
+
+
+def test_parse_os_release_ignores_malformed_lines() -> None:
+    assert _parse_os_release("garbage-no-equals\nID=x\n") == {"id": "x"}
+
+
+def test_parse_os_release_all_malformed_returns_none() -> None:
+    assert _parse_os_release("nonsense-line\n") is None
+
+
+def test_provenance_records_os_release(tmp_path: Path) -> None:
+    rec = _Recorder()
+    text = 'ID=fedora\nVERSION_ID=43\nPRETTY_NAME="Fedora Linux 43"\n'
+    out = _plane(tmp_path, rec, probe_os_release=lambda _q: text).build(_spec())
+    assert out.provenance["os_release"] == {
+        "id": "fedora",
+        "version_id": "43",
+        "pretty_name": "Fedora Linux 43",
+    }
+
+
+def test_provenance_omits_os_release_when_probe_returns_none(tmp_path: Path) -> None:
+    # The hermetic default (_no_os_release -> None) is the omitted-operand path.
+    rec = _Recorder()
+    out = _plane(tmp_path, rec).build(_spec())
+    assert "os_release" not in out.provenance
+
+
+def test_provenance_omits_os_release_on_probe_error(tmp_path: Path) -> None:
+    def _boom(_q: Path) -> str | None:
+        raise CategorizedError("no tool", category=ErrorCategory.MISSING_DEPENDENCY)
+
+    rec = _Recorder()
+    out = _plane(tmp_path, rec, probe_os_release=_boom).build(_spec())
+    assert "os_release" not in out.provenance
 
 
 def test_build_rejects_uncataloged_name(tmp_path: Path) -> None:
