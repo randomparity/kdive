@@ -148,6 +148,10 @@ def _example_item(provider: str, doc: InventoryDoc | None) -> ToolResponse:
         "sizing_note": _SIZING_NOTE,
         "uses_real_reference": not placeholder,
     }
+    if provider == _LOCAL:
+        # Disclose that the example image was picked by declaration order and point the agent to
+        # images.list to choose deliberately (#1017): the vacuum that made agents reuse this one.
+        data.update(_local_selection_context(doc))
     return ToolResponse.success(provider, "ok", data=data)
 
 
@@ -218,14 +222,57 @@ def _fault_profile() -> dict[str, JsonValue]:
     }
 
 
+def _public_images(doc: InventoryDoc | None, provider: str) -> list[ImageEntry]:
+    """Every ``PUBLIC``-visibility ``[[image]]`` declared for ``provider``, in declaration order."""
+    if doc is None:
+        return []
+    return [
+        image
+        for image in doc.image
+        if image.provider == provider and image.visibility == ImageVisibility.PUBLIC
+    ]
+
+
 def _public_image(doc: InventoryDoc | None, provider: str) -> ImageEntry | None:
     """The first ``PUBLIC``-visibility ``[[image]]`` declared for ``provider``, or ``None``."""
-    if doc is None:
-        return None
-    for image in doc.image:
-        if image.provider == provider and image.visibility == ImageVisibility.PUBLIC:
-            return image
-    return None
+    images = _public_images(doc, provider)
+    return images[0] if images else None
+
+
+_SELECTION_NOTE_MANY = (
+    "Chosen by declaration order (the first-declared public local-libvirt image); it is one of "
+    "{count} public images. Call images.list / images.describe to choose deliberately by "
+    "capabilities, os, and description."
+)
+_SELECTION_NOTE_ONE = "The only public local-libvirt image in this inventory."
+_SELECTION_NOTE_NONE = (
+    "No public local-libvirt image is declared; this example uses a placeholder rootfs. Declare an "
+    "[[image]] (or replace the rootfs path) before provisioning."
+)
+
+
+def _selection_note(count: int) -> str:
+    """The count-conditioned disclosure so the note never asserts a choice that does not exist."""
+    if count > 1:
+        return _SELECTION_NOTE_MANY.format(count=count)
+    if count == 1:
+        return _SELECTION_NOTE_ONE
+    return _SELECTION_NOTE_NONE
+
+
+def _local_selection_context(doc: InventoryDoc | None) -> dict[str, JsonValue]:
+    """The local example's selection disclosure: how many images exist, why this one, its context.
+
+    ``available_images`` lets the agent know a choice exists; ``selection_note`` discloses that the
+    example image was picked by declaration order and — when there is a choice — points to
+    ``images.list``; ``description`` echoes the chosen image's operator-attested hint (ADR-0311).
+    """
+    images = _public_images(doc, _LOCAL)
+    return {
+        "available_images": len(images),
+        "selection_note": _selection_note(len(images)),
+        "description": images[0].description if images else "",
+    }
 
 
 def _remote_base_volume(doc: InventoryDoc | None) -> str | None:

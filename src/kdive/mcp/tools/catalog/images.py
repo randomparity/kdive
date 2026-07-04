@@ -11,7 +11,7 @@ included — so the operator can see in-flight and seeded images.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastmcp import FastMCP
 from psycopg.rows import dict_row
@@ -59,8 +59,30 @@ _LIST_SQL = """
 """
 
 
+def _compact_os(provenance: dict[str, Any]) -> dict[str, JsonValue]:
+    """Project ``provenance["os_release"]`` into a compact ``{id[, version_id]}`` identity.
+
+    ADR-0311. Empty when there is no ``os_release`` record, it is not a dict, or it carries no
+    ``id`` — a record without a distro id is not a usable identity, so a bare version is never
+    surfaced. ``version_id`` is included only when present (a rolling distro may omit it).
+    """
+    record = provenance.get("os_release")
+    if not isinstance(record, dict) or not record.get("id"):
+        return {}
+    compact: dict[str, JsonValue] = {"id": str(record["id"])}
+    version_id = record.get("version_id")
+    if version_id:
+        compact["version_id"] = str(version_id)
+    return compact
+
+
 def _row_envelope(entry: ImageCatalogEntry) -> ToolResponse:
-    """One image row as a sub-envelope: identity, scope, and publish state in ``data``."""
+    """One image row as a sub-envelope: identity, scope, publish state, and merit signals.
+
+    Carries the build-fact ``capabilities`` tags, a compact verified ``os`` identity, and the
+    operator-attested ``description`` so an agent can compare images on merit in one call rather
+    than an N+1 ``images.describe`` fan-out (ADR-0311).
+    """
     return ToolResponse.success(
         str(entry.id),
         entry.state.value,
@@ -72,6 +94,9 @@ def _row_envelope(entry: ImageCatalogEntry) -> ToolResponse:
             "owner": entry.owner or "",
             "state": entry.state.value,
             "volume": entry.volume or "",
+            "capabilities": [cap.value for cap in entry.capabilities],
+            "os": _compact_os(entry.provenance),
+            "description": entry.description or "",
         },
     )
 
@@ -171,6 +196,8 @@ def _describe_envelope(entry: ImageCatalogEntry, basis: KernelVersion) -> ToolRe
             "state": entry.state.value,
             "digest": entry.digest or "",
             "capabilities": [cap.value for cap in entry.capabilities],
+            "os": _compact_os(entry.provenance),
+            "description": entry.description or "",
             "provenance": entry.provenance,
             "capability_signals": _capability_signals(entry, basis),
             "volume": entry.volume or "",

@@ -86,6 +86,7 @@ class ImageCatalogEntry(DomainModel):
     managed_by: ManagedBy = ManagedBy.RUNTIME
     volume: str | None = None
     path: str | None = None
+    description: str | None = None
 
 
 __all__ = ["Capability", "ImageCatalogEntry", "ImageState", "ImageVisibility"]

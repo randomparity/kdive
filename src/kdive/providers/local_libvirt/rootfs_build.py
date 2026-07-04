@@ -47,9 +47,11 @@ from kdive.images.kdump_support import MakedumpfileVersion
 from kdive.images.planes._build_common import (
     DEFAULT_BOOT_ENTRIES_PROBE,
     DEFAULT_MAKEDUMPFILE_PROBE,
+    DEFAULT_OS_RELEASE_PROBE,
     DEFAULT_VERSION_INSPECT,
     BootEntriesProbeSeam,
     MakedumpfileProbeSeam,
+    OsReleaseProbeSeam,
     VersionInspectSeam,
     build_workspace,
     digest_file,
@@ -186,6 +188,7 @@ class RootfsBuildTools:
     inspect_versions: VersionInspectSeam = DEFAULT_VERSION_INSPECT
     probe_makedumpfile: MakedumpfileProbeSeam = DEFAULT_MAKEDUMPFILE_PROBE
     probe_boot_entries: BootEntriesProbeSeam = DEFAULT_BOOT_ENTRIES_PROBE
+    probe_os_release: OsReleaseProbeSeam = DEFAULT_OS_RELEASE_PROBE
     verify_cloud_init: VerifyCloudInit = _real_verify_cloud_init
 
 
@@ -269,6 +272,7 @@ class LocalLibvirtRootfsBuildPlane:
                 package_versions=package_versions,
                 makedumpfile_version=makedumpfile_version,
                 boot_kernel_count=boot_kernel_count,
+                os_release=self._capture_os_release(scratch),
             ),
         )
 
@@ -312,6 +316,21 @@ class LocalLibvirtRootfsBuildPlane:
             except ValueError:
                 _log.warning("makedumpfile version %r did not parse; skipping", candidate)
         return None
+
+    def _capture_os_release(self, scratch: Path) -> dict[str, str] | None:
+        """The built image's OS identity from ``/etc/os-release``, or ``None`` (ADR-0311).
+
+        Reads the raw os-release text via the injected probe and parses ``ID``/``VERSION_ID``/
+        ``PRETTY_NAME``. Advisory like the makedumpfile/boot-kernel captures: any probe failure
+        (``CategorizedError``), an absent file (``None`` text), or a body with no ``ID`` degrades to
+        ``None`` so the build still publishes and the operand is simply omitted.
+        """
+        try:
+            raw = self._tools.probe_os_release(scratch)
+        except CategorizedError:
+            _log.warning("os-release probe failed; provenance omits os_release")
+            return None
+        return _parse_os_release(raw) if raw is not None else None
 
     def _capture_boot_kernel_count(self, scratch: Path) -> int | None:
         """The number of non-rescue ``vmlinuz-*`` kernels in the built image's ``/boot`` (ADR-0295).
@@ -363,6 +382,30 @@ class LocalLibvirtRootfsBuildPlane:
                 path.unlink(missing_ok=True)
 
 
+_OS_RELEASE_KEYS = {"ID": "id", "VERSION_ID": "version_id", "PRETTY_NAME": "pretty_name"}
+
+
+def _parse_os_release(text: str) -> dict[str, str] | None:
+    """Parse os-release ``KEY=VALUE`` text into the recorded subset, or ``None`` (ADR-0311).
+
+    Keeps ``ID``/``VERSION_ID``/``PRETTY_NAME`` (as ``id``/``version_id``/``pretty_name``),
+    stripping matching single/double quotes and skipping blank and ``#``-comment lines. Returns
+    ``None`` unless ``ID`` is present — a record without a distro id is not a usable identity —
+    while ``version_id``/``pretty_name`` are included only when present (a rolling distro such as
+    Debian testing may omit ``VERSION_ID``).
+    """
+    record: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        mapped = _OS_RELEASE_KEYS.get(key.strip())
+        if mapped is not None:
+            record[mapped] = value.strip().strip("\"'")
+    return record if record.get("id") else None
+
+
 def _provenance(
     spec: RootfsBuildSpec,
     entry: RootfsCatalogEntry,
@@ -372,6 +415,7 @@ def _provenance(
     package_versions: dict[str, str],
     makedumpfile_version: str | None,
     boot_kernel_count: int | None,
+    os_release: dict[str, str] | None,
 ) -> dict[str, object]:
     """Record the pinned inputs and build args that produced the image (falsifiable contract).
 
@@ -390,6 +434,10 @@ def _provenance(
     computed ``direct_kernel`` provisionability signal; added when the count is known — including
     ``0`` — and omitted only when the probe could not produce a listing (``None``), so a degraded
     build's row stays byte-identical to a pre-feature one (ADR-0295).
+    ``os_release`` (the built image's ``ID``/``VERSION_ID``/``PRETTY_NAME`` from
+    ``/etc/os-release``) is the verified OS identity surfaced by ``images.list``/``describe``; added
+    only when captured, omitted otherwise so a degraded build's row stays byte-identical to a
+    pre-feature one (ADR-0311).
     """
     record: dict[str, object] = {
         "plane": "local-libvirt",
@@ -410,4 +458,6 @@ def _provenance(
         record["makedumpfile_version"] = makedumpfile_version
     if boot_kernel_count is not None:
         record["boot_kernel_count"] = boot_kernel_count
+    if os_release:
+        record["os_release"] = os_release
     return record

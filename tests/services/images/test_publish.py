@@ -216,6 +216,42 @@ def test_realizing_defined_baseline_follows_same_path(migrated_url: str, tmp_pat
     asyncio.run(_run())
 
 
+def test_publish_does_not_clobber_operator_description(migrated_url: str, tmp_path: Path) -> None:
+    # description is reconcile-owned (ADR-0311): a build/publish of the same image must leave an
+    # operator-set description intact, since publish never writes that column.
+    store = _FakeStore()
+    source = _qcow2_source(tmp_path)
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            seeded = ImageCatalogEntry(
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                pending_since=_DT,
+                provider="local-libvirt",
+                name="base",
+                arch="x86_64",
+                format="qcow2",
+                root_device="/dev/vda",
+                object_key=None,
+                digest=None,
+                capabilities=[Capability.AGENT],
+                provenance={},
+                visibility=ImageVisibility.PUBLIC,
+                owner=None,
+                expires_at=None,
+                state=ImageState.DEFINED,
+                description="operator hint: RHEL debug host",
+            )
+            await IMAGE_CATALOG.insert(conn, seeded)
+            entry = await publish_image(conn, store, request=_PUBLIC_REQUEST, source=source)
+            assert entry.state is ImageState.REGISTERED
+            assert entry.description == "operator hint: RHEL debug host"
+
+    asyncio.run(_run())
+
+
 def test_publish_fails_when_object_does_not_head(migrated_url: str, tmp_path: Path) -> None:
     # The put "succeeds" but the object is not actually present: the HEAD gate must catch it
     # and the row stays pending (no false registered).

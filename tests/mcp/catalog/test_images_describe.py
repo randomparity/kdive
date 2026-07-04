@@ -50,6 +50,7 @@ async def _insert(
     state: str = "registered",
     capabilities: list[str] | None = None,
     provenance: str = "{}",
+    description: str | None = None,
 ) -> str:
     key = None if state == "defined" else f"images/local-libvirt/{name}/x86_64.qcow2"
     digest = None if state == "defined" else "sha256:abc"
@@ -57,11 +58,11 @@ async def _insert(
         cur = await conn.execute(
             "INSERT INTO image_catalog "
             "(provider, name, arch, format, root_device, object_key, digest, capabilities, "
-            " provenance, visibility, owner, expires_at, state, pending_since) "
+            " provenance, visibility, owner, expires_at, state, pending_since, description) "
             "VALUES ('local-libvirt', %(name)s, 'x86_64', 'qcow2', '/dev/vda', %(key)s, "
             " %(digest)s, %(capabilities)s, %(provenance)s::jsonb, %(vis)s, %(owner)s, "
             " CASE WHEN %(vis)s = 'private' THEN now() + interval '1 hour' ELSE NULL END, "
-            " %(state)s, now()) RETURNING id",
+            " %(state)s, now(), %(description)s) RETURNING id",
             {
                 "name": name,
                 "key": key,
@@ -71,6 +72,7 @@ async def _insert(
                 "vis": visibility,
                 "owner": owner,
                 "state": state,
+                "description": description,
             },
         )
         row = await cur.fetchone()
@@ -91,6 +93,43 @@ async def _insert_staged_path(pool: AsyncConnectionPool, *, name: str, path: str
         row = await cur.fetchone()
     assert row is not None
     return str(row[0])
+
+
+def test_describe_carries_compact_os_and_operator_description(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            image_id = await _insert(
+                pool,
+                name="fedora-kdive-ready-43",
+                visibility="public",
+                owner=None,
+                provenance='{"os_release": {"id": "fedora", "version_id": "43", '
+                '"pretty_name": "Fedora Linux 43"}}',
+                description="RHEL-family debug host",
+            )
+            resp = await catalog_images.describe_image(pool, _ctx(), image_id=image_id)
+        d = resp.data
+        assert d["os"] == {"id": "fedora", "version_id": "43"}
+        assert d["description"] == "RHEL-family debug host"
+        # full os-release stays available verbatim in provenance
+        provenance = d["provenance"]
+        assert isinstance(provenance, dict)
+        os_release = provenance["os_release"]
+        assert isinstance(os_release, dict)
+        assert os_release["pretty_name"] == "Fedora Linux 43"
+
+    asyncio.run(_run())
+
+
+def test_describe_omits_os_and_empties_description_when_unset(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            image_id = await _insert(pool, name="bare", visibility="public", owner=None)
+            resp = await catalog_images.describe_image(pool, _ctx(), image_id=image_id)
+        assert resp.data["os"] == {}
+        assert resp.data["description"] == ""
+
+    asyncio.run(_run())
 
 
 def test_describe_public_row_carries_full_detail(migrated_url: str) -> None:

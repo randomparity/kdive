@@ -8,10 +8,21 @@ types, and return schema, read each tool's own description.
 
 ## Picking an image
 
-- `images.list` — the RBAC-filtered catalog view: the images you can see, to choose from.
-- `images.describe` — the full detail for one image: boot layout, `package_versions`, and the
-  computed `capability_signals`. **Call this before `systems.provision`.** Two signals matter
-  most:
+- `images.list` — the RBAC-filtered catalog view. Each row carries enough to **compare images
+  on merit in one call**, so you rarely need an `images.describe` per candidate:
+  - `capabilities` — the build-fact tags baked into the image. Match the tag to the job:
+    `kdump` for crash/vmcore work, `drgn`/`agent` for live introspection, `ssh` for guest
+    access, `build` for a kernel-build host. A tag means the tooling is present, not that a
+    feature is live end to end (that is what the signals below verify).
+  - `os` — the verified base OS identity (`id`, and `version_id` when known), read from the
+    built image itself. Use it to match the target distro/release.
+  - `description` — an optional operator-attested hint about what an image is for. Advisory
+    context only, never a capability guarantee — verify with the signals below.
+  Do not just reuse the image named in a `systems.profile_examples` example: that one is picked
+  by declaration order, and the example's `selection_note`/`available_images` say so.
+- `images.describe` — the full detail for one image: boot layout, `package_versions`, `os`,
+  `description`, and the computed `capability_signals`. **Call this before `systems.provision`.**
+  Two signals matter most:
   - `kdump` — whether the image can capture a vmcore for a target kernel (the crash-triage
     path depends on it).
   - `direct_kernel` — `provisionable` only when `/boot` holds exactly one non-rescue kernel;

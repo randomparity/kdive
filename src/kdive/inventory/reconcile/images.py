@@ -171,7 +171,7 @@ async def _load_config_rows(
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id, provider, name, arch, format, root_device, visibility, capabilities, "
-            "       object_key, digest, volume, path, provenance, state "
+            "       object_key, digest, volume, path, provenance, state, description "
             "FROM image_catalog WHERE managed_by = %s",
             (CONFIG_MANAGED_BY,),
         )
@@ -206,8 +206,8 @@ async def _create_entry(
     await conn.execute(
         "INSERT INTO image_catalog "
         "(provider, name, arch, format, root_device, visibility, capabilities, "
-        " object_key, volume, path, digest, provenance, state, managed_by) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        " object_key, volume, path, digest, provenance, state, managed_by, description) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             entry.provider,
             entry.name,
@@ -223,6 +223,7 @@ async def _create_entry(
             Jsonb(realized.provenance),
             realized.state,
             CONFIG_MANAGED_BY,
+            entry.description or None,
         ),
     )
     diff.created.append(_record(entry))
@@ -243,6 +244,10 @@ async def _update_entry(
         "root_device": entry.root_device,
         "visibility": entry.visibility.value,
         "capabilities": list(entry.capabilities),
+        # Normalize empty -> NULL on both sides: the DB stores NULL for an unset description while
+        # entry.description defaults to "", so an un-normalized compare would report a spurious
+        # config change (and redundant UPDATE) on every reconcile of a description-less image.
+        "description": entry.description or None,
     }
     head = await _resolve_s3_head(entry, row, store)
     provenance = await _resolve_staged_provenance(entry, row)
@@ -262,7 +267,7 @@ async def _update_entry(
         await conn.execute(
             "UPDATE image_catalog SET format = %s, root_device = %s, visibility = %s, "
             "capabilities = %s, object_key = %s, volume = %s, path = %s, digest = %s, "
-            "provenance = %s, state = %s WHERE id = %s",
+            "provenance = %s, state = %s, description = %s WHERE id = %s",
             (
                 desired["format"],
                 desired["root_device"],
@@ -274,6 +279,7 @@ async def _update_entry(
                 realized_image.digest,
                 Jsonb(realized_image.provenance),
                 realized_image.state,
+                desired["description"],
                 row["id"],
             ),
         )

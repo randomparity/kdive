@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.tools.catalog import images as catalog_images
@@ -102,6 +104,38 @@ async def _insert_staged_path(pool: AsyncConnectionPool, *, name: str, path: str
             " 'public', NULL, 'registered', now())",
             {"name": name, "path": path},
         )
+
+
+async def _insert_characterized(
+    pool: AsyncConnectionPool,
+    *,
+    name: str,
+    capabilities: list[str],
+    provenance: dict[str, object],
+    description: str | None,
+) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO image_catalog "
+            "(provider, name, arch, format, root_device, object_key, digest, visibility, owner, "
+            " state, pending_since, capabilities, provenance, description) "
+            "VALUES ('local-libvirt', %(name)s, 'x86_64', 'qcow2', '/dev/vda', %(key)s, "
+            " 'sha256:abc', 'public', NULL, 'registered', now(), %(caps)s, %(prov)s, %(desc)s)",
+            {
+                "name": name,
+                "key": f"images/local-libvirt/{name}/x86_64.qcow2",
+                "caps": capabilities,
+                "prov": Jsonb(provenance),
+                "desc": description,
+            },
+        )
+
+
+def _item(resp: object, name: str) -> Any:
+    for item in getattr(resp, "items", []):
+        if item.data["name"] == name:
+            return item
+    raise AssertionError(f"{name} not in listing")
 
 
 def _names(resp: object) -> set[str]:
@@ -240,5 +274,63 @@ def test_list_malformed_cursor_is_config_error(migrated_url: str) -> None:
             resp = await catalog_images.list_images(pool, _ctx(), cursor="!!!")
         assert resp.status == "error"
         assert resp.data["reason"] == "invalid_cursor"
+
+    asyncio.run(_run())
+
+
+def test_compact_os_full() -> None:
+    prov = {"os_release": {"id": "fedora", "version_id": "43", "pretty_name": "Fedora Linux 43"}}
+    assert catalog_images._compact_os(prov) == {"id": "fedora", "version_id": "43"}
+
+
+def test_compact_os_id_only() -> None:
+    assert catalog_images._compact_os({"os_release": {"id": "debian"}}) == {"id": "debian"}
+
+
+def test_compact_os_absent_returns_empty() -> None:
+    assert catalog_images._compact_os({}) == {}
+    assert catalog_images._compact_os({"os_release": None}) == {}
+    assert catalog_images._compact_os({"os_release": "not-a-dict"}) == {}
+
+
+def test_compact_os_no_id_returns_empty() -> None:
+    # A record without a distro id is not a usable identity; never emit a bare version.
+    assert catalog_images._compact_os({"os_release": {"version_id": "43"}}) == {}
+
+
+def test_list_row_carries_capabilities_os_description(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert_characterized(
+                pool,
+                name="fedora-kdive-ready-43",
+                capabilities=["kdump", "drgn", "ssh"],
+                provenance={"os_release": {"id": "fedora", "version_id": "43"}},
+                description="RHEL-family debug host",
+            )
+            resp = await catalog_images.list_images(pool, _ctx())
+        data = _item(resp, "fedora-kdive-ready-43").data
+        assert data["capabilities"] == ["kdump", "drgn", "ssh"]
+        assert data["os"] == {"id": "fedora", "version_id": "43"}
+        assert data["description"] == "RHEL-family debug host"
+
+    asyncio.run(_run())
+
+
+def test_list_row_omits_os_and_empties_description_when_unset(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert_characterized(
+                pool,
+                name="bare-image",
+                capabilities=[],
+                provenance={},
+                description=None,
+            )
+            resp = await catalog_images.list_images(pool, _ctx())
+        data = _item(resp, "bare-image").data
+        assert data["capabilities"] == []
+        assert data["os"] == {}
+        assert data["description"] == ""
 
     asyncio.run(_run())
