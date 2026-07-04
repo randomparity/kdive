@@ -55,7 +55,12 @@ async def _conn(url: str) -> AsyncIterator[psycopg.AsyncConnection]:
 
 
 async def _seed_resource(
-    conn: psycopg.AsyncConnection, *, cap: int = 5, vcpus: int = 64, memory_mb: int = 65536
+    conn: psycopg.AsyncConnection,
+    *,
+    cap: int = 5,
+    vcpus: int = 64,
+    memory_mb: int = 65536,
+    disk_gb: int = 500,
 ) -> Resource:
     return await RESOURCES.insert(
         conn,
@@ -68,6 +73,7 @@ async def _seed_resource(
                 CONCURRENT_ALLOCATION_CAP_KEY: cap,
                 "vcpus": vcpus,
                 "memory_mb": memory_mb,
+                "disk_gb": disk_gb,
             },
             pool="local-libvirt",
             cost_class="local",

@@ -84,6 +84,7 @@ async def _seed(conn: psycopg.AsyncConnection) -> Resource:
                 CONCURRENT_ALLOCATION_CAP_KEY: 1000,
                 "vcpus": 64,
                 "memory_mb": 65536,
+                "disk_gb": 500,
                 PCIE_DEVICES_KEY: [dict(_X710)],
             },
             pool="local-libvirt",

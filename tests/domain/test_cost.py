@@ -23,6 +23,7 @@ from kdive.domain.accounting.cost import (
     quantize_kcu,
     rate,
     validate_against_resource,
+    validate_disk_against_resource,
     validate_size,
     validate_window,
 )
@@ -262,3 +263,31 @@ def test_validate_against_resource_invalid_cap_value_fails_closed(bad: object) -
     with pytest.raises(CategorizedError) as exc:
         validate_against_resource(Selector(vcpus=1, memory_gb=1), res)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_validate_disk_at_ceiling_is_admitted() -> None:
+    res = _resource({"vcpus": 4, "memory_mb": 8192, "disk_gb": 50})
+    validate_disk_against_resource(50, res)  # exactly at the ceiling, no raise
+
+
+def test_validate_disk_over_ceiling_is_configuration_error() -> None:
+    res = _resource({"vcpus": 4, "memory_mb": 8192, "disk_gb": 50})
+    with pytest.raises(CategorizedError) as exc:
+        validate_disk_against_resource(51, res)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"field": "disk_gb", "requested": "51", "ceiling": "50"}
+    assert "disk_gb=51" in str(exc.value)
+
+
+def test_validate_disk_none_skips_the_check() -> None:
+    # A request that carries no disk (no ceiling to bound) never looks the ceiling up, so a
+    # host without a disk ceiling does not fail a disk-less request.
+    res = _resource({"vcpus": 4, "memory_mb": 8192})
+    validate_disk_against_resource(None, res)  # no raise
+
+
+def test_validate_disk_unadvertised_ceiling_is_unbounded() -> None:
+    # A provider that sizes no disk from host storage (remote disk-image / fault-inject)
+    # advertises no disk ceiling; a disk request to it is not bounded here (not a gap).
+    res = _resource({"vcpus": 4, "memory_mb": 8192})  # no disk_gb advertised
+    validate_disk_against_resource(10, res)  # no raise

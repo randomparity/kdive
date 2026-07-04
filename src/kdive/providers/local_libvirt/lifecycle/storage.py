@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import subprocess  # noqa: S404 - qemu-img is invoked with a fixed argv, no shell
@@ -19,6 +20,7 @@ ROOTFS_DIR = "/var/lib/kdive/rootfs"
 _QEMU_IMG_TIMEOUT_S = 5 * 60
 _QEMU_IMG = "qemu-img"
 _QEMU_IMG_ERROR_TAIL_CHARS = 2000
+_BYTES_PER_GB = 1024**3
 
 
 def overlay_path(system_id: UUID | str) -> str:
@@ -96,6 +98,101 @@ def _real_make_overlay(base: str, overlay: str) -> None:
         )
 
 
+def _run_qemu_img(
+    argv: list[str],
+    *,
+    op: str,
+    action: str,
+    overlay: str,
+    extra_details: dict[str, object] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a ``qemu-img`` subcommand against ``overlay`` with uniform fail-closed error mapping.
+
+    Resolves the binary (``MISSING_DEPENDENCY`` if absent or a launch ``FileNotFoundError``),
+    runs it under the shared timeout, and maps a launch ``OSError`` to ``INFRASTRUCTURE_FAILURE``
+    and a timeout or non-zero exit to ``PROVISIONING_FAILURE``. ``action`` completes the message
+    "... to {action}"; ``op`` keys the error details. Returns the completed process on success.
+    """
+
+    def _details() -> dict[str, object]:
+        details = _overlay_error_details(op, overlay, tool=_QEMU_IMG)
+        if extra_details:
+            details.update(extra_details)
+        return details
+
+    qemu_img = shutil.which(_QEMU_IMG)
+    if qemu_img is None:
+        raise CategorizedError(
+            f"qemu-img is not installed; cannot {action}",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+            details=_details(),
+        )
+    try:
+        result = subprocess.run(  # noqa: S603 - resolved qemu-img; argv is data, no shell
+            [qemu_img, *argv],
+            capture_output=True,
+            text=True,
+            timeout=_QEMU_IMG_TIMEOUT_S,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise CategorizedError(
+            f"qemu-img is not installed; cannot {action}",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+            details=_details(),
+        ) from exc
+    except OSError as exc:
+        details = _details()
+        details["error"] = type(exc).__name__
+        raise CategorizedError(
+            f"failed to launch qemu-img to {action}",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details=details,
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise CategorizedError(
+            f"qemu-img exceeded the timeout to {action}",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details={**_details(), "timeout_s": _QEMU_IMG_TIMEOUT_S},
+        ) from exc
+    if result.returncode != 0:
+        raise CategorizedError(
+            f"qemu-img failed to {action}",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details={**_details(), "stderr": result.stderr[-_QEMU_IMG_ERROR_TAIL_CHARS:]},
+        )
+    return result
+
+
+def _real_overlay_virtual_size(overlay: str) -> int:
+    """Return the overlay's qcow2 virtual size in bytes via ``qemu-img info``."""
+    result = _run_qemu_img(
+        ["info", "--output=json", overlay],
+        op="overlay_info",
+        action="read the per-System overlay virtual size",
+        overlay=overlay,
+    )
+    try:
+        return int(json.loads(result.stdout)["virtual-size"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise CategorizedError(
+            "qemu-img info returned no readable virtual-size for the per-System overlay",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details=_overlay_error_details("overlay_info", overlay, tool=_QEMU_IMG),
+        ) from exc
+
+
+def _real_resize_overlay(overlay: str, disk_gb: int) -> None:
+    """Grow the overlay's qcow2 virtual size to ``disk_gb`` GB via ``qemu-img resize``."""
+    _run_qemu_img(
+        ["resize", overlay, f"{disk_gb}G"],
+        op="resize_overlay",
+        action="resize the per-System rootfs overlay",
+        overlay=overlay,
+        extra_details={"disk_gb": disk_gb},
+    )
+
+
 def _real_remove_overlay(overlay: str) -> None:
     """Remove a System's overlay file; an absent file is the achieved post-state."""
     try:
@@ -122,6 +219,8 @@ def _real_overlay_exists(overlay: str) -> bool:
 
 
 type MakeOverlay = Callable[[str, str], None]
+type ResizeOverlay = Callable[[str, int], None]
+type OverlayVirtualSize = Callable[[str], int]
 type RemoveOverlay = Callable[[str], None]
 type RemoveBaseline = Callable[[str], None]
 type OverlayExists = Callable[[str], bool]
@@ -150,6 +249,8 @@ class PreparedOverlay:
 @dataclass(frozen=True, slots=True)
 class ProvisioningFiles:
     make_overlay: MakeOverlay = _real_make_overlay
+    resize_overlay: ResizeOverlay = _real_resize_overlay
+    overlay_virtual_size: OverlayVirtualSize = _real_overlay_virtual_size
     remove_overlay: RemoveOverlay = _real_remove_overlay
     remove_baseline: RemoveBaseline = _real_remove_baseline
     overlay_exists: OverlayExists = _real_overlay_exists
@@ -157,12 +258,34 @@ class ProvisioningFiles:
     baseline_exists: OverlayExists = _real_overlay_exists
     prepare_console_log: PrepareConsoleLog = _prepare_console_log
 
-    def prepare_overlay(self, system_id: UUID, *, base: str) -> PreparedOverlay:
+    def prepare_overlay(
+        self, system_id: UUID, *, base: str, disk_gb: int | None
+    ) -> PreparedOverlay:
         overlay = overlay_path(system_id)
         created = not self.overlay_exists(overlay)
         if created:
             self.make_overlay(base, overlay)
+            try:
+                self._grow_if_requested(overlay, disk_gb)
+            except CategorizedError:
+                # A resize failure after creating the overlay must reclaim it, so a retry
+                # re-creates and re-grows cleanly — never reusing an un-grown overlay, which
+                # would silently boot the guest at the base size (the phantom-knob regression).
+                self.remove_overlay(overlay)
+                raise
         return PreparedOverlay(path=overlay, created=created)
+
+    def _grow_if_requested(self, overlay: str, disk_gb: int | None) -> None:
+        """Grow the just-created overlay to ``disk_gb`` (grow-only; ADR-0312, ADR-0060).
+
+        Runs only on the create path (a running/reused overlay is never resized). Grows only
+        when ``disk_gb`` exceeds the current virtual size, so a request at or below the base
+        size is a no-op and the qcow2 is never shrunk below its backing file.
+        """
+        if disk_gb is None:
+            return
+        if disk_gb * _BYTES_PER_GB > self.overlay_virtual_size(overlay):
+            self.resize_overlay(overlay, disk_gb)
 
     def prepare_console(self, system_id: UUID) -> None:
         self.prepare_console_log(console_log_path(system_id))

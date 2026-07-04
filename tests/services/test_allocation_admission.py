@@ -83,6 +83,7 @@ async def _seed_resource(
     cap: object,
     owner_project: str | None = None,
     affinity_allowlist: list[str] | None = None,
+    disk_gb: int = 500,
 ) -> Resource:
     return await RESOURCES.insert(
         conn,
@@ -91,7 +92,12 @@ async def _seed_resource(
             created_at=_DT,
             updated_at=_DT,
             kind=ResourceKind.LOCAL_LIBVIRT,
-            capabilities={CONCURRENT_ALLOCATION_CAP_KEY: cap, "vcpus": 64, "memory_mb": 65536},
+            capabilities={
+                CONCURRENT_ALLOCATION_CAP_KEY: cap,
+                "vcpus": 64,
+                "memory_mb": 65536,
+                "disk_gb": disk_gb,
+            },
             pool="local-libvirt",
             cost_class="local",
             status=ResourceStatus.AVAILABLE,
@@ -163,6 +169,42 @@ def test_admit_under_cap_grants_and_audits(migrated_url: str) -> None:
             assert outcome.allocation.state is AllocationState.GRANTED
             assert await _count_allocs(conn) == 1
             assert await _count_audit(conn) == 1
+
+    asyncio.run(_run())
+
+
+def test_admit_over_disk_ceiling_denies_configuration_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            res = await _seed_resource(conn, cap=2, disk_gb=50)
+            await _seed_budget_quota(conn)
+            outcome = await admit(
+                conn,
+                AllocationRequest(
+                    ctx=CTX, resource=res, project="proj", selector=SEL, window=1, disk_gb=60
+                ),
+            )
+            assert outcome.granted is False
+            assert outcome.allocation is None
+            assert outcome.category is ErrorCategory.CONFIGURATION_ERROR
+            assert outcome.details == {"field": "disk_gb", "requested": "60", "ceiling": "50"}
+            assert await _count_allocs(conn) == 0  # no durable row on a rejected request
+
+    asyncio.run(_run())
+
+
+def test_admit_at_disk_ceiling_grants(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            res = await _seed_resource(conn, cap=2, disk_gb=50)
+            await _seed_budget_quota(conn)
+            outcome = await admit(
+                conn,
+                AllocationRequest(
+                    ctx=CTX, resource=res, project="proj", selector=SEL, window=1, disk_gb=50
+                ),
+            )
+            assert outcome.granted is True  # exactly at the ceiling admits
 
     asyncio.run(_run())
 

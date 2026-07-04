@@ -90,7 +90,9 @@ def test_cloud_init_helper_writes_authoritative_cfg(tmp_path: Path) -> None:
     assert "disable_root: false" in cfg
     assert "dhcp4: true" in cfg and 'match: { name: "e*" }' in cfg
     assert 'mode: "off"' in cfg  # quoted so YAML does not read it as boolean false
-    assert "resize_rootfs: false" in cfg
+    # growpart stays off (no partition table, ADR-0030); resize_rootfs is on so cloud-init
+    # grows the whole-disk ext4 to fill an overlay sized at provision (ADR-0312, #985).
+    assert "resize_rootfs: true" in cfg
 
 
 def test_cloud_init_helper_writes_nocloud_seed(tmp_path: Path) -> None:

@@ -164,6 +164,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0058",
         "0059",
         "0060",
+        "0061",
     ]
     assert second == []
 
@@ -597,6 +598,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0058",
         "0059",
         "0060",
+        "0061",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -936,6 +938,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0058",
         "0059",
         "0060",
+        "0061",
     ]
 
 
@@ -945,6 +948,7 @@ _SEED_SHAPES = {
     "medium": (2, 4096, 20),
     "large": (4, 8192, 40),
     "max": (8, 16384, 80),
+    "debug": (4, 8192, 60),  # migration 0061 (#985, ADR-0312)
 }
 
 

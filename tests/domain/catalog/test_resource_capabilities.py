@@ -8,6 +8,7 @@ import pytest
 
 from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
+    DISK_GB_KEY,
     MEMORY_MB_KEY,
     PCIE_DEVICES_KEY,
     VCPUS_KEY,
@@ -75,6 +76,34 @@ def test_resource_capabilities_accepts_zero_allocation_cap() -> None:
 
     assert caps.allocation_cap() == 0
     assert caps.require_allocation_cap(resource_id=uuid4()) == 0
+
+
+def test_disk_ceiling_reads_non_negative_int() -> None:
+    caps = ResourceCapabilities.from_mapping({DISK_GB_KEY: 100})
+
+    assert caps.disk_ceiling() == 100
+
+
+@pytest.mark.parametrize("bad", [None, "100", -1, True])
+def test_disk_ceiling_none_when_absent_or_invalid(bad: object) -> None:
+    # An unadvertised or invalid ceiling reads as None (unbounded — the provider does not
+    # size a disk from host storage); admission skips the bound rather than failing closed.
+    caps = ResourceCapabilities.from_mapping({DISK_GB_KEY: bad})
+
+    assert caps.disk_ceiling() is None
+
+
+def test_disk_ceiling_accepts_zero() -> None:
+    caps = ResourceCapabilities.from_mapping({DISK_GB_KEY: 0})
+
+    assert caps.disk_ceiling() == 0
+
+
+def test_disk_gb_key_not_in_extras() -> None:
+    caps = ResourceCapabilities.from_mapping({DISK_GB_KEY: 40, "other": 1})
+
+    assert DISK_GB_KEY not in caps.extras()
+    assert caps.extras() == {"other": 1}
 
 
 def test_require_size_ceiling_reports_memory_when_only_memory_invalid() -> None:

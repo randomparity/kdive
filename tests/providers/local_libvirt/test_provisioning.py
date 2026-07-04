@@ -546,11 +546,15 @@ def _prov(
     baseline_exists: Callable[[str], bool] = lambda _path: False,
     extract_baseline_kernel: Callable[[Path, Path, str | None], BaselineKernel] = _fake_extract,
     free_port: Callable[[], int] = lambda: next(_FREE_PORTS),
+    overlay_virtual_size: Callable[[str], int] = lambda _overlay: 1 << 60,
+    resize_overlay: Callable[[str, int], None] = lambda _overlay, _gb: None,
 ) -> LocalLibvirtProvisioning:
     # The overlay seams default to no-ops so the libvirt-only tests never spawn qemu-img; the
     # console-log seam is also a no-op so they never depend on host /var/lib/kdive permissions.
     # The default "overlay absent" makes provision create one, matching a fresh provision. The
     # baseline extractor is the no-op fake so provision never touches libguestfs (ADR-0272).
+    # The default overlay_virtual_size is huge so the grow-only check never resizes unless a
+    # test opts in (a resize-capturing seam) with a smaller base size.
     return LocalLibvirtProvisioning(
         connect=lambda: conn,
         files=ProvisioningFiles(
@@ -560,6 +564,8 @@ def _prov(
             overlay_exists=overlay_exists,
             baseline_exists=baseline_exists,
             prepare_console_log=lambda _path: None,
+            overlay_virtual_size=overlay_virtual_size,
+            resize_overlay=resize_overlay,
         ),
         materialize_rootfs=lambda rootfs, _system_id, _arch: (
             rootfs.path if rootfs.kind == "local" else "/var/lib/kdive/rootfs/upload.qcow2"
@@ -602,6 +608,8 @@ def test_provision_catalog_rootfs_threads_arch_to_fetch() -> None:
             overlay_exists=lambda _overlay: False,
             baseline_exists=lambda _path: False,
             prepare_console_log=lambda _path: None,
+            overlay_virtual_size=lambda _overlay: 1 << 60,
+            resize_overlay=lambda _overlay, _gb: None,
         ),
         catalog_fetch=_fetch,
         extract_baseline_kernel=_fake_extract,
@@ -771,6 +779,8 @@ def _prov_with_port(conn: _ProvConn, *, free_port: Callable[[], int]) -> LocalLi
             overlay_exists=lambda _overlay: False,
             baseline_exists=lambda _path: False,
             prepare_console_log=lambda _path: None,
+            overlay_virtual_size=lambda _overlay: 1 << 60,
+            resize_overlay=lambda _overlay, _gb: None,
         ),
         materialize_rootfs=lambda rootfs, _system_id, _arch: rootfs.path,
         free_port=free_port,
@@ -913,6 +923,23 @@ def test_provision_creates_overlay_over_base_and_attaches_it() -> None:
     assert disk is not None and disk.get("file") == overlay  # the domain boots the overlay
 
 
+def test_provision_grows_overlay_to_profile_disk_gb() -> None:
+    # End-to-end plumbing guard (ADR-0312): the disk_gb stamped on the profile reaches the
+    # overlay-resize seam. A wiring regression that dropped it would silently leave the guest
+    # at the base size — the phantom-knob bug this fixes — and this default-gate test would fail.
+    resize_calls: list[tuple[str, int]] = []
+    data = copy.deepcopy(_VALID)
+    data["disk_gb"] = 60
+    profile = ProvisioningProfile.parse(data)
+    conn = _ProvConn()
+    _prov(
+        conn,
+        overlay_virtual_size=lambda _overlay: 6 * 1024**3,  # a 6 GB base to grow past
+        resize_overlay=lambda overlay, gb: resize_calls.append((overlay, gb)),
+    ).provision(_SYS, profile)
+    assert resize_calls == [(overlay_path(_SYS), 60)]
+
+
 def test_provision_prepares_console_log_before_define() -> None:
     calls: list[tuple[str, str]] = []
 
@@ -932,6 +959,8 @@ def test_provision_prepares_console_log_before_define() -> None:
             overlay_exists=lambda _overlay: False,
             baseline_exists=lambda _path: False,
             prepare_console_log=prepare,
+            overlay_virtual_size=lambda _overlay: 1 << 60,
+            resize_overlay=lambda _overlay, _gb: None,
         ),
         materialize_rootfs=lambda _rootfs, _system_id, _arch: "/var/lib/kdive/rootfs/base.qcow2",
         extract_baseline_kernel=_fake_extract,
@@ -947,7 +976,7 @@ def test_prepare_overlay_reuses_existing_overlay_without_creation() -> None:
         overlay_exists=lambda overlay: overlay == overlay_path(_SYS),
     )
 
-    overlay = files.prepare_overlay(_SYS, base="/base.qcow2")
+    overlay = files.prepare_overlay(_SYS, base="/base.qcow2", disk_gb=None)
 
     assert overlay.path == overlay_path(_SYS)
     assert overlay.created is False
@@ -961,10 +990,71 @@ def test_prepare_overlay_creates_missing_overlay() -> None:
         overlay_exists=lambda _overlay: False,
     )
 
-    overlay = files.prepare_overlay(_SYS, base="/base.qcow2")
+    overlay = files.prepare_overlay(_SYS, base="/base.qcow2", disk_gb=None)
 
     assert overlay.created is True
     assert made == [("/base.qcow2", overlay_path(_SYS))]
+
+
+_BASE_BYTES = 6 * 1024**3
+
+
+def _grow_files(resize_calls: list[tuple[str, int]], *, exists: bool = False) -> ProvisioningFiles:
+    return ProvisioningFiles(
+        make_overlay=lambda _base, _overlay: None,
+        overlay_exists=lambda _overlay: exists,
+        overlay_virtual_size=lambda _overlay: _BASE_BYTES,
+        resize_overlay=lambda overlay, gb: resize_calls.append((overlay, gb)),
+    )
+
+
+def test_prepare_overlay_grows_when_disk_exceeds_base() -> None:
+    calls: list[tuple[str, int]] = []
+    _grow_files(calls).prepare_overlay(_SYS, base="/base.qcow2", disk_gb=60)
+    assert calls == [(overlay_path(_SYS), 60)]
+
+
+def test_prepare_overlay_no_resize_at_or_below_base() -> None:
+    calls: list[tuple[str, int]] = []
+    files = _grow_files(calls)
+    files.prepare_overlay(_SYS, base="/base.qcow2", disk_gb=6)  # == base
+    files.prepare_overlay(_SYS, base="/base.qcow2", disk_gb=3)  # < base (never shrink)
+    assert calls == []
+
+
+def test_prepare_overlay_never_resizes_reused_overlay() -> None:
+    calls: list[tuple[str, int]] = []
+    # A present overlay is a running/reused QEMU disk (ADR-0060) — never resize it.
+    _grow_files(calls, exists=True).prepare_overlay(_SYS, base="/base.qcow2", disk_gb=60)
+    assert calls == []
+
+
+def test_prepare_overlay_none_disk_never_resizes() -> None:
+    calls: list[tuple[str, int]] = []
+    _grow_files(calls).prepare_overlay(_SYS, base="/base.qcow2", disk_gb=None)
+    assert calls == []
+
+
+def test_prepare_overlay_resize_failure_removes_the_created_overlay() -> None:
+    # A resize failure must reclaim the just-created overlay so a retry re-creates and re-grows
+    # it — never reusing an un-grown overlay, which would silently boot the guest at the base
+    # size (the phantom-knob regression). The failure propagates as the original error.
+    removed: list[str] = []
+
+    def _boom(_overlay: str, _gb: int) -> None:
+        raise CategorizedError("resize failed", category=ErrorCategory.PROVISIONING_FAILURE)
+
+    files = ProvisioningFiles(
+        make_overlay=lambda _base, _overlay: None,
+        overlay_exists=lambda _overlay: False,
+        overlay_virtual_size=lambda _overlay: _BASE_BYTES,
+        resize_overlay=_boom,
+        remove_overlay=removed.append,
+    )
+    with pytest.raises(CategorizedError) as exc:
+        files.prepare_overlay(_SYS, base="/base.qcow2", disk_gb=60)
+    assert exc.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert removed == [overlay_path(_SYS)]
 
 
 def test_cleanup_overlay_if_created_removes_only_created_overlay() -> None:
@@ -1296,6 +1386,8 @@ def test_provision_console_log_failure_removes_the_overlay() -> None:
                 overlay_exists=lambda _overlay: False,
                 baseline_exists=lambda _path: False,
                 prepare_console_log=fail_prepare,
+                overlay_virtual_size=lambda _overlay: 1 << 60,
+                resize_overlay=lambda _overlay, _gb: None,
             ),
             materialize_rootfs=lambda _rootfs, _system_id, _arch: (
                 "/var/lib/kdive/rootfs/base.qcow2"
@@ -1434,6 +1526,8 @@ def test_provision_passes_real_system_id_to_materialize_and_define() -> None:
             overlay_exists=lambda _overlay: False,
             baseline_exists=lambda _path: False,
             prepare_console_log=lambda _path: None,
+            overlay_virtual_size=lambda _overlay: 1 << 60,
+            resize_overlay=lambda _overlay, _gb: None,
         ),
         materialize_rootfs=lambda rootfs, system_id, _arch: (
             seen.append(system_id) or rootfs.path  # type: ignore[func-returns-value]

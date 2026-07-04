@@ -81,7 +81,15 @@ class AllocationRequestPayload(SelectorPayload):
             "(supply exactly one sizing source)."
         ),
     )
-    disk_gb: int | None = None
+    disk_gb: int | None = Field(
+        default=None,
+        description=(
+            "Guest disk in GB (part of the custom triple; omit when using a shape). Sizes the "
+            "guest's usable disk — the filesystem grows to fill it on first boot — so allow "
+            "headroom for tool installs + build artifacts + a vmcore. Bounded by the host disk "
+            "ceiling (over-ceiling is a configuration_error)."
+        ),
+    )
     resource: ResourceSelector = Field(default_factory=ResourceByKind, discriminator="mode")
     pcie_devices: list[str] = Field(
         default_factory=list,

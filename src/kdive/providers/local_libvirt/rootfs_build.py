@@ -146,11 +146,12 @@ def _real_verify_cloud_init(qcow2: Path) -> None:  # pragma: no cover - live_vm
     A version-robust offline guard for silent no-ops CI cannot catch by booting. Each check runs
     in the guest via guestfish ``sh`` (which aborts the script non-zero on any failed check,
     verified empirically): the kdive drop-in and NoCloud seed exist, cloud-init is installed,
-    nothing re-disables it, and no cloud.cfg.d drop-in disables cloud-init networking. It does
-    **not** assert specific unit-enable state — unit names vary across cloud-init versions (24.x
-    renamed ``cloud-init.service`` to ``cloud-init-network.service``, live-found on Debian 13);
-    the vendor cloud base ships cloud-init enabled and ``--install`` enables it via the package
-    preset, so enumerating names would be fragile without adding safety.
+    nothing re-disables it, no cloud.cfg.d drop-in disables cloud-init networking, and the drop-in
+    keeps ``resize_rootfs`` on (ADR-0312) so a built image cannot silently ship the disk-grow knob
+    disabled. It does **not** assert specific unit-enable state — unit names vary across cloud-init
+    versions (24.x renamed ``cloud-init.service`` to ``cloud-init-network.service``, live-found on
+    Debian 13); the vendor cloud base ships cloud-init enabled and ``--install`` enables it via the
+    package preset, so enumerating names would be fragile without adding safety.
     """
     from kdive.images.families._fedora_customize import (
         KDIVE_CLOUD_CFG_PATH,
@@ -163,6 +164,7 @@ def _real_verify_cloud_init(qcow2: Path) -> None:  # pragma: no cover - live_vm
         "test ! -e /etc/cloud/cloud-init.disabled",
         "test -x /usr/bin/cloud-init",
         '! grep -rqs "config:[[:space:]]*disabled" /etc/cloud/cloud.cfg.d/',
+        f'grep -qs "resize_rootfs:[[:space:]]*true" {KDIVE_CLOUD_CFG_PATH}',
     )
     script = "".join(f"sh '{check}'\n" for check in checks)
     run_guestfs_tool(

@@ -48,6 +48,9 @@ SEED_MACHINE_ID = "0a1b2c3d4e5f60718293a4b5c6d7e8f9"  # pragma: allowlist secret
 # outranks the datasource, so carrying the DHCP config here (not only in the seed) defeats a base
 # image that ships `network: {config: disabled}`. `mode: "off"` is quoted — unquoted `off` is a
 # YAML boolean. `match: {name: "e*"}` is interface-name-independent under the SLIRP NIC.
+# `growpart` stays off — the rootfs is a no-partition-table whole-disk ext4 (ADR-0030), so there
+# is no partition to grow. `resize_rootfs` is on so cloud-init's cc_resizefs grows that whole-disk
+# ext4 to fill an overlay sized larger than the base at provision (ADR-0312, #985).
 KDIVE_CLOUD_CFG_PATH = "/etc/cloud/cloud.cfg.d/99-kdive.cfg"
 KDIVE_CLOUD_CFG_CONTENT = """\
 datasource_list: [ NoCloud ]
@@ -60,7 +63,7 @@ network:
       dhcp4: true
       dhcp-identifier: mac
 growpart: { mode: "off" }
-resize_rootfs: false
+resize_rootfs: true
 """
 NOCLOUD_SEED_DIR = "/var/lib/cloud/seed/nocloud"
 _NOCLOUD_META_DATA = "instance-id: kdive-rootfs\nlocal-hostname: kdive\n"

@@ -193,6 +193,32 @@ def validate_against_resource(selector: Selector, resource: Resource) -> None:
         raise _caps_error("memory_mb", requested_mb, cap_memory_mb, resource)
 
 
+def validate_disk_against_resource(disk_gb: int | None, resource: Resource) -> None:
+    """Reject a disk request exceeding the chosen Resource's advertised disk ceiling.
+
+    The admission-only ≤ resource-caps check for disk (ADR-0007 §2, ADR-0312). disk is not a
+    kcu input, so it is validated here beside the priced selector rather than on it.
+
+    Enforced only where a ceiling is advertised: local-libvirt always advertises one
+    (live-derived from host storage at discovery), so a local request is always bounded; a
+    provider that sizes no disk from host storage (remote-libvirt's disk-image, fault-inject)
+    advertises none and is not bounded here — unlike vcpus/memory, an absent disk ceiling is
+    "this provider does not allocate host disk", not a registration gap. ``disk_gb`` is ``None``
+    only for a request that carries no disk (the ADR-0067 shape-XOR-triple rule makes a sized
+    request always carry one).
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` if ``disk_gb`` exceeds an advertised ceiling.
+    """
+    if disk_gb is None:
+        return
+    ceiling = resource.capability_view.disk_ceiling()
+    if ceiling is None:
+        return
+    if disk_gb > ceiling:
+        raise _caps_error("disk_gb", disk_gb, ceiling, resource)
+
+
 def _caps_error(field: str, requested: int, ceiling: int, resource: Resource) -> CategorizedError:
     return CategorizedError(
         f"selector {field}={requested} exceeds resource {resource.id} ceiling {ceiling}",
