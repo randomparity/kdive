@@ -97,6 +97,19 @@ A not-yet-rebuilt image grows its virtual disk (Part 1 is host-side and always
 runs) but leaves the extra space unformatted until rebuilt — a documented
 operator action, surfaced in the local-libvirt image/rebuild docs.
 
+**Load-bearing assumption, to be verified before build.** The feature succeeds
+only if `cc_resizefs` actually grows a *no-partition-table whole-disk ext4* under
+the *fixed NoCloud `instance-id: kdive-rootfs`* and *direct-kernel* boot. Two
+sub-risks: (a) cc_resizefs must handle a partition-less whole-disk device (resize
+the block device directly, not a partition); (b) cc_resizefs is a per-instance
+module, so it runs only if cloud-init treats the per-System guest as a new
+instance — which is the *same* per-instance pass ADR-0288's host-key and DHCP
+modules already depend on, so if those work, cc_resizefs runs. The first plan
+task is a live spike that boots a rebuilt image on a grown overlay and records
+`df` evidence that the root fs grew; that evidence is pasted into this spec before
+the rest of the build proceeds. The `live_vm` growth assertion (below) is the
+standing regression guard for it.
+
 ### Part 3 — Host-advertised disk ceiling
 
 `domain/catalog/resource_capabilities.py` gains `DISK_GB_KEY = "disk_gb"`, a
@@ -113,22 +126,47 @@ with no `disk_gb` (impossible after ADR-0067's XOR rule, but defended) skips the
 check.
 
 Ceiling sources:
-- **local-libvirt** — `discovery.py` advertises `disk_gb` from a new
-  `KDIVE_LIBVIRT_DISK_CEILING_GB` operator env (int; mirrors
-  `KDIVE_LIBVIRT_ALLOCATION_CAP`). A missing/invalid value is a
-  `configuration_error` at discovery, like the allocation cap.
+- **local-libvirt** — `discovery.py` advertises `disk_gb` from a **live source**:
+  `shutil.disk_usage(ROOTFS_DIR).total // (1024**3)` (the storage that backs the
+  per-System overlays, `/var/lib/kdive/rootfs`). This mirrors how `vcpus`/
+  `memory_mb` come from live `getInfo()` — always present, so an existing local
+  deployment keeps working on upgrade with no new operator action. A `ROOTFS_DIR`
+  that cannot be stat-ed is a genuine host fault (`infrastructure_failure` at
+  discovery), not a routine unset. **No new required env is introduced.**
 - **remote-libvirt / fault-inject** — declared in `systems.toml` capabilities
   beside `vcpus`/`memory_mb`.
 
+**Upgrade contract (non-breaking).** Because the local ceiling is live-derived
+and always advertised, adding the fail-closed check does not turn a
+previously-working local `allocations.request` into a hard failure on upgrade —
+only a request whose `disk_gb` genuinely exceeds host storage is denied. For
+remote/fault-inject, the ceiling is a `systems.toml` key the operator adds like
+the existing `vcpus`/`memory_mb` keys; a host missing it fails closed with the
+host-registration-gap message (matching `require_size_ceiling`), which is the
+pre-existing discipline for those providers, called out in the operator docs.
+
 ### Part 4 — Honest per-System size in the report
 
-`services/reports/sections.py` `InventorySection` reads the stamped
+`services/reports/sections.py` `InventorySection` reports the stamped
 `requested_vcpus`/`requested_memory_gb`/`requested_disk_gb` from the System's
-allocation instead of the shape catalog. The SQL joins `allocations` (already
-joined for `resource_kind`) and selects the stamped columns; the `memory_mb`
-column becomes `memory_gb` (or converts `requested_memory_gb * 1024`) to keep the
-column contract. Every System — custom or shaped — reports its true size; the
-`system_shapes` join is dropped.
+allocation. The `allocations` table is already joined (for `resource_kind`), so
+this adds no join.
+
+**Column contract (pinned).** The report keeps its existing column names and
+units — `vcpus`, `memory_mb`, `disk_gb` — so no consumer contract changes.
+`memory_mb` is computed as `requested_memory_gb * 1024`.
+
+**Legacy NULL rows.** `requested_disk_gb` is nullable and was added in migration
+0015; `requested_vcpus`/`requested_memory_gb` in 0002. Allocations granted before
+those migrations carry `NULL`. To avoid trading one NULL population (custom
+systems) for another (legacy systems), the columns `COALESCE` onto the
+`system_shapes` catalog as a fallback: `COALESCE(a.requested_vcpus, sh.vcpus)`,
+`COALESCE(a.requested_memory_gb * 1024, sh.memory_mb)`,
+`COALESCE(a.requested_disk_gb, sh.disk_gb)`. The `system_shapes` `LEFT JOIN` is
+retained only as this fallback. A custom-sized System (stamped, no shape) now
+reports its real size; a legacy shaped System still resolves through the catalog;
+a legacy custom System with no stamp and no shape reports `NULL` (unchanged, and
+unavoidable — the size was never recorded).
 
 ### Part 5 — Seed the `debug` shape
 
@@ -153,6 +191,14 @@ Forward-only migration `0061_debug_system_shape.sql` inserts
 - **Overlay resize** (unit, mocked `qemu-img`): grow when `disk_gb >` current;
   no-op at/below base; never on the reuse path; resize failure reclaims the
   overlay and raises `PROVISIONING_FAILURE`; idempotent create-path retry.
+- **Plumbing seam** (service/integration, default gate): provision through the
+  real admission→profile→provisioner seam (mock only `qemu-img` at the boundary)
+  and assert `prepare_overlay` receives the `disk_gb` stamped on the allocation
+  snapshot — so a wiring regression that reverts to the base size fails in the
+  default gate, not only under `live_vm`.
+- **Discovery ceiling** (unit): local discovery advertises `disk_gb` from a
+  stubbed `disk_usage`; an un-stat-able `ROOTFS_DIR` raises
+  `infrastructure_failure`.
 - **cloud-init config**: `KDIVE_CLOUD_CFG_CONTENT` contains `resize_rootfs: true`
   and `growpart: {mode: "off"}`; `verify_cloud_init` self-check asserts
   `resize_rootfs: true` (update the existing `false` assertion).
@@ -161,7 +207,9 @@ Forward-only migration `0061_debug_system_shape.sql` inserts
   host-registration-gap `configuration_error`; local discovery reads the env,
   invalid env → `configuration_error`.
 - **Report** (service): custom-triple System shows real vcpus/memory/disk (was
-  `NULL`); shaped System shows its size; scope/cap behavior unchanged.
+  `NULL`); shaped System shows its size via the catalog fallback; a legacy
+  allocation with `NULL requested_*` and no shape reports `NULL` (documented,
+  unchanged); scope/cap behavior unchanged.
 - **Migration**: `0061` applies; `debug` row present with `(4, 8192, 60)`;
   golden version lists updated.
 - **Live (`live_vm`, manual)**: provision a System with `disk_gb=60` on a

@@ -84,12 +84,14 @@ size honest in the operator report. Four parts.
    capabilities gain a `disk_gb` key alongside `vcpus`/`memory_mb`; admission's
    `≤ resource-caps` check rejects `disk_gb > ceiling` as a `configuration_error`
    naming the requested value and the ceiling, exactly like the vcpus/memory
-   over-cap path. local-libvirt advertises the ceiling from a new
-   `KDIVE_LIBVIRT_DISK_CEILING_GB` operator env (mirroring
-   `KDIVE_LIBVIRT_ALLOCATION_CAP`); remote-libvirt and fault-inject declare it in
-   `systems.toml` like the existing size keys. A host that advertises no disk
-   ceiling fails closed with a host-registration-gap message, matching
-   `require_size_ceiling`.
+   over-cap path. local-libvirt advertises the ceiling from a **live source** —
+   `shutil.disk_usage("/var/lib/kdive/rootfs").total` — so it is always present
+   like the vcpus/memory ceilings from `getInfo()`, and adding the check does not
+   break an existing local deployment on upgrade (no new required env). An
+   un-stat-able rootfs path is a host `infrastructure_failure` at discovery.
+   remote-libvirt and fault-inject declare the ceiling in `systems.toml` like the
+   existing size keys; a host that advertises none fails closed with a
+   host-registration-gap message, matching `require_size_ceiling`.
 
 4. **The operator report shows real per-System size.** The `inventory` section
    reads the authoritative stamped `requested_vcpus`/`requested_memory_gb`/
@@ -110,8 +112,15 @@ documented, so the common debug case is one name rather than a computed triple.
   intervention) is reachable through the already-authorized `allocations.request`
   path.
 - disk is bounded per-request by a host-advertised ceiling; an over-ceiling
-  request fails closed at admission with a diagnostic, and a host missing the
-  ceiling fails closed rather than admitting an unbounded disk.
+  request fails closed at admission with a diagnostic. The local ceiling is
+  live-derived and always advertised, so upgrade is non-breaking — only a request
+  exceeding host storage is newly denied. remote/fault-inject hosts declare the
+  ceiling in `systems.toml` (existing discipline); one missing it fails closed
+  rather than admitting an unbounded disk.
+- the operator report keeps its existing `vcpus`/`memory_mb`/`disk_gb` column
+  names and units; stamped `requested_*` is authoritative, with the shape catalog
+  retained only as a `COALESCE` fallback for legacy allocations whose `requested_*`
+  predates the snapshot columns.
 - Operators see real per-System size in `reports.generate`, including
   custom-sized Systems that previously reported `NULL`.
 - Rebuilt images gain the disk knob; the build self-check guarantees a fresh
