@@ -87,9 +87,16 @@ class InventorySection:
             scope_clause = " WHERE s.project = ANY(%s)"
             params.append(list(scope.projects))
         params.append(cap + 1)
+        # The at-grant stamped size (requested_*) is authoritative for every System — custom or
+        # shaped (ADR-0312). The shape catalog is a COALESCE fallback only for legacy allocations
+        # whose requested_* predates those snapshot columns (0002/0015); a custom System (stamped,
+        # no shape) now reports its real size instead of NULL. Column names/units are unchanged.
         sql: LiteralString = (
             "SELECT s.id AS system_id, s.domain_name AS name, s.project, s.state, "
-            "r.kind AS resource_kind, sh.vcpus, sh.memory_mb, sh.disk_gb "
+            "r.kind AS resource_kind, "
+            "COALESCE(a.requested_vcpus, sh.vcpus) AS vcpus, "
+            "COALESCE(a.requested_memory_gb * 1024, sh.memory_mb) AS memory_mb, "
+            "COALESCE(a.requested_disk_gb, sh.disk_gb) AS disk_gb "
             "FROM systems s "
             "JOIN allocations a ON a.id = s.allocation_id "
             "JOIN resources r ON r.id = a.resource_id "

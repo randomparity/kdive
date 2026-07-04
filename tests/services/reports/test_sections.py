@@ -162,6 +162,73 @@ def test_inventory_known_and_unknown_shape(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+async def _custom_allocation(
+    conn: AsyncConnection,
+    resource_id: UUID,
+    *,
+    project: str,
+    vcpus: int,
+    memory_gb: int,
+    disk_gb: int,
+) -> Allocation:
+    """A full-custom allocation: stamped requested_* sizing, no shape label (ADR-0067)."""
+    return await ALLOCATIONS.insert(
+        conn,
+        Allocation(
+            id=uuid4(),
+            created_at=_AS_OF,
+            updated_at=_AS_OF,
+            principal="user-1",
+            project=project,
+            resource_id=resource_id,
+            state=AllocationState.ACTIVE,
+            lease_expiry=None,
+            shape=None,
+            requested_vcpus=vcpus,
+            requested_memory_gb=memory_gb,
+            requested_disk_gb=disk_gb,
+        ),
+    )
+
+
+def test_inventory_reports_stamped_size_for_custom_system(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool, pool.connection() as conn:
+            res = await _resource(conn)
+            alloc = await _custom_allocation(
+                conn, res.id, project="proj", vcpus=8, memory_gb=16, disk_gb=100
+            )
+            await _system(conn, alloc.id, project="proj", shape=None, name="vm-custom")
+            rows = (await InventorySection().gather(conn, _scope(), None, _AS_OF, cap=500)).rows
+        row = next(r for r in rows if r["name"] == "vm-custom")
+        # A custom-sized System (no shape) reports its stamped size, not NULL: memory in MB.
+        assert (row["vcpus"], row["memory_mb"], row["disk_gb"]) == (8, 16384, 100)
+
+    asyncio.run(_run())
+
+
+def test_inventory_legacy_null_stamp_no_shape_reports_null(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool, pool.connection() as conn:
+            res = await _resource(conn)
+            # A legacy allocation predating the requested_* snapshot columns: no stamp, no shape.
+            alloc = await _custom_allocation(
+                conn, res.id, project="proj", vcpus=2, memory_gb=4, disk_gb=20
+            )
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE allocations SET requested_vcpus = NULL, requested_memory_gb = NULL, "
+                    "requested_disk_gb = NULL WHERE id = %s",
+                    (alloc.id,),
+                )
+            await _system(conn, alloc.id, project="proj", shape=None, name="vm-legacy")
+            rows = (await InventorySection().gather(conn, _scope(), None, _AS_OF, cap=500)).rows
+        row = next(r for r in rows if r["name"] == "vm-legacy")
+        assert (row["vcpus"], row["memory_mb"], row["disk_gb"]) == (None, None, None)
+
+    asyncio.run(_run())
+
+
 def test_leases_active_stale_boundary_against_as_of(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool, pool.connection() as conn:
