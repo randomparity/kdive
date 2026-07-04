@@ -98,31 +98,80 @@ def _real_make_overlay(base: str, overlay: str) -> None:
         )
 
 
-def _real_overlay_virtual_size(overlay: str) -> int:
-    """Return the overlay's qcow2 virtual size in bytes via ``qemu-img info``."""
+def _run_qemu_img(
+    argv: list[str],
+    *,
+    op: str,
+    action: str,
+    overlay: str,
+    extra_details: dict[str, object] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a ``qemu-img`` subcommand against ``overlay`` with uniform fail-closed error mapping.
+
+    Resolves the binary (``MISSING_DEPENDENCY`` if absent or a launch ``FileNotFoundError``),
+    runs it under the shared timeout, and maps a launch ``OSError`` to ``INFRASTRUCTURE_FAILURE``
+    and a timeout or non-zero exit to ``PROVISIONING_FAILURE``. ``action`` completes the message
+    "... to {action}"; ``op`` keys the error details. Returns the completed process on success.
+    """
+
+    def _details() -> dict[str, object]:
+        details = _overlay_error_details(op, overlay, tool=_QEMU_IMG)
+        if extra_details:
+            details.update(extra_details)
+        return details
+
     qemu_img = shutil.which(_QEMU_IMG)
     if qemu_img is None:
         raise CategorizedError(
-            "qemu-img is not installed; cannot read the per-System overlay virtual size",
+            f"qemu-img is not installed; cannot {action}",
             category=ErrorCategory.MISSING_DEPENDENCY,
-            details=_overlay_error_details("overlay_info", overlay, tool=_QEMU_IMG),
+            details=_details(),
         )
-    result = subprocess.run(  # noqa: S603 - resolved qemu-img; overlay is argv data
-        [qemu_img, "info", "--output=json", overlay],
-        capture_output=True,
-        text=True,
-        timeout=_QEMU_IMG_TIMEOUT_S,
-        check=False,
-    )
+    try:
+        result = subprocess.run(  # noqa: S603 - resolved qemu-img; argv is data, no shell
+            [qemu_img, *argv],
+            capture_output=True,
+            text=True,
+            timeout=_QEMU_IMG_TIMEOUT_S,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise CategorizedError(
+            f"qemu-img is not installed; cannot {action}",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+            details=_details(),
+        ) from exc
+    except OSError as exc:
+        details = _details()
+        details["error"] = type(exc).__name__
+        raise CategorizedError(
+            f"failed to launch qemu-img to {action}",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details=details,
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise CategorizedError(
+            f"qemu-img exceeded the timeout to {action}",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details={**_details(), "timeout_s": _QEMU_IMG_TIMEOUT_S},
+        ) from exc
     if result.returncode != 0:
         raise CategorizedError(
-            "qemu-img failed to read the per-System overlay virtual size",
+            f"qemu-img failed to {action}",
             category=ErrorCategory.PROVISIONING_FAILURE,
-            details={
-                **_overlay_error_details("overlay_info", overlay, tool=_QEMU_IMG),
-                "stderr": result.stderr[-_QEMU_IMG_ERROR_TAIL_CHARS:],
-            },
+            details={**_details(), "stderr": result.stderr[-_QEMU_IMG_ERROR_TAIL_CHARS:]},
         )
+    return result
+
+
+def _real_overlay_virtual_size(overlay: str) -> int:
+    """Return the overlay's qcow2 virtual size in bytes via ``qemu-img info``."""
+    result = _run_qemu_img(
+        ["info", "--output=json", overlay],
+        op="overlay_info",
+        action="read the per-System overlay virtual size",
+        overlay=overlay,
+    )
     try:
         return int(json.loads(result.stdout)["virtual-size"])
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
@@ -135,30 +184,13 @@ def _real_overlay_virtual_size(overlay: str) -> int:
 
 def _real_resize_overlay(overlay: str, disk_gb: int) -> None:
     """Grow the overlay's qcow2 virtual size to ``disk_gb`` GB via ``qemu-img resize``."""
-    qemu_img = shutil.which(_QEMU_IMG)
-    if qemu_img is None:
-        raise CategorizedError(
-            "qemu-img is not installed; cannot resize the per-System rootfs overlay",
-            category=ErrorCategory.MISSING_DEPENDENCY,
-            details=_overlay_error_details("resize_overlay", overlay, tool=_QEMU_IMG),
-        )
-    result = subprocess.run(  # noqa: S603 - resolved qemu-img; overlay is argv data
-        [qemu_img, "resize", overlay, f"{disk_gb}G"],
-        capture_output=True,
-        text=True,
-        timeout=_QEMU_IMG_TIMEOUT_S,
-        check=False,
+    _run_qemu_img(
+        ["resize", overlay, f"{disk_gb}G"],
+        op="resize_overlay",
+        action="resize the per-System rootfs overlay",
+        overlay=overlay,
+        extra_details={"disk_gb": disk_gb},
     )
-    if result.returncode != 0:
-        raise CategorizedError(
-            "qemu-img failed to resize the per-System rootfs overlay",
-            category=ErrorCategory.PROVISIONING_FAILURE,
-            details={
-                **_overlay_error_details("resize_overlay", overlay, tool=_QEMU_IMG),
-                "disk_gb": disk_gb,
-                "stderr": result.stderr[-_QEMU_IMG_ERROR_TAIL_CHARS:],
-            },
-        )
 
 
 def _real_remove_overlay(overlay: str) -> None:
