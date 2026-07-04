@@ -109,14 +109,17 @@ This is **orthogonal to the `direct_kernel` signal**: no curated
   `systems.toml`, reconciled to the catalog.
 - `os_release` adds a verified, falsifiable OS identity to build provenance,
   cross-checking a possibly-mislabelled catalog name.
-- One migration (`0060`, additive nullable column). Because `image_catalog`
-  reads are `SELECT *` into the `extra="forbid"` `ImageCatalogEntry`, the code
-  (carrying the new `description` field) must deploy **before** the migration is
-  applied — otherwise old instances raise on the unexpected column (the general
-  property of any `image_catalog` column addition here, stated as a sequencing
-  invariant in the spec). Migrations are forward-only. The `images.list` output
-  contract grows (additive fields); fielded-output/snapshot tests are updated.
-  No RBAC change (all fields respect the existing public/private list filter).
+- One migration (`0060`, additive nullable column), shipped with the code and
+  applied as part of the deploy via the advisory-lock-guarded `apply_migrations`
+  step (ADR-0015). Reads tolerate either side of the migration (the model field
+  defaults to `None`), but reconcile *writes* the column, so the migration must
+  precede write traffic — hence migration-with-deploy, not code-strictly-first.
+  This self-hosted control plane is not a hot rolling multi-instance tier, so the
+  only skew window (old code reading a migrated DB, rejected by `extra="forbid"`)
+  is the brief deploy restart. Migrations are forward-only. The `images.list`
+  output contract grows (additive fields); fielded-output/snapshot tests are
+  updated. No RBAC change (all fields respect the existing public/private list
+  filter).
 - Honesty is preserved: every new field is either a build fact or explicitly
   operator-attested; no ranking or recommendation is computed, and no unbuilt
   row gains a fabricated capability value.

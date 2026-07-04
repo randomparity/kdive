@@ -202,17 +202,26 @@ raise a `ValidationError` on every `image_catalog` read. This is the general
 property of every `image_catalog` column addition under `extra="forbid"` +
 `SELECT *`, not new to this change.
 
-Sequencing invariant: **deploy the code (with `ImageCatalogEntry.description`)
-before applying migration `0060`.** The migration is additive and nullable, so
-new code reads a not-yet-migrated DB fine (`description` simply absent → `None`
-default is never populated because the column read is via `SELECT *`; the field
-defaults on the model). A new-code + migrated DB is the steady state. The only
-unsafe window — migrated DB read by old code — is closed by ordering code first.
-Migrations are forward-only (`db/migrate.py` applies `NNNN_*.sql` ascending; no
-down-migrations); "rollback" of `0060` means leaving the unused nullable column
-in place, which old *and* new code before this feature both tolerate as long as
-they are not simultaneously live with the strict model — hence the ordering rule
-above is the operative safeguard.
+Sequencing invariant: **ship migration `0060` together with the code and apply
+the migration as part of the deploy** — via the existing advisory-lock-guarded
+`apply_migrations` step (`db/migrate.py`, ADR-0015; invoked from
+`__main__`/`admin`), so the column exists before new code serves traffic.
+Reads are tolerant either side of the migration (additive nullable column;
+`ImageCatalogEntry.description` defaults to `None`, so `model_validate` over a
+`SELECT *` succeeds whether or not the column is present). **Writes are not**:
+reconcile's `_create_entry`/`_update_entry` reference the `description` column,
+so a write against a not-yet-migrated DB would raise `column does not exist` —
+therefore the migration must precede write traffic. This is why "code strictly
+before migration" is **not** the rule: it would only move the break from old
+readers to new writers.
+
+This self-hosted control plane is not a long-lived multi-instance rolling tier
+(migrations are an operator-run deploy step, not a hot web-tier rollout), so the
+only skew window — old code reading a migrated DB (`extra="forbid"` rejects the
+unexpected column) — is the brief service restart during the deploy, not a
+sustained state. Migrations are forward-only (`db/migrate.py` applies
+`NNNN_*.sql` ascending; no down-migrations); "rollback" of `0060` leaves the
+unused nullable column in place, which is inert.
 
 ## Out of scope
 
