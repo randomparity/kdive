@@ -72,11 +72,16 @@ operator context; never compute a ranking or a curated capability value.
    `image_catalog` gains a nullable `description` column (migration `0060`);
    reconcile plumbs it through `_create_entry`/`_update_entry` exactly as
    `capabilities` is, so editing `systems.toml` and re-reconciling updates the
-   row. It is surfaced in `images.list`, `images.describe`, and the
-   `profile_examples` example, **labelled operator-attested** — advisory context,
-   never a capability or liveness guarantee (parallels ADR-0092's
-   `client_attested` provenance and the #867 client labels). Rows with no
-   matching inventory `[[image]]` carry no description.
+   row. It is length-capped at inventory-load (280 chars) so the field stays
+   token-safe on every paginated `images.list` row. It is **reconcile-owned**:
+   `publish_image` omits `description` from its write set today
+   (`publish.py:188-192`) and must never be extended to write it, so a build
+   never clobbers operator context. It is surfaced in `images.list`,
+   `images.describe`, and the `profile_examples` example, **labelled
+   operator-attested** — advisory context, never a capability or liveness
+   guarantee (parallels ADR-0092's `client_attested` provenance and the #867
+   client labels). Rows with no matching inventory `[[image]]` carry no
+   description.
 
 4. **`profile_examples` de-anoints the first-declared image.** It still emits one
    runnable example, but the local example item now discloses the image was
@@ -104,7 +109,12 @@ This is **orthogonal to the `direct_kernel` signal**: no curated
   `systems.toml`, reconciled to the catalog.
 - `os_release` adds a verified, falsifiable OS identity to build provenance,
   cross-checking a possibly-mislabelled catalog name.
-- One migration (`0060`, additive nullable column). The `images.list` output
+- One migration (`0060`, additive nullable column). Because `image_catalog`
+  reads are `SELECT *` into the `extra="forbid"` `ImageCatalogEntry`, the code
+  (carrying the new `description` field) must deploy **before** the migration is
+  applied — otherwise old instances raise on the unexpected column (the general
+  property of any `image_catalog` column addition here, stated as a sequencing
+  invariant in the spec). Migrations are forward-only. The `images.list` output
   contract grows (additive fields); fielded-output/snapshot tests are updated.
   No RBAC change (all fields respect the existing public/private list filter).
 - Honesty is preserved: every new field is either a build fact or explicitly
