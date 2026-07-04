@@ -26,7 +26,7 @@ schema_version = 2
 # `build-fs` writes to in Step 6), under the provider allowed_roots (`/var/lib/kdive/rootfs`). It
 # seeds `registered` (bootable) immediately — no object-store upload — so an MCP agent with no host
 # shell can DISCOVER it (`fixtures.list` / `systems.profile_examples`) and provision with
-# `rootfs = {kind = "catalog", provider = "local-libvirt", name = "fedora-kdive-ready-43"}`. The
+# `rootfs = {kind = "catalog", provider = "local-libvirt", name = "fedora-kdive-ready-44"}`. The
 # path must be absolute, under allowed_roots, and the image `public` (a private staged-path image is
 # rejected at load). The file need not exist yet at reconcile time (declared, not probed) —
 # provisioning re-validates it, so build it in Step 6 before you provision. Use an `s3` source
@@ -34,7 +34,7 @@ schema_version = 2
 # ---------------------------------------------------------------------------------------------
 [[image]]
 provider = "local-libvirt"
-name = "fedora-kdive-ready-43"
+name = "fedora-kdive-ready-44"
 arch = "x86_64"
 format = "qcow2"
 root_device = "/dev/vda"
@@ -42,7 +42,7 @@ visibility = "public"
 capabilities = ["ssh", "selinux", "kdump", "drgn"]
 [image.source]
 kind = "staged-path"
-path = "/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2"
+path = "/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2"
 
 # ---------------------------------------------------------------------------------------------
 # HOST — one local-libvirt resource on qemu:///system, reconciled into resources.
