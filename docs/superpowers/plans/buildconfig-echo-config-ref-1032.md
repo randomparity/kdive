@@ -136,18 +136,38 @@ union error by design.)
 2. Wrapper docstrings (`set`/`list`/`get`): note the response carries
    `data.config_ref` to paste into a **`source='server'`** `runs.create` build,
    and point at `runs.validate_profile`. Avoid an unqualified "ready-to-use".
-   Keep each docstring one line where the schema renders it (FastMCP serializes
-   the first line into the tool description).
+   Make each docstring **multi-line**: first line = the concise tool summary the
+   reference renders as the lead sentence, following lines carry the
+   `config_ref` + `validate_profile` guidance. Multi-line tool docstrings are
+   standard here (e.g. `images.list`) and the generator renders the **full**
+   docstring (`gen_tool_reference.py` uses `t.description`; the newline ban
+   applies only to *parameter* descriptions, not tool docstrings), so the new
+   guidance is agent-visible. The current one-line docstrings are already near
+   the 100-char ceiling (`get`≈99, `list`≈96, `set`≈88), so appending on the
+   same physical line is not possible — go multi-line.
 
-**Constraints:** honor the repo doc-style guard (plain, factual prose; the
-project's banned-adjective list; "Milestone" not the S-word). Keep
-`Field`/docstring text within the existing paragraph shape.
+**Constraints:**
+- Ruff line-length 100 applies to **each physical line** (`just lint`).
+- Doc-style guard: plain, factual prose; the project's banned-adjective list;
+  "Milestone" not the S-word.
+- Do **not** add a new `build_profile` example snippet to the Field —
+  `test_build_profile_examples_are_valid` (ADR-0177) parses every documented
+  example, so a non-parseable snippet fails. Keep the existing
+  `{'kind':'catalog','provider':'system','name':'kdump'}` example.
 
-**Tests / verification:** none asserts wording, but confirm the ADR/leak and
-docstring guards (whatever the repo runs) stay green; see Task 5 regen.
+**Tests / verification (run before committing this task):**
+- `uv run python -m pytest tests/mcp/core/test_tool_docs.py -q` — this module
+  asserts over the `runs.create` `build_profile` description
+  (`test_runs_create_documents_warm_tree_is_provenance_only`, the combined
+  `create_text` cross-reference checks) and parses documented examples; a Field
+  edit can trip it, so verify it here rather than only at Task 5.
+- `uv run python -m pytest tests/mcp/catalog/test_build_configs_tool.py -q`
+  (docstring changes do not affect handler behavior, but keep the suite green).
+- `just lint` (100-char lines) + the doc-style guard.
 
 **Acceptance:** the Field and three docstrings carry the lane qualifier and the
-`validate_profile` pointer; no forbidden prose; `provider`-decorative wording
+`validate_profile` pointer; every physical line ≤100 chars;
+`test_tool_docs.py` green; no forbidden prose; `provider`-decorative wording
 absent from agent-facing text.
 
 **Rollback:** revert the two files' text.
