@@ -75,15 +75,23 @@ Acceptance:
     seed default and the echoed convention share one value;
   - for `set`/`list`/`get`, the echoed `data.config_ref` equals
     `catalog_config_ref(<name>).model_dump()`;
-  - a `BuildProfile.parse` of a `source='server'` document carrying the echoed
-    `config_ref` succeeds, and a `source='external'` document carrying the same
-    ref is rejected as a `CONFIGURATION_ERROR` whose error detail names the
-    `config` field (the existing `extra="forbid"` → `configuration_error`
-    mapping at the parse boundary) — pinning the lane boundary and confirming the
-    cross-lane paste fails categorized, not as a raw crash. Enriching that
-    message to name `source='server'` is out of scope (it would special-case
-    pydantic extra-field errors for a priority:low change; the detail already
-    names `config` and the Field text names the lane).
+  - `ServerBuildProfile.model_validate({...,"config":<echoed ref>})` succeeds and
+    `ExternalBuildProfile.model_validate({...,"config":<echoed ref>})` raises
+    (extra `config` forbidden). This pins the structural lane boundary at the
+    model level — stable regardless of which boundary an agent hits, and not
+    dependent on any particular error *message*.
+
+  **Boundary note (not over-claimed).** `runs.create` types `build_profile` as
+  the raw `ExternalBuildProfile | ServerBuildProfile` union with no `source`
+  discriminator (`registrar.py:66`), so a `source='external'`+`config` document
+  there surfaces a merged, source-ambiguous pydantic union error — the exact
+  error `runs.validate_profile` exists to replace (`validate_profile.py:8-12`).
+  The spec therefore does **not** assert a clean `config`-named
+  `CONFIGURATION_ERROR` at the create boundary. The mitigation for the cross-lane
+  paste is the Field text naming `source='server'` (so a reading agent never
+  pastes into the external lane); `runs.validate_profile` — which routes through
+  `BuildProfile.parse` and yields the clean typed verdict — is the read-only
+  pre-flight an agent can use to check a profile before `runs.create`.
 - The `buildconfig.set`/`list`/`get` wrapper docstrings mention that the
   response carries a ready-to-use `data.config_ref` (the agent-facing contract;
   the generated `docs/guide/reference/buildconfig.md` renders the docstring, not
@@ -117,10 +125,13 @@ by construction a valid `CatalogComponentRef`) and add it under `config_ref` to:
 - `set_build_config` success payload (`:189-199`);
 - `_entry_envelope` list-item payload (`:202-213`), keyed on `entry.name`;
 - `read_build_config` (`buildconfig.get`) payload (`:118-127`), keyed on the
-  **resolved row's `entry.name`** (not the requested string). All three sites
-  derive the ref from the canonical row name so a future case-insensitive or
-  normalized name column cannot make `get` echo a non-canonical name that
-  resolves differently from `list`.
+  **resolved row's `entry.name`** (not the requested string). For the same
+  forward-safety, `read_build_config`'s success-envelope subject is also switched
+  from the requested `name` argument to `entry.name`, so the envelope subject and
+  the echoed `config_ref.name` stay consistent if the name column ever gains
+  case-insensitive or normalized lookup. All three sites derive the ref from the
+  canonical row name so `get` cannot echo a non-canonical name that resolves
+  differently from `list`.
 
 `buildconfig.get` is included beyond the two tools the issue names because it is
 the inspect tool the `runs.create` `Field` text points agents to ("Call
