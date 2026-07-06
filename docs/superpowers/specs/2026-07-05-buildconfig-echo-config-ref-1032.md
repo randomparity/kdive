@@ -52,12 +52,20 @@ Acceptance:
 - Each `buildconfig.list` item and the `buildconfig.get` payload include the
   same `data.config_ref`.
 - The echoed `config_ref` is produced from the same `provider="system"`
-  convention that `DEFAULT_CONFIG_REF` uses, so the two cannot diverge; the
-  value round-trips through `parse_component_ref` as a valid `CatalogComponentRef`.
-- The `runs.create` `config` `Field` description states that for a catalog ref
-  `provider` is **not consulted** — any non-empty value works, `system` by
-  convention — and that operator-published fragments are referenced by `name`
-  alone.
+  convention that `DEFAULT_CONFIG_REF` uses; the invariant is **enforced by a
+  test**, not asserted by prose (see the test criteria below), and the value
+  round-trips through `parse_component_ref` as a valid `CatalogComponentRef`.
+- The `runs.create` `config` `Field` description directs the agent to paste the
+  `config_ref` echoed by `buildconfig.set`/`list`/`get`, and notes that a
+  catalog fragment is referenced by `name` (the ref's `provider` is currently
+  decorative for build configs). It does **not** teach "any non-empty value
+  works" as a durable rule — see decision 3 for why the canonical-ref framing is
+  forward-safe and the "any value works" framing is not.
+- A test asserts that, for `set`/`list`/`get`, the echoed `data.config_ref`
+  deep-equals `catalog_config_ref(<name>).model_dump()`, and a build-path test
+  asserts the echoed ref resolves to fragment bytes via the catalog fetch
+  (`catalog_fetch(ref["name"])`) — converting "cannot diverge" and "pastes
+  directly into `runs.create`" from claims into enforced checks.
 - The `buildconfig.set`/`list`/`get` wrapper docstrings mention that the
   response carries a ready-to-use `data.config_ref` (the agent-facing contract;
   the generated `docs/guide/reference/buildconfig.md` renders the docstring, not
@@ -98,14 +106,23 @@ the inspect tool the `runs.create` `Field` text points agents to ("Call
 buildconfig.get to inspect a named fragment"); echoing there closes the loop for
 the same one-call cost and keeps the three sibling tools consistent.
 
-### 3. Document the decorative `provider` on `runs.create`
+### 3. Document `provider` on `runs.create` — canonical-ref framing, not a rule
 
 Append to the `config` clause of the `build_profile` `Field` description
-(`registrar.py:83-86`) a sentence: for a catalog ref, `provider` is not
-consulted — any non-empty value works (`system` by convention), and
-operator-published fragments are referenced by `name` alone;
-`buildconfig.set`/`list`/`get` echo a ready-to-use `config_ref`. Keep the
-existing worked example. Do **not** describe a `source`→`provider` mapping.
+(`registrar.py:83-86`): a catalog fragment is referenced by `name`, and the
+canonical way to obtain the ref is to paste the `config_ref` echoed by
+`buildconfig.set`/`list`/`get`; the ref's `provider` is currently decorative for
+build configs (`system` by convention). Keep the existing worked example. Do
+**not** describe a `source`→`provider` mapping.
+
+**Forward-safety.** The Field text points agents at the *echoed canonical ref*
+rather than teaching "any non-empty value works". Echoing a canonical
+`config_ref` that agents copy verbatim is forward-safe: if #1033 (or later
+multi-tenant/namespaced-catalog work) makes `provider` meaningful, the echoed
+value changes at one source (`catalog_config_ref`) and every agent that copied
+it stays correct. Teaching the decorative rule as durable guidance is **not**
+forward-safe — an agent that internalized "any value works" would then construct
+wrong refs. #1033 owns re-evaluating this contract; see Out of scope.
 
 ### 4. Wrapper docstrings mention `config_ref`
 
@@ -136,4 +153,9 @@ plain revert; no state to unwind.
 - Changing how `provider` is validated or resolved (it stays a required
   non-empty string in the ref model; only its documentation and the echoed value
   change).
-- The related #1033.
+- The related #1033. **Coordination dependency:** if #1033 makes `provider`
+  meaningful for build-config catalog refs, it must revise the
+  `catalog_config_ref` provider value (one source) and the `runs.create` `config`
+  Field text this spec adds. The canonical-ref framing (decision 3) limits the
+  blast radius to those two sites; agents that copied the echoed ref need no
+  re-education.
