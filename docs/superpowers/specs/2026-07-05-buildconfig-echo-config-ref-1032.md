@@ -60,11 +60,11 @@ Acceptance:
   test**, not asserted by prose (see the test criteria below), and the value
   round-trips through `parse_component_ref` as a valid `CatalogComponentRef`.
 - The `runs.create` `config` `Field` description directs the agent to paste the
-  `config_ref` echoed by `buildconfig.set`/`list`/`get`, and notes that a
-  catalog fragment is referenced by `name` (the ref's `provider` is currently
-  decorative for build configs). It does **not** teach "any non-empty value
-  works" as a durable rule — see decision 3 for why the canonical-ref framing is
-  forward-safe and the "any value works" framing is not.
+  `config_ref` echoed by `buildconfig.set`/`list`/`get` for a `source='server'`
+  build. It does **not** state that `provider` is decorative or that "any
+  non-empty value works" — that framing is not forward-safe (decision 3); the
+  decorative fact stays in the `catalog_config_ref` factory comment and this
+  spec, off the agent surface.
 - Tests pin the invariants so a regression fails rather than ships green:
   - a **literal** assertion that `catalog_config_ref("x").model_dump()` equals
     `{"kind":"catalog","provider":"system","name":"x"}` — a drift of the factory
@@ -75,9 +75,15 @@ Acceptance:
     seed default and the echoed convention share one value;
   - for `set`/`list`/`get`, the echoed `data.config_ref` equals
     `catalog_config_ref(<name>).model_dump()`;
-  - a `ServerBuildProfile.parse` of a profile carrying the echoed `config_ref`
-    succeeds and an `ExternalBuildProfile.parse` of the same ref is rejected —
-    pinning the lane boundary the Field text documents.
+  - a `BuildProfile.parse` of a `source='server'` document carrying the echoed
+    `config_ref` succeeds, and a `source='external'` document carrying the same
+    ref is rejected as a `CONFIGURATION_ERROR` whose error detail names the
+    `config` field (the existing `extra="forbid"` → `configuration_error`
+    mapping at the parse boundary) — pinning the lane boundary and confirming the
+    cross-lane paste fails categorized, not as a raw crash. Enriching that
+    message to name `source='server'` is out of scope (it would special-case
+    pydantic extra-field errors for a priority:low change; the detail already
+    names `config` and the Field text names the lane).
 - The `buildconfig.set`/`list`/`get` wrapper docstrings mention that the
   response carries a ready-to-use `data.config_ref` (the agent-facing contract;
   the generated `docs/guide/reference/buildconfig.md` renders the docstring, not
@@ -111,34 +117,42 @@ by construction a valid `CatalogComponentRef`) and add it under `config_ref` to:
 - `set_build_config` success payload (`:189-199`);
 - `_entry_envelope` list-item payload (`:202-213`), keyed on `entry.name`;
 - `read_build_config` (`buildconfig.get`) payload (`:118-127`), keyed on the
-  requested `name`.
+  **resolved row's `entry.name`** (not the requested string). All three sites
+  derive the ref from the canonical row name so a future case-insensitive or
+  normalized name column cannot make `get` echo a non-canonical name that
+  resolves differently from `list`.
 
 `buildconfig.get` is included beyond the two tools the issue names because it is
 the inspect tool the `runs.create` `Field` text points agents to ("Call
 buildconfig.get to inspect a named fragment"); echoing there closes the loop for
 the same one-call cost and keeps the three sibling tools consistent.
 
-### 3. Document `provider` on `runs.create` — canonical-ref framing, not a rule
+### 3. `runs.create` Field points to the echoed ref — no decorative rule taught
 
 Append to the `config` clause of the `build_profile` `Field` description
-(`registrar.py:83-86`): for a **`source='server'`** build, a catalog fragment is
-referenced by `name`, and the canonical way to obtain the ref is to paste the
-`config_ref` echoed by `buildconfig.set`/`list`/`get`; the ref's `provider` is
-currently decorative for build configs (`system` by convention). Because the
-`config` clause already lives inside the `source='server'` part of the paragraph
-that is the only place `config` is accepted, the added text names the lane
-explicitly so an agent on the recommended `source='external'` default does not
-paste the ref into a profile that has no `config` field. Keep the existing worked
-example. Do **not** describe a `source`→`provider` mapping.
+(`registrar.py:83-86`), inside the `source='server'` part of the paragraph that
+is the only place `config` is accepted: for a **`source='server'`** build, obtain
+the ref by pasting the `config_ref` echoed by `buildconfig.set`/`list`/`get`
+(which fills in the required `provider` for you). Naming the lane explicitly stops
+an agent on the recommended `source='external'` default from pasting the ref into
+a profile with no `config` field. Keep the existing worked example. Do **not**
+describe a `source`→`provider` mapping, and do **not** state in agent-facing text
+that `provider` is decorative / "any value works" (see Forward-safety).
 
-**Forward-safety.** The Field text points agents at the *echoed canonical ref*
-rather than teaching "any non-empty value works". Echoing a canonical
-`config_ref` that agents copy verbatim is forward-safe: if #1033 (or later
-multi-tenant/namespaced-catalog work) makes `provider` meaningful, the echoed
-value changes at one source (`catalog_config_ref`) and every agent that copied
-it stays correct. Teaching the decorative rule as durable guidance is **not**
-forward-safe — an agent that internalized "any value works" would then construct
-wrong refs. #1033 owns re-evaluating this contract; see Out of scope.
+**Refinement of the issue's proposed fix #2.** The issue proposed documenting in
+the Field text that `provider` is "not consulted — any non-empty value works". We
+deliberately do **not** teach that rule on the agent surface: the echoed
+canonical ref already removes the guesswork the issue targets, and teaching "any
+value works" is the one framing that is *not* forward-safe. The decorative fact
+stays where only maintainers read it — the `catalog_config_ref` factory comment
+and this spec — not in the tool schema an agent acts on.
+
+**Forward-safety.** Echoing a canonical `config_ref` that agents copy verbatim is
+forward-safe: if #1033 (or later multi-tenant/namespaced-catalog work) makes
+`provider` meaningful, the echoed value changes at one source
+(`catalog_config_ref`) and every agent that copied it stays correct. An agent
+that had internalized "any value works" would instead construct wrong refs.
+#1033 owns re-evaluating this contract; see Out of scope.
 
 ### 4. Wrapper docstrings mention `config_ref`
 
