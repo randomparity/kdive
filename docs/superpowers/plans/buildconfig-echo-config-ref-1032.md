@@ -78,8 +78,15 @@ remains).
 - each `list` item `data["config_ref"] == catalog_config_ref(item_name).model_dump()`.
 - `get` `data["config_ref"] == catalog_config_ref(name).model_dump()` and the
   envelope subject equals the row name.
-- Extend/keep the existing payload-shape assertions (`name/sha256/source/...`)
-  so the additive key does not regress prior fields.
+- **Update the existing exact-key-set guard** at
+  `tests/mcp/catalog/test_build_configs_tool.py:361`:
+  `set(by_name["alpha"].data) == {"name","sha256","source","description"}` will
+  flip red when `config_ref` is added. Extend it to
+  `{"name","sha256","source","description","config_ref"}` **and** add a positive
+  assertion that `by_name["alpha"].data["config_ref"] ==
+  catalog_config_ref("alpha").model_dump()` — upgrade the guard to pin the new
+  contract, do not just re-balance the set or delete the check. (`set`/`get` use
+  per-key assertions and are unaffected by an exact-key-set guard.)
 
 **Acceptance:** all three tools echo the canonical ref; existing fields intact;
 `get` subject is the row name; `just test` green for the suite.
@@ -148,6 +155,12 @@ union error by design.)
 
 **Constraints:**
 - Ruff line-length 100 applies to **each physical line** (`just lint`).
+- The `runs.create` `build_profile` Field is a **parameter description**, subject
+  to the newline ban (`gen_tool_reference.py:269-270` raises on a literal `\n`).
+  Append the `config_ref`/`validate_profile` guidance as **adjacent string
+  literals with no literal `\n`**, matching the existing Field's pattern. (The
+  newline ban applies to parameter descriptions only — the *tool docstrings* in
+  item 2 may be multi-line.)
 - Doc-style guard: plain, factual prose; the project's banned-adjective list;
   "Milestone" not the S-word.
 - Do **not** add a new `build_profile` example snippet to the Field —
