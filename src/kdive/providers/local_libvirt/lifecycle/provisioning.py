@@ -163,6 +163,7 @@ class LocalLibvirtProvisioning:
         catalog_fetch: CatalogFetch | None = None,
         free_port: FreePort | None = None,
         extract_baseline_kernel: ExtractBaselineKernel | None = None,
+        guest_egress: bool = False,
     ) -> None:
         self._connect = connect
         self._files = files or ProvisioningFiles()
@@ -171,13 +172,19 @@ class LocalLibvirtProvisioning:
         self._materialize_rootfs = materialize_rootfs or self._materialize_rootfs_base
         self._free_port = free_port or _bind_probe_free_port
         self._extract_baseline_kernel = extract_baseline_kernel or _real_extract_baseline_kernel
+        # Operator-resolved egress policy for the SSH-forward NIC (ADR-0313, #1031). Default False
+        # keeps restrict=on; composition binds the per-Resource value via rebind_for_resource.
+        self._guest_egress = guest_egress
 
     @classmethod
-    def from_env(cls) -> LocalLibvirtProvisioning:
+    def from_env(cls, *, guest_egress: bool = False) -> LocalLibvirtProvisioning:
         """Build from ``KDIVE_LIBVIRT_URI`` (default ``qemu:///system``); does not connect.
 
         Wires the ``catalog`` rootfs lane (ADR-0228): the catalog fetch lazily opens its own DB
         connection + object store per call, so constructing the provisioner opens nothing.
+
+        ``guest_egress`` (ADR-0313, #1031) is the operator-resolved egress opt-in for the local
+        Resource this provisioner serves; the host-agnostic default is ``False`` (``restrict=on``).
         """
         host_uri = config.require(LIBVIRT_URI)
         allowed_roots = [Path(ROOTFS_DIR)]
@@ -187,6 +194,7 @@ class LocalLibvirtProvisioning:
             connect=lambda: libvirt.open(host_uri),
             allowed_roots=allowed_roots,
             catalog_fetch=rootfs_catalog_fetch_from_env(allowed_roots),
+            guest_egress=guest_egress,
         )
 
     def provision(
@@ -231,6 +239,14 @@ class LocalLibvirtProvisioning:
         # allocated — no longer gated on ssh_credential_ref, which now controls only the
         # drgn-live introspection credential. Reuse-on-retry (_ssh_port_for) is unchanged.
         ssh_port = self._ssh_port_for(system_id)
+        if self._guest_egress:
+            # Positive, greppable signal for a security-relevant state: the operator opted this
+            # resource into guest egress, so the guest NIC renders restrict=off (ADR-0313, #1031).
+            _log.info(
+                "provisioning System %s with guest egress enabled (restrict=off): the guest can "
+                "reach the network; the network-zone firewall is the enforcement boundary",
+                system_id,
+            )
         xml = render_domain_xml(  # validates the profile
             system_id,
             profile,
@@ -239,6 +255,7 @@ class LocalLibvirtProvisioning:
             ssh_port=ssh_port,
             kernel_path=baseline.kernel,
             initrd_path=baseline.initrd,
+            guest_egress=self._guest_egress,
         )
         try:
             if overlay.created:

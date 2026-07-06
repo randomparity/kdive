@@ -39,3 +39,11 @@ Once authorized you have **root** in the guest, and kdive never holds the privat
 guest is yours to customize: the guest package manager is your own — install tracers,
 compilers, and stress tools at runtime (`apt install trace-cmd`) rather than concluding a
 capability is missing. Mind disk headroom, since toolchains and captures consume guest disk.
+
+Runtime installs need the guest to reach its distro mirrors. On **local-libvirt** the guest
+has **no outbound egress by default** (the NIC is loopback-forwarded for SSH with QEMU
+`restrict=on`), so `dnf`/`apt install` fails to resolve any host until the **operator** enables
+egress for that resource (`guest_egress = true` on the `[[local_libvirt]]` block in the operator's
+systems inventory — not a per-request knob). Ask your operator to enable it, or use an image that
+already bakes the toolchain you need. On **remote-libvirt** the operator-staged base image and host
+network already provide egress.

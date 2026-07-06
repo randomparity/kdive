@@ -259,11 +259,21 @@ volume = "fedora-kdive-remote-base-43.qcow2"
 
 # Local-libvirt does NOT declare vcpus/memory_mb here: its size ceiling is probed by discovery
 # and merged onto the row, so this overlay only sets name/cost_class/concurrent_allocation_cap.
+# `name` must match the discovery-created resource name (read it from `kdive resources list` /
+# the `resources` catalog) for this overlay to apply — a mismatch is silently ignored.
 # [[local_libvirt]]
 # name = "workstation"
 # host_uri = "qemu:///system"
 # cost_class = "local"
 # concurrent_allocation_cap = 1
+# guest_egress = true   # OPERATOR OPT-IN (#1031, ADR-0313). Default (omitted/false) keeps the
+#                       # guest NIC's `restrict=on` — no outbound egress, so an agent CANNOT
+#                       # `dnf`/`apt install` at runtime. Set true to render `restrict=off` (SLIRP
+#                       # NAT + DNS) so runtime installs work. SECURITY: this drops the QEMU-level
+#                       # egress block, so an agent-supplied kernel can reach the network — your
+#                       # network zone's firewall becomes the enforcement boundary. Only enable in
+#                       # a lab micro-zone that already restricts egress. Takes effect on the next
+#                       # provision (it renders into the domain XML), not on a running guest.
 
 # Fault-inject (the synthetic, hardware-free provider) is now created ONLY from this file
 # (Phase 2, #393): reconcile_resources is its sole creator and the vcpus/memory_mb below are

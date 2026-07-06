@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import importlib
 import itertools
+import logging
 import subprocess
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -421,6 +422,41 @@ def test_render_emits_ssh_forward_without_credential_ref() -> None:
     ]
 
 
+def test_render_ssh_forward_egress_enabled_flips_restrict_off() -> None:
+    # Operator-gated egress (#1031, ADR-0313): guest_egress=True drops restrict=on so the guest
+    # gets SLIRP NAT + DNS. Only the restrict token flips — the hostfwd, PCI slot, and NIC device
+    # are unchanged from the default (restrict=on) render.
+    xml = render_domain_xml(
+        _SYS, _profile(), disk_path=_DISK, ssh_port=40022, kernel_path=_KERNEL, guest_egress=True
+    )
+    root = _safe_fromstring(xml)
+    args = [
+        arg.get("value") for arg in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
+    ]
+    assert args == [
+        "-netdev",
+        "user,id=kdivessh,restrict=off,hostfwd=tcp:127.0.0.1:40022-:22",
+        "-device",
+        "virtio-net-pci,netdev=kdivessh,addr=0x10",
+    ]
+
+
+def test_render_ssh_forward_egress_default_is_restricted() -> None:
+    # The secure default: an explicit guest_egress=False (and the omitted-kwarg default) keep
+    # restrict=on, byte-for-byte the pre-#1031 NIC.
+    explicit = render_domain_xml(
+        _SYS, _profile(), disk_path=_DISK, ssh_port=40022, kernel_path=_KERNEL, guest_egress=False
+    )
+    default = _render()
+    for xml in (explicit, default):
+        args = [
+            arg.get("value")
+            for arg in _safe_fromstring(xml).findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
+        ]
+        assert "user,id=kdivessh,restrict=on,hostfwd=tcp:127.0.0.1:40022-:22" in args
+        assert all("restrict=off" not in a for a in args if a is not None)
+
+
 def test_render_rejects_missing_ssh_port() -> None:
     # ssh_port is now required (the forward is unconditional), independent of the credential ref —
     # a None is a CONFIGURATION_ERROR, mirroring kernel_path (ADR-0281).
@@ -548,6 +584,7 @@ def _prov(
     free_port: Callable[[], int] = lambda: next(_FREE_PORTS),
     overlay_virtual_size: Callable[[str], int] = lambda _overlay: 1 << 60,
     resize_overlay: Callable[[str, int], None] = lambda _overlay, _gb: None,
+    guest_egress: bool = False,
 ) -> LocalLibvirtProvisioning:
     # The overlay seams default to no-ops so the libvirt-only tests never spawn qemu-img; the
     # console-log seam is also a no-op so they never depend on host /var/lib/kdive permissions.
@@ -572,6 +609,7 @@ def _prov(
         ),
         free_port=free_port,
         extract_baseline_kernel=extract_baseline_kernel,
+        guest_egress=guest_egress,
     )
 
 
@@ -628,6 +666,37 @@ def test_provision_defines_and_starts_returns_name() -> None:
     # Two connections, both closed (no leak): the always-on SSH-port reuse lookup (ADR-0281)
     # opens one, define/start opens the other.
     assert conn.closed == 2
+
+
+def test_provision_default_renders_restrict_on() -> None:
+    # The secure default: a provisioner with no guest_egress renders restrict=on end-to-end.
+    conn = _ProvConn()
+    _prov(conn).provision(_SYS, _profile())
+    assert "restrict=on" in conn.recorded_xml[0]
+    assert "restrict=off" not in conn.recorded_xml[0]
+
+
+def test_provision_guest_egress_renders_restrict_off() -> None:
+    # Operator opt-in (#1031, ADR-0313): a provisioner built with guest_egress=True renders
+    # restrict=off in the defined domain XML, so the guest gets SLIRP NAT + DNS.
+    conn = _ProvConn()
+    _prov(conn, guest_egress=True).provision(_SYS, _profile())
+    assert "restrict=off" in conn.recorded_xml[0]
+    assert "restrict=on" not in conn.recorded_xml[0]
+
+
+def test_provision_guest_egress_logs_positive_signal(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Egress is a security-relevant state; a provision with it enabled emits a greppable INFO
+    # signal (ADR-0313 observability). The default provision stays silent about egress.
+    with caplog.at_level(logging.INFO):
+        _prov(_ProvConn(), guest_egress=True).provision(_SYS, _profile())
+    assert any("guest egress enabled" in rec.getMessage() for rec in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        _prov(_ProvConn()).provision(_SYS, _profile())
+    assert all("guest egress" not in rec.getMessage() for rec in caplog.records)
 
 
 def test_provision_extracts_baseline_and_renders_kernel() -> None:

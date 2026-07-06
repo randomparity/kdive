@@ -387,6 +387,25 @@ def test_local_libvirt_instance_parses() -> None:
     )
     doc = InventoryDoc.parse(d)
     assert doc.local_libvirt[0].host_uri == "qemu:///system"
+    # guest_egress defaults off (secure default; #1031/ADR-0313) — a block omitting the key
+    # keeps restrict=on behavior.
+    assert doc.local_libvirt[0].guest_egress is False
+
+
+def test_local_libvirt_guest_egress_opt_in_parses() -> None:
+    d = _doc(
+        remote_libvirt=[],
+        local_libvirt=[
+            {
+                "name": "loc",
+                "cost_class": "local",
+                "host_uri": "qemu:///system",
+                "guest_egress": True,
+            }
+        ],
+    )
+    doc = InventoryDoc.parse(d)
+    assert doc.local_libvirt[0].guest_egress is True
 
 
 def test_build_host_instance_parses() -> None:

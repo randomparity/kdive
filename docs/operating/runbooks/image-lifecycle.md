@@ -235,3 +235,38 @@ row-first (the catalog row is written before the object), so a live publish is n
 
 To force the expired-private sweep immediately (e.g. to reclaim quota now), an operator runs
 `kdivectl images prune --expired` (`platform_admin` break-glass).
+
+## Runtime tool installs on local-libvirt (operator-gated egress)
+
+An agent that has root in the guest (`systems.authorize_ssh_key`) can install tools at runtime
+(`dnf`/`apt install trace-cmd`, `bpftrace`, `gcc`, kernel-headers, …) — **but only if the guest can
+reach its distro mirrors**. On local-libvirt the guest NIC is a loopback-forwarded SSH channel with
+QEMU `restrict=on`, which blocks **all** guest-initiated egress by default (ADR-0218 §1), so a
+runtime install fails with `Could not resolve host: …`. This is the secure default and is unchanged
+unless you opt in.
+
+To let a local-libvirt resource's guests install tools at runtime (ADR-0313, #1031):
+
+1. Set `guest_egress = true` on that resource's `[[local_libvirt]]` block in `systems.toml`. The
+   block's `name` must match the discovery-created resource name — read it from `kdive resources
+   list` (or the `resources` catalog); a mismatch is silently ignored and egress stays off.
+2. Reconcile (`kdive reconcile-systems`, the deploy `migrate` step, or the reconciler loop).
+3. **Re-provision** the System (the flag renders `restrict=off` into the domain XML at provision;
+   it does not retrofit a running guest). New Systems pick it up on first boot.
+
+`guest_egress` is resolved at provision time from the **worker's** `systems.toml`. If the worker runs
+as a different user than the operator/reconciler (e.g. a root worker), make sure both read the same
+file — set `KDIVE_SYSTEMS_TOML` to a shared absolute path rather than relying on the per-user XDG
+default (`$HOME/.config/kdive/systems.toml`), or the worker will read a different inventory and the
+opt-in silently stays off.
+
+**Security — what you are accepting.** `restrict=off` drops the QEMU-level egress block, so an
+agent-supplied (untrusted) kernel can send outbound traffic through the NIC. The QEMU block is no
+longer the boundary — **your network zone's firewall is**. Enable this only for resources that live
+in a lab micro-zone whose network firewall already restricts egress. When the flag is absent or
+false, behavior is exactly as before (`restrict=on`, no egress).
+
+**Note:** `restrict=off` opens the *route*; the guest still needs to DHCP the NIC and populate
+`/etc/resolv.conf` (SLIRP hands out `10.0.2.15` with DNS at `10.0.2.3`). The `kdive-ready` images do
+this under direct-kernel boot; if a custom image does not bring the NIC up, runtime installs still
+fail even with egress enabled.
