@@ -75,10 +75,17 @@ Acceptance:
     seed default and the echoed convention share one value;
   - for `set`/`list`/`get`, the echoed `data.config_ref` equals
     `catalog_config_ref(<name>).model_dump()` (these per-site tests pin
-    echo-presence, the exact key, and name-canonicalization — **not** the
-    `provider` value, which the literal + `DEFAULT_CONFIG_REF` tests above pin;
-    they compare the factory output to itself and cannot fail on a `provider`
-    drift);
+    echo-presence and the exact key — **not** the `provider` value, which the
+    literal + `DEFAULT_CONFIG_REF` tests above pin, and **not**
+    name-canonicalization, which is inert under today's exact-match lookup where
+    the requested name already equals `entry.name`; keying on `entry.name` is a
+    forward-safety code choice, not a currently-falsifiable test);
+  - a negative doc-content guard asserts the agent-facing `runs.create`
+    `build_profile` Field and the three `buildconfig` wrapper descriptions do not
+    contain the decorative-provider framing (the phrases `any non-empty value`,
+    `any value works`, `provider is decorative`, `provider is not consulted`) —
+    pinning the forward-safety decision (decision 3) as a regression guard, not a
+    manual read;
   - `ServerBuildProfile.model_validate({...,"config":<echoed ref>})` succeeds and
     `ExternalBuildProfile.model_validate({...,"config":<echoed ref>})` raises
     (extra `config` forbidden). This pins the structural lane boundary at the

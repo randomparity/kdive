@@ -77,7 +77,11 @@ remains).
 - `set` success `data["config_ref"] == catalog_config_ref(name).model_dump()`.
 - each `list` item `data["config_ref"] == catalog_config_ref(item_name).model_dump()`.
 - `get` `data["config_ref"] == catalog_config_ref(name).model_dump()` and the
-  envelope subject equals the row name.
+  envelope subject equals the row name. (Under today's exact-match lookup the
+  requested `name` equals `entry.name`, so this pins echo-presence and the exact
+  key; the entry.name-vs-requested-name distinction is a forward-safety code
+  choice that only becomes falsifiable if the lookup ever normalizes — do not
+  claim it as a currently-pinned invariant.)
 - **Update the existing exact-key-set guard** at
   `tests/mcp/catalog/test_build_configs_tool.py:361`:
   `set(by_name["alpha"].data) == {"name","sha256","source","description"}` will
@@ -184,15 +188,29 @@ union error by design.)
    (`test_runs_create_documents_warm_tree_is_provenance_only`, the combined
    `create_text` cross-reference checks) and parses documented examples; a Field
    edit can trip it, so verify it here rather than only at Task 5.
-4. `uv run python -m pytest tests/mcp/catalog/test_build_configs_tool.py -q`
+4. **Add a negative doc-content guard** in `tests/mcp/core/test_tool_docs.py`
+   (matching the file's existing negative-substring pattern, e.g.
+   `"runs.build.cmdline" not in create_text` at `:356`): assert the
+   `runs.create` `build_profile` description **and** the three `buildconfig`
+   wrapper descriptions do **not** contain the provider-decorative framing —
+   check the specific phrases `"any non-empty value"`, `"any value works"`,
+   `"provider is decorative"`, and `"provider is not consulted"`. This pins the
+   spec's forward-safety decision (spec decision 3) as a regression guard rather
+   than a manual read. **Do not** assert `"decorative" not in <text>` on its own:
+   the Field legitimately says `resolved_commit ... decorative when dirty`
+   (`registrar.py:80`), so a bare-word ban would false-fail. Use the full
+   phrases above.
+5. `uv run python -m pytest tests/mcp/catalog/test_build_configs_tool.py -q`
    (docstring changes do not affect handler behavior, but keep the suite green).
-5. `just lint` (100-char lines).
+6. `just lint` (100-char lines).
 
 **Acceptance:** the Field and three docstrings carry the lane qualifier and the
-`validate_profile` pointer; the generated reference docs are regenerated and
-committed with the sources (`just docs-check` clean); every physical line ≤100
-chars; `test_tool_docs.py` green; prose passes the manual doc-style read;
-`provider`-decorative wording absent from agent-facing text.
+`validate_profile` pointer; the negative doc-content guard (step 4) passes and
+fails if the decorative-provider framing is reintroduced; the generated reference
+docs are regenerated and committed with the sources (`just docs-check` clean);
+every physical line ≤100 chars; `test_tool_docs.py` green; prose passes the
+manual doc-style read; `provider`-decorative wording absent from agent-facing
+text.
 
 **Rollback:** revert the two source files' text and re-run `just docs` to
 re-sync the generated docs (or revert all four files together).
@@ -222,10 +240,15 @@ re-run.
 
 ## Sequencing & notes
 
-- Order 1 → 2 → 3 → 4 → 5. Task 1 is a hard prerequisite for 2 and 3 (they import
-  the factory). 4 is independent of 2/3. Each task commits green: Tasks 2/3 touch
-  no generated-doc source, so their commits pass `docs-check`; Task 4 regenerates
-  and commits the reference docs in the same commit as its source edits.
+- Order 1 → 2 → 3 → 4 → 5 is a hard constraint, not a default. Task 1 is a code
+  prerequisite for 2 and 3 (they import the factory). Task 4 has no code/import
+  dependency on 2/3, but its docstrings/Field **document the `data.config_ref`
+  field Task 2 adds**, so it must follow Task 2 — landing Task 4 first would
+  commit docs describing a response field the handler does not yet emit (a
+  phantom-field commit the no-squash bisect discipline is meant to avoid). Each
+  task commits green: Tasks 2/3 touch no generated-doc source, so their commits
+  pass `docs-check`; Task 4 regenerates and commits the reference docs in the
+  same commit as its source edits.
 - No migration, no schema, no auth change. No ADR (spec "No ADR").
 - Commit per task with a conventional-commit subject; stage explicit paths.
 - Guardrail memory: `just test` alone misses generated-doc drift, and `just ci`
