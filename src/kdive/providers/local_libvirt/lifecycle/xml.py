@@ -44,6 +44,7 @@ def render_domain_xml(
     ssh_port: int | None = None,
     kernel_path: Path | None = None,
     initrd_path: Path | None = None,
+    guest_egress: bool = False,
 ) -> str:
     """Render the tagged libvirt domain XML for a System (ADR-0025 §3, ADR-0272).
 
@@ -65,6 +66,13 @@ def render_domain_xml(
     credential, never whether the forward exists. Both passthroughs share **one**
     ``<qemu:commandline>`` element so a System provisioned for both transports renders a single,
     schema-valid element.
+
+    ``guest_egress`` (ADR-0313, #1031) is the operator-resolved egress policy for the NIC. When
+    ``False`` (the default) the forward renders ``restrict=on`` — no guest-initiated egress, the
+    ADR-0218 §1 default. When ``True`` it renders ``restrict=off`` so the guest gets normal SLIRP
+    NAT + DNS and an agent can install tools at runtime. The flag is operator-owned (resolved from
+    ``systems.toml`` at provision, never from the request); the renderer only consumes the resolved
+    boolean.
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` for an invalid profile, a gdbstub-flagged
@@ -123,7 +131,7 @@ def render_domain_xml(
     # credential, so every ready System is reachable by `systems.ssh_info`/`authorize_ssh_key`
     # without a destructive reprovision. `ssh_credential_ref` now gates only the drgn-live
     # introspection credential, not whether the forward exists.
-    _append_ssh_forward(domain, ssh_port)
+    _append_ssh_forward(domain, ssh_port, guest_egress=guest_egress)
 
     return ET.tostring(domain, encoding="unicode")
 
@@ -185,16 +193,24 @@ def _append_gdbstub(domain: ET.Element, gdb_port: int | None) -> None:
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=f"tcp:{_LOOPBACK_HOST}:{gdb_port}")
 
 
-def _append_ssh_forward(domain: ET.Element, ssh_port: int | None) -> None:
-    """Append a loopback QEMU user-mode SSH port-forward + NIC for drgn-live (ADR-0218 §2).
+def _append_ssh_forward(
+    domain: ET.Element, ssh_port: int | None, *, guest_egress: bool = False
+) -> None:
+    """Append a loopback QEMU user-mode SSH port-forward + NIC for drgn-live (ADR-0218 §1).
 
     ``-netdev user`` is QEMU's built-in unprivileged SLIRP user-mode network (no bridge, no root,
     no daemon); ``hostfwd=tcp:127.0.0.1:<port>-:22`` forwards the loopback-only host port to the
     guest's sshd. The ``virtio-net-pci`` device binds the netdev so the guest sees a single NIC it
-    brings up by DHCP. ``restrict=on`` isolates the guest to the forwarded port only — it blocks
-    all guest-initiated outbound traffic (NAT'd internet/DNS, host-network access) the drgn-live
-    control channel never needs, so an agent-supplied kernel cannot use the NIC for egress; the
-    inbound ``hostfwd`` SSH connection still works (ADR-0218 §2, defense-in-depth on the new NIC).
+    brings up by DHCP.
+
+    ``restrict`` is now an operator policy, not an unconditional block (ADR-0313, #1031). Default
+    (``guest_egress=False``) renders ``restrict=on`` — the guest is isolated to the forwarded port,
+    all guest-initiated outbound traffic (NAT'd internet/DNS, host-network access) is blocked so an
+    agent-supplied kernel cannot use the NIC for egress, and only the inbound ``hostfwd`` SSH
+    connection works (ADR-0218 §1 default-deny). When the operator opts a Resource in
+    (``guest_egress=True``), it renders ``restrict=off`` so the guest gets normal SLIRP NAT + DNS
+    (``10.0.2.3``) and can reach its distro mirrors; the operator's network-zone firewall is then
+    the enforcement boundary.
     """
     if ssh_port is None:
         raise CategorizedError(
@@ -203,7 +219,8 @@ def _append_ssh_forward(domain: ET.Element, ssh_port: int | None) -> None:
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     commandline = _qemu_commandline(domain)
-    netdev = f"user,id=kdivessh,restrict=on,hostfwd=tcp:{_LOOPBACK_HOST}:{ssh_port}-:22"
+    restrict = "off" if guest_egress else "on"
+    netdev = f"user,id=kdivessh,restrict={restrict},hostfwd=tcp:{_LOOPBACK_HOST}:{ssh_port}-:22"
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-netdev")
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=netdev)
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-device")

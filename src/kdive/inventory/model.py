@@ -180,6 +180,11 @@ class LocalLibvirtInstance(_Instance):
     """A ``[[local_libvirt]]`` provider instance."""
 
     host_uri: str
+    # Operator opt-in to guest outbound egress (#1031, ADR-0313). Default ``False`` keeps the
+    # SSH-forward NIC's ``restrict=on`` (no egress); ``True`` renders ``restrict=off`` so the guest
+    # gets SLIRP NAT + DNS and an agent can install tools at runtime. Operator-owned: it is resolved
+    # from this file at provision time, never from the allocation/provision request.
+    guest_egress: bool = False
 
 
 class FaultInjectInstance(_Instance):

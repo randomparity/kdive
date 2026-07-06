@@ -24,6 +24,7 @@ from kdive.providers.core.discovery_registration import (
 from kdive.providers.core.runtime import DebugCapabilities, ProviderRuntime
 from kdive.providers.infra.reaping import InfraReaper
 from kdive.providers.local_libvirt.build import LocalLibvirtBuild
+from kdive.providers.local_libvirt.config import local_guest_egress_for_resource
 from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import (
     LocalLibvirtLiveIntrospect,
@@ -91,9 +92,20 @@ def build_rootfs_build_plane(*, workspace: Path | None = None) -> LocalLibvirtRo
     return LocalLibvirtRootfsBuildPlane.from_env(workspace=workspace)
 
 
-def build_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
-    """Build local-libvirt provider ports without opening live provider connections."""
-    provisioner = LocalLibvirtProvisioning.from_env()
+def build_runtime(
+    *, secret_registry: SecretRegistry, resource_name: str | None = None
+) -> ProviderRuntime:
+    """Build local-libvirt provider ports without opening live provider connections.
+
+    ``resource_name`` (ADR-0313, #1031) binds the provisioner to a specific local Resource's
+    operator ``guest_egress`` opt-in, resolved op-time from ``systems.toml``. The resolver
+    chokepoint (``ProviderRuntime.for_resource`` → ``rebind_for_resource``) supplies it per op; a
+    ``None`` (host-agnostic construction) keeps the secure default (``restrict=on``).
+    """
+    guest_egress = (
+        local_guest_egress_for_resource(resource_name) if resource_name is not None else False
+    )
+    provisioner = LocalLibvirtProvisioning.from_env(guest_egress=guest_egress)
     builder = LocalLibvirtBuild.from_env(secret_registry=secret_registry)
     install = LocalLibvirtInstall.from_env()
     connector = LocalLibvirtConnect.from_env()
@@ -138,4 +150,9 @@ def build_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
         # The per-System bootstrap key (ADR-0289, #963) is injected via virt-customize into the
         # local overlay only local-libvirt owns; other providers leave this unset.
         bootstrap_key_customizer=authorized_key_customizer,
+        # Per-Resource rebind (ADR-0187/0313, #1031): bind the operator guest_egress opt-in for the
+        # allocated Resource by name. Previously unset (identity) — local now resolves per op.
+        rebind_for_resource=lambda name: build_runtime(
+            secret_registry=secret_registry, resource_name=name
+        ),
     )

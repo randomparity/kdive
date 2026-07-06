@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import cast
 
+import pytest
+
 from kdive.components.references import (
     CONFIG_COMPONENT,
     INITRD_COMPONENT,
@@ -91,6 +93,36 @@ def test_build_runtime_wires_local_ports_and_capabilities() -> None:
     }
     assert runtime.build_config_validator is not None
     assert runtime.rootfs_validator is not None
+
+
+def test_local_runtime_sets_rebind_for_resource() -> None:
+    # ADR-0313/0187: local now carries a per-Resource rebind hook so the resolver binds the
+    # operator's guest_egress opt-in to the allocated Resource by name (previously identity/no-op).
+    runtime = composition.build_runtime(secret_registry=SecretRegistry())
+    assert runtime.rebind_for_resource is not None
+
+
+def test_rebind_threads_guest_egress_into_provisioner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ADR-0313: for_resource(name) must bind the operator's resolved guest_egress to the
+    # provisioner it hands back; a name with no matching [[local_libvirt]] block resolves to the
+    # secure default (egress off). The resolver is monkeypatched here (the real-loader path is
+    # covered in test_egress_config.py; provisioner->restrict rendering in test_provisioning.py).
+    monkeypatch.setattr(
+        composition,
+        "local_guest_egress_for_resource",
+        lambda name: name == "egress-on",
+    )
+    runtime = composition.build_runtime(secret_registry=SecretRegistry())
+
+    on = cast("LocalLibvirtProvisioning", runtime.for_resource("egress-on").provisioner)
+    off = cast("LocalLibvirtProvisioning", runtime.for_resource("egress-off").provisioner)
+    assert on._guest_egress is True
+    assert off._guest_egress is False
+    # The host-agnostic build (no resource bound) keeps the secure default.
+    base = cast("LocalLibvirtProvisioning", runtime.provisioner)
+    assert base._guest_egress is False
 
 
 def test_build_runtime_threads_secret_registry_into_secret_aware_ports() -> None:
