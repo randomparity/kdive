@@ -316,7 +316,11 @@ def _register_buildconfig_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def buildconfig_list_tool() -> ToolResponse:
-        """List build-config fragments with name, sha256, source, and description. Auth only."""
+        """List build-config fragments with name, sha256, source, and description. Auth only.
+
+        Each item echoes a data.config_ref to paste into a source='server' runs.create
+        build; runs.validate_profile pre-flights a profile before you create the Run.
+        """
         return await list_build_config_entries(pool, current_context())
 
 
@@ -353,7 +357,11 @@ def _register_buildconfig_get(
             Field(description="The build-config fragment name to retrieve (e.g. kdump)."),
         ],
     ) -> ToolResponse:
-        """Fetch a seeded kernel-config fragment inline with sha256 and merge recipe. Auth only."""
+        """Fetch a seeded kernel-config fragment inline with sha256 and merge recipe. Auth only.
+
+        The response echoes a data.config_ref to paste into a source='server' runs.create
+        build; runs.validate_profile pre-flights a profile before you create the Run.
+        """
         ctx = current_context()
         _ = ctx  # authenticated caller established; no project RBAC for shared catalog
         try:
@@ -385,7 +393,11 @@ def _register_buildconfig_set(
             Field(description="Optional human label; empty keeps the prior description."),
         ] = "",
     ) -> ToolResponse:
-        """Publish/replace a build-config fragment. Requires platform_admin; audited."""
+        """Publish/replace a build-config fragment. Requires platform_admin; audited.
+
+        The response echoes a data.config_ref to paste into a source='server' runs.create
+        build; runs.validate_profile pre-flights a profile before you create the Run.
+        """
         try:
             return await set_build_config(
                 pool,
