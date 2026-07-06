@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from kdive.components.references import (
@@ -92,6 +93,19 @@ def build_rootfs_build_plane(*, workspace: Path | None = None) -> LocalLibvirtRo
     return LocalLibvirtRootfsBuildPlane.from_env(workspace=workspace)
 
 
+def _rebind_for_resource(secret_registry: SecretRegistry) -> Callable[[str], ProviderRuntime]:
+    """Per-Resource rebind factory (ADR-0187/0313), mirroring remote-libvirt's shape.
+
+    Captures only ``secret_registry`` (not ``build_runtime``'s enclosing scope) so a long-lived
+    runtime does not retain the built ports through a closure.
+    """
+
+    def rebind(resource_name: str) -> ProviderRuntime:
+        return build_runtime(secret_registry=secret_registry, resource_name=resource_name)
+
+    return rebind
+
+
 def build_runtime(
     *, secret_registry: SecretRegistry, resource_name: str | None = None
 ) -> ProviderRuntime:
@@ -152,7 +166,5 @@ def build_runtime(
         bootstrap_key_customizer=authorized_key_customizer,
         # Per-Resource rebind (ADR-0187/0313, #1031): bind the operator guest_egress opt-in for the
         # allocated Resource by name. Previously unset (identity) — local now resolves per op.
-        rebind_for_resource=lambda name: build_runtime(
-            secret_registry=secret_registry, resource_name=name
-        ),
+        rebind_for_resource=_rebind_for_resource(secret_registry),
     )
