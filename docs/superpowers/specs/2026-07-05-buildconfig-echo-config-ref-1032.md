@@ -48,7 +48,11 @@ Acceptance:
 
 - `buildconfig.set` success payload includes
   `data.config_ref = {kind:"catalog", provider:"system", name:<name>}` — a ref
-  that pastes directly into `runs.create` `build_profile.config`.
+  that pastes into `runs.create` `build_profile.config` **for a `source='server'`
+  build**. `config` is a `ServerBuildProfile`-only field
+  (`src/kdive/profiles/build.py:118`); `ExternalBuildProfile` has no `config`
+  field and is `extra="forbid"`, so the acceptance and the `Field` text must say
+  the echoed ref applies to server builds, not the `source='external'` default.
 - Each `buildconfig.list` item and the `buildconfig.get` payload include the
   same `data.config_ref`.
 - The echoed `config_ref` is produced from the same `provider="system"`
@@ -61,11 +65,19 @@ Acceptance:
   decorative for build configs). It does **not** teach "any non-empty value
   works" as a durable rule — see decision 3 for why the canonical-ref framing is
   forward-safe and the "any value works" framing is not.
-- A test asserts that, for `set`/`list`/`get`, the echoed `data.config_ref`
-  deep-equals `catalog_config_ref(<name>).model_dump()`, and a build-path test
-  asserts the echoed ref resolves to fragment bytes via the catalog fetch
-  (`catalog_fetch(ref["name"])`) — converting "cannot diverge" and "pastes
-  directly into `runs.create`" from claims into enforced checks.
+- Tests pin the invariants so a regression fails rather than ships green:
+  - a **literal** assertion that `catalog_config_ref("x").model_dump()` equals
+    `{"kind":"catalog","provider":"system","name":"x"}` — a drift of the factory
+    `provider` (e.g. to `"seed"`) must fail (a factory-vs-factory deep-equal is
+    tautological and would not, since every echo site derives from the same
+    factory and the ref only requires a non-empty `provider`);
+  - `DEFAULT_CONFIG_REF.provider == catalog_config_ref("kdump").provider`, so the
+    seed default and the echoed convention share one value;
+  - for `set`/`list`/`get`, the echoed `data.config_ref` equals
+    `catalog_config_ref(<name>).model_dump()`;
+  - a `ServerBuildProfile.parse` of a profile carrying the echoed `config_ref`
+    succeeds and an `ExternalBuildProfile.parse` of the same ref is rejected —
+    pinning the lane boundary the Field text documents.
 - The `buildconfig.set`/`list`/`get` wrapper docstrings mention that the
   response carries a ready-to-use `data.config_ref` (the agent-facing contract;
   the generated `docs/guide/reference/buildconfig.md` renders the docstring, not
@@ -109,11 +121,15 @@ the same one-call cost and keeps the three sibling tools consistent.
 ### 3. Document `provider` on `runs.create` — canonical-ref framing, not a rule
 
 Append to the `config` clause of the `build_profile` `Field` description
-(`registrar.py:83-86`): a catalog fragment is referenced by `name`, and the
-canonical way to obtain the ref is to paste the `config_ref` echoed by
-`buildconfig.set`/`list`/`get`; the ref's `provider` is currently decorative for
-build configs (`system` by convention). Keep the existing worked example. Do
-**not** describe a `source`→`provider` mapping.
+(`registrar.py:83-86`): for a **`source='server'`** build, a catalog fragment is
+referenced by `name`, and the canonical way to obtain the ref is to paste the
+`config_ref` echoed by `buildconfig.set`/`list`/`get`; the ref's `provider` is
+currently decorative for build configs (`system` by convention). Because the
+`config` clause already lives inside the `source='server'` part of the paragraph
+that is the only place `config` is accepted, the added text names the lane
+explicitly so an agent on the recommended `source='external'` default does not
+paste the ref into a profile that has no `config` field. Keep the existing worked
+example. Do **not** describe a `source`→`provider` mapping.
 
 **Forward-safety.** The Field text points agents at the *echoed canonical ref*
 rather than teaching "any non-empty value works". Echoing a canonical
