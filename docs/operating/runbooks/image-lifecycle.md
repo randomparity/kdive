@@ -254,6 +254,12 @@ To let a local-libvirt resource's guests install tools at runtime (ADR-0313, #10
 3. **Re-provision** the System (the flag renders `restrict=off` into the domain XML at provision;
    it does not retrofit a running guest). New Systems pick it up on first boot.
 
+`guest_egress` is resolved at provision time from the **worker's** `systems.toml`. If the worker runs
+as a different user than the operator/reconciler (e.g. a root worker), make sure both read the same
+file — set `KDIVE_SYSTEMS_TOML` to a shared absolute path rather than relying on the per-user XDG
+default (`$HOME/.config/kdive/systems.toml`), or the worker will read a different inventory and the
+opt-in silently stays off.
+
 **Security — what you are accepting.** `restrict=off` drops the QEMU-level egress block, so an
 agent-supplied (untrusted) kernel can send outbound traffic through the NIC. The QEMU block is no
 longer the boundary — **your network zone's firewall is**. Enable this only for resources that live
