@@ -8,10 +8,12 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
-from kdive.components.references import LocalComponentRef
+from kdive.build_configs.defaults import catalog_config_ref
+from kdive.components.references import CatalogComponentRef, LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import (
     BuildProfile,
+    ExternalBuildProfile,
     GitKernelSource,
     ServerBuildProfile,
     dump_build_profile,
@@ -372,3 +374,28 @@ def test_rejected_uri_error_does_not_leak_value() -> None:
     with pytest.raises(CategorizedError) as e:
         BuildProfile.parse(data)
     assert "PLANTED-TOKEN" not in str(e.value.details)
+
+
+# ---------------------------------------------------------------------------
+# #1032: config is a source='server'-only field — the echoed config_ref pastes
+# into a server build and is rejected in the external lane.
+# ---------------------------------------------------------------------------
+
+
+def test_echoed_config_ref_parses_in_server_lane() -> None:
+    ref = catalog_config_ref("kdump").model_dump()
+    profile = ServerBuildProfile.model_validate(
+        {"schema_version": 1, "source": "server", "kernel_source_ref": "warm", "config": ref}
+    )
+    assert isinstance(profile.config, CatalogComponentRef)
+    assert profile.config.name == "kdump"
+
+
+def test_echoed_config_ref_rejected_in_external_lane() -> None:
+    # ExternalBuildProfile has no `config` field and is extra='forbid', so pasting the
+    # echoed ref into a source='external' profile is a schema error (the lane boundary).
+    ref = catalog_config_ref("kdump").model_dump()
+    with pytest.raises(ValidationError):
+        ExternalBuildProfile.model_validate(
+            {"schema_version": 1, "source": "external", "config": ref}
+        )

@@ -18,6 +18,9 @@ Delete an operator-published fragment. Requires platform_admin; audited.
 
 Fetch a seeded kernel-config fragment inline with sha256 and merge recipe. Auth only.
 
+The response echoes a data.config_ref to paste into a source='server' runs.create
+build; runs.validate_profile pre-flights a profile before you create the Run.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `name` | string | yes | The build-config fragment name to retrieve (e.g. kdump). |
@@ -28,11 +31,17 @@ Fetch a seeded kernel-config fragment inline with sha256 and merge recipe. Auth 
 
 List build-config fragments with name, sha256, source, and description. Auth only.
 
+Each item echoes a data.config_ref to paste into a source='server' runs.create
+build; runs.validate_profile pre-flights a profile before you create the Run.
+
 ## `buildconfig.set`
 
 `implemented`
 
 Publish/replace a build-config fragment. Requires platform_admin; audited.
+
+The response echoes a data.config_ref to paste into a source='server' runs.create
+build; runs.validate_profile pre-flights a profile before you create the Run.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

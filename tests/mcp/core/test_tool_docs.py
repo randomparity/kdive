@@ -444,6 +444,38 @@ def test_expected_boot_failure_documents_match_contract() -> None:
     assert "256" in description
 
 
+_DECORATIVE_PROVIDER_PHRASES = (
+    "any non-empty value",
+    "any value works",
+    "provider is decorative",
+    "provider is not consulted",
+)
+
+
+def test_buildconfig_surface_points_at_the_echoed_config_ref() -> None:
+    # #1032: an agent references an operator fragment by pasting the config_ref the
+    # buildconfig tools echo, into a source='server' runs.create build. The wrapper
+    # docstrings and the runs.create config Field must surface that ref and the
+    # validate_profile pre-flight — and must NOT teach that provider is decorative /
+    # "any value works" (forward-safety, spec decision 3): agents copy the canonical
+    # ref, they are never taught to hand-pick a provider.
+    tools = {t.name: t for t in TOOLS}
+    request_props = tools["runs.create"].parameters["properties"]["request"]["properties"]
+    create_text = request_props["build_profile"]["description"]
+    buildconfig_texts = {
+        name: tools[name].description or ""
+        for name in ("buildconfig.set", "buildconfig.list", "buildconfig.get")
+    }
+
+    for text in (create_text, *buildconfig_texts.values()):
+        lowered = text.lower()
+        assert "config_ref" in text
+        assert "source='server'" in text
+        assert "validate_profile" in text
+        for phrase in _DECORATIVE_PROVIDER_PHRASES:
+            assert phrase not in lowered, f"decorative-provider framing leaked: {phrase!r}"
+
+
 def test_allocation_and_estimate_payload_schemas_are_concrete() -> None:
     tools = {t.name: t for t in TOOLS}
 
