@@ -101,7 +101,7 @@ remains).
 `get` subject is the row name; `just test` green for the suite.
 
 **Rollback:** drop the `config_ref` keys and restore the `get` subject.
-**Coupled with Task 4:** Task 4's committed docs/docstrings describe this echo, so
+**Coupled with Task 4:** Task 4's committed reference docs and docstrings describe this echo, so
 do not revert Task 2 in isolation — revert Task 2 and Task 4 together, or revert
 the PR as a unit, else the reference docs assert a `config_ref` the handler no
 longer emits (the phantom-field state).
