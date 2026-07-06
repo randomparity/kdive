@@ -132,6 +132,10 @@ union error by design.)
   `build_profile` `Field`, `:83-86`)
 - `src/kdive/mcp/tools/catalog/build_configs.py` (the `@app.tool` wrapper
   docstrings for `set` `:384`, `list` `:315`, `get` `:352`)
+- `docs/guide/reference/buildconfig.md`, `docs/guide/reference/runs.md`
+  (generated — regenerated via `just docs` and committed **in this task**, since
+  they are built from the docstrings/Field above and `just ci` runs `docs-check`;
+  a commit that changes the sources but not the generated docs fails CI)
 
 **Do:**
 1. `runs.create` Field: in the `source='server'` part of the `config` clause,
@@ -161,58 +165,69 @@ union error by design.)
   literals with no literal `\n`**, matching the existing Field's pattern. (The
   newline ban applies to parameter descriptions only — the *tool docstrings* in
   item 2 may be multi-line.)
-- Doc-style guard: plain, factual prose; the project's banned-adjective list;
-  "Milestone" not the S-word.
+- Plain, factual prose; the project's banned-adjective list; "Milestone" not
+  the S-word. **This is a manual review check** — there is no automated
+  banned-adjective guard recipe/test in the repo, so confirm it by reading, not
+  by running a command.
 - Do **not** add a new `build_profile` example snippet to the Field —
   `test_build_profile_examples_are_valid` (ADR-0177) parses every documented
   example, so a non-parseable snippet fails. Keep the existing
   `{'kind':'catalog','provider':'system','name':'kdump'}` example.
 
 **Tests / verification (run before committing this task):**
-- `uv run python -m pytest tests/mcp/core/test_tool_docs.py -q` — this module
-  asserts over the `runs.create` `build_profile` description
-  (`test_runs_create_documents_warm_tree_is_provenance_only`, the combined
-  `create_text` cross-reference checks) and parses documented examples; a Field
-  edit can trip it, so verify it here rather than only at Task 5.
-- `uv run python -m pytest tests/mcp/catalog/test_build_configs_tool.py -q`
-  (docstring changes do not affect handler behavior, but keep the suite green).
-- `just lint` (100-char lines) + the doc-style guard.
+1. Edit the docstrings/Field, then `just docs` to regenerate
+   `docs/guide/reference/{buildconfig,runs}.md`; stage the regenerated docs with
+   the source edits so the commit is drift-free.
+2. `just docs-check` — confirm no residual drift (this gate is inside `just ci`).
+3. `uv run python -m pytest tests/mcp/core/test_tool_docs.py -q` — asserts over
+   the `runs.create` `build_profile` description
+   (`test_runs_create_documents_warm_tree_is_provenance_only`, the combined
+   `create_text` cross-reference checks) and parses documented examples; a Field
+   edit can trip it, so verify it here rather than only at Task 5.
+4. `uv run python -m pytest tests/mcp/catalog/test_build_configs_tool.py -q`
+   (docstring changes do not affect handler behavior, but keep the suite green).
+5. `just lint` (100-char lines).
 
 **Acceptance:** the Field and three docstrings carry the lane qualifier and the
-`validate_profile` pointer; every physical line ≤100 chars;
-`test_tool_docs.py` green; no forbidden prose; `provider`-decorative wording
-absent from agent-facing text.
+`validate_profile` pointer; the generated reference docs are regenerated and
+committed with the sources (`just docs-check` clean); every physical line ≤100
+chars; `test_tool_docs.py` green; prose passes the manual doc-style read;
+`provider`-decorative wording absent from agent-facing text.
 
-**Rollback:** revert the two files' text.
+**Rollback:** revert the two source files' text and re-run `just docs` to
+re-sync the generated docs (or revert all four files together).
 
 ---
 
-## Task 5 — Regenerate reference docs; full guardrails
+## Task 5 — Final full-suite gate
 
-**Where it fits:** spec acceptance "`just docs` … no drift; `just ci` green".
-
-**Files (generated):** `docs/guide/reference/buildconfig.md`,
-`docs/guide/reference/runs.md` (do not hand-edit; regenerate).
+**Where it fits:** spec acceptance "`just ci` green". Reference docs were already
+regenerated and committed in Task 4; this task is the whole-repo gate before push.
 
 **Do:**
-1. `just docs` to regenerate the tool-reference docs from the changed docstrings
-   / `Field`.
-2. `just docs-check` (or the repo's drift check) to confirm no residual drift.
-3. Run `just lint`, `just type`, `just test`, then `just ci`.
+1. `just docs` again and confirm no diff (idempotent safety check — Task 4 should
+   have left the generated docs in sync).
+2. Run `just ci` — the full PR gate (lint, type whole-tree, lock-check,
+   lint-shell, lint-ansible, test-ansible, lint-workflows, check-mermaid,
+   docs-links, docs-paths, adr-status-check, docs-check, config-docs-check,
+   config-guard, env-docs-check, resources-docs-check, chart-version-check,
+   test).
 
-**Acceptance:** generated docs reflect the new wrapper docstring lines; `just ci`
-green (lint, type whole-tree, lint-shell, lint-workflows, check-mermaid, test).
+**Acceptance:** `just docs` produces no diff; `just ci` green end-to-end.
 
-**Rollback:** `just docs` after any code revert re-syncs the generated files.
+**Rollback:** none (verification-only task); if red, fix the offending task and
+re-run.
 
 ---
 
 ## Sequencing & notes
 
 - Order 1 → 2 → 3 → 4 → 5. Task 1 is a hard prerequisite for 2 and 3 (they import
-  the factory). 4 is independent of 2/3 but 5 must run last (regen after all text
-  changes).
+  the factory). 4 is independent of 2/3. Each task commits green: Tasks 2/3 touch
+  no generated-doc source, so their commits pass `docs-check`; Task 4 regenerates
+  and commits the reference docs in the same commit as its source edits.
 - No migration, no schema, no auth change. No ADR (spec "No ADR").
 - Commit per task with a conventional-commit subject; stage explicit paths.
-- Guardrail memory: `just test` alone misses generated-doc drift — always run
-  `just docs`/`docs-check` after Field/docstring edits (Task 5).
+- Guardrail memory: `just test` alone misses generated-doc drift, and `just ci`
+  runs `docs-check` — so any commit that edits a docstring/`Field` must include
+  the `just docs` regeneration (Task 4), not defer it.
