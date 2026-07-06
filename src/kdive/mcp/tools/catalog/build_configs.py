@@ -32,6 +32,7 @@ from kdive.build_configs.catalog import (
     list_build_configs,
     upsert_operator_build_config,
 )
+from kdive.build_configs.defaults import catalog_config_ref
 from kdive.build_configs.rules import exceeds_build_config_cap, validate_build_config_name
 from kdive.config.core_settings import MAX_BUILD_CONFIG_BYTES
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -116,13 +117,14 @@ async def read_build_config(
     data = fetched.data
     entry.verify_bytes(data)
     return ToolResponse.success(
-        name,
+        entry.name,
         "available",
         data={
             "content": data.decode(),
             "sha256": entry.sha256,
             "source": entry.source,
             "merge_recipe": _MERGE_RECIPE,
+            "config_ref": catalog_config_ref(entry.name).model_dump(),
         },
     )
 
@@ -195,6 +197,7 @@ async def set_build_config(
                 "sha256": validated.sha256,
                 "bytes": len(validated.data),
                 "source": "operator",
+                "config_ref": catalog_config_ref(name).model_dump(),
             },
         )
 
@@ -209,6 +212,7 @@ def _entry_envelope(entry: BuildConfigEntry) -> ToolResponse:
             "sha256": entry.sha256,
             "source": entry.source,
             "description": entry.description,
+            "config_ref": catalog_config_ref(entry.name).model_dump(),
         },
     )
 

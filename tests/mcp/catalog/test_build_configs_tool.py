@@ -17,6 +17,7 @@ from kdive.build_configs.catalog import (
     upsert_operator_build_config,
     upsert_seed_build_config,
 )
+from kdive.build_configs.defaults import catalog_config_ref
 from kdive.build_configs.seed import KDUMP_FRAGMENT_PATH, seed_build_configs
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.responses import ToolResponse
@@ -78,9 +79,11 @@ def test_buildconfig_get_returns_inline_bytes_and_sha(
                 resp = await read_build_config(conn, minio_store, name="kdump")
 
         assert resp.status == "available"
+        assert resp.object_id == "kdump"  # subject echoes the resolved row name
         assert resp.data["content"] == data.decode()
         assert resp.data["sha256"] == hashlib.sha256(data).hexdigest()
         assert "merge_config.sh -m" in str(resp.data["merge_recipe"])
+        assert resp.data["config_ref"] == catalog_config_ref("kdump").model_dump()
 
     asyncio.run(_run())
 
@@ -190,6 +193,7 @@ def test_set_publishes_and_get_reports_operator_source(
             assert resp.data["source"] == "operator"
             assert resp.data["sha256"] == hashlib.sha256(b"CONFIG_X=y\n").hexdigest()
             assert resp.data["bytes"] == len(b"CONFIG_X=y\n")
+            assert resp.data["config_ref"] == catalog_config_ref("kdump").model_dump()
 
             async with pool.connection() as conn:
                 got = await read_build_config(conn, minio_store, name="kdump")
@@ -358,7 +362,14 @@ def test_list_returns_all_rows_sorted_with_provenance_no_bytes(migrated_url: str
         assert by_name["alpha"].data["source"] == "operator"
         assert by_name["kdump"].data["source"] == "seed"
         assert by_name["zeta"].data["sha256"] == "sha_cfg"
-        assert set(by_name["alpha"].data) == {"name", "sha256", "source", "description"}
+        assert set(by_name["alpha"].data) == {
+            "name",
+            "sha256",
+            "source",
+            "description",
+            "config_ref",
+        }
+        assert by_name["alpha"].data["config_ref"] == catalog_config_ref("alpha").model_dump()
         assert "content" not in by_name["alpha"].data
 
     asyncio.run(_run())
