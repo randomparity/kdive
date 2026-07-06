@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import importlib
 import itertools
+import logging
 import subprocess
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -682,6 +683,20 @@ def test_provision_guest_egress_renders_restrict_off() -> None:
     _prov(conn, guest_egress=True).provision(_SYS, _profile())
     assert "restrict=off" in conn.recorded_xml[0]
     assert "restrict=on" not in conn.recorded_xml[0]
+
+
+def test_provision_guest_egress_logs_positive_signal(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Egress is a security-relevant state; a provision with it enabled emits a greppable INFO
+    # signal (ADR-0313 observability). The default provision stays silent about egress.
+    with caplog.at_level(logging.INFO):
+        _prov(_ProvConn(), guest_egress=True).provision(_SYS, _profile())
+    assert any("guest egress enabled" in rec.getMessage() for rec in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        _prov(_ProvConn()).provision(_SYS, _profile())
+    assert all("guest egress" not in rec.getMessage() for rec in caplog.records)
 
 
 def test_provision_extracts_baseline_and_renders_kernel() -> None:

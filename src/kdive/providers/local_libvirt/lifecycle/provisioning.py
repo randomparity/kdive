@@ -239,6 +239,14 @@ class LocalLibvirtProvisioning:
         # allocated — no longer gated on ssh_credential_ref, which now controls only the
         # drgn-live introspection credential. Reuse-on-retry (_ssh_port_for) is unchanged.
         ssh_port = self._ssh_port_for(system_id)
+        if self._guest_egress:
+            # Positive, greppable signal for a security-relevant state: the operator opted this
+            # resource into guest egress, so the guest NIC renders restrict=off (ADR-0313, #1031).
+            _log.info(
+                "provisioning System %s with guest egress enabled (restrict=off): the guest can "
+                "reach the network; the network-zone firewall is the enforcement boundary",
+                system_id,
+            )
         xml = render_domain_xml(  # validates the profile
             system_id,
             profile,
