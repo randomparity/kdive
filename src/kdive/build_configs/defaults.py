@@ -13,11 +13,21 @@ from kdive.config.core_settings import DATABASE_URL
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.store.objectstore import object_store_from_env
 
+
+def catalog_config_ref(name: str) -> CatalogComponentRef:
+    """Build a catalog config ref for a build-config fragment, keyed by ``name``.
+
+    ``provider`` is decorative for build configs (the catalog is keyed by name alone) but the
+    ref model requires a non-empty string; ``system`` matches the seed tenant. This is the one
+    source of that convention, so the seed default and every echoed ref cannot diverge.
+    """
+    return CatalogComponentRef(kind="catalog", provider="system", name=name)
+
+
 # The implicit config ref a build resolves when a profile names none: the seeded ``kdump``
 # catalog fragment. Shared so the validation-time and execution-time substitutions cannot
-# diverge. ``provider`` is decorative for build configs (the catalog is keyed by name alone)
-# but the ref model requires it; ``system`` matches the seed tenant.
-DEFAULT_CONFIG_REF = CatalogComponentRef(kind="catalog", provider="system", name="kdump")
+# diverge.
+DEFAULT_CONFIG_REF = catalog_config_ref("kdump")
 
 # The operator command that seeds the build-config catalog (the kdump fragment). It is the
 # remediation the missing-entry error points at (ADR-0105): ``migrate`` runs the idempotent,
@@ -64,4 +74,5 @@ __all__ = [
     "SEED_REMEDIATION_COMMAND",
     "CatalogConfigFetch",
     "build_config_fetch_from_env",
+    "catalog_config_ref",
 ]
