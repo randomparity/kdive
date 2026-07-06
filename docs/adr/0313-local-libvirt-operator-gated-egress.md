@@ -78,9 +78,24 @@ table:
 A new `local_guest_egress_for_resource(name)` loads the `[[local_libvirt]]` instances via the shared
 inventory loader and returns the named instance's `guest_egress`, defaulting to **`False`
 (egress off — the secure default)** when no block names that Resource. A *missing* file or a
-*missing* block is legitimate absence → egress off, never an error; a *malformed* file already fails
-the shared loader with `CONFIGURATION_ERROR` and that propagates (fail-fast on operator corruption,
-identical to the reconciler's all-or-nothing contract).
+*missing* block is legitimate absence → egress off, never an error.
+
+**A malformed file degrades to the secure default, it does not fail the op.** This is the one place
+local's contract deliberately diverges from remote's `remote_config_for_resource`, and the reason is
+that the seam runs on a different footing for each provider. `rebind_for_resource` /
+`for_resource(name)` is invoked at the resolver chokepoint for **every** provider op (provision,
+connect/debug-attach, control, retrieve, vmcore/live introspect), not just provision. For
+remote-libvirt the host connection config is *mandatory* — no op can run without it — so a malformed
+`systems.toml` correctly fails those ops closed. For local-libvirt the guest is reachable and every
+op works with **no** `systems.toml` at all; `guest_egress` is the sole thing this seam reads, and its
+secure default is "off". So a malformed file must **not** break unrelated local ops (a live
+`debug.start_session` or `vmcore.fetch` on an already-running local System has nothing to do with an
+operator's egress typo). `local_guest_egress_for_resource` therefore catches the loader's
+`InventoryError`, logs a warning, and returns `False` — the same degrade-not-crash fault-isolation
+`is_remote_libvirt_configured` already applies at the composition gate (ADR-0112). The reconciler
+remains the loud, authoritative validator that rejects a malformed file; the op path is not that
+validator, and defaulting to the *secure* direction on a parse fault is fail-safe, not a silent
+swallow (the warning is logged).
 
 ### 2. Activate the existing per-Resource rebind seam for local
 
@@ -124,6 +139,21 @@ avoidance the issue requires.
 - Flipping `guest_egress` takes effect on the next **fresh** provision of a Resource (the rendered
   domain XML encodes `restrict`); it does not retrofit a still-running domain, the same
   provision-time-decision property ADR-0281 §Non-goals documents for the forward itself.
+- **`restrict=off` is necessary, not sufficient.** Dropping the block opens the *route*; a runtime
+  install also needs the guest to DHCP the NIC and populate `/etc/resolv.conf` with the SLIRP
+  resolver (`10.0.2.15` lease, DNS at `10.0.2.3`). That the `kdive-ready` rootfs does so under
+  direct-kernel boot is the same guest-DHCP live-proof risk ADR-0218 §1 already flagged for the
+  forward itself — unit tests prove the render, and a `live_vm` drive proves an egress-enabled System
+  actually reaches a mirror (acceptance criterion 1). This recurses the #985 framing one level: the
+  disk headroom was there but the network was not; now the route is there but the guest's DNS config
+  is the remaining precondition, verified live rather than assumed from the render.
+- **The opt-in silently no-ops on a resource-name mismatch.** local Resources are discovery-created;
+  the `[[local_libvirt]]` block overlays (and now supplies `guest_egress`) by matching `name`. An
+  operator who sets `guest_egress = true` under a `name` that does not match the discovery-assigned
+  resource name gets egress-**off** with no error — the same silent-mismatch property the existing
+  cost_class/pool overlay already has. The runbook documents how to read the resource's actual name
+  (`ops`/`resources` listing) so the operator matches it, and the resolver logs which name it
+  consulted so a mis-set field is diagnosable from the worker log.
 
 ## Considered & rejected
 

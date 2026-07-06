@@ -66,12 +66,23 @@ and the real host network via the guest-agent seam.
     `remote_libvirt/config.py::_load_inventory_doc` / `_load_remote_instances`.
   - Returns the named instance's `guest_egress`; returns **`False`** when the file is absent
     (`load_inventory_optional` → `None`) **or** no `[[local_libvirt]]` block names that Resource.
-  - A *malformed* file raises `CONFIGURATION_ERROR` from the shared loader and propagates (fail-fast;
-    identical to the reconciler's all-or-nothing). This is the one path that fails provisioning — an
-    operator with a corrupt inventory, not a legitimate absence.
+  - A *malformed* file is caught (`InventoryError`), logged as a warning, and degrades to **`False`**
+    (secure default) — it does **not** fail the op. Rationale (ADR-0313 §1): the seam runs for
+    *every* local op (provision, debug-attach, retrieve, introspect), and local ops need no
+    `systems.toml` at all, so a corrupt inventory must not break a live `debug.start_session` or
+    `vmcore.fetch` over an operator's egress typo. This is the same degrade-not-crash isolation
+    `is_remote_libvirt_configured` already applies; the reconciler stays the loud validator. (Remote
+    diverges here — it *fails closed* on a malformed file because its host config is mandatory.)
+  - The resolver logs the resource `name` it consulted, so a silent no-op from a name mismatch
+    (below) is diagnosable from the worker log.
 - Rationale for no-raise on a missing block: unlike remote (host config mandatory, missing instance =
   hard error), the `[[local_libvirt]]` block is optional — discovery creates the Resource with or
   without it. Defaulting to egress-off is both the secure default and the back-compatible one.
+- **Name-match requirement (silent no-op).** local Resources are discovery-created; the operator's
+  `[[local_libvirt]].name` must equal the discovery-assigned resource name for the overlay (and now
+  `guest_egress`) to apply. A mismatch yields egress-off with no error — same property as the
+  existing cost_class/pool overlay. The runbook task documents how the operator reads the actual
+  resource name so they match it.
 
 ### Provisioner (`providers/local_libvirt/lifecycle/provisioning.py`)
 
@@ -121,7 +132,8 @@ Resolver (`tests/providers/local_libvirt/test_egress_config.py`, new):
 - `guest_egress` omitted / `false` → `False`.
 - No `[[local_libvirt]]` block naming the Resource → `False` (not an error).
 - Absent `systems.toml` (loader returns `None`) → `False`.
-- Malformed `systems.toml` → `CONFIGURATION_ERROR` propagates.
+- Malformed `systems.toml` → `False` (degrades to secure default; a warning is logged), **not** a
+  raised error — assert the op-path resilience explicitly, since it is the F1 blast-radius fix.
 - (Loader is exercised against a `tmp_path` `systems.toml` with `KDIVE_SYSTEMS_TOML` pointed at it —
   the boundary is the filesystem read, mocked via the real loader + a temp file, not a stub.)
 
@@ -136,16 +148,32 @@ Model (`tests/inventory/test_model.py` or the inventory parse tests):
 - A `[[local_libvirt]]` block with `guest_egress = true` parses; a block omitting it defaults to
   `False`; a pre-existing file without the key is unaffected.
 
+Live (`live_vm`-gated, verifies acceptance criterion 1 — the behavioral claim the unit tests cannot
+prove):
+
+- Provision an egress-enabled local System (a `[[local_libvirt]]` block with `guest_egress = true`
+  matching the resource name) and assert an in-guest `dnf`/`apt install` of a small package succeeds
+  (or, minimally, that DNS resolves and a mirror is reachable). This closes the necessary-but-not-
+  sufficient gap: `restrict=off` alone is only the route; the guest DHCP/DNS config is the second
+  precondition (ADR-0218 §1's guest-DHCP live-proof risk, inherited here). If a fresh live drive is
+  out of scope for the shipping PR, the deferral is stated explicitly here rather than left implied.
+
 ## Risks
 
 - **Security posture.** With egress on, an agent-supplied kernel can egress; the operator accepts
   this and the network-zone firewall becomes the enforcement boundary (ADR-0313 Consequences). The
   default is unchanged and secure; the risk is opt-in only.
-- **New op-time dependency on `systems.toml` readability for local provisioning.** Today local
-  provisioning reads only `KDIVE_LIBVIRT_URI`; it will now also read `systems.toml` per op. Bounded:
-  a missing file/block is the secure default (no error); only a *malformed* file fails provisioning,
-  which is the same operator-corruption signal the reconciler already raises — and an operator with a
-  malformed inventory has a broken fleet regardless.
+- **New op-time `systems.toml` read on the `rebind_for_resource` seam — which runs for every local
+  op, not just provision.** Today local provider ops never read `systems.toml`; after this change the
+  resolver chokepoint reads it per op (provision, debug-attach, control, retrieve, introspect).
+  Bounded by the F1 decision: a missing file/block *or a malformed file* degrades to the secure
+  default (egress-off) with a logged warning — a corrupt inventory never breaks an unrelated live
+  local op. The reconciler stays the loud validator. This is the deliberate remote/local divergence
+  (remote fails closed because its host config is mandatory; local degrades because it needs none).
 - **Reprovision to take effect.** Flipping `guest_egress` requires a fresh provision to re-render the
   NIC; a define-only retry against a running domain will not change live QEMU (ADR-0281 §Non-goals).
   Documented in the runbook.
+- **Per-op runtime rebuild (accepted).** Setting `rebind_for_resource` means `for_resource(name)`
+  rebuilds the local runtime per op instead of returning `self`. Accepted, matching remote: no live
+  connection opens at construction, so the cost is object allocation only. If it ever proves heavy,
+  the fallback is to resolve just the egress bool and rebind only the provisioner — not needed now.
