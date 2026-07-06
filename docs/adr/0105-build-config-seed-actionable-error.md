@@ -20,12 +20,16 @@ nor the missing identifier in a field an agent can act on.
 
 Two facts constrain the fix:
 
-1. **The seed already runs in `migrate`.** `kdive.admin.bootstrap.migrate()` calls
+1. *Superseded by [ADR-0121](0121-decouple-migrate-validate-systems.md) /
+   [ADR-0122](0122-declarative-build-config-systems-toml.md) — `migrate()` is now
+   SQL-only; the build-config seed moved to the dedicated `seed-build-configs`
+   command (a `post-install`/`post-upgrade` Helm hook on the stock deploy path).*
+   ~~**The seed already runs in `migrate`.** `kdive.admin.bootstrap.migrate()` calls
    `_seed_build_configs_step`, which publishes the packaged kdump fragment and
    upserts its catalog row (ADR-0096). That step is **S3-tolerant**: it skips
    cleanly when the object store is unconfigured, so a schema-only / partial
    bring-up migrate degrades instead of failing, and the fragment is seeded on a
-   later `migrate` once S3 is reachable.
+   later `migrate` once S3 is reachable.~~
 
 2. **The build path itself needs S3.** `_fetch` reads the fragment bytes from the
    object store. A build can only succeed when S3 is configured — and whenever S3
@@ -35,8 +39,10 @@ Two facts constrain the fix:
    step). The campaign's "bare migrations don't seed it" was that window: a
    migrate run before S3 was wired up.
 
-The actionable command is therefore `python -m kdive migrate` (re-run once S3 is
-configured), not a new bespoke seed command.
+~~The actionable command is therefore `python -m kdive migrate` (re-run once S3 is
+configured), not a new bespoke seed command.~~ *Superseded by
+[ADR-0121](0121-decouple-migrate-validate-systems.md) — the actionable command is
+`python -m kdive seed-build-configs` (`SEED_REMEDIATION_COMMAND` follows it).*
 
 ## Decision
 
@@ -58,7 +64,11 @@ job response surfaces under `data`. So `jobs.get` on the failed build returns
 the command an operator actually runs. The message string is also widened to name the
 command for plain-text log readers.
 
-**Part 2 — do not add a second seed to bare migrations.** The standard kdump
+**Part 2 — do not add a second seed to bare migrations.** *Superseded by
+[ADR-0121](0121-decouple-migrate-validate-systems.md) — the seed no longer lives in
+`migrate` at all; it is the standalone `seed-build-configs` command, wired as a deploy
+hook. The "no second seed path" principle stands; the single path moved.*
+~~The standard kdump
 build-config stays seeded by the existing `migrate` step, which already runs on every
 `migrate` and is the stock deploy path. Adding an unconditional seed to "bare
 migrations" is rejected: the seed *requires* the object store (it writes the fragment
@@ -67,7 +77,7 @@ and duplicating the existing S3-tolerant step would create two code paths that c
 drift. The durable robustness fix for the campaign window is the actionable error
 above plus the already-correct re-run-safe (idempotent, sha256-gated) seed in
 `migrate`. The stock path (`migrate` with S3 configured → seed → build) works today;
-the error now repairs the only failure window.
+the error now repairs the only failure window.~~
 
 ## Consequences
 
@@ -104,6 +114,9 @@ the error now repairs the only failure window.
   side effect. Mixing a write into the read path would hide the missing-seed condition
   the operator needs to fix once at deploy time.
 
-- **A dedicated `seed-build-configs` operator subcommand named in the error.** Rejected
+- **A dedicated `seed-build-configs` operator subcommand named in the error.** ~~Rejected
   as redundant: `migrate` already performs this seed idempotently. Pointing the operator
-  at `migrate` reuses the one command the deploy already runs rather than adding surface.
+  at `migrate` reuses the one command the deploy already runs rather than adding surface.~~
+  *Superseded by [ADR-0121](0121-decouple-migrate-validate-systems.md) — this rejected
+  alternative later shipped: `seed-build-configs` is now the seed command and the one the
+  error names.*

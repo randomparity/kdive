@@ -150,6 +150,9 @@ Run is **inert** — it sits in `created`, consuming no compute, until the agent
 stray. The proper fix (a client idempotency token) is deferred to the build-plane work that
 owns long-running step admission, where the `(run_id, step, kind)` `dedup_key` already
 lives. Recorded so non-idempotent retries are a decision, not an oversight.
+*(The deferred fix landed: [ADR-0193](0193-uniform-mutation-idempotency.md) gives
+`runs.create` an optional `idempotency_key` whose keyed retry replays the original
+envelope. Unkeyed calls remain non-idempotent as described.)*
 
 ## Consequences
 

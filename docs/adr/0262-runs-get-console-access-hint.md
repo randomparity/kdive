@@ -36,7 +36,10 @@ When `runs.get` surfaces `refs.console`, also surface a structured
 `data.console_access` affordance naming the two VIEWER-accessible read paths for the
 redacted console artifact, using literal valid tool identifiers:
 
-- `search` → `artifacts.search_text` (targeted query)
+- ~~`search` → `artifacts.search_text` (targeted query)~~ *Superseded by
+  [ADR-0283](0283-artifact-get-jump-cursor.md) — `artifacts.search_text` is deleted;
+  targeted search is `artifacts.get(find=…)`, and the `search_text` mention is dropped
+  from `console_access`.*
 - `full_text` → `artifacts.get` (full log by paging `next_offset` until
   `content_truncated` is `"false"`; ADR-0247's per-window cap means whole-log = paging)
 - `ref` → `"console"`, tying the affordance to the `refs["console"]` entry
@@ -60,7 +63,8 @@ so it is redaction-safe.
 ## Consequences
 
 - An agent reading `runs.get` learns both VIEWER-accessible console read paths from the
-  envelope, with no out-of-band knowledge: search via `artifacts.search_text`, full log
+  envelope, with no out-of-band knowledge: search via ~~`artifacts.search_text`~~
+  *`artifacts.get(find=…)` ([ADR-0283](0283-artifact-get-jump-cursor.md))*, full log
   via paged `artifacts.get`.
 - The affordance names only tools the console-ref viewer can actually call, so it never
   steers a viewer at a forbidden or inapplicable tool.

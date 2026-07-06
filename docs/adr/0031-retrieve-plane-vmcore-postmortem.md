@@ -41,14 +41,19 @@ here.
 
 ### 1. The vmcore is System-scoped; `vmcore.fetch(system_id)` is the kdump-capture op, and `capture_vmcore` is its JobKind (not a separate tool)
 
-The walking-skeleton surface is `vmcore.list(system_id)` and `vmcore.fetch(system_id) →
+*Superseded in part by [ADR-0244](0244-per-run-vmcore-capture.md) — the vmcore is now
+**Run**-scoped: `vmcore.fetch(run_id, method)` / `vmcore.list(run_id)`, artifacts owned
+`owner_kind='runs'`/`owner_id={run_id}`, key `…/runs/{run_id}/vmcore-{method}`, dedup
+`{run_id}:capture_vmcore:{method}`. The tool/JobKind identity below stands.*
+
+The walking-skeleton surface is ~~`vmcore.list(system_id)` and `vmcore.fetch(system_id) →
 {job_id} # waits for kdump capture`. The vmcore is a property of the crashed **System**
-(one System per Allocation, one crash), not of a Run. So `vmcore.fetch` is the admission
-that enqueues `JobKind.CAPTURE_VMCORE` (dedup `{system_id}:capture_vmcore`); the
+(one System per Allocation, one crash), not of a Run.~~ So `vmcore.fetch` is the admission
+that enqueues `JobKind.CAPTURE_VMCORE` ~~(dedup `{system_id}:capture_vmcore`)~~; the
 `capture_vmcore` handler is the work behind it. Issue #24's "register `capture_vmcore`
 handler" and "`vmcore.fetch` (→ job)" are the same operation viewed from the two seams —
-there is no separate `capture_vmcore` *tool*. The artifacts are owned `owner_kind=systems`,
-`owner_id=system_id`.
+there is no separate `capture_vmcore` *tool*. ~~The artifacts are owned `owner_kind=systems`,
+`owner_id=system_id`.~~
 
 ### 2. Capture moves no durable-object lifecycle state; it records on the Job and the artifact rows
 
@@ -92,7 +97,9 @@ rows in one transaction under the **per-System advisory lock** (`LockScope.SYSTE
 lock every System mutation already holds). Execution idempotency: the handler, holding the
 lock, first checks whether a `vmcore` row already exists for the System and, if so, returns
 its key without re-capturing. Because the lock serializes all per-System work and the
-object key is deterministic (`{tenant}/systems/{system_id}/vmcore`), a worker re-dispatch
+object key is deterministic (~~`{tenant}/systems/{system_id}/vmcore`~~ *now
+`…/runs/{run_id}/vmcore-{method}` under `LockScope.RUN` per
+[ADR-0244](0244-per-run-vmcore-capture.md)*), a worker re-dispatch
 re-puts the same key (idempotent S3 overwrite) and the existence check prevents a duplicate
 row — **no `artifacts` unique constraint and no migration are required**. An orphaned object
 from a crash between the two object writes is bounded by object-store retention (ADR-0013);

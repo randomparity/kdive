@@ -64,11 +64,16 @@ To make generation honest and drift-proof:
   and a pytest test fails on any tool missing a description, a parameter description, or a
   valid maturity value. Two further invariants the same test enforces over the live registry:
   - **The destructive hint matches a reviewed set.** `destructiveHint=true` must hold for
-    exactly the declared destructive-administration set — `control.power`,
-    `control.force_crash`, `systems.teardown`, `systems.reprovision` (ADR-0028/ADR-0037) —
+    exactly the declared destructive-administration set — ~~`control.power`,
+    `control.force_crash`, `systems.teardown`, `systems.reprovision` (ADR-0028/ADR-0037)~~
+    *the set has since grown: [ADR-0062](0062-platform-operations.md) added the `ops.*`
+    break-glass and host ops, [ADR-0268](0268-tool-gateway-dispatcher.md) added
+    `tools.invoke`; the reviewed set is `DESTRUCTIVE_TOOLS` in
+    `src/kdive/mcp/tools/_docmeta.py`* —
     and for no tool outside it. Enforcement is uneven (`force_crash`/`reprovision` run the
-    three-check gate `assert_destructive_allowed`; `power` off/cycle/reset and `teardown` are
-    admin-role-gated via `require_role`), so the hint is anchored to the *set*, not to the
+    ~~three-check~~ gate `assert_destructive_allowed`; ~~`power` off/cycle/reset and~~ `teardown` is
+    admin-role-gated via `require_role` *(power off/cycle/reset moved into the gate,
+    [ADR-0130](0130-destructive-gate-per-op-revision.md))*, so the hint is anchored to the *set*, not to the
     gate call. A backstop asserts every handler that invokes `assert_destructive_allowed` is
     in the set, so a newly-gated op cannot be added without either carrying the hint or
     failing CI. This deliberately covers `teardown` — the most irreversible op — which a

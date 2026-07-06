@@ -74,7 +74,10 @@ CI deselects. `import libvirt` carries a scoped `unresolved-import` suppression
 ### 4. Admission counts non-terminal allocations under the lock; a denial creates no row
 
 Inside the per-resource lock, admission counts allocations on the host in a
-**non-terminal** state (`requested`, `granted`, `active`, `releasing`) and compares
+~~**non-terminal** state (`requested`, `granted`, `active`, `releasing`)~~ *an
+**occupying** state (`granted`, `active`, `releasing`) — `requested` was excluded when
+[ADR-0069](0069-reservation-pending-queue-scheduler.md) made it a durable queued state,
+so a waiting request cannot occupy the slot it waits for* — and compares
 against the cap:
 
 - **Under cap →** insert the Allocation **directly as `granted`** (the spec's

@@ -67,6 +67,11 @@ enforcement seam **for platform roles**; per-project authority — including
 
 ### 3. This round builds the seam plus one read tool (`accounting.report`); the rest of the auditor suite parks with the operator/admin tools
 
+*(Naming note: the two scope forms shipped as two tools —
+`accounting.report_all_projects` and `accounting.report_granted_set`; see
+[ADR-0250](0250-ledger-report-cli-verbs.md). The authority split described here is
+unchanged.)*
+
 This round delivers **P1** (the seam) and **P2** — `accounting.report` — a multi-project
 usage/billing rollup + per-allocation reserved/reconciled variance, with optional
 **group-by-principal** and **time-window** dimensions (per-developer / per-quarter spend;

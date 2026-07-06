@@ -91,8 +91,11 @@ target; target 3 is a designed-for follow-up.
    fetches the ref into an isolated per-run workspace subdir). To resolve an **arbitrary** ref
    or sha the ssh checkout uses `git init` + `git fetch --depth 1 <remote> <ref>` +
    `git checkout FETCH_HEAD` (a plain `clone --depth 1` fetches only the default-branch tip
-   and cannot check out another ref). The cross-checks fail closed — the local builder rejects
-   a git ref and the ssh builder rejects a warm-tree string — so the builder-dependent
+   and cannot check out another ref). The cross-checks fail closed — ~~the local builder rejects
+   a git ref and~~ *(superseded by [ADR-0162](0162-local-git-build-lane.md) — the
+   `worker-local` host now accepts warm-tree **or** git provenance, git gated by the
+   `KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST` deny-by-default allowlist)* the ssh builder rejects
+   a warm-tree string — so the builder-dependent
    interpretation of one shared field can never silently mismatch; the consequence is that a
    profile is authored for a builder kind (a warm-tree profile cannot run on an ssh host
    without rewriting `kernel_source_ref`).

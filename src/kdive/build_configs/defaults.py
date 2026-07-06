@@ -30,10 +30,11 @@ def catalog_config_ref(name: str) -> CatalogComponentRef:
 DEFAULT_CONFIG_REF = catalog_config_ref("kdump")
 
 # The operator command that seeds the build-config catalog (the kdump fragment). It is the
-# remediation the missing-entry error points at (ADR-0105): ``migrate`` runs the idempotent,
-# S3-tolerant seed step (``_seed_build_configs_step``). Kept as one constant so the affordance
-# the error surfaces cannot drift from the command an operator actually runs.
-SEED_REMEDIATION_COMMAND = "python -m kdive migrate"
+# remediation the missing-entry error points at (ADR-0105). ADR-0121 moved the idempotent,
+# S3-tolerant seed out of ``migrate`` (now SQL-only) into the dedicated ``seed-build-configs``
+# command, which deploys run as a post-install/post-upgrade hook. Kept as one constant so the
+# affordance the error surfaces cannot drift from the command an operator actually runs.
+SEED_REMEDIATION_COMMAND = "python -m kdive seed-build-configs"
 
 # A synchronous catalog fetch the build path injects: name -> verified fragment bytes. It must
 # be synchronous because ``build()`` runs off the event loop via ``asyncio.to_thread``.

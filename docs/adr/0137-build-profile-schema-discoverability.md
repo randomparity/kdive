@@ -130,3 +130,5 @@ the in-body parse failure.
   `systems.provision`'s `dump_profile` round-trip).
 - **A create-time rejection of URI-looking bare `kernel_source_ref`**: out of scope and already
   rejected by ADR-0136 — a URI-looking bare string is the established warm-tree-label convention.
+  *(Later reversed: [ADR-0242](0242-self-service-build-from-url.md) supersedes ADR-0136's
+  no-guard decision and rejects clone-URL-scheme bare strings at the parse boundary.)*

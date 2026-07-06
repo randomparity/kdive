@@ -82,16 +82,19 @@ unchanged in shape from the remote live port.
    (defense-in-depth: the connect plane already enforced loopback at open time; the seam
    re-enforces at use time so a tampered/forged handle cannot redirect the SSH connection off
    loopback).
-2. Resolve the **kdive-managed SSH private key** as the `root@127.0.0.1` identity. The
+2. Resolve the ~~**kdive-managed SSH private key**~~ *per-System bootstrap private key
+   ([ADR-0289](0289-per-system-ssh-bootstrap-key.md) — `managed_private_key_path()` and the
+   build-time `--ssh-inject` are deleted; drgn-live loads the key from
+   `system_bootstrap_keys`)* as the `root@127.0.0.1` identity. The
    `LiveIntrospector` port is `introspect_live(transport_handle, helper)` — it carries no System,
    profile, or `ssh_credential_ref` (those resolve at `debug.start_session`, a different worker
-   call). The in-reach source is the env-level managed keypair the rootfs build authorized:
+   call). ~~The in-reach source is the env-level managed keypair the rootfs build authorized:
    `managed_private_key_path()` (the private counterpart to the `managed_public_key_path()`
    `rootfs_build` `--ssh-inject`s to `root`, ADR-0052) — an already-`0600` stable path, so no temp
    copy is needed. ADR-0218 §1 pins the transport to exactly this key, so a per-System
-   `ssh_credential_ref` is not consulted here (the build authorized only the managed key). The seam
+   `ssh_credential_ref` is not consulted here (the build authorized only the managed key).~~ The seam
    registers the key value for redaction; the value never enters the handle, a row, or a response.
-   An absent managed key is a `CONFIGURATION_ERROR` before any IO.
+   An absent ~~managed~~ *bootstrap* key is a `CONFIGURATION_ERROR` before any IO.
 3. Run `ssh -i <managed-private-key> -o BatchMode=yes -o StrictHostKeyChecking=no -o
    UserKnownHostsFile=/dev/null -o ConnectTimeout=<n> -p <port> root@127.0.0.1 --
    /usr/local/sbin/kdive-drgn <helper>` with fixed argv and a bounded subprocess timeout (a named

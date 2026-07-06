@@ -60,19 +60,27 @@ made method-conditional and the param can be threaded. Where to resolve it is th
    that seeds a real `model_dump(by_alias=True)` profile with `crashkernel` set and asserts the
    kdump install is rejected, rather than trusting prose.
 
-2. **The `runs.install` crashkernel gate is method-conditional.** The `crashkernel=` cmdline
+2. *Superseded by [ADR-0061](0061-boot-cmdline-composition.md) — the platform now injects
+   `crashkernel=` for every kdump boot, the crashkernel admission gate is removed, and a
+   user cmdline *carrying* any platform-owned token (`root=`/`console=`/`crashkernel=`) is
+   rejected (`cmdline_overrides_platform_args`). Sizing is tunable via `runs.install`'s
+   `crashkernel` parameter ([ADR-0300](0300-tunable-crashkernel-reservation.md)).*
+   ~~**The `runs.install` crashkernel gate is method-conditional.** The `crashkernel=` cmdline
    token is required **iff** the resolved method is `kdump`. For `console`/`host_dump`/`gdbstub`
    the gate admits a cmdline without it. This couples the gate to the profile field
    (`crashkernel` set ⇒ token required), closing the decoupling above: a System provisioned for
    kdump still cannot install a cmdline that drops the reservation, and a non-kdump System is no
-   longer blocked.
+   longer blocked.~~
 
-3. **`_DEFAULT_CMDLINE` splits by method.** The single hard-coded default
+3. *Superseded by [ADR-0061](0061-boot-cmdline-composition.md) — the method-conditional
+   defaults moved into the platform-composed `system_required_cmdline(method)`; the Run
+   cmdline carries only appended debug args.* ~~**`_DEFAULT_CMDLINE` splits by method.**
+   The single hard-coded default
    (`console=ttyS0 crashkernel=256M`) becomes two: `console=ttyS0 crashkernel=256M` for the
    `kdump` default and `console=ttyS0` for the non-kdump default. `_cmdline_for` selects the
    method-appropriate default when the Run carries no explicit cmdline, so a kdump System with no
    override still satisfies its own gate and a non-kdump System does not inherit a spurious
-   reservation.
+   reservation.~~
 
 4. **`install_handler` threads `method` and `initrd_ref` to the provider.** `method` is the
    Decision-1 resolution. `initrd_ref` is read from the build ledger's `(run_id, "build")`

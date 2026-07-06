@@ -81,7 +81,11 @@ field is present" are the acceptance criteria, but a bare `str` accepts `""` —
 present yet useless, and for `crashkernel` that silently defeats the kdump
 prerequisite the field exists to guarantee. Every required string field —
 `arch`, `kernel_source_ref`, and the libvirt section's `rootfs_image_ref` and
-`crashkernel` — is therefore a non-empty `str` (`Field(min_length=1)`) with
+`crashkernel` — is therefore a non-empty `str` (`Field(min_length=1)`) *(since relaxed:
+`kernel_source_ref` is optional except for `direct-kernel` boots,
+[ADR-0133](0133-profile-examples-onboarding-chain.md); `crashkernel` is optional and its
+value is a kdump signal only — the boot-time sizing is platform-injected,
+[ADR-0300](0300-tunable-crashkernel-reservation.md))* with
 `str_strip_whitespace=True` in the model config, so a blank or whitespace-only value
 is a `configuration_error`, not a hollow pass. `crashkernel` is otherwise an
 **opaque non-empty token** in M0: its grammar (`"256M"`, `"auto"`, range syntax) is

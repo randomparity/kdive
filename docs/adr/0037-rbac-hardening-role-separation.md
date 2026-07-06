@@ -102,10 +102,16 @@ permits" generalization is **not** exercised in M1 — `reprovision` is the lone
 operator-with-opt-in path for any new op is deferred until a provider needs it, rather
 than shipped untested.
 
-`power off`/`cycle`/`reset` and `teardown` are pinned by raising their existing
+*Superseded by [ADR-0129](0129-systems-teardown-admin-authority.md) /
+[ADR-0130](0130-destructive-gate-per-op-revision.md) — `power off`/`cycle`/`reset` now
+route through `assert_destructive_allowed` alongside `force_crash` and `reprovision` (a
+two-check gate: required role + profile opt-in; the `capability_scope` check was removed
+by ADR-0130). Only `teardown` is pinned by a bare `require_role(admin)` (ADR-0129).*
+
+~~`power off`/`cycle`/`reset` and `teardown` are pinned by raising their existing
 `require_role` factor from `operator` to `admin` — they are not routed through the
 three-check capability-scope gate (no `capability_scope`/`profile_opt_in` is modeled for
-them; only `force_crash` and `reprovision` are). This supersedes
+them; only `force_crash` and `reprovision` are).~~ This supersedes
 [ADR-0028](0028-control-plane-power-force-crash.md) §3 ("`power` … authorized at
 `operator` … not at `admin`") for the destructive power actions; `power on` stays
 `operator`.
@@ -130,6 +136,12 @@ cover are `accounting.set_budget`, `accounting.set_quota`, `control.force_crash`
 `control.power off`/`cycle`/`reset`, and `systems.teardown`, plus the cross-project
 `accounting.usage(investigation_id)` viewer refusal. That table is the authoritative
 privileged-op list the negative-test set is checked against.
+
+*Superseded in part by [ADR-0234](0234-external-build-default-and-contributor-role.md) —
+a `contributor` role now sits below `operator`, and the build-debug loop tools the
+decision-1 table gates at `operator` (`allocations.request`/`.renew`/`.release`,
+`runs.*`, `debug.*`, `investigations.*`, `postmortem.*`) moved down to `contributor`.
+The current role-to-tool map is `src/kdive/mcp/exposure.py`.*
 
 ## Consequences
 

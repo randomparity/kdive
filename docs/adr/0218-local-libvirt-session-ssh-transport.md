@@ -86,12 +86,17 @@ template does not DHCP automatically, `rootfs_build` gains a one-line network-en
 follow-up. This ADR renders the host-side forward and records the guest-side DHCP as the one
 remaining live-proof risk — it does not assert the guest networks today.
 
-The rootfs injects the managed public key to **`root`**, so the live transport connects as
+*Superseded by [ADR-0289](0289-per-system-ssh-bootstrap-key.md) — the managed key is
+deleted; the transport identity is the per-System bootstrap private key from
+`system_bootstrap_keys`, injected at provision. `root@127.0.0.1` and the loopback forward
+stand.*
+
+~~The rootfs injects the managed public key to **`root`**, so the live transport connects as
 **`root@127.0.0.1`** with the managed private key (ADR-0052) as the identity; the operator's
 `ssh_credential_ref` must resolve to that managed private key for auth to succeed (the build
-authorized no other key). A mismatch is an SSH auth failure → `DEBUG_ATTACH_FAILURE`, not a silent
+authorized no other key).~~ A mismatch is an SSH auth failure → `DEBUG_ATTACH_FAILURE`, not a silent
 wrong-credential success. `_real_ssh_connect` is `live_vm`-gated and out of CI scope; pinning
-user=`root` + identity=managed-key gives B3 (#677) a defined connect target.
+user=`root` ~~+ identity=managed-key~~ gives B3 (#677) a defined connect target.
 
 `render_domain_xml` gains a keyword-only `ssh_port: int | None = None`. Passing `ssh_port=None`
 with `ssh_credential_ref` set is a programming error (the provisioner always allocates when the

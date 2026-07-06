@@ -111,6 +111,12 @@ additive, not a rename.
 
 ### 6. The accounting report is a new server-side read-only tool, not a client-side assembly
 
+*Naming note — the surface shipped as two split tools,
+`accounting.report_all_projects` (`platform_auditor`) and
+`accounting.report_granted_set` (member), plus `accounting.usage_project`; see
+[ADR-0250](0250-ledger-report-cli-verbs.md). This section's single `accounting.report`
+with two "forms" describes the pre-split design; the gating is unchanged.*
+
 The driver's reporting phase asserts against a new read-only `accounting.report`
 (ledger-audit) MCP tool — per-allocation `reserved`/`reconciled`/variance plus a
 cross-project rollup, complementing the O(1) `accounting.usage`. Putting it in the server

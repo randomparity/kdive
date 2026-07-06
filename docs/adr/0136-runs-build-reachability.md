@@ -55,8 +55,14 @@ Two constraints shape the fix:
 
 ## Decision
 
-Two changes, at the layers that own the failure. No create-time rejection is added (see
-Considered & rejected — it would break the established bare-string-label convention).
+*Superseded in part by [ADR-0242](0242-self-service-build-from-url.md) — a create-time
+guard now exists: a bare string beginning with a recognized clone-URL scheme
+(`git+ssh://`, `git://`, `ssh://`, `https://`, `http://`, `git:`) is rejected at the
+`ServerBuildProfile` parse boundary. Non-scheme bare labels (and `git+https://`,
+`file://`) remain valid warm-tree labels; the build-time sharpening below stands.*
+
+Two changes, at the layers that own the failure. ~~No create-time rejection is added (see
+Considered & rejected — it would break the established bare-string-label convention).~~
 
 **1. Sharpen the build-time warm-tree error (build boundary).** In
 `workspace.py:sync_tree`, split the single generic `CONFIGURATION_ERROR` into two

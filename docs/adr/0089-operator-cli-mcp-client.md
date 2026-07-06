@@ -119,9 +119,13 @@ Two facts from the codebase decide it:
      **role gate** — a plain platform-role check, *not* the heavier break-glass ceremony the
      mutating verbs route through (a read needs authorization, not break-glass) — and even then
      returns presence/metadata only, never values (a redaction test enforces this).
-   - **`fixtures.list` is project-scoped** like the other catalog reads: an agent sees the
-     fixtures available to its granted projects, an operator sees the platform view. The
-     rootfs/fixture catalog is not sensitive in the way secret presence is.
+   - *Superseded by [ADR-0120](0120-operator-fixture-profile-write-path.md) — the shipped
+     `fixtures.list` requires a valid token only, with no project RBAC: the fixture catalog
+     is a shared, operator-seeded, non-secret resource, so every authenticated caller sees
+     the same view.* ~~**`fixtures.list` is project-scoped** like the other catalog reads:
+     an agent sees the fixtures available to its granted projects, an operator sees the
+     platform view.~~ The rootfs/fixture catalog is not sensitive in the way secret
+     presence is.
 
    So "operators get no capability agents lack" holds for the project-scoped catalog reads,
    but secret *presence* is explicitly an operator-only capability — the one place the

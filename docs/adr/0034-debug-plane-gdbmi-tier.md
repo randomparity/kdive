@@ -11,7 +11,9 @@
   [ADR-0027](0027-safety-modules-secret-backend-impl.md) (the `Redactor` every
   transcript/record passes through),
   [ADR-0019](0019-tool-response-envelope.md) (the response envelope),
-  [ADR-0020](0020-rbac-audit-gate-implementation.md) (the `operator` role + audit record),
+  [ADR-0020](0020-rbac-audit-gate-implementation.md) (the ~~`operator`~~ role + audit
+  record; *the `debug.*` role floor is `contributor` since
+  [ADR-0234](0234-external-build-default-and-contributor-role.md)*),
   [ADR-0009](0009-capability-provider-dispatch.md) (the `DebugPlane` capability this
   realizes).
 - **Spec:** [`../superpowers/specs/2026-06-04-debug-plane-gdbmi-design.md`](../archive/superpowers/specs/2026-06-04-debug-plane-gdbmi-design.md)

@@ -39,8 +39,9 @@ from the enforced rule:
    `check_source_kind_compatibility` to consume it (its error strings, category, and
    details are preserved byte-for-byte, so ADR-0157's behavior is unchanged).
 2. `build_hosts.list` gains a derived `supported_source_kinds` field per host
-   (`["warm-tree"]` for `local`, `["git"]` for `ssh`/`ephemeral_libvirt`), computed
-   from `kind` via `accepted_source_kinds`. No new column, migration, or
+   (~~`["warm-tree"]` for `local`~~ *`["warm-tree", "git"]` for `local` since
+   [ADR-0162](0162-local-git-build-lane.md)*, `["git"]` for `ssh`/`ephemeral_libvirt`),
+   computed from `kind` via `accepted_source_kinds`. No new column, migration, or
    authorization.
 3. Add a new read-only, auth-only `runs.profile_examples` tool, sibling to
    `systems.profile_examples` but pool-backed (the build-host inventory is in

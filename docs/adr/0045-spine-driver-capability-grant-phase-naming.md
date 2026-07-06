@@ -36,7 +36,14 @@ reports `boot`"), but leaves the concrete mechanism to this sub-issue.
 ## Decision
 
 **1. The driver grants the destructive capability scope out of band, via a privileged DB
-update, before the `crash` phase.** After the `allocate` phase returns the `allocation_id`,
+update, before the `crash` phase.**
+
+*Superseded by [ADR-0130](0130-destructive-gate-per-op-revision.md) — the
+`capability_scope` column, model field, and gate check were removed (the gate is now
+role + profile opt-in), so this out-of-band grant no longer exists; the driver needs no
+pre-`crash` DB update.*
+
+~~After the `allocate` phase returns the `allocation_id`,
 the driver issues a single `UPDATE allocations SET capability_scope = … WHERE id =
 <allocation_id>` against the **same Postgres the stack uses** (`KDIVE_DATABASE_URL`), setting
 `{"destructive_ops": ["force_crash"]}`. This mirrors exactly what
@@ -45,7 +52,7 @@ for the privileged platform/admin action that would, in a real deployment, grant
 capability to an allocation. It is **setup the driver performs deterministically up front**,
 not behaviour the `crash` phase discovers (the spec's "established up front" requirement). The
 gate is **not** weakened — all three independent checks still run against real data over the
-wire at `crash`; the driver only supplies the one factor no wire tool exposes.
+wire at `crash`; the driver only supplies the one factor no wire tool exposes.~~
 
 **2. Each phase runs inside a `phase(name)` async context manager that re-raises any failure as
 `SpinePhaseError(phase=name)`.** A phase that raises, or whose tool envelope returns

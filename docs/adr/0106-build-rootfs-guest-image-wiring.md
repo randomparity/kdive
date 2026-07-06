@@ -20,7 +20,9 @@ The local-libvirt live spine (`tests/integration/test_live_stack.py`, the bootin
 environment variable, which must point at a readable qcow2 file
 (`tests/integration/conftest.py:live_vm_preflight`). The image is produced by
 `python -m kdive build-rootfs`, which drives `LocalLibvirtRootfsBuildPlane` and
-moves the built qcow2 to `--dest`.
+moves the built qcow2 to `--dest`. *(The command was later renamed
+`build-fs`/`run_build_fs` — see ADR-0222/ADR-0296; this ADR's `build-rootfs` /
+`run_build_rootfs` names refer to that command.)*
 
 The MCP tool-coverage campaign (`docs/archive/reports/mcp-coverage-campaign-2026-06-13.md`,
 finding **F3**) classified the local lifecycle as **"GAP (fixture)"**: not a broken

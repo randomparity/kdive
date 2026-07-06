@@ -87,14 +87,19 @@ terminal Run without an illegal edge.
 
 ### 3. The `crashkernel=` reservation is enforced at `runs.install`, synchronously, against the kernel command line
 
-The acceptance pins "a kernel without `crashkernel=` is rejected at install
+*Superseded by [ADR-0051](0051-install-method-conditional-crashkernel.md) (gate made
+method-conditional), then [ADR-0061](0061-boot-cmdline-composition.md) — the gate is
+removed entirely: the platform injects `crashkernel=` for every kdump boot and rejects a
+user cmdline that carries it.*
+
+~~The acceptance pins "a kernel without `crashkernel=` is rejected at install
 (`configuration_error`)". The reservation is a property of the **kernel command line**
 the install plane sets (not of the build profile or the resolved `.config` — those are
 the build plane's, ADR-0029 §3). So `runs.install` constructs the cmdline from the Run's
 `build_profile` (an optional `cmdline`, defaulting to one that **includes**
 `crashkernel=`) and rejects a cmdline missing a `crashkernel=` token **before** enqueuing
 any job — an immediate, actionable `configuration_error`, matching `runs.build`'s
-synchronous profile parse. This is distinct from the build plane's `CONFIG_CRASH_DUMP`
+synchronous profile parse.~~ This is distinct from the build plane's `CONFIG_CRASH_DUMP`
 check: `CONFIG_CRASH_DUMP=y` compiles kdump *into* the kernel; `crashkernel=` *reserves*
 the memory at boot. Both are needed; they are checked where each lives.
 

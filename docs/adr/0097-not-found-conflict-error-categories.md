@@ -111,7 +111,13 @@ ungranted project is indistinguishable from not-found").
 
 ### Conflict stays defined-but-unemitted (stated honestly)
 
-No tool in the current surface emits `conflict`. The closest existing semantics —
+*Superseded by [ADR-0193](0193-uniform-mutation-idempotency.md) (cross-tool
+idempotency-key reuse → `CONFLICT`, fail-closed) and
+[ADR-0158](0158-runs-cancel-tool.md) (`runs.cancel` on a `succeeded`/`failed` Run →
+`conflict`) — the anticipated state-conflict seams arrived, so `conflict`/exit 5 is now
+emitted and reachable.*
+
+~~No tool in the current surface emits `conflict`.~~ The closest existing semantics —
 uniqueness/single-attach collisions — already have dedicated, stable categories that we are
 **not** renaming: a second gdbstub attach is `transport_conflict`; a System that already
 carries a non-terminal Run is `transport_conflict` (ADR-0032, ADR-0067); a terminal
@@ -121,7 +127,8 @@ be a gratuitous wire-string change to a stable contract for no caller benefit.
 Therefore `CONFLICT` is added to the enum (so the value exists, the CLI mapping has a named
 producer-side counterpart, and a future state-conflict seam can adopt it without another
 taxonomy ADR), but **exit code 5 remains defined-but-unemitted** until a concrete
-state-conflict seam needs it. We record this explicitly rather than inventing a synthetic
+state-conflict seam needs it *(that seam arrived: ADR-0193 and ADR-0158, above)*. We
+record this explicitly rather than inventing a synthetic
 conflict path to "light up" the code. Issue #339 (authz-denial enveloping) is the next change
 to this surface and may revisit whether any denial is better modeled as a conflict; this ADR
 does not pre-decide that.

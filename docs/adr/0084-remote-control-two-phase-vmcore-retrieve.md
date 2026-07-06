@@ -176,7 +176,8 @@ The acceptance flow uses only existing orchestration, but the capture is **opera
 auto-scheduled**: `control.force_crash` injects the NMI → the guest panics → the control handler
 transitions the System to `crashed` → kdump writes the core to local dump storage and reboots the
 guest normally → an operator (or the `live_vm` acceptance test) calls `vmcore.fetch(system_id,
-kdump)`, which admits a `CAPTURE_VMCORE` job on the `crashed` System
+kdump)` (*now `vmcore.fetch(run_id, kdump)` per
+[ADR-0244](0244-per-run-vmcore-capture.md)*), which admits a `CAPTURE_VMCORE` job on the `crashed` System
 (`mcp/tools/lifecycle/vmcore.py`) → the worker runs the two-phase `capture()`. **No component
 auto-runs capture after the reboot**, and the `crashed` admission state does not imply the guest
 agent is back up — which is exactly why `capture()` owns the §2 step-0 readiness wait rather than
@@ -212,9 +213,12 @@ NMI/curl/upload/`crash` mechanics run only under the `live_vm` gate.
 - **Build-id match is verified at postmortem, not capture.** `capture()` records the inspected
   build-id but stores the core unconditionally; the "matches the Run build-id" acceptance criterion
   is enforced by `run_crash_postmortem`'s provenance gate, which the `live_vm` acceptance test drives
-  explicitly, because the `capture(system_id, method)` port carries no Run identity. The vmcore is
+  explicitly, because the `capture(system_id, method)` port carries no Run identity. ~~The vmcore is
   scoped **per System** (first-method-wins, ADR-0050), not per Run, so a core captured under one Run
-  can satisfy a later Run's precheck; the build-id gate at postmortem is what ties a given core to a
+  can satisfy a later Run's precheck;~~ *Superseded by
+  [ADR-0244](0244-per-run-vmcore-capture.md) — the vmcore is per **Run**
+  (`vmcore.fetch(run_id, method)`), so a core no longer crosses Runs;* the build-id gate at
+  postmortem is what ties a given core to a
   given Run's kernel, and the acceptance test asserts that match rather than assuming capture
   guarantees it.
 - **Single-PUT ceiling.** A core over 5 GiB is rejected at inspect (`CONFIGURATION_ERROR`);

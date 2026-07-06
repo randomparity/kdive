@@ -76,8 +76,12 @@ iterating, not administering.
 A reprovision changes the OS/kernel target, so any Run bound to the System's prior
 boot is invalid against the new install. Reprovision requires the System to have **no
 non-terminal Run** (else **`stale_handle`** — the System reference is not reprovisionable
-while a Run is live; `transport_conflict` is reserved for debug-transport contention, a
-different condition). "Non-terminal Run" is a Run in `created` or `running` (terminal =
+while a Run is live; ~~`transport_conflict` is reserved for debug-transport contention, a
+different condition~~ *the reservation no longer holds:
+[ADR-0070](0070-fleet-availability-system-reuse.md) and
+[ADR-0158](0158-runs-cancel-tool.md) return `transport_conflict`
+(`system_has_live_run`) when `runs.create` targets a System with a live Run;
+reprovision keeps `stale_handle`*). "Non-terminal Run" is a Run in `created` or `running` (terminal =
 `succeeded`/`failed`/`canceled`). The live-Run check and the `ready → reprovisioning`
 transition are taken together under `LockScope.SYSTEM` — the same lock `runs.create`
 holds (ADR-0027) — so a Run cannot be created between the check and the transition;

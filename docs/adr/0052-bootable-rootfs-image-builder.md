@@ -48,13 +48,18 @@ module), and how a host-built image is **referenced** versus the long-term catal
    independent of the *host-side* `virt_image_t`/0644 labeling of the image file, which still
    applies.
 
-5. **The SSH key comes from a kdive-managed keypair, ported into `src/kdive/prereqs/`.** The
+5. *Superseded by [ADR-0289](0289-per-system-ssh-bootstrap-key.md) — the standing managed
+   keypair, `managed_ssh_key.py`, and the build-time key injection are deleted. Each System
+   gets a unique bootstrap keypair generated at provision (stored in
+   `system_bootstrap_keys`, public half injected via the per-System overlay); the base
+   image bakes no authorized key.*
+   ~~**The SSH key comes from a kdive-managed keypair, ported into `src/kdive/prereqs/`.** The
    rewrite had no key module; rather than auto-scraping `~/.ssh` or making the key optional, kdive
    owns a durable ed25519 keypair under `$XDG_DATA_HOME/kdive/ssh` (override `KDIVE_SSH_KEY_DIR`).
    The module is the single source of truth for the key path and its generation, so the builder
    and a future Python connect path cannot disagree. `KDIVE_ROOTFS_AUTHORIZED_KEY` overrides it
    with an operator-supplied `.pub`. The module is stdlib-only and 3.10-safe because the builder
-   invokes it through the host `python3`, which may predate the project venv.
+   invokes it through the host `python3`, which may predate the project venv.~~
 
 6. **`build-guest-image.sh` is overwritten in place, keeping its name.** The fixtures test, the
    gated integration preflight, and the runbooks reference the name; renaming would spread the

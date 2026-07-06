@@ -148,7 +148,9 @@ deliberate limit. The two caps:
 
 - **`max_concurrent_allocations`** is checked at `allocations.request` — the
   per-*project* analogue of M0's per-*host* cap (ADR-0023), counting the project's
-  non-terminal allocations under the per-project lock.
+  ~~non-terminal~~ *occupying (`granted`/`active`/`releasing`;
+  [ADR-0069](0069-reservation-pending-queue-scheduler.md) excluded queued `requested`
+  rows)* allocations under the per-project lock.
 - **`max_concurrent_systems`** is checked at `systems.provision` — Systems are
   created in the provisioning plane, a later step than admission, so the natural
   enforcement point is provision time, counting the project's non-terminal Systems

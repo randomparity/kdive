@@ -223,14 +223,16 @@ def _patch_fetch_env(
     return calls
 
 
-def test_build_config_seed_remediation_command_is_the_migrate_command() -> None:
-    """Pin the affordance to the literal operator command (ADR-0105).
+def test_build_config_seed_remediation_command_is_the_seed_command() -> None:
+    """Pin the affordance to the literal operator command (ADR-0105, ADR-0121).
 
-    The error's remediation must name the one command an operator actually runs; a
-    rename of the seed command without updating this constant is a CI failure here, so
-    the affordance can never drift into pointing at a command that does not exist.
+    The error's remediation must name the one command an operator actually runs — the
+    ``seed-build-configs`` command that ADR-0121 split out of the now SQL-only
+    ``migrate``. A rename of the seed command without updating this constant is a CI
+    failure here, so the affordance can never drift into pointing at a command that
+    does not (or no longer does) perform the seed.
     """
-    assert build_defaults.SEED_REMEDIATION_COMMAND == "python -m kdive migrate"
+    assert build_defaults.SEED_REMEDIATION_COMMAND == "python -m kdive seed-build-configs"
 
 
 def test_build_config_fetch_unknown_name_is_configuration_error(
