@@ -74,7 +74,11 @@ Acceptance:
   - `DEFAULT_CONFIG_REF.provider == catalog_config_ref("kdump").provider`, so the
     seed default and the echoed convention share one value;
   - for `set`/`list`/`get`, the echoed `data.config_ref` equals
-    `catalog_config_ref(<name>).model_dump()`;
+    `catalog_config_ref(<name>).model_dump()` (these per-site tests pin
+    echo-presence, the exact key, and name-canonicalization — **not** the
+    `provider` value, which the literal + `DEFAULT_CONFIG_REF` tests above pin;
+    they compare the factory output to itself and cannot fail on a `provider`
+    drift);
   - `ServerBuildProfile.model_validate({...,"config":<echoed ref>})` succeeds and
     `ExternalBuildProfile.model_validate({...,"config":<echoed ref>})` raises
     (extra `config` forbidden). This pins the structural lane boundary at the
@@ -92,10 +96,13 @@ Acceptance:
   pastes into the external lane); `runs.validate_profile` — which routes through
   `BuildProfile.parse` and yields the clean typed verdict — is the read-only
   pre-flight an agent can use to check a profile before `runs.create`.
-- The `buildconfig.set`/`list`/`get` wrapper docstrings mention that the
-  response carries a ready-to-use `data.config_ref` (the agent-facing contract;
-  the generated `docs/guide/reference/buildconfig.md` renders the docstring, not
-  the response shape).
+- The `buildconfig.set`/`list`/`get` wrapper docstrings state the response
+  carries a `data.config_ref` to paste into a **`source='server'`**
+  `runs.create` build (the lane qualifier travels with the ref, not only on the
+  sibling `runs.create` Field), and point at `runs.validate_profile` as the
+  read-only pre-flight for a pasted ref. The docstring is the only agent-visible
+  channel here (the generated `docs/guide/reference/buildconfig.md` renders the
+  docstring, not the response shape).
 - No `source`→`provider` mapping is documented anywhere.
 - `just docs` regenerates `docs/guide/reference/{buildconfig,runs}.md` with no
   drift; `just ci` green.
@@ -165,12 +172,18 @@ forward-safe: if #1033 (or later multi-tenant/namespaced-catalog work) makes
 that had internalized "any value works" would instead construct wrong refs.
 #1033 owns re-evaluating this contract; see Out of scope.
 
-### 4. Wrapper docstrings mention `config_ref`
+### 4. Wrapper docstrings carry the ref and its lane
 
 Update the `buildconfig.set`/`list`/`get` wrapper docstrings
-(`registrar`-style `@app.tool` docstrings at `:315`, `:352`, `:384`) to note the
-response carries `data.config_ref` — the only agent-visible channel for a
-response field, since the generated reference documents parameters only.
+(`@app.tool` docstrings at `:315`, `:352`, `:384`) to note the response carries
+`data.config_ref` to paste into a **`source='server'`** `runs.create` build, and
+to point at `runs.validate_profile` as the read-only pre-flight for a pasted ref.
+The docstring is the only agent-visible channel for a response field (the
+generated reference documents parameters only), so the lane qualifier and the
+recovery pointer must live here, not only on the sibling `runs.create` Field —
+the `buildconfig.list`/`get` → paste path is where an agent produces the ref and
+is least likely to have read `runs.create`'s Field first. Avoid an unqualified
+"ready-to-use" phrasing that omits the lane.
 
 ## No ADR
 
@@ -183,8 +196,14 @@ convention (ADRs capture decisions with viable alternatives), none is warranted.
 
 ## Compatibility & rollback
 
-Purely additive: a new `data.config_ref` key on three response payloads and
-docstring/`Field` text. No schema, migration, auth, or persistence change.
+Additive apart from one no-op subject switch: a new `data.config_ref` key on
+three response payloads, docstring/`Field` text, and `read_build_config`'s
+success-envelope subject changing from the requested `name` argument to the
+resolved `entry.name` (decision 2). That subject switch is a behavioral no-op
+under today's exact-match lookup (`catalog.py:16`, `WHERE name = %(name)s`, so a
+found row's `entry.name` equals the requested `name`); it only diverges if the
+name column later gains case-insensitive/normalized lookup, which is the
+forward-safety it is for. No schema, migration, auth, or persistence change.
 Existing clients that ignore unknown response keys are unaffected. Rollback is a
 plain revert; no state to unwind.
 
