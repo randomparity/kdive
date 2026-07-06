@@ -33,8 +33,13 @@ All work is in one package area; tasks are ordered so each leaves the tree green
 
 **Do:**
 1. Add `def catalog_config_ref(name: str) -> CatalogComponentRef:` returning
-   `CatalogComponentRef(kind="catalog", provider="system", name=name)`. Move the
-   existing decorative-`provider` explanation comment onto this factory.
+   `CatalogComponentRef(kind="catalog", provider="system", name=name)`. Split the
+   existing blended comment at `defaults.py:16-20`: move **only** the
+   decorative-`provider` sentence ("`provider` is decorative for build configs
+   (the catalog is keyed by name alone) but the ref model requires it; `system`
+   matches the seed tenant") onto the factory, and **keep** the "implicit config
+   ref a build resolves when a profile names none: the seeded `kdump` catalog
+   fragment" rationale on `DEFAULT_CONFIG_REF`.
 2. Redefine `DEFAULT_CONFIG_REF = catalog_config_ref("kdump")`.
 3. Export `catalog_config_ref` in `__all__`.
 
@@ -96,6 +101,10 @@ remains).
 `get` subject is the row name; `just test` green for the suite.
 
 **Rollback:** drop the `config_ref` keys and restore the `get` subject.
+**Coupled with Task 4:** Task 4's committed docs/docstrings describe this echo, so
+do not revert Task 2 in isolation — revert Task 2 and Task 4 together, or revert
+the PR as a unit, else the reference docs assert a `config_ref` the handler no
+longer emits (the phantom-field state).
 
 ---
 
@@ -199,7 +208,13 @@ union error by design.)
    than a manual read. **Do not** assert `"decorative" not in <text>` on its own:
    the Field legitimately says `resolved_commit ... decorative when dirty`
    (`registrar.py:80`), so a bare-word ban would false-fail. Use the full
-   phrases above.
+   phrases above. In the **same** guard, add **positive**-presence assertions
+   (matching the repo pattern `test_jobs_wait_description_conveys_retry_contract`
+   `:379` / `test_runs_get_documents_build_provenance_shape` `:369`): assert
+   `"config_ref"`, the chosen lane phrase (e.g. `"source='server'"`), and
+   `"validate_profile"` are **present** in the `runs.create` `build_profile`
+   description and in each `buildconfig.set`/`list`/`get` description — so the
+   deliverable itself is regression-locked, not only the absence of bad framing.
 5. `uv run python -m pytest tests/mcp/catalog/test_build_configs_tool.py -q`
    (docstring changes do not affect handler behavior, but keep the suite green).
 6. `just lint` (100-char lines).
@@ -213,7 +228,10 @@ manual doc-style read; `provider`-decorative wording absent from agent-facing
 text.
 
 **Rollback:** revert the two source files' text and re-run `just docs` to
-re-sync the generated docs (or revert all four files together).
+re-sync the generated docs (or revert all four files together). **Coupled with
+Task 2** (see its Rollback): the docs here describe Task 2's `config_ref` echo,
+so revert the pair together — never Task 4's docs while Task 2's echo remains, or
+vice versa.
 
 ---
 
