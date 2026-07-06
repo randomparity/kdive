@@ -24,9 +24,10 @@ def test_catalog_config_ref_returns_a_component_ref() -> None:
 
 
 def test_default_config_ref_shares_the_factory_convention() -> None:
-    # The seed default and the echoed convention derive from one provider value.
+    # The seed default and the echoed convention derive from one factory, so the whole
+    # object (provider included) matches; provider="system" itself is pinned literally by
+    # test_catalog_config_ref_dumps_the_canonical_shape.
     assert catalog_config_ref("kdump") == DEFAULT_CONFIG_REF
-    assert DEFAULT_CONFIG_REF.provider == catalog_config_ref("kdump").provider
 
 
 def test_catalog_config_ref_round_trips_through_parse_component_ref() -> None:
