@@ -59,7 +59,9 @@ caller's own granted System, so the two dropped layers add no defensible safety 
 
 `admin` (not `operator`) remains the bar: teardown destroys project resources, which is
 administration, and the issue states an own-project admin should be permitted.
-`force_crash`, `power`, and `reprovision` keep the full three-check gate unchanged. The
+`force_crash`, `power`, and `reprovision` keep the full ~~three-check~~ gate unchanged
+*(reduced to two checks — role + profile opt-in — by
+[ADR-0130](0130-destructive-gate-per-op-revision.md))*. The
 admin role check runs **before** the existing idempotent `torn_down` short-circuit
 (`admin.py:250-256`), preserving today's authz-before-state order — so a non-admin caller
 never receives the `torn_down` success envelope that would leak a System's terminal state and

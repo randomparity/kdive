@@ -15,6 +15,9 @@
 
 ADR-0042 §4 lists `report` as the spine's final phase and §6 settles that the report is a
 server-side `accounting.report` tool whose all-projects form is gated `platform_auditor`.
+*(Naming note: the tool shipped split as `accounting.report_all_projects` /
+`accounting.report_granted_set` — [ADR-0250](0250-ledger-report-cli-verbs.md); this ADR's
+`accounting.report` references mean the all-projects tool unless stated otherwise.)*
 The tool (#97) and the phase-structured spine through `release → teardown` (#100) are both
 merged. What is **not** yet built is the `report` phase itself: the spine never drives
 `accounting.report`, never asserts the run's spend against the ledger, and never emits a

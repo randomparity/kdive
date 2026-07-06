@@ -27,9 +27,11 @@ What the forward actually is, and what gates it (verified on `main`):
   (ADR-0218 §2). The host side binds `127.0.0.1` on the worker host (loopback-only, ADR-0210).
 - The host port is an OS-assigned ephemeral port (`_bind_probe_free_port` binds `127.0.0.1:0`
   and reads back the assignment), not a value drawn from a bounded pool.
-- The managed ed25519 key (ADR-0052) is injected into **every** guest's `root`
-  `authorized_keys` at build time, regardless of `ssh_credential_ref`. The worker can already
-  root-SSH any booted guest that has a reachable forward.
+- ~~The managed ed25519 key (ADR-0052) is injected into **every** guest's `root`
+  `authorized_keys` at build time, regardless of `ssh_credential_ref`.~~ *Superseded by
+  [ADR-0289](0289-per-system-ssh-bootstrap-key.md) — build-time injection is deleted;
+  a per-System bootstrap public key is injected at provision instead.* The worker can
+  still root-SSH any booted guest that has a reachable forward (with that System's key).
 
 So `ssh_credential_ref` currently gates two unrelated things: (1) whether the forward/NIC are
 rendered at all, and (2) the drgn-live introspection credential the debug-session path

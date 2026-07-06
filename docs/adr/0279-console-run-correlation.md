@@ -97,7 +97,9 @@ written before the change keep `run_id = NULL`.
 
 - An agent reads "all durable console evidence for this Run" from `runs.get data.console_artifacts`
   — an ordered index of artifact ids it then pages with `artifacts.get` / searches with
-  `artifacts.search_text` — instead of guessing which `console-part-*` rows in a System-scoped list
+  ~~`artifacts.search_text`~~ *`artifacts.get(find=…)`
+  ([ADR-0283](0283-artifact-get-jump-cursor.md) deleted `search_text`)* — instead of
+  guessing which `console-part-*` rows in a System-scoped list
   belong to its Run. The largest black-box verification gap closes for forward evidence.
 - Ownership and lifecycle are untouched: console stays System-owned, reclaimed at teardown, excluded
   from the run-owned expiry sweep. The new column is purely additive metadata.

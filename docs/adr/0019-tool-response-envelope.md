@@ -38,10 +38,14 @@ failure slot and a small typed escape hatch for plane scalars:
   `{"result": "<object-store-key>"}`); never inline artifact bytes or log text.
 - `error_category: str | None` — set **iff** the response reports a failed object,
   carrying the value from the `ErrorCategory` taxonomy; `None` otherwise.
-- `data: dict[str, str]` — plane-specific scalar fields that are not one of the
+- *Superseded by [ADR-0113](0113-flat-tool-output-schema.md) /
+  [ADR-0263](0263-native-json-scalars-in-tool-data.md) — `data` is
+  `dict[str, JsonValue]`: counts and flags are native JSON scalars, and the
+  `str→str` flattening convention is retired.*
+  ~~`data: dict[str, str]` — plane-specific scalar fields that are not one of the
   above (for `jobs.*`, `{"kind": "<job-kind>"}`). Constrained to `str→str` so the
   envelope stays JSON-trivial and type-checkable; richer plane payloads that
-  later need nesting get their own typed sub-model rather than loosening this.
+  later need nesting get their own typed sub-model rather than loosening this.~~
 
 Two constructors keep call sites uniform and the failure invariant local:
 `ToolResponse.from_job(job)` builds the jobs shape, and the model rejects an
@@ -70,9 +74,13 @@ time, so "category iff failed" is enforced once here rather than per tool.
   construction so one poisoned row cannot blank the whole list — the validator's
   strictness is intentional, and the isolation obligation it imposes on list-style
   tools is recorded in their handlers (M0: `tools/jobs.py §list_jobs`).
-- `*.list` returns a sequence of objects, which a single `ToolResponse` does not
-  model. M0's `jobs.list` returns `list[ToolResponse]` (one envelope per job); a
-  paginated list envelope is deferred until a plane needs cursors.
+- *Superseded by [ADR-0113](0113-flat-tool-output-schema.md) /
+  [ADR-0192](0192-list-pagination-envelope.md) — `*.list` returns a single
+  collection envelope carrying `items: list[ToolResponse]`, with opt-in keyset
+  pagination.* ~~`*.list` returns a sequence of objects, which a single
+  `ToolResponse` does not model. M0's `jobs.list` returns `list[ToolResponse]`
+  (one envelope per job); a paginated list envelope is deferred until a plane
+  needs cursors.~~
 
 ## Alternatives considered
 

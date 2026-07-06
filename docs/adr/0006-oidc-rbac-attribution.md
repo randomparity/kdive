@@ -19,10 +19,12 @@ install, debug), `admin` (destructive ops and project administration). **Roles a
 scoped to a project and asserted by the IdP** (the memberships
 [0002](0002-multi-user-mcp-http.md) validates), never self-assigned; **there is no
 implicit global admin** — a cross-project role, if ever needed, is a separate
-explicitly-granted claim. A **destructive operation requires three independent,
-all-required checks**: the granted allocation capability scope, an `admin` role
-for that project (or `operator` only where the op's profile opt-in permits), and
-the explicit profile/flag opt-in. Every state transition and destructive op is
+explicitly-granted claim. A **destructive operation requires ~~three~~ *two*
+independent, all-required checks**: ~~the granted allocation capability scope,~~ an
+`admin` role for that project (or `operator` only where the op's profile opt-in
+permits), and the explicit profile/flag opt-in *(the capability-scope check was
+removed by [ADR-0130](0130-destructive-gate-per-op-revision.md))*. Every state
+transition and destructive op is
 attributed to `(principal, agent_session)` and written to the append-only audit
 log. The agent acts **on behalf of** a principal: `principal` is the token
 subject; `agent_session` is a per-session claim.

@@ -96,7 +96,9 @@ removed (replace, don't deprecate). The `readiness` seam stays injected — it i
 sleep (so unit tests run without a real wait). `_real_readiness` therefore owns its own cadence:
 on `pending`, if the guest is still running, it sleeps one poll interval before returning
 `answered=False`. The window is `_DEFAULT_BOOT_WINDOW_POLLS (30) × _POLL_INTERVAL_SECONDS (5)` =
-**150 s**, both constants co-located in `install.py` with a comment that their product is the
+**150 s** *(widened to 300 s by
+[ADR-0251](0251-local-multidistro-rootfs-catalog.md) §6 to absorb the first-boot dracut
+build)*, both constants co-located in `install.py` with a comment that their product is the
 window (so neither drifts unseen and the seam need not read the count). 150 s is sized with
 margin over a cold boot of a freshly-built `~/src/linux` kernel to `kdive-ready`; the `live_vm`
 acceptance is the falsifiable check that it clears a real fixed boot. The interval, not the count,

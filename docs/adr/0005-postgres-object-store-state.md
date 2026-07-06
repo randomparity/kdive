@@ -23,7 +23,11 @@ Concurrency uses **transaction-scoped Postgres advisory locks**
 per-project budget-scope lock for admission control — replacing the PoC's
 `flock`/`O_CREAT|O_EXCL`. Transaction scope keeps the locks correct behind a
 transaction-pooling connection pooler (PgBouncer); session-scoped locks are not
-used. Idempotent steps are enforced by a `(run_id, step)` unique key.
+used *(amended by [ADR-0095](0095-reconciler-remote-console-collector.md) — the
+reconciler's console-collector leadership claim is a session-scoped
+`pg_advisory_lock`, held on a dedicated long-lived non-pooled connection; the
+prohibition stands for pooled connections)*. Idempotent steps are enforced by a
+`(run_id, step)` unique key.
 
 ## Consequences
 
