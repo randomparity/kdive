@@ -205,6 +205,15 @@ set at spec time, not a substitute for the grep.
   `live_stack`-gated but their fixtures still `parse` in setup.
 - `tests/mcp/resources/test_pre_provision_checklist_docs.py:32`: drop `ssh_credential_ref` from the
   asserted token set (it is removed from the served checklist).
+- `tests/mcp/lifecycle/test_recovery_redaction.py:81,97` and `test_recovery_helpers.py:80`: these
+  **plant** `provider.local-libvirt.ssh_credential_ref` as a redaction/allowlist marker (raw dicts —
+  no parse break, but caught by the grep gate). Their subject is the field being removed. Decision:
+  the `local-libvirt` section no longer carries any secret-bearing field, so drop the
+  now-subjectless `test_system_envelope_excludes_ssh_credential_ref` and the `ssh_credential_ref`
+  plant in `test_recovery_helpers.py` — `kernel_source_ref` (already planted in both tests) keeps a
+  live redaction subject, so coverage of the envelope-exclusion path is retained. Confirm the
+  `build_profile_summary` allowlist behavior stays asserted via the surviving `kernel_source_ref`
+  assertions before deleting.
 - `tests/mcp/debug/test_debug_tools.py`: replace the ref-resolution start_session tests with:
   - drgn-live `start_session` on a ready local System with **no** `ssh_credential_ref` succeeds;
   - the bootstrap key value is registered in the redaction registry after a drgn-live start
@@ -228,7 +237,7 @@ set at spec time, not a substitute for the grep.
 4. A drgn-live `start_session` against a System with no bootstrap-key row fails closed with
    `configuration_error` and `reason="no_bootstrap_key"`.
 5. remote-libvirt and fault-inject drgn-live start behavior is unchanged (no bootstrap-key
-   gate/seed; `drgn_live_uses_bootstrap_key` is `False`).
+   gate/seed; `drgn_live_seeds_bootstrap_key` is `False`).
 6. No source, generated doc, config doc, or agent resource references `ssh_credential_ref` for the
    drgn-live path; the introspect/debug guides state drgn-live needs no credential provisioning.
 7. Build-host `ssh_credential_ref` (DB column, transport, tools, tests) is unchanged.

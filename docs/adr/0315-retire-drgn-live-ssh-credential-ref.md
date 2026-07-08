@@ -51,7 +51,7 @@ on the per-System bootstrap key instead.
    shared `introspect.run` path loads it for every provider — but opens its drgn-live transport over
    the guest-agent seam, so it needs no seed *at start_session*; the seam name is scoped to that
    start-time step, not "remote never touches the key".)
-3. **At `start_session`** for a drgn-live transport where `drgn_live_uses_bootstrap_key` is true,
+3. **At `start_session`** for a drgn-live transport where `drgn_live_seeds_bootstrap_key` is true,
    call `load_system_bootstrap_private_key(conn, system.id, secret_registry=self._secret_registry)`
    before opening the transport. That shared loader already **fails closed** with
    `configuration_error` / `reason="no_bootstrap_key"` when the key row is absent, and **registers**
