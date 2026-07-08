@@ -613,6 +613,20 @@ MCP_TOOL_GATEWAY = Setting(
     ),
 )
 
+COMPACT_RESPONSES = Setting(
+    name="KDIVE_COMPACT_RESPONSES",
+    parse=_str,
+    default="off",
+    group="mcp",
+    processes=_SERVER,
+    help=(
+        "When on/1/true, the server omits null/empty defaulted fields from every tool "
+        "response envelope (recursively within items) to cut per-call tokens (ADR-0314). "
+        "Default off — the full ADR-0019 envelope. A failure envelope always keeps "
+        "error_category and retryable; detail is kept when a reason exists."
+    ),
+)
+
 SETTINGS = [
     DATABASE_URL,
     HTTP_HOST,
@@ -664,4 +678,5 @@ SETTINGS = [
     OTEL_SERVICE_NAMESPACE,
     HEALTH_BIND_ADDR,
     MCP_TOOL_GATEWAY,
+    COMPACT_RESPONSES,
 ]

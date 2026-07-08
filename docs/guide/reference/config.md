@@ -126,6 +126,7 @@
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
+| `KDIVE_COMPACT_RESPONSES` | server | `off` | no | When on/1/true, the server omits null/empty defaulted fields from every tool response envelope (recursively within items) to cut per-call tokens (ADR-0314). Default off — the full ADR-0019 envelope. A failure envelope always keeps error_category and retryable; detail is kept when a reason exists. |
 | `KDIVE_MCP_TOOL_GATEWAY` | server | `off` | no | Enable the core-set tool gateway (ADR-0268): when set to on/1/true, list_tools returns only the CORE_TOOLS set (intersected with RBAC), so agents discover tools.search and tools.invoke first. Default off — full ADR-0148 RBAC catalog. |
 
 ## objectstore

@@ -530,3 +530,41 @@ def test_prompts_add_no_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     without_prompts = {t.name for t in asyncio.run(_built_app().list_tools())}
 
     assert with_prompts == without_prompts
+
+
+def test_compact_middleware_is_registered_outermost() -> None:
+    # CompactResponseMiddleware must be outer of DenialAudit + BindingError so it observes their
+    # synthesized failure envelopes; first-added is outermost (ADR-0314).
+    from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
+    from kdive.mcp.middleware.compact import CompactResponseMiddleware
+    from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    order = [type(m).__name__ for m in app.middleware]
+    assert order.index(CompactResponseMiddleware.__name__) < order.index(
+        DenialAuditMiddleware.__name__
+    )
+    assert order.index(CompactResponseMiddleware.__name__) < order.index(
+        BindingErrorMiddleware.__name__
+    )
+
+
+def test_build_app_logs_when_compact_enabled(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("KDIVE_COMPACT_RESPONSES", "on")
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    with caplog.at_level("INFO", logger="kdive.mcp.app"):
+        build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    assert sum("compact_responses enabled" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_build_app_silent_when_compact_disabled(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("KDIVE_COMPACT_RESPONSES", raising=False)
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    with caplog.at_level("INFO", logger="kdive.mcp.app"):
+        build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    assert not any("compact_responses enabled" in r.getMessage() for r in caplog.records)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from opentelemetry import metrics, trace
@@ -11,6 +13,7 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.auth import build_verifier
 from kdive.mcp.exposure import gateway_enabled
 from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
+from kdive.mcp.middleware.compact import CompactResponseMiddleware
 from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
 from kdive.mcp.middleware.doc_exposure import DocExposureMiddleware
 from kdive.mcp.middleware.exposure import ToolExposureMiddleware
@@ -19,10 +22,13 @@ from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.tool_index import build_instructions
 from kdive.mcp.tool_registration import PLANE_REGISTRARS, AppAssembly
+from kdive.mcp.verbosity import compact_responses_enabled
 from kdive.mcp.worker_registration import HANDLER_REGISTRARS, WorkerHandlerAssembly
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import build_object_store_assembly
+
+_log = logging.getLogger(__name__)
 
 
 def build_app(
@@ -38,6 +44,9 @@ def build_app(
         auth=verifier or build_verifier(),
         instructions=build_instructions(gateway_enabled()),
     )
+    app.add_middleware(CompactResponseMiddleware())  # first == outermost (ADR-0314)
+    if compact_responses_enabled():
+        _log.info("compact_responses enabled")
     app.add_middleware(
         TelemetryMiddleware(
             tracer=trace.get_tracer("kdive.mcp"), meter=metrics.get_meter("kdive.mcp")

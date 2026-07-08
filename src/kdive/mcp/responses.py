@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import CategorizedError, ErrorCategory, suppressed_detail
@@ -76,6 +76,11 @@ def reason_data(reason: str) -> dict[str, JsonValue]:
 
 class ToolResponse(BaseModel):
     """The structured JSON every MCP tool returns (ADR-0019)."""
+
+    # Reject unknown keys on validation: a dump has exactly these fields, so an envelope
+    # round-tripped through model_validate (e.g. the compact-response middleware, ADR-0314)
+    # must not silently drop a stray key — a superset dict raises rather than being coerced.
+    model_config = ConfigDict(extra="forbid")
 
     object_id: str
     status: str

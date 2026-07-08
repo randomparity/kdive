@@ -143,3 +143,28 @@ Rules:
 - **`inventory.list` is the one non-continuable list.** It summarizes two independent
   streams (allocations + systems), so it reports `truncated` but emits no `next_cursor`;
   narrow it with the `project` / `resource_id` filters instead.
+
+## Compact responses (opt-in)
+
+When an operator sets `KDIVE_COMPACT_RESPONSES=on` (default `off`), the server omits
+null/empty *defaulted* envelope fields from every tool response, recursively within `items`,
+to cut per-call tokens on token-heavy list tools
+([ADR-0314](../adr/0314-compact-response-envelope.md)). The default is unchanged and
+byte-identical.
+
+Under compaction:
+
+- A field at its default is **omitted**: `error_category`/`retryable`/`detail` when null,
+  and `suggested_next_actions`/`refs`/`items`/`data` when empty. `object_id` and `status`
+  are always present.
+- A failure envelope always keeps `error_category` and `retryable`. `detail` is kept only
+  when non-null (a `not_found`/`authorization_denied` suppressed constant, or a reason the
+  tool set); a worker-plane job-handle failure whose `detail` is null omits it.
+- **Absent means default.** An omitted field is semantically identical to its documented
+  default (empty list/dict, or null). A consumer must not read key-absence as a distinct
+  "unknown" signal. This applies to first-party clients too — the `response.get("items", [])`
+  idiom is compaction-safe, and a *populated* collection's `items` is never dropped (only an
+  empty one is), so index access on a known-populated collection is unaffected.
+
+The advertised output schema types every omittable field as optional/nullable, so compact
+responses stay schema-valid.
