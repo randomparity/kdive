@@ -10,10 +10,8 @@ from fastmcp.server.middleware import Middleware
 from fastmcp.tools import Tool
 from opentelemetry import metrics
 
-import kdive.config as config
-from kdive.config.core_settings import MCP_TOOL_GATEWAY
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.mcp.exposure import CORE_TOOLS, visible_tool_names
+from kdive.mcp.exposure import CORE_TOOLS, gateway_enabled, visible_tool_names
 from kdive.mcp.middleware.shared import request_context
 from kdive.mcp.provider_schema import project_tool_schema
 from kdive.providers.core.resolver import ProviderResolver
@@ -51,11 +49,6 @@ def project_listed_tool(tool: Tool, kinds: frozenset[ResourceKind]) -> Tool:
         return tool
     projected = project_tool_schema(tool.parameters, kinds)
     return tool.model_copy(update={"parameters": projected})
-
-
-def _gateway_enabled() -> bool:
-    """Return True when KDIVE_MCP_TOOL_GATEWAY is set to on/1/true (default off)."""
-    return (config.get(MCP_TOOL_GATEWAY) or "").strip().lower() in {"on", "1", "true"}
 
 
 def _narrow_or_passthrough(tool: Tool, kinds: frozenset[ResourceKind] | None) -> Tool:
@@ -108,7 +101,7 @@ class ToolExposureMiddleware(Middleware):
         try:
             ctx = request_context()
             visible = visible_tool_names(ctx, (tool.name for tool in tools))
-            if _gateway_enabled():
+            if gateway_enabled():
                 visible &= CORE_TOOLS
         except AuthError:
             _log.debug("no verified token in on_list_tools; advertising the full catalog")

@@ -23,8 +23,21 @@ from __future__ import annotations
 from collections.abc import Iterable
 from enum import StrEnum
 
+import kdive.config as config
+from kdive.config.core_settings import MCP_TOOL_GATEWAY
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import _PLATFORM_IMPLIES, PlatformRole, Role
+
+
+def gateway_enabled() -> bool:
+    """Return True when KDIVE_MCP_TOOL_GATEWAY is set to on/1/true (default off, ADR-0268).
+
+    Single source of truth for the gateway toggle: the exposure middleware reads it to
+    decide whether to clip ``list_tools`` to ``CORE_TOOLS``, and ``build_instructions``
+    reads it so the advertised instructions match the surface the agent actually sees.
+    """
+    return (config.get(MCP_TOOL_GATEWAY) or "").strip().lower() in {"on", "1", "true"}
+
 
 _ROLE_RANK: dict[Role, int] = {
     Role.VIEWER: 0,
