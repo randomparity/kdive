@@ -16,7 +16,7 @@
 - **No ADR citations in agent-facing text** (ADR-0270), but config `help=` is operator-facing — an ADR cite there is fine (matches existing settings).
 - **Doc-style guard:** plain, factual prose; use "Milestone" not "Sprint"; avoid "critical/robust/comprehensive/elegant".
 - **Commit trailer (every commit):** `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
-- **Verified ground truth (do not re-litigate):** FastMCP 3.4.2 has no global tool serializer; `structured_content` is a hard-coded full dump (`fastmcp/tools/base.py:324`). First-added middleware is **outermost** — it processes the response **last** (verified: IN `A,B,C` / OUT `C,B,A`). `ToolResult` signature is `(content, structured_content, meta, is_error)` and exposes `.meta`. `tools.invoke` returns the inner `ToolResult` directly (`gateway.py:115`), so compaction is idempotent across the gateway double pass. Config test idiom: `monkeypatch.setenv(...)` is sufficient — the autouse `reset_config` fixture (`tests/conftest.py:32`) clears the snapshot and `config.get` lazy-loads.
+- **Verified ground truth (do not re-litigate):** FastMCP 3.4.2 has no global tool serializer; `structured_content` is a hard-coded full dump (`fastmcp/tools/base.py:324`). First-added middleware is **outermost** — it processes the response **last** (verified empirically: IN `A,B,C` / OUT `C,B,A`). `ToolResult.__init__` signature is `(content, structured_content, meta, is_error)` — it accepts `meta=` and exposes `.meta` (verified: `ToolResult(structured_content={...}).meta` is a readable attribute). Constructing `ToolResult(structured_content={...})` with `content` omitted **regenerates a non-empty `content` text block** from the dict (verified: `.content` has one `TextContent` whose `.text` is the JSON of the structured content) — this is why compacting `structured_content` also shrinks the `content` copy. `tools.invoke` returns the inner `ToolResult` directly (`gateway.py:115`, `run_middleware=True`), so compaction is idempotent across the gateway double pass (verified end-to-end: a `tools.invoke(name="images.list")` response comes back with inner `items[]` rows compacted). Config test idiom: `monkeypatch.setenv(...)` is sufficient — the autouse `reset_config` fixture (`tests/conftest.py:32`) clears the snapshot and `config.get` lazy-loads.
 
 ---
 
@@ -168,6 +168,7 @@ Create `tests/mcp/middleware/test_compact.py`. This mirrors the `_FakeContext` /
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -220,8 +221,6 @@ def test_enabled_compacts_collection_and_items(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_enabled_compacts_content_text_block(monkeypatch: pytest.MonkeyPatch) -> None:
-    import json
-
     out = _drive(_full_collection(), enabled=True, monkeypatch=monkeypatch)
     assert out.content, "content block must be regenerated"
     parsed = json.loads(out.content[0].text)
@@ -413,7 +412,7 @@ def test_build_app_silent_when_compact_disabled(
     assert not any("compact_responses enabled" in r.getMessage() for r in caplog.records)
 ```
 
-Confirm `import pytest` and `import logging` are present at the top of `tests/mcp/core/test_app.py`; add `import pytest` if missing.
+`import pytest` is already present at `tests/mcp/core/test_app.py:9` and the new tests need no additional imports (they use the `caplog` fixture and `pytest.MonkeyPatch`/`pytest.LogCaptureFixture` hints). Do **not** add `import logging` to the test file — it is unused there and ruff would flag F401. The `logging` import belongs only in `src/kdive/mcp/app.py` (Step 3).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -439,11 +438,11 @@ Add a module logger after the imports (top level, before `build_app`):
 _log = logging.getLogger(__name__)
 ```
 
-In `build_app`, register `CompactResponseMiddleware` as the **first** middleware — before `TelemetryMiddleware` — and emit the startup log. Replace the existing first `app.add_middleware(TelemetryMiddleware(...))` block so the compact middleware precedes it:
+In `build_app`, register `CompactResponseMiddleware` **unconditionally** as the **first** middleware — before `TelemetryMiddleware` — and emit the startup log only when the flag is on. Insert this immediately before the existing first `app.add_middleware(TelemetryMiddleware(...))` block:
 
 ```python
+    app.add_middleware(CompactResponseMiddleware())  # first == outermost (ADR-0314)
     if compact_responses_enabled():
-        app.add_middleware(CompactResponseMiddleware())
         _log.info("compact_responses enabled")
     app.add_middleware(
         TelemetryMiddleware(
@@ -452,7 +451,7 @@ In `build_app`, register `CompactResponseMiddleware` as the **first** middleware
     )
 ```
 
-Rationale: first-added is outermost, so it processes the response last — after Telemetry/Usage read the full envelope and after DenialAudit/BindingError synthesize their envelopes. Registering it only when enabled keeps the disabled path free of even a no-op middleware frame, and satisfies the "silent when off" test.
+Rationale: first-added is outermost, so it processes the response last — after Telemetry/Usage read the full envelope and after DenialAudit/BindingError synthesize their envelopes. **Register unconditionally** — the middleware's `on_call_tool` no-ops per call via `compact_responses_enabled()` when off (one negligible frame), so the ordering test can build the app with the flag off and still find the middleware, and a runtime flag flip takes effect without rebuilding the app. Only the `_log.info` is gated, satisfying the "silent when off" test.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -461,48 +460,69 @@ Expected: PASS (3 cases).
 
 - [ ] **Step 5: Add gateway + synthesized-envelope integration tests**
 
-Append to `tests/mcp/middleware/test_compact.py` an integration section that drives a real FastMCP app + `Client` (mirror the `Client(app)` usage in `tests/mcp/core/test_binding_error_middleware.py`). These prove the outermost ordering compacts synthesized envelopes and that a gateway-routed call is compacted at both levels.
+Append to `tests/mcp/middleware/test_compact.py` an integration section that drives a real FastMCP app + `Client` (mirror the `Client(app)` usage in `tests/mcp/core/test_binding_error_middleware.py`). This is **verified to work** end-to-end (the gateway's `tools.invoke` re-enters the middleware chain with `run_middleware=True`, so the inner call compacts and the outer pass compacts again — idempotent; an unknown-tool call yields a handler-synthesized failure envelope that the outermost middleware compacts). Put the group imports at the top of the file with the other imports (not inline) to avoid ruff E402.
+
+Add these imports to the file header (`json` is already imported from Task 2 Step 1):
 
 ```python
-# --- integration: real app, flag on ----------------------------------------
+from fastmcp import Client, FastMCP
 
-import json  # noqa: E402  (grouped with the integration section)
+from kdive.mcp.tools.gateway import register as register_gateway
+from kdive.providers.core.resolver import ProviderResolver
+```
 
-from fastmcp import Client, FastMCP  # noqa: E402
+Then the integration tests:
 
-from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware  # noqa: E402
-
-
-def _compact_app() -> FastMCP:
-    """A minimal app with Compact outermost of BindingError, plus a list + a raising tool."""
+```python
+def _gateway_app() -> FastMCP:
+    """A minimal app: Compact outermost, the real tools.invoke gateway, and one list tool."""
     app = FastMCP(name="probe")
     app.add_middleware(CompactResponseMiddleware())  # first == outermost
-    app.add_middleware(BindingErrorMiddleware())
+    register_gateway(app, resolver=ProviderResolver({}))
 
     @app.tool(name="images.list")
     async def images_list() -> ToolResponse:
         rows = [ToolResponse.success("img-0", "registered", data={"name": "n0"})]
-        return ToolResponse.collection("images", "ok", rows,
-                                       suggested_next_actions=["images.list"])
+        return ToolResponse.collection("images", "ok", rows)
 
     return app
 
 
-def test_integration_list_response_compacted_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_integration_gateway_routed_response_compacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    # tools.invoke re-enters the chain (run_middleware=True): inner + outer compaction pass.
     monkeypatch.setenv("KDIVE_COMPACT_RESPONSES", "on")
 
     async def _run() -> dict[str, Any]:
-        async with Client(_compact_app()) as client:
-            res = await client.call_tool("images.list", {})
+        async with Client(_gateway_app()) as client:
+            res = await client.call_tool("tools.invoke", {"name": "images.list", "arguments": {}})
             return res.structured_content
 
     sc = asyncio.run(_run())
-    assert "error_category" not in sc
-    assert "error_category" not in sc["items"][0]
-    assert sc["items"][0]["data"] == {"name": "n0"}
+    assert "error_category" not in sc and "refs" not in sc
+    row = sc["items"][0]
+    assert set(row) == {"object_id", "status", "data"}  # inner row compacted too
+    assert row["data"] == {"name": "n0"}
+
+
+def test_integration_synthesized_failure_envelope_compacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An unknown tool makes tools.invoke synthesize a full configuration_error envelope; the
+    # outermost middleware must compact it (proving it wraps handler/downstream-synthesized results).
+    monkeypatch.setenv("KDIVE_COMPACT_RESPONSES", "on")
+
+    async def _run() -> dict[str, Any]:
+        async with Client(_gateway_app()) as client:
+            res = await client.call_tool("tools.invoke", {"name": "nope.missing", "arguments": {}})
+            return res.structured_content
+
+    sc = asyncio.run(_run())
+    assert sc["error_category"] == "configuration_error"
+    assert sc["retryable"] is False and sc["detail"]  # failure fields kept
+    assert "refs" not in sc and "items" not in sc  # empty defaults compacted away
 ```
 
-Note: if the harness's `Client` structured-content access differs, read the returned `CallToolResult.structured_content` (FastMCP client) — the assertion targets the compacted envelope. A synthesized-envelope case (e.g. `allocations.request` shape-XOR through `BindingErrorMiddleware`) is already covered structurally by `test_compact_middleware_is_registered_outermost` + the unit `test_enabled_preserves_direct_failure_fields`; add a binding-error integration case only if the app harness above can register that tool cheaply, otherwise rely on the ordering test.
+Note: the `register_gateway`/`ProviderResolver({})` combo logs a benign "no registered runtimes" warning — harmless for this test.
 
 - [ ] **Step 6: Run the integration tests + guardrails**
 
@@ -570,16 +590,16 @@ Expected: pass; snapshot in sync.
 
 - [ ] **Step 4: Commit**
 
+`just resources-docs` regenerates the packaged snapshot at
+`src/kdive/mcp/resources/_content/response-envelope.md` (the mirror of the source doc,
+ADR-0151). Stage both by explicit path — inspect `git status` first, never `git add -A`:
+
 ```bash
-git add docs/guide/response-envelope.md
-# also stage whatever `just resources-docs` regenerated (the packaged snapshot file(s)):
-git add -- $(git diff --name-only)
+git add docs/guide/response-envelope.md src/kdive/mcp/resources/_content/response-envelope.md
 git commit -m "docs(1035): document opt-in compact response envelope
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
-
-(Stage the regenerated snapshot by explicit path — inspect `git status` first; do not `git add -A`.)
 
 ---
 
@@ -600,7 +620,7 @@ Re-run the matching regen recipe (`just config-docs` / `just resources-docs` / `
 
 ## Self-Review
 
-- **Spec coverage:** flag (Task 1) ✓; single-source reader (Task 1) ✓; middleware transform with exact-shape guard + exclude_defaults + meta forwarding (Task 2) ✓; outermost registration + startup log (Task 3) ✓; every acceptance criterion has a test — OFF byte-identical passthrough (T2 `test_disabled_...`), ON top-level+items omission (T2 `test_enabled_compacts_collection_and_items`), content-block compaction (T2 `test_enabled_compacts_content_text_block`), non-null-detail failure kept (T2 `test_enabled_preserves_direct_failure_fields`), from_job null-detail dropped (T2 `test_enabled_drops_null_detail_on_from_job_failure`), superset passthrough (T2 `test_enabled_passes_superset_dict_through_unchanged`), non-envelope passthrough (T2 `test_enabled_passes_non_dict_...`), idempotent (T2 `test_enabled_is_idempotent`), gateway-routed (T3 integration), startup log on/off (T3), docs + absent==default (Task 4), `just config-docs`/`just resources-docs`/`just ci` (Tasks 1/4/5) ✓.
+- **Spec coverage:** flag (Task 1) ✓; single-source reader (Task 1) ✓; middleware transform with exact-shape guard + exclude_defaults + meta forwarding (Task 2) ✓; outermost registration + startup log (Task 3) ✓; every acceptance criterion has a test — OFF byte-identical passthrough (T2 `test_disabled_...`), ON top-level+items omission (T2 `test_enabled_compacts_collection_and_items`), content-block compaction (T2 `test_enabled_compacts_content_text_block`), non-null-detail failure kept (T2 `test_enabled_preserves_direct_failure_fields`), from_job null-detail dropped (T2 `test_enabled_drops_null_detail_on_from_job_failure`), superset passthrough (T2 `test_enabled_passes_superset_dict_through_unchanged`), non-envelope passthrough (T2 `test_enabled_passes_non_dict_...`), idempotent (T2 `test_enabled_is_idempotent`), gateway-routed double pass (T3 `test_integration_gateway_routed_response_compacted`), synthesized failure envelope compacted (T3 `test_integration_synthesized_failure_envelope_compacted`), outermost ordering (T3 `test_compact_middleware_is_registered_outermost`), startup log on/off (T3 `test_build_app_logs_when_compact_enabled` / `_silent_when_compact_disabled`), docs + absent==default (Task 4), `just config-docs`/`just resources-docs`/`just ci` (Tasks 1/4/5) ✓.
 - **Placeholder scan:** none — every code/test step shows full content.
 - **Type consistency:** `compact_responses_enabled()`, `CompactResponseMiddleware`, `_compact_result`, `COMPACT_RESPONSES` names are used identically across tasks.
 
