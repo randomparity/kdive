@@ -65,9 +65,16 @@ both ≠ the `None` default) are non-default on every failure and always kept, w
 `None` (a worker-plane `from_job` FAILED envelope, null by design). Re-validation
 re-derives `retryable` from `error_category` via the model validator, so the
 ADR-0019 invariant is preserved. Compaction is idempotent (re-validating a compact
-dict refills defaults, re-dumping drops them again), so the gateway meta-tool
-double pass is safe. A consumer must read an omitted field as its documented
-default — key-absence is not a distinct signal.
+dict refills defaults, re-dumping drops them again), so the gateway double pass is
+safe: `tools.invoke` returns the inner tool's `ToolResult` directly
+(`gateway.py:115`), compacted on its own pass and again on the outer pass, so the
+savings reach gateway-routed calls. A consumer must read an omitted field as its
+documented default — key-absence is not a distinct signal. The subset guard leans
+on the surface-wide ADR-0019 invariant that every tool returns a `ToolResponse`;
+it is that invariant, not the guard alone, that makes reshaping lossless.
+
+When the flag is on, `build_app` emits one `compact_responses enabled` startup log
+so a downstream break is attributable to compaction rather than a producer bug.
 
 ## Consequences
 

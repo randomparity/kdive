@@ -99,12 +99,20 @@ Behavior:
 2. When on, obtain `result = await call_next(context)`. If `result` is not a
    `ToolResult` with a `dict` `structured_content`, return it unchanged.
 3. **Exact-shape guard.** Only compact a dict whose top-level keys are a subset
-   of the `ToolResponse` field names (`set(sc) <= set(ToolResponse.model_fields)`).
-   `ToolResponse` has no `model_config`, so pydantic's default `extra="ignore"`
-   would let a *superset* dict validate and silently drop its extra keys — that is
-   corruption, not passthrough. The subset guard means any dict carrying a key the
-   envelope does not define passes through untouched, so "non-envelope ⇒ unchanged"
-   is a real guarantee, not just the `ValidationError` case.
+   of the `ToolResponse` field names (`set(sc) <= set(ToolResponse.model_fields)`)
+   *and* which then validates as a `ToolResponse` (validation requires `object_id`
+   and `status`). `ToolResponse` has no `model_config`, so pydantic's default
+   `extra="ignore"` would otherwise let a *superset* dict validate and silently
+   drop its extra keys — that is corruption, not passthrough. The subset guard is
+   **necessary but not sufficient** on its own: the actual safety guarantee is the
+   surface-wide ADR-0019 invariant that *every* tool returns a `ToolResponse`, so a
+   tool's `structured_content` is always a genuine envelope dump — reshaping it
+   compactly is correct, never lossy. The guard exists to keep that true even if a
+   future tool bypasses the envelope: a dict carrying an undefined key, or one that
+   fails validation, passes through untouched. It does **not** claim to distinguish
+   a coincidentally-envelope-shaped non-envelope dict — that case cannot arise while
+   the ADR-0019 invariant holds, which a completeness guard (the ADR-0170 output
+   schema sweep over the live registry) already anchors.
 4. Re-validate the guarded dict into a `ToolResponse` and re-dump it compactly:
    `ToolResponse.model_validate(sc).model_dump(mode="json", exclude_defaults=True)`.
    Return `ToolResult(structured_content=<compact dict>, meta=result.meta)`.
@@ -114,6 +122,15 @@ Behavior:
 5. On `ValidationError` (a subset-shaped dict that still fails field validation)
    or any non-dict structured content, return the original result unchanged —
    fail safe, never corrupt a response.
+
+### Observability
+
+Compaction is a deployment-wide change to the wire shape, and the absent==default
+contract is the one way it can break a non-adopting consumer. So when the flag is
+on, `build_app` emits a single startup log line (`compact_responses enabled`) at
+assembly time — the same place the gateway flag is read — so a downstream break is
+attributable to compaction (not a producer bug) and an operator can confirm the
+active mode from the logs. No per-call logging (that would defeat the token goal).
 
 `model_dump(exclude_defaults=True)` is the primitive rather than a hand-written
 field-stripper: pydantic recurses into `items` applying the same rule, and it
@@ -126,8 +143,15 @@ design — see `responses.py:86-88`). Re-validation recomputes `retryable` from
 `error_category` via the existing model validator, so it stays consistent.
 
 Compaction is **idempotent**: re-validating a compact dict refills the defaults,
-and re-dumping drops them again — so the double pass on gateway meta-tools
-(`tools.invoke`/`tools.search`, which re-enter the middleware chain) is safe.
+and re-dumping drops them again — so the double pass on gateway meta-tools is
+safe. `tools.invoke` returns the inner tool's `ToolResult` directly
+(`gateway.py:115`: `app.call_tool(..., run_middleware=True)`), so the inner call
+is compacted on its own middleware pass and the outer `tools.invoke` pass compacts
+the same object again (idempotent, safe) — meaning the token savings **do** reach
+gateway-routed calls, the primary beneficiary. The inner envelope is surfaced as
+`tools.invoke`'s own top-level `structured_content`, not nested inside its `data`,
+so it is genuinely trimmed. (`tools.search` nests tool *schemas* in `data`, which
+are payload, not envelopes, and are correctly left untouched.)
 
 ## Acceptance criteria
 
@@ -152,6 +176,11 @@ and re-dumping drops them again — so the double pass on gateway meta-tools
       passes through unchanged — the extra key survives, nothing is dropped.
 - [ ] With the flag **on**, non-dict / non-envelope structured content (a
       constructed test double) passes through unchanged (no crash, no mutation).
+- [ ] With the flag **on**, a list response routed through `tools.invoke`
+      (e.g. `tools.invoke(name="images.list")`) is compacted at both the outer
+      envelope and each inner `items[]` row (idempotent double pass).
+- [ ] With the flag **on**, `build_app` emits exactly one `compact_responses
+      enabled` startup log line; with the flag **off**, none.
 - [ ] Compacting an already-compact response yields the same dict (idempotent).
 - [ ] `docs/guide/response-envelope.md` documents the opt-in flag, its contract,
       **and the absent==default consumer rule** (under compaction an omitted field
@@ -167,9 +196,13 @@ and re-dumping drops them again — so the double pass on gateway meta-tools
   does not define fails the exact-shape subset guard → pass through unchanged (its
   extra keys survive). A subset-shaped dict that still fails field validation
   raises `ValidationError` → pass through unchanged. Both paths are safe.
-- **`data` holding an explicit `None`/`{}` value.** Left untouched: `data`
-  contents are payload, not envelope defaults; `exclude_defaults` does not
-  recurse into a plain `dict` value.
+- **`data` contents vs an empty top-level `data`.** A *non-empty* `data` dict is
+  preserved verbatim — `exclude_defaults` does not recurse into a plain `dict`, so
+  a `next_cursor=None` or a nested `{}` *inside* `data` survives (it is payload).
+  But an *empty* top-level `data={}` equals the field's default and **is** omitted,
+  consistent with the absent==default rule (a plain `success()` with no payload
+  compacts to just `object_id` + `status`). A `collection()` always has a non-empty
+  `data` (it carries `count`), so its `data` is always kept.
 - **Absent==default consumer contract.** Compaction erases the distinction
   between an explicitly-empty field and an absent one (e.g. a CANCELED job's
   `suggested_next_actions=[]` disappears). This is intentional and load-bearing:
