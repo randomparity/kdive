@@ -211,10 +211,14 @@ regenerated `_content/*.md` alongside the canonical edits so `just resources-doc
   the asserted token set.
 - `tests/mcp/lifecycle/test_recovery_redaction.py` (~81, 97) and `test_recovery_helpers.py` (~80) —
   these plant `provider.local-libvirt.ssh_credential_ref` as a redaction/allowlist marker. Read each
-  test's intent, then drop the now-subjectless `test_system_envelope_excludes_ssh_credential_ref` and
-  the `ssh_credential_ref` plant in `test_recovery_helpers.py`; the `kernel_source_ref` plant already
-  present in both tests keeps the envelope-exclusion / allowlist path covered. Do **not** invent a new
-  secret field to keep the test alive — the section has none.
+  test's intent, then:
+  - **Repoint** `test_system_envelope_excludes_ssh_credential_ref` to plant a still-present field
+    (`kernel_source_ref`) instead of deleting it — it is the only dedicated `system_envelope`
+    assertion, and repointing keeps the `system_envelope → provisioning_profile_summary` wiring
+    explicitly guarded (rename it accordingly, e.g. `..._excludes_kernel_source_ref`).
+  - **Drop** the `ssh_credential_ref` plant in `test_recovery_helpers.py:80`; its `kernel_source_ref`
+    plant (~79) already covers the `provisioning_profile_summary` allowlist directly.
+  Do **not** invent a new secret field — the local-libvirt section has none after this change.
 - Update any served-resource snapshot / `test_provisioning_for_debugging_docs` assertions that
   reference the removed text.
 

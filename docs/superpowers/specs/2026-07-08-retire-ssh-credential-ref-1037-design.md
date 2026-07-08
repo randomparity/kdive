@@ -208,12 +208,11 @@ set at spec time, not a substitute for the grep.
 - `tests/mcp/lifecycle/test_recovery_redaction.py:81,97` and `test_recovery_helpers.py:80`: these
   **plant** `provider.local-libvirt.ssh_credential_ref` as a redaction/allowlist marker (raw dicts —
   no parse break, but caught by the grep gate). Their subject is the field being removed. Decision:
-  the `local-libvirt` section no longer carries any secret-bearing field, so drop the
-  now-subjectless `test_system_envelope_excludes_ssh_credential_ref` and the `ssh_credential_ref`
-  plant in `test_recovery_helpers.py` — `kernel_source_ref` (already planted in both tests) keeps a
-  live redaction subject, so coverage of the envelope-exclusion path is retained. Confirm the
-  `build_profile_summary` allowlist behavior stays asserted via the surviving `kernel_source_ref`
-  assertions before deleting.
+  the `local-libvirt` section no longer carries any secret-bearing field, so **repoint**
+  `test_system_envelope_excludes_ssh_credential_ref` to plant `kernel_source_ref` (it is the only
+  dedicated `system_envelope` assertion — keep it guarding the `system_envelope → summary` wiring),
+  and **drop** the redundant `ssh_credential_ref` plant in `test_recovery_helpers.py` whose
+  `kernel_source_ref` plant already covers the `provisioning_profile_summary` allowlist directly.
 - `tests/mcp/debug/test_debug_tools.py`: replace the ref-resolution start_session tests with:
   - drgn-live `start_session` on a ready local System with **no** `ssh_credential_ref` succeeds;
   - the bootstrap key value is registered in the redaction registry after a drgn-live start
