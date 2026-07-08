@@ -53,9 +53,17 @@ they are resolved:
   ServerBuildProfile`. → collapsed in Task 3.
 - `services/runs/complete_build.py`, `mcp/tools/catalog/artifacts/uploads.py`,
   `build_artifacts/validation.py`, `components/requirements.py` — config-validation / profile
-  plumbing. → Task 3.
-- `build_configs/**` importers: `admin/build_configs.py`, `inventory/reconcile/build_configs.py`,
-  `inventory/model.py`, `inventory/cli.py`. → Task 4.
+  plumbing. `ConfigRequirements`/`CmdlineRequirements` **data classes survive** (inert
+  `FixtureManifest` fields); only the validator functions die. → Task 3.
+- `mcp/tool_registration.py` (real hub) registers `build_configs` (→ Task 1) and `ops.build_hosts`
+  (→ Task 2); `mcp/exposure.py` holds the RBAC keys for both (Task 1 + Task 2, regen RBAC matrix).
+- `providers/core/runtime.py` `builder: Builder` required field + every `*/composition.py` builder
+  construction. → structural surgery in Task 2.
+- `diagnostics/kernel_src.py`, `providers/remote_libvirt/diagnostics/contribution.py`,
+  `inventory/reconcile/{pipeline,build_hosts,overrides}.py`, `__main__.py` `_build_reconcile_config`
+  — surviving importers of deleted build-host/db/telemetry symbols. → Task 2.
+- `build_configs/**` importers: `admin/build_configs.py`, `inventory/reconcile/build_configs.py`
+  (imported by `inventory/reconcile/pipeline.py`), `inventory/model.py`, `inventory/cli.py`. → Task 4.
 
 ---
 
@@ -75,9 +83,14 @@ that nothing else imports except the MCP registrar/tool-index. Leaves `runs.crea
   registrations and their imports; prune every docstring / `suggested_next_actions` that names
   `runs.build`, `runs.validate_profile`, `runs.profile_examples`, or `buildconfig.*`. Keep
   `runs.create`, `runs.complete_build`, `runs.bind/cancel/install/boot`.
-- Modify: `src/kdive/mcp/tools/catalog/registrar.py` (or wherever `buildconfig.*` is registered)
-  — drop the buildconfig registrations.
+- Modify: `src/kdive/mcp/tool_registration.py` (the real registration hub — there is no
+  `catalog/registrar.py`) — remove the `build_configs` import (line ~23) and its
+  `build_configs.register(...)` call (line ~157).
 - Modify: `src/kdive/mcp/tool_index.py` — remove keyword entries for the deleted tools.
+- Modify: `src/kdive/mcp/exposure.py` — drop the RBAC/visibility keys `buildconfig.set/delete/get/list`,
+  `runs.profile_examples`, `runs.validate_profile` (keep `build_hosts.*` for Task 2). The generated
+  RBAC tool matrix / reference index is derived from this; regen and reconcile
+  `tests/scripts/test_gen_rbac_tool_matrix.py`.
 - Delete tests: `tests/mcp/catalog/test_build_configs_tool.py`,
   `tests/mcp/lifecycle/test_runs_build*.py`, `tests/mcp/lifecycle/test_validate_profile*.py`,
   `tests/mcp/lifecycle/test_profile_examples*.py`,
@@ -128,6 +141,12 @@ but nothing special-cases it (a transient dead-but-green state fixed in Task 3).
 - `src/kdive/db/build_hosts.py`, `src/kdive/db/build_host_policy.py`,
   `src/kdive/db/buildhost_agent_probes.py`.
 - `src/kdive/mcp/tools/ops/build_hosts/**`.
+- `src/kdive/inventory/reconcile/build_hosts.py` (imports `db.build_hosts.BuildHostKind`; called
+  by `inventory/reconcile/pipeline.py`).
+- `src/kdive/diagnostics/kernel_src.py` — warm-tree kernel-**source** diagnostics (server-build
+  only: imports `db.build_host_policy` + `db.build_hosts.get_by_id(WORKER_LOCAL_ID)`). Delete it
+  and its registration in the diagnostics contribution / `ops.diagnostics`; sweep
+  `rg -n 'kernel_src' src` to catch the registrar.
 
 **Files — modify (surgery):**
 - `src/kdive/jobs/handlers/runs/registrar.py` — drop the `JobKind.BUILD` /
@@ -150,9 +169,28 @@ but nothing special-cases it (a transient dead-but-green state fixed in Task 3).
   for now (Task 3 simplifies it).
 - `src/kdive/components/validation.py` — remove its `build_host_selection` import/use (find with
   `rg -n build_host_selection src/kdive/components/validation.py`; drop the dead check).
-- Provider assembly/composition: remove `Builder`/build references left dangling by the deleted
-  `providers/ports/build.py` and `providers/assembly/build_hosts.py` (sweep
-  `rg -n 'Builder|assembly.build_hosts|ports.build' src/kdive/providers`).
+- **Provider runtime + composition (structural).** `src/kdive/providers/core/runtime.py` declares
+  `builder: Builder` as a **required** field (import at line ~21, field at ~71); each provider's
+  `composition.py` constructs a concrete builder (`local_libvirt/composition.py` →
+  `LocalLibvirtBuild.from_env`, `fault_inject/composition.py` → `FaultInjectBuild(...)`,
+  `remote_libvirt/composition.py` → `RemoteLibvirtBuild` + `BuildTransport` +
+  `RemoteLibvirtBuildVmReaper`). Drop the `builder` field + import from `ProviderRuntime` and
+  remove each provider's builder construction (and the remote build-VM reaper wiring). Sweep with
+  `rg -n 'Builder|LocalLibvirtBuild|RemoteLibvirtBuild|FaultInjectBuild|ports\.build|assembly\.build_hosts|Build.*Reaper' src/kdive/providers`.
+- `src/kdive/inventory/reconcile/pipeline.py` — remove the `reconcile_build_hosts` import (line ~18)
+  and its `await reconcile_build_hosts(...)` call (~42). (The `reconcile_build_configs` call is
+  removed in Task 4.)
+- `src/kdive/inventory/reconcile/overrides.py` — remove the `db.build_hosts.BuildHostKind` import
+  (~31) and the `EPHEMERAL_LIBVIRT` override branch (~213-217).
+- `src/kdive/__main__.py` — in `_build_reconcile_config` (~614) drop the
+  `reconciler.build_host_fleet.BuildHostTelemetry` import and its `ReconcileConfig` wiring, in
+  lockstep with the `loop.py` counter/field removals.
+- `src/kdive/providers/remote_libvirt/diagnostics/contribution.py` — remove the
+  `diagnostics.buildhost_agent_check` import (~13), the sibling `buildhost_agent` probe use, the
+  `_buildhost_agent_check` factory, and its registration in the diagnostics contribution (~100-111).
+- `src/kdive/mcp/tool_registration.py` — drop the `ops.build_hosts` import (~50),
+  `_register_ops_build_hosts_tools` (~203-206), and its entry in the registration list (~282).
+- `src/kdive/mcp/exposure.py` — drop the `build_hosts.*` RBAC keys (regen the RBAC matrix).
 
 **Files — delete tests:** all of `tests/providers/build_host/**`,
 `tests/providers/local_libvirt/test_build.py`, `tests/providers/remote_libvirt/build/**` +
@@ -175,7 +213,7 @@ but nothing special-cases it (a transient dead-but-green state fixed in Task 3).
 - [ ] **Step 1: Surgery first.** Edit the six modify-files above to drop every reference to the
   soon-deleted symbols. This must precede deletion so intermediate greps are meaningful.
 - [ ] **Step 2: Delete the execution + fleet modules and their tests** (`git rm`).
-- [ ] **Step 3: Sweep.** `rg -n 'build_host|BuildPhaseRecorder|build_telemetry|BuildHostProber|build_host_selection|jobs.handlers.runs.build|handlers.runs.composite|providers.ports.build|assembly.build_hosts' src` must return only surviving *rootfs*-image build references (e.g. `rootfs_build.py`) and the inert `JobKind.BUILD*` enum members — nothing importing a deleted module.
+- [ ] **Step 3: Sweep.** `rg -n 'build_host|BuildHostKind|BuildPhaseRecorder|build_telemetry|BuildHostProber|BuildHostTelemetry|build_host_selection|kernel_src|reconcile_build_hosts|jobs.handlers.runs.build|handlers.runs.composite|providers.ports.build|assembly.build_hosts|LocalLibvirtBuild|RemoteLibvirtBuild|FaultInjectBuild|\.builder\b|buildhost_agent' src` must return only surviving *rootfs*-image build references (e.g. `rootfs_build.py`) and the inert `JobKind.BUILD*` enum members — nothing importing a deleted module or reading the removed `ProviderRuntime.builder`.
 - [ ] **Step 4: Guardrails.** `just lint && just type && just test && just docs-check`. Expect
   the external-lane, install, boot, reconciler (non-fleet), and rootfs-image-build tests to stay
   green.
@@ -209,11 +247,17 @@ Collapses the profile model and removes every remaining reader of `ServerBuildPr
   `'conditional'` to `'optional'`; rewrite its note; delete `_validate_effective_config`; drop the
   `profile_requirements` parameter from `validate_external_artifacts`; remove the
   `ConfigRequirements` / `validate_config_requirements` import.
-- `src/kdive/components/requirements.py` — delete `ConfigRequirements`, `validate_config_requirements`,
-  `load_profile_config_requirements`, and the dead `validate_cmdline_requirements`. Keep only what
-  `FixtureManifest` (`components/catalog.py`) still references (the inert `CmdlineRequirements`
-  data shape, if referenced). **Do not touch** `services/runs/steps.py` `platform_owned_cmdline_token`
-  — that is the real install/boot cmdline gate and stays.
+- `src/kdive/components/requirements.py` — delete the **validator functions and helpers**:
+  `validate_config_requirements`, `validate_cmdline_requirements` (dead code),
+  `load_profile_config_requirements`, and `_parse_config` (if unused after those go). **Keep the
+  `ConfigRequirements` and `CmdlineRequirements` data classes** — `FixtureManifest`
+  (`components/catalog.py:42-43`) declares `config: ConfigRequirements` and `cmdline:
+  CmdlineRequirements` fields, and a fixture (`fixtures/local-libvirt/profiles/console-ready_x86_64.yaml`)
+  populates `config:`, so deleting the classes would dangle `catalog.py` and break fixture parse.
+  The classes become inert data shapes (no code reads them for gating). **Do not touch**
+  `services/runs/steps.py` `platform_owned_cmdline_token` — that is the real install/boot cmdline
+  gate and stays. `components/validation.py` was already stripped of its `build_host_selection`
+  use in Task 2.
 
 **Files — modify tests:**
 - `tests/profiles/test_build.py`, `tests/profiles/test_build_profile_source.py` — drop
@@ -239,7 +283,10 @@ Collapses the profile model and removes every remaining reader of `ServerBuildPr
   per the modify list; remove the config-validation plumbing.
 - [ ] **Step 4: Prune `components/requirements.py`** to only what `FixtureManifest` references;
   delete its dead-code test.
-- [ ] **Step 5: Sweep.** `rg -n 'ServerBuildProfile|profile_requirements|ConfigRequirements|validate_config_requirements|validate_cmdline_requirements|is_git_source|MAX_CONFIG_FRAGMENTS' src tests` must be empty.
+- [ ] **Step 5: Sweep.**
+  `rg -n 'ServerBuildProfile|profile_requirements|validate_config_requirements|validate_cmdline_requirements|load_profile_config_requirements|is_git_source|MAX_CONFIG_FRAGMENTS' src tests`
+  must be empty. Note `ConfigRequirements` / `CmdlineRequirements` **intentionally survive** as
+  inert `FixtureManifest` data shapes — do not sweep for them.
 - [ ] **Step 6: Run the new test — it PASSES.** Then guardrails
   `just lint && just type && just test && just docs && just docs-check`.
 - [ ] **Step 7: Commit** — `feat(build)!: flatten BuildProfile and drop all kernel-config validation`.
@@ -254,9 +301,12 @@ Collapses the profile model and removes every remaining reader of `ServerBuildPr
 (`src/kdive/cli/__main__.py` or `src/kdive/__main__.py` registration + its handler).
 
 **Files — modify (sweep remaining importers):**
+- `src/kdive/inventory/reconcile/pipeline.py` — remove the `reconcile_build_configs` import
+  (line ~17) and its `await reconcile_build_configs(conn, doc, store)` call (~43). **This is the
+  actual importer** — the `reconcile_build_hosts` sibling was already removed here in Task 2.
 - `src/kdive/inventory/model.py`, `src/kdive/inventory/cli.py`,
-  `src/kdive/inventory/reconcile/__init__.py` — remove build-config reconcile registration and any
-  `build_configs` import.
+  `src/kdive/inventory/reconcile/__init__.py` — remove any build-config reconcile re-export /
+  registration and any `build_configs` import (sweep `rg -n build_configs src/kdive/inventory`).
 - Confirm `src/kdive/components/catalog.py` does **not** import `build_configs` (its
   `load_fixture_catalog` is local); adjust only if a real import exists.
 
