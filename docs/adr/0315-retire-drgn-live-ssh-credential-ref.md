@@ -44,8 +44,13 @@ on the per-System bootstrap key instead.
    (`profiles/provisioning.py`). The models are `extra="forbid"`, so a profile carrying the field is
    rejected at parse — the field is gone, not ignored.
 2. **Replace** the two vestigial `ProfilePolicy` methods (`ssh_credential_ref`,
-   `drgn_live_requires_credential`) with one boolean seam `drgn_live_uses_bootstrap_key(profile)` —
-   `True` for local-libvirt, `False` for remote-libvirt (guest-agent realization) and fault-inject.
+   `drgn_live_requires_credential`) with one boolean seam `drgn_live_seeds_bootstrap_key(profile)` —
+   true iff the drgn-live transport-open *at `start_session`* authenticates over the loopback SSH
+   forward and so must gate+seed on the per-System bootstrap key: `True` for local-libvirt, `False`
+   for remote-libvirt and fault-inject. (Remote-libvirt still has and uses a bootstrap key — the
+   shared `introspect.run` path loads it for every provider — but opens its drgn-live transport over
+   the guest-agent seam, so it needs no seed *at start_session*; the seam name is scoped to that
+   start-time step, not "remote never touches the key".)
 3. **At `start_session`** for a drgn-live transport where `drgn_live_uses_bootstrap_key` is true,
    call `load_system_bootstrap_private_key(conn, system.id, secret_registry=self._secret_registry)`
    before opening the transport. That shared loader already **fails closed** with
@@ -79,6 +84,11 @@ is a different store and is untouched.
   (profile is jsonb; no column).
 - The `ssh_credential_ref_missing` failure reason is retired; the fail-closed reason for a missing
   key is `no_bootstrap_key`.
+- Because the bootstrap key seeds redaction process-globally, no secret is registered under the
+  per-session scope on the debug path anymore, so the session-scoped seed/release machinery
+  (`_secret_scope`, `_release_failed_attach_secret`, the `start_session`/`end_session` `release`
+  calls) becomes registrant-less and is removed as dead code rather than left to imply a
+  session-scoped lifetime that no longer exists.
 - One provider-policy method shape is unchanged (boolean, same per-provider values); only its name
   and meaning change, so the three adapters and their tests update in lockstep.
 
