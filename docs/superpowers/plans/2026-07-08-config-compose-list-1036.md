@@ -358,7 +358,7 @@ git commit -m "feat(1036): add config_refs + effective-fragment compose helpers"
 
 - [ ] **Step 1: Write failing tests**
 
-Add to `tests/providers/build_host/test_orchestration.py` (reuse the file's `_validating_orchestrator`; extend it to key the fetch by name for compose):
+Add to `tests/providers/build_host/test_orchestration.py`. The compose tests below construct `BuildHostOrchestrator.create(...)` inline (with a name-keyed `catalog_fetch` and a capturing `checkout`) rather than the file's single-fragment `_validating_orchestrator` helper, which returns one fragment regardless of name; the single-guard tests in Task 4 reuse `_validating_orchestrator` unchanged:
 
 ```python
 def test_build_workspace_composes_two_catalog_fragments(tmp_path: Path) -> None:
@@ -719,27 +719,30 @@ git commit -m "feat(1036): guard rootfs-mount symbols via the requirements seam"
 - Consumes: `config_refs` (Task 2).
 - Produces: both handlers run `reject_unsupported_component_source` and (when present) `config_validator` for **every** ref in `config_refs(parsed)`, failing on the first bad ref. Behavior for a single/absent config is identical to today.
 
-- [ ] **Step 1: Write failing tests (both handlers)**
+- [ ] **Step 1: Write failing tests (both handlers, discriminating)**
 
-The two handlers' tests live in two different trees; add one test to **each**. Reuse each module's existing Run-creation, pool, and `ComponentSourceCapabilities`/`config_validator` fixtures — do not invent new ones. The shared assertion: a compose list whose *second* ref is rejected (by an unsupported source kind, or by the module's injected `config_validator`) fails the build call with `CONFIGURATION_ERROR`, proving every ref is checked, not just the first.
+The two handlers' tests live in two different trees; add one test to **each**. Reuse each module's existing Run-creation, pool, and `ComponentSourceCapabilities` fixtures — do not invent new ones. Mirror the modules' existing assertion form (the real harness compares the string, e.g. `resp.error_category == "configuration_error"`), not an enum identity.
 
-In `tests/mcp/lifecycle/test_runs_tools.py` (mirror the `_reject_config` test at ~L2905 that injects `config_validator=_reject_config` and asserts a single catalog ref is rejected — extend it so the profile's `config` is a two-element list and the rejection still fires):
+**The test must be discriminating: the FIRST ref passes and the SECOND ref is the one rejected**, so a regression that only validates `config_refs(parsed)[0]` fails. Use a source-kind mismatch against each module's accepted sources (a validator that rejects unconditionally would fire on ref #1 and prove nothing):
+
+In `tests/mcp/lifecycle/test_runs_tools.py` — `_CATALOG_COMPONENT_SOURCES` accepts only the `catalog` source, so a `config` list `[{catalog kdump}, {local <allowed-path>}]` passes `reject_unsupported_component_source` on ref #1 and fails on ref #2, proving iteration reached the second ref:
 
 ```python
-async def test_build_rejects_a_bad_ref_within_a_compose_list(...):
-    # Same harness as the single-ref _reject_config test, but config is a list; the injected
-    # config_validator rejects, proving each ref in the list is validated.
-    # config: [{catalog kdump}, {catalog kdump}]  (validator rejects on call)
+async def test_build_validates_every_ref_in_a_compose_list(...):
+    # First ref (catalog) is accepted by _CATALOG_COMPONENT_SOURCES; the second (local) is not,
+    # so a per-ref loop must reach ref #2 and reject. Mirror the module's single-ref source-
+    # rejection test for Run creation, pool, and the BuildRunHandlers(_CATALOG_COMPONENT_SOURCES).
+    # config: [{catalog kdump}, {local <path>}]
     ...
-    assert response.error_category is ErrorCategory.CONFIGURATION_ERROR
+    assert resp.error_category == "configuration_error"
 ```
 
-In `tests/mcp/tools/lifecycle/runs/test_composite_tool.py`, add the analogous list-config rejection test mirroring that module's existing single-ref source-rejection test.
+In `tests/mcp/tools/lifecycle/runs/test_composite_tool.py` — that module's profile accepts only the `local` config source, so use the inverse order `[{local <path>}, {catalog kdump}]` (ref #1 local passes, ref #2 catalog rejected). Mirror that module's existing single-ref source-rejection test.
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/test_runs_tools.py tests/mcp/tools/lifecycle/runs/test_composite_tool.py -k "compose_list or within_a_compose_list" -q`
-Expected: FAIL (only one ref is checked today; a list is not iterated).
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_runs_tools.py tests/mcp/tools/lifecycle/runs/test_composite_tool.py -k "every_ref_in_a_compose_list or validates_every_ref" -q`
+Expected: FAIL (only one ref is checked today; a list is not iterated, so ref #2 is never rejected).
 
 - [ ] **Step 3: Implement**
 
