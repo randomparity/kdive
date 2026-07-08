@@ -725,19 +725,21 @@ The two handlers' tests live in two different trees; add one test to **each**. R
 
 **The test must be discriminating: the FIRST ref passes and the SECOND ref is the one rejected**, so a regression that only validates `config_refs(parsed)[0]` fails. Use a source-kind mismatch against each module's accepted sources (a validator that rejects unconditionally would fire on ref #1 and prove nothing):
 
-In `tests/mcp/lifecycle/test_runs_tools.py` — `_CATALOG_COMPONENT_SOURCES` accepts only the `catalog` source, so a `config` list `[{catalog kdump}, {local <allowed-path>}]` passes `reject_unsupported_component_source` on ref #1 and fails on ref #2, proving iteration reached the second ref:
+In `tests/mcp/lifecycle/test_runs_tools.py` — `_CATALOG_COMPONENT_SOURCES` accepts `frozenset({"catalog", "local"})` (verify at :2758-2761), so ref #2 must be a kind *outside* that set. Use an `artifact` ref (`ArtifactComponentRef`: `{"kind": "artifact", "artifact_id": <uuid>}`, which parses but is rejected): `config: [{catalog kdump}, {artifact <uuid>}]` passes `reject_unsupported_component_source` on ref #1 and fails on ref #2, proving iteration reached the second ref:
 
 ```python
+from uuid import uuid4
+
 async def test_build_validates_every_ref_in_a_compose_list(...):
-    # First ref (catalog) is accepted by _CATALOG_COMPONENT_SOURCES; the second (local) is not,
-    # so a per-ref loop must reach ref #2 and reject. Mirror the module's single-ref source-
-    # rejection test for Run creation, pool, and the BuildRunHandlers(_CATALOG_COMPONENT_SOURCES).
-    # config: [{catalog kdump}, {local <path>}]
+    # ref #1 (catalog) is accepted by _CATALOG_COMPONENT_SOURCES {catalog, local}; ref #2
+    # (artifact) is not, so a per-ref loop must reach ref #2 and reject. Mirror the module's
+    # single-ref source-rejection test for Run creation, pool, and BuildRunHandlers(_CATALOG_COMPONENT_SOURCES).
+    # config: [{catalog kdump}, {kind: artifact, artifact_id: str(uuid4())}]
     ...
     assert resp.error_category == "configuration_error"
 ```
 
-In `tests/mcp/tools/lifecycle/runs/test_composite_tool.py` — that module's profile accepts only the `local` config source, so use the inverse order `[{local <path>}, {catalog kdump}]` (ref #1 local passes, ref #2 catalog rejected). Mirror that module's existing single-ref source-rejection test.
+In `tests/mcp/tools/lifecycle/runs/test_composite_tool.py` — that module's `_TEST_COMPONENT_SOURCES` accepts only `{"local"}` (verify at :48-50), so use `config: [{local <allowed-path>}, {catalog kdump}]` (ref #1 local passes, ref #2 catalog rejected). Mirror that module's existing single-ref source-rejection test.
 
 - [ ] **Step 2: Run to verify failure**
 
