@@ -38,21 +38,32 @@ the rootfs invariant.
    `config_refs(profile)`, replaces the three `or DEFAULT_CONFIG_REF` idioms so the resolve and
    validate sites cannot diverge. An empty list is a `CONFIGURATION_ERROR`.
 
-2. **Rootfs symbols are a platform-mandated `ConfigRequirements` set, enforced via the existing
-   validator.** A single constant `PLATFORM_ROOTFS_REQUIRED` (the five rootfs/boot symbols) is
-   validated at build against the final `.config` in `_validate_final_config`, always, reusing
-   `validate_config_requirements` and re-raising with `details.reason =
-   "platform_rootfs_symbol_missing"`. A consistency test asserts the seeded `kdump.config` satisfies
-   the set, so the constant and the seeded default cannot drift.
+2. **The whole always-on platform requirement is one surfaced-and-enforced contract.** Two constants
+   are the single source of truth: `PLATFORM_REQUIRED_CONFIG` (exact `=y` requirements — the five
+   rootfs/boot symbols plus `CONFIG_CRASH_DUMP`, moved out of the old `REQUIRED_KERNEL_CONFIG` one-element
+   group) and `REQUIRED_KERNEL_CONFIG` (reduced to the genuine debuginfo OR-group). `_validate_final_config`
+   validates the post-`olddefconfig` `.config` against both, always, reusing `validate_config_requirements`
+   (re-raising with `details.reason = "platform_config_symbol_missing"`) and the existing
+   `missing_config_groups`. Enforcement is behavior-equivalent to today, just reorganized so it is
+   surfaceable as one contract. The final-config drop-check is made **net-intent-aware** so a later
+   composed fragment that disables/downgrades an earlier symbol is honored, not flagged as a spurious
+   drop.
 
-3. **The set is surfaced, not just enforced.** `buildconfig.get` echoes `data.platform_required_config`
-   from the same constant, and the agent-facing `config` Field names the replace-not-compose semantics
-   and the platform-required set (pointing at the machine-readable field rather than re-enumerating,
-   to stay single-sourced).
+3. **The contract is surfaced as exactly what is enforced.** `buildconfig.get` echoes
+   `data.platform_required_config = {all_of, any_of}` derived from the two constants; the agent-facing
+   `config` Field names the replace-not-compose semantics and points at that field rather than
+   re-enumerating. A test asserts the surfaced payload is built from the constants the guard validates
+   against, so the discoverable set can never become a subset of the enforced one. A drift guard ties
+   the constants to the seeded `kdump.config`, and a guard-passes test exercises `_validate_final_config`
+   against a representative good final `.config` (fragment-text alone would not prove `olddefconfig`
+   survival).
 
-Scope: server-build lane only. The external/`complete` lane runs no `olddefconfig` and has no
-server-side `.config` to validate. No DB migration — the profile persists in the `runs.build_profile`
-JSONB and a list value round-trips; existing single-ref/absent profiles parse unchanged.
+Scope: server-build lane only — the `.config`-text guard is not *applicable* to the external/`complete`
+lane (no `olddefconfig`, no server-side `.config`). The unbootable-guest failure mode still exists
+there for a prebuilt kernel missing the symbols; this ADR does not claim to close it (a possible
+follow-up surfaces the requirement from `IKCONFIG` at upload). No DB migration — the profile persists
+in the `runs.build_profile` JSONB and a list value round-trips; existing single-ref/absent profiles
+parse unchanged.
 
 ## Consequences
 
@@ -62,8 +73,9 @@ JSONB and a list value round-trips; existing single-ref/absent profiles parse un
 - One requirements model spans profile requirements and the platform invariant; the guard is
   discoverable through the same surface the agent uses to pick fragments.
 - The default (absent `config`) and existing single-ref builds are byte-for-byte unchanged.
-- New failure detail `reason = "platform_rootfs_symbol_missing"` (a `CONFIGURATION_ERROR` variant, not
-  a new `ErrorCategory`).
+- New failure detail `reason = "platform_config_symbol_missing"` (a `CONFIGURATION_ERROR` variant, not
+  a new `ErrorCategory`). `REQUIRED_KERNEL_CONFIG` shrinks to the debuginfo OR-group; `CONFIG_CRASH_DUMP`
+  moves to the exact requirements set (same `=y` enforcement).
 
 ## Considered & rejected
 
