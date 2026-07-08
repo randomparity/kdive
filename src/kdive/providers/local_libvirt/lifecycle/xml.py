@@ -62,10 +62,10 @@ def render_domain_xml(
     not a credential, so every ready System is reachable by ``systems.ssh_info`` /
     ``authorize_ssh_key`` without a destructive reprovision. ``ssh_port`` is therefore **required**
     (the provisioner always allocates it), exactly like ``kernel_path``; a ``None`` is a
-    ``CONFIGURATION_ERROR``. ``ssh_credential_ref`` now gates only the drgn-live introspection
-    credential, never whether the forward exists. Both passthroughs share **one**
-    ``<qemu:commandline>`` element so a System provisioned for both transports renders a single,
-    schema-valid element.
+    ``CONFIGURATION_ERROR``. drgn-live authenticates with the per-System bootstrap key
+    (ADR-0289/0315), so the forward exists independently of any profile credential. Both
+    passthroughs share **one** ``<qemu:commandline>`` element so a System provisioned for both
+    transports renders a single, schema-valid element.
 
     ``guest_egress`` (ADR-0313, #1031) is the operator-resolved egress policy for the NIC. When
     ``False`` (the default) the forward renders ``restrict=on`` — no guest-initiated egress, the
@@ -129,8 +129,8 @@ def render_domain_xml(
         _append_gdbstub(domain, gdb_port)
     # The SSH forward is always rendered (ADR-0281, #937): it is loopback plumbing, not a
     # credential, so every ready System is reachable by `systems.ssh_info`/`authorize_ssh_key`
-    # without a destructive reprovision. `ssh_credential_ref` now gates only the drgn-live
-    # introspection credential, not whether the forward exists.
+    # without a destructive reprovision. drgn-live authenticates with the per-System bootstrap key
+    # (ADR-0289/0315), independent of the forward's presence.
     _append_ssh_forward(domain, ssh_port, guest_egress=guest_egress)
 
     return ET.tostring(domain, encoding="unicode")

@@ -13,10 +13,7 @@ class FaultInjectProfilePolicy:
     def rootfs_source(self, profile: ProvisioningProfile) -> RootfsSource | None:
         return None
 
-    def ssh_credential_ref(self, profile: ProvisioningProfile) -> str | None:
-        return None
-
-    def drgn_live_requires_credential(self, profile: ProvisioningProfile) -> bool:
+    def drgn_live_seeds_bootstrap_key(self, profile: ProvisioningProfile) -> bool:
         return False
 
     def validate_profile(self, profile: ProvisioningProfile) -> None:

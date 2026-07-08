@@ -10,10 +10,11 @@ There are two modes: **live** (over SSH against a running guest) and **offline**
 captured vmcore).
 
 **Live prerequisites.** Live introspection reaches the guest over the drgn-over-SSH transport,
-so it needs the system provisioned with an `ssh_credential_ref`, a drgn-capable guest image,
-and a guest reachable over SSH. These are bound at provision — see the
-provisioning-for-debugging notes in the investigation index. `introspect.run` and
-`introspect.script` take a live drgn-live `DebugSession`.
+which needs **no** credential provisioning: the SSH forward is rendered on every domain and the
+transport authenticates with the per-System bootstrap key, so any ready local system qualifies.
+The only requirement is a drgn-capable guest image and a guest reachable over SSH — if drgn is
+absent, `introspect.run` reports `missing_dependency`. `introspect.run` and `introspect.script`
+take a live drgn-live `DebugSession`.
 
 ## Live introspection
 

@@ -37,6 +37,10 @@ from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigati
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.debug import sessions as debug_tools
 from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
+from kdive.prereqs.system_bootstrap_key import (
+    ensure_system_bootstrap_key,
+    load_system_bootstrap_private_key,
+)
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
@@ -52,7 +56,6 @@ from kdive.providers.ports.lifecycle import (
 )
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.security.authz.rbac import AuthorizationError, Role
-from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.systems_support import provider_resolver
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
@@ -144,23 +147,14 @@ def _handlers(
     connector: _FakeConnector,
     *,
     runtime: Any | None = None,
-    secret_backend: Any | None = None,
-    secret_backend_factory: Any | None = None,
     secret_registry: SecretRegistry | None = None,
     profile_policy: ProfilePolicy = _PROFILE_POLICY,
 ) -> debug_tools.DebugSessionHandlers:
-    if secret_backend is not None:
-
-        def _backend_factory(_: UUID) -> Any:
-            return secret_backend
-
-        secret_backend_factory = _backend_factory
     registry = secret_registry if secret_registry is not None else SecretRegistry()
     runtime_resolver = None if runtime is None else _FixedDebugRuntimeResolver(runtime)
     return debug_tools.DebugSessionHandlers.from_resolver(
         provider_resolver(connector=connector, profile_policy=profile_policy),
         runtime_resolver=cast(Any, runtime_resolver),
-        secret_backend_factory=secret_backend_factory,
         secret_registry=registry,
     )
 
@@ -172,15 +166,11 @@ async def _start_session(
     run_id: str,
     transport: str = "gdbstub",
     connector: _FakeConnector,
-    secret_backend: Any | None = None,
-    secret_backend_factory: Any | None = None,
     secret_registry: SecretRegistry | None = None,
     profile_policy: ProfilePolicy = _PROFILE_POLICY,
 ):
     return await _handlers(
         connector,
-        secret_backend=secret_backend,
-        secret_backend_factory=secret_backend_factory,
         secret_registry=secret_registry,
         profile_policy=profile_policy,
     ).start_session(pool, ctx, run_id=run_id, transport=transport)
@@ -789,36 +779,6 @@ def test_start_session_without_operator_raises(migrated_url: str) -> None:
 # --- debug.start_session(transport="drgn-live") (ADR-0039) ---------------------------------------
 
 
-class _OrderRecordingBackend:
-    """A fake SecretBackend that records resolution order against a shared log.
-
-    Registers into an injected ``SecretRegistry`` (a test-local one, never the process
-    global) before returning — mirroring ``FileRefBackend``'s structural post-condition —
-    so the ordering test can assert the registry was seeded before the connector ran.
-    """
-
-    def __init__(
-        self,
-        log: list[str],
-        *,
-        value: str = "guest-ssh-secret",
-        registry: SecretRegistry | None = None,
-        scope: object | None = None,
-    ) -> None:
-        self._log = log
-        self._value = value
-        self._registry = registry
-        self._scope = scope
-        self.refs: list[str] = []
-
-    def resolve(self, ref: str) -> str:
-        self.refs.append(ref)
-        self._log.append(f"resolve:{ref}")
-        if self._registry is not None:
-            self._registry.register(self._value, scope=self._scope)
-        return self._value
-
-
 class _OrderRecordingConnector(_FakeConnector):
     """A connector that appends to a shared log when open_transport is invoked."""
 
@@ -869,20 +829,26 @@ class _ConnectionRecordingPool:
         return _ConnectionRecordingContext(self._pool.connection(), self._log)
 
 
-def _ssh_profile() -> dict[str, Any]:
-    profile = copy.deepcopy(_PROFILE)
-    profile["provider"]["local-libvirt"]["ssh_credential_ref"] = "ssh/guest-key"
-    return profile
-
-
 def _fault_inject_profile() -> dict[str, Any]:
     profile = copy.deepcopy(_PROFILE)
     profile["provider"] = {"fault-inject": {}}
     return profile
 
 
-async def _seed_ssh_system(pool: AsyncConnectionPool, alloc_id: str) -> str:
-    return await _seed_profiled_system(pool, alloc_id, _ssh_profile())
+async def _seed_drgn_system(pool: AsyncConnectionPool, alloc_id: str) -> str:
+    """Seed a ready local System with a per-System bootstrap key (drgn-live now gates on it)."""
+    sys_id = await _seed_profiled_system(pool, alloc_id, copy.deepcopy(_PROFILE))
+    async with pool.connection() as conn:
+        await ensure_system_bootstrap_key(conn, UUID(sys_id))
+    return sys_id
+
+
+async def _bootstrap_private_key(pool: AsyncConnectionPool, sys_id: str) -> str:
+    # Reuse the production reader (throwaway registry so the process singleton is untouched).
+    async with pool.connection() as conn:
+        return await load_system_bootstrap_private_key(
+            conn, UUID(sys_id), secret_registry=SecretRegistry()
+        )
 
 
 async def _seed_profiled_system(
@@ -910,18 +876,15 @@ def test_start_session_drgn_live_attaches_and_row_records_transport(migrated_url
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_ssh_system(pool, alloc_id)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
             run_id = await _seed_run(pool, sys_id)
-            log: list[str] = []
-            connector = _OrderRecordingConnector(log)
-            backend = _OrderRecordingBackend(log)
+            connector = _OrderRecordingConnector([])
             resp = await _start_session(
                 pool,
                 _ctx(),
                 run_id=run_id,
                 transport="drgn-live",
                 connector=connector,
-                secret_backend=backend,
             )
             assert resp.status == "live"
             assert connector.opened == [("kdive-x", "drgn-live")]
@@ -941,46 +904,48 @@ def test_start_session_drgn_live_attaches_and_row_records_transport(migrated_url
     asyncio.run(_run())
 
 
-def test_start_session_ssh_resolves_credential_before_opening_transport(migrated_url: str) -> None:
+def test_start_session_drgn_live_seeds_bootstrap_key_before_opening_transport(
+    migrated_url: str,
+) -> None:
+    # ADR-0315: drgn-live seeds the redaction registry from the per-System bootstrap key in the
+    # attach-request prep (before _open_transport), so the key is masked before any transport IO.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_ssh_system(pool, alloc_id)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
             run_id = await _seed_run(pool, sys_id)
-            log: list[str] = []
+            private_key = await _bootstrap_private_key(pool, sys_id)
             registry = SecretRegistry()
-            connector = _OrderRecordingConnector(log)
-            backend = _OrderRecordingBackend(log, registry=registry)
-            await _start_session(
+            connector = _OrderRecordingConnector([])
+            resp = await _start_session(
                 pool,
                 _ctx(),
                 run_id=run_id,
                 transport="drgn-live",
                 connector=connector,
-                secret_backend=backend,
+                secret_registry=registry,
             )
-            # Ordering acceptance: resolve (which registers) precedes the open.
-            assert log == ["resolve:ssh/guest-key", "open:drgn-live"]
-            assert backend.refs == ["ssh/guest-key"]
-            # The credential is in the registry before the transport was used.
-            assert "guest-ssh-secret" in registry.snapshot()
+            assert resp.status == "live"
+            assert connector.opened == [("kdive-x", "drgn-live")]
+            # The bootstrap key is registered for redaction after a successful start.
+            assert private_key in registry.snapshot()
 
     asyncio.run(_run())
 
 
-def test_start_session_ssh_resolves_connector_before_credential(migrated_url: str) -> None:
+def test_start_session_resolves_connector_before_seeding_bootstrap_key(migrated_url: str) -> None:
+    # A connector-resolution failure short-circuits before the bootstrap-key seed, so the key is
+    # never loaded into the registry.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_ssh_system(pool, alloc_id)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
             run_id = await _seed_run(pool, sys_id)
-            log: list[str] = []
+            private_key = await _bootstrap_private_key(pool, sys_id)
             registry = SecretRegistry()
-            backend = _OrderRecordingBackend(log, registry=registry)
             handlers = debug_tools.DebugSessionHandlers.from_resolver(
                 _FailingConnectorResolver(),
                 runtime_resolver=None,
-                secret_backend_factory=lambda _session_id: backend,
                 secret_registry=registry,
             )
 
@@ -994,29 +959,21 @@ def test_start_session_ssh_resolves_connector_before_credential(migrated_url: st
 
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert count == 0
-        assert backend.refs == []
-        assert log == []
-        assert "guest-ssh-secret" not in registry.snapshot()
+        assert private_key not in registry.snapshot()
 
     asyncio.run(_run())
 
 
-def test_start_session_cleans_up_open_transport_and_secret_on_insert_failure(
+def test_start_session_cleans_up_open_transport_on_insert_failure(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_ssh_system(pool, alloc_id)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
             run_id = await _seed_run(pool, sys_id)
             log: list[str] = []
-            registry = SecretRegistry()
             connector = _OrderRecordingConnector(log)
-
-            def _backend_factory(session_id: UUID) -> _OrderRecordingBackend:
-                return _OrderRecordingBackend(
-                    log, registry=registry, scope=f"debug-session:{session_id}"
-                )
 
             async def _raise_after_open(*_args: object, **_kwargs: object) -> None:
                 raise RuntimeError("insert failed")
@@ -1025,16 +982,14 @@ def test_start_session_cleans_up_open_transport_and_secret_on_insert_failure(
             handlers = debug_tools.DebugSessionHandlers.from_resolver(
                 provider_resolver(connector=connector, profile_policy=_PROFILE_POLICY),
                 runtime_resolver=None,
-                secret_backend_factory=_backend_factory,
-                secret_registry=registry,
+                secret_registry=SecretRegistry(),
             )
 
             with pytest.raises(RuntimeError, match="insert failed"):
                 await handlers.start_session(pool, _ctx(), run_id=run_id, transport="drgn-live")
 
-        assert log == ["resolve:ssh/guest-key", "open:drgn-live"]
+        assert log == ["open:drgn-live"]
         assert connector.closed == ["drgn-live://127.0.0.1:22"]
-        assert "guest-ssh-secret" not in registry.snapshot()
 
     asyncio.run(_run())
 
@@ -1068,11 +1023,13 @@ def test_start_session_opens_transport_between_db_connections(migrated_url: str)
     asyncio.run(_run())
 
 
-def test_start_session_ssh_missing_credential_ref_is_config_error(migrated_url: str) -> None:
+def test_start_session_drgn_live_no_bootstrap_key_is_config_error(migrated_url: str) -> None:
+    # ADR-0315/ADR-0289: drgn-live fails closed if the System has no per-System bootstrap key row,
+    # before any transport is opened.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)  # no ssh_credential_ref
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)  # no bootstrap key
             run_id = await _seed_run(pool, sys_id)
             connector = _FakeConnector()
             resp = await _start_session(
@@ -1081,140 +1038,72 @@ def test_start_session_ssh_missing_credential_ref_is_config_error(migrated_url: 
                 run_id=run_id,
                 transport="drgn-live",
                 connector=connector,
-                secret_backend=_OrderRecordingBackend([]),
             )
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data is not None and resp.data["reason"] == "no_bootstrap_key"
         assert count == 0
-        assert connector.opened == []  # no transport opened without a credential
+        assert connector.opened == []  # no transport opened without a bootstrap key
 
     asyncio.run(_run())
 
 
-def test_start_session_drgn_live_fault_inject_skips_credential(migrated_url: str) -> None:
-    # A fault-inject profile has no local-libvirt section, so drgn_live_requires_credential is
-    # False: the drgn-live session opens with no credential (#215/ADR-0085), like remote.
+def test_start_session_drgn_live_fault_inject_skips_bootstrap_key(migrated_url: str) -> None:
+    # A fault-inject profile realizes drgn-live off the SSH forward, so
+    # drgn_live_seeds_bootstrap_key is False: the session opens with no bootstrap-key seed.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_profiled_system(pool, alloc_id, _fault_inject_profile())
-            run_id = await _seed_run(pool, sys_id)
+            run_id = await _seed_run(pool, sys_id)  # note: no bootstrap key seeded
             connector = _FakeConnector()
-            backend = _OrderRecordingBackend([])
             resp = await _start_session(
                 pool,
                 _ctx(),
                 run_id=run_id,
                 transport="drgn-live",
                 connector=connector,
-                secret_backend=backend,
                 profile_policy=_FAULT_POLICY,
             )
         assert resp.status == "live"
         assert connector.opened == [("kdive-x", "drgn-live")]
-        assert backend.refs == []  # no credential resolved for a non-local-section profile
-
-    asyncio.run(_run())
 
 
-def test_start_session_ssh_invalid_profile_is_config_error(migrated_url: str) -> None:
+def test_start_session_drgn_live_invalid_profile_is_config_error(migrated_url: str) -> None:
+    # A stored profile that no longer parses (mangled provider key) surfaces as configuration_error
+    # from the bootstrap-key prep, before any transport is opened.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            profile = _ssh_profile()
+            profile = copy.deepcopy(_PROFILE)
             profile["provider"] = {"local_libvirt": profile["provider"]["local-libvirt"]}
             sys_id = await _seed_profiled_system(pool, alloc_id, profile)
             run_id = await _seed_run(pool, sys_id)
             connector = _FakeConnector()
-            backend = _OrderRecordingBackend([])
             resp = await _start_session(
                 pool,
                 _ctx(),
                 run_id=run_id,
                 transport="drgn-live",
                 connector=connector,
-                secret_backend=backend,
             )
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert count == 0
-        assert backend.refs == []
         assert connector.opened == []
 
-    asyncio.run(_run())
 
-
-class _RaisingBackend:
-    """A SecretBackend whose resolve raises a planted error (degraded secret store)."""
-
-    def __init__(self, exc: Exception) -> None:
-        self._exc = exc
-
-    def resolve(self, ref: str) -> str:
-        del ref
-        raise self._exc
-
-
-def test_start_session_ssh_path_escape_is_config_error(migrated_url: str) -> None:
+def test_drgn_live_bootstrap_key_stays_masked_after_session_ends(migrated_url: str) -> None:
+    # ADR-0315: the bootstrap key seeds redaction process-globally (scope=None), so it stays masked
+    # for the process lifetime — unlike the retired session-scoped credential, it is NOT released at
+    # end_session (the key is long-lived and reused across sessions).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_ssh_system(pool, alloc_id)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
             run_id = await _seed_run(pool, sys_id)
-            connector = _FakeConnector()
-            resp = await _start_session(
-                pool,
-                _ctx(),
-                run_id=run_id,
-                transport="drgn-live",
-                connector=connector,
-                secret_backend=_RaisingBackend(PathSafetyError("escapes root")),
-            )
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert connector.opened == []  # credential never resolved → no transport opened
-
-    asyncio.run(_run())
-
-
-def test_start_session_ssh_backend_dependency_failure_preserves_category(
-    migrated_url: str,
-) -> None:
-    # A degraded secret store (e.g. a manager backend) must not be mislabeled as bad input.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_ssh_system(pool, alloc_id)
-            run_id = await _seed_run(pool, sys_id)
-            err = CategorizedError("vault down", category=ErrorCategory.MISSING_DEPENDENCY)
-            resp = await _start_session(
-                pool,
-                _ctx(),
-                run_id=run_id,
-                transport="drgn-live",
-                connector=_FakeConnector(),
-                secret_backend=_RaisingBackend(err),
-            )
-        assert resp.status == "error" and resp.error_category == "missing_dependency"
-
-    asyncio.run(_run())
-
-
-def test_ssh_credential_masks_after_session_ends(migrated_url: str) -> None:
-    # ADR-0039 §2: the guest credential is registered before transport use, scoped to the
-    # DebugSession, and released when the session detaches.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_ssh_system(pool, alloc_id)
-            run_id = await _seed_run(pool, sys_id)
+            private_key = await _bootstrap_private_key(pool, sys_id)
             registry = SecretRegistry()
-
-            def _backend_for(session_id: UUID) -> _OrderRecordingBackend:
-                return _OrderRecordingBackend(
-                    [],
-                    registry=registry,
-                    scope=f"debug-session:{session_id}",
-                )
 
             start = await _start_session(
                 pool,
@@ -1222,10 +1111,10 @@ def test_ssh_credential_masks_after_session_ends(migrated_url: str) -> None:
                 run_id=run_id,
                 transport="drgn-live",
                 connector=_FakeConnector(),
-                secret_backend_factory=_backend_for,
+                secret_registry=registry,
             )
             assert start.status == "live"
-            assert "guest-ssh-secret" in registry.snapshot()
+            assert private_key in registry.snapshot()
             await _end_session(
                 pool,
                 _ctx(),
@@ -1233,7 +1122,8 @@ def test_ssh_credential_masks_after_session_ends(migrated_url: str) -> None:
                 connector=_FakeConnector(),
                 secret_registry=registry,
             )
-            assert "guest-ssh-secret" not in registry.snapshot()
+            # Process-global seed: still masked after the session ends.
+            assert private_key in registry.snapshot()
 
     asyncio.run(_run())
 
@@ -1242,7 +1132,7 @@ def test_second_ssh_attach_is_transport_conflict(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_ssh_system(pool, alloc_id)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
             run_a = await _seed_run(pool, sys_id)
             run_b = await _seed_run(pool, sys_id)
             await _seed_session(pool, run_a, DebugSessionState.LIVE, transport="drgn-live")
@@ -1253,7 +1143,6 @@ def test_second_ssh_attach_is_transport_conflict(migrated_url: str) -> None:
                 run_id=run_b,
                 transport="drgn-live",
                 connector=connector,
-                secret_backend=_OrderRecordingBackend([]),
             )
         assert resp.status == "error" and resp.error_category == "transport_conflict"
         assert connector.opened == []
@@ -1266,7 +1155,7 @@ def test_gdbstub_and_ssh_sessions_coexist_on_one_system(migrated_url: str) -> No
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_ssh_system(pool, alloc_id)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
             run_a = await _seed_run(pool, sys_id)
             run_b = await _seed_run(pool, sys_id)
             await _seed_session(pool, run_a, DebugSessionState.LIVE, transport="gdbstub")
@@ -1276,7 +1165,6 @@ def test_gdbstub_and_ssh_sessions_coexist_on_one_system(migrated_url: str) -> No
                 run_id=run_b,
                 transport="drgn-live",
                 connector=_FakeConnector(),
-                secret_backend=_OrderRecordingBackend([]),
             )
         assert resp.status == "live"  # the gdbstub session does not conflict with ssh
 
@@ -1315,7 +1203,7 @@ def test_start_session_drgn_live_remote_skips_credential_and_stores_domain_handl
             sys_id = await _seed_profiled_system(pool, alloc_id, _remote_profile())
             run_id = await _seed_run(pool, sys_id)
             connector = _DomainHandleConnector()
-            # No secret_backend supplied: a remote drgn-live start must not need one.
+            # Remote drgn-live opens over the guest agent: no bootstrap-key seed at start_session.
             resp = await _start_session(
                 pool,
                 _ctx(),
@@ -1335,31 +1223,6 @@ def test_start_session_drgn_live_remote_skips_credential_and_stores_domain_handl
         assert row is not None
         assert row["transport"] == "drgn-live"
         assert row["transport_handle"] == "kdive-x"  # bare domain, ADR-0083 §4
-
-    asyncio.run(_run())
-
-
-def test_start_session_drgn_live_local_missing_ref_is_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)  # local, no ssh ref
-            run_id = await _seed_run(pool, sys_id)
-            connector = _FakeConnector()
-            resp = await _start_session(
-                pool,
-                _ctx(),
-                run_id=run_id,
-                transport="drgn-live",
-                connector=connector,
-                secret_backend=_OrderRecordingBackend([]),
-            )
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert resp.data == {"reason": "ssh_credential_ref_missing"}
-        assert resp.detail is not None
-        assert "ssh_credential_ref" in resp.detail
-        assert "reprovision" in resp.detail.lower()
-        assert connector.opened == []
 
     asyncio.run(_run())
 

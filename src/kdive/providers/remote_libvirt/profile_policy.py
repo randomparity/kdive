@@ -13,10 +13,9 @@ class RemoteLibvirtProfilePolicy:
     def rootfs_source(self, profile: ProvisioningProfile) -> RootfsSource | None:
         return None
 
-    def ssh_credential_ref(self, profile: ProvisioningProfile) -> str | None:
-        return None
-
-    def drgn_live_requires_credential(self, profile: ProvisioningProfile) -> bool:
+    def drgn_live_seeds_bootstrap_key(self, profile: ProvisioningProfile) -> bool:
+        # Remote has and uses a per-System bootstrap key at introspect.run, but opens its drgn-live
+        # transport over the guest agent, so start_session needs no bootstrap-key seed (ADR-0315).
         return False
 
     def validate_profile(self, profile: ProvisioningProfile) -> None:

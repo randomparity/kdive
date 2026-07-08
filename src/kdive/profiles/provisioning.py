@@ -96,7 +96,7 @@ class LibvirtDebugOptions(_ProfileBase):
 
 
 # Provenance: ADR-0024 decisions 1/2b/2c; rootfs ADR-0048 §3; destructive opt-in ADR-0028 §2;
-# ssh_credential_ref ADR-0039 §2; debug ADR-0049 Decision 3.
+# debug ADR-0049 Decision 3.
 class LibvirtProfile(_ProfileBase):
     """The ``local-libvirt`` provider section.
 
@@ -115,10 +115,7 @@ class LibvirtProfile(_ProfileBase):
     ``destructive_ops`` is the optionally-empty list of destructive op kinds this profile
     opts in (e.g. ``["force_crash"]``); the control plane's gate resolves the opt-in
     factor from it (deny-by-default — an absent or empty list refuses every destructive
-    op). ``ssh_credential_ref`` is the optional opaque **reference** (never
-    the value) into the file-ref secret backend that the live ssh transport resolves a
-    guest credential through; a profile that does not opt into live ssh
-    introspection leaves it ``None``. ``debug`` declares which crash-capture methods the
+    op). ``debug`` declares which crash-capture methods the
     System is provisioned for; defaults to all flags disabled.
     """
 
@@ -139,7 +136,6 @@ class LibvirtProfile(_ProfileBase):
         ),
     )
     destructive_ops: list[NonEmptyStr] = Field(default_factory=list)
-    ssh_credential_ref: NonEmptyStr | None = None
     debug: LibvirtDebugOptions = Field(default_factory=LibvirtDebugOptions)
 
 

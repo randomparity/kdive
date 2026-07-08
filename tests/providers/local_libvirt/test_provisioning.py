@@ -383,31 +383,9 @@ def test_render_rejects_gdbstub_flag_without_a_port() -> None:
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
-def test_render_emits_loopback_ssh_forward_when_credential_ref_set() -> None:
-    xml = render_domain_xml(
-        _SYS,
-        _profile(ssh_credential_ref="guest_key.pem"),
-        disk_path=_DISK,
-        ssh_port=40022,
-        kernel_path=_KERNEL,
-    )
-    # The forwarded loopback port round-trips through the shared parser.
-    assert recorded_ssh_port(xml) == 40022
-    root = _safe_fromstring(xml)
-    args = [
-        arg.get("value") for arg in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
-    ]
-    assert args == [
-        "-netdev",
-        "user,id=kdivessh,restrict=on,hostfwd=tcp:127.0.0.1:40022-:22",
-        "-device",
-        "virtio-net-pci,netdev=kdivessh,addr=0x10",
-    ]
-
-
-def test_render_emits_ssh_forward_without_credential_ref() -> None:
-    # The forward is plumbing, not a credential: a default profile (no ssh_credential_ref) still
-    # renders the loopback SSH forward so any ready System is reachable (ADR-0281, #937).
+def test_render_emits_loopback_ssh_forward() -> None:
+    # The forward is plumbing, not a credential: a default profile renders the loopback SSH forward
+    # so any ready System is reachable (ADR-0281, #937). drgn-live needs no credential (ADR-0315).
     xml = render_domain_xml(_SYS, _profile(), disk_path=_DISK, ssh_port=40022, kernel_path=_KERNEL)
     assert recorded_ssh_port(xml) == 40022
     root = _safe_fromstring(xml)
@@ -470,7 +448,7 @@ def test_render_gdbstub_and_ssh_share_one_commandline_element() -> None:
     # <qemu:commandline> element (gdbstub and drgn-live coexist, ADR-0039 §4).
     xml = render_domain_xml(
         _SYS,
-        _profile(debug={"gdbstub": True}, ssh_credential_ref="guest_key.pem"),
+        _profile(debug={"gdbstub": True}),
         disk_path=_DISK,
         gdb_port=4444,
         ssh_port=40022,
@@ -917,7 +895,9 @@ def test_provision_already_running_domain_is_idempotent() -> None:
 
 
 def _ssh_profile() -> ProvisioningProfile:
-    return _profile(ssh_credential_ref="guest_key.pem")
+    # The loopback SSH forward renders on every domain (ADR-0281), so a default profile exercises
+    # the SSH-port allocation path — no credential field (retired, ADR-0315).
+    return _profile()
 
 
 def test_provision_ssh_allocates_a_fresh_port_when_no_prior_domain() -> None:
@@ -941,9 +921,9 @@ def test_provision_ssh_reuses_the_recorded_port_on_retry() -> None:
     assert recorded_ssh_port(conn.recorded_xml[-1]) == 40023
 
 
-def test_provision_always_allocates_an_ssh_port_without_credential_ref() -> None:
-    # The SSH forward is plumbing now (ADR-0281, #937): a default profile with no
-    # ssh_credential_ref still allocates and records a forwarded SSH port.
+def test_provision_always_allocates_an_ssh_port() -> None:
+    # The SSH forward is plumbing now (ADR-0281, #937): a default profile always allocates and
+    # records a forwarded SSH port.
     conn = _ProvConn()
     ports = iter([40022])
     _prov_with_port(conn, free_port=lambda: next(ports)).provision(_SYS, _profile())
@@ -964,7 +944,7 @@ def test_provision_gdbstub_and_ssh_allocate_both_ports() -> None:
     # recorded into the one defined domain XML.
     ports = iter([5555, 40022])
     conn = _ProvConn()
-    profile = _profile(debug={"gdbstub": True}, ssh_credential_ref="guest_key.pem")
+    profile = _profile(debug={"gdbstub": True})
     _prov_with_port(conn, free_port=lambda: next(ports)).provision(_SYS, profile)
     assert recorded_gdb_port(conn.recorded_xml[-1]) == 5555
     assert recorded_ssh_port(conn.recorded_xml[-1]) == 40022

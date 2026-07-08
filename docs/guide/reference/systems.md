@@ -81,7 +81,6 @@ Use `systems.provision` instead when the profile needs no upload window. Operato
     - `crashkernel` (`string (nullable)`, optional)
     - `baseline_kernel` (`string (nullable)`, optional) — Optional hint naming the baseline kernel to boot when the rootfs /boot holds more than one kernel. A direct-kernel provision extracts the rootfs's own kernel and fails closed on an ambiguous multi-kernel /boot rather than guessing a version order; this hint is the explicit escape hatch. Give either the full 'vmlinuz-<ver>' filename or the bare '<ver>' (copy a value from the 'candidates' list in the ambiguous-selection error). A hint naming no present kernel is rejected. Omit it for a single-kernel image (the common case) — selection is then unambiguous.
     - `destructive_ops` (`array<string>`, optional)
-    - `ssh_credential_ref` (`string (nullable)`, optional)
     - `debug` (`object`, optional) — Per-System debug provisioning flags.  Bound at provision/boot; declare which capture methods the System is provisioned for. ``preserve_on_crash`` adds a pvpanic device + ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument.
       - `preserve_on_crash` (`boolean`, optional)
       - `gdbstub` (`boolean`, optional)
@@ -181,7 +180,6 @@ System. Operator only.
     - `crashkernel` (`string (nullable)`, optional)
     - `baseline_kernel` (`string (nullable)`, optional) — Optional hint naming the baseline kernel to boot when the rootfs /boot holds more than one kernel. A direct-kernel provision extracts the rootfs's own kernel and fails closed on an ambiguous multi-kernel /boot rather than guessing a version order; this hint is the explicit escape hatch. Give either the full 'vmlinuz-<ver>' filename or the bare '<ver>' (copy a value from the 'candidates' list in the ambiguous-selection error). A hint naming no present kernel is rejected. Omit it for a single-kernel image (the common case) — selection is then unambiguous.
     - `destructive_ops` (`array<string>`, optional)
-    - `ssh_credential_ref` (`string (nullable)`, optional)
     - `debug` (`object`, optional) — Per-System debug provisioning flags.  Bound at provision/boot; declare which capture methods the System is provisioned for. ``preserve_on_crash`` adds a pvpanic device + ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument.
       - `preserve_on_crash` (`boolean`, optional)
       - `gdbstub` (`boolean`, optional)
@@ -251,7 +249,6 @@ use `systems.provision` instead. Requires operator and opt-in.
     - `crashkernel` (`string (nullable)`, optional)
     - `baseline_kernel` (`string (nullable)`, optional) — Optional hint naming the baseline kernel to boot when the rootfs /boot holds more than one kernel. A direct-kernel provision extracts the rootfs's own kernel and fails closed on an ambiguous multi-kernel /boot rather than guessing a version order; this hint is the explicit escape hatch. Give either the full 'vmlinuz-<ver>' filename or the bare '<ver>' (copy a value from the 'candidates' list in the ambiguous-selection error). A hint naming no present kernel is rejected. Omit it for a single-kernel image (the common case) — selection is then unambiguous.
     - `destructive_ops` (`array<string>`, optional)
-    - `ssh_credential_ref` (`string (nullable)`, optional)
     - `debug` (`object`, optional) — Per-System debug provisioning flags.  Bound at provision/boot; declare which capture methods the System is provisioned for. ``preserve_on_crash`` adds a pvpanic device + ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument.
       - `preserve_on_crash` (`boolean`, optional)
       - `gdbstub` (`boolean`, optional)

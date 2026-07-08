@@ -17,11 +17,15 @@ class ProfilePolicy(Protocol):
     def rootfs_source(self, profile: ProvisioningProfile) -> RootfsSource | None:
         """Return the rootfs source used by this provider, if any."""
 
-    def ssh_credential_ref(self, profile: ProvisioningProfile) -> str | None:
-        """Return the live-SSH credential reference used by this provider, if any."""
+    def drgn_live_seeds_bootstrap_key(self, profile: ProvisioningProfile) -> bool:
+        """Return whether a drgn-live ``start_session`` gates+seeds on the per-System bootstrap key.
 
-    def drgn_live_requires_credential(self, profile: ProvisioningProfile) -> bool:
-        """Return whether drgn-live needs a profile credential."""
+        True iff the drgn-live transport-open at ``start_session`` authenticates over the loopback
+        SSH forward, so the handler must fail closed on a missing per-System bootstrap key and seed
+        redaction from it before opening the transport (ADR-0289, ADR-0315). A provider that opens
+        drgn-live over the guest agent returns ``False`` — it needs no start-time seed even though
+        it still uses the bootstrap key at ``introspect.run``.
+        """
 
     def validate_profile(self, profile: ProvisioningProfile) -> None:
         """Run provider-specific static profile validation."""

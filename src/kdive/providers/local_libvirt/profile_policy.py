@@ -19,10 +19,9 @@ class LocalLibvirtProfilePolicy:
     def rootfs_source(self, profile: ProvisioningProfile) -> RootfsSource:
         return profile.provider.local_libvirt.rootfs
 
-    def ssh_credential_ref(self, profile: ProvisioningProfile) -> str | None:
-        return profile.provider.local_libvirt.ssh_credential_ref
-
-    def drgn_live_requires_credential(self, profile: ProvisioningProfile) -> bool:
+    def drgn_live_seeds_bootstrap_key(self, profile: ProvisioningProfile) -> bool:
+        # Local drgn-live opens over the loopback SSH forward (ADR-0039), so start_session must
+        # gate+seed on the per-System bootstrap key (ADR-0289, ADR-0315).
         return True
 
     def validate_profile(self, profile: ProvisioningProfile) -> None:

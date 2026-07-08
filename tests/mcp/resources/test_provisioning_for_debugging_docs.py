@@ -5,10 +5,11 @@ the served bytes to canonical ``docs/`` — but neither asserts that the provisi
 debug/live-introspection guidance is present. Without this guard, a later edit could drop
 the section (the issue's whole deliverable) with CI still green.
 
-The assertion is behavioral: it checks the section heading and the three provision-bound
-knobs an agent must set at provision (``gdbstub``, ``preserve_on_crash``,
-``ssh_credential_ref``) are named in the **served snapshot** an agent actually reads over
-MCP — not a hard-coded doc path — so it also fails if the snapshot falls out of sync.
+The assertion is behavioral: it checks the section heading and the two provision-bound
+knobs an agent must set at provision (``gdbstub``, ``preserve_on_crash``) are named in the
+**served snapshot** an agent actually reads over MCP — not a hard-coded doc path — so it
+also fails if the snapshot falls out of sync. (drgn-live is no longer provision-bound —
+ADR-0315 — so it is intentionally absent.)
 """
 
 from __future__ import annotations
@@ -32,5 +33,5 @@ def test_agent_index_names_provision_bound_debug_knobs() -> None:
     assert "provisioning for debugging" in lowered, (
         "served agent-index is missing the provisioning-for-debugging section (#955)"
     )
-    for knob in ("gdbstub", "preserve_on_crash", "ssh_credential_ref"):
+    for knob in ("gdbstub", "preserve_on_crash"):
         assert knob in body, f"served agent-index does not name the provision-bound knob {knob!r}"

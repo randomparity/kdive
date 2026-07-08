@@ -177,33 +177,12 @@ def test_baseline_kernel_rejects_blank(value: str) -> None:
     _expect_configuration_error(data)
 
 
-def test_ssh_credential_ref_defaults_to_none() -> None:
-    # A profile that opts out of live ssh introspection carries no credential reference.
-    profile = ProvisioningProfile.parse(_valid())
-    assert profile.provider.local_libvirt.ssh_credential_ref is None
-
-
-def test_ssh_credential_ref_parses_when_present() -> None:
-    # The reference is an opaque, non-empty token into the file-ref secret backend (ADR-0039);
-    # it is a reference, never the credential value itself.
+def test_local_libvirt_ssh_credential_ref_now_rejected() -> None:
+    # The vestigial drgn-live credential ref is retired (ADR-0315); the local-libvirt section is
+    # extra="forbid", so a profile still carrying it is rejected at parse — drgn-live now gates on
+    # the per-System bootstrap key, not a profile field.
     data = _valid()
     data["provider"]["local-libvirt"]["ssh_credential_ref"] = "ssh/guest-key"
-    profile = ProvisioningProfile.parse(data)
-    assert profile.provider.local_libvirt.ssh_credential_ref == "ssh/guest-key"
-    assert _LOCAL_POLICY.ssh_credential_ref(profile) == "ssh/guest-key"
-
-
-def test_ssh_credential_ref_returns_none_for_provider_without_ssh_credentials() -> None:
-    data = _valid()
-    data["provider"] = {"fault-inject": {}}
-    profile = ProvisioningProfile.parse(data)
-
-    assert _FAULT_POLICY.ssh_credential_ref(profile) is None
-
-
-def test_ssh_credential_ref_rejects_blank() -> None:
-    data = _valid()
-    data["provider"]["local-libvirt"]["ssh_credential_ref"] = "   "
     _expect_configuration_error(data)
 
 
@@ -750,11 +729,10 @@ def test_remote_profile_destructive_opt_in() -> None:
     assert _REMOTE_POLICY.destructive_opt_in(profile, JobKind.REPROVISION) is False
 
 
-def test_remote_profile_rootfs_and_ssh_are_none() -> None:
+def test_remote_profile_rootfs_is_none() -> None:
     profile = ProvisioningProfile.parse(_valid_remote())
 
     assert _REMOTE_POLICY.rootfs_source(profile) is None
-    assert _REMOTE_POLICY.ssh_credential_ref(profile) is None
 
 
 def test_remote_profile_rejects_unknown_fields() -> None:
@@ -771,18 +749,18 @@ def test_remote_profile_validate_profile_accepts_remote_section() -> None:
     _REMOTE_POLICY.validate_profile(ProvisioningProfile.parse(_valid_remote()))
 
 
-def test_drgn_live_requires_credential_true_for_local_section() -> None:
+def test_drgn_live_seeds_bootstrap_key_true_for_local_section() -> None:
     profile = ProvisioningProfile.parse(_valid())
-    assert _LOCAL_POLICY.drgn_live_requires_credential(profile) is True
+    assert _LOCAL_POLICY.drgn_live_seeds_bootstrap_key(profile) is True
 
 
-def test_drgn_live_requires_credential_false_for_remote_section() -> None:
+def test_drgn_live_seeds_bootstrap_key_false_for_remote_section() -> None:
     profile = ProvisioningProfile.parse(_valid_remote())
-    assert _REMOTE_POLICY.drgn_live_requires_credential(profile) is False
+    assert _REMOTE_POLICY.drgn_live_seeds_bootstrap_key(profile) is False
 
 
-def test_drgn_live_requires_credential_false_for_fault_inject_section() -> None:
+def test_drgn_live_seeds_bootstrap_key_false_for_fault_inject_section() -> None:
     data = _valid()
     data["provider"] = {"fault-inject": {}}
     profile = ProvisioningProfile.parse(data)
-    assert _FAULT_POLICY.drgn_live_requires_credential(profile) is False
+    assert _FAULT_POLICY.drgn_live_seeds_bootstrap_key(profile) is False

@@ -671,14 +671,14 @@ def test_resolve_ssh_endpoint_absent_domain_is_configuration_error() -> None:
 
 
 def test_resolve_ssh_endpoint_without_a_recorded_port_is_configuration_error() -> None:
-    # A System provisioned without ssh_credential_ref records no SSH forward — actionable, not a
-    # missing dep.
+    # A domain with no recorded loopback SSH forward is actionable (reprovision), not a missing dep.
     conn = _FakeGdbConn(domain=_FakeGdbDomain("<domain/>"))
     resolver = connect_mod._resolve_ssh_endpoint_via(lambda: conn)
     with pytest.raises(CategorizedError) as exc:
         resolver(_SYSTEM)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert "ssh_credential_ref" in str(exc.value)
+    assert "SSH forward" in str(exc.value)
+    assert "reprovision" in str(exc.value)
 
 
 def test_resolve_ssh_endpoint_malformed_xml_is_infrastructure_failure() -> None:

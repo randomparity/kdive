@@ -236,8 +236,8 @@ class LocalLibvirtProvisioning:
         overlay = self._files.prepare_overlay(system_id, base=base, disk_gb=profile.disk_gb)
         gdb_port = self._gdb_port_for(system_id) if section.debug.gdbstub else None
         # The SSH forward is rendered on every domain (ADR-0281, #937), so the port is always
-        # allocated — no longer gated on ssh_credential_ref, which now controls only the
-        # drgn-live introspection credential. Reuse-on-retry (_ssh_port_for) is unchanged.
+        # allocated. drgn-live no longer needs a profile credential — it authenticates with the
+        # per-System bootstrap key (ADR-0289/0315). Reuse-on-retry (_ssh_port_for) is unchanged.
         ssh_port = self._ssh_port_for(system_id)
         if self._guest_egress:
             # Positive, greppable signal for a security-relevant state: the operator opted this

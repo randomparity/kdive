@@ -78,7 +78,9 @@ def _run_with_expected_boot_failure(detail: dict[str, object]) -> Run:
     return _bound_run().model_copy(update={"expected_boot_failure": detail})
 
 
-def test_system_envelope_excludes_ssh_credential_ref() -> None:
+def test_system_envelope_excludes_kernel_source_ref() -> None:
+    # The provisioning-profile summary allowlists only shape fields, so a secret-bearing field
+    # like kernel_source_ref never reaches the recovery envelope.
     system = System(
         id=uuid4(),
         created_at=_DT,
@@ -94,7 +96,8 @@ def test_system_envelope_excludes_ssh_credential_ref() -> None:
             "vcpu": 2,
             "memory_mb": 4096,
             "disk_gb": 20,
-            "provider": {"local-libvirt": {"ssh_credential_ref": f"file:///run/{_PLANTED}"}},
+            "kernel_source_ref": f"git+https://h/{_PLANTED}/r.git",
+            "provider": {"local-libvirt": {}},
         },
     )
     resp = system_envelope(system, resource_kind="local-libvirt", resource_id=str(uuid4()))

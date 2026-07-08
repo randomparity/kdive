@@ -124,7 +124,7 @@ PLANNED_SIGNALS: tuple[PlannedSignal, ...] = (
     PlannedSignal(
         "live_drgn",
         "#762/#697",
-        "drgn liveness depends on provider introspection and profile ssh_credential_ref",
+        "drgn liveness depends on provider introspection and a drgn-capable guest image",
     ),
 )
 
