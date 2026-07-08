@@ -9,9 +9,10 @@ schema live in each tool's own description.
 
 Calling tools **directly by name** (surfaced by lazy-loading hosts as `mcp__kdive__*`) is
 the canonical path — by default the server lists its full catalog. `tools.search` and
-`tools.invoke` are an equivalent discovery gateway for hosts without lazy tool loading, or
-when an operator enables the core-set gateway; prefer direct calls when your host lists the
-tools. Either path reaches the same tools with the same RBAC.
+`tools.invoke` are a discovery gateway for hosts without lazy tool loading; prefer direct
+calls when your host lists the tools. Both paths enforce the same RBAC. If an operator
+enables the core-set gateway, only a small core set is listed directly, so reach everything
+else through `tools.search` / `tools.invoke`.
 
 ## The typical session
 
