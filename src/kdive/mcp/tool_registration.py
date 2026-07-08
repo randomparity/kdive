@@ -20,7 +20,6 @@ from kdive.mcp.tools.accounting.reports import register as register_accounting_r
 from kdive.mcp.tools.accounting.usage import register as register_accounting_usage
 from kdive.mcp.tools.catalog import (
     availability,
-    build_configs,
     fixtures,
     resources,
     shapes,
@@ -151,16 +150,6 @@ def _register_artifact_tools(
     artifacts_tools.register(app, pool, resolver=assembly.resolver)
 
 
-def _register_build_config_tools(
-    app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
-) -> None:
-    build_configs.register(
-        app,
-        pool,
-        store_factory=assembly.object_stores.request_time_store_factory,
-    )
-
-
 def _register_vmcore_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:
     vmcore_tools.register(
         app, pool, resolver=assembly.resolver, secret_registry=assembly.secret_registry
@@ -266,7 +255,6 @@ PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _register_runs_tools,
     _register_control_tools,
     _register_artifact_tools,
-    _register_build_config_tools,
     _register_vmcore_tools,
     _register_debug_tools,
     _register_introspection_tools,

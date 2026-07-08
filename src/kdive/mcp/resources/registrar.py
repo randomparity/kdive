@@ -1,7 +1,7 @@
 """Register operator docs as MCP resources (ADR-0151).
 
 `build_app()` registers tools only, so `ListMcpResourcesTool` returns nothing even though
-the tool surface cites operator docs (``docs/operating/build-source-staging.md``) in
+the tool surface cites operator docs (``docs/operating/external-build-upload.md``) in
 schema/error strings. This module registers those cited docs as
 ``TextResource``s over a **fixed, code-defined allowlist** — no request-supplied path, no
 parameterized template — so a doc named in an error string is reachable over MCP. Internal
@@ -76,18 +76,6 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
             "lib/modules/<release>/), the exact tar recipe, and the optional "
             "vmlinux/effective_config/initrd. Cited by the runs.create build_profile schema "
             "and artifacts.expected_uploads."
-        ),
-    ),
-    DocResource(
-        uri="resource://kdive/docs/operating/build-source-staging.md",
-        source="docs/operating/build-source-staging.md",
-        content_file="build-source-staging.md",
-        name="build-source-staging",
-        title="Staging kernel source for runs.build",
-        description=(
-            "Advanced single-host alternative to the default external-upload lane: how to "
-            "stage a warm kernel source tree (KDIVE_KERNEL_SRC) or register a remote build "
-            "host for the server-build lane. Cited by the runs.create build_profile schema."
         ),
     ),
     DocResource(

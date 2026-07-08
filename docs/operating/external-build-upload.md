@@ -1,9 +1,7 @@
 # Preparing artifacts for the external-build lane
 
-**This is the default build lane (ADR-0234): build locally, upload, `runs.complete_build`.**
-No operator-staged source tree or build host is needed — most callers should start here. The
-warm-tree/server lanes in [kernel source staging](build-source-staging.md) are a single-host
-convenience that requires operator setup.
+**This is the build lane (ADR-0234): build locally, upload, `runs.complete_build`.**
+No operator-staged source tree or build host is needed.
 
 The external-build lane (`runs.create` with a `build_profile` whose `source="external"`)
 ingests a kernel you built yourself instead of building one on a worker. You upload the
@@ -22,10 +20,6 @@ built with the debug options turned on. The validator constrains the artifacts' 
 (bzImage magic, gzip layout, a `lib/modules` member, and — only if the Run's profile carries
 config requirements — that those *required* symbols are present); it never disallows a symbol
 you enabled. There is no allowed-config allowlist: enable what the investigation needs.
-
-Do not read the `buildconfig.set` platform-admin gate as "a project agent can't get a KASAN
-kernel." That gate only governs operator config fragments on the single-host **server**-build
-convenience lane; on this default external lane you supply the config yourself.
 
 A useful debug set to start from:
 
@@ -117,8 +111,6 @@ A mismatch between a declared `sha256`/`size_bytes` and the stored object is rej
 
 ## Related
 
-- [Staging kernel source for `runs.build`](build-source-staging.md) — the **server**-build
-  lane (let a worker build the kernel) instead of uploading one.
 - [`artifacts` tool reference](../guide/reference/artifacts.md) — `create_run_upload`,
   `expected_uploads`, and chunked-upload parameters.
 - [`runs` tool reference](../guide/reference/runs.md) — `runs.create` build profiles and

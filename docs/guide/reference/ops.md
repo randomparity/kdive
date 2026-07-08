@@ -140,5 +140,5 @@ window to pin both bounds.
 
 - `agent_session` (`string (nullable)`, optional) — Filter to one agent session's calls.
 - `principal` (`string (nullable)`, optional) — Filter by acting principal.
-- `tool` (`string (nullable)`, optional) — Filter by tool name (e.g. 'runs.build').
+- `tool` (`string (nullable)`, optional) — Filter by tool name (e.g. 'runs.create').
 - `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit start to default to the last 24h.

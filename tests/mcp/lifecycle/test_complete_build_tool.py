@@ -13,8 +13,6 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.artifacts.storage import HeadResult, PresignedUpload, PresignPutRequest
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput
-from kdive.components.references import ComponentKind
-from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db import upload_manifest
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
@@ -30,7 +28,6 @@ from kdive.mcp.tools.catalog.artifacts.uploads import (
     create_run_upload as _create_run_upload,
 )
 from kdive.mcp.tools.lifecycle.runs.complete_build import CompleteBuildHandlers
-from kdive.mcp.tools.lifecycle.runs.server_build import BuildRunHandlers
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import Role
@@ -81,12 +78,7 @@ _EXTERNAL_PROFILE_WITH_REQUIREMENTS = {
         "name": "console-ready_x86_64",
     },
 }
-_TEST_COMPONENT_SOURCES = ComponentSourceCapabilities(
-    provider="test-provider",
-    accepted_component_sources={ComponentKind.CONFIG: frozenset({"local"})},
-)
 _DEFAULT_BUILD_HANDLERS = CompleteBuildHandlers()
-_DEFAULT_SERVER_BUILD_HANDLERS = BuildRunHandlers(_TEST_COMPONENT_SOURCES)
 
 
 async def create_run_upload(
@@ -468,20 +460,6 @@ def test_complete_build_success_does_not_carry_the_format_advisory(migrated_url:
             )
         assert resp.status == "succeeded"
         assert EXPECTED_UPLOADS_TOOL not in resp.suggested_next_actions
-
-    asyncio.run(_run())
-
-
-def test_build_run_rejects_external_source(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_external_run(pool)
-            resp = await _DEFAULT_SERVER_BUILD_HANDLERS.build_run(
-                pool,
-                _ctx(),
-                str(run_id),
-            )
-        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
 
     asyncio.run(_run())
 

@@ -66,7 +66,7 @@ class ToolTrailQuery(BaseModel):
         str | None, Field(description="Filter to one agent session's calls.")
     ] = None
     principal: Annotated[str | None, Field(description="Filter by acting principal.")] = None
-    tool: Annotated[str | None, Field(description="Filter by tool name (e.g. 'runs.build').")] = (
+    tool: Annotated[str | None, Field(description="Filter by tool name (e.g. 'runs.create').")] = (
         None
     )
     window: Annotated[

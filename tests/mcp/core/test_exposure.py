@@ -55,8 +55,10 @@ def test_project_roles_on_ungranted_projects_do_not_expose_project_tools() -> No
     other_project = _ctx(roles={"a": Role.ADMIN}, projects=("b",))
 
     assert not scope_satisfied(ExposureScope.PROJECT_VIEWER, ungranted)
-    assert not tool_visible("runs.build", ungranted)
-    assert visible_tool_names(ungranted, {"projects.list", "runs.build"}) == {"projects.list"}
+    assert not tool_visible("runs.complete_build", ungranted)
+    assert visible_tool_names(ungranted, {"projects.list", "runs.complete_build"}) == {
+        "projects.list"
+    }
     assert not scope_satisfied(ExposureScope.PROJECT_ADMIN, other_project)
 
 
@@ -203,7 +205,6 @@ _CONTRIBUTOR_LOOP = frozenset(
     {
         "runs.create",
         "runs.bind",
-        "runs.build",
         "runs.complete_build",
         "runs.install",
         "runs.boot",

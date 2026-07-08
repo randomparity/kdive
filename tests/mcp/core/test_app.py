@@ -57,7 +57,6 @@ def test_build_app_registers_jobs_tools() -> None:
         assert {
             "runs.create",
             "runs.get",
-            "runs.build",
             "runs.complete_build",
             "runs.install",
             "runs.boot",
@@ -443,7 +442,6 @@ _EXPECTED_STEP_MATURITY: dict[str, str] = {
     "systems.define": "implemented",
     "runs.create": "implemented",
     "runs.complete_build": "implemented",
-    "runs.build": "implemented",
     "runs.install": "implemented",
     "runs.boot": "implemented",
     "debug.start_session": "implemented",

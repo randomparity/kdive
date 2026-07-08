@@ -66,10 +66,6 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "build_hosts.register_ephemeral_libvirt": ("tests/mcp/ops/test_build_hosts.py",),
     "build_hosts.register_ssh": ("tests/mcp/ops/test_build_hosts.py",),
     "build_hosts.remove": ("tests/mcp/ops/test_build_hosts.py",),
-    "buildconfig.delete": ("tests/mcp/catalog/test_build_configs_tool.py",),
-    "buildconfig.get": ("tests/mcp/catalog/test_build_configs_tool.py",),
-    "buildconfig.list": ("tests/mcp/catalog/test_build_configs_tool.py",),
-    "buildconfig.set": ("tests/mcp/catalog/test_build_configs_tool.py",),
     "control.force_crash": ("tests/mcp/lifecycle/test_control_tools.py",),
     "control.power": ("tests/mcp/lifecycle/test_control_tools.py",),
     "control.diagnostic_sysrq": ("tests/mcp/lifecycle/test_control_tools.py",),
@@ -155,16 +151,12 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "session.whoami": ("tests/mcp/identity/test_session_tools.py",),
     "runs.bind": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.boot": ("tests/mcp/lifecycle/test_runs_tools.py",),
-    "runs.build": ("tests/mcp/lifecycle/test_runs_tools.py",),
-    "runs.build_install_boot": ("tests/mcp/tools/lifecycle/runs/test_composite_tool.py",),
     "runs.cancel": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.complete_build": ("tests/mcp/lifecycle/test_complete_build_tool.py",),
     "runs.create": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.get": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.install": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.list": ("tests/mcp/lifecycle/test_runs_list.py",),
-    "runs.profile_examples": ("tests/mcp/lifecycle/test_runs_profile_examples.py",),
-    "runs.validate_profile": ("tests/mcp/lifecycle/test_runs_validate_profile.py",),
     "secrets.list": ("tests/mcp/ops/test_secrets_list.py",),
     "shapes.delete": ("tests/mcp/catalog/test_shapes_tools.py",),
     "shapes.list": ("tests/mcp/catalog/test_shapes_tools.py",),
@@ -337,7 +329,7 @@ def test_filtered_list_tools_use_request_payloads() -> None:
 def test_run_cmdline_docs_describe_debug_args_only() -> None:
     """The agent-provided cmdline must not document platform-owned boot args."""
     tools = {t.name: t for t in TOOLS}
-    for tool_name in ("runs.build", "runs.complete_build"):
+    for tool_name in ("runs.complete_build",):
         schema = tools[tool_name].parameters["properties"]["cmdline"]
         description = schema["description"]
         assert "dhash_entries=1" in description
@@ -354,14 +346,12 @@ def test_run_lifecycle_tools_cross_reference_real_cmdline_parameters() -> None:
     request_props = create.parameters["properties"]["request"]["properties"]
     create_text = (create.description or "") + request_props["build_profile"]["description"]
     assert "runs.build.cmdline" not in create_text
-    assert "runs.build" in create_text
     assert "runs.complete_build" in create_text
     assert "cmdline" in create_text
 
     for tool_name in ("runs.boot", "runs.get"):
         description = tools[tool_name].description or ""
         assert "runs.build.cmdline" not in description
-        assert "runs.build" in description
         assert "runs.complete_build" in description
         assert "cmdline" in description
 
@@ -408,21 +398,6 @@ def test_jobs_wait_description_conveys_retry_contract() -> None:
     assert "short" in timeout_desc
 
 
-def test_runs_create_documents_warm_tree_is_provenance_only() -> None:
-    # D5 (#806): a warm-tree kernel_source_ref is a provenance label only — it does not
-    # select the tree; the operator stages the real source via KDIVE_KERNEL_SRC on the
-    # worker, and runs.get echoes the label and resolved commit in data.build_provenance.
-    # The build_profile schema text must state this inline so a cold agent need not open
-    # the build-source-staging resource to understand the field.
-    tools = {t.name: t for t in TOOLS}
-    request_props = tools["runs.create"].parameters["properties"]["request"]["properties"]
-    description = request_props["build_profile"]["description"]
-    lowered = description.lower()
-    assert "provenance" in lowered
-    assert "KDIVE_KERNEL_SRC" in description
-    assert "build_provenance" in description
-
-
 def test_expected_boot_failure_documents_match_contract() -> None:
     # D7 (#763): the expected_boot_failure pattern is matched by
     # security.artifacts.artifact_search.search_text (a case-sensitive literal substring, applied
@@ -442,56 +417,6 @@ def test_expected_boot_failure_documents_match_contract() -> None:
     assert "|" in description
     assert "16" in description
     assert "256" in description
-
-
-_DECORATIVE_PROVIDER_PHRASES = (
-    "any non-empty value",
-    "any value works",
-    "provider is decorative",
-    "provider is not consulted",
-)
-
-
-def test_buildconfig_surface_points_at_the_echoed_config_ref() -> None:
-    # #1032: an agent references an operator fragment by pasting the config_ref the
-    # buildconfig tools echo, into a source='server' runs.create build. The wrapper
-    # docstrings and the runs.create config Field must surface that ref and the
-    # validate_profile pre-flight — and must NOT teach that provider is decorative /
-    # "any value works" (forward-safety, spec decision 3): agents copy the canonical
-    # ref, they are never taught to hand-pick a provider.
-    tools = {t.name: t for t in TOOLS}
-    request_props = tools["runs.create"].parameters["properties"]["request"]["properties"]
-    create_text = request_props["build_profile"]["description"]
-    buildconfig_texts = {
-        name: tools[name].description or ""
-        for name in ("buildconfig.set", "buildconfig.list", "buildconfig.get")
-    }
-
-    for text in (create_text, *buildconfig_texts.values()):
-        lowered = text.lower()
-        assert "config_ref" in text
-        assert "source='server'" in text
-        assert "validate_profile" in text
-        for phrase in _DECORATIVE_PROVIDER_PHRASES:
-            assert phrase not in lowered, f"decorative-provider framing leaked: {phrase!r}"
-
-
-def test_validate_profile_points_at_buildconfig_for_config_resolution() -> None:
-    # #1033: the validate_profile disclaimer says a 'valid' verdict does NOT guarantee the
-    # config resolves. It must point the agent at the cheap catalog-resolve check that already
-    # exists (buildconfig.get / buildconfig.list echo existence + sha256 without a build), and
-    # disclose that a kind='local' config is resolved on the worker at build time and so cannot
-    # be pre-flighted server-side. catalog and local are the only config kinds a build accepts.
-    tools = {t.name: t for t in TOOLS}
-    description = tools["runs.validate_profile"].parameters["properties"]["build_profile"][
-        "description"
-    ]
-    lowered = description.lower()
-    assert "buildconfig.get" in description
-    assert "buildconfig.list" in description
-    assert "catalog" in lowered
-    assert "local" in lowered
-    assert "build time" in lowered or "worker" in lowered
 
 
 def test_allocation_and_estimate_payload_schemas_are_concrete() -> None:

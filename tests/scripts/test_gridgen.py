@@ -7,8 +7,8 @@ def test_generate_rows_covers_known_tools_with_correct_metadata() -> None:
     rows = {r.tool: r for r in generate_rows()}
     assert rows["resources.list"].annotation == "read_only"
     assert rows["resources.list"].plane == "resources"
-    assert rows["runs.build"].maturity == "implemented"
-    assert rows["runs.build"].annotation == "mutating"
+    assert rows["runs.complete_build"].maturity == "implemented"
+    assert rows["runs.complete_build"].annotation == "mutating"
     assert rows["control.force_crash"].annotation == "destructive"
     assert rows["control.force_crash"].destructive_member is True
     assert all(r.plane for r in rows.values())

@@ -7,19 +7,13 @@ tool's own description.
 
 ## Starting a run
 
-- `runs.create` — open a run bound to an investigation and a build profile. The external
-  upload lane (build the kernel yourself and upload it) is the default build path.
+- `runs.create` — open a run bound to an investigation and a build profile. Build the kernel
+  yourself and upload it (the external upload lane).
 - `runs.bind` — bind an existing run to a system, when create did not.
-- `runs.validate_profile` — check a build profile for problems without creating a run.
-- `runs.profile_examples` — fetch ready-made build-profile templates to start from.
 
 ## Building
 
-- `runs.build` — enqueue a warm-tree server build for a run (the single-host server-build
-  lane, an alternative to uploading a prebuilt kernel).
 - `runs.complete_build` — finalize an externally uploaded build once its artifacts are in.
-- `runs.build_install_boot` — run the single-host server-build lane as one pollable job;
-  prefer it over calling build, install, and boot separately when you build on a host.
 
 ## Install and boot
 

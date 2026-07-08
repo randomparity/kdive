@@ -8,7 +8,6 @@ from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
-from kdive.db.build_hosts import list_all_hosts
 from kdive.domain.capacity.state import RunState
 from kdive.domain.external_provenance import PROVENANCE_FIELD_MAX_LEN
 from kdive.domain.labels import LABEL_MAX_LEN
@@ -25,7 +24,6 @@ from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run as _cancel_run
 from kdive.mcp.tools.lifecycle.runs.complete_build import (
     CompleteBuildHandlers as _CompleteBuildHandlers,
 )
-from kdive.mcp.tools.lifecycle.runs.composite import CompositeRunHandlers as _CompositeRunHandlers
 from kdive.mcp.tools.lifecycle.runs.create import (
     RunCreateRequest as _RunCreateRequest,
 )
@@ -35,25 +33,16 @@ from kdive.mcp.tools.lifecycle.runs.create import (
 from kdive.mcp.tools.lifecycle.runs.create import create_run as _create_run
 from kdive.mcp.tools.lifecycle.runs.list import RunsListRequest as _RunsListRequest
 from kdive.mcp.tools.lifecycle.runs.list import list_runs as _list_runs
-from kdive.mcp.tools.lifecycle.runs.profile_examples import (
-    build_host_profile_examples as _build_host_profile_examples,
-)
-from kdive.mcp.tools.lifecycle.runs.server_build import BuildRunHandlers as _BuildRunHandlers
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run as _boot_run
 from kdive.mcp.tools.lifecycle.runs.steps import install_run as _install_run
-from kdive.mcp.tools.lifecycle.runs.validate_profile import (
-    validate_build_profile as _validate_build_profile,
-)
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.profiles.build import (
     ExternalBuildProfile,
     ServerBuildProfile,
     dump_build_profile,
 )
-from kdive.profiles.types import BuildProfileInput, ExpectedBootFailureInput
-from kdive.providers.assembly.build_hosts import declared_remote_instance_names
+from kdive.profiles.types import ExpectedBootFailureInput
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security.artifacts.artifact_search import MAX_PATTERN_CHARS, MAX_TERMS
 from kdive.security.authz.rbac import Role
 from kdive.services.runs.steps import DEFAULT_CRASHKERNEL
@@ -65,37 +54,16 @@ class _RunsCreatePayload(ToolPayload):
     investigation_id: str = Field(description="Investigation to attach the Run to.")
     build_profile: ExternalBuildProfile | ServerBuildProfile = Field(
         description=(
-            "Build profile for the Run's kernel. The recommended default is source='external': "
-            "ingest a prebuilt artifact. After runs.create with source='external', "
-            "call artifacts.expected_uploads to learn the exact bytes to produce, "
+            "Build profile for the Run's kernel. Use source='external': ingest a prebuilt "
+            "artifact. After runs.create with source='external', call "
+            "artifacts.expected_uploads to learn the exact bytes to produce, "
             "artifacts.create_run_upload to upload, then runs.complete_build (where you may also "
             "record the optional source_label/source_ref provenance of the tree you built from - "
-            "an unverified client claim, surfaced in runs.get data.build_provenance). "
-            "source='server' "
-            "builds from a kernel tree (kernel_source_ref required) and is a single-host "
-            "convenience: for a local build host a warm-tree kernel_source_ref is a provenance "
-            "label only - it does not select the tree; the operator stages the actual source "
-            "via KDIVE_KERNEL_SRC on the worker. That lane builds the worker's working-tree "
-            "state, not HEAD: runs.get reports data.build_provenance.{label, resolved_commit "
-            "(the HEAD the tree is based on, decorative when dirty), dirty (bool), and when dirty: "
-            "untracked (bool), tree_sha (content digest of tracked changes), dirty_files (changed "
-            "tracked paths, capped with dirty_files_truncated)} - tracked git state only. "
-            "For a source='server' build, the optional 'config' is a catalog ComponentRef: "
-            "paste the config_ref that buildconfig.set/list/get echo "
-            "(e.g. {'kind':'catalog','provider':'system','name':'kdump'}), which fills in the "
-            "required provider for you. Omit it to get the seeded kdump fragment (KEXEC, "
-            "CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a kdump+debuginfo kernel. Call "
-            "buildconfig.get to inspect a named fragment - its merge_recipe shows the "
-            "fragment layers onto defconfig (make defconfig, then merge_config.sh, then "
-            "make olddefconfig), so a from-source build keeps defconfig's base rootfs/boot "
-            "options and you only add on top - and runs.validate_profile to "
-            "pre-flight a profile without creating a Run. Extra "
+            "an unverified client claim, surfaced in runs.get data.build_provenance). Extra "
             "kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the cmdline "
-            "parameter to runs.build for server builds, or to runs.complete_build for external "
-            "builds. See "
+            "parameter to runs.complete_build. See "
             "resource://kdive/docs/operating/external-build-upload.md for shaping a "
-            "source='external' upload, or resource://kdive/docs/operating/build-source-staging.md "
-            "for staging a server-build source."
+            "source='external' upload."
         )
     )
     system_id: str | None = Field(
@@ -198,27 +166,9 @@ def register(
     _register_runs_create(app, pool, resolver)
     _register_runs_bind(app, pool)
     _register_runs_cancel(app, pool)
-    _register_runs_build(app, pool, resolver)
-    _register_runs_build_install_boot(app, pool, resolver)
     _register_runs_complete_build(app, pool, resolver)
     _register_runs_install(app, pool, resolver)
     _register_runs_boot(app, pool)
-    _register_runs_profile_examples(app, pool)
-    _register_runs_validate_profile(app, pool)
-
-
-def _build_handlers(runtime: ProviderRuntime) -> _BuildRunHandlers:
-    return _BuildRunHandlers(
-        runtime.component_sources,
-        config_validator=runtime.build_config_validator,
-    )
-
-
-def _composite_handlers(runtime: ProviderRuntime) -> _CompositeRunHandlers:
-    return _CompositeRunHandlers(
-        runtime.component_sources,
-        config_validator=runtime.build_config_validator,
-    )
 
 
 def _complete_build_handlers() -> _CompleteBuildHandlers:
@@ -237,8 +187,7 @@ def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: Provid
         """Return one run; `succeeded` means build done. `data.steps` has install/boot status.
 
         `data.required_cmdline` is the platform-required boot args; append extra kernel debug
-        args (e.g. `dhash_entries=1`) with the `cmdline` parameter on `runs.build` for server
-        builds, or `runs.complete_build` for external builds.
+        args (e.g. `dhash_entries=1`) with the `cmdline` parameter on `runs.complete_build`.
 
         Console evidence: `refs.console` is the boot-window console snapshot and
         `data.console_access` names how to read it (`artifacts.get` windowed/paged, or jumped to
@@ -307,8 +256,7 @@ def _register_runs_create(
                     "Run creation request. After source='external', call "
                     "artifacts.expected_uploads and artifacts.create_run_upload, then "
                     "runs.complete_build. Extra kernel cmdline args are passed later as "
-                    "`cmdline` on runs.build for server builds, or runs.complete_build for "
-                    "external builds."
+                    "`cmdline` on runs.complete_build."
                 )
             ),
         ],
@@ -367,108 +315,6 @@ def _register_runs_cancel(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         """Cancel a non-terminal run, freeing its system without a teardown."""
         return await _cancel_run(pool, current_context(), run_id)
-
-
-def _register_runs_build(
-    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
-) -> None:
-    @app.tool(
-        name="runs.build",
-        annotations=_docmeta.mutating(),
-        meta=_docmeta.maturity_meta("implemented"),
-    )
-    async def runs_build(
-        run_id: Annotated[str, Field(description="The Run to build.")],
-        cmdline: Annotated[
-            str | None,
-            Field(
-                description="Kernel debug args appended to the platform-required boot args "
-                "(e.g. 'dhash_entries=1'). Omit for no extra debug args. Bound on the first "
-                "build of a Run."
-            ),
-        ] = None,
-        idempotency_key: Annotated[
-            str | None,
-            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
-        ] = None,
-    ) -> ToolResponse:
-        """Enqueue a kernel build for a run."""
-        ctx = current_context()
-        return await with_runtime_for_run_target_kind(
-            pool,
-            resolver,
-            ctx,
-            run_id,
-            lambda runtime: _build_handlers(runtime).build_run(
-                pool,
-                ctx,
-                run_id,
-                cmdline=cmdline,
-                idempotency_key=idempotency_key,
-            ),
-            required_role=Role.CONTRIBUTOR,
-        )
-
-
-def _register_runs_build_install_boot(
-    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
-) -> None:
-    @app.tool(
-        name="runs.build_install_boot",
-        annotations=_docmeta.mutating(),
-        meta=_docmeta.maturity_meta("implemented"),
-    )
-    async def runs_build_install_boot(
-        run_id: Annotated[
-            str,
-            Field(
-                description=(
-                    "A created, bound, not-yet-built Run to drive build->install->boot "
-                    "as a single pollable job. The Run must use a "
-                    "source='server' build profile. Poll the returned job with jobs.wait."
-                )
-            ),
-        ],
-        cmdline: Annotated[
-            str | None,
-            Field(
-                description=(
-                    "Kernel debug args appended to the platform-required boot args "
-                    "(e.g. 'dhash_entries=1'). Bound at build time and applied through "
-                    "install and boot. Omit for no extra debug args."
-                )
-            ),
-        ] = None,
-        idempotency_key: Annotated[
-            str | None,
-            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
-        ] = None,
-    ) -> ToolResponse:
-        """Build, install, and boot a bound Run as a single pollable job.
-
-        Performs build-host admission (same as runs.build) then enqueues one
-        BUILD_INSTALL_BOOT job. Requires operator role — the composite includes install
-        and boot, whose gate is operator. Poll the returned job handle with jobs.wait.
-
-        This one-shot uses the default kdump crash-capture reservation. For a larger
-        reservation (a KASAN kernel or a large guest), use the granular path instead —
-        runs.build, then runs.install with a crashkernel size, then runs.boot.
-        """
-        ctx = current_context()
-        return await with_runtime_for_run_target_kind(
-            pool,
-            resolver,
-            ctx,
-            run_id,
-            lambda runtime: _composite_handlers(runtime).build_install_boot(
-                pool,
-                ctx,
-                run_id,
-                cmdline=cmdline,
-                idempotency_key=idempotency_key,
-            ),
-            required_role=Role.OPERATOR,
-        )
 
 
 def _register_runs_complete_build(
@@ -619,63 +465,6 @@ def _register_runs_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
 
         To iterate boot parameters (e.g. `dhash_entries=1`), pass `cmdline` to `runs.install`
         against the built kernel — no rebuild — then boot here; `runs.boot` takes no cmdline. Extra
-        args can also be bound at build via `runs.build`/`runs.complete_build`.
+        args can also be bound at build via `runs.complete_build`.
         """
         return await _boot_run(pool, current_context(), run_id, idempotency_key=idempotency_key)
-
-
-def _register_runs_profile_examples(app: FastMCP, pool: AsyncConnectionPool) -> None:
-    @app.tool(
-        name="runs.profile_examples",
-        annotations=_docmeta.read_only(),
-        meta={"maturity": "implemented"},
-    )
-    async def runs_profile_examples() -> ToolResponse:
-        """Return a ready-to-edit build profile per registered build host. Requires a token."""
-        # Auth-only (ADR-0117): the verifier already gated the transport; enforce token
-        # presence as defence-in-depth. No platform/project gate, no audit — the projection
-        # is the public host-kind/source-kind rule only (ADR-0160).
-        current_context()
-        declared = declared_remote_instance_names()
-        async with pool.connection() as conn:
-            hosts = await list_all_hosts(conn)
-        return _build_host_profile_examples(hosts, declared)
-
-
-def _register_runs_validate_profile(app: FastMCP, pool: AsyncConnectionPool) -> None:
-    @app.tool(
-        name="runs.validate_profile",
-        annotations=_docmeta.read_only(),
-        meta={"maturity": "implemented"},
-    )
-    async def runs_validate_profile(
-        build_profile: Annotated[
-            BuildProfileInput,
-            Field(
-                description=(
-                    "A build_profile document to check before runs.create, returning the typed "
-                    "validation envelope WITHOUT inserting a Run or consuming capacity. It runs "
-                    "the same checks runs.create runs: structural parse (source='server' vs "
-                    "'external'; warm-tree string vs {'git':{'remote','ref'}} kernel_source_ref) "
-                    "and build-host/source-kind compatibility for a registered build_host. A "
-                    "'valid' verdict means the document parses and (for a registered named host) "
-                    "is source-kind compatible — it does NOT guarantee the source tree exists, "
-                    "the config resolves, the kernel builds, or capacity is free; those are "
-                    "checked later at runs.build/runs.complete_build. To confirm now that a "
-                    "catalog 'config' resolves (without a build), call buildconfig.get(name) or "
-                    "browse buildconfig.list — both echo the fragment's existence and sha256; a "
-                    "kind='local' config is resolved on the worker at build time and cannot be "
-                    "pre-flighted server-side. An unregistered build_host "
-                    "is not rejected (data.build_host_registered=false discloses the compat check "
-                    "was skipped). Call runs.profile_examples for a ready-to-edit shape."
-                )
-            ),
-        ],
-    ) -> ToolResponse:
-        """Validate a build profile without inserting a Run. Requires a token."""
-        # Auth-only (ADR-0117/0160), as runs.profile_examples: the verifier already gated the
-        # transport; enforce token presence as defence-in-depth. No platform/project gate, no
-        # audit — the tool only validates caller-supplied input and reads the public build-host
-        # projection runs.profile_examples already exposes.
-        current_context()
-        return await _validate_build_profile(pool, build_profile)

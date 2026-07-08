@@ -96,12 +96,9 @@ CANONICAL_PROMPTS: tuple[PromptSpec, ...] = (
         title="Build, boot, and debug a kernel",
         description="Build a kernel, boot it on a system, and attach a live debug session.",
         summary=(
-            "Build a kernel, boot it, and attach a live debug session. External upload is the "
-            "default build lane (ADR-0234): upload a prebuilt artifact via "
+            "Build a kernel, boot it, and attach a live debug session. Build the kernel "
+            "yourself and upload it (ADR-0234): upload a prebuilt artifact via "
             "artifacts.expected_uploads -> artifacts.create_run_upload -> runs.complete_build. "
-            "A warm-tree server build (runs.build, after runs.create) is the secondary "
-            "single-host path; prefer runs.build_install_boot to run that lane as one "
-            "pollable job when you choose it. "
             "Prerequisite: an open investigation and a defined, allocated system "
             "(see start_investigation)."
         ),
