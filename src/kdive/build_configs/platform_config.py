@@ -10,6 +10,7 @@ per-method ``profile_requirements``.
 from __future__ import annotations
 
 from kdive.components.requirements import ConfigRequirements
+from kdive.serialization import JsonValue
 
 # Exact `=y` requirements: rootfs/boot-mount symbols. Not auto-selected by olddefconfig.
 PLATFORM_REQUIRED_CONFIG = ConfigRequirements(
@@ -31,12 +32,16 @@ REQUIRED_KERNEL_CONFIG: tuple[tuple[str, ...], ...] = (
 PLATFORM_CONFIG_SYMBOL_MISSING = "platform_config_symbol_missing"
 
 
-def platform_required_payload() -> dict[str, object]:
+def platform_required_payload() -> dict[str, JsonValue]:
     """The surfaced platform requirement, derived from the constants the build guard enforces."""
-    return {
-        "all_of": dict(PLATFORM_REQUIRED_CONFIG.required),
-        "any_of": [list(group) for group in REQUIRED_KERNEL_CONFIG],
+    all_of: dict[str, JsonValue] = {
+        symbol: value for symbol, value in PLATFORM_REQUIRED_CONFIG.required.items()
     }
+    any_of: list[JsonValue] = []
+    for group in REQUIRED_KERNEL_CONFIG:
+        members: list[JsonValue] = [symbol for symbol in group]
+        any_of.append(members)
+    return {"all_of": all_of, "any_of": any_of}
 
 
 __all__ = [

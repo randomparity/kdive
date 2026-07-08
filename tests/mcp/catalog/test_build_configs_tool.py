@@ -18,6 +18,7 @@ from kdive.build_configs.catalog import (
     upsert_seed_build_config,
 )
 from kdive.build_configs.defaults import catalog_config_ref
+from kdive.build_configs.platform_config import platform_required_payload
 from kdive.build_configs.seed import KDUMP_FRAGMENT_PATH, seed_build_configs
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.responses import ToolResponse
@@ -84,6 +85,8 @@ def test_buildconfig_get_returns_inline_bytes_and_sha(
         assert resp.data["sha256"] == hashlib.sha256(data).hexdigest()
         assert "merge_config.sh -m" in str(resp.data["merge_recipe"])
         assert resp.data["config_ref"] == catalog_config_ref("kdump").model_dump()
+        # surfaced == enforced: the payload is derived from the guard's constants (ADR-0316).
+        assert resp.data["platform_required_config"] == platform_required_payload()
 
     asyncio.run(_run())
 
