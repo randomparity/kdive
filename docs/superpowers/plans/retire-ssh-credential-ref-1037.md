@@ -27,8 +27,11 @@ guardrail(s) before committing. One logical change per commit; conventional-comm
 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` trailer. Stage explicit paths
 (never `git add -A`).
 
-**Global acceptance gate (check after Task 6):** `rg ssh_credential_ref src/ tests/ docs/` shows
-matches **only** in the build-host store. Any local-libvirt-profile-context match is a miss.
+**Global acceptance gate (check after Task 6):** scope the grep to **live surfaces only** —
+`rg ssh_credential_ref src/ tests/ docs/guide docs/operating`. Matches must appear **only** in the
+build-host store. **Do not** grep `docs/archive`, `docs/design`, `docs/specs`, `docs/adr`,
+`docs/superpowers` — those are historical/authority records (including this change's own spec and
+ADR) that intentionally reference the retired field and must not be edited.
 
 ---
 
@@ -100,34 +103,42 @@ the real secret.
 **Files:** `src/kdive/mcp/tools/debug/sessions_lifecycle.py`, `src/kdive/mcp/tools/debug/sessions.py`.
 
 **Change:**
-1. In `_prepare_attach_request` (`sessions_lifecycle.py`), replace the `backend =
-   self._credential_backend(...)` + `_resolve_credential(...)` block with: for a `_DRGN_LIVE`
-   transport where `resources.profile_policy.drgn_live_seeds_bootstrap_key(profile)` is true,
+1. Add the import `from kdive.prereqs.system_bootstrap_key import load_system_bootstrap_private_key`
+   (not currently imported in `sessions_lifecycle.py`).
+2. In `_prepare_attach_request` (`sessions_lifecycle.py`), replace the `backend =
+   self._credential_backend(...)` + `_resolve_credential(...)` block. `_prepare_attach_request` has
+   **no already-parsed profile** — only `system` (raw `system.provisioning_profile`) and
+   `resources.profile_policy` — so parse it here, wrapping the parse **and** the loader in the same
+   `try/except` (mirroring the old `_resolve_credential:443–446`, so the spec-criterion-2 parse break
+   surfaces as `configuration_error` on `start_session` rather than escaping uncaught):
    ```python
-   try:
-       await load_system_bootstrap_private_key(
-           conn, system.id, secret_registry=self._secret_registry
-       )
-   except CategorizedError as exc:
-       return ToolResponse.failure_from_error(str(system.id), exc)
+   if transport == _DRGN_LIVE:
+       try:
+           profile = ProvisioningProfile.parse(system.provisioning_profile)
+           if resources.profile_policy.drgn_live_seeds_bootstrap_key(profile):
+               await load_system_bootstrap_private_key(
+                   conn, system.id, secret_registry=self._secret_registry
+               )
+       except CategorizedError as exc:
+           return ToolResponse.failure_from_error(str(system.id), exc)
    ```
-   (parse the profile from `system.provisioning_profile` as `_resolve_credential` did, or reuse the
-   already-parsed profile). Keep it **before** `_open_transport` runs (it is — `_prepare_attach_request`
-   returns the request, then `start_session` calls `_open_transport`), preserving ADR-0039 §2 ordering.
-   Import `load_system_bootstrap_private_key` from `kdive.prereqs.system_bootstrap_key`.
-2. Delete `_resolve_credential`, `_credential_backend`, the `secret_backend_factory` constructor
+   This runs **before** `_open_transport` (`_prepare_attach_request` returns the request, then
+   `start_session` calls `_open_transport`), preserving ADR-0039 §2 seed-before-output ordering.
+   (`ProvisioningProfile` is already imported in the module — it is used by the old
+   `_resolve_credential`.)
+3. Delete `_resolve_credential`, `_credential_backend`, the `secret_backend_factory` constructor
    param + `self._secret_backend_factory` attribute on `DebugSessionLifecycle`, and the
    `secret_backend_factory` plumbing through the `create`/`__init__` chain
    (`sessions_lifecycle.py:245,254,265,273,371–376`).
-3. Delete the now-registrant-less session-scoped release machinery: `_secret_scope`,
+4. Delete the now-registrant-less session-scoped release machinery: `_secret_scope`,
    `_release_failed_attach_secret`, the `secret_scope` local + `_release_failed_attach_secret`
    calls in `start_session` (`307,316,331`), the `self._secret_registry.release(secret_scope)` in
    the except branch (`329`), and `end_session`'s `self._secret_registry.release(_secret_scope(uid))`
    (`417`). Keep `self._secret_registry` (the loader registers through it). Verify gdbstub registers
    no secret (it does not) so nothing else depends on these.
-4. `sessions.py` — delete `_secret_backend_factory` builder (`98–121`) and its wiring into the
+5. `sessions.py` — delete `_secret_backend_factory` builder (`98–121`) and its wiring into the
    lifecycle construction (`82–92, 121`).
-5. Rewrite the `start_session` docstring (`286–294`) to drop `ssh_credential_ref` /
+6. Rewrite the `start_session` docstring (`286–294`) to drop `ssh_credential_ref` /
    `secret_backend_factory` and describe the bootstrap-key gate+seed. No `ssh_credential_ref` string
    may remain in this module.
 
@@ -165,17 +176,35 @@ no `ssh_credential_ref` in `connect.py`.
 
 **Where it fits:** fixes the actual P6 discoverability defect and keeps the served resources honest.
 
-**Files (source of served content + comments):**
-- `src/kdive/mcp/resources/_content/toolsets-introspect.md` (~13),
-  `toolsets-debug.md` (~49), `agent-index.md` (~94, 111), and the pre-provision-checklist served
-  content that lists `ssh_credential_ref` as a provision-bound knob — reword to: drgn-live needs no
-  credential provisioning; it works on any ready local System (the SSH forward always renders,
-  ADR-0281). State the real prerequisite is a drgn-capable guest image (`introspect.run` reports
-  `missing_dependency` otherwise).
+**CRITICAL — edit canonical sources, never the generated snapshots.** The served resources
+`src/kdive/mcp/resources/_content/*.md` are **generated** from the canonical `docs/guide/` tree by
+`scripts/gen_doc_resources.py` (ADR-0151); `just resources-docs` writes them and
+`just resources-docs-check` gates them. Hand-editing `_content/*.md` gets clobbered on regen and/or
+fails the check. Edit the canonical docs, then regenerate.
+
+**Canonical docs to reword** (drgn-live needs no credential provisioning; it works on any ready
+local System — the SSH forward always renders, ADR-0281; the real prerequisite is a drgn-capable
+guest image, `introspect.run` reports `missing_dependency` otherwise):
+- `docs/guide/agent-index.md` (~94, 111)
+- `docs/guide/toolsets/introspect.md` (~13)
+- `docs/guide/toolsets/debug.md` (~49)
+- The canonical pre-provision-checklist doc (the source that lists `ssh_credential_ref` as a
+  provision-bound knob — find via `DOC_RESOURCES` in `mcp/resources/registrar.py`).
+
+**Operator walkthrough (hand-authored, not generated) — reword directly:**
+- `docs/operating/providers/local-libvirt-walkthrough.md` (~276, 284, 294, 304) — remove the
+  "**Set `ssh_credential_ref` in the provisioning profile**" step and its JSON example; state
+  drgn-live works on any ready local System with no credential step. Keep operator-doc style (no
+  `just` commands — use `python -m kdive` / `scripts/*.sh` if a command is needed).
+
+**Code comments + capability message:**
 - `src/kdive/images/capability_signals.py` (~127) — reword the `drgn` capability message to drop
   `ssh_credential_ref` ("drgn liveness depends on provider introspection and a drgn-capable guest").
 - `src/kdive/providers/local_libvirt/lifecycle/provisioning.py` (~239) and `xml.py` (~65, 132) —
   update the code comments that describe `ssh_credential_ref` as the drgn-live gate.
+
+**Regenerate the snapshots:** after the canonical edits, run `just resources-docs`; commit the
+regenerated `_content/*.md` alongside the canonical edits so `just resources-docs-check` passes.
 
 **Tests:**
 - `tests/mcp/resources/test_pre_provision_checklist_docs.py` (~32) — drop `ssh_credential_ref` from
@@ -219,10 +248,11 @@ committed generated files match a fresh generation.
 **Where it fits:** the closing verification before review.
 
 **Steps:**
-1. `rg ssh_credential_ref src/ tests/ docs/` — confirm matches are **only** the build-host store
-   (`db/build_hosts.py`, `db/schema/0027*.sql`, `0029*.sql`,
+1. `rg ssh_credential_ref src/ tests/ docs/guide docs/operating` — confirm matches are **only** the
+   build-host store (`db/build_hosts.py`, `db/schema/0027*.sql`, `0029*.sql`,
    `inventory/reconcile/build_hosts.py`, `mcp/tools/ops/build_hosts/**`,
-   `providers/shared/build_host/**`, and their tests). Zero local-libvirt-profile matches.
+   `providers/shared/build_host/**`, and their tests). Zero local-libvirt-profile matches. (Do not
+   grep the historical/authority doc trees — see the global gate note.)
 2. Run each guardrail: `just lint`, `just type`, `just docs-check`, `just config-docs-check`,
    `just resources-docs-check`, `just docs-links`, `just docs-paths`, `just adr-status-check`, then
    the full `just test`.
