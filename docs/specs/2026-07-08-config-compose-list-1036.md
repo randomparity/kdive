@@ -175,12 +175,15 @@ stays where it is (its `=y` was already mandatory); it is not moved, so its fail
 - **Guard proven against a real final `.config`, not fragment text:** the guard validates the
   *post-`olddefconfig`* `.config`, so a test that merely checks `kdump.config`'s bytes would not prove
   the default build passes (an unmet dependency could still drop a symbol at `olddefconfig`). Two
-  tests instead: (a) a **drift guard** asserting every `PLATFORM_REQUIRED_CONFIG`/`REQUIRED_KERNEL_CONFIG`
-  symbol is *declared* in the seeded `kdump.config` (so the constants cannot diverge from the seeded
-  default); and (b) a **guard-passes test** running `_validate_final_config` against the existing
-  representative good final-`.config` fixture the orchestration tests already use, asserting it passes.
-  Survival of the symbols through a real `make olddefconfig` remains covered by the live/integration
-  build path (out of band), which this spec does not duplicate.
+  tests instead: (a) a **drift guard** asserting every `PLATFORM_REQUIRED_CONFIG` exact symbol *and*
+  ≥1 member of each `REQUIRED_KERNEL_CONFIG` OR-group is *declared* in the seeded `kdump.config` (the
+  seed declares only `DEBUG_INFO_DWARF5` of the debuginfo group, which satisfies it — the guard must
+  not demand all three); and (b) a **guard-passes test** running `_validate_final_config` against a
+  **newly authored** representative good final-`.config` fixture (the five mount symbols +
+  `CONFIG_CRASH_DUMP=y` + one debuginfo option), since the orchestration tests today only build minimal
+  inline configs engineered to *fail* a check. Survival of the symbols through a real
+  `make olddefconfig` remains covered by the live/integration build path (out of band), which this spec
+  does not duplicate.
 
 ### Why this is the smaller, safer change
 
@@ -211,8 +214,9 @@ untouched.
 - `buildconfig.get` returns `data.platform_required_config` as `{all_of, any_of}`, and a test asserts
   that payload is derived from the exact constants `_validate_final_config` enforces (`surfaced ==
   enforced`).
-- Drift guard: every surfaced platform symbol is declared in the seeded `kdump.config`. Guard-passes
-  test: `_validate_final_config` accepts the existing good final-`.config` fixture.
+- Drift guard: every `all_of` symbol and ≥1 member of each `any_of` group is declared in the seeded
+  `kdump.config`. Guard-passes test: `_validate_final_config` accepts a newly authored good
+  final-`.config` fixture (mount symbols + `CONFIG_CRASH_DUMP=y` + one debuginfo option).
 - The `config` Field text names the replace-not-compose semantics and points at
   `data.platform_required_config`; generated `docs/guide/reference/*.md` regenerate clean via
   `just docs`.
