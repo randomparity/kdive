@@ -93,7 +93,8 @@ enumerates every file.
   guest build-transport / buildhost-agent diagnostics; `providers/ports/build*.py`;
   `providers/fault_inject/build.py`; `providers/assembly/build_hosts.py`;
   `providers/shared/build_timeouts.py`.
-- **Build jobs / telemetry:** `jobs/handlers/runs/build.py`; `domain/build_phase.py`;
+- **Build jobs / telemetry:** `jobs/handlers/runs/build.py`, `jobs/handlers/runs/composite.py`
+  (the `composite_handler` for the `BUILD_INSTALL_BOOT` job); `domain/build_phase.py`;
   `observability/build_telemetry.py`.
 - **Build-host fleet:** `db/build_hosts.py`, `db/build_host_policy.py`,
   `db/buildhost_agent_probes.py`; `reconciler/build_host_fleet.py` +
@@ -128,37 +129,71 @@ image, which both lanes need and Spec 2 extends.
 - **`services/runs/admission.py`** — remove the `is_external` / source branch; every
   run is the upload lane.
 - **`build_artifacts/validation.py`** — keep `EXTERNAL_BUILD_CONTRACTS` and the
-  kernel / vmlinux / initrd checks; make `effective_config` an always-optional,
-  **unvalidated** accepted artifact.
+  kernel / vmlinux / initrd checks. For `effective_config`: flip its contract
+  `requirement` from `'conditional'` to `'optional'`, rewrite the profile-requirements
+  note on it, delete `_validate_effective_config`, drop the `profile_requirements`
+  parameter from `validate_external_artifacts`, and remove the now-unused
+  `ConfigRequirements` / `validate_config_requirements` import. The artifact is accepted
+  but never inspected.
 - **`services/runs/steps.py`** — keep `BuildStepResult` / finalize (shared with
   install/boot); drop server-build-only helpers.
 - **`jobs/payloads.py`, `domain/operations/jobs.py`** — remove `BuildPayload` /
   `BuildInstallBootPayload`; leave the two `JobKind` enum values inert with a comment.
 - **`mcp/tool_index.py`** — prune keywords for the deleted tools.
+- **`reconciler/loop.py`** — strip the build-host fleet wiring: the imports of
+  `BuildHostProber` (deleted `providers/shared/build_host/reachability`),
+  `BuildHostTelemetry` / `read_build_host_snapshot` (deleted `reconciler/build_host_fleet.py`),
+  and `reconciler/repairs/build_hosts` (deleted); plus the
+  `_reclaim_build_host_leases` / `_reap_orphan_build_vms` / `_probe_build_host_reachability`
+  aliases, the `_refresh_build_host_snapshot` method, and the
+  `reclaimed_build_host_leases` / `build_host_states_changed` counters.
+- **`jobs/handlers/runs/registrar.py`** — drop the `JobKind.BUILD` /
+  `BUILD_INSTALL_BOOT` handler registrations and the `build_handler` / `composite_handler` /
+  `BuildProfile` / `ServerBuildProfile` imports; keep the install/boot and other registrations.
+- **`jobs/handlers/runs/ports.py` + `mcp/worker_registration.py`** — remove the
+  `BuildHostTransportFactories` (imported from deleted `jobs.handlers.runs.build` in
+  `ports.py`, and from deleted `providers.shared.build_host.dispatch` in
+  `worker_registration.py`) and `BuildPhaseRecorder` (deleted
+  `observability/build_telemetry.py`) wiring threaded through worker startup.
+- **`mcp/tools/catalog/artifacts/uploads.py`** — `_run_accepts_upload` currently gates on
+  `isinstance(parsed, ExternalBuildProfile)`; simplify to the flat-`BuildProfile` check
+  (every run is the upload lane now).
+- **`services/runs/complete_build.py`** (the external-lane finalizer) — delete
+  `_external_config_requirements` and the `_external_build_profile` isinstance guard;
+  remove the `ConfigRequirements` / `load_fixture_catalog` / `profile.profile_requirements`
+  plumbing threaded through `CompleteBuildValidation`; call `validate_external_artifacts`
+  with no `profile_requirements`. This is the file that makes "unvalidated `effective_config`"
+  actually work.
 - **`components/requirements.py` + fixture profile YAML (`fixtures/local-libvirt/profiles/*.yaml`)**
-  — **INSPECT, do not blanket-delete.** The `ConfigRequirements` validator and
-  `load_profile_config_requirements` are build-only and go. But `CmdlineRequirements`
-  and `validate_cmdline_requirements` gate the **protected cmdline prefixes**
-  (`nokaslr`, the `crashkernel` token) at `runs.install`/`runs.boot` — a *source-agnostic*
-  path that must survive. The plan traces which half of this module and the fixture
-  `requires.{config,rootfs,cmdline}` blocks are consumed by install/boot before removing
-  anything.
+  — **INSPECT.** `ConfigRequirements`, `validate_config_requirements`,
+  `load_profile_config_requirements`, and `validate_cmdline_requirements` are all
+  build/validation-only and go — `validate_cmdline_requirements` is **dead code** (only
+  its own unit test `tests/provider_components/test_requirements.py` calls it; delete the
+  test with it). The install/boot cmdline protection is entirely independent and **stays**:
+  `platform_owned_cmdline_token` + `_PLATFORM_OWNED_CMDLINE_TOKENS`
+  (`root=` / `console=` / `crashkernel=`) in `services/runs/steps.py`. `CmdlineRequirements`
+  survives only as an inert field on `FixtureManifest` (`components/catalog.py`); keep
+  what `FixtureManifest` still references and drop the rest.
 
 ## Schema change
 
 One new forward migration:
 
 ```sql
+-- Drop dependents BEFORE build_hosts: both buildhost_agent_probe_guests
+-- (FK ON DELETE CASCADE) and build_host_leases (FK ON DELETE RESTRICT)
+-- REFERENCE build_hosts(id), so build_hosts cannot be dropped first.
 DROP TABLE IF EXISTS build_config_catalog;
+DROP TABLE IF EXISTS buildhost_agent_probe_guests;   -- real name (0041), not "buildhost_agent_probes"
 DROP TABLE IF EXISTS build_host_leases;
-DROP TABLE IF EXISTS build_hosts;
-DROP TABLE IF EXISTS buildhost_agent_probes;
--- plus ephemeral-build-host columns/rows
+DROP TABLE IF EXISTS build_hosts;                     -- ephemeral columns (0029) drop with the table
 -- JobKind enum values BUILD, BUILD_INSTALL_BOOT are left in place:
 -- Postgres cannot drop a value from an existing enum without recreating the type.
 ```
 
 The migration is destructive but touches only server-build infrastructure state.
+`egress_probe_guests` (0022) is a **separate** table (egress reachability, not build
+hosts) and must survive — do not confuse it with `buildhost_agent_probe_guests`.
 
 ## Preserved knowledge (for Spec 3)
 
