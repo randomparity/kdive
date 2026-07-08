@@ -89,8 +89,14 @@ shaping, not tool exposure.
 
 A new `CompactResponseMiddleware(Middleware)` with an `on_call_tool` hook,
 registered in `build_app` (`src/kdive/mcp/app.py`) as the **outermost** response
-middleware so it observes the final `ToolResult` — including the failure
-envelopes `BindingErrorMiddleware` synthesizes.
+middleware — specifically *outer* of both `DenialAuditMiddleware` (`app.py:51`,
+which synthesizes `authorization_denied` envelopes) and `BindingErrorMiddleware`
+(`app.py:52`, currently innermost, which synthesizes `configuration_error`
+envelopes) — so it observes the final `ToolResult`, including those synthesized
+failure envelopes. This ordering is load-bearing: slotting it *inside*
+`DenialAudit` would still catch binding errors but silently skip compacting every
+`authorization_denied` envelope (a fail-safe miss, not corruption). Verify the
+registration position when wiring.
 
 Behavior:
 
@@ -165,6 +171,15 @@ are payload, not envelopes, and are correctly left untouched.)
       `retryable`, `detail`, and any empty `suggested_next_actions`/`refs`/`items`,
       at the top level and within each `items[]` entry; `object_id`, `status`,
       and non-empty `data` remain.
+- [ ] With the flag **on**, the **`content` TextContent text block** (the second
+      wire copy, the larger half of the payload) is *also* compacted for that
+      response — parse its JSON and confirm it omits the defaulted fields at the top
+      level and within `items[]`, not only `structured_content`.
+- [ ] With the flag **on**, a middleware-*synthesized* failure envelope — an
+      `authorization_denied` (from `DenialAuditMiddleware`) or a recognized binding
+      `ValidationError` (e.g. `allocations.request` shape-XOR, from
+      `BindingErrorMiddleware`) — is compacted, proving `CompactResponseMiddleware`
+      is ordered outer of both.
 - [ ] With the flag **on**, a direct `failure()` envelope (e.g. a `not_found` /
       `configuration_error`) still carries `error_category`, `retryable`, and its
       non-null `detail`.
