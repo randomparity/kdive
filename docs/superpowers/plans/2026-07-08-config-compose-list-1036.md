@@ -29,7 +29,7 @@
 - `src/kdive/mcp/tools/lifecycle/runs/server_build.py`, `.../composite.py` — iterate `config_refs(parsed)` for per-ref source/validator checks.
 - `src/kdive/mcp/tools/catalog/build_configs.py` — add `data.platform_required_config` to `read_build_config`.
 - `src/kdive/mcp/tools/lifecycle/runs/registrar.py` — extend the `config` Field text.
-- Tests: `tests/profiles/test_build.py`, `tests/providers/build_host/test_config_compose.py` (**new**), `tests/providers/build_host/test_orchestration.py`, `tests/build_configs/test_platform_config.py` (**new**), `tests/mcp/lifecycle/runs/` (server_build/composite tool tests), `tests/mcp/catalog/test_build_configs_tool.py`.
+- Tests: `tests/profiles/test_build.py`, `tests/providers/build_host/test_config_compose.py` (**new**), `tests/providers/build_host/test_orchestration.py`, `tests/build_configs/test_platform_config.py` (**new**), `tests/mcp/lifecycle/test_runs_tools.py` (server_build / `runs.build` harness), `tests/mcp/tools/lifecycle/runs/test_composite_tool.py` (`runs.build_install_boot`), `tests/mcp/catalog/test_build_configs_tool.py`.
 
 Verify before coding (fast checks that keep import direction acyclic):
 - `grep -n build_configs src/kdive/profiles/build.py` → **NO** (profiles must not import build_configs; the length validator uses only `MAX_CONFIG_FRAGMENTS` defined locally).
@@ -388,6 +388,37 @@ def test_build_workspace_composes_two_catalog_fragments(tmp_path: Path) -> None:
     assert "CONFIG_FOO=m" in merged and "CONFIG_FOO=y" not in merged
 
 
+def test_build_workspace_compose_later_disable_is_not_a_dropped_symbol(tmp_path: Path) -> None:
+    # Acceptance: a later fragment disabling an earlier =y symbol builds successfully — the
+    # net-intent effective fragment emits it as unset, so the drop-check does not flag it.
+    fetches = {
+        "kdump": b"CONFIG_FOO=y\nCONFIG_SQUASHFS=y\n",
+        "faultinject": b"# CONFIG_FOO is not set\n",
+    }
+    orchestrator = BuildHostOrchestrator.create(
+        workspace_root=tmp_path,
+        catalog_fetch=lambda name: fetches[name],
+        checkout=lambda _r, _p, _w, _f: None,
+        run_olddefconfig=lambda _w: CapturedStep(0, ""),
+        # FOO is correctly off in the final config; the build must NOT be rejected.
+        read_config=lambda _w: "# CONFIG_FOO is not set\n" + _GOOD_TAIL,
+        run_make=lambda _w: CapturedStep(0, ""),
+    )
+    profile = BuildProfile.parse(
+        {
+            "schema_version": 1,
+            "kernel_source_ref": "warm-ref",
+            "config": [
+                {"kind": "catalog", "provider": "system", "name": "kdump"},
+                {"kind": "catalog", "provider": "system", "name": "faultinject"},
+            ],
+        }
+    )
+    assert isinstance(profile, ServerBuildProfile)
+    # Does not raise (no spurious "dropped by olddefconfig" for the intentional disable).
+    orchestrator.build_workspace(_RUN, profile)
+
+
 def test_build_workspace_single_ref_passes_raw_bytes(tmp_path: Path) -> None:
     # The single-config path must hand the checkout seam the raw fetched bytes unchanged.
     raw = b"# verbatim comment\nCONFIG_SQUASHFS=y\n" + _GOOD_TAIL.encode()
@@ -419,7 +450,7 @@ _GOOD_TAIL = (
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/providers/build_host/test_orchestration.py -k "composes_two or single_ref_passes_raw" -q`
+Run: `uv run python -m pytest tests/providers/build_host/test_orchestration.py -k "composes_two or single_ref_passes_raw or later_disable" -q`
 Expected: FAIL (compose not wired; `build_workspace` resolves a single ref only).
 
 - [ ] **Step 3: Implement**
@@ -445,17 +476,11 @@ with:
         )
 ```
 
-Update the imports in `orchestration.py`: drop the now-unused `resolve_config_bytes`/`DEFAULT_CONFIG_REF` import there if they are unused elsewhere in the file (check with `grep -n "resolve_config_bytes\|DEFAULT_CONFIG_REF" src/kdive/providers/shared/build_host/orchestration.py`), and add:
+Fix the imports by **editing the existing blocks** (do not add a new import line — re-importing `validate_config_ref` would be an F811/F401 the lint gate rejects):
+- In the existing `from ...configuration.config import (...)` block (currently names `DEFAULT_BUILD_COMPONENT_ROOT, load_profile_config_requirements, missing_config_groups, resolve_config_bytes, validate_config_ref`), **add** `config_refs` and `resolve_config_list_bytes` and **remove** `resolve_config_bytes` (now unused). Keep `validate_config_ref`, `missing_config_groups`, `load_profile_config_requirements`, `DEFAULT_BUILD_COMPONENT_ROOT`.
+- In `from kdive.build_configs.defaults import DEFAULT_CONFIG_REF, CatalogConfigFetch`, **remove** `DEFAULT_CONFIG_REF` (now unused), keeping `CatalogConfigFetch`.
 
-```python
-from kdive.providers.shared.build_host.configuration.config import (
-    config_refs,
-    resolve_config_list_bytes,
-    validate_config_ref,
-)
-```
-
-(`validate_config_ref` is already imported there; keep it.)
+Confirm with `grep -n "resolve_config_bytes\|DEFAULT_CONFIG_REF" src/kdive/providers/shared/build_host/orchestration.py` (expect no remaining references after the edit). `validate_config_requirements` is already imported at the top of the file — no import change needed for Task 4.
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -492,17 +517,16 @@ Create `tests/build_configs/test_platform_config.py`:
 ```python
 from __future__ import annotations
 
-from pathlib import Path
-
 from kdive.build_configs.platform_config import (
     PLATFORM_REQUIRED_CONFIG,
     REQUIRED_KERNEL_CONFIG,
     platform_required_payload,
 )
+from kdive.build_configs.seed import KDUMP_FRAGMENT_PATH
 
 
 def _kdump_declarations() -> dict[str, str]:
-    text = Path("src/kdive/build_configs/data/kdump.config").read_text()
+    text = KDUMP_FRAGMENT_PATH.read_text()
     declared = {}
     for line in text.splitlines():
         if line.startswith("CONFIG_") and "=" in line:
@@ -688,38 +712,34 @@ git commit -m "feat(1036): guard rootfs-mount symbols via the requirements seam"
 **Files:**
 - Modify: `src/kdive/mcp/tools/lifecycle/runs/server_build.py:83-96`
 - Modify: `src/kdive/mcp/tools/lifecycle/runs/composite.py:118-130`
-- Test: the existing tool tests under `tests/mcp/lifecycle/runs/` (locate with `rg -l "runs.build\b|server_build|build_install_boot" tests/mcp`)
+- Test (server_build / `runs.build`): `tests/mcp/lifecycle/test_runs_tools.py` — mirror the existing config-validator harness (`_reject_config` / `_CATALOG_COMPONENT_SOURCES` / `BuildRunHandlers(...config_validator=...)` at ~L2752-2962).
+- Test (composite / `runs.build_install_boot`): `tests/mcp/tools/lifecycle/runs/test_composite_tool.py` — mirror its existing single-ref config-source rejection test.
 
 **Interfaces:**
 - Consumes: `config_refs` (Task 2).
 - Produces: both handlers run `reject_unsupported_component_source` and (when present) `config_validator` for **every** ref in `config_refs(parsed)`, failing on the first bad ref. Behavior for a single/absent config is identical to today.
 
-- [ ] **Step 1: Write failing test**
+- [ ] **Step 1: Write failing tests (both handlers)**
 
-Locate the server-build tool test module (e.g. `tests/mcp/lifecycle/runs/test_server_build.py`; confirm with `rg -l "def.*build" tests/mcp/lifecycle/runs`). Add a test asserting a list config with one unsupported ref is rejected. Mirror the existing single-ref rejection test's harness; the key new assertion:
+The two handlers' tests live in two different trees; add one test to **each**. Reuse each module's existing Run-creation, pool, and `ComponentSourceCapabilities`/`config_validator` fixtures — do not invent new ones. The shared assertion: a compose list whose *second* ref is rejected (by an unsupported source kind, or by the module's injected `config_validator`) fails the build call with `CONFIGURATION_ERROR`, proving every ref is checked, not just the first.
+
+In `tests/mcp/lifecycle/test_runs_tools.py` (mirror the `_reject_config` test at ~L2905 that injects `config_validator=_reject_config` and asserts a single catalog ref is rejected — extend it so the profile's `config` is a two-element list and the rejection still fires):
 
 ```python
-async def test_build_rejects_unsupported_ref_within_a_list(...):
-    # A compose list whose second ref uses an unsupported source kind is rejected at runs.build,
-    # not silently accepted.
-    profile = {
-        "schema_version": 1,
-        "kernel_source_ref": {"git": {"remote": "https://ex/linux.git", "ref": "v6.9"}},
-        "config": [
-            {"kind": "catalog", "provider": "system", "name": "kdump"},
-            {"kind": "artifact", "artifact_id": "...", "sha256": "sha256:" + "0" * 64},
-        ],
-    }
-    # ... create a Run with this profile, call the build tool ...
-    assert response.error_category == ErrorCategory.CONFIGURATION_ERROR
+async def test_build_rejects_a_bad_ref_within_a_compose_list(...):
+    # Same harness as the single-ref _reject_config test, but config is a list; the injected
+    # config_validator rejects, proving each ref in the list is validated.
+    # config: [{catalog kdump}, {catalog kdump}]  (validator rejects on call)
+    ...
+    assert response.error_category is ErrorCategory.CONFIGURATION_ERROR
 ```
 
-(Match the exact fixture/setup already used by the module's single-ref rejection test; reuse its Run-creation and pool fixtures rather than inventing new ones.)
+In `tests/mcp/tools/lifecycle/runs/test_composite_tool.py`, add the analogous list-config rejection test mirroring that module's existing single-ref source-rejection test.
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/runs/test_server_build.py -k "unsupported_ref_within_a_list" -q`
-Expected: FAIL (only the first/one ref is checked today; a list is not iterated).
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_runs_tools.py tests/mcp/tools/lifecycle/runs/test_composite_tool.py -k "compose_list or within_a_compose_list" -q`
+Expected: FAIL (only one ref is checked today; a list is not iterated).
 
 - [ ] **Step 3: Implement**
 
@@ -762,13 +782,13 @@ Add `from kdive.providers.shared.build_host.configuration.config import config_r
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/runs/ -q`
-Expected: PASS (new test + existing single-ref tests).
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_runs_tools.py tests/mcp/tools/lifecycle/runs/test_composite_tool.py -q`
+Expected: PASS (both new tests + existing single-ref tests in both modules).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/kdive/mcp/tools/lifecycle/runs/server_build.py src/kdive/mcp/tools/lifecycle/runs/composite.py tests/mcp/lifecycle/runs/
+git add src/kdive/mcp/tools/lifecycle/runs/server_build.py src/kdive/mcp/tools/lifecycle/runs/composite.py tests/mcp/lifecycle/test_runs_tools.py tests/mcp/tools/lifecycle/runs/test_composite_tool.py
 git commit -m "feat(1036): validate every composed config ref at run creation"
 ```
 
@@ -880,7 +900,7 @@ git commit -m "docs(1036): document config compose + platform-required in the co
 
 - [ ] **Step 1: Regression — single/absent config unchanged**
 
-Run: `uv run python -m pytest tests/providers/build_host tests/profiles tests/mcp/catalog tests/mcp/lifecycle/runs -q`
+Run: `uv run python -m pytest tests/providers/build_host tests/profiles tests/build_configs tests/mcp/catalog tests/mcp/lifecycle/test_runs_tools.py tests/mcp/tools/lifecycle/runs/test_composite_tool.py -q`
 Expected: PASS, including the pre-existing single-ref and default-config tests (byte-for-byte guarantee).
 
 - [ ] **Step 2: Lint + types**
