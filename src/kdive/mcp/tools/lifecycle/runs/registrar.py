@@ -658,7 +658,11 @@ def _register_runs_validate_profile(app: FastMCP, pool: AsyncConnectionPool) -> 
                     "'valid' verdict means the document parses and (for a registered named host) "
                     "is source-kind compatible — it does NOT guarantee the source tree exists, "
                     "the config resolves, the kernel builds, or capacity is free; those are "
-                    "checked later at runs.build/runs.complete_build. An unregistered build_host "
+                    "checked later at runs.build/runs.complete_build. To confirm now that a "
+                    "catalog 'config' resolves (without a build), call buildconfig.get(name) or "
+                    "browse buildconfig.list — both echo the fragment's existence and sha256; a "
+                    "kind='local' config is resolved on the worker at build time and cannot be "
+                    "pre-flighted server-side. An unregistered build_host "
                     "is not rejected (data.build_host_registered=false discloses the compat check "
                     "was skipped). Call runs.profile_examples for a ready-to-edit shape."
                 )
