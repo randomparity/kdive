@@ -6,11 +6,14 @@
 - **Issue:** [#1037](https://github.com/randomparity/kdive/issues/1037) (BLACK_BOX_REVIEW.md P6; epic #998)
 - **Amends:** [ADR-0039](0039-ssh-transport-live-introspection.md) §2 — the drgn-live SSH credential
   is no longer resolved from a profile `ssh_credential_ref` through a `FileRefBackend`; the redaction
-  seed comes from the per-System bootstrap key.
+  seed comes from the per-System bootstrap key. [ADR-0085](0085-drgn-live-transport-generalization.md)
+  Decision 2 — the `drgn_live_requires_credential` / `ssh_credential_ref` gate and its
+  `configuration_error {reason: ssh_credential_ref_missing}` are retired; the fail-closed reason for a
+  drgn-live start is now `no_bootstrap_key`. (ADR-0085's `drgn-live` transport *name* generalization
+  is unchanged.)
 - **Builds on:** [ADR-0289](0289-per-system-ssh-bootstrap-key.md) (the per-System bootstrap key that
   already authenticates `introspect.*`), [ADR-0281](0281-always-render-ssh-forward.md) (the SSH
-  forward renders on every local domain), [ADR-0085](0085-drgn-live-transport-generalization.md) (the
-  agent-facing `drgn-live` transport kind).
+  forward renders on every local domain).
 - **Spec:** [`docs/superpowers/specs/2026-07-08-retire-ssh-credential-ref-1037-design.md`](../superpowers/specs/2026-07-08-retire-ssh-credential-ref-1037-design.md).
 
 ## Context
