@@ -24,6 +24,7 @@ from kdive.providers.shared.build_host.common import _dropped_fragment_symbols
 from kdive.providers.shared.build_host.configuration.config import (
     DEFAULT_BUILD_COMPONENT_ROOT,
     config_refs,
+    decode_fragment_text,
     load_profile_config_requirements,
     missing_config_groups,
     resolve_config_list_bytes,
@@ -111,7 +112,7 @@ class BuildHostOrchestrator:
             allowed_component_roots=self.allowed_component_roots,
             catalog_fetch=self.catalog_fetch,
         )
-        fragment_text = fragment_bytes.decode()
+        fragment_text = decode_fragment_text(fragment_bytes)
         with recorder.phase(BuildPhase.SOURCE_SYNC, provider):
             clone_provenance = self.checkout(run_id, profile, workspace, fragment_bytes)
         with recorder.phase(BuildPhase.CONFIGURE, provider):

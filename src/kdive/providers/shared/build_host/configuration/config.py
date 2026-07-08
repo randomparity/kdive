@@ -117,6 +117,18 @@ def config_refs(profile: ServerBuildProfile) -> list[ComponentRef]:
     return [profile.config]
 
 
+def decode_fragment_text(raw: bytes) -> str:
+    """Decode a config fragment as UTF-8, mapping a non-text fragment to ``CONFIGURATION_ERROR``.
+
+    A ``local`` config ref resolves arbitrary on-disk bytes, so a non-UTF-8 fragment must fail
+    fast with a categorized envelope rather than an uncaught ``UnicodeDecodeError``.
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ref_error("config", "config fragment is not valid UTF-8 text") from exc
+
+
 def effective_config_fragment(fragments: list[bytes]) -> bytes:
     """Collapse ordered fragments into one canonical fragment, last-writer-wins per symbol.
 
@@ -127,7 +139,7 @@ def effective_config_fragment(fragments: list[bytes]) -> bytes:
     """
     values: dict[str, str | None] = {}
     for raw in fragments:
-        for line in raw.decode().splitlines():
+        for line in decode_fragment_text(raw).splitlines():
             stripped = line.strip()
             if stripped.startswith("# CONFIG_") and stripped.endswith(" is not set"):
                 values[stripped[len("# ") : -len(" is not set")]] = None

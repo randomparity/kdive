@@ -9,8 +9,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from kdive.build_configs.defaults import DEFAULT_CONFIG_REF
 from kdive.components.references import CatalogComponentRef
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.shared.build_host.configuration.config import (
     config_refs,
@@ -77,6 +80,12 @@ def test_resolve_single_ref_is_raw_bytes_unchanged() -> None:
         catalog_fetch=lambda _n: raw,
     )
     assert got == raw  # single-ref path must not normalize
+
+
+def test_effective_fragment_non_utf8_is_configuration_error() -> None:
+    with pytest.raises(CategorizedError) as caught:
+        effective_config_fragment([b"CONFIG_FOO=y\n", b"\xff\xfe not utf-8\n"])
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
 def test_resolve_multi_ref_returns_effective_fragment() -> None:
