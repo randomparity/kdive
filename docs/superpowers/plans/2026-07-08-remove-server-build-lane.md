@@ -191,6 +191,19 @@ but nothing special-cases it (a transient dead-but-green state fixed in Task 3).
 - `src/kdive/mcp/tool_registration.py` — drop the `ops.build_hosts` import (~50),
   `_register_ops_build_hosts_tools` (~203-206), and its entry in the registration list (~282).
 - `src/kdive/mcp/exposure.py` — drop the `build_hosts.*` RBAC keys (regen the RBAC matrix).
+- **`src/kdive/providers/assembly/composition.py` (structural — the transport-factory/prober hub).**
+  Drop the `db.build_hosts.BuildHostKind` import (~19), the
+  `providers.shared.build_host.dispatch`/`.reachability` imports (~44-45), and the three build-host
+  methods `_build_host_transport_factory_maps`, `build_build_host_transport_factories` (~412), and
+  `build_reconciler_build_host_prober` (~423). Then its two callers, in lockstep:
+  `src/kdive/mcp/app.py:88` (drop the `transport_factories=composition.build_build_host_transport_factories()`
+  arg to worker registration) and `src/kdive/__main__.py:633` (drop
+  `build_host_prober=provider_composition.build_reconciler_build_host_prober()` from
+  `ReconcileConfig` — matches the `:614` `BuildHostTelemetry` removal above).
+- `src/kdive/mcp/tools/ops/diagnostics.py` — remove the `with_buildhost_agent` param and all its
+  plumbing (`_audit_args`, `_audit_run`, service-factory threading) and the `_BUILDHOST_TOOL`
+  constant, plus the `local_kernel_src` opt-in tied to the deleted `diagnostics/kernel_src.py`.
+  Regenerate the tool reference (`just docs`).
 
 **Files — delete tests:** all of `tests/providers/build_host/**`,
 `tests/providers/local_libvirt/test_build.py`, `tests/providers/remote_libvirt/build/**` +
