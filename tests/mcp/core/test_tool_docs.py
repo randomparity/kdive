@@ -476,6 +476,24 @@ def test_buildconfig_surface_points_at_the_echoed_config_ref() -> None:
             assert phrase not in lowered, f"decorative-provider framing leaked: {phrase!r}"
 
 
+def test_validate_profile_points_at_buildconfig_for_config_resolution() -> None:
+    # #1033: the validate_profile disclaimer says a 'valid' verdict does NOT guarantee the
+    # config resolves. It must point the agent at the cheap catalog-resolve check that already
+    # exists (buildconfig.get / buildconfig.list echo existence + sha256 without a build), and
+    # disclose that a kind='local' config is resolved on the worker at build time and so cannot
+    # be pre-flighted server-side. catalog and local are the only config kinds a build accepts.
+    tools = {t.name: t for t in TOOLS}
+    description = tools["runs.validate_profile"].parameters["properties"]["build_profile"][
+        "description"
+    ]
+    lowered = description.lower()
+    assert "buildconfig.get" in description
+    assert "buildconfig.list" in description
+    assert "catalog" in lowered
+    assert "local" in lowered
+    assert "build time" in lowered or "worker" in lowered
+
+
 def test_allocation_and_estimate_payload_schemas_are_concrete() -> None:
     tools = {t.name: t for t in TOOLS}
 
