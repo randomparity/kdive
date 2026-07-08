@@ -21,6 +21,14 @@ from kdive.providers.shared.build_host.orchestration import BuildHostOrchestrato
 
 _RUN = UUID("44444444-4444-4444-4444-444444444444")
 
+# A final .config tail that satisfies every always-on guard: the five mount symbols,
+# CONFIG_CRASH_DUMP, and one debuginfo option.
+_GOOD_TAIL = (
+    "CONFIG_SQUASHFS=y\nCONFIG_SQUASHFS_ZSTD=y\nCONFIG_OVERLAY_FS=y\n"
+    "CONFIG_BLK_DEV_LOOP=y\nCONFIG_XFS_FS=y\nCONFIG_CRASH_DUMP=y\n"
+    "CONFIG_DEBUG_INFO_DWARF5=y\n"
+)
+
 
 def _server_profile() -> ServerBuildProfile:
     profile = BuildProfile.parse(
@@ -132,3 +140,67 @@ def test_build_workspace_rejects_config_missing_required_group(tmp_path: Path) -
     assert caught.value.details["missing_any_of"] == [
         ["CONFIG_DEBUG_INFO_DWARF4", "CONFIG_DEBUG_INFO_DWARF5", "CONFIG_DEBUG_INFO_BTF"]
     ]
+
+
+def _compose_profile(names: list[str]) -> ServerBuildProfile:
+    profile = BuildProfile.parse(
+        {
+            "schema_version": 1,
+            "kernel_source_ref": "warm-ref",
+            "config": [{"kind": "catalog", "provider": "system", "name": n} for n in names],
+        }
+    )
+    assert isinstance(profile, ServerBuildProfile)
+    return profile
+
+
+def test_build_workspace_composes_two_catalog_fragments(tmp_path: Path) -> None:
+    # A two-fragment compose resolves the union; the later fragment's value wins.
+    fetches = {"kdump": b"CONFIG_FOO=y\n", "faultinject": b"CONFIG_FOO=m\nCONFIG_FAULT=y\n"}
+    seen: list[bytes] = []
+    orchestrator = BuildHostOrchestrator.create(
+        workspace_root=tmp_path,
+        catalog_fetch=lambda name: fetches[name],
+        checkout=lambda _r, _p, _w, fragment: seen.append(fragment),
+        run_olddefconfig=lambda _w: CapturedStep(0, ""),
+        read_config=lambda _w: "CONFIG_FOO=m\nCONFIG_FAULT=y\n" + _GOOD_TAIL,
+        run_make=lambda _w: CapturedStep(0, ""),
+    )
+    orchestrator.build_workspace(_RUN, _compose_profile(["kdump", "faultinject"]))
+    merged = seen[-1].decode()
+    assert "CONFIG_FOO=m" in merged and "CONFIG_FOO=y" not in merged
+
+
+def test_build_workspace_compose_later_disable_is_not_a_dropped_symbol(tmp_path: Path) -> None:
+    # A later fragment disabling an earlier =y symbol builds successfully: the net-intent
+    # effective fragment emits it as unset, so the drop-check does not flag it.
+    fetches = {
+        "kdump": b"CONFIG_FOO=y\nCONFIG_SQUASHFS=y\n",
+        "faultinject": b"# CONFIG_FOO is not set\n",
+    }
+    orchestrator = BuildHostOrchestrator.create(
+        workspace_root=tmp_path,
+        catalog_fetch=lambda name: fetches[name],
+        checkout=lambda _r, _p, _w, _f: None,
+        run_olddefconfig=lambda _w: CapturedStep(0, ""),
+        read_config=lambda _w: "# CONFIG_FOO is not set\n" + _GOOD_TAIL,
+        run_make=lambda _w: CapturedStep(0, ""),
+    )
+    # Does not raise (no spurious "dropped by olddefconfig" for the intentional disable).
+    orchestrator.build_workspace(_RUN, _compose_profile(["kdump", "faultinject"]))
+
+
+def test_build_workspace_single_ref_passes_raw_bytes(tmp_path: Path) -> None:
+    # The single-config path must hand the checkout seam the raw fetched bytes unchanged.
+    raw = b"# verbatim comment\nCONFIG_SQUASHFS=y\n" + _GOOD_TAIL.encode()
+    seen: list[bytes] = []
+    orchestrator = BuildHostOrchestrator.create(
+        workspace_root=tmp_path,
+        catalog_fetch=lambda _n: raw,
+        checkout=lambda _r, _p, _w, fragment: seen.append(fragment),
+        run_olddefconfig=lambda _w: CapturedStep(0, ""),
+        read_config=lambda _w: raw.decode(),
+        run_make=lambda _w: CapturedStep(0, ""),
+    )
+    orchestrator.build_workspace(_RUN, _server_profile())
+    assert seen[-1] == raw

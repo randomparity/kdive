@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import kdive.config as config
-from kdive.build_configs.defaults import CatalogConfigFetch
+from kdive.build_configs.defaults import DEFAULT_CONFIG_REF, CatalogConfigFetch
 from kdive.components.catalog import load_fixture_catalog
 from kdive.components.local_paths import validate_local_component_path
 from kdive.components.references import (
@@ -17,6 +17,7 @@ from kdive.components.references import (
 from kdive.components.requirements import ConfigRequirements
 from kdive.config.core_settings import BUILD_COMPONENT_ROOTS
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.profiles.build import ServerBuildProfile
 
 DEFAULT_BUILD_COMPONENT_ROOT = "/var/lib/kdive/build/components"
 
@@ -100,6 +101,67 @@ def resolve_config_bytes(
     if isinstance(ref, CatalogComponentRef):
         return catalog_fetch(ref.name)
     raise ref_error("config", "config component ref must be local or catalog for builds")
+
+
+def config_refs(profile: ServerBuildProfile) -> list[ComponentRef]:
+    """The ordered config refs a build resolves: the default when absent, else the profile's.
+
+    A single ref wraps to a one-element list; a list is returned as-is. This is the single
+    source that replaces the scattered ``profile.config or DEFAULT_CONFIG_REF`` idiom, so the
+    resolve site and the run-creation validation sites cannot diverge.
+    """
+    if profile.config is None:
+        return [DEFAULT_CONFIG_REF]
+    if isinstance(profile.config, list):
+        return list(profile.config)
+    return [profile.config]
+
+
+def effective_config_fragment(fragments: list[bytes]) -> bytes:
+    """Collapse ordered fragments into one canonical fragment, last-writer-wins per symbol.
+
+    Each ``CONFIG_x=<val>`` sets the symbol; each ``# CONFIG_x is not set`` unsets it; a later
+    line for the same symbol overrides an earlier one across every fragment. Emitted in
+    first-seen order so a composed set merges deterministically (independent of merge_config.sh's
+    within-file duplicate handling). Comments and blank lines are inert and dropped.
+    """
+    values: dict[str, str | None] = {}
+    for raw in fragments:
+        for line in raw.decode().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("# CONFIG_") and stripped.endswith(" is not set"):
+                values[stripped[len("# ") : -len(" is not set")]] = None
+            elif stripped.startswith("CONFIG_") and "=" in stripped:
+                symbol, _, value = stripped.partition("=")
+                values[symbol] = value
+    lines = [
+        f"{symbol}={value}" if value is not None else f"# {symbol} is not set"
+        for symbol, value in values.items()
+    ]
+    return ("\n".join(lines) + "\n").encode()
+
+
+def resolve_config_list_bytes(
+    refs: list[ComponentRef],
+    *,
+    allowed_component_roots: list[Path],
+    catalog_fetch: CatalogConfigFetch,
+) -> bytes:
+    """Resolve ordered config refs to fragment bytes for the merge step.
+
+    A single ref returns its raw resolved bytes unchanged (the default/single-config path stays
+    byte-for-byte). Multiple refs are resolved in order and collapsed by
+    :func:`effective_config_fragment` so the merged ``.config`` reflects last-writer-wins.
+    """
+    resolved = [
+        resolve_config_bytes(
+            ref, allowed_component_roots=allowed_component_roots, catalog_fetch=catalog_fetch
+        )
+        for ref in refs
+    ]
+    if len(resolved) == 1:
+        return resolved[0]
+    return effective_config_fragment(resolved)
 
 
 def validate_config_ref(ref: ComponentRef, *, allowed_component_roots: list[Path]) -> None:

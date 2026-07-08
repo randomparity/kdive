@@ -9,7 +9,6 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.build_configs.defaults import DEFAULT_CONFIG_REF
 from kdive.components.references import CONFIG_COMPONENT, ComponentRef
 from kdive.components.validation import (
     ComponentSourceCapabilities,
@@ -31,6 +30,7 @@ from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._idempotency import keyed_mutation
 from kdive.mcp.tools.lifecycle.runs.common import RUN_BUILD_TERMINAL, run_job_envelope
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
+from kdive.providers.shared.build_host.configuration.config import config_refs
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
@@ -79,22 +79,19 @@ class BuildRunHandlers:
                     return _config_error(
                         run_id, data={"reason": "external_source_uses_complete_build"}
                     )
-                # An omitted config validates against the kdump catalog default, matching the
-                # resolver substitution on the build path (ADR-0096).
-                config_ref = parsed.config or DEFAULT_CONFIG_REF
+                # An omitted config validates against the kdump catalog default; a composed list
+                # validates every ref, matching the resolver substitution on the build path.
                 try:
-                    reject_unsupported_component_source(
-                        self.component_sources,
-                        component_kind=CONFIG_COMPONENT,
-                        ref=config_ref,
-                    )
+                    for config_ref in config_refs(parsed):
+                        reject_unsupported_component_source(
+                            self.component_sources,
+                            component_kind=CONFIG_COMPONENT,
+                            ref=config_ref,
+                        )
+                        if self.config_validator is not None:
+                            self.config_validator(config_ref)
                 except CategorizedError as exc:
                     return ToolResponse.failure_from_error(run_id, exc)
-                if self.config_validator is not None:
-                    try:
-                        self.config_validator(config_ref)
-                    except CategorizedError as exc:
-                        return ToolResponse.failure_from_error(run_id, exc)
                 return await keyed_mutation(
                     conn,
                     idempotency_key=idempotency_key,

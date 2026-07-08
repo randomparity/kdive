@@ -2944,6 +2944,39 @@ def test_build_rejects_local_config_outside_provider_roots_before_state_change(
     assert len(calls) == 1
 
 
+def test_build_validates_every_ref_in_a_compose_list(migrated_url: str) -> None:
+    # A composed config list is validated per-ref: ref #1 (catalog) is accepted by
+    # _CATALOG_COMPONENT_SOURCES {catalog, local}; ref #2 (artifact) is not, so the build is
+    # rejected — proving iteration reaches the second ref, not only the first.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            profile = {
+                **copy.deepcopy(_VALID_BUILD),
+                "config": [
+                    {"kind": "catalog", "provider": "system", "name": "kdump"},
+                    {"kind": "artifact", "artifact_id": str(uuid4())},
+                ],
+            }
+            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
+
+            resp = await BuildRunHandlers(_CATALOG_COMPONENT_SOURCES).build_run(
+                pool, _ctx(Role.OPERATOR), run_id
+            )
+
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM jobs WHERE kind='build' AND dedup_key=%s",
+                    (f"{run_id}:build",),
+                )
+                jobs = await cur.fetchone()
+
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert jobs is not None and jobs["n"] == 0
+
+    asyncio.run(_run())
+
+
 def test_build_omitted_config_validates_kdump_catalog_default(migrated_url: str) -> None:
     # ADR-0096: an omitted config substitutes the kdump catalog ref BEFORE validation, so a
     # provider that accepts the catalog source admits the build and the validator sees that ref.

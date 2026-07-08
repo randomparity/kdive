@@ -12,6 +12,7 @@ from kdive.build_configs.defaults import catalog_config_ref
 from kdive.components.references import CatalogComponentRef, LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import (
+    MAX_CONFIG_FRAGMENTS,
     BuildProfile,
     ExternalBuildProfile,
     GitKernelSource,
@@ -19,6 +20,46 @@ from kdive.profiles.build import (
     dump_build_profile,
     is_git_source,
 )
+
+
+def _server_doc(config: Any) -> dict[str, Any]:
+    return {"schema_version": 1, "kernel_source_ref": "warm-tree-ref", "config": config}
+
+
+def _catalog(name: str) -> dict[str, Any]:
+    return {"kind": "catalog", "provider": "system", "name": name}
+
+
+def test_config_accepts_a_list_of_refs() -> None:
+    profile = BuildProfile.parse(_server_doc([_catalog("kdump"), _catalog("faultinject")]))
+    assert isinstance(profile, ServerBuildProfile)
+    assert isinstance(profile.config, list)
+    names = []
+    for ref in profile.config:
+        assert isinstance(ref, CatalogComponentRef)
+        names.append(ref.name)
+    assert names == ["kdump", "faultinject"]
+
+
+def test_config_still_accepts_a_single_ref() -> None:
+    profile = BuildProfile.parse(_server_doc(_catalog("kdump")))
+    assert isinstance(profile, ServerBuildProfile)
+    assert isinstance(profile.config, CatalogComponentRef)
+    assert profile.config.name == "kdump"
+
+
+def test_config_empty_list_is_configuration_error() -> None:
+    with pytest.raises(CategorizedError) as caught:
+        BuildProfile.parse(_server_doc([]))
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_config_over_cap_list_is_configuration_error() -> None:
+    over = [_catalog(f"frag{i}") for i in range(MAX_CONFIG_FRAGMENTS + 1)]
+    with pytest.raises(CategorizedError) as caught:
+        BuildProfile.parse(_server_doc(over))
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
 
 _VALID: dict[str, Any] = {
     "schema_version": 1,
@@ -68,7 +109,7 @@ def test_server_build_profile_parses_config_ref_and_profile_requirements() -> No
     )
 
     assert isinstance(profile, ServerBuildProfile)
-    assert profile.config is not None
+    assert isinstance(profile.config, LocalComponentRef)
     assert profile.config.kind == "local"
     assert profile.profile_requirements is not None
     assert profile.profile_requirements.name == "console-ready_x86_64"

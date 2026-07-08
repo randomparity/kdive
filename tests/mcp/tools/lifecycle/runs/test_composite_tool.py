@@ -256,6 +256,26 @@ def test_build_install_boot_requires_operator(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_build_install_boot_validates_every_ref_in_a_compose_list(migrated_url: str) -> None:
+    # Per-ref validation over a composed list: ref #1 (local) is accepted by
+    # _TEST_COMPONENT_SOURCES {local}; ref #2 (catalog) is not, so the composite is rejected —
+    # proving iteration reaches the second ref, not only the first.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            profile = {
+                **copy.deepcopy(_VALID_BUILD),
+                "config": [
+                    {"kind": "local", "path": "/configs/kdump.config"},
+                    {"kind": "catalog", "provider": "system", "name": "kdump"},
+                ],
+            }
+            run_id = await _seed_bound_run(pool, state=RunState.CREATED, build_profile=profile)
+            resp = await _COMPOSITE_HANDLERS.build_install_boot(pool, _ctx(), run_id)
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
 def test_build_install_boot_terminal_run_is_config_error(migrated_url: str) -> None:
     """A terminal (canceled/failed) Run returns a configuration_error."""
 

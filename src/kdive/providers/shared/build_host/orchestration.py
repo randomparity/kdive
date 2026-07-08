@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
-from kdive.build_configs.defaults import DEFAULT_CONFIG_REF, CatalogConfigFetch
+from kdive.build_configs.defaults import CatalogConfigFetch
 from kdive.components.references import ComponentRef
 from kdive.components.requirements import validate_config_requirements
 from kdive.domain.build_phase import BuildPhase
@@ -18,9 +18,10 @@ from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.shared.build_host.common import _dropped_fragment_symbols
 from kdive.providers.shared.build_host.configuration.config import (
     DEFAULT_BUILD_COMPONENT_ROOT,
+    config_refs,
     load_profile_config_requirements,
     missing_config_groups,
-    resolve_config_bytes,
+    resolve_config_list_bytes,
     validate_config_ref,
 )
 from kdive.providers.shared.build_host.execution import ReadConfig, RunStep, build_failure
@@ -105,9 +106,8 @@ class BuildHostOrchestrator:
     ) -> BuildWorkspaceResult:
         """Resolve config, checkout, preflight, run ``make``, and return workspace metadata."""
         workspace = self.workspace_path(run_id)
-        config_ref = profile.config or DEFAULT_CONFIG_REF
-        fragment_bytes = resolve_config_bytes(
-            config_ref,
+        fragment_bytes = resolve_config_list_bytes(
+            config_refs(profile),
             allowed_component_roots=self.allowed_component_roots,
             catalog_fetch=self.catalog_fetch,
         )

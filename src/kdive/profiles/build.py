@@ -43,6 +43,9 @@ from kdive.profiles.types import BuildProfileInput
 type NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 """A string that is non-empty after whitespace stripping; blank values fail validation."""
 
+MAX_CONFIG_FRAGMENTS = 8
+"""Upper bound on a composed ``config`` list; bounds the per-ref catalog fetches a build opens."""
+
 
 class _BuildProfileBase(BaseModel):
     """Shared config + version guard for both build-lane profiles."""
@@ -112,10 +115,26 @@ class ServerBuildProfile(_BuildProfileBase):
 
     source: Literal["server"] = "server"
     kernel_source_ref: NonEmptyStr | GitKernelSource
-    config: ComponentRef | None = None
+    config: ComponentRef | list[ComponentRef] | None = None
     profile_requirements: ProfileRequirementsRef | None = None
     patch_ref: NonEmptyStr | None = None
     build_host: NonEmptyStr | None = None
+
+    @field_validator("config", mode="after")
+    @classmethod
+    def _bounded_config_list(
+        cls, value: ComponentRef | list[ComponentRef] | None
+    ) -> ComponentRef | list[ComponentRef] | None:
+        """A list ``config`` composes fragments in order; bound it to 1..MAX_CONFIG_FRAGMENTS.
+
+        An empty list is neither "absent" (which resolves the seeded default) nor a valid
+        compose; an over-cap list would open an unbounded number of per-ref catalog fetches.
+        """
+        if isinstance(value, list) and not (1 <= len(value) <= MAX_CONFIG_FRAGMENTS):
+            raise ValueError(
+                f"config list must have 1..{MAX_CONFIG_FRAGMENTS} entries, got {len(value)}"
+            )
+        return value
 
     @field_validator("kernel_source_ref", mode="after")
     @classmethod
