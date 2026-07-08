@@ -60,7 +60,16 @@ def test_disabled_recorder_is_noop() -> None:
 # --- End-to-end: recorder threaded through the build orchestrator ---
 
 _GOOD_CONFIG = "\n".join(
-    ["CONFIG_CRASH_DUMP=y", "CONFIG_DEBUG_INFO=y", "CONFIG_DEBUG_INFO_DWARF5=y"]
+    [
+        "CONFIG_CRASH_DUMP=y",
+        "CONFIG_DEBUG_INFO=y",
+        "CONFIG_DEBUG_INFO_DWARF5=y",
+        "CONFIG_SQUASHFS=y",
+        "CONFIG_SQUASHFS_ZSTD=y",
+        "CONFIG_OVERLAY_FS=y",
+        "CONFIG_BLK_DEV_LOOP=y",
+        "CONFIG_XFS_FS=y",
+    ]
 )
 _FRAGMENT_BYTES = _GOOD_CONFIG.encode()
 _RUN = UUID("11111111-1111-1111-1111-111111111111")

@@ -129,7 +129,11 @@ def test_build_host_orchestrator_runs_neutral_build_sequence(tmp_path: Path) -> 
     )
     assert isinstance(profile, ServerBuildProfile)
     calls: list[str] = []
-    fragment = b"CONFIG_CRASH_DUMP=y\nCONFIG_DEBUG_INFO_DWARF5=y\n"
+    fragment = (
+        b"CONFIG_CRASH_DUMP=y\nCONFIG_DEBUG_INFO_DWARF5=y\n"
+        b"CONFIG_SQUASHFS=y\nCONFIG_SQUASHFS_ZSTD=y\nCONFIG_OVERLAY_FS=y\n"
+        b"CONFIG_BLK_DEV_LOOP=y\nCONFIG_XFS_FS=y\n"
+    )
 
     def checkout(
         run_id: UUID, checkout_profile: ServerBuildProfile, workspace: Path, data: bytes

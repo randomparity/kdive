@@ -54,12 +54,17 @@ _VALID_PROFILE: dict[str, Any] = {
     "patch_ref": None,
 }
 
-# A .config that satisfies both preflight checks (kdump + debuginfo).
+# A .config that satisfies the kdump + debuginfo + platform rootfs-mount checks (ADR-0316).
 _GOOD_CONFIG = "\n".join(
     [
         "CONFIG_CRASH_DUMP=y",
         "CONFIG_DEBUG_INFO=y",
         "CONFIG_DEBUG_INFO_DWARF5=y",
+        "CONFIG_SQUASHFS=y",
+        "CONFIG_SQUASHFS_ZSTD=y",
+        "CONFIG_OVERLAY_FS=y",
+        "CONFIG_BLK_DEV_LOOP=y",
+        "CONFIG_XFS_FS=y",
     ]
 )
 # Catalog fragment bytes the injected fetch returns; its symbols survive the (faked) read_config.

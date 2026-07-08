@@ -44,8 +44,12 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 
 _RUN = UUID("44444444-4444-4444-4444-444444444444")
 
-# A .config satisfying both kdump + debuginfo requirements.
-_GOOD_CONFIG = "CONFIG_CRASH_DUMP=y\nCONFIG_DEBUG_INFO=y\nCONFIG_DEBUG_INFO_DWARF5=y\n"
+# A .config satisfying the kdump + debuginfo + platform rootfs-mount requirements (ADR-0316).
+_GOOD_CONFIG = (
+    "CONFIG_CRASH_DUMP=y\nCONFIG_DEBUG_INFO=y\nCONFIG_DEBUG_INFO_DWARF5=y\n"
+    "CONFIG_SQUASHFS=y\nCONFIG_SQUASHFS_ZSTD=y\nCONFIG_OVERLAY_FS=y\n"
+    "CONFIG_BLK_DEV_LOOP=y\nCONFIG_XFS_FS=y\n"
+)
 _FRAGMENT_BYTES = _GOOD_CONFIG.encode()
 
 _VALID_PROFILE: dict[str, Any] = {
