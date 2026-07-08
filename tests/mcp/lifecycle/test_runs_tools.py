@@ -2766,7 +2766,7 @@ async def _system_id_of(pool: AsyncConnectionPool, run_id: str) -> str:
 
 # --- build-host fixtures (shared by the create-compat tests below) -------------------
 
-from kdive.db.build_hosts import WORKER_LOCAL_ID  # noqa: E402
+WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
 
 # A git kernel_source_ref in the {"git": {...}} discriminated form (ssh-host provenance).
 _GIT_BUILD: dict[str, Any] = {
@@ -2812,27 +2812,6 @@ async def _lease_count(pool: AsyncConnectionPool, host_id: UUID) -> int:
     )
 
 
-async def _insert_ephemeral_host(
-    pool: AsyncConnectionPool,
-    *,
-    name: str = "builders",
-    max_concurrent: int = 2,
-    enabled: bool = True,
-    state: str = "ready",
-) -> UUID:
-    async with pool.connection() as conn:
-        cur = await conn.execute(
-            "INSERT INTO build_hosts "
-            "  (name, kind, base_image_volume, workspace_root, max_concurrent, enabled, state) "
-            "VALUES (%s, 'ephemeral_libvirt', 'kdive-build-base.qcow2', '/build', %s, %s, %s)"
-            " RETURNING id",
-            (name, max_concurrent, enabled, state),
-        )
-        row = await cur.fetchone()
-    assert row is not None
-    return row[0]
-
-
 # --- runs.create: build-host <-> source-kind compatibility (#534) --------------------
 
 # An external-build profile (no kernel_source_ref, no build_host): the compat check skips it.
@@ -2841,40 +2820,6 @@ _EXTERNAL_BUILD: dict[str, Any] = {"schema_version": 1, "source": "external"}
 
 async def _run_count_on_system(pool: AsyncConnectionPool, system_id: str) -> int:
     return await _count(pool, "SELECT count(*) AS n FROM runs WHERE system_id = %s", (system_id,))
-
-
-def test_create_remote_host_with_warm_tree_is_config_error_no_run(migrated_url: str) -> None:
-    # ssh host + warm-tree (string) kernel_source_ref → rejected AT create; no run inserted.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            await _insert_ssh_host(pool, name="ssh-create")
-            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
-            sys_id = await _seed_system(pool)
-            profile = {**copy.deepcopy(_VALID_BUILD), "build_host": "ssh-create"}
-            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
-            nruns = await _run_count_on_system(pool, sys_id)
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert resp.detail == "a remote build host requires a git kernel_source_ref"
-        assert nruns == 0
-
-    asyncio.run(_run())
-
-
-def test_create_ephemeral_host_with_warm_tree_is_config_error_no_run(migrated_url: str) -> None:
-    # ephemeral_libvirt host + warm-tree string → rejected AT create with the remote message.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            await _insert_ephemeral_host(pool, name="eph-create")
-            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
-            sys_id = await _seed_system(pool)
-            profile = {**copy.deepcopy(_VALID_BUILD), "build_host": "eph-create"}
-            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
-            nruns = await _run_count_on_system(pool, sys_id)
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert resp.detail == "a remote build host requires a git kernel_source_ref"
-        assert nruns == 0
-
-    asyncio.run(_run())
 
 
 def test_create_local_host_with_git_ref_succeeds(migrated_url: str) -> None:
@@ -2975,41 +2920,12 @@ def test_create_live_run_precedes_compat_check(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-# --- build_handler (the worker) ------------------------------------------------------
+# --- build-job seeding helpers (build worker retired; cancel tests still exercise inert
+# BUILD-kind jobs) --------------------------------------------------------------------
 
-from kdive.build_artifacts.results import BuildOutput  # noqa: E402
 from kdive.jobs import queue  # noqa: E402
 from kdive.jobs.models import HandlerRegistry  # noqa: E402
 from kdive.jobs.payloads import BuildPayload, InstallPayload, RunPayload  # noqa: E402
-
-
-class _FakeBuilder:
-    """Records build() calls; returns a canned BuildOutput or raises."""
-
-    def __init__(self, *, error: ErrorCategory | None = None) -> None:
-        self.calls: list[UUID] = []
-        self._error = error
-
-    def build(self, run_id: UUID, profile: Any, **_: object) -> BuildOutput:
-        self.calls.append(run_id)
-        if self._error is not None:
-            raise CategorizedError("boom", category=self._error)
-        return BuildOutput(
-            kernel_ref=f"proj/runs/{run_id}/kernel",
-            debuginfo_ref=f"proj/runs/{run_id}/vmlinux",
-            build_id="abcdef0123456789",
-        )
-
-
-class _MissingBuildOutputBuilder:
-    """Raises the typed failure used when an expected build artifact is absent after make."""
-
-    def build(self, run_id: UUID, profile: Any, **_: object) -> BuildOutput:
-        raise CategorizedError(
-            "bzImage is missing or unreadable",
-            category=ErrorCategory.BUILD_FAILURE,
-            details={"output": "bzImage"},
-        )
 
 
 async def _enqueue_build_job(pool: AsyncConnectionPool, run_id: str) -> Job:
@@ -3040,233 +2956,6 @@ async def _build_job_for(conn: AsyncConnection, run_id: str) -> Job:
         row = await cur.fetchone()
     assert row is not None
     return Job.model_validate(row)
-
-
-def test_build_handler_drives_run_succeeded_sets_refs(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_running_run(pool)
-            job = await _enqueue_build_job(pool, run_id)
-            builder = _FakeBuilder()
-            async with pool.connection() as conn:
-                result = await runs_handlers.build_handler(
-                    conn,
-                    job,
-                    resolver=provider_resolver(builder=builder),
-                    secret_registry=SecretRegistry(),
-                )
-            assert result == run_id
-            assert builder.calls == [UUID(run_id)]
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(
-                    "SELECT state, kernel_ref, debuginfo_ref FROM runs WHERE id=%s", (run_id,)
-                )
-                row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM run_steps WHERE run_id=%s AND step='build'",
-                    (run_id,),
-                )
-                steps = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM audit_log WHERE transition='running->succeeded' "
-                    "AND object_id=%s",
-                    (run_id,),
-                )
-                audit_n = await cur.fetchone()
-        assert row is not None and row["state"] == "succeeded"
-        assert row["kernel_ref"] == f"proj/runs/{run_id}/kernel"
-        assert row["debuginfo_ref"] == f"proj/runs/{run_id}/vmlinux"
-        assert steps is not None and steps["n"] == 1
-        assert audit_n is not None and audit_n["n"] == 1
-
-    asyncio.run(_run())
-
-
-def test_build_handler_replay_does_not_rebuild(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_running_run(pool)
-            job = await _enqueue_build_job(pool, run_id)
-            builder = _FakeBuilder()
-            async with pool.connection() as conn:
-                await runs_handlers.build_handler(
-                    conn,
-                    job,
-                    resolver=provider_resolver(builder=builder),
-                    secret_registry=SecretRegistry(),
-                )
-            # Re-dispatch the same job: the ledger short-circuits the rebuild.
-            async with pool.connection() as conn:
-                await runs_handlers.build_handler(
-                    conn,
-                    job,
-                    resolver=provider_resolver(builder=builder),
-                    secret_registry=SecretRegistry(),
-                )
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM runs WHERE id=%s", (run_id,))
-                row = await cur.fetchone()
-        assert builder.calls == [UUID(run_id)]  # built exactly once
-        assert row is not None and row["state"] == "succeeded"
-
-    asyncio.run(_run())
-
-
-def test_build_handler_build_failure_sets_run_failed(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_running_run(pool)
-            job = await _enqueue_build_job(pool, run_id)
-            builder = _FakeBuilder(error=ErrorCategory.BUILD_FAILURE)
-            async with pool.connection() as conn:
-                with pytest.raises(CategorizedError) as caught:
-                    await runs_handlers.build_handler(
-                        conn,
-                        job,
-                        resolver=provider_resolver(builder=builder),
-                        secret_registry=SecretRegistry(),
-                    )
-            assert caught.value.category is ErrorCategory.BUILD_FAILURE
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state, failure_category FROM runs WHERE id=%s", (run_id,))
-                row = await cur.fetchone()
-                await cur.execute("SELECT count(*) AS n FROM run_steps WHERE run_id=%s", (run_id,))
-                steps = await cur.fetchone()
-        assert row is not None and row["state"] == "failed"
-        assert row["failure_category"] == "build_failure"
-        assert steps is not None and steps["n"] == 0  # no ledger row on failure
-
-    asyncio.run(_run())
-
-
-def test_build_handler_missing_output_records_build_failure(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_running_run(pool)
-            job = await _enqueue_build_job(pool, run_id)
-            async with pool.connection() as conn:
-                with pytest.raises(CategorizedError) as caught:
-                    await runs_handlers.build_handler(
-                        conn,
-                        job,
-                        resolver=provider_resolver(builder=_MissingBuildOutputBuilder()),
-                        secret_registry=SecretRegistry(),
-                    )
-            assert caught.value.category is ErrorCategory.BUILD_FAILURE
-            assert caught.value.details == {"output": "bzImage"}
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state, failure_category FROM runs WHERE id=%s", (run_id,))
-                row = await cur.fetchone()
-        assert row is not None and row["state"] == "failed"
-        assert row["failure_category"] == "build_failure"
-
-    asyncio.run(_run())
-
-
-def test_build_handler_config_failure_sets_run_failed_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_running_run(pool)
-            job = await _enqueue_build_job(pool, run_id)
-            builder = _FakeBuilder(error=ErrorCategory.CONFIGURATION_ERROR)
-            async with pool.connection() as conn:
-                with pytest.raises(CategorizedError):
-                    await runs_handlers.build_handler(
-                        conn,
-                        job,
-                        resolver=provider_resolver(builder=builder),
-                        secret_registry=SecretRegistry(),
-                    )
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state, failure_category FROM runs WHERE id=%s", (run_id,))
-                row = await cur.fetchone()
-        assert row is not None and row["state"] == "failed"
-        assert row["failure_category"] == "configuration_error"
-
-    asyncio.run(_run())
-
-
-def test_build_handler_tolerates_concurrent_cancel(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_running_run(pool)
-            job = await _enqueue_build_job(pool, run_id)
-            # Cancel the Run before the handler finalizes (running → canceled).
-            async with pool.connection() as conn:
-                await conn.execute("UPDATE runs SET state='canceled' WHERE id=%s", (run_id,))
-            builder = _FakeBuilder()
-            async with pool.connection() as conn:
-                result = await runs_handlers.build_handler(
-                    conn,
-                    job,
-                    resolver=provider_resolver(builder=builder),
-                    secret_registry=SecretRegistry(),
-                )
-            assert result == run_id  # does not crash
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM runs WHERE id=%s", (run_id,))
-                row = await cur.fetchone()
-        assert row is not None and row["state"] == "canceled"  # cancel wins; build is inert
-
-    asyncio.run(_run())
-
-
-def test_build_handler_crash_window_re_dispatch_overwrites_no_orphan(migrated_url: str) -> None:
-    # Simulate a finalize crash: the first builder stores its artifacts then raises (after the
-    # puts). A re-dispatch with a succeeding builder must use the SAME deterministic keys and
-    # finalize without a second ledger row.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_running_run(pool)
-            job = await _enqueue_build_job(pool, run_id)
-            crashing = _FakeBuilder(error=ErrorCategory.BUILD_FAILURE)
-            async with pool.connection() as conn:
-                with pytest.raises(CategorizedError):
-                    await runs_handlers.build_handler(
-                        conn,
-                        job,
-                        resolver=provider_resolver(builder=crashing),
-                        secret_registry=SecretRegistry(),
-                    )
-            # The failure drove the Run terminal (failed); a real lease-lapse crash would not.
-            # Reset to running to model a crash that left no ledger row but the Run still running.
-            async with pool.connection() as conn:
-                await conn.execute(
-                    "UPDATE runs SET state='running', failure_category=NULL WHERE id=%s", (run_id,)
-                )
-            ok = _FakeBuilder()
-            async with pool.connection() as conn:
-                await runs_handlers.build_handler(
-                    conn,
-                    job,
-                    resolver=provider_resolver(builder=ok),
-                    secret_registry=SecretRegistry(),
-                )
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state, kernel_ref FROM runs WHERE id=%s", (run_id,))
-                row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM run_steps WHERE run_id=%s AND step='build'",
-                    (run_id,),
-                )
-                steps = await cur.fetchone()
-        assert row is not None and row["state"] == "succeeded"
-        assert row["kernel_ref"] == f"proj/runs/{run_id}/kernel"  # same deterministic key
-        assert steps is not None and steps["n"] == 1  # exactly one ledger row
-
-    asyncio.run(_run())
-
-
-def test_register_handlers_binds_build() -> None:
-    registry = HandlerRegistry()
-    runs_handlers.register_handlers(
-        registry,
-        ports=runs_handlers.RunHandlerPorts(
-            resolver=provider_resolver(builder=_FakeBuilder()),
-            secret_registry=SecretRegistry(),
-        ),
-    )
-    assert registry.get(JobKind.BUILD) is not None
 
 
 # --- runs.install / runs.boot (install + boot plane, #19) ----------------------------
@@ -4587,7 +4276,6 @@ def test_register_handlers_binds_install_and_boot() -> None:
         registry,
         ports=runs_handlers.RunHandlerPorts(
             resolver=provider_resolver(
-                builder=_FakeBuilder(),
                 installer=_FakeInstaller(),
                 booter=_FakeBooter(),
                 profile_policy=_LOCAL_POLICY,

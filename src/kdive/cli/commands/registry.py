@@ -238,14 +238,12 @@ def add_subparsers(sub: argparse._SubParsersAction) -> None:
 def _doctor_parser(sub: argparse._SubParsersAction, parent: argparse.ArgumentParser) -> None:
     """Add the ``doctor`` verb: a deployment-diagnostics gate, not a generic read verb.
 
-    It is wired here (not as a ``Verb``) because it has bespoke flags (``--with-egress``,
-    ``--with-buildhost-agent``), renders a fixed verdict table, and maps its own gate-safe exit
-    codes (ADR-0091 §5).
+    It is wired here (not as a ``Verb``) because it has a bespoke flag (``--with-egress``),
+    renders a fixed verdict table, and maps its own gate-safe exit codes (ADR-0091 §5).
     """
     parser = sub.add_parser("doctor", parents=[parent], help="run deployment diagnostics")
     parser.add_argument("--provider", dest="provider", default=None)
     parser.add_argument("--with-egress", dest="with_egress", action="store_true")
-    parser.add_argument("--with-buildhost-agent", dest="with_buildhost_agent", action="store_true")
 
 
 async def run_verb(args: argparse.Namespace) -> int:

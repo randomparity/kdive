@@ -60,12 +60,6 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "artifacts.get": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "artifacts.list": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "audit.query": ("tests/mcp/ops/test_audit_query.py",),
-    "build_envs.list": ("tests/mcp/ops/build_hosts/test_build_envs.py",),
-    "build_hosts.disable": ("tests/mcp/ops/test_build_hosts.py",),
-    "build_hosts.list": ("tests/mcp/ops/test_build_hosts.py",),
-    "build_hosts.register_ephemeral_libvirt": ("tests/mcp/ops/test_build_hosts.py",),
-    "build_hosts.register_ssh": ("tests/mcp/ops/test_build_hosts.py",),
-    "build_hosts.remove": ("tests/mcp/ops/test_build_hosts.py",),
     "control.force_crash": ("tests/mcp/lifecycle/test_control_tools.py",),
     "control.power": ("tests/mcp/lifecycle/test_control_tools.py",),
     "control.diagnostic_sysrq": ("tests/mcp/lifecycle/test_control_tools.py",),
@@ -440,37 +434,6 @@ def test_allocation_and_estimate_payload_schemas_are_concrete() -> None:
         "memory_gb",
         "vcpus",
         "window",
-    }
-
-
-def test_build_host_register_tools_are_variant_specific() -> None:
-    tools = {t.name: t for t in TOOLS}
-
-    assert "build_hosts.register" not in tools
-
-    ssh_params = set(tools["build_hosts.register_ssh"].parameters["properties"])
-    assert ssh_params == {"request"}
-    ssh_request = tools["build_hosts.register_ssh"].parameters["properties"]["request"]
-    assert set(ssh_request["properties"]) == {
-        "address",
-        "max_concurrent",
-        "name",
-        "ssh_credential_ref",
-        "toolchain_desc",
-        "workspace_root",
-    }
-
-    ephemeral_params = set(tools["build_hosts.register_ephemeral_libvirt"].parameters["properties"])
-    assert ephemeral_params == {"request"}
-    ephemeral_request = tools["build_hosts.register_ephemeral_libvirt"].parameters["properties"][
-        "request"
-    ]
-    assert set(ephemeral_request["properties"]) == {
-        "base_image_volume",
-        "max_concurrent",
-        "name",
-        "toolchain_desc",
-        "workspace_root",
     }
 
 

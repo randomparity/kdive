@@ -165,7 +165,6 @@ def _build_panels() -> list[dict]:
     _row_capacity(grid)
     _row_reconciler(grid)
     _row_jobs(grid)
-    _row_build(grid)
     _row_provider(grid)
     _row_capture(grid)
     return grid.panels
@@ -363,47 +362,6 @@ def _row_jobs(grid: _Grid) -> None:
             "Time-to-claim p95 by kind",
             [_target(_quantile("kdive_job_time_to_claim", 0.95, ("job_kind",)), "{{job_kind}}")],
             unit="s",
-        ),
-        width=12,
-    )
-
-
-def _row_build(grid: _Grid) -> None:
-    grid.row("Build plane")
-    grid.add(
-        _timeseries(
-            "Build-phase duration p95",
-            [
-                _target(
-                    _quantile("kdive_build_phase_duration", 0.95, ("build_phase",)),
-                    "{{build_phase}}",
-                )
-            ],
-            unit="s",
-        ),
-        width=12,
-    )
-    grid.add(
-        _timeseries(
-            "Build-host capacity by host",
-            [_target("sum by (build_host) (kdive_build_host_capacity)", "{{build_host}}")],
-            unit="short",
-        ),
-        width=12,
-    )
-    grid.add(
-        _timeseries(
-            "Build-host leases by host",
-            [_target("sum by (build_host) (kdive_build_host_leases)", "{{build_host}}")],
-            unit="short",
-        ),
-        width=12,
-    )
-    grid.add(
-        _timeseries(
-            "Build-host reachability by host",
-            [_target("sum by (build_host) (kdive_build_host_reachable)", "{{build_host}}")],
-            unit="short",
         ),
         width=12,
     )

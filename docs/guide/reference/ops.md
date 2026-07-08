@@ -10,14 +10,12 @@ Run the deployment diagnostics. Platform operator-gated.
 
 Returns one verdict carrying each check's three-state status, detail, fix, and the
 provider it covered. A check that could not be run (a down dependency) reports an
-``error`` distinctly — it is not a contract failure. ``with_egress`` and
-``with_buildhost_agent`` add the mutating probes (off by default; each provisioning is
-audited distinctly).
+``error`` distinctly — it is not a contract failure. ``with_egress`` adds the mutating
+probe (off by default; the provisioning is audited distinctly).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `provider` | string (nullable) | no | Diagnose one named registered provider; omit for all registered. |
-| `with_buildhost_agent` | boolean | no | Opt into the heavy ephemeral_libvirt_buildhost_agent probe: provisions a throwaway builder on each ephemeral_libvirt build host and checks its guest-agent reachability. Audited distinctly; off by default. |
 | `with_egress` | boolean | no | Opt into the heavy guest_egress probe: provisions a short-lived guest on the target provider and execs a presigned request to object-store from inside it. Audited distinctly; off by default. |
 
 ## `ops.export_cost_classes`

@@ -9,8 +9,8 @@ from kdive.health.metrics_text import render_prometheus
 from tests.deploy.grafana_catalog import catalog_series
 
 
-def test_catalog_has_29_series() -> None:
-    assert len(catalog_series()) == 29
+def test_catalog_has_expected_series_count() -> None:
+    assert len(catalog_series()) == 25
 
 
 def test_catalog_includes_known_instruments() -> None:

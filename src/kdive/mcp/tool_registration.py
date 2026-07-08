@@ -46,7 +46,6 @@ from kdive.mcp.tools.ops import reconcile_systems as ops_reconcile_systems_tools
 from kdive.mcp.tools.ops import secrets as ops_secrets_tools
 from kdive.mcp.tools.ops import tool_trail as ops_tool_trail_tools
 from kdive.mcp.tools.ops import tuning as ops_tuning_tools
-from kdive.mcp.tools.ops.build_hosts import registrar as ops_build_hosts_tools
 from kdive.mcp.tools.ops.images import registrar as ops_images_tools
 from kdive.mcp.tools.ops.resources import host_ops as ops_resource_host_tools
 from kdive.mcp.tools.ops.resources import registrar as ops_resource_mutation_tools
@@ -54,7 +53,7 @@ from kdive.mcp.tools.reports import generate as reports_generate
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.infra.reaping import BuildVmReaper, DumpVolumeReaper, InfraReaper
+from kdive.providers.infra.reaping import DumpVolumeReaper, InfraReaper
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly
 
@@ -67,7 +66,6 @@ class AppAssembly:
     secret_registry: SecretRegistry
     reaper: InfraReaper
     dump_volume_reaper: DumpVolumeReaper
-    build_vm_reaper: BuildVmReaper
     object_stores: ObjectStoreAssembly
 
 
@@ -101,7 +99,6 @@ def _register_reconcile_tools(
         upload_store=assembly.object_stores.optional_upload_store,
         image_store=assembly.object_stores.optional_image_store,
         dump_volume_reaper=assembly.dump_volume_reaper,
-        build_vm_reaper=assembly.build_vm_reaper,
     )
     ops_reconcile_tools.register(app, pool, ports=ports)
 
@@ -175,24 +172,15 @@ def _register_introspection_tools(
 def _register_diagnostics_tools(
     app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly
 ) -> None:
-    def _service_factory(
-        provider: str | None, *, with_egress: bool = False, with_buildhost_agent: bool = False
-    ) -> DiagnosticsService:
+    def _service_factory(provider: str | None, *, with_egress: bool = False) -> DiagnosticsService:
         return default_service_factory(
             provider,
             with_egress=with_egress,
-            with_buildhost_agent=with_buildhost_agent,
             pool=pool,
             provider_contributions=diagnostic_provider_contributions(),
         )
 
     ops_diagnostics_tools.register(app, pool, _service_factory)
-
-
-def _register_ops_build_hosts_tools(
-    app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly
-) -> None:
-    ops_build_hosts_tools.register(app, pool)
 
 
 def _register_ops_images_tools(
@@ -267,7 +255,6 @@ PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _pool_only_plane_registrar(inventory_tools.register),
     _pool_only_plane_registrar(fixtures.register),
     _pool_only_plane_registrar(catalog_images.register),
-    _register_ops_build_hosts_tools,
     _register_ops_images_tools,
     _register_ops_secrets_tools,
     _register_doc_resources,

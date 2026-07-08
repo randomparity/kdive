@@ -611,7 +611,6 @@ def _build_reconcile_config(
     telemetry: Telemetry,
 ) -> Any:
     from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
-    from kdive.reconciler.build_host_fleet import BuildHostTelemetry
     from kdive.reconciler.fleet import FleetTelemetry
     from kdive.reconciler.loop import ReconcileConfig
     from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
@@ -629,15 +628,12 @@ def _build_reconcile_config(
         console_registry=console_registry,
         resetter=provider_composition.build_reconciler_transport_resetter(),
         dump_volume_reaper=provider_composition.build_reconciler_dump_volume_reaper(),
-        build_vm_reaper=provider_composition.build_reconciler_build_vm_reaper(),
-        build_host_prober=provider_composition.build_reconciler_build_host_prober(),
         heartbeat=heartbeat,
         telemetry=ReconcilerTelemetry(
             tracer=telemetry.tracer_provider.get_tracer("kdive.reconciler"),
             meter=meter,
         ),
         fleet_telemetry=FleetTelemetry(meter=meter),
-        build_host_telemetry=BuildHostTelemetry(meter=meter),
         admission_metrics=AdmissionMetrics(meter=meter),
         debug_session_telemetry=DebugSessionTelemetry(meter=meter),
     )

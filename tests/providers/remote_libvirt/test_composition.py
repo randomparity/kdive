@@ -14,7 +14,6 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.providers.core.runtime import DebugCapabilities
 from kdive.providers.remote_libvirt import composition
-from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.debug.introspect import (
     RemoteLibvirtLiveIntrospect,
@@ -136,7 +135,6 @@ def test_build_runtime_wires_each_port_to_its_remote_adapter() -> None:
 
     assert isinstance(runtime.profile_policy, RemoteLibvirtProfilePolicy)
     assert isinstance(runtime.provisioner, RemoteLibvirtProvisioning)
-    assert isinstance(runtime.builder, RemoteLibvirtBuild)
     assert isinstance(runtime.installer, RemoteLibvirtInstall)
     assert runtime.booter is runtime.installer
     assert isinstance(runtime.connector, RemoteLibvirtConnect)
@@ -187,10 +185,6 @@ def test_build_runtime_engine_redactor_uses_the_provider_secret_registry() -> No
 
 def test_build_runtime_validators_and_component_sources() -> None:
     runtime = composition.build_runtime(secret_registry=SecretRegistry())
-    # build_config_validator is the builder's bound method (not None / not a stand-in).
-    assert (
-        runtime.build_config_validator == runtime.builder.validate_config_ref  # ty: ignore[unresolved-attribute]
-    )
     # rootfs_validator accepts any rootfs and returns None (remote has no rootfs to validate).
     assert runtime.rootfs_validator is not None
     assert runtime.rootfs_validator(object()) is None  # ty: ignore[invalid-argument-type]

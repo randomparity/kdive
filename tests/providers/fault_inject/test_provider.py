@@ -14,9 +14,7 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import PowerAction
-from kdive.profiles.build import ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.fault_inject.build import FaultInjectBuild
 from kdive.providers.fault_inject.debug.gdb import (
     FaultInjectDebugEngine,
     fault_inject_attach_seam,
@@ -38,7 +36,6 @@ from kdive.providers.ports.lifecycle import (
 _SYSTEM = UUID("11111111-1111-1111-1111-111111111111")
 _RUN = UUID("22222222-2222-2222-2222-222222222222")
 _PROVISIONING_PROFILE = cast(ProvisioningProfile, object())
-_BUILD_PROFILE = cast(ServerBuildProfile, object())
 
 
 class _FakeStore:
@@ -87,19 +84,7 @@ def test_reprovision_leaves_the_system_owning_exactly_one_domain() -> None:
     assert owned == [second]
 
 
-# --- Build / Install / Boot ------------------------------------------------------------
-
-
-def test_build_stores_a_synthetic_kernel_and_returns_consistent_refs() -> None:
-    store = _FakeStore()
-    builder = FaultInjectBuild(store_factory=lambda: store)
-
-    output = builder.build(_RUN, profile=_BUILD_PROFILE)
-
-    assert output.kernel_ref and output.debuginfo_ref
-    assert len(output.build_id) == 40  # a plausible GNU build-id length
-    assert {w.owner_kind for w in store.writes} == {"runs"}
-    assert all(w.owner_id == str(_RUN) for w in store.writes)
+# --- Install / Boot --------------------------------------------------------------------
 
 
 def test_install_and_boot_succeed_on_the_happy_path() -> None:
@@ -277,20 +262,6 @@ def test_capture_stores_a_synthetic_vmcore_with_raw_and_redacted_artifacts() -> 
     assert Sensitivity.SENSITIVE in sensitivities  # the raw core
     assert Sensitivity.REDACTED in sensitivities  # its redacted derivative
     assert output.vmcore_build_id == output.vmcore_build_id  # present, consistent
-
-
-def test_capture_build_id_matches_the_builder_so_provenance_holds() -> None:
-    store = _FakeStore()
-    build_id = (
-        FaultInjectBuild(store_factory=lambda: store).build(_RUN, profile=_BUILD_PROFILE).build_id
-    )
-    captured = FaultInjectRetrieve(store_factory=lambda: store).capture(
-        _SYSTEM, _RUN, CaptureMethod.HOST_DUMP
-    )
-
-    # A mock spine installs the built kernel then captures its core; a fixed synthetic
-    # build-id keeps the capture's provenance check against the build aligned.
-    assert captured.vmcore_build_id == build_id
 
 
 def test_crash_postmortem_returns_a_bounded_synthetic_transcript() -> None:

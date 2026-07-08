@@ -50,10 +50,6 @@ _TOOL = "ops.diagnostics"
 # under cover of "just running doctor", and is separable in the audit trail from the read-only
 # run.
 _EGRESS_TOOL = "ops.diagnostics.egress"
-# The distinct audit tool for the mutating opt-in build-host agent probe (ADR-0167): provisioning
-# a throwaway builder is recorded under its own event, separate from the read-only run and from the
-# egress probe, for the same non-amplification reason.
-_BUILDHOST_TOOL = "ops.diagnostics.buildhost_agent"
 _OBJECT_ID = "diagnostics"
 _log = logging.getLogger(__name__)
 
@@ -63,9 +59,7 @@ class ServiceFactory(Protocol):
 
     ``provider`` is a named registered provider, or ``None`` for all registered.
     ``with_egress`` assembles the heavy opt-in ``guest_egress`` check (provisions a probe
-    guest) on top of the cheap read-only checks (ADR-0091 §3). ``with_buildhost_agent``
-    assembles the heavy opt-in ``ephemeral_libvirt_buildhost_agent`` check (provisions a
-    throwaway builder per ephemeral_libvirt host) — ADR-0167.
+    guest) on top of the cheap read-only checks (ADR-0091 §3).
     """
 
     def __call__(
@@ -73,7 +67,6 @@ class ServiceFactory(Protocol):
         provider: str | None,
         *,
         with_egress: bool = False,
-        with_buildhost_agent: bool = False,
     ) -> DiagnosticsService: ...
 
 
@@ -90,17 +83,16 @@ async def run_diagnostics(
     *,
     provider: str | None = None,
     with_egress: bool = False,
-    with_buildhost_agent: bool = False,
 ) -> ToolResponse:
     """Run the read-only diagnostics and return one coherent verdict; operator-gated.
 
     A caller without ``platform_operator`` is denied; the denial is audited iff the caller
     holds any platform role (the over-reach accountability row), and the served run is
-    always audited under the resolved actor. ``with_egress`` and ``with_buildhost_agent`` opt
-    into the heavy mutating probes (each provisions infrastructure); when set, the provisioning
-    action is audited **distinctly** from the read-only run so it cannot be amplified under cover
-    of "just running doctor" (ADR-0091 §4, ADR-0167). The verdict carries each check's three-state
-    result; an ``error`` item is reported distinctly and never inflated into a ``fail``.
+    always audited under the resolved actor. ``with_egress`` opts into the heavy mutating
+    probe (it provisions infrastructure); when set, the provisioning action is audited
+    **distinctly** from the read-only run so it cannot be amplified under cover of "just
+    running doctor" (ADR-0091 §4). The verdict carries each check's three-state result; an
+    ``error`` item is reported distinctly and never inflated into a ``fail``.
     """
     with bind_context(principal=ctx.principal):
         try:
@@ -111,13 +103,11 @@ async def run_diagnostics(
                 ctx,
                 tool=_TOOL,
                 scope=ALL_PROJECTS_SCOPE,
-                args=_audit_args(provider, with_egress, with_buildhost_agent),
+                args=_audit_args(provider, with_egress),
             )
             return _denied()
-        report = await _diagnostics_report_from_service(
-            service_factory, provider, with_egress, with_buildhost_agent
-        )
-        await _audit_run(pool, ctx, provider, with_egress, with_buildhost_agent)
+        report = await _diagnostics_report_from_service(service_factory, provider, with_egress)
+        await _audit_run(pool, ctx, provider, with_egress)
         return _verdict(report.results, report.has_failure, report.has_error)
 
 
@@ -125,7 +115,6 @@ async def _diagnostics_report_from_service(
     service_factory: ServiceFactory,
     provider: str | None,
     with_egress: bool,
-    with_buildhost_agent: bool,
 ) -> DiagnosticsReport:
     """Run the diagnostics service, mapping assembly failures to an ``error`` verdict.
 
@@ -137,15 +126,12 @@ async def _diagnostics_report_from_service(
     exists to inspect).
     """
     try:
-        service = service_factory(
-            provider, with_egress=with_egress, with_buildhost_agent=with_buildhost_agent
-        )
+        service = service_factory(provider, with_egress=with_egress)
     except Exception as exc:  # noqa: BLE001 - a build/config fault is an error verdict, not a crash
         _log.error(
-            "diagnostics assembly failed for provider=%r egress=%s buildhost_agent=%s: %s",
+            "diagnostics assembly failed for provider=%r egress=%s: %s",
             provider,
             with_egress,
-            with_buildhost_agent,
             exc,
             exc_info=True,
         )
@@ -161,13 +147,10 @@ async def _diagnostics_report_from_service(
     return await service.run()
 
 
-def _audit_args(
-    provider: str | None, with_egress: bool, with_buildhost_agent: bool
-) -> dict[str, object]:
+def _audit_args(provider: str | None, with_egress: bool) -> dict[str, object]:
     return {
         "provider": provider,
         "with_egress": with_egress,
-        "with_buildhost_agent": with_buildhost_agent,
     }
 
 
@@ -176,15 +159,12 @@ async def _audit_run(
     ctx: RequestContext,
     provider: str | None,
     with_egress: bool,
-    with_buildhost_agent: bool,
 ) -> None:
-    args = _audit_args(provider, with_egress, with_buildhost_agent)
+    args = _audit_args(provider, with_egress)
     async with pool.connection() as conn, conn.transaction():
         await _record(conn, ctx, _TOOL, args)
         if with_egress:
             await _record(conn, ctx, _EGRESS_TOOL, args)
-        if with_buildhost_agent:
-            await _record(conn, ctx, _BUILDHOST_TOOL, args)
 
 
 async def _record(
@@ -219,8 +199,8 @@ def _item(result: CheckResult) -> ToolResponse:
                 result.failure_category.value if result.failure_category is not None else None
             ),
             "resource_id": result.resource_id,
-            # The check's structured fields (e.g. local_kernel_src's resolved path + git HEAD,
-            # #845); ``{}`` when the check discloses none, so the key is always present.
+            # The check's structured fields; ``{}`` when the check discloses none, so the key is
+            # always present.
             "data": dict(result.data) if result.data else {},
         },
     )
@@ -268,22 +248,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool, service_factory: ServiceFa
                 "from inside it. Audited distinctly; off by default."
             ),
         ] = False,
-        with_buildhost_agent: Annotated[
-            bool,
-            Field(
-                description="Opt into the heavy ephemeral_libvirt_buildhost_agent probe: "
-                "provisions a throwaway builder on each ephemeral_libvirt build host and checks "
-                "its guest-agent reachability. Audited distinctly; off by default."
-            ),
-        ] = False,
     ) -> ToolResponse:
         """Run the deployment diagnostics. Platform operator-gated.
 
         Returns one verdict carrying each check's three-state status, detail, fix, and the
         provider it covered. A check that could not be run (a down dependency) reports an
-        ``error`` distinctly — it is not a contract failure. ``with_egress`` and
-        ``with_buildhost_agent`` add the mutating probes (off by default; each provisioning is
-        audited distinctly).
+        ``error`` distinctly — it is not a contract failure. ``with_egress`` adds the mutating
+        probe (off by default; the provisioning is audited distinctly).
         """
         return await run_diagnostics(
             pool,
@@ -291,5 +262,4 @@ def register(app: FastMCP, pool: AsyncConnectionPool, service_factory: ServiceFa
             current_context(),
             provider=provider,
             with_egress=with_egress,
-            with_buildhost_agent=with_buildhost_agent,
         )

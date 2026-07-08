@@ -90,7 +90,6 @@ def _resolver_with_plane(plane: _FakePlane | None) -> ProviderResolver:
     runtime = ProviderRuntime(
         profile_policy=LocalLibvirtProfilePolicy(),
         provisioner=cast(Any, object()),
-        builder=cast(Any, object()),
         installer=cast(Any, object()),
         booter=cast(Any, object()),
         connector=cast(Any, object()),

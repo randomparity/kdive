@@ -459,7 +459,7 @@ def test_pass_loop_marks_span_error_when_run_once_raises(
 
 
 def test_reconciler_keeps_real_telemetry_doubles_when_config_omits_them() -> None:
-    """Omitted fleet/build-host telemetry default to real disabled instances, not None."""
+    """Omitted fleet telemetry defaults to a real disabled instance, not None."""
     reconciler = Reconciler(
         pool=_FakePool(),  # ty: ignore[invalid-argument-type]
         reaper=NullReaper(),
@@ -467,9 +467,7 @@ def test_reconciler_keeps_real_telemetry_doubles_when_config_omits_them() -> Non
     )
     # `or`-default must yield a usable object (not None / not the falsy short-circuit).
     assert reconciler._fleet_telemetry is not None
-    assert reconciler._build_host_telemetry is not None
     assert hasattr(reconciler._fleet_telemetry, "refresh")
-    assert hasattr(reconciler._build_host_telemetry, "refresh")
 
 
 def test_run_once_forwards_pool_reaper_and_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -587,12 +585,11 @@ def test_pass_loop_resets_next_due_so_steady_state_lag_stays_small(
 
 
 def test_pass_loop_refreshes_snapshots_each_pass(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each pass awaits both snapshot refreshers exactly once.
+    """Each pass awaits the fleet snapshot refresher exactly once.
 
-    Spies replace the refresher coroutines so the test pins the *calls* the loop body makes
-    (loop.py ``await self._refresh_fleet_snapshot()`` / ``_refresh_build_host_snapshot()``),
-    not construction-time attributes. Deleting either ``await`` statement drops its name from
-    ``calls`` and fails the matching assertion.
+    A spy replaces the refresher coroutine so the test pins the *call* the loop body makes
+    (loop.py ``await self._refresh_fleet_snapshot()``), not construction-time attributes.
+    Deleting the ``await`` statement drops its name from ``calls`` and fails the assertion.
     """
     telemetry = _RecordingTelemetry()
     reconciler = Reconciler(
@@ -608,11 +605,7 @@ def test_pass_loop_refreshes_snapshots_each_pass(monkeypatch: pytest.MonkeyPatch
     async def _spy_fleet() -> None:
         calls.append("fleet")
 
-    async def _spy_build_host() -> None:
-        calls.append("build_host")
-
     monkeypatch.setattr(reconciler, "_refresh_fleet_snapshot", _spy_fleet)
-    monkeypatch.setattr(reconciler, "_refresh_build_host_snapshot", _spy_build_host)
 
     async def _run() -> None:
         stop = asyncio.Event()
@@ -627,7 +620,6 @@ def test_pass_loop_refreshes_snapshots_each_pass(monkeypatch: pytest.MonkeyPatch
     asyncio.run(_run())
 
     assert calls.count("fleet") == 1
-    assert calls.count("build_host") == 1
 
 
 def test_pass_loop_swallows_snapshot_read_failure_and_completes(

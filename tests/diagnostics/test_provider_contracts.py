@@ -33,7 +33,6 @@ def test_provider_contribution_field_set() -> None:
         "checks",
         "unavailable_worker_checks",
         "worker_checks",
-        "buildhost_agent_check",
     }
 
 
@@ -46,6 +45,5 @@ def test_provider_contribution_is_frozen() -> None:
         worker_checks=lambda: [],
     )
     assert contribution.enabled() is True
-    assert contribution.buildhost_agent_check is None
     with pytest.raises(dataclasses.FrozenInstanceError):
         contribution.provider = "other"  # ty: ignore[invalid-assignment]

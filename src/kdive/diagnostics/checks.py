@@ -26,8 +26,6 @@ PROVIDER_TLS_ID = "provider_tls"
 GDBSTUB_ACL_ID = "gdbstub_acl"
 REACHABILITY_ID = "remote_libvirt_reachability"
 BASE_IMAGE_STAGING_ID = "remote_libvirt_base_image_staging"
-LOCAL_KERNEL_SRC_ID = "local_kernel_src"
-BUILDHOST_AGENT_ID = "ephemeral_libvirt_buildhost_agent"
 
 _log = logging.getLogger(__name__)
 

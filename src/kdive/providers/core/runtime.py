@@ -18,7 +18,6 @@ from kdive.domain.capture import CaptureMethod
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import RootfsSource
-from kdive.providers.ports.build import Builder
 from kdive.providers.ports.console import ConsoleSnapshotter
 from kdive.providers.ports.debug import (
     AttachSeam,
@@ -68,7 +67,6 @@ class ProviderRuntime:
 
     profile_policy: ProfilePolicy
     provisioner: Provisioner
-    builder: Builder
     installer: Installer
     booter: Booter
     connector: Connector

@@ -15,7 +15,6 @@ from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
 from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.models import HandlerRegistry, JobHandler
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactories
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly
 
@@ -26,7 +25,6 @@ class WorkerHandlerAssembly:
 
     resolver: ProviderResolver
     secret_registry: SecretRegistry
-    transport_factories: BuildHostTransportFactories | None
     object_stores: ObjectStoreAssembly
 
 
@@ -49,16 +47,12 @@ def _register_run_handlers(
     registry: HandlerRegistry,
     assembly: WorkerHandlerAssembly,
 ) -> None:
-    from kdive.observability.build_telemetry import BuildPhaseRecorder
-
     runs.register_handlers(
         registry,
         ports=runs.RunHandlerPorts(
             resolver=assembly.resolver,
             secret_registry=assembly.secret_registry,
-            transport_factories=assembly.transport_factories,
             artifact_store=assembly.object_stores.optional_upload_store,
-            build_phase_recorder=BuildPhaseRecorder(meter=metrics.get_meter("kdive.worker")),
         ),
     )
 

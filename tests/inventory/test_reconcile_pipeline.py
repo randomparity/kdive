@@ -41,7 +41,6 @@ def test_pipeline_invokes_coefficients_before_resources(monkeypatch: pytest.Monk
         "reconcile_images",
         "reconcile_coefficients",
         "reconcile_resources",
-        "reconcile_build_hosts",
         "reconcile_build_configs",
     ):
         monkeypatch.setattr(reconcile_pipeline, name, _recorder(name, calls, received))
@@ -67,12 +66,11 @@ def test_pipeline_invokes_coefficients_before_resources(monkeypatch: pytest.Monk
 
     # The load-bearing invariant: a host's price is upserted before its row is reconciled.
     assert calls.index("reconcile_coefficients") < calls.index("reconcile_resources")
-    # The override GC runs last, after the resource/build-host passes apply the doc (ADR-0199).
+    # The override GC runs last, after the resource pass applies the doc (ADR-0199).
     assert calls == [
         "reconcile_images",
         "reconcile_coefficients",
         "reconcile_resources",
-        "reconcile_build_hosts",
         "reconcile_build_configs",
         "reconcile_overrides_gc",
     ]
@@ -82,6 +80,5 @@ def test_pipeline_invokes_coefficients_before_resources(monkeypatch: pytest.Monk
     assert received["reconcile_images"] == (conn, doc, store)
     assert received["reconcile_coefficients"] == (conn, doc)
     assert received["reconcile_resources"] == (conn, doc)
-    assert received["reconcile_build_hosts"] == (conn, doc)
     assert received["reconcile_build_configs"] == (conn, doc, store)
     assert received["reconcile_overrides_gc"] == (conn, doc)

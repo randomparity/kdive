@@ -32,14 +32,10 @@ from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.infra.console_hosting import CollectorRegistry
 from kdive.providers.infra.reaping import (
-    BuildVmReaper,
     DumpVolumeReaper,
     InfraReaper,
-    NullBuildVmReaper,
     NullDumpVolumeReaper,
 )
-from kdive.providers.shared.build_host.reachability import BuildHostProber
-from kdive.reconciler.build_host_fleet import BuildHostTelemetry, read_build_host_snapshot
 from kdive.reconciler.cleanup import gc as gc_repairs
 from kdive.reconciler.cleanup.images import (
     repair_dangling_images as _repair_dangling_images,
@@ -67,7 +63,6 @@ from kdive.reconciler.fleet import FleetTelemetry, read_fleet_snapshot
 from kdive.reconciler.inventory import InventoryReconcilePass
 from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
 from kdive.reconciler.repairs import allocations as allocation_repairs
-from kdive.reconciler.repairs import build_hosts as build_host_repairs
 from kdive.reconciler.repairs import console_rotation as console_rotation_repairs
 from kdive.reconciler.repairs import debug_sessions as debug_session_repairs
 from kdive.reconciler.repairs import jobs as job_repairs
@@ -103,9 +98,6 @@ _reap_console_collectors = gc_repairs.reap_console_collectors
 _reap_orphaned_dump_volumes = gc_repairs.reap_orphaned_dump_volumes
 _reap_orphaned_active_allocations = allocation_repairs.reap_orphaned_active_allocations
 _reap_queue_timeouts_for = allocation_repairs.reap_queue_timeouts_for
-_reclaim_build_host_leases = build_host_repairs.reclaim_orphan_build_host_leases
-_reap_orphan_build_vms = build_host_repairs.reap_orphan_build_vms
-_probe_build_host_reachability = build_host_repairs.probe_build_host_reachability
 _repair_abandoned_jobs = job_repairs.repair_abandoned_jobs
 _repair_dead_sessions = debug_session_repairs.repair_dead_sessions
 _repair_orphaned_systems = system_repairs.repair_orphaned_systems
@@ -121,13 +113,11 @@ __all__ = [
     "_gc_idempotency_keys",
     "_gc_investigation_artifacts",
     "_gc_report_artifacts",
-    "_probe_build_host_reachability",
     "_promote_pending",
     "_reap_expired_runtime_resources",
     "_reap_orphaned_active_allocations",
     "_reap_console_collectors",
     "_reap_orphaned_dump_volumes",
-    "_reclaim_build_host_leases",
     "_repair_abandoned_jobs",
     "_repair_dead_sessions",
     "_repair_orphaned_systems",
@@ -143,9 +133,6 @@ _NULL_RESETTER: TransportResetter = NullResetter()
 # The default dump-volume reaper (ADR-0094): a module-level singleton so it can be a
 # stateless default argument without a per-call construction (ruff B008).
 _NULL_DUMP_VOLUME_REAPER: DumpVolumeReaper = NullDumpVolumeReaper()
-
-# The default build-VM reaper (ADR-0100): a module-level stateless singleton (see above).
-_NULL_BUILD_VM_REAPER: BuildVmReaper = NullBuildVmReaper()
 
 # The default (no-op) admission metrics (ADR-0190 D): a module-level singleton so it is a
 # stateless default field without a per-call construction (ruff B008).
@@ -211,9 +198,6 @@ class ReconcileReport:
     expired_private_images: int = 0
     console_collectors_reaped: int = 0
     reaped_dump_volumes: int = 0
-    reaped_build_vms: int = 0
-    reclaimed_build_host_leases: int = 0
-    build_host_states_changed: int = 0
     reaped_runtime_resources: int = 0
     investigation_artifacts_gc_count: int = 0
     expired_build_artifacts_gc_count: int = 0
@@ -246,9 +230,6 @@ class ReconcileReport:
             expired_private_images=_report_count(full_counts, "expired_private_images"),
             console_collectors_reaped=_report_count(full_counts, "console_collectors_reaped"),
             reaped_dump_volumes=_report_count(full_counts, "reaped_dump_volumes"),
-            reaped_build_vms=_report_count(full_counts, "reaped_build_vms"),
-            reclaimed_build_host_leases=_report_count(full_counts, "reclaimed_build_host_leases"),
-            build_host_states_changed=_report_count(full_counts, "build_host_states_changed"),
             reaped_runtime_resources=_report_count(full_counts, "reaped_runtime_resources"),
             investigation_artifacts_gc_count=_report_count(
                 full_counts, "investigation_artifacts_gc_count"
@@ -266,8 +247,6 @@ class ReconcileConfig:
 
     resetter: TransportResetter = _NULL_RESETTER
     dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER
-    build_vm_reaper: BuildVmReaper = _NULL_BUILD_VM_REAPER
-    build_host_prober: BuildHostProber | None = None
     resource_probe: ResourceProbe | None = None
     upload_store: UploadStore | None = None
     image_store: ImageSweepStore | None = None
@@ -287,7 +266,6 @@ class ReconcileConfig:
     )
     telemetry: ReconcilerTelemetry | None = None
     fleet_telemetry: FleetTelemetry | None = None
-    build_host_telemetry: BuildHostTelemetry | None = None
     admission_metrics: AdmissionMetrics = field(default=_NULL_ADMISSION_METRICS)
     debug_session_telemetry: DebugSessionTelemetry = field(default=_NULL_DEBUG_SESSION_TELEMETRY)
 
@@ -329,15 +307,6 @@ def _expired_private_images_repair(
     if image_store is None:
         return None
     return lambda conn: _repair_expired_private_images(conn, image_store)
-
-
-def _build_host_states_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
-) -> _RepairFn | None:
-    build_host_prober = config.build_host_prober
-    if build_host_prober is None:
-        return None
-    return lambda conn: _probe_build_host_reachability(conn, build_host_prober)
 
 
 def _abandoned_uploads_repair(
@@ -410,13 +379,6 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
         lambda _r, c, _g: lambda conn: _reap_expired_runtime_resources(conn, c.resource_probe),
     ),
     _RepairCatalogEntry(
-        "reaped_build_vms",
-        lambda _r, c, _g: lambda conn: _reap_orphan_build_vms(conn, c.build_vm_reaper),
-    ),
-    _RepairCatalogEntry(
-        "reclaimed_build_host_leases", lambda _r, _c, _g: _reclaim_build_host_leases
-    ),
-    _RepairCatalogEntry(
         "dead_sessions",
         lambda _r, c, _g: (
             lambda conn: _repair_dead_sessions(
@@ -445,7 +407,6 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
             )
         ),
     ),
-    _RepairCatalogEntry("build_host_states_changed", _build_host_states_repair),
     _RepairCatalogEntry("abandoned_uploads", _abandoned_uploads_repair),
     _RepairCatalogEntry("report_artifacts_gc_count", _report_artifacts_gc_repair),
     _RepairCatalogEntry("investigation_artifacts_gc_count", _investigation_artifacts_gc_repair),
@@ -566,7 +527,6 @@ class Reconciler:
         self._heartbeat_tick = config.heartbeat_tick.total_seconds()
         self._telemetry = config.telemetry or ReconcilerTelemetry.disabled()
         self._fleet_telemetry = config.fleet_telemetry or FleetTelemetry.disabled()
-        self._build_host_telemetry = config.build_host_telemetry or BuildHostTelemetry.disabled()
 
     async def run_once(self) -> ReconcileReport:
         """Run one reconciliation pass."""
@@ -614,20 +574,6 @@ class Reconciler:
             return
         self._fleet_telemetry.refresh(snapshot)
 
-    async def _refresh_build_host_snapshot(self) -> None:
-        """Read build-host lease/capacity/reachability into the gauge cache (ADR-0191 G2/G3).
-
-        Best-effort: a read failure is logged and leaves the previous cached snapshot in place
-        — the build-host gauges are observability, never load-bearing for the repair pass.
-        """
-        try:
-            async with self._pool.connection() as conn:
-                snapshot = await read_build_host_snapshot(conn)
-        except Exception:  # noqa: BLE001 - a snapshot read must never starve the repair loop
-            _log.warning("reconciler: build-host snapshot read failed this pass", exc_info=True)
-            return
-        self._build_host_telemetry.refresh(snapshot)
-
     def _start_heartbeat_ticker(self, stop: asyncio.Event) -> asyncio.Task[None] | None:
         if self._config.heartbeat is None:
             return None
@@ -653,7 +599,6 @@ class Reconciler:
                     span.set_outcome("error")
                     _log.exception("reconcile pass failed; continuing after %ss", interval)
             await self._refresh_fleet_snapshot()
-            await self._refresh_build_host_snapshot()
             next_due = time.monotonic() + interval
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=interval)

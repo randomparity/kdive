@@ -39,7 +39,6 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.accounting.cost import cost, quantize_kcu, rate
 from kdive.domain.capacity.state import (
@@ -86,6 +85,8 @@ from tests.mcp.systems_support import (
 from tests.mcp.systems_support import (
     provider_resolver as _provider_resolver,
 )
+
+WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 # The frozen instant the release path stamps active_ended_at at in the #3 reconciliation

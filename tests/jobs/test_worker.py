@@ -16,7 +16,6 @@ from opentelemetry.sdk.trace import TracerProvider
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.db.repositories import JOBS
 from kdive.domain.capacity.state import JobState, RunState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -40,6 +39,8 @@ from tests.integration._seed import (
     seed_running_run,
     seed_system,
 )
+
+WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 

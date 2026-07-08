@@ -28,7 +28,6 @@ from typing import Any
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from kdive.db.build_hosts import BuildHostKind
 from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     MEMORY_MB_KEY,
@@ -205,19 +204,18 @@ async def _live_resource_values(
     return live
 
 
+_BUILD_HOST_KINDS = frozenset({"local", "ssh", "ephemeral_libvirt"})
+
+
 def _declared_build_host_values(doc: InventoryDoc) -> dict[str, dict[str, Any]]:
     """The file's declared comparable values per config build host ``name``."""
     declared: dict[str, dict[str, Any]] = {}
     for inst in doc.build_host:
-        try:
-            kind = BuildHostKind(inst.kind)
-        except ValueError:
+        if inst.kind not in _BUILD_HOST_KINDS:
             continue
-        base_image_volume = (
-            inst.base_image_volume if kind is BuildHostKind.EPHEMERAL_LIBVIRT else None
-        )
+        base_image_volume = inst.base_image_volume if inst.kind == "ephemeral_libvirt" else None
         declared[inst.name] = {
-            "kind": kind.value,
+            "kind": inst.kind,
             "base_image_volume": base_image_volume,
             "workspace_root": inst.workspace_root,
             "max_concurrent": inst.max_concurrent,

@@ -91,7 +91,6 @@ def _args(**kwargs: object) -> argparse.Namespace:
     kwargs.setdefault("json", False)
     kwargs.setdefault("provider", None)
     kwargs.setdefault("with_egress", False)
-    kwargs.setdefault("with_buildhost_agent", False)
     return argparse.Namespace(**kwargs)
 
 
@@ -291,21 +290,12 @@ def test_with_egress_flag_is_threaded_to_the_tool(monkeypatch: pytest.MonkeyPatc
     assert client.calls == [("ops.diagnostics", {"with_egress": True})]
 
 
-def test_with_buildhost_agent_flag_is_threaded_to_the_tool(
-    monkeypatch: pytest.MonkeyPatch, capsys
-) -> None:
-    client = _install_session(monkeypatch, _verdict([], has_failure=False, has_error=False))
-    asyncio.run(doctor.doctor(_args(with_buildhost_agent=True)))
-    assert client.calls == [("ops.diagnostics", {"with_buildhost_agent": True})]
-
-
 def test_doctor_is_a_known_subcommand() -> None:
     from kdive.cli.__main__ import build_parser
 
     args = build_parser().parse_args(["doctor"])
     assert args.command == "doctor"
     assert args.provider is None and args.with_egress is False
-    assert args.with_buildhost_agent is False
 
 
 def test_doctor_parses_provider_and_egress_flags() -> None:
@@ -313,13 +303,6 @@ def test_doctor_parses_provider_and_egress_flags() -> None:
 
     args = build_parser().parse_args(["doctor", "--provider", "remote-libvirt", "--with-egress"])
     assert args.provider == "remote-libvirt" and args.with_egress is True
-
-
-def test_doctor_parses_with_buildhost_agent_flag() -> None:
-    from kdive.cli.__main__ import build_parser
-
-    args = build_parser().parse_args(["doctor", "--with-buildhost-agent"])
-    assert args.with_buildhost_agent is True
 
 
 def test_doctor_json_flag_accepted_after_the_verb() -> None:
@@ -353,19 +336,14 @@ def test_payload_omits_flags_when_attributes_are_absent() -> None:
 
 
 def test_payload_does_not_force_flags_on_when_attributes_default() -> None:
-    # When the opt-ins are present but False, neither flag is forwarded; a default of True
-    # (instead of False) would wrongly opt every run into the heavy probes.
-    payload = doctor._payload(
-        argparse.Namespace(provider=None, with_egress=False, with_buildhost_agent=False)
-    )
+    # When the opt-in is present but False, the flag is not forwarded; a default of True
+    # (instead of False) would wrongly opt every run into the heavy probe.
+    payload = doctor._payload(argparse.Namespace(provider=None, with_egress=False))
     assert "with_egress" not in payload
-    assert "with_buildhost_agent" not in payload
 
 
 def test_payload_forwards_only_the_opt_ins_that_are_set() -> None:
-    payload = doctor._payload(
-        argparse.Namespace(provider="remote-libvirt", with_egress=True, with_buildhost_agent=False)
-    )
+    payload = doctor._payload(argparse.Namespace(provider="remote-libvirt", with_egress=True))
     assert payload == {"provider": "remote-libvirt", "with_egress": True}
 
 

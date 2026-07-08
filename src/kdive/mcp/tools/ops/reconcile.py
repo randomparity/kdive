@@ -26,10 +26,8 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.providers.infra.reaping import (
-    BuildVmReaper,
     DumpVolumeReaper,
     InfraReaper,
-    NullBuildVmReaper,
     NullDumpVolumeReaper,
 )
 from kdive.reconciler.loop import ReconcileConfig, ReconcileReport, UploadStore, reconcile_once
@@ -40,7 +38,6 @@ from kdive.services.images.retention import ImageSweepStore
 
 # A module-level singleton so it can be a stateless default arg (ruff B008).
 _NULL_DUMP_VOLUME_REAPER: DumpVolumeReaper = NullDumpVolumeReaper()
-_NULL_BUILD_VM_REAPER: BuildVmReaper = NullBuildVmReaper()
 
 _RECONCILE_TOOL = "ops.reconcile_now"
 _RECONCILE_OBJECT_ID = "reconcile"
@@ -56,7 +53,6 @@ class ReconcileRepairPorts:
     upload_store: UploadStore | None
     image_store: ImageSweepStore | None = None
     dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER
-    build_vm_reaper: BuildVmReaper = _NULL_BUILD_VM_REAPER
 
 
 async def reconcile_now(
@@ -95,7 +91,6 @@ async def reconcile_now(
                 upload_store=ports.upload_store,
                 image_store=ports.image_store,
                 dump_volume_reaper=ports.dump_volume_reaper,
-                build_vm_reaper=ports.build_vm_reaper,
             ),
         )
         async with pool.connection() as conn, conn.transaction():

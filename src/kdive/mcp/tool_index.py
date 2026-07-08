@@ -22,8 +22,6 @@ NAMESPACE_TOC: dict[str, str] = {
     "allocations": "System capacity reservation, leasing, and release",
     "artifacts": "Run artifact access, uploads, and raw binary retrieval",
     "audit": "Audit log queries across operations",
-    "build_envs": "Available kernel build environment listing",
-    "build_hosts": "Build host registration, listing, and removal",
     "control": "In-guest power cycling and crash injection (NMI / panic)",
     "debug": "Live GDB-based kernel debugging sessions (breakpoints, registers, memory)",
     "fixtures": "Test fixture profile listing and validation",

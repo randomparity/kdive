@@ -1070,7 +1070,7 @@
     },
     {
       "type": "row",
-      "title": "Build plane",
+      "title": "Provider operations",
       "collapsed": false,
       "id": 28,
       "gridPos": {
@@ -1078,195 +1078,6 @@
         "w": 24,
         "x": 0,
         "y": 94
-      },
-      "panels": []
-    },
-    {
-      "type": "timeseries",
-      "title": "Build-phase duration p95",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "stacking": {
-              "mode": "none"
-            }
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "histogram_quantile(0.95, sum by (le, build_phase) (rate(kdive_build_phase_duration_bucket[$__rate_interval])))",
-          "legendFormat": "{{build_phase}}",
-          "refId": "A",
-          "range": true
-        }
-      ],
-      "id": 29,
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 95
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Build-host capacity by host",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "stacking": {
-              "mode": "none"
-            }
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (build_host) (kdive_build_host_capacity)",
-          "legendFormat": "{{build_host}}",
-          "refId": "A",
-          "range": true
-        }
-      ],
-      "id": 30,
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 95
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Build-host leases by host",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "stacking": {
-              "mode": "none"
-            }
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (build_host) (kdive_build_host_leases)",
-          "legendFormat": "{{build_host}}",
-          "refId": "A",
-          "range": true
-        }
-      ],
-      "id": 31,
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 103
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Build-host reachability by host",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "stacking": {
-              "mode": "none"
-            }
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (build_host) (kdive_build_host_reachable)",
-          "legendFormat": "{{build_host}}",
-          "refId": "A",
-          "range": true
-        }
-      ],
-      "id": 32,
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 103
-      }
-    },
-    {
-      "type": "row",
-      "title": "Provider operations",
-      "collapsed": false,
-      "id": 33,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 111
       },
       "panels": []
     },
@@ -1306,12 +1117,12 @@
           "range": true
         }
       ],
-      "id": 34,
+      "id": 29,
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 112
+        "y": 95
       }
     },
     {
@@ -1350,24 +1161,24 @@
           "range": true
         }
       ],
-      "id": 35,
+      "id": 30,
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 112
+        "y": 95
       }
     },
     {
       "type": "row",
       "title": "Capture",
       "collapsed": false,
-      "id": 36,
+      "id": 31,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 120
+        "y": 103
       },
       "panels": []
     },
@@ -1407,12 +1218,12 @@
           "range": true
         }
       ],
-      "id": 37,
+      "id": 32,
       "gridPos": {
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 121
+        "y": 104
       }
     },
     {
@@ -1451,12 +1262,12 @@
           "range": true
         }
       ],
-      "id": 38,
+      "id": 33,
       "gridPos": {
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 121
+        "y": 104
       }
     },
     {
@@ -1495,12 +1306,12 @@
           "range": true
         }
       ],
-      "id": 39,
+      "id": 34,
       "gridPos": {
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 121
+        "y": 104
       }
     }
   ]

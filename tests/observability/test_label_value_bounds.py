@@ -8,25 +8,21 @@ families render through the Prometheus text renderer.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
-from opentelemetry.metrics import CallbackOptions
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 
-from kdive.domain.build_phase import BuildPhase
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import ErrorCategory
 from kdive.health.metrics_text import render_prometheus
 from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.jobs.worker_telemetry import WorkerTelemetry
-from kdive.observability.build_telemetry import BuildPhaseRecorder
 from kdive.observability.console_telemetry import ConsoleTelemetry
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.observability.labels import ALLOWED_LABEL_KEYS
-from kdive.reconciler.build_host_fleet import BuildHostSnapshot, BuildHostTelemetry
 from kdive.reconciler.fleet import FleetSnapshot, FleetTelemetry
 from kdive.reconciler.loop import ALL_REPAIR_KINDS
 from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
@@ -56,18 +52,11 @@ _BOUNDS: dict[str, set[str]] = {
     "error_category": {c.value for c in ErrorCategory},
     "reason": {r.value for r in _AdmissionReason},
     # ADR-0191 §1: new bounded-enum labels from the second-cut instruments.
-    "build_phase": {p.value for p in BuildPhase},
     "capture_method": {c.value for c in CaptureMethod},
     "transport": {"gdbstub", "drgn-live"},
 }
 _OUTCOME_ADMISSION_VALUES = {d.value for d in AdmissionDecision}
 _IDENTIFIER_KEYS = {"project", "principal", "object_id", "secret_ref", "tenant"}
-
-# Seeded build-host names used in _emit_everything — the bound for the build_host label.
-# build_host is the documented deployment-bounded (non-enum) exception (ADR-0191 §1); it
-# is not keyed to an enum in _BOUNDS, but its values are still asserted to be a subset of
-# this declared operator set.
-_SEEDED_BUILD_HOSTS = {"builder-01", "builder-02"}
 
 
 def _emit_everything(reader: InMemoryMetricReader) -> None:
@@ -105,21 +94,6 @@ def _emit_everything(reader: InMemoryMetricReader) -> None:
         job_handle.set_outcome("ok")
     worker.record_time_to_claim("build", 5.0)
     worker.record_job_retry("build")
-
-    # G1: build sub-phase duration.
-    build_recorder = BuildPhaseRecorder(meter=meter)
-    with build_recorder.phase(BuildPhase.COMPILE, "local-libvirt"):
-        pass
-
-    # G2/G3: build-host lease/capacity/reachability gauges from a seeded snapshot.
-    build_host_telem = BuildHostTelemetry(meter=meter)
-    build_host_telem.refresh(
-        BuildHostSnapshot(
-            leases={h: i for i, h in enumerate(_SEEDED_BUILD_HOSTS)},
-            capacity={h: 4 for h in _SEEDED_BUILD_HOSTS},
-            reachable={h: 1.0 for h in _SEEDED_BUILD_HOSTS},
-        )
-    )
 
     # H1: vmcore capture duration + bytes.
     capture_telem = CaptureTelemetry(meter=meter)
@@ -171,84 +145,6 @@ def test_new_label_values_stay_within_their_bounded_enums() -> None:
                 assert attrs[key] in allowed, f"{key}={attrs[key]!r} escaped its bound"
         if "outcome" in attrs and attrs["outcome"] in _OUTCOME_ADMISSION_VALUES:
             assert attrs["outcome"] in _OUTCOME_ADMISSION_VALUES
-        # build_host is the deployment-bounded non-enum exception (ADR-0191 §1): assert its
-        # values are drawn from the seeded operator set, not an enum.
-        if "build_host" in attrs:
-            assert attrs["build_host"] in _SEEDED_BUILD_HOSTS, (
-                f"build_host={attrs['build_host']!r} not in the seeded host set"
-            )
-
-
-def _build_host_metrics(reader: InMemoryMetricReader) -> dict[str, Any]:
-    by_name: dict[str, Any] = {}
-    data = reader.get_metrics_data()
-    assert data is not None
-    for rm in data.resource_metrics:
-        for sm in rm.scope_metrics:
-            for metric in sm.metrics:
-                if metric.name.startswith("kdive.build_host."):
-                    by_name[metric.name] = metric
-    return by_name
-
-
-def test_build_host_gauges_emit_named_values_and_descriptions() -> None:
-    reader = InMemoryMetricReader()
-    meter = MeterProvider(metric_readers=[reader]).get_meter("test")
-    telem = BuildHostTelemetry(meter=meter)
-    telem.refresh(
-        BuildHostSnapshot(
-            leases={"builder-01": 3},
-            capacity={"builder-01": 7},
-            reachable={"builder-01": 1.0},
-        )
-    )
-    metrics = _build_host_metrics(reader)
-    assert set(metrics) == {
-        "kdive.build_host.leases",
-        "kdive.build_host.capacity",
-        "kdive.build_host.reachable",
-    }
-
-    expected = {
-        "kdive.build_host.leases": (3, "Active build-host lease count per host."),
-        "kdive.build_host.capacity": (
-            7,
-            "Maximum concurrent build leases per host (max_concurrent).",
-        ),
-        "kdive.build_host.reachable": (
-            1.0,
-            "1.0 if the host is state=ready, 0.0 if state=unreachable.",
-        ),
-    }
-    for name, (value, description) in expected.items():
-        metric = metrics[name]
-        assert metric.unit == "1"
-        assert metric.description == description
-        points = list(metric.data.data_points)
-        assert len(points) == 1
-        assert points[0].value == value
-        assert dict(points[0].attributes) == {"build_host": "builder-01"}
-
-
-def test_build_host_callbacks_yield_empty_before_first_refresh() -> None:
-    meter = MeterProvider(metric_readers=[InMemoryMetricReader()]).get_meter("test")
-    telem = BuildHostTelemetry(meter=meter)
-    # The pre-first-pass empty snapshot makes every callback yield zero observations
-    # rather than crashing on a missing snapshot.
-    none_options = cast(CallbackOptions, None)
-    assert list(telem._leases_callback(none_options)) == []
-    assert list(telem._capacity_callback(none_options)) == []
-    assert list(telem._reachable_callback(none_options)) == []
-
-
-def test_build_host_telemetry_refresh_replaces_snapshot() -> None:
-    reader = InMemoryMetricReader()
-    meter = MeterProvider(metric_readers=[reader]).get_meter("test")
-    telem = BuildHostTelemetry(meter=meter)
-    telem.refresh(BuildHostSnapshot(leases={"builder-02": 5}, capacity={}, reachable={}))
-    leases = _build_host_metrics(reader)["kdive.build_host.leases"]
-    points = list(leases.data.data_points)
-    assert [(p.value, dict(p.attributes)) for p in points] == [(5, {"build_host": "builder-02"})]
 
 
 def _fleet_metrics(reader: InMemoryMetricReader) -> dict[str, Any]:
@@ -341,9 +237,6 @@ def test_new_metric_families_render_to_prometheus_text() -> None:
         "kdive_errors",
         # ADR-0191 second-cut families:
         "kdive_provider_op_duration",
-        "kdive_build_phase_duration",
-        "kdive_build_host_leases",
-        "kdive_build_host_reachable",
         "kdive_vmcore_capture_duration",
         "kdive_console_bytes",
         "kdive_debug_session_duration",
