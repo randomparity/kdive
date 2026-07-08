@@ -2,8 +2,10 @@
 
 When KDIVE_COMPACT_RESPONSES is on, rebuild each tool result's envelope with the null/empty
 defaulted fields omitted (recursively within ``items``), cutting per-call tokens. Registered
-outermost in ``build_app`` so it observes the final ``ToolResult`` — including the failure
-envelopes DenialAudit/BindingError synthesize. Default off: the result passes through unchanged.
+outermost in ``build_app`` so it observes the final result — a ``ToolResult`` (the normal tool
+path and ``BindingErrorMiddleware``'s synthesized failures) or a bare ``ToolResponse``
+(``DenialAuditMiddleware``'s ``authorization_denied`` short-circuit); both are compacted.
+Default off: the result passes through unchanged.
 """
 
 from __future__ import annotations
@@ -38,13 +40,20 @@ class CompactResponseMiddleware(Middleware):
 def _compact_result(result: Any) -> Any:
     """Return `result` with its envelope compacted, or unchanged when it is not an envelope.
 
-    Compacts only a ``ToolResult`` whose ``structured_content`` is a dict of envelope keys and
-    validates as a ``ToolResponse``; ``model_dump(exclude_defaults=True)`` recurses into ``items``
-    and keeps every non-default failure field. Rebuilding a ``ToolResult`` from only the compact
-    ``structured_content`` regenerates a matching ``content`` text block, so both wire copies
-    shrink. Anything else (a superset/non-envelope dict, a ``ValidationError``, non-dict content)
-    is returned untouched — fail safe, never corrupt a response.
+    Handles both shapes a middleware chain can produce: a bare ``ToolResponse`` (a short-circuit
+    such as ``DenialAuditMiddleware``) is dumped directly; a ``ToolResult`` whose
+    ``structured_content`` is a dict of envelope keys is re-validated as a ``ToolResponse``.
+    ``ToolResponse`` is ``extra="forbid"``, so a superset dict at any depth (top level *or* an
+    ``items`` row) raises ``ValidationError`` and the whole result passes through untouched — the
+    top-level subset check is a cheap fast-path for the common non-envelope case.
+    ``model_dump(exclude_defaults=True)`` recurses into ``items`` and keeps every non-default
+    failure field; rebuilding a ``ToolResult`` from only the compact ``structured_content``
+    regenerates a matching ``content`` text block, so both wire copies shrink, and ``is_error`` /
+    ``meta`` are carried through. Anything else (a non-envelope dict, a ``ValidationError``,
+    non-dict content) is returned untouched — fail safe, never corrupt a response.
     """
+    if isinstance(result, ToolResponse):
+        return ToolResult(structured_content=result.model_dump(mode="json", exclude_defaults=True))
     if not isinstance(result, ToolResult):
         return result
     sc = result.structured_content
@@ -55,4 +64,4 @@ def _compact_result(result: Any) -> Any:
     except ValidationError:
         return result
     compact = envelope.model_dump(mode="json", exclude_defaults=True)
-    return ToolResult(structured_content=compact, meta=result.meta)
+    return ToolResult(structured_content=compact, meta=result.meta, is_error=result.is_error)

@@ -104,12 +104,46 @@ def test_enabled_passes_superset_dict_through_unchanged(monkeypatch: pytest.Monk
     assert out is result  # untouched — extra key survives
 
 
+def test_enabled_passes_item_with_extra_key_through_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An items[] row carrying a key outside the envelope must NOT be silently stripped:
+    # extra="forbid" makes model_validate raise, so the whole result passes through untouched.
+    sc = {
+        "object_id": "images",
+        "status": "ok",
+        "data": {"count": 1},
+        "items": [{"object_id": "img-0", "status": "registered", "extra_row_field": 7}],
+    }
+    result = ToolResult(structured_content=sc)
+    out = _drive(result, enabled=True, monkeypatch=monkeypatch)
+    assert out is result  # untouched — the item's extra field survives
+
+
 def test_enabled_passes_non_dict_structured_content_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result = ToolResult(content=[])  # no structured_content
     out = _drive(result, enabled=True, monkeypatch=monkeypatch)
     assert out is result
+
+
+def test_enabled_preserves_is_error_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = ToolResponse.failure("obj", ErrorCategory.NOT_FOUND)
+    result = ToolResult(structured_content=env.model_dump(mode="json"), is_error=True)
+    out = _drive(result, enabled=True, monkeypatch=monkeypatch)
+    assert out.is_error is True  # not flipped to False by the rebuild
+
+
+def test_enabled_compacts_bare_toolresponse(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A middleware short-circuit (e.g. DenialAudit) returns a bare ToolResponse, not a ToolResult.
+    env = ToolResponse.failure("runs.create", ErrorCategory.AUTHORIZATION_DENIED)
+    out = _drive(env, enabled=True, monkeypatch=monkeypatch)
+    assert isinstance(out, ToolResult)
+    sc = out.structured_content
+    assert sc["error_category"] == ErrorCategory.AUTHORIZATION_DENIED.value
+    assert sc["detail"]  # suppressed constant kept
+    assert "refs" not in sc and "items" not in sc  # empties compacted away
 
 
 def test_enabled_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
