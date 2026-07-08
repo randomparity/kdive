@@ -130,8 +130,11 @@ but nothing special-cases it (a transient dead-but-green state fixed in Task 3).
 - Remote-libvirt ephemeral build-VM: `src/kdive/providers/remote_libvirt/lifecycle/build_vm.py`,
   `.../reaping/build_vm.py`, `.../guest/build_transport.py`, `.../diagnostics/buildhost_agent.py`.
 - `src/kdive/providers/ports/build.py`, `src/kdive/providers/ports/build_transport.py`.
-- `src/kdive/providers/fault_inject/build.py`, `src/kdive/providers/assembly/build_hosts.py`,
-  `src/kdive/providers/shared/build_timeouts.py`.
+- `src/kdive/providers/fault_inject/build.py`, `src/kdive/providers/assembly/build_hosts.py`.
+  **KEEP** `providers/shared/build_timeouts.py` (and its test) — despite the name it holds only a
+  generic `SLOW_BUILD_TOOL_TIMEOUT_S` constant that the **surviving rootfs-image lane** imports
+  (`local_libvirt/rootfs_build.py:70`, `remote_libvirt/rootfs_build.py:47`); it is not
+  server-build-only.
 - `src/kdive/observability/build_telemetry.py`, `src/kdive/domain/build_phase.py`.
 
 **Files — delete (build-host fleet):**
@@ -143,10 +146,11 @@ but nothing special-cases it (a transient dead-but-green state fixed in Task 3).
 - `src/kdive/mcp/tools/ops/build_hosts/**`.
 - `src/kdive/inventory/reconcile/build_hosts.py` (imports `db.build_hosts.BuildHostKind`; called
   by `inventory/reconcile/pipeline.py`).
-- `src/kdive/diagnostics/kernel_src.py` — warm-tree kernel-**source** diagnostics (server-build
-  only: imports `db.build_host_policy` + `db.build_hosts.get_by_id(WORKER_LOCAL_ID)`). Delete it
-  and its registration in the diagnostics contribution / `ops.diagnostics`; sweep
-  `rg -n 'kernel_src' src` to catch the registrar.
+- `src/kdive/diagnostics/kernel_src.py` **+ `src/kdive/diagnostics/local_kernel_src_check.py`** —
+  warm-tree kernel-**source** diagnostics (server-build only: `kernel_src.py` imports
+  `db.build_host_policy` + `db.build_hosts.get_by_id(WORKER_LOCAL_ID)`). Delete both. Their
+  assembly site `diagnostics/service.py` and the `ops.diagnostics` opt-in are surgery (modify
+  list); sweep `rg -n 'kernel_src|local_kernel_src|LocalKernelSrcCheck' src` to catch every site.
 
 **Files — modify (surgery):**
 - `src/kdive/jobs/handlers/runs/registrar.py` — drop the `JobKind.BUILD` /
@@ -204,6 +208,10 @@ but nothing special-cases it (a transient dead-but-green state fixed in Task 3).
   plumbing (`_audit_args`, `_audit_run`, service-factory threading) and the `_BUILDHOST_TOOL`
   constant, plus the `local_kernel_src` opt-in tied to the deleted `diagnostics/kernel_src.py`.
   Regenerate the tool reference (`just docs`).
+- `src/kdive/diagnostics/service.py` — the diagnostics assembly site: drop the
+  `import kdive.diagnostics.kernel_src` (~26) and the always-on `local_kernel_src` check assembled
+  in `_build_host_checks()` (~337-341: `warm_tree_source_probe()`, `local_host_enabled_probe`),
+  and the `buildhost_agent` check factory. These checks are removed, not relocated.
 
 **Files — delete tests:** all of `tests/providers/build_host/**`,
 `tests/providers/local_libvirt/test_build.py`, `tests/providers/remote_libvirt/build/**` +
@@ -216,7 +224,10 @@ but nothing special-cases it (a transient dead-but-green state fixed in Task 3).
 `tests/diagnostics/test_buildhost_agent*.py`, `tests/mcp/ops/build_hosts/**`,
 `tests/mcp/ops/test_build_hosts.py`, `tests/observability/test_build_telemetry.py`,
 `tests/domain/test_build_phase.py`, `tests/guards/test_build_host_boundaries.py`,
-`tests/adversarial/test_build_config_concurrency.py`.
+`tests/adversarial/test_build_config_concurrency.py`, `tests/diagnostics/test_local_kernel_src.py`.
+Also **adjust** (remove only the deleted-check cases, keep the rest): `tests/diagnostics/test_service.py`,
+`tests/diagnostics/test_default_factory.py`, `tests/mcp/ops/test_diagnostics.py`. Do **not**
+delete `tests/providers/shared/test_build_timeouts.py` (module kept).
 
 **Interfaces:**
 - Consumes: Task 1's reduced MCP surface.
