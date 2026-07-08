@@ -46,8 +46,8 @@ provisioning-for-debugging notes in the investigation index and decide up front.
 member, array, or type-aware expressions. To read a **struct field or array member by name**
 (e.g. `some_struct->field[3].member`) on a live guest, use the drgn path — `introspect.script`
 in the introspect toolset — which reads typed kernel objects by name without halting the CPU.
-That path runs on a **separate drgn-live session** (provisioned with `ssh_credential_ref`, not
-gdbstub), not the debug session here — see the introspect guide's live prerequisites.
+That path runs on a **separate drgn-live session** (which needs no credential provisioning,
+unlike gdbstub), not the debug session here — see the introspect guide's live prerequisites.
 
 ## Modules
 

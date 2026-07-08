@@ -36,7 +36,7 @@ _SSH_USER = "root"
 _NOT_READY_DETAIL = "System is not ready; SSH is available only on a ready System."
 # The local-libvirt forward is rendered on every domain now (ADR-0281, #937), so a None endpoint
 # on a ready System means the provider exposes no loopback SSH forward — direct SSH to a System is
-# a local-libvirt capability — not a missing ssh_credential_ref to reprovision for.
+# a local-libvirt capability, not a missing per-profile credential.
 _UNPROVISIONED_DETAIL = (
     "This System's provider exposes no loopback SSH forward; direct SSH to a System is a "
     "local-libvirt capability."

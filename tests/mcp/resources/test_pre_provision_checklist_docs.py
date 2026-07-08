@@ -1,7 +1,7 @@
 """The served agent index must carry one consolidated pre-provision checklist (#997).
 
 Several choices are provision-bound and expensive to change (a reprovision rebuilds and
-reboots): the debug flags, `ssh_credential_ref`, the base image, the shape/disk, and the
+reboots): the debug flags, the base image, the shape/disk, and the
 kernel config baked into the upload. They used to be scattered, so this guard asserts a single
 "decide before you provision" checklist names every irreversible choice in one place. The
 assertion reads the **served snapshot** an agent receives over MCP, so it also fails if the
@@ -28,8 +28,9 @@ def test_agent_index_has_consolidated_pre_provision_checklist() -> None:
     assert "decide before you provision" in lowered, (
         "served agent-index has no consolidated pre-provision checklist (#997)"
     )
-    # Every provision-bound irreversible choice must appear in the served index.
-    for token in ("images.describe", "disk", "kernel config", "gdbstub", "ssh_credential_ref"):
+    # Every provision-bound irreversible choice must appear in the served index. (drgn-live is no
+    # longer provision-bound — ADR-0315 — so it is intentionally absent here.)
+    for token in ("images.describe", "disk", "kernel config", "gdbstub"):
         assert token in lowered, (
             f"pre-provision checklist does not name the irreversible choice {token!r} (#997)"
         )

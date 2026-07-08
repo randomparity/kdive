@@ -41,7 +41,6 @@ from kdive.prereqs.system_bootstrap_key import (
 )
 from kdive.providers.shared.libvirt_xml import recorded_ssh_port
 from kdive.providers.shared.runtime_paths import domain_name_for
-from kdive.security.secrets.secrets import secrets_root_from_env
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.harness import LiveStackClient, OidcIssuer
 from tests.integration.live_stack.spine import (
@@ -69,10 +68,6 @@ _AGENT_SESSION = "console-parts-sess"
 _SHELL = "/bin/sh"
 # SSH user the per-System bootstrap key (ADR-0289, #963) authenticates as (ADR-0218 §1).
 _SSH_USER = "root"
-# Credential ref that opts the loopback SSH transport in (renders hostfwd + NIC). Its file content
-# does not authenticate SSH — the per-System bootstrap key does — but its presence gates the
-# transport.
-_SSH_CREDENTIAL_REF = "drgn-ssh"
 # Lines emitted to the kernel console: ~60 bytes × 5 000 = ~300 KiB, > 4 × 64 KiB threshold.
 _PROOF_LINES = 5_000
 # Timeout waiting for the reconciler's console_rotate sweep + worker drain.
@@ -98,12 +93,6 @@ def _preflight() -> tuple[OidcIssuer, str, str]:
     db_url = os.environ.get(_DATABASE_URL_ENV)
     if not db_url:
         pytest.skip(f"{_DATABASE_URL_ENV} unset; bring up the stack (see the live-stack runbook)")
-    secret = secrets_root_from_env() / _SSH_CREDENTIAL_REF
-    if not secret.is_file():
-        pytest.skip(
-            f"SSH credential ref {_SSH_CREDENTIAL_REF!r} not seeded at {secret}; seed any file "
-            "there so the loopback SSH transport (the in-guest workload path) resolves"
-        )
     issuer = require_issuer()
     base_url = require_stack()
     return issuer, base_url, db_url
@@ -125,11 +114,10 @@ def _provision_profile() -> dict[str, object]:
         "provider": {
             "local-libvirt": {
                 "rootfs": {"kind": "local", "path": os.environ[_GUEST_IMAGE_ENV]},
-                # Opt the loopback SSH transport in: this renders the SSH hostfwd + virtio NIC
-                # (ADR-0218/0240) so the test can SSH-exec the post-readiness workload in-guest.
-                # Local-libvirt domains carry no qemu guest-agent channel, so SSH is the in-guest
-                # exec path (the same one drgn-live uses).
-                "ssh_credential_ref": _SSH_CREDENTIAL_REF,
+                # The loopback SSH hostfwd + virtio NIC render on every domain (ADR-0281), so the
+                # test can SSH-exec the post-readiness workload in-guest. Local-libvirt domains
+                # carry no qemu guest-agent channel, so SSH is the in-guest exec path (the same one
+                # drgn-live uses).
             }
         },
     }
@@ -165,8 +153,8 @@ def _emit_proof_lines(domain: libvirt.virDomain, key_path: Path, proof_marker: s
     port = recorded_ssh_port(domain.XMLDesc(0))
     if port is None:
         raise AssertionError(
-            "no SSH hostfwd port in the domain XML; the provision profile must set "
-            "provider.local-libvirt.ssh_credential_ref to render the SSH transport"
+            "no SSH hostfwd port in the domain XML; the loopback SSH forward should render on "
+            "every local-libvirt domain (ADR-0281)"
         )
     # POSIX sh loop: $i is a shell variable, {proof_marker} and {_PROOF_LINES} are
     # Python f-string substitutions (safe: only hex + hyphens / a literal integer). One open of

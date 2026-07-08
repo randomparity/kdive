@@ -326,8 +326,8 @@ def _resolved_ssh_port(xml: str, domain_name: str) -> int:
     port = recorded_ssh_port_from_root(root)
     if port is None:
         raise _config_error(
-            f"System {domain_name!r} was not provisioned for drgn-live; reprovision with "
-            "the profile's ssh_credential_ref set"
+            f"System {domain_name!r} has no recorded loopback SSH forward for drgn-live; "
+            "reprovision to render one (the forward is rendered on every domain, ADR-0281)"
         )
     return port
 

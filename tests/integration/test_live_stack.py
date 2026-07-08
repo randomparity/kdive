@@ -35,7 +35,6 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.sizing import AllocationSizing
 from kdive.profiles.provisioning import reconcile_profile_sizing
-from kdive.security.secrets.secrets import secrets_root_from_env
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.harness import (
     LiveStackClient,
@@ -75,11 +74,6 @@ _REACHABILITY_PUBKEY = (
     "kdive-956-reachability-e2e"
 )
 
-# The drgn-live opt-in credential: a filename the operator seeds under KDIVE_SECRETS_ROOT. Setting
-# `ssh_credential_ref` renders the SSH loopback hostfwd + virtio NIC and is the credential the
-# start_session gate resolves (ADR-0085/0240). The ref's content does not authenticate SSH (the
-# managed key does); it only needs to resolve.
-_DRGN_SSH_CREDENTIAL_REF = "drgn-ssh"
 _MAX_SCRIPT_BYTES = 256 * 1024
 # A real drgn script only a live kernel can answer: `drgn -k -q <file>` provides `prog` (the live
 # drgn.Program). The marker makes the genuine in-guest output unmistakable in the returned envelope.
@@ -175,12 +169,12 @@ def _build_profile() -> dict[str, object]:
 
 
 def _live_script_provision_profile() -> dict[str, object]:
-    """Provision profile for the online drgn-live path: opts the SSH transport in, no force_crash.
+    """Provision profile for the online drgn-live path: no force_crash.
 
-    `ssh_credential_ref` is the drgn-live opt-in — it renders the loopback SSH hostfwd + virtio
-    NIC and is resolved by the start_session credential gate (ADR-0085/0240). The introspect.script
-    proof never crashes the guest, so this profile omits the `force_crash` destructive opt-in the
-    crash spine needs.
+    drgn-live needs no credential provisioning (ADR-0315): the loopback SSH forward renders on
+    every domain (ADR-0281) and the transport authenticates with the per-System bootstrap key
+    (ADR-0289). The introspect.script proof never crashes the guest, so this profile omits the
+    `force_crash` destructive opt-in the crash spine needs.
     """
     return {
         "schema_version": 1,
@@ -194,7 +188,6 @@ def _live_script_provision_profile() -> dict[str, object]:
             "local-libvirt": {
                 "rootfs": {"kind": "local", "path": os.environ[_GUEST_IMAGE_ENV]},
                 "crashkernel": "256M",
-                "ssh_credential_ref": _DRGN_SSH_CREDENTIAL_REF,
             }
         },
     }
@@ -500,17 +493,6 @@ def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
     asyncio.run(_run())
 
 
-def _require_drgn_ssh_secret() -> None:
-    """Skip unless the operator has seeded the drgn-live SSH credential ref (ADR-0240)."""
-    secret = secrets_root_from_env() / _DRGN_SSH_CREDENTIAL_REF
-    if not secret.is_file():
-        pytest.skip(
-            f"drgn-live credential ref {_DRGN_SSH_CREDENTIAL_REF!r} not seeded at {secret}; "
-            f"seed any file there (its content does not authenticate SSH — the managed key does) "
-            f"so the start_session credential gate resolves"
-        )
-
-
 @pytest.mark.live_stack
 def test_spine_live_script_over_the_wire() -> None:
     """Boot a guest, attach drgn-live, and run a real caller drgn script via introspect.script.
@@ -521,7 +503,6 @@ def test_spine_live_script_over_the_wire() -> None:
     over-cap script is rejected before any guest send. Self-cleans (end_session + release).
     """
     issuer, base_url, db_url = _spine_preflight()
-    _require_drgn_ssh_secret()
     operator_token = _token(issuer, role="operator")
 
     async def _run() -> None:
@@ -659,11 +640,11 @@ def _reachability_preflight(family: str) -> tuple[OidcIssuer, str, str, str]:
 
 
 def _reachability_provision_profile(image: str) -> dict[str, object]:
-    """A minimal direct-kernel profile for the reachability proof: no ssh_credential_ref.
+    """A minimal direct-kernel profile for the reachability proof.
 
-    The loopback SSH forward + virtio NIC render on *every* local-libvirt provision (ADR-0281),
-    so ``ssh_credential_ref`` is deliberately omitted — it would buy nothing here and would import
-    the drgn-live secret-seeding gate. No ``force_crash`` (no destructive op needed).
+    The loopback SSH forward + virtio NIC render on *every* local-libvirt provision (ADR-0281), so
+    the profile carries no credential field — drgn-live authenticates with the per-System bootstrap
+    key (ADR-0289/0315). No ``force_crash`` (no destructive op needed).
     """
     return {
         "schema_version": 1,

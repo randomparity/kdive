@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Annotated
-from uuid import UUID
 
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
@@ -25,7 +23,6 @@ from kdive.mcp.tools.debug.sessions_lifecycle import (
     _InsertSession,
     _resolved_connector_for_run,
     _resolved_detach_resources,
-    _secret_scope,
 )
 from kdive.mcp.tools.debug.sessions_lifecycle import (
     DebugSessionHandlers as _LifecycleDebugSessionHandlers,
@@ -36,7 +33,6 @@ from kdive.mcp.tools.debug.sessions_read import list_sessions as _list_sessions
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 
 __all__ = [
     "DebugSessionHandlers",
@@ -79,7 +75,6 @@ class DebugSessionHandlers(_LifecycleDebugSessionHandlers):
         *,
         runtime_resolver: DebugRuntimeResolver | None,
         insert_session_locked: _InsertSession | None = None,
-        secret_backend_factory: Callable[[UUID], SecretBackend] | None = None,
         secret_registry: SecretRegistry,
         telemetry: DebugSessionTelemetry | None = None,
     ) -> DebugSessionHandlers:
@@ -89,20 +84,9 @@ class DebugSessionHandlers(_LifecycleDebugSessionHandlers):
             insert_session_locked=(
                 _insert_session_locked if insert_session_locked is None else insert_session_locked
             ),
-            secret_backend_factory=secret_backend_factory,
             secret_registry=secret_registry,
             telemetry=telemetry,
         )
-
-
-def _secret_backend_factory(secret_registry: SecretRegistry):
-    def _factory(session_id: UUID):
-        return secret_backend_from_env(
-            registry=secret_registry,
-            scope=_secret_scope(session_id),
-        )
-
-    return _factory
 
 
 def register(
@@ -118,7 +102,6 @@ def register(
     handlers = DebugSessionHandlers.from_resolver(
         resolver,
         runtime_resolver=runtime,
-        secret_backend_factory=_secret_backend_factory(secret_registry),
         secret_registry=secret_registry,
         telemetry=telemetry,
     )

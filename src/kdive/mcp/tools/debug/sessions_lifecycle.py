@@ -46,6 +46,7 @@ from kdive.mcp.tools.debug.ops import DebugEngineRuntime, DebugRuntimeResolver
 from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
 from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
+from kdive.prereqs.system_bootstrap_key import load_system_bootstrap_private_key
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
@@ -61,9 +62,7 @@ from kdive.providers.ports.lifecycle import (
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
-from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.security.secrets.secrets import SecretBackend
 
 _GDBSTUB = "gdbstub"
 _DRGN_LIVE = "drgn-live"
@@ -167,10 +166,6 @@ def _resolved_detach_resources(
     return detach_resources
 
 
-def _secret_scope(session_id: UUID) -> str:
-    return f"debug-session:{session_id}"
-
-
 async def _system_for_run(conn: AsyncConnection, run: Run) -> System | None:
     return await SYSTEMS.get(conn, run.require_system_id())
 
@@ -222,13 +217,6 @@ def _map_attach_failure_category(category: ErrorCategory) -> ErrorCategory:
     return category
 
 
-def _release_failed_attach_secret(
-    registry: SecretRegistry, secret_scope: str, result: ToolResponse | TransportHandle
-) -> None:
-    if isinstance(result, ToolResponse) and result.status != "live":
-        registry.release(secret_scope)
-
-
 class DebugSessionHandlers:
     """Bound debug session lifecycle handlers.
 
@@ -242,7 +230,6 @@ class DebugSessionHandlers:
         connector_for_run: _ConnectorForRun,
         detach_resources: _DetachResourcesForSession,
         insert_session_locked: _InsertSession | None = None,
-        secret_backend_factory: Callable[[UUID], SecretBackend] | None = None,
         secret_registry: SecretRegistry,
         telemetry: DebugSessionTelemetry | None = None,
     ) -> None:
@@ -251,7 +238,6 @@ class DebugSessionHandlers:
         self._insert_session_locked = (
             _insert_session_locked if insert_session_locked is None else insert_session_locked
         )
-        self._secret_backend_factory = secret_backend_factory
         self._secret_registry = secret_registry
         self._telemetry = telemetry or DebugSessionTelemetry.disabled()
 
@@ -262,7 +248,6 @@ class DebugSessionHandlers:
         *,
         runtime_resolver: DebugRuntimeResolver | None,
         insert_session_locked: _InsertSession | None = None,
-        secret_backend_factory: Callable[[UUID], SecretBackend] | None = None,
         secret_registry: SecretRegistry,
         telemetry: DebugSessionTelemetry | None = None,
     ) -> DebugSessionHandlers:
@@ -270,7 +255,6 @@ class DebugSessionHandlers:
             connector_for_run=_resolved_connector_for_run(resolver),
             detach_resources=_resolved_detach_resources(resolver, runtime_resolver),
             insert_session_locked=insert_session_locked,
-            secret_backend_factory=secret_backend_factory,
             secret_registry=secret_registry,
             telemetry=telemetry,
         )
@@ -285,12 +269,12 @@ class DebugSessionHandlers:
     ) -> ToolResponse:
         """Open a single-attach transport and insert a `live` DebugSession (contributor).
 
-        For a ``transport="drgn-live"`` session whose profile realizes it over SSH (the
-        local-libvirt section; ``drgn_live_requires_credential``) the guest credential is
-        resolved from the profile's ``ssh_credential_ref`` through the bound secret backend
-        factory **before** the transport is opened, so the redaction registry is seeded before
-        any transport output can carry the value (ADR-0039 §2). gdbstub, and a guest-agent
-        drgn-live realization (remote), need no credential.
+        A ``transport="drgn-live"`` session whose profile realizes it over the loopback SSH forward
+        (the local-libvirt section; ``ProfilePolicy.drgn_live_seeds_bootstrap_key``) fails closed if
+        the target System has no per-System bootstrap key (ADR-0289), and seeds the redaction
+        registry from that key **before** the transport is opened — so the registry is seeded before
+        any transport output can carry it (ADR-0039 §2, ADR-0315). gdbstub, and a guest-agent
+        drgn-live realization (remote), need no start-time seed.
         """
         uid = _as_uuid(run_id)
         if uid is None:
@@ -304,7 +288,6 @@ class DebugSessionHandlers:
             )
         transport_kind = cast(DebugTransportKind, transport)
         session_id = uuid4()
-        secret_scope = _secret_scope(session_id)
         with bind_context(principal=ctx.principal):
             async with pool.connection() as conn:
                 request = await self._prepare_attach_request(
@@ -313,7 +296,6 @@ class DebugSessionHandlers:
             if isinstance(request, ToolResponse):
                 return request
             opened = await _open_transport(request.connector, request.system, request.transport)
-            _release_failed_attach_secret(self._secret_registry, secret_scope, opened)
             if isinstance(opened, ToolResponse):
                 return opened
             async with pool.connection() as conn:
@@ -326,9 +308,7 @@ class DebugSessionHandlers:
                     )
                 except Exception:
                     await _close(request.connector, str(opened))
-                    self._secret_registry.release(secret_scope)
                     raise
-            _release_failed_attach_secret(self._secret_registry, secret_scope, response)
             return response
 
     async def _prepare_attach_request(
@@ -356,10 +336,9 @@ class DebugSessionHandlers:
                 provider=resources.provider,
                 supported=sorted(resources.supported_debug_transports),
             )
-        backend = self._credential_backend(session_id, transport)
-        resolved = _resolve_credential(system, transport, resources.profile_policy, backend)
-        if isinstance(resolved, ToolResponse):
-            return resolved
+        seeded = await self._seed_bootstrap_key(conn, system, transport, resources.profile_policy)
+        if isinstance(seeded, ToolResponse):
+            return seeded
         return _AttachRequest(
             run=run,
             system=system,
@@ -368,12 +347,35 @@ class DebugSessionHandlers:
             connector=resources.connector,
         )
 
-    def _credential_backend(
-        self, session_id: UUID, transport: DebugTransportKind
-    ) -> SecretBackend | None:
-        if transport != _DRGN_LIVE or self._secret_backend_factory is None:
+    async def _seed_bootstrap_key(
+        self,
+        conn: AsyncConnection,
+        system: System,
+        transport: DebugTransportKind,
+        profile_policy: ProfilePolicy,
+    ) -> None | ToolResponse:
+        """Gate + seed drgn-live on the per-System bootstrap key before the transport opens.
+
+        For a drgn-live transport whose profile realizes it over the loopback SSH forward
+        (``drgn_live_seeds_bootstrap_key``), load the System's per-System bootstrap key: the loader
+        fails closed with ``configuration_error`` (``reason="no_bootstrap_key"``) when absent and
+        registers the key value into the redaction registry, so the connector runs with the registry
+        already seeded (ADR-0289, ADR-0039 §2, ADR-0315). Returns ``None`` when no seed is needed
+        (gdbstub, or a guest-agent drgn-live realization) or the seed succeeded, or a failure
+        envelope. Parsing the stored profile here also surfaces a retired-field configuration error
+        as ``configuration_error`` rather than letting it escape.
+        """
+        if transport != _DRGN_LIVE:
             return None
-        return self._secret_backend_factory(session_id)
+        try:
+            profile = ProvisioningProfile.parse(system.provisioning_profile)
+            if profile_policy.drgn_live_seeds_bootstrap_key(profile):
+                await load_system_bootstrap_private_key(
+                    conn, system.id, secret_registry=self._secret_registry
+                )
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(str(system.id), exc)
+        return None
 
     async def end_session(
         self,
@@ -414,62 +416,10 @@ class DebugSessionHandlers:
             if resources.runtime is not None:
                 async with resources.runtime.lock_for(session_id):
                     resources.runtime.reap(session_id)
-            self._secret_registry.release(_secret_scope(uid))
             seconds = (datetime.now(UTC) - resolved_session.session.created_at).total_seconds()
             outcome = "ok" if envelope.status != "error" else "error"
             self._telemetry.record(resolved_session.session.transport, outcome, seconds)
             return envelope
-
-
-def _resolve_credential(
-    system: System,
-    transport: DebugTransportKind,
-    profile_policy: ProfilePolicy,
-    secret_backend: SecretBackend | None,
-) -> None | ToolResponse:
-    """Resolve + register the SSH credential before transport use (ADR-0039 §2 ordering).
-
-    A credential is needed only for a ``drgn-live`` transport whose profile realizes it over
-    SSH — the local-libvirt section, per ``ProfilePolicy.drgn_live_requires_credential``
-    (ADR-0085 Decision 2). Returns ``None`` when none is required (gdbstub, or a guest-agent
-    realization such as
-    remote) or resolution succeeded, or a failure envelope. The resolved value is registered
-    into the redaction registry by the backend (a structural post-condition of
-    ``FileRefBackend.resolve``) before this returns — so the connector that opens the SSH
-    connection runs with the registry already seeded.
-    """
-    if transport != _DRGN_LIVE:
-        return None
-    try:
-        profile = ProvisioningProfile.parse(system.provisioning_profile)
-    except CategorizedError as exc:
-        return ToolResponse.failure_from_error(str(system.id), exc)
-    if not profile_policy.drgn_live_requires_credential(profile):
-        return None
-    ref = profile_policy.ssh_credential_ref(profile)
-    if ref is None:
-        return _config_error(
-            str(system.id),
-            detail=(
-                "System not provisioned for drgn-live; reprovision with "
-                "`provider.local-libvirt.ssh_credential_ref` set — see the "
-                "local-libvirt walkthrough."
-            ),
-            data={"reason": "ssh_credential_ref_missing"},
-        )
-    if secret_backend is None:
-        return ToolResponse.failure(str(system.id), ErrorCategory.MISSING_DEPENDENCY)
-    try:
-        secret_backend.resolve(ref)
-    except PathSafetyError:
-        # A reference that escapes the secrets root / points at a non-file is a caller-config
-        # error for the file-backed secret backend.
-        return ToolResponse.failure(str(system.id), ErrorCategory.CONFIGURATION_ERROR)
-    except CategorizedError as exc:
-        # Preserve the backend's own category (e.g. a manager backend's MISSING_DEPENDENCY /
-        # INFRASTRUCTURE_FAILURE) so a degraded secret store is not mislabeled as bad input.
-        return ToolResponse.failure_from_error(str(system.id), exc)
-    return None
 
 
 async def _attach_preconditions(

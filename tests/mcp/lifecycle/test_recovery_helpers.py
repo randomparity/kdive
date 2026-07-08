@@ -77,7 +77,7 @@ def test_provisioning_summary_allowlists_only_safe_fields() -> None:
         "memory_mb": 8192,
         "disk_gb": 40,
         "kernel_source_ref": "git@secret",
-        "provider": {"local-libvirt": {"ssh_credential_ref": "file:///run/secret"}},
+        "provider": {"local-libvirt": {}},
     }
     summary = provisioning_profile_summary(profile)
     assert summary == {

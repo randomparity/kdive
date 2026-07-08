@@ -91,10 +91,10 @@ your first provision so every irreversible choice is made up front:
   `debug.start_session` fails.
 - **`debug.preserve_on_crash: true`** — set it to hold a crashed guest (vCPUs stopped) for
   post-panic inspection.
-- **`ssh_credential_ref`** — set it if you need drgn-over-SSH live introspection
-  (`introspect.run`); it also needs a drgn-capable image and an SSH-reachable guest.
 
-The three debug/live-introspection knobs are detailed next.
+Live drgn introspection (`introspect.run`) needs **no** provisioning knob — it works on any
+ready local system (the SSH forward is rendered on every domain), and its only requirement is a
+drgn-capable guest image. The two debug knobs are detailed next.
 
 ## Provisioning for debugging and live introspection
 
@@ -108,10 +108,11 @@ and reboots the system (an expensive cycle). Decide these before you provision:
 - `provider.local-libvirt.debug.preserve_on_crash: true` — holds a crashed guest (vCPUs
   stopped) instead of destroying it, so you can attach and inspect the halted kernel after
   a panic.
-- `provider.local-libvirt.ssh_credential_ref` — the guest credential the drgn-over-SSH
-  live-introspection transport (`introspect.run`) resolves to reach the guest. It is
-  necessary but not sufficient: live introspection also needs a drgn-capable guest image
-  and a guest that is reachable over SSH.
+
+Live drgn introspection (`introspect.run`) is **not** provision-bound: the SSH forward is
+rendered on every domain and the drgn-over-SSH transport authenticates with the per-System
+bootstrap key, so a ready local system needs no credential knob. Its only requirement is a
+drgn-capable guest image (`introspect.run` reports `missing_dependency` if drgn is absent).
 
 These flags default off, so a plain profile provisions a system you can build, boot, and
 observe on but not live-debug. `systems.profile_examples` returns starting-point profiles;
