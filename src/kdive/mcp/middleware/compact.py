@@ -20,9 +20,11 @@ from pydantic import ValidationError
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.verbosity import compact_responses_enabled
 
-# The exact set of top-level envelope keys. A dict carrying any other key is not a ToolResponse
-# dump and is passed through untouched — pydantic's default extra="ignore" would otherwise let a
-# superset validate and silently drop its extra keys.
+# The exact set of top-level envelope keys, used as a cheap fast-path: a dict carrying any other
+# key is not an envelope dump, so skip the model_validate round-trip and pass it through. The
+# actual correctness guard is ToolResponse's extra="forbid" (responses.py), which makes a superset
+# at any depth (top level or an items row) raise ValidationError; this set only avoids paying that
+# exception for the common non-envelope dict.
 _ENVELOPE_FIELDS = frozenset(ToolResponse.model_fields)
 
 
@@ -41,16 +43,12 @@ def _compact_result(result: Any) -> Any:
     """Return `result` with its envelope compacted, or unchanged when it is not an envelope.
 
     Handles both shapes a middleware chain can produce: a bare ``ToolResponse`` (a short-circuit
-    such as ``DenialAuditMiddleware``) is dumped directly; a ``ToolResult`` whose
-    ``structured_content`` is a dict of envelope keys is re-validated as a ``ToolResponse``.
-    ``ToolResponse`` is ``extra="forbid"``, so a superset dict at any depth (top level *or* an
-    ``items`` row) raises ``ValidationError`` and the whole result passes through untouched — the
-    top-level subset check is a cheap fast-path for the common non-envelope case.
-    ``model_dump(exclude_defaults=True)`` recurses into ``items`` and keeps every non-default
-    failure field; rebuilding a ``ToolResult`` from only the compact ``structured_content``
-    regenerates a matching ``content`` text block, so both wire copies shrink, and ``is_error`` /
-    ``meta`` are carried through. Anything else (a non-envelope dict, a ``ValidationError``,
-    non-dict content) is returned untouched — fail safe, never corrupt a response.
+    such as ``DenialAuditMiddleware``) and a ``ToolResult`` carrying an envelope
+    ``structured_content``. ``exclude_defaults=True`` omits the null/empty defaulted fields
+    (recursively within ``items``) while keeping every non-default failure field; ``is_error`` and
+    ``meta`` are carried through. Anything that is not an envelope — a non-dict / non-envelope
+    ``structured_content`` or a dict that fails ``ToolResponse`` validation — is returned
+    untouched: fail safe, never corrupt a response.
     """
     if isinstance(result, ToolResponse):
         return ToolResult(structured_content=result.model_dump(mode="json", exclude_defaults=True))
