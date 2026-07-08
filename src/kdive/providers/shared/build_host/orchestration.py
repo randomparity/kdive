@@ -9,6 +9,11 @@ from pathlib import Path
 from uuid import UUID
 
 from kdive.build_configs.defaults import CatalogConfigFetch
+from kdive.build_configs.platform_config import (
+    PLATFORM_CONFIG_SYMBOL_MISSING,
+    PLATFORM_REQUIRED_CONFIG,
+    REQUIRED_KERNEL_CONFIG,
+)
 from kdive.components.references import ComponentRef
 from kdive.components.requirements import validate_config_requirements
 from kdive.domain.build_phase import BuildPhase
@@ -26,11 +31,6 @@ from kdive.providers.shared.build_host.configuration.config import (
 )
 from kdive.providers.shared.build_host.execution import ReadConfig, RunStep, build_failure
 from kdive.providers.shared.build_host.workspaces.workspace import Checkout, CloneProvenance
-
-REQUIRED_KERNEL_CONFIG: tuple[tuple[str, ...], ...] = (
-    ("CONFIG_CRASH_DUMP",),
-    ("CONFIG_DEBUG_INFO_DWARF4", "CONFIG_DEBUG_INFO_DWARF5", "CONFIG_DEBUG_INFO_BTF"),
-)
 
 # Removes the per-run workspace after a terminal build. The worker-local default rmtrees the
 # rsync destination; over_transport injects a transport-routed removal of the host-side clone.
@@ -156,6 +156,17 @@ def _validate_final_config(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"missing_any_of": [list(group) for group in missing]},
         )
+    try:
+        validate_config_requirements(config_text, PLATFORM_REQUIRED_CONFIG)
+    except CategorizedError as exc:
+        raise CategorizedError(
+            "kernel .config omits a platform-required rootfs symbol",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={
+                "reason": PLATFORM_CONFIG_SYMBOL_MISSING,
+                "missing": exc.details.get("missing_or_different", []),
+            },
+        ) from exc
     if profile.profile_requirements is not None:
         requirements = load_profile_config_requirements(
             provider=profile.profile_requirements.provider,

@@ -142,6 +142,41 @@ def test_build_workspace_rejects_config_missing_required_group(tmp_path: Path) -
     ]
 
 
+def test_build_workspace_rejects_missing_mount_symbol(tmp_path: Path) -> None:
+    # crash-dump + debuginfo present, but a rootfs-mount symbol is missing: fails with the
+    # platform reason naming the missing symbol.
+    final = "CONFIG_CRASH_DUMP=y\nCONFIG_DEBUG_INFO_DWARF5=y\nCONFIG_SQUASHFS=y\n"
+    orch = _validating_orchestrator(tmp_path, fragment=b"CONFIG_SQUASHFS=y\n", final_config=final)
+
+    with pytest.raises(CategorizedError) as caught:
+        orch.build_workspace(_RUN, _server_profile())
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.details["reason"] == "platform_config_symbol_missing"
+    missing = caught.value.details["missing"]
+    assert isinstance(missing, list)
+    assert "CONFIG_OVERLAY_FS" in missing
+
+
+def test_build_workspace_missing_crash_dump_keeps_existing_shape(tmp_path: Path) -> None:
+    # CONFIG_CRASH_DUMP stays in REQUIRED_KERNEL_CONFIG: its failure keeps missing_any_of.
+    final = _GOOD_TAIL.replace("CONFIG_CRASH_DUMP=y\n", "# CONFIG_CRASH_DUMP is not set\n")
+    orch = _validating_orchestrator(tmp_path, fragment=b"CONFIG_SQUASHFS=y\n", final_config=final)
+
+    with pytest.raises(CategorizedError) as caught:
+        orch.build_workspace(_RUN, _server_profile())
+
+    assert caught.value.details["missing_any_of"] == [["CONFIG_CRASH_DUMP"]]
+
+
+def test_build_workspace_accepts_a_good_final_config(tmp_path: Path) -> None:
+    orch = _validating_orchestrator(
+        tmp_path, fragment=b"CONFIG_SQUASHFS=y\n", final_config=_GOOD_TAIL
+    )
+    # Does not raise: the good tail satisfies mount + crash-dump + debuginfo.
+    orch.build_workspace(_RUN, _server_profile())
+
+
 def _compose_profile(names: list[str]) -> ServerBuildProfile:
     profile = BuildProfile.parse(
         {
