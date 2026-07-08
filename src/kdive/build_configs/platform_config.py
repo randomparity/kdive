@@ -34,13 +34,8 @@ PLATFORM_CONFIG_SYMBOL_MISSING = "platform_config_symbol_missing"
 
 def platform_required_payload() -> dict[str, JsonValue]:
     """The surfaced platform requirement, derived from the constants the build guard enforces."""
-    all_of: dict[str, JsonValue] = {
-        symbol: value for symbol, value in PLATFORM_REQUIRED_CONFIG.required.items()
-    }
-    any_of: list[JsonValue] = []
-    for group in REQUIRED_KERNEL_CONFIG:
-        members: list[JsonValue] = [symbol for symbol in group]
-        any_of.append(members)
+    all_of: dict[str, JsonValue] = dict(PLATFORM_REQUIRED_CONFIG.required)
+    any_of: list[JsonValue] = [list(group) for group in REQUIRED_KERNEL_CONFIG]
     return {"all_of": all_of, "any_of": any_of}
 
 
