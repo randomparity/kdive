@@ -12,6 +12,17 @@ cannot enable it on a ready system. If the system was not provisioned for it,
 gdbstub set, and reprovisioning rebuilds and reboots the system. See the
 provisioning-for-debugging notes in the investigation index and decide up front.
 
+**Expected console line — don't chase it.** gdbstub provisioning injects `nokaslr` into the
+kernel command line to disable KASLR, so a breakpoint set by symbol resolves against the
+fetched vmlinux's link-time addresses instead of a randomized base (without it, symbol
+breakpoints never fire). The kernel consumes `nokaslr` in early boot, so its later
+unknown-parameter check prints this on the console:
+
+> `Unknown kernel command line parameters "nokaslr", will be passed to user space.`
+
+That line is expected and harmless — KASLR is disabled as intended; it does not indicate a
+misconfiguration.
+
 ## Session lifecycle
 
 - `debug.start_session` — attach a GDB session to a booted system's stub.
