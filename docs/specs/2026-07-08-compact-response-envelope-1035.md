@@ -35,11 +35,13 @@ null-stripping, to stay faithful to that intent.
    byte-identical output, no schema change, no test churn.
 3. Preserve the `error_category`-iff-failure invariant and the derived
    `retryable` in compact mode — a failure envelope must still carry
-   `error_category` and `retryable`. `detail` is retained **when a reason
-   exists**: a direct `failure()` sets a non-null suppressed message (kept),
-   while a worker-plane `from_job` FAILED envelope has `detail=None` by design
-   (`responses.py:86-88`) and correctly omits it (a `null` detail carries no
-   information — retaining it would defeat the compaction).
+   `error_category` and `retryable`. `detail` is retained **iff it is non-null**.
+   It is non-null when the category carries a suppressed constant
+   (`not_found`/`authorization_denied`, via `suppressed_detail`,
+   `errors.py:66-86`) *or* the caller passed an explicit reason; it is `null`
+   otherwise (a worker-plane `from_job` FAILED envelope, or a `failure()` raised
+   with a diagnostic category and no `detail` arg) and is correctly omitted (a
+   `null` detail carries no information — retaining it would defeat the compaction).
 4. Zero blast radius across the 28 `collection()` / N list-tool call sites — the
    mechanism must be cross-cutting, not per-tool.
 
@@ -143,9 +145,11 @@ field-stripper: pydantic recurses into `items` applying the same rule, and it
 **cannot drift** as the model evolves. It preserves the failure fields that carry
 information: `error_category` (non-`None`) and `retryable` (`True`/`False`, both ≠
 the `None` default) are non-default on *every* failure and always kept;
-`detail` is kept when non-`None` (a direct `failure()`), and correctly dropped
-when `None` (a worker-plane `from_job` FAILED envelope, where it is null by
-design — see `responses.py:86-88`). Re-validation recomputes `retryable` from
+`detail` is kept iff non-`None` — present when the category supplies a suppressed
+constant (`not_found`/`authorization_denied`) or the caller passed a reason, and
+dropped when `None` (a worker-plane `from_job` FAILED envelope, or a `failure()`
+raised with a diagnostic category and no `detail` — null by design, see
+`responses.py:86-88`, `errors.py:66-86`). Re-validation recomputes `retryable` from
 `error_category` via the existing model validator, so it stays consistent.
 
 Compaction is **idempotent**: re-validating a compact dict refills the defaults,
@@ -180,9 +184,10 @@ are payload, not envelopes, and are correctly left untouched.)
       `ValidationError` (e.g. `allocations.request` shape-XOR, from
       `BindingErrorMiddleware`) — is compacted, proving `CompactResponseMiddleware`
       is ordered outer of both.
-- [ ] With the flag **on**, a direct `failure()` envelope (e.g. a `not_found` /
-      `configuration_error`) still carries `error_category`, `retryable`, and its
-      non-null `detail`.
+- [ ] With the flag **on**, a `failure()` envelope whose `detail` is non-null
+      (a `not_found`, whose suppressed constant is always present, or a
+      binding-error with an explicit `detail`) still carries `error_category`,
+      `retryable`, and that `detail`.
 - [ ] With the flag **on**, a worker-plane `from_job` FAILED envelope
       (`detail=None`) still carries `error_category` and `retryable`, and
       correctly **omits** `detail` (it is null by design).
@@ -222,7 +227,12 @@ are payload, not envelopes, and are correctly left untouched.)
   between an explicitly-empty field and an absent one (e.g. a CANCELED job's
   `suggested_next_actions=[]` disappears). This is intentional and load-bearing:
   a consumer must read an omitted field as its documented default, never as a
-  distinct "unknown" signal. Documented in `docs/guide/response-envelope.md`.
+  distinct "unknown" signal. This applies to **first-party** clients too (the
+  CLI, `scripts/live-debug.py`), not only external consumers — the existing
+  `response.get("items", [])` idiom those scripts already use is compaction-safe,
+  and a *populated* collection's `items` is never dropped (only an empty one is),
+  so index access on a known-populated collection is unaffected. Documented in
+  `docs/guide/response-envelope.md`.
 - **`retryable=False` on a permanent failure.** Kept — `False ≠ None` default.
 - **Gateway on (`tools.invoke`).** Inner and outer results both compacted;
   idempotent, so no corruption.
