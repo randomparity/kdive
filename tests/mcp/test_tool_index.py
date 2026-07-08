@@ -69,8 +69,54 @@ def test_instructions_cover_every_live_namespace() -> None:
     assert "tools.invoke" in text, "instructions must mention tools.invoke"
 
 
+# The false-when-off claim: the gateway-primary framing that is only accurate when the
+# gateway is actually filtering the catalog down to the core set (#1034).
+_GATEWAY_PRIMARY_CLAIM = "Only a small set of core tools are listed directly"
+
+
 def test_instructions_point_at_the_agent_index() -> None:
-    """build_instructions() names the agent-index doc resource as the workflow entry point."""
+    """Both instruction variants name the agent-index doc resource as the entry point."""
     from kdive.mcp.tool_index import build_instructions
 
-    assert "resource://kdive/docs/guide/agent-index.md" in build_instructions()
+    for enabled in (False, True):
+        assert "resource://kdive/docs/guide/agent-index.md" in build_instructions(enabled)
+
+
+def test_instructions_both_modes_cover_namespaces_and_gateway_tools() -> None:
+    """Every namespace and both gateway tools appear whether the gateway is on or off."""
+    from kdive.mcp.tool_index import NAMESPACE_TOC, build_instructions
+
+    for enabled in (False, True):
+        text = build_instructions(enabled)
+        for ns in NAMESPACE_TOC:
+            assert ns in text, f"namespace {ns!r} missing when gateway_enabled={enabled}"
+        assert "tools.search" in text
+        assert "tools.invoke" in text
+
+
+def test_instructions_gateway_off_do_not_claim_gateway_primary() -> None:
+    """With the gateway off (default), instructions must not claim the gateway is primary.
+
+    Regression for #1034: the gateway is off by default, so every tool is listed
+    directly; the old text falsely asserted the opposite.
+    """
+    from kdive.mcp.tool_index import build_instructions
+
+    text = build_instructions(gateway_enabled=False)
+    assert _GATEWAY_PRIMARY_CLAIM not in text, (
+        "gateway-off instructions must not claim only core tools are listed directly"
+    )
+    assert "mcp__kdive__" in text, "gateway-off instructions must name the direct tool surface"
+
+
+def test_instructions_gateway_on_describe_gateway_first() -> None:
+    """With the gateway on, instructions describe the gateway-first discovery pattern."""
+    from kdive.mcp.tool_index import build_instructions
+
+    assert _GATEWAY_PRIMARY_CLAIM in build_instructions(gateway_enabled=True)
+
+
+def test_default_app_instructions_do_not_claim_gateway_primary() -> None:
+    """The assembled app defaults to gateway-off instructions (proves the wiring, #1034)."""
+    app = _built_app()
+    assert _GATEWAY_PRIMARY_CLAIM not in (app.instructions or "")

@@ -5,6 +5,15 @@ session to the toolsets you call at each stage, then links a per-toolset guide. 
 explains what its tools are for and when to reach for them; the exact parameters and return
 schema live in each tool's own description.
 
+## Reaching tools
+
+Calling tools **directly by name** (surfaced by lazy-loading hosts as `mcp__kdive__*`) is
+the canonical path — by default the server lists its full catalog. `tools.search` and
+`tools.invoke` are a discovery gateway for hosts without lazy tool loading; prefer direct
+calls when your host lists the tools. Both paths enforce the same RBAC. If an operator
+enables the core-set gateway, only a small core set is listed directly, so reach everything
+else through `tools.search` / `tools.invoke`.
+
 ## The typical session
 
 A reproduce-and-investigate session moves through these stages. Each names the toolset and

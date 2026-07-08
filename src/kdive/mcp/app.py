@@ -9,6 +9,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.auth import build_verifier
+from kdive.mcp.exposure import gateway_enabled
 from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
 from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
 from kdive.mcp.middleware.doc_exposure import DocExposureMiddleware
@@ -35,7 +36,7 @@ def build_app(
     app: FastMCP = FastMCP(
         name="kdive",
         auth=verifier or build_verifier(),
-        instructions=build_instructions(),
+        instructions=build_instructions(gateway_enabled()),
     )
     app.add_middleware(
         TelemetryMiddleware(
