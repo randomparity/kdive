@@ -37,7 +37,10 @@ from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigati
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.debug import sessions as debug_tools
 from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
-from kdive.prereqs.system_bootstrap_key import ensure_system_bootstrap_key
+from kdive.prereqs.system_bootstrap_key import (
+    ensure_system_bootstrap_key,
+    load_system_bootstrap_private_key,
+)
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
@@ -841,13 +844,11 @@ async def _seed_drgn_system(pool: AsyncConnectionPool, alloc_id: str) -> str:
 
 
 async def _bootstrap_private_key(pool: AsyncConnectionPool, sys_id: str) -> str:
-    async with pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute(
-            "SELECT private_key FROM system_bootstrap_keys WHERE system_id = %s", (UUID(sys_id),)
+    # Reuse the production reader (throwaway registry so the process singleton is untouched).
+    async with pool.connection() as conn:
+        return await load_system_bootstrap_private_key(
+            conn, UUID(sys_id), secret_registry=SecretRegistry()
         )
-        row = await cur.fetchone()
-    assert row is not None
-    return row[0]
 
 
 async def _seed_profiled_system(
@@ -877,8 +878,7 @@ def test_start_session_drgn_live_attaches_and_row_records_transport(migrated_url
             alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_drgn_system(pool, alloc_id)
             run_id = await _seed_run(pool, sys_id)
-            log: list[str] = []
-            connector = _OrderRecordingConnector(log)
+            connector = _OrderRecordingConnector([])
             resp = await _start_session(
                 pool,
                 _ctx(),
