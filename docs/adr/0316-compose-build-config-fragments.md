@@ -38,25 +38,30 @@ the rootfs invariant.
    `config_refs(profile)`, replaces the three `or DEFAULT_CONFIG_REF` idioms so the resolve and
    validate sites cannot diverge. An empty list is a `CONFIGURATION_ERROR`.
 
-2. **The whole always-on platform requirement is one surfaced-and-enforced contract.** Two constants
-   are the single source of truth: `PLATFORM_REQUIRED_CONFIG` (exact `=y` requirements — the five
-   rootfs/boot symbols plus `CONFIG_CRASH_DUMP`, moved out of the old `REQUIRED_KERNEL_CONFIG` one-element
-   group) and `REQUIRED_KERNEL_CONFIG` (reduced to the genuine debuginfo OR-group). `_validate_final_config`
-   validates the post-`olddefconfig` `.config` against both, always, reusing `validate_config_requirements`
-   (re-raising with `details.reason = "platform_config_symbol_missing"`) and the existing
-   `missing_config_groups`. Enforcement is behavior-equivalent to today, just reorganized so it is
-   surfaceable as one contract. The final-config drop-check is made **net-intent-aware** so a later
+2. **A universal rootfs-mount guard, reusing the requirements validator.** A new constant
+   `PLATFORM_REQUIRED_CONFIG` (the five exact `=y` rootfs-mount symbols) is validated at build against
+   the post-`olddefconfig` `.config` in `_validate_final_config`, always, reusing
+   `validate_config_requirements` and re-raising with `details.reason = "platform_config_symbol_missing"`.
+   The **selection principle**: the universal set holds exactly the symbols every kdive System needs to
+   mount its image regardless of capture method, which `olddefconfig` will not auto-select.
+   Capture-method-specific symbols (`FW_CFG_SYSFS` for host_dump, #708) are excluded — they belong to
+   the per-method `profile_requirements` seam, since forcing them on a gdbstub-/console-only build would
+   over-guard it. The pre-existing `REQUIRED_KERNEL_CONFIG` check (`CONFIG_CRASH_DUMP` + debuginfo
+   OR-group) is **retained unchanged** — not moved, weakened, or widened, so its `missing_any_of`
+   failure shape is preserved. The final-config drop-check is made **net-intent-aware** so a later
    composed fragment that disables/downgrades an earlier symbol is honored, not flagged as a spurious
    drop.
 
-3. **The contract is surfaced as exactly what is enforced.** `buildconfig.get` echoes
-   `data.platform_required_config = {all_of, any_of}` derived from the two constants; the agent-facing
-   `config` Field names the replace-not-compose semantics and points at that field rather than
-   re-enumerating. A test asserts the surfaced payload is built from the constants the guard validates
-   against, so the discoverable set can never become a subset of the enforced one. A drift guard ties
-   the constants to the seeded `kdump.config`, and a guard-passes test exercises `_validate_final_config`
-   against a representative good final `.config` (fragment-text alone would not prove `olddefconfig`
-   survival).
+3. **Surfaced as exactly what is enforced — a self-check aid, not a bootability proof.**
+   `buildconfig.get` echoes `data.platform_required_config = {all_of, any_of}` derived from
+   `PLATFORM_REQUIRED_CONFIG` and `REQUIRED_KERNEL_CONFIG`; the agent-facing `config` Field names the
+   replace-not-compose semantics and points at that field. A test asserts the surfaced payload is built
+   from the constants the guard validates against, so the discoverable set can never become a subset of
+   the guarded one. A drift guard ties the constants to the seeded `kdump.config`, and a guard-passes
+   test exercises `_validate_final_config` against a representative good final `.config` (fragment-text
+   alone would not prove `olddefconfig` survival). The guard runs at build, not at
+   `runs.validate_profile` (which only parses), so the surfaced set is a self-check aid — not a
+   pre-flightable guarantee — and it certifies mount, not full kdump-functional completeness.
 
 Scope: server-build lane only — the `.config`-text guard is not *applicable* to the external/`complete`
 lane (no `olddefconfig`, no server-side `.config`). The unbootable-guest failure mode still exists
@@ -73,9 +78,12 @@ parse unchanged.
 - One requirements model spans profile requirements and the platform invariant; the guard is
   discoverable through the same surface the agent uses to pick fragments.
 - The default (absent `config`) and existing single-ref builds are byte-for-byte unchanged.
-- New failure detail `reason = "platform_config_symbol_missing"` (a `CONFIGURATION_ERROR` variant, not
-  a new `ErrorCategory`). `REQUIRED_KERNEL_CONFIG` shrinks to the debuginfo OR-group; `CONFIG_CRASH_DUMP`
-  moves to the exact requirements set (same `=y` enforcement).
+- New failure detail `reason = "platform_config_symbol_missing"` for a missing rootfs-mount symbol (a
+  `CONFIGURATION_ERROR` variant, not a new `ErrorCategory`). The pre-existing `CONFIG_CRASH_DUMP` /
+  debuginfo check is unchanged, keeping its `missing_any_of` shape.
+- The guard certifies rootfs *mount*, not full kdump-functional completeness; capture-method symbols
+  stay in `profile_requirements`. The `config` list is bounded (`MAX_CONFIG_FRAGMENTS`) so an unbounded
+  compose cannot open unbounded per-ref catalog fetches.
 
 ## Considered & rejected
 
@@ -92,3 +100,7 @@ parse unchanged.
   what makes compose safe, so they ship together.
 - **Merge fragments at the `local` component-path or add new ref kinds.** Out of scope; a list is an
   ordered set of refs each resolved by the unchanged `resolve_config_bytes` rules.
+- **Guarding every kdump-functional symbol (`FW_CFG_SYSFS`, `KEXEC_*`, `IKCONFIG`, …) in the universal
+  set.** Over-guards debug workflows that don't use a given capture method, and turns the always-on set
+  into an unprincipled grab-bag. Method-specific requirements belong to `profile_requirements`; the
+  universal guard stays scoped to mount.
