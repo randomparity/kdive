@@ -35,7 +35,11 @@ null-stripping, to stay faithful to that intent.
    byte-identical output, no schema change, no test churn.
 3. Preserve the `error_category`-iff-failure invariant and the derived
    `retryable` in compact mode — a failure envelope must still carry
-   `error_category`, `retryable`, and `detail`.
+   `error_category` and `retryable`. `detail` is retained **when a reason
+   exists**: a direct `failure()` sets a non-null suppressed message (kept),
+   while a worker-plane `from_job` FAILED envelope has `detail=None` by design
+   (`responses.py:86-88`) and correctly omits it (a `null` detail carries no
+   information — retaining it would defeat the compaction).
 4. Zero blast radius across the 28 `collection()` / N list-tool call sites — the
    mechanism must be cross-cutting, not per-tool.
 
@@ -69,8 +73,8 @@ COMPACT_RESPONSES = Setting(
     processes=_SERVER,
     help="When on/1/true, the server omits null/empty defaulted fields from every "
          "tool response envelope (recursively within items) to cut per-call tokens. "
-         "Default off — the full ADR-0019 envelope. Failure fields (error_category, "
-         "retryable, detail) are always present on a failure.",
+         "Default off — the full ADR-0019 envelope. A failure envelope always keeps "
+         "error_category and retryable; detail is kept when a reason exists.",
 )
 ```
 
@@ -94,23 +98,32 @@ Behavior:
    no per-call cost when the feature is not enabled).
 2. When on, obtain `result = await call_next(context)`. If `result` is not a
    `ToolResult` with a `dict` `structured_content`, return it unchanged.
-3. Re-validate that dict into a `ToolResponse` and re-dump it compactly:
+3. **Exact-shape guard.** Only compact a dict whose top-level keys are a subset
+   of the `ToolResponse` field names (`set(sc) <= set(ToolResponse.model_fields)`).
+   `ToolResponse` has no `model_config`, so pydantic's default `extra="ignore"`
+   would let a *superset* dict validate and silently drop its extra keys — that is
+   corruption, not passthrough. The subset guard means any dict carrying a key the
+   envelope does not define passes through untouched, so "non-envelope ⇒ unchanged"
+   is a real guarantee, not just the `ValidationError` case.
+4. Re-validate the guarded dict into a `ToolResponse` and re-dump it compactly:
    `ToolResponse.model_validate(sc).model_dump(mode="json", exclude_defaults=True)`.
    Return `ToolResult(structured_content=<compact dict>, meta=result.meta)`.
    Constructing a `ToolResult` with only `structured_content` auto-regenerates
    the `content` text block from that dict, so **both** wire fields are compacted
    in one construction (the established `BindingErrorMiddleware` pattern).
-4. On `ValidationError` (a result whose `structured_content` is not a valid
-   envelope) or any non-dict structured content, return the original result
-   unchanged — fail safe, never corrupt a response.
+5. On `ValidationError` (a subset-shaped dict that still fails field validation)
+   or any non-dict structured content, return the original result unchanged —
+   fail safe, never corrupt a response.
 
 `model_dump(exclude_defaults=True)` is the primitive rather than a hand-written
 field-stripper: pydantic recurses into `items` applying the same rule, and it
-**cannot drift** as the model evolves. It provably preserves failure fields —
-`error_category` (non-`None`), `retryable` (`True`/`False`, both ≠ the `None`
-default), and `detail` (non-`None`) are all non-default on a failure and kept.
-Re-validation recomputes `retryable` from `error_category` via the existing
-model validator, so it stays consistent.
+**cannot drift** as the model evolves. It preserves the failure fields that carry
+information: `error_category` (non-`None`) and `retryable` (`True`/`False`, both ≠
+the `None` default) are non-default on *every* failure and always kept;
+`detail` is kept when non-`None` (a direct `failure()`), and correctly dropped
+when `None` (a worker-plane `from_job` FAILED envelope, where it is null by
+design — see `responses.py:86-88`). Re-validation recomputes `retryable` from
+`error_category` via the existing model validator, so it stays consistent.
 
 Compaction is **idempotent**: re-validating a compact dict refills the defaults,
 and re-dumping drops them again — so the double pass on gateway meta-tools
@@ -128,24 +141,40 @@ and re-dumping drops them again — so the double pass on gateway meta-tools
       `retryable`, `detail`, and any empty `suggested_next_actions`/`refs`/`items`,
       at the top level and within each `items[]` entry; `object_id`, `status`,
       and non-empty `data` remain.
-- [ ] With the flag **on**, a failure envelope (e.g. a `not_found` /
-      `configuration_error`) still carries `error_category`, `retryable`, and
-      `detail`.
-- [ ] With the flag **on**, a non-envelope structured content (constructed test
-      double) passes through unchanged (no crash, no mutation).
+- [ ] With the flag **on**, a direct `failure()` envelope (e.g. a `not_found` /
+      `configuration_error`) still carries `error_category`, `retryable`, and its
+      non-null `detail`.
+- [ ] With the flag **on**, a worker-plane `from_job` FAILED envelope
+      (`detail=None`) still carries `error_category` and `retryable`, and
+      correctly **omits** `detail` (it is null by design).
+- [ ] With the flag **on**, structured content whose top-level keys are a
+      *superset* of the envelope (an `object_id`/`status` dict plus an extra key)
+      passes through unchanged — the extra key survives, nothing is dropped.
+- [ ] With the flag **on**, non-dict / non-envelope structured content (a
+      constructed test double) passes through unchanged (no crash, no mutation).
 - [ ] Compacting an already-compact response yields the same dict (idempotent).
-- [ ] `docs/guide/response-envelope.md` documents the opt-in flag and its
-      contract; `just resources-docs` refreshes the packaged snapshot and
+- [ ] `docs/guide/response-envelope.md` documents the opt-in flag, its contract,
+      **and the absent==default consumer rule** (under compaction an omitted field
+      is semantically identical to its documented default — empty list/dict or
+      null — so a consumer must not read key-absence as a distinct signal);
+      `just resources-docs` refreshes the packaged snapshot and
       `just resources-docs-check` passes.
 - [ ] `just ci` is green.
 
 ## Failure modes and edge cases
 
-- **Not a `ToolResponse`.** Some result path returns non-envelope structured
-  content → `model_validate` raises → pass through unchanged.
+- **Superset / non-envelope structured content.** A dict with keys the envelope
+  does not define fails the exact-shape subset guard → pass through unchanged (its
+  extra keys survive). A subset-shaped dict that still fails field validation
+  raises `ValidationError` → pass through unchanged. Both paths are safe.
 - **`data` holding an explicit `None`/`{}` value.** Left untouched: `data`
   contents are payload, not envelope defaults; `exclude_defaults` does not
   recurse into a plain `dict` value.
+- **Absent==default consumer contract.** Compaction erases the distinction
+  between an explicitly-empty field and an absent one (e.g. a CANCELED job's
+  `suggested_next_actions=[]` disappears). This is intentional and load-bearing:
+  a consumer must read an omitted field as its documented default, never as a
+  distinct "unknown" signal. Documented in `docs/guide/response-envelope.md`.
 - **`retryable=False` on a permanent failure.** Kept — `False ≠ None` default.
 - **Gateway on (`tools.invoke`).** Inner and outer results both compacted;
   idempotent, so no corruption.

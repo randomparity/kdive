@@ -45,21 +45,29 @@ Add an **opt-in server config flag** and compact in one cross-cutting middleware
 2. **Transform — an `on_call_tool` middleware.** `CompactResponseMiddleware`,
    registered outermost in `build_app`, so it sees the final `ToolResult`
    including binding-error envelopes. When the flag is off it passes through
-   untouched (no per-call cost). When on it re-validates the result's
+   untouched (no per-call cost). When on it guards on an exact envelope shape —
+   only a dict whose top-level keys are a subset of the `ToolResponse` fields is
+   compacted, because the model's default `extra="ignore"` would otherwise let a
+   superset dict validate and silently drop its extra keys — then re-validates the
    `structured_content` into a `ToolResponse` and re-dumps with
    `model_dump(mode="json", exclude_defaults=True)`, returning a fresh
    `ToolResult(structured_content=<compact>, meta=result.meta)`. Constructing a
    `ToolResult` from only `structured_content` regenerates the `content` text
    from the compact dict, so both wire fields shrink in one step (the existing
-   `BindingErrorMiddleware` pattern). A `structured_content` that is not a valid
-   envelope (`ValidationError`) or not a dict passes through unchanged.
+   `BindingErrorMiddleware` pattern). Anything else — a superset/non-envelope
+   dict, a `ValidationError`, or non-dict content — passes through unchanged.
 
 `exclude_defaults=True` is chosen over a hand-written field-stripper: it recurses
-into `items`, cannot drift as the model evolves, and provably keeps failure
-fields (`error_category` non-`None`; `retryable` `True`/`False`, both ≠ `None`
-default; `detail` non-`None`). Re-validation re-derives `retryable` from
-`error_category` via the model validator, so the ADR-0019 invariant is preserved.
-Compaction is idempotent, so the gateway meta-tool double pass is safe.
+into `items`, cannot drift as the model evolves, and keeps the failure fields that
+carry information — `error_category` (non-`None`) and `retryable` (`True`/`False`,
+both ≠ the `None` default) are non-default on every failure and always kept, while
+`detail` is kept when non-`None` (a direct `failure()`) and correctly dropped when
+`None` (a worker-plane `from_job` FAILED envelope, null by design). Re-validation
+re-derives `retryable` from `error_category` via the model validator, so the
+ADR-0019 invariant is preserved. Compaction is idempotent (re-validating a compact
+dict refills defaults, re-dumping drops them again), so the gateway meta-tool
+double pass is safe. A consumer must read an omitted field as its documented
+default — key-absence is not a distinct signal.
 
 ## Consequences
 
