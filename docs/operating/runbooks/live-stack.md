@@ -246,7 +246,8 @@ After the stack is up, use the live-stack harness to call MCP tools for:
 - `allocations.request`
 - `systems.provision` with
   `rootfs: {"kind": "catalog", "provider": "local-libvirt", "name": "fedora-kdive-ready-44"}`
-- `runs.build` with a staged `.config`
+- `runs.create`, then `artifacts.create_run_upload` + PUT your locally-built kernel, then
+  `runs.complete_build`
 - `runs.install`
 - `runs.boot`
 - `artifacts.list(system_id=...)`

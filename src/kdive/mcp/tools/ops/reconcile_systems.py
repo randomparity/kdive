@@ -1,7 +1,7 @@
 """``ops.reconcile_systems`` — trigger one inventory reconcile pass over MCP (M2.6 #399).
 
 The inventory engine (``systems.toml`` → ``image_catalog`` / ``cost_class_coefficients`` /
-``resources`` / ``build_hosts``) runs from three places: the ``kdive reconcile-systems`` CLI,
+``resources``) runs from three places: the ``kdive reconcile-systems`` CLI,
 the reconciler-loop drift pass, and
 this on-demand MCP trigger. Unlike ``ops.reconcile_now`` (gated ``platform_operator``), this pass
 can **prune** config rows that left the file (and the row-delete frees an image's S3 bytes to the
@@ -52,8 +52,8 @@ class _AbsentImageStore:
     """A no-op ``ImageHeadStore`` used when no object store is configured.
 
     Every HEAD reports absent, so an ``s3`` image stays ``defined`` + warns (exactly the
-    store-down degrade the engine already tolerates), while ``staged`` images, resources, and
-    build hosts reconcile normally — the inventory pass needs no S3 to do most of its work.
+    store-down degrade the engine already tolerates), while ``staged`` images and resources
+    reconcile normally — the inventory pass needs no S3 to do most of its work.
     """
 
     def head_present(self, key: str) -> bool:  # noqa: ARG002 - protocol param name, unused
@@ -69,16 +69,16 @@ async def reconcile_systems(
     """Run one inventory reconcile pass on demand; audit and return the combined diff.
 
     Gates ``platform_admin`` first (a denial writes no inventory change), reconciles the
-    ``systems.toml`` into ``image_catalog`` / ``cost_class_coefficients`` / ``resources`` /
-    ``build_hosts``, audits the action to ``platform_audit_log`` (actor + diff), and returns the
+    ``systems.toml`` into ``image_catalog`` / ``cost_class_coefficients`` / ``resources``,
+    audits the action to ``platform_audit_log`` (actor + diff), and returns the
     per-category counts and the pruned/cordoned identities.
 
     Args:
         pool: The shared async pool the pass draws a fresh connection from.
         ctx: The caller's request context; must hold ``platform_admin``.
         image_store: The object store HEADed to confirm ``s3`` image existence, or ``None`` to
-            run with a no-op store (``s3`` images stay ``defined`` + warn; staged/resources/build
-            hosts still reconcile).
+            run with a no-op store (``s3`` images stay ``defined`` + warn; staged images and
+            resources still reconcile).
 
     Returns:
         A success ``ToolResponse`` carrying the diff, or a

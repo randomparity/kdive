@@ -36,7 +36,6 @@ failure. See [errors](errors.md).
 |---|---|
 | Allocation | `allocations.request` (when admission control defers) |
 | Provisioning | `systems.provision`, `systems.reprovision`, `systems.teardown` |
-| Build | `runs.build` |
 | Install | `runs.install` |
 | Boot | `runs.boot` |
 | Control | `control.force_crash`, `control.power` |
@@ -71,7 +70,7 @@ short waits avoid it.
 ## Retrying the initial enqueue (idempotency)
 
 The read-retry contract above covers `jobs.wait`/`jobs.get`. But a transport reset can also
-drop the **response to the enqueuing call itself** — `runs.build`, `vmcore.fetch`,
+drop the **response to the enqueuing call itself** — `runs.install`, `vmcore.fetch`,
 `control.power`, `systems.provision`, and the rest of the create/enqueue surface. A blind
 retry of that call could enqueue a second job. To retry it safely, pass an `idempotency_key`
 ([ADR-0193](../adr/0193-uniform-mutation-idempotency.md), and see

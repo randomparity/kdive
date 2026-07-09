@@ -809,10 +809,10 @@ def test_document_without_persist_is_refused(migrated_url: str) -> None:
 
 def test_persist_oversized_document_is_refused(migrated_url: str, monkeypatch: object) -> None:
     import kdive.config as config
-    from kdive.config.core_settings import MAX_BUILD_CONFIG_BYTES
+    from kdive.config.core_settings import MAX_INVENTORY_EXPORT_BYTES
 
     fake = writeback.FakeWriteback()
-    config.load({"KDIVE_MAX_BUILD_CONFIG_BYTES": "32"})
+    config.load({"KDIVE_MAX_INVENTORY_EXPORT_BYTES": "32"})
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -827,7 +827,7 @@ def test_persist_oversized_document_is_refused(migrated_url: str, monkeypatch: o
             )
             assert resp.status == "error"
             assert resp.error_category == "configuration_error"
-            assert MAX_BUILD_CONFIG_BYTES.name in str(resp.detail)
+            assert MAX_INVENTORY_EXPORT_BYTES.name in str(resp.detail)
 
     asyncio.run(_run())
     config.reset()

@@ -111,14 +111,8 @@ volume = "fedora-kdive-remote-base-43.qcow2"
 """
 
 
-# The always-on local_kernel_src check (ADR-0163) reads KDIVE_KERNEL_SRC and FAILs when it is
-# unusable, which would flip report.has_failure and add a row to every aggregated run(). The shared
-# run-fixtures point it at `root` (an existing absolute tmp dir → USABLE) so the new check passes
-# and does not pollute the has_failure expectations the existing tests assert; tests that exercise
-# the check's FAIL path set/clear KDIVE_KERNEL_SRC explicitly instead of using these helpers.
 def _set_env(monkeypatch, root: Path, **refs: str) -> None:
     monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(root))
-    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(root))
     for name, value in refs.items():
         monkeypatch.setenv(name, value)
     config.load()
@@ -128,14 +122,12 @@ def _with_remote_instance(monkeypatch, root: Path, *, instances: str = _INSTANCE
     path = root / "systems.toml"
     path.write_text(f"schema_version = 2\n{_IMAGE}\n{instances}\n")
     monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(root))
-    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(root))
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(path))
     config.load()
 
 
 def _no_remote_instance(monkeypatch, root: Path) -> None:
     monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(root))
-    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(root))
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(root / "absent.toml"))
     config.load()
 

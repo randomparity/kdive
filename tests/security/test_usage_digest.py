@@ -51,6 +51,6 @@ def test_secret_keyed_field_is_redacted_regardless_of_value() -> None:
 
 def test_different_non_secret_args_differ() -> None:
     redactor = _redactor()
-    assert digest_args(redactor, {"tool": "runs.build"}) != digest_args(
+    assert digest_args(redactor, {"tool": "runs.install"}) != digest_args(
         redactor, {"tool": "runs.boot"}
     )

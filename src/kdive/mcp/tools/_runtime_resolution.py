@@ -48,7 +48,7 @@ _AUTHORIZED_SYSTEM_KIND: LiteralString = (
 )
 # A target-kind-only Run lookup is authorized by the Run row and selected by its committed
 # ``target_kind``. It deliberately does not join System/Allocation/Resource, so unbound Runs
-# (ADR-0169, ``system_id IS NULL``) resolve for ``runs.build`` / ``runs.complete_build`` before
+# (ADR-0169, ``system_id IS NULL``) resolve for ``runs.complete_build`` before
 # any System exists. Bound-run operations use ``ProviderResolver.runtime_for_run`` instead, which
 # applies ``ProviderRuntime.for_resource(name)`` before capability or port handoff.
 _AUTHORIZED_RUN_KIND: LiteralString = (

@@ -2,9 +2,9 @@
 
 The upload validator constrains artifact *structure* (bzImage magic, gzip layout, a
 ``lib/modules`` member, build-id match) and never which Kconfig symbols were enabled — so the
-kernel config is the agent's to choose. Without this stated, the ``buildconfig.set``
-platform-admin gate reads as "a project agent can't get a KASAN kernel", which is false on the
-default external-build lane. This guard keeps the contract from being dropped by a later edit.
+kernel config is the agent's to choose. Stating this keeps an agent from assuming it cannot get,
+say, a KASAN kernel on the build lane. This guard keeps the contract from being dropped by a
+later edit.
 
 The assertion reads the **served snapshot** an agent receives over MCP, so it also fails if
 the packaged snapshot falls out of sync with the source doc.

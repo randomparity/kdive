@@ -1,12 +1,11 @@
-# Preparing artifacts for the external-build lane
+# Preparing artifacts for the build lane
 
 **This is the build lane (ADR-0234): build locally, upload, `runs.complete_build`.**
 No operator-staged source tree or build host is needed.
 
-The external-build lane (`runs.create` with a `build_profile` whose `source="external"`)
-ingests a kernel you built yourself instead of building one on a worker. You upload the
-artifacts, then call `runs.complete_build` to finalize the Run. This page is the recipe for
-shaping those artifacts so they pass validation on the first try.
+The build lane ingests a kernel you built yourself: `runs.create` with a `build_profile`
+records the Run, you upload the artifacts, then `runs.complete_build` finalizes the Run. This
+page is the recipe for shaping those artifacts so they pass validation on the first try.
 
 The validator rejects a malformed upload with a precise message, but only **after** the
 upload round-trip — so the cost of getting the shape wrong is a wasted upload, not just an
@@ -14,12 +13,12 @@ error. Each rule below names the rejection it prevents.
 
 ## Choosing your kernel config
 
-**The kernel config is yours to choose.** Because you build the kernel locally on this lane,
-you decide which Kconfig symbols are enabled before you upload — a debug kernel is one you
-built with the debug options turned on. The validator constrains the artifacts' **structure**
-(bzImage magic, gzip layout, a `lib/modules` member, and — only if the Run's profile carries
-config requirements — that those *required* symbols are present); it never disallows a symbol
-you enabled. There is no allowed-config allowlist: enable what the investigation needs.
+**The kernel config is yours to choose.** Because you build the kernel locally, you decide
+which Kconfig symbols are enabled before you upload — a debug kernel is one you built with the
+debug options turned on. The validator constrains only the artifacts' **structure** (bzImage
+magic, gzip layout, a `lib/modules` member); it never inspects or constrains your `.config`.
+There is no allowed-config allowlist and no required-symbol check: enable what the
+investigation needs.
 
 A useful debug set to start from:
 
@@ -88,7 +87,7 @@ boot image first.
 | Name | When to upload | Notes |
 |---|---|---|
 | `vmlinux` | to enable kernel-debugging / DWARF introspection | the uncompressed kernel ELF with debug info. If you upload it you **must** declare a `build_id` in `runs.complete_build`, and it must match the ELF's GNU build-id note, or the upload is rejected. |
-| `effective_config` | when the Run's build profile carries config requirements | the kernel `.config` used for the build, ≤ 1 MiB; validated against the profile's required symbols. |
+| `effective_config` | to record the `.config` you built with | the kernel `.config` used for the build, ≤ 1 MiB. Stored for provenance; never validated against a symbol list. |
 | `initrd` | when booting needs a specific initramfs | the initial ramdisk image. |
 
 ## The upload flow

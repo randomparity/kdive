@@ -83,6 +83,8 @@ class RunPayload(_PayloadBase):
 
 
 class BuildPayload(RunPayload):
+    # Inert: the server-build lane was removed, but the JobKind.BUILD enum value cannot be
+    # dropped from Postgres, so this payload shape is retained for the enum->payload registry.
     cmdline: str | None = None
     build_host_id: str
 
@@ -104,11 +106,10 @@ class BuildPayload(RunPayload):
 
 
 class BuildInstallBootPayload(BuildPayload):
-    """Payload for the composite build->install->boot job (ADR-0268, #866).
+    """Inert composite build->install->boot payload shape (retained for the JobKind enum).
 
-    Carries the build admission result (`build_host_id`, selected + leased at the
-    `runs.build_install_boot` boundary) so the handler can synthesize a `BuildPayload` for the
-    build phase; install/boot need only `run_id`.
+    The server-build lane was removed; this payload no longer has a handler. It is kept only
+    because ``JobKind.BUILD_INSTALL_BOOT`` cannot be dropped from the Postgres enum.
     """
 
 

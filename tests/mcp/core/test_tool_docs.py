@@ -351,13 +351,13 @@ def test_run_lifecycle_tools_cross_reference_real_cmdline_parameters() -> None:
 
 
 def test_runs_get_documents_build_provenance_shape() -> None:
-    # #938 addendum: an agent calling runs.get reads only the runs.get wrapper docstring, so the
-    # data.build_provenance field (and the new dirty_files manifest) must be documented there, not
-    # only on runs.create which a runs.get caller never reads.
+    # An agent calling runs.get reads only the runs.get wrapper docstring, so the
+    # data.build_provenance field must be documented there, not only on runs.create which a
+    # runs.get caller never reads. On the upload lane it carries the client-attested claim.
     tools = {t.name: t for t in TOOLS}
     description = tools["runs.get"].description or ""
     assert "build_provenance" in description
-    assert "dirty_files" in description
+    assert "client_attested" in description
 
 
 def test_jobs_wait_description_conveys_retry_contract() -> None:

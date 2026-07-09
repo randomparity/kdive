@@ -78,7 +78,7 @@ async def _seed_session(pool: AsyncConnectionPool) -> None:
             conn,
             principal="alice",
             agent_session="sess-1",
-            tool="runs.build",
+            tool="runs.install",
             outcome="ok",
             ts=_NOW - timedelta(minutes=30),
             args_digest="d1",
@@ -105,7 +105,7 @@ async def _seed_session(pool: AsyncConnectionPool) -> None:
             conn,
             principal="bob",
             agent_session="sess-2",
-            tool="runs.build",
+            tool="runs.install",
             outcome="ok",
             ts=_NOW - timedelta(minutes=5),
             args_digest="dX",
@@ -149,7 +149,7 @@ def test_auditor_reads_session_trail_newest_first_and_audits(migrated_url: str) 
         assert [(r["tool"], r["outcome"], r["args_digest"]) for r in rows] == [
             ("jobs.wait", "ok", "d3"),
             ("systems.authorize_ssh_key", "error", "d2"),
-            ("runs.build", "ok", "d1"),
+            ("runs.install", "ok", "d1"),
         ]
         assert all(r["agent_session"] == "sess-1" for r in rows)
         # Exactly one platform_audit_log row records the cross-tenant read.
@@ -200,11 +200,11 @@ def test_principal_and_tool_filters_narrow_rows(migrated_url: str) -> None:
                 pool, ctx, request=_query(principal="bob"), now=_NOW
             )
             by_tool = await trail_tools.tool_trail(
-                pool, ctx, request=_query(tool="runs.build"), now=_NOW
+                pool, ctx, request=_query(tool="runs.install"), now=_NOW
             )
         assert {r["agent_session"] for r in _rows(by_principal)} == {"sess-2"}
-        assert {r["tool"] for r in _rows(by_tool)} == {"runs.build"}
-        assert len(_rows(by_tool)) == 2  # alice's + bob's runs.build
+        assert {r["tool"] for r in _rows(by_tool)} == {"runs.install"}
+        assert len(_rows(by_tool)) == 2  # alice's + bob's runs.install
 
     asyncio.run(_run())
 
@@ -217,7 +217,7 @@ def test_default_window_bounds_to_last_24h(migrated_url: str) -> None:
                     conn,
                     principal="alice",
                     agent_session="sess-1",
-                    tool="runs.build",
+                    tool="runs.install",
                     outcome="ok",
                     ts=_NOW - timedelta(hours=48),
                     args_digest="old",

@@ -116,18 +116,12 @@ read with `artifacts.get`. It is bounded: when more exist than the cap,
 true (the oldest entries are dropped; the boot console stays at `refs.console`). The key is
 absent when the Run has no correlated console.
 
-Build provenance: `data.build_provenance` (present once the build succeeded with recorded
-provenance, absent otherwise) records what was built. A git/remote build carries
-`{remote, ref, resolved_commit, build_host}`. A local warm-tree (`source='server'`) build
-carries `{label, resolved_commit, dirty}` plus, when `dirty` is true:
-`untracked` (were non-ignored untracked files staged), `tree_sha` (content digest of the
-tracked changes), `dirty_files` (the changed tracked paths, capped — `dirty_files_truncated`
-is true when the list was capped), and, for an external upload, `client_attested: true` with
-the caller's `source_label`/`source_ref`. The warm-tree lane builds working-tree state, not
-HEAD: `resolved_commit` is the HEAD it is based on (decorative when `dirty`), and
-`dirty`/`tree_sha`/`dirty_files` cover git-tracked state only (gitignored paths are
-invisible). Compare `tree_sha` across runs to confirm two builds compiled the same tracked
-source.
+Build provenance: `data.build_provenance` (present once the build succeeded with a
+caller-supplied claim, absent otherwise) records the agent's client-attested source. On
+the upload lane KDIVE never clones or verifies a source tree, so this is the caller's own
+freeform claim: `client_attested: true` with the `source_label`/`source_ref` passed to
+`runs.complete_build`. Compare it across runs to track which local source produced each
+build.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

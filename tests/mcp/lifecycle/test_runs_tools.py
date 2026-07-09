@@ -35,7 +35,6 @@ from kdive.domain.pcie import PCIeClaim
 from kdive.jobs.handlers import console_evidence
 from kdive.jobs.handlers.runs import common as run_handler_common
 from kdive.jobs.handlers.runs import registrar as runs_handlers
-from kdive.jobs.handlers.runs import shared as runs_shared
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run_target_kind
@@ -5188,22 +5187,6 @@ def test_cancel_swallows_build_job_race_to_terminal(
             async with pool.connection() as conn:
                 refreshed = await _build_job_for(conn, run_id)
             assert refreshed.state is JobState.SUCCEEDED
-
-    asyncio.run(_run())
-
-
-def test_finalize_build_after_cancel_does_not_resurrect_run(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_running_run(pool)
-            job = await _enqueue_build_job(pool, run_id)
-            await cancel_run(pool, _ctx(Role.OPERATOR), run_id)
-            result = run_steps.BuildStepResult(kernel_ref="k", debuginfo_ref="d", build_id="b")
-            async with pool.connection() as conn:
-                run = await RUNS.get(conn, UUID(run_id))
-                assert run is not None
-                await runs_shared.finalize_build(conn, job, run, result)
-            assert await _run_state(pool, run_id) == "canceled"
 
     asyncio.run(_run())
 

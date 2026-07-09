@@ -263,11 +263,11 @@ def test_verdict_projects_resource_id(migrated_url: str) -> None:
 
 
 def test_verdict_projects_check_data(migrated_url: str) -> None:
-    # A check that discloses structured CheckResult.data (e.g. local_kernel_src's resolved path +
-    # git HEAD, #845) surfaces it under the item's nested ``data`` key; a check with none gets {}.
+    # A check that discloses structured CheckResult.data (#845) surfaces it under the item's
+    # nested ``data`` key; a check with none gets {}.
     results = [
         CheckResult(
-            check_id="local_kernel_src",
+            check_id="disclosing_check",
             status=CheckStatus.PASS,
             detail="usable",
             data={"vantage": "server", "resolved_path": "/abs/linux", "branch": "main"},
@@ -279,7 +279,7 @@ def test_verdict_projects_check_data(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             resp = await diagnostics.run_diagnostics(pool, _factory(results), _OPERATOR)
         by_check = {item.data["check"]: item for item in resp.items}
-        assert by_check["local_kernel_src"].data["data"] == {
+        assert by_check["disclosing_check"].data["data"] == {
             "vantage": "server",
             "resolved_path": "/abs/linux",
             "branch": "main",
