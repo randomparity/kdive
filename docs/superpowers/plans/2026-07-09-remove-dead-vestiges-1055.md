@@ -89,8 +89,8 @@ arch: {arch}
 
 - [ ] **Step 2: Run the tests to confirm they fail against current code**
 
-Run: `uv run python -m pytest tests/provider_components/test_catalog.py tests/admin/test_default_fixtures.py -q`
-Expected: FAIL — the current `_PROFILE_YAML`/model still emit/require `requires`, so `test_default_fixtures` asserts the wrong dict and the catalog test still parses with the old shape. (This anchors the behavior change.)
+Run: `uv run python -m pytest tests/provider_components/test_catalog.py tests/admin/test_default_fixtures.py tests/mcp/catalog/test_fixtures_validate.py -q`
+Expected: FAIL. The current `ProfileCatalogEntry.requires` field is **required** (no default), so the requires-free fixture YAMLs written in Step 1 fail to parse against current code: `test_load_fixture_catalog_filters_provider` and `test_profiles_are_sorted_by_provider_name_arch` go red as `load_fixture_catalog` raises `CategorizedError` / `configuration_error`, and `test_console_ready_profile_has_no_requires_block` goes red on the dict assertion against the old `_PROFILE_YAML`. `test_valid_catalog_reports_profiles` uses `install_fixtures` (the **old** `_PROFILE_YAML`, not the edited template), so it stays green until Step 5 strips the literal. This anchors the behavior change.
 
 - [ ] **Step 3: Delete the requirements module**
 
@@ -165,7 +165,7 @@ git add -u src/kdive/components/requirements.py fixtures/local-libvirt/configs/c
 git commit -m "refactor: remove dead profile-requirements apparatus (#1055)"
 ```
 
-**Acceptance criteria (reviewer-checkable):** AC1–AC4 of the spec. `requirements.py` gone; `ProfileCatalogEntry` has only provider/name/arch; both fixture sources and all three parse tests carry no `requires:`; `console-ready.required.config` gone; `just lint && just type && just test` green.
+**Acceptance criteria (reviewer-checkable):** AC1–AC4 of the spec. `requirements.py` gone; `ProfileCatalogEntry` has only provider/name/arch; both fixture sources and all three parse tests carry no `requires:`; `console-ready.required.config` gone; `just lint && just type && just test` green. **AC3 witness:** `tests/mcp/catalog/test_fixtures_validate.py::test_valid_catalog_reports_profiles` is the `install-fixtures → load_fixture_catalog` round-trip (it calls `install_fixtures(dest)` then validates the written catalog), so its green state proves the packaged fixture re-parses requires-free.
 
 ---
 
@@ -301,7 +301,7 @@ Delete the entire `_override_identity_lock` helper (lines 330–336).
 
 - [ ] **Step 4: Remove `source_kind` from the `@app.tool` wrapper**
 
-In the `inventory_clear_override` wrapper (lines 396–423): delete the `source_kind: Annotated[str, Field(...)]` parameter (lines 397–399), drop `source_kind=source_kind,` from the inner `clear_override(...)` call, and confirm the wrapper docstring names only `(resource_kind, name)` (it already carries no `source_kind` token — no textual change needed there):
+In the `inventory_clear_override` wrapper (lines 396–423), make three removals: (a) delete the `source_kind: Annotated[str, Field(...)]` parameter (lines 397–399); (b) **rewrite the `resource_kind` Field description** to drop the "or 'build-host' for a build host" sentinel (current text: "Resource kind (e.g. 'remote-libvirt') for a resource, or 'build-host' for a build host." at lines 400–408) — that Field text is exactly what renders the `build-host` string into `inventory.md:18`, so leaving it fails AC8's `rg 'source_kind|build-host' docs/guide/reference/inventory.md` gate after `just docs`; (c) drop `source_kind=source_kind,` from the inner `clear_override(...)` call. The wrapper docstring already carries no `source_kind` token — no change needed there. Target state:
 
 ```python
     async def inventory_clear_override(
