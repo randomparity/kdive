@@ -15,8 +15,7 @@ when no override exists (idempotent).
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `name` | string | yes | The identity name whose override to clear. |
-| `resource_kind` | string | yes | Resource kind (e.g. 'remote-libvirt') for a resource, or 'build-host' for a build host. |
-| `source_kind` | string | yes | Inventory family: 'resource' or 'build_host'. |
+| `resource_kind` | string | yes | Resource kind (e.g. 'remote-libvirt') whose override to clear. |
 
 ## `inventory.list`
 

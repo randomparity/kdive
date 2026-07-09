@@ -16,7 +16,6 @@ Both are thin FastMCP wrappers over plain async handlers taking the pool + reque
 
 from __future__ import annotations
 
-from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import Annotated, LiteralString
 from uuid import UUID
@@ -27,11 +26,9 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
-from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.overrides import (
-    BUILD_HOST_RESOURCE_KIND,
     InventorySourceKind,
     OverrideIdentity,
 )
@@ -229,23 +226,21 @@ async def clear_override(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
-    source_kind: str,
     resource_kind: str,
     name: str,
 ) -> ToolResponse:
     """Delete the override-ledger entry for a config-declared identity (platform_admin).
 
     Clears a ``removed``/``detached`` override so the next no-entry reconcile pass re-asserts the
-    file — the supported re-add path for a config host removed at runtime. Validates the
-    ``(source_kind, resource_kind)`` pairing against the ledger enums, takes the matching
-    per-identity lock, and deletes the entry. Returns ``cleared`` on success, ``not_found`` when
-    no entry exists (idempotent), or ``configuration_error`` on an illegal kind pairing.
+    file — the supported re-add path for a config host removed at runtime. Validates
+    ``resource_kind`` against the resource-kind enum, takes the per-identity lock, and deletes the
+    entry. Returns ``cleared`` on success, ``not_found`` when no entry exists (idempotent), or
+    ``configuration_error`` on an unknown ``resource_kind``.
 
     Args:
         pool: The shared async connection pool.
         ctx: The caller's request context (must hold ``platform_admin``).
-        source_kind: The inventory family (``resource`` | ``build_host``).
-        resource_kind: The resource kind, or the ``build-host`` sentinel for a build host.
+        resource_kind: The resource kind (e.g. ``remote-libvirt``).
         name: The identity name.
     """
     with bind_context(principal=ctx.principal):
@@ -256,21 +251,21 @@ async def clear_override(
                 pool,
                 ctx,
                 tool=_CLEAR_TOOL,
-                scope=f"denied:{source_kind}/{resource_kind}/{name}",
-                args={"source_kind": source_kind, "resource_kind": resource_kind, "name": name},
+                scope=f"denied:{resource_kind}/{name}",
+                args={"resource_kind": resource_kind, "name": name},
             )
             return ToolResponse.failure(
                 _CLEAR_OBJECT_ID,
                 ErrorCategory.AUTHORIZATION_DENIED,
                 suggested_next_actions=[_CLEAR_TOOL],
             )
-        identity = _parse_override_identity(source_kind, resource_kind, name)
+        identity = _parse_override_identity(resource_kind, name)
         if isinstance(identity, ToolResponse):
             return identity
         async with (
             pool.connection() as conn,
             conn.transaction(),
-            _override_identity_lock(conn, identity),
+            resource_identity_lock(conn, ResourceKind(identity.resource_kind), identity.name),
         ):
             cleared = await clear_override_entry(conn, identity)
             if not cleared:
@@ -285,37 +280,22 @@ async def clear_override(
             "cleared",
             suggested_next_actions=["inventory.list"],
             data={
-                "source_kind": identity.source_kind.value,
                 "resource_kind": identity.resource_kind,
                 "name": identity.name,
             },
         )
 
 
-def _parse_override_identity(
-    source_kind: str, resource_kind: str, name: str
-) -> OverrideIdentity | ToolResponse:
-    """Validate the ledger PK against the enums; return the identity or a config-error envelope."""
+def _parse_override_identity(resource_kind: str, name: str) -> OverrideIdentity | ToolResponse:
+    """Validate ``resource_kind`` against the resource-kind enum; return the identity or a
+    config-error envelope."""
     try:
-        source = InventorySourceKind(source_kind)
+        ResourceKind(resource_kind)
     except ValueError:
-        return _clear_config_error(
-            f"source_kind {source_kind!r} is not one of "
-            f"{', '.join(k.value for k in InventorySourceKind)}"
-        )
-    if source is InventorySourceKind.BUILD_HOST:
-        if resource_kind != BUILD_HOST_RESOURCE_KIND:
-            return _clear_config_error(
-                f"a build_host override's resource_kind must be {BUILD_HOST_RESOURCE_KIND!r}"
-            )
-    else:
-        try:
-            ResourceKind(resource_kind)
-        except ValueError:
-            return _clear_config_error(
-                f"resource_kind {resource_kind!r} is not a valid resource kind"
-            )
-    return OverrideIdentity(source_kind=source, resource_kind=resource_kind, name=name)
+        return _clear_config_error(f"resource_kind {resource_kind!r} is not a valid resource kind")
+    return OverrideIdentity(
+        source_kind=InventorySourceKind.RESOURCE, resource_kind=resource_kind, name=name
+    )
 
 
 def _clear_config_error(reason: str) -> ToolResponse:
@@ -325,15 +305,6 @@ def _clear_config_error(reason: str) -> ToolResponse:
         data={"reason": reason},
         suggested_next_actions=[_CLEAR_TOOL],
     )
-
-
-def _override_identity_lock(
-    conn: AsyncConnection, identity: OverrideIdentity
-) -> AbstractAsyncContextManager[None]:
-    """The per-identity lock matching the override's family (serializes with reconcile)."""
-    if identity.source_kind is InventorySourceKind.BUILD_HOST:
-        return advisory_xact_lock(conn, LockScope.BUILD_HOST, identity.name)
-    return resource_identity_lock(conn, ResourceKind(identity.resource_kind), identity.name)
 
 
 async def _audit_clear(
@@ -346,12 +317,8 @@ async def _audit_clear(
         agent_session=ctx.agent_session,
         event=audit.PlatformAuditEvent(
             tool=_CLEAR_TOOL,
-            scope=f"{identity.source_kind.value}:{identity.resource_kind}:{identity.name}",
-            args={
-                "source_kind": identity.source_kind.value,
-                "resource_kind": identity.resource_kind,
-                "name": identity.name,
-            },
+            scope=f"{identity.resource_kind}:{identity.name}",
+            args={"resource_kind": identity.resource_kind, "name": identity.name},
             platform_role=held_platform_roles(ctx),
             actor=actor_for(ctx),
         ),
@@ -394,17 +361,9 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def inventory_clear_override(
-        source_kind: Annotated[
-            str, Field(description="Inventory family: 'resource' or 'build_host'.")
-        ],
         resource_kind: Annotated[
             str,
-            Field(
-                description=(
-                    "Resource kind (e.g. 'remote-libvirt') for a resource, or 'build-host' for "
-                    "a build host."
-                )
-            ),
+            Field(description="Resource kind (e.g. 'remote-libvirt') whose override to clear."),
         ],
         name: Annotated[str, Field(description="The identity name whose override to clear.")],
     ) -> ToolResponse:
@@ -417,7 +376,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         return await clear_override(
             pool,
             current_context(),
-            source_kind=source_kind,
             resource_kind=resource_kind,
             name=name,
         )

@@ -21,9 +21,7 @@ transaction or take a lock. The caller owns the transaction and the per-identity
 concurrency). The reconcile pass reads under its own pass lock.
 
 Identity is ``(source_kind, resource_kind, name)`` — the ledger table's PK. ``source_kind`` is the
-inventory family (``resource`` | ``build_host``); ``resource_kind`` is the resource ``kind`` for a
-resource, or the fixed sentinel ``build-host`` for a build host (build-host names are globally
-unique, so the sentinel keeps the PK total).
+inventory family (only ``resource`` today); ``resource_kind`` is the resource ``kind``.
 """
 
 from __future__ import annotations
@@ -38,7 +36,6 @@ from psycopg.rows import dict_row
 __all__ = [
     "InventoryOverrideDisposition",
     "InventorySourceKind",
-    "BUILD_HOST_RESOURCE_KIND",
     "OverrideIdentity",
     "InventoryOverride",
     "set_override",
@@ -59,12 +56,6 @@ class InventorySourceKind(StrEnum):
     """The inventory family an override targets (the ledger's ``source_kind``)."""
 
     RESOURCE = "resource"
-    BUILD_HOST = "build_host"
-
-
-# Build-host names are globally unique, so a build-host override fixes resource_kind to this
-# sentinel — the PK stays (source_kind, resource_kind, name) for both families.
-BUILD_HOST_RESOURCE_KIND = "build-host"
 
 
 @dataclass(frozen=True)

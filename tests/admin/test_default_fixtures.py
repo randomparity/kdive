@@ -17,15 +17,11 @@ def test_local_libvirt_fixtures_declare_manifest_and_profile() -> None:
     assert manifest["storage"]["allowed_component_roots"] == ["/var/lib/kdive/rootfs"]
 
 
-def test_console_ready_profile_carries_required_boot_policy() -> None:
+def test_console_ready_profile_has_no_requires_block() -> None:
     profile = yaml.safe_load(LOCAL_LIBVIRT_FIXTURES["profiles/console-ready_x86_64.yaml"])
 
-    assert profile["provider"] == "local-libvirt"
-    assert profile["name"] == "console-ready_x86_64"
-    assert profile["requires"]["cmdline"]["required_tokens"] == [
-        "console=ttyS0",
-        "root=/dev/vda",
-    ]
-    # The console-ready profile's gate is its config/cmdline requirements; it requires no
-    # rootfs capability (ADR-0287 dropped the phantom `agent` requirement).
-    assert profile["requires"]["rootfs"]["capabilities"] == []
+    assert profile == {
+        "provider": "local-libvirt",
+        "name": "console-ready_x86_64",
+        "arch": "x86_64",
+    }

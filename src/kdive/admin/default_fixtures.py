@@ -8,6 +8,9 @@ rootfs list (the rootfs catalog is the DB now).
 
 The manifest is built from the :class:`~kdive.components.catalog.FixtureManifest` model
 rather than an embedded YAML literal, so this module holds no inline inventory YAML.
+
+kdive no longer inspects a kernel .config (ADR-0316), so a profile carries no kernel-config/cmdline
+requirements — only its ``(provider, name, arch)`` triple (ADR-0319, #1055).
 """
 
 from __future__ import annotations
@@ -23,24 +26,6 @@ _PROFILE_RELATIVE = "profiles/console-ready_x86_64.yaml"
 _PROFILE_YAML = """provider: local-libvirt
 name: console-ready_x86_64
 arch: x86_64
-requires:
-  config:
-    required:
-      CONFIG_SERIAL_8250_CONSOLE: y
-      CONFIG_VIRTIO_BLK: y
-      CONFIG_VIRTIO_PCI: y
-  cmdline:
-    required_tokens:
-      - console=ttyS0
-      - root=/dev/vda
-    protected_prefixes:
-      - console=
-      - root=
-      - crashkernel=
-  rootfs:
-    format: qcow2
-    root_device: /dev/vda
-    capabilities: []
 """
 
 

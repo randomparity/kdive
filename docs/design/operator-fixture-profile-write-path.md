@@ -1,8 +1,15 @@
 # Operator override for local-libvirt fixture profiles
 
+> **Superseded (2026-07-09).** The server-build lane that read a profile's `requires` was removed by
+> [ADR-0316](../adr/0316-remove-server-build-lane.md); the `requires` data shape itself
+> (`ProfileRequirements` / `ConfigRequirements` / `CmdlineRequirements`) was removed by
+> [ADR-0319](../adr/0319-remove-dead-profile-requirements-buildhost-vestiges.md) (#1055). A fixture
+> profile now carries only `(provider, name, arch)`; the consumer references below no longer exist.
+> Retained for historical context only.
+
 - **Issue:** [#439](https://github.com/randomparity/kdive/issues/439)
 - **ADR:** [`../adr/0120-operator-fixture-profile-write-path.md`](../adr/0120-operator-fixture-profile-write-path.md)
-- **Status:** Draft
+- **Status:** Draft (superseded — see banner)
 
 ## Problem
 
@@ -34,7 +41,7 @@ ADR-0119, but the artifact is consumed by a different seam, so the answer differ
 
 | Building block | Where |
 |---|---|
-| Fixture catalog models (`FixtureManifest`, `ProfileCatalogEntry`, `ProfileRequirements`) | `src/kdive/components/catalog.py` |
+| Fixture catalog models (`FixtureManifest`, `ProfileCatalogEntry`) | `src/kdive/components/catalog.py` |
 | Disk loader + env override `KDIVE_FIXTURE_CATALOG_PATH` → source-tree default | `src/kdive/components/catalog.py` (`load_fixture_catalog`, `fixture_catalog_path_from_env`) |
 | Packaged default profile + manifest (the bytes `install-fixtures` writes) | `src/kdive/admin/default_fixtures.py` (`LOCAL_LIBVIRT_FIXTURES`) |
 | `install-fixtures` CLI (writes the packaged bundle to `--dest`) | `src/kdive/__main__.py`, `src/kdive/admin/bootstrap.py` (`install_fixtures`) |
