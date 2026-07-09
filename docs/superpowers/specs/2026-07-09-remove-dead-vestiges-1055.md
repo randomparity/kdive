@@ -106,10 +106,13 @@ Files:
    `removed` resource override (success), returns `not_found` when none exists (idempotent), and
    returns `configuration_error` on an invalid `resource_kind`. Its wrapper docstring and `Field`
    text match the new signature, and no `source_kind` key appears in the success `data` payload, the
-   denial-audit scope/args, or the `_audit_clear` scope/args. No `source_kind` / `build_host` /
-   `build-host` token remains anywhere in `src/kdive/mcp/tools/ops/inventory.py` — including
-   docstrings and `Args` blocks — falsifiable via
-   `rg 'source_kind|build_host|build-host' src/kdive/mcp/tools/ops/inventory.py` returning zero hits.
+   denial-audit scope/args, or the `_audit_clear` scope/args. Two falsifiable grep checks over
+   `src/kdive/mcp/tools/ops/inventory.py`: (a) `rg 'build_host|build-host' …` returns **zero** hits —
+   the build-host path is fully gone; (b) `rg 'source_kind' …` returns **exactly one** line, the
+   internal `OverrideIdentity(source_kind=InventorySourceKind.RESOURCE, resource_kind=…, name=…)`
+   constructor, which names the real ledger PK column (the codebase constructs `OverrideIdentity`
+   with that keyword everywhere; keyword form is kept for style consistency). `source_kind` appears in
+   no tool parameter, `Field`, docstring, `Args` block, response `data` key, or audit scope/arg.
 7. The `db/locks.py` `LockScope` docstring no longer claims a `BUILD_HOST` scope exists or that it is
    the `inventory.clear_override` lock.
 8. `docs/guide/reference/inventory.md` is regenerated (via `just docs`) and committed:
