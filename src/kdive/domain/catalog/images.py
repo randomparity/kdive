@@ -67,6 +67,8 @@ class ImageCatalogEntry(DomainModel):
     ``object_key`` (S3), ``volume`` (a staged provider volume), or ``path`` (a local-libvirt
     staged host file under the provider ``allowed_roots``, ADR-0228); a ``DEFINED`` row carries
     none. ``pending_since`` backs the publish-deadline grace window the reconciler keys off.
+    ``kernel_config_key`` is the object-store key of the image's extracted ``/boot/config-<ver>``
+    (a sibling of the qcow2, ADR-0317), ``None`` when no config was captured.
     """
 
     provider: str
@@ -87,6 +89,7 @@ class ImageCatalogEntry(DomainModel):
     volume: str | None = None
     path: str | None = None
     description: str | None = None
+    kernel_config_key: str | None = None
 
 
 __all__ = ["Capability", "ImageCatalogEntry", "ImageState", "ImageVisibility"]
