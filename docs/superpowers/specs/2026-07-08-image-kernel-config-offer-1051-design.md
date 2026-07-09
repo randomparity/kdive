@@ -71,14 +71,23 @@ never inspects or validates the config.
      to download the multi-GB qcow2 and run libguestfs to answer a read call.
 
 3. **`images.kernel_config` returns a presigned download URL, not inline bytes**,
-   mirroring `artifacts.fetch_raw` (ADR-0243). The agent needs the whole file to feed
-   `make`, so a windowed inline read (`artifacts.get`) is useless and 250 KB inline is
-   large. It resolves the row under the **same visibility predicate** as
-   `images.describe` (public, or owned-private with `viewer`), HEADs the config object,
-   presigns a short-lived GET (`KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS`), **records an audit
-   event** for the egress (mirroring `fetch_raw`), and returns the URL under
-   `refs.download_uri` with `data.default_kernel_version` / `data.size_bytes` /
-   `data.ttl`.
+   borrowing the presigned-URL *return shape* of `artifacts.fetch_raw` (ADR-0243). The
+   agent needs the whole file to feed `make`, so a windowed inline read (`artifacts.get`)
+   is useless and 250 KB inline is large. It resolves the row under the **same visibility
+   predicate** as `images.describe` (public, or owned-private with `viewer`), HEADs the
+   config object, presigns a short-lived GET (`KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS`), and
+   returns the URL under `refs.download_uri` with `data.default_kernel_version` /
+   `data.size_bytes` / `data.ttl`.
+   - **The egress is intentionally not audited**, unlike `fetch_raw`. `fetch_raw` audits
+     because its assets are `SENSITIVE` and contributor-gated (a project-scoped
+     `audit.record` under the Run's project). A kernel `.config` is REDACTED-class and
+     visibility-gated identically to `images.describe`/`images.list`, which surface the
+     same image — including full `provenance` — with no audit. A project-scoped
+     `audit.record` is in fact **unavailable** here: a public image has `owner=None` and a
+     legitimate reader may hold zero granted projects, so `audit.record` (which requires
+     `event.project in ctx.projects`) would raise for the common path. Auditing the config
+     fetch but not the richer `describe` of the same row would be inconsistent; the config
+     is not audited.
 
 4. **No validation, anywhere.** kdive stores the config bytes verbatim and never parses
    or checks them. The config is REDACTED-class (kernel `CONFIG_*` symbols carry no
@@ -109,14 +118,20 @@ never inspects or validates the config.
      and inventory prune delete only the row and rely on the leaked-sweep backstop — the
      same treatment those paths already give the qcow2.
 
-7. **Publish crash-window recovery reuses the deterministic key.** The config is written
-   at the deterministic `{arch}.config` key, so a re-run of publish overwrites it
-   idempotently (like the qcow2). A crash *after* the config write but *before* the
-   `registered` flip leaves the config object with no persisted `kernel_config_key`; it is
-   reclaimed by the (fixed) leaked-sweep exactly as a crashed qcow2 write is — no bespoke
-   rollback. The config leg is ordered after the qcow2 HEAD-gate and its key is persisted
-   in the same `registered`-flip statement, so a registered row's `kernel_config_key` is
-   set iff its config object was written.
+7. **`kernel_config_key` is persisted at adopt/insert, before the object write — true
+   symmetry with `object_key`.** The qcow2's `object_key` is set on the `pending` row
+   *before* the qcow2 is written, so the leaked-sweep cross-check protects a pending row's
+   object the instant the row exists. The config leg does the same: when
+   `request.kernel_config` is present, `_adopt_or_insert_pending` / `_insert_pending` set
+   the deterministic `{arch}.config` key on the `pending` row alongside `object_key`,
+   *before* either object is written. The config object is then written after the qcow2
+   HEAD-gate. So during the whole `pending` window the config object — once written — is
+   **row-protected**, not merely grace-protected, exactly like the qcow2. A crash before
+   the object write leaves a key on the row with no object (recovered by the
+   deterministic-key idempotent re-publish); a crash after leaves a row-protected object
+   the re-publish overwrites. `kernel_config_key` does not participate in the
+   `object_key`/`volume`/`path` exactly-one CHECK, so setting it on a `pending` row is
+   unconstrained.
 
 ## What changes
 
@@ -148,14 +163,16 @@ never inspects or validates the config.
 - **`images/planes/base.py`** (`RootfsBuildOutput`) — add `kernel_config: bytes | None
   = None` (the extracted config, `None` when absent). Provenance already carries the
   version.
-- **`services/images/publish.py`** — when `PublishRequest.kernel_config` is present,
-  write it as a second object (`{arch}.config`) after the qcow2 HEAD-gate and set the
-  row's `kernel_config_key` in the `pending`→`registered` `UPDATE ... RETURNING`. Add
-  `kernel_config: bytes | None` to `PublishRequest`. The config write is ordered **after**
-  the qcow2 (the qcow2 is the image identity); a config-write failure fails the publish
-  (the row stays `pending` for the reconciler), and the config leg's recovery is the
-  deterministic-key idempotent re-run + leaked-sweep backstop of Decision 7 — not a
-  bespoke rollback.
+- **`services/images/publish.py`** — add `kernel_config: bytes | None` to
+  `PublishRequest` and a `kernel_config_object_key(request)` helper (the deterministic
+  `{arch}.config` key). When `request.kernel_config` is present,
+  `_adopt_or_insert_pending` / `_insert_pending` set `kernel_config_key` on the `pending`
+  row alongside `object_key` (before any object write, Decision 7); after the qcow2
+  HEAD-gate, write the config object and HEAD-gate it. A config-write/HEAD failure fails
+  the publish (the row stays `pending` for the reconciler); recovery is the
+  deterministic-key idempotent re-run + leaked-sweep backstop of Decisions 6–7 — not a
+  bespoke rollback. When `request.kernel_config` is absent, no key is set and no second
+  object is written.
 - **`reconciler/cleanup/images.py`** — extend the `_delete_if_leaked` cross-check to
   protect an object referenced by `object_key` **OR** `kernel_config_key` (Decision 6),
   so the leaked-sweep never deletes a live image's config and still reclaims an orphaned

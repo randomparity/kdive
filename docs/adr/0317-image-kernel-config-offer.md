@@ -39,15 +39,22 @@ non-provisionable. `images.list` and `images.describe` surface it as
 **2. The `.config` is stored as a separate object-store artifact.** During publish the
 extracted config bytes are written as a sibling object of the qcow2 at
 `images/{owner_kind}/{name}/{arch}.config`, ordered after the qcow2 HEAD-gate and before
-the `registered` flip. Its key is persisted on a new nullable
-`image_catalog.kernel_config_key` column (additive, forward-only), withheld from the
-agent surface like `object_key`.
+the `registered` flip. Its deterministic key is persisted on a new nullable
+`image_catalog.kernel_config_key` column (additive, forward-only), set on the `pending`
+row *before* the object is written — so the leaked-sweep protects a pending row's config
+the instant the row exists, exactly as it protects the qcow2 via `object_key`. The column
+is withheld from the agent surface like `object_key`.
 
 **3. `images.kernel_config` hands the agent a presigned download URL.** A new read tool
 resolves the row under the same visibility predicate as `images.describe` (public, or
 owned-private with `viewer`), HEADs the config object, presigns a short-lived GET, and
 returns it under `refs.download_uri` with `data.default_kernel_version` / `size_bytes` /
-`ttl`. It never returns inline bytes and never inspects the config.
+`ttl`. It never returns inline bytes and never inspects the config. The egress is **not
+audited**: the config is REDACTED-class and visibility-gated identically to
+`images.describe`/`images.list` (which surface the same image and its provenance without
+audit), and a project-scoped `audit.record` is unavailable for a public image
+(`owner=None`, readers may hold zero projects). This is the presigned-URL *return shape*
+of `fetch_raw`, not its SENSITIVE-asset audit contract.
 
 **4. No validation.** kdive stores and serves the config verbatim. It is REDACTED-class
 (kernel `CONFIG_*` symbols carry no secrets); the gate is image visibility, not
