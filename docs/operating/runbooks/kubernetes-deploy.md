@@ -329,7 +329,7 @@ storage pool. Those are host-side obligations independent of this chart install.
 ## 9. Persist runtime inventory back to the source (opt-in writeback)
 
 ADR-0199 makes inventory runtime-mutable: an operator can add/remove/modify config-declared systems
-and build-hosts at runtime, and `ops.export_systems_toml` serializes that live state back to a
+at runtime, and `ops.export_systems_toml` serializes that live state back to a
 `systems.toml` document. By default the export only returns **text** — an operator copies it into
 the version-controlled file and re-applies the `kdive-systems` ConfigMap by hand.
 
@@ -411,8 +411,8 @@ The operator flow for a fleet with remote_libvirt hosts:
    is written verbatim.
 
 An inventory with no remote_libvirt host and no `defined` image carries no placeholder, so a bare
-`ops.export_systems_toml(persist=true)` persists it directly (images / build_hosts / cost_classes
-round-trip with no operator step).
+`ops.export_systems_toml(persist=true)` persists it directly (images / cost_classes round-trip
+with no operator step).
 
 ### Propagation and the `file` target
 

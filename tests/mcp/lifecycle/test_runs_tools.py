@@ -18,8 +18,6 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.components.references import CatalogComponentRef, ComponentKind
-from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, JOBS, RESOURCES, RUNS, SYSTEMS
 from kdive.domain.capacity.state import (
     AllocationState,
@@ -37,7 +35,6 @@ from kdive.domain.pcie import PCIeClaim
 from kdive.jobs.handlers import console_evidence
 from kdive.jobs.handlers.runs import common as run_handler_common
 from kdive.jobs.handlers.runs import registrar as runs_handlers
-from kdive.jobs.handlers.runs import shared as runs_shared
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run_target_kind
@@ -51,7 +48,6 @@ from kdive.mcp.tools.lifecycle.runs.create import (
     create_run,
 )
 from kdive.mcp.tools.lifecycle.runs.create import _created_response as _created_response
-from kdive.mcp.tools.lifecycle.runs.server_build import BuildRunHandlers
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.security.authz.rbac import AuthorizationError, Role
@@ -64,11 +60,7 @@ from tests.db_waits import wait_until_any_backend_waiting
 from tests.mcp.systems_support import provider_resolver
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
-_PROFILE: dict[str, Any] = {
-    "schema_version": 1,
-    "kernel_source_ref": "git+https://git.kernel.org#v6.9",
-    "config": {"kind": "local", "path": "/configs/kdump.config"},
-}
+_PROFILE: dict[str, Any] = {"schema_version": 1}
 
 
 @pytest.fixture(autouse=True)
@@ -435,10 +427,10 @@ def test_cancel_unbound_run_succeeds(migrated_url: str) -> None:
 
 
 def test_with_runtime_for_run_target_kind_resolves_unbound_run(migrated_url: str) -> None:
-    """The runs.build / runs.complete_build admission path resolves an unbound Run (ADR-0169).
+    """The runs.complete_build admission path resolves an unbound Run (ADR-0169).
 
-    The runs.build wrapper uses the target-kind helper, not the bound-run helper, because a Run can
-    be built before it is attached to a System. The runtime is selected from the Run's committed
+    The wrapper uses the target-kind helper, not the bound-run helper, because a Run can be built
+    before it is attached to a System. The runtime is selected from the Run's committed
     target_kind.
     """
 
@@ -484,8 +476,8 @@ def test_envelope_for_run_failed_uses_run_failure_category() -> None:
     assert resp.error_category == "build_failure"
     assert resp.data["current_status"] == "failed"
     assert "investigation_id" in resp.data
-    assert resp.data["build_source"] == "server"  # _profile() default
-    assert resp.data["build_source_provenance"] == "warm-tree"  # _profile() has string ref
+    assert resp.data["build_source"] == "external"  # every run is the upload lane
+    assert "build_source_provenance" not in resp.data
 
 
 def test_envelope_for_run_failed_defaults_to_infrastructure_failure() -> None:
@@ -618,7 +610,7 @@ def test_envelope_for_run_expected_boot_failure_detail_is_structured() -> None:
     )
 
     assert resp.status == "created"
-    assert resp.suggested_next_actions == ["runs.get", "runs.build"]
+    assert resp.suggested_next_actions == ["runs.get", "runs.complete_build"]
     assert resp.data["required_cmdline"] == "panic_on_oops=1"
     assert resp.data["expected_boot_failure"] == "console_crash"
     assert resp.data["expected_boot_failure_detail"] == expected
@@ -869,8 +861,8 @@ def test_envelope_for_run_ready_boot_outcome_omitted_for_remote_libvirt() -> Non
 @pytest.mark.parametrize(
     ("state", "actions"),
     [
-        (RunState.CREATED, ["runs.get", "runs.build"]),
-        (RunState.RUNNING, ["runs.get", "runs.build"]),
+        (RunState.CREATED, ["runs.get", "runs.complete_build"]),
+        (RunState.RUNNING, ["runs.get", "runs.complete_build"]),
         (RunState.SUCCEEDED, ["runs.get", "runs.install"]),
         (RunState.CANCELED, ["runs.get"]),
     ],
@@ -931,7 +923,7 @@ def test_get_created_run(migrated_url: str) -> None:
             run_id = await _seed_run(pool, state=RunState.CREATED)
             resp = await get_run(pool, _ctx(), run_id)
         assert resp.status == "created"
-        assert resp.suggested_next_actions == ["runs.get", "runs.build"]
+        assert resp.suggested_next_actions == ["runs.get", "runs.complete_build"]
 
     asyncio.run(_run())
 
@@ -1689,30 +1681,24 @@ def test_get_run_surfaces_expected_boot_failure_matched_line(migrated_url: str) 
     asyncio.run(_run())
 
 
-def _create_result(*, is_external: bool) -> RunCreateResult:
+def _create_result() -> RunCreateResult:
     return RunCreateResult(
         run_id=uuid4(),
         project="proj",
         investigation_id=uuid4(),
         target_kind=ResourceKind.LOCAL_LIBVIRT,
         system_id=None,
-        is_external=is_external,
     )
 
 
-def test_created_response_external_chains_to_the_upload_loop() -> None:
-    resp = _created_response(_create_result(is_external=True))
+def test_created_response_chains_to_the_upload_loop() -> None:
+    resp = _created_response(_create_result())
     assert resp.status == "created"
     assert resp.suggested_next_actions == [
         "runs.get",
         "artifacts.expected_uploads",
         "artifacts.create_run_upload",
     ]
-
-
-def test_created_response_server_chains_to_build() -> None:
-    resp = _created_response(_create_result(is_external=False))
-    assert resp.suggested_next_actions == ["runs.get", "runs.build"]
 
 
 def test_create_external_run_chains_to_upload_loop(migrated_url: str) -> None:
@@ -1727,7 +1713,7 @@ def test_create_external_run_chains_to_upload_loop(migrated_url: str) -> None:
                 _ctx(),
                 inv_id,
                 sys_id,
-                profile={"schema_version": 1, "source": "external"},
+                profile={"schema_version": 1},
             )
         assert resp.status == "created"
         assert resp.suggested_next_actions == [
@@ -1914,7 +1900,7 @@ def test_create_first_run_flips_investigation_active(migrated_url: str) -> None:
                 )
                 flip = await cur.fetchone()
         assert run_row is not None and run_row["state"] == "created"
-        assert run_row["build_profile"]["source"] == "server"
+        assert run_row["build_profile"] == {"schema_version": 1}
         assert inv_row is not None and inv_row["state"] == "active"
         assert inv_row["last_run_at"] is not None
         assert flip is not None and flip["n"] == 1
@@ -1950,7 +1936,7 @@ def test_create_unbound_run_succeeds(migrated_url: str) -> None:
         assert row["target_kind"] == "local-libvirt"
         assert resp.data["system_id"] is None
         assert resp.data["target_kind"] == "local-libvirt"
-        assert "runs.build" in resp.suggested_next_actions
+        assert "artifacts.expected_uploads" in resp.suggested_next_actions
         assert inv is not None and inv["state"] == "active"
 
     asyncio.run(_run())
@@ -2277,9 +2263,9 @@ def test_create_non_dict_build_profile_is_config_error(migrated_url: str) -> Non
 
 
 def test_create_bare_url_build_profile_does_not_leak_token(migrated_url: str) -> None:
-    # ADR-0242 / ADR-0029: a bare-URL kernel_source_ref that carries a credential must not
-    # appear anywhere in the response — neither in data, detail, nor as a literal "input" key.
-    # The error propagates through BuildProfile.parse (include_input=False) → RunCreateError →
+    # A build_profile carrying a credential-looking value in an unknown field must not appear
+    # anywhere in the response — neither in data, detail, nor as a literal "input" key. The
+    # error propagates through BuildProfile.parse (include_input=False) → RunCreateError →
     # ToolResponse.failure_from_error; this test asserts the full pipeline is leak-free.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -2742,27 +2728,9 @@ def test_reuse_does_not_deadlock_against_release_under_lock_order(migrated_url: 
     asyncio.run(_run())
 
 
-# --- runs.build (synchronous admission) ----------------------------------------------
+# --- shared build fixtures + helpers -------------------------------------------------
 
-_VALID_BUILD: dict[str, Any] = {
-    "schema_version": 1,
-    "kernel_source_ref": "git+https://git.kernel.org#v6.9",
-    "config": {"kind": "local", "path": "/configs/kdump.config"},
-}
-_TEST_COMPONENT_SOURCES = ComponentSourceCapabilities(
-    provider="test-provider",
-    accepted_component_sources={ComponentKind.CONFIG: frozenset({"local"})},
-)
-_BUILD_HANDLERS = BuildRunHandlers(_TEST_COMPONENT_SOURCES)
-# A provider that accepts the catalog config source (local-libvirt/remote-libvirt under ADR-0096).
-_CATALOG_COMPONENT_SOURCES = ComponentSourceCapabilities(
-    provider="catalog-provider",
-    accepted_component_sources={ComponentKind.CONFIG: frozenset({"catalog", "local"})},
-)
-
-
-async def _build(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) -> Any:
-    return await _BUILD_HANDLERS.build_run(pool, ctx, run_id)
+_VALID_BUILD: dict[str, Any] = {"schema_version": 1}
 
 
 async def _count(pool: AsyncConnectionPool, query: LiteralString, params: tuple[Any, ...]) -> int:
@@ -2781,688 +2749,17 @@ async def _system_id_of(pool: AsyncConnectionPool, run_id: str) -> str:
     return str(row["system_id"])
 
 
-def test_build_created_run_flips_running_and_enqueues(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_run(
-                pool, state=RunState.CREATED, build_profile=copy.deepcopy(_VALID_BUILD)
-            )
-            resp = await _build(pool, _ctx(), run_id)
-            assert resp.status == "queued"
-            assert resp.data["run_id"] == run_id
-            assert "jobs.wait" in resp.suggested_next_actions
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM runs WHERE id = %s", (run_id,))
-                run_row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM jobs WHERE kind='build' AND dedup_key=%s",
-                    (f"{run_id}:build",),
-                )
-                jobs = await cur.fetchone()
-        assert run_row is not None and run_row["state"] == "running"
-        assert jobs is not None and jobs["n"] == 1
+# --- build-job fixtures --------------------------------------------------------------
 
-    asyncio.run(_run())
-
-
-def test_build_is_idempotent_returns_same_job(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_run(
-                pool, state=RunState.CREATED, build_profile=copy.deepcopy(_VALID_BUILD)
-            )
-            r1 = await _build(pool, _ctx(), run_id)
-            r2 = await _build(pool, _ctx(), run_id)
-            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs", ())
-        assert r1.object_id == r2.object_id  # same job (dedup)
-        assert njobs == 1
-
-    asyncio.run(_run())
-
-
-def test_build_on_succeeded_run_returns_same_job_no_transition(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_run(
-                pool, state=RunState.CREATED, build_profile=copy.deepcopy(_VALID_BUILD)
-            )
-            first = await _build(pool, _ctx(), run_id)
-            # Drive the Run to succeeded directly (the handler would do this).
-            async with pool.connection() as conn:
-                await conn.execute("UPDATE runs SET state='running' WHERE id=%s", (run_id,))
-                await conn.execute("UPDATE runs SET state='succeeded' WHERE id=%s", (run_id,))
-            again = await _build(pool, _ctx(), run_id)
-            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs", ())
-        assert again.object_id == first.object_id
-        assert njobs == 1
-
-    asyncio.run(_run())
-
-
-def test_build_malformed_profile_is_config_error_no_job(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_run(
-                pool, state=RunState.CREATED, build_profile={"schema_version": 2}
-            )
-            resp = await _build(pool, _ctx(), run_id)
-            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs", ())
-            ncreated = await _count(
-                pool, "SELECT count(*) AS n FROM runs WHERE id=%s AND state='created'", (run_id,)
-            )
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert njobs == 0
-        assert ncreated == 1  # the Run is untouched (still created), not flipped
-
-    asyncio.run(_run())
-
-
-def test_build_rejects_unsupported_artifact_config_before_state_change(
-    migrated_url: str,
-) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            profile = {
-                **copy.deepcopy(_VALID_BUILD),
-                "config": {
-                    "kind": "artifact",
-                    "artifact_id": "00000000-0000-0000-0000-000000000001",
-                    "sha256": "sha256:" + "1" * 64,
-                },
-            }
-            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
-
-            resp = await _BUILD_HANDLERS.build_run(
-                pool,
-                _ctx(Role.OPERATOR),
-                run_id,
-            )
-
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM runs WHERE id = %s", (run_id,))
-                run_row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM jobs WHERE kind='build' AND dedup_key=%s",
-                    (f"{run_id}:build",),
-                )
-                jobs = await cur.fetchone()
-
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert run_row is not None and run_row["state"] == "created"
-        assert jobs is not None and jobs["n"] == 0
-
-    asyncio.run(_run())
-
-
-def test_build_rejects_local_config_outside_provider_roots_before_state_change(
-    migrated_url: str, tmp_path: Path
-) -> None:
-    outside = tmp_path / "outside.config"
-    outside.write_text("CONFIG_CRASH_DUMP=y\n", encoding="utf-8")
-    calls: list[Any] = []
-
-    def _reject_config(config: Any) -> None:
-        calls.append(config)
-        raise CategorizedError(
-            "config is outside provider roots",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
-
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            profile = {
-                **copy.deepcopy(_VALID_BUILD),
-                "config": {"kind": "local", "path": str(outside)},
-            }
-            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
-
-            resp = await BuildRunHandlers(
-                _TEST_COMPONENT_SOURCES,
-                config_validator=_reject_config,
-            ).build_run(
-                pool,
-                _ctx(Role.OPERATOR),
-                run_id,
-            )
-
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM runs WHERE id = %s", (run_id,))
-                run_row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM jobs WHERE kind='build' AND dedup_key=%s",
-                    (f"{run_id}:build",),
-                )
-                jobs = await cur.fetchone()
-
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert run_row is not None and run_row["state"] == "created"
-        assert jobs is not None and jobs["n"] == 0
-
-    asyncio.run(_run())
-    assert len(calls) == 1
-
-
-def test_build_omitted_config_validates_kdump_catalog_default(migrated_url: str) -> None:
-    # ADR-0096: an omitted config substitutes the kdump catalog ref BEFORE validation, so a
-    # provider that accepts the catalog source admits the build and the validator sees that ref.
-    validated: list[Any] = []
-
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            profile = {
-                "schema_version": 1,
-                "kernel_source_ref": "git+https://git.kernel.org#v6.9",
-            }
-            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
-
-            resp = await BuildRunHandlers(
-                _CATALOG_COMPONENT_SOURCES,
-                config_validator=validated.append,
-            ).build_run(pool, _ctx(Role.OPERATOR), run_id)
-
-        assert resp.status == "queued"
-        assert validated == [CatalogComponentRef(kind="catalog", provider="system", name="kdump")]
-
-    asyncio.run(_run())
-
-
-def test_build_omitted_config_rejected_when_provider_lacks_catalog_source(
-    migrated_url: str,
-) -> None:
-    # A provider that does NOT accept the catalog source rejects an omitted config at
-    # run-creation (the substituted kdump catalog ref is unsupported), before any state change.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            profile = {
-                "schema_version": 1,
-                "kernel_source_ref": "git+https://git.kernel.org#v6.9",
-            }
-            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
-
-            resp = await _BUILD_HANDLERS.build_run(pool, _ctx(Role.OPERATOR), run_id)
-
-            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs", ())
-            ncreated = await _count(
-                pool, "SELECT count(*) AS n FROM runs WHERE id=%s AND state='created'", (run_id,)
-            )
-
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert njobs == 0
-        assert ncreated == 1
-
-    asyncio.run(_run())
-
-
-@pytest.mark.parametrize("state", [RunState.FAILED, RunState.CANCELED])
-def test_build_on_terminal_run_is_config_error(migrated_url: str, state: RunState) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_run(pool, state=state, build_profile=copy.deepcopy(_VALID_BUILD))
-            resp = await _build(pool, _ctx(), run_id)
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert resp.data["current_status"] == state.value
-
-    asyncio.run(_run())
-
-
-def test_build_terminal_run_checks_state_before_capacity(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            host_id = await _insert_ssh_host(pool, name="full-terminal-host", max_concurrent=1)
-            async with pool.connection() as conn:
-                await conn.execute(
-                    "INSERT INTO build_host_leases (run_id, build_host_id) VALUES (%s, %s)",
-                    (uuid4(), host_id),
-                )
-            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "full-terminal-host"}
-            run_id = await _seed_run(pool, state=RunState.FAILED, build_profile=profile)
-
-            resp = await _build(pool, _ctx(), run_id)
-            nleases = await _lease_count(pool, host_id)
-            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
-
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert resp.data["current_status"] == "failed"
-        assert "runs.build" not in resp.suggested_next_actions
-        assert nleases == 1
-        assert njobs == 0
-
-    asyncio.run(_run())
-
-
-def test_build_missing_run_is_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await _build(pool, _ctx(), str(uuid4()))
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-
-    asyncio.run(_run())
-
-
-def test_build_cross_project_is_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_run(
-                pool, state=RunState.CREATED, build_profile=copy.deepcopy(_VALID_BUILD)
-            )
-            resp = await _build(pool, _ctx(projects=("other",)), run_id)
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-
-    asyncio.run(_run())
-
-
-def test_build_malformed_uuid_is_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await _build(pool, _ctx(), "not-a-uuid")
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-
-    asyncio.run(_run())
-
-
-def test_build_without_operator_raises(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_run(
-                pool, state=RunState.CREATED, build_profile=copy.deepcopy(_VALID_BUILD)
-            )
-            with pytest.raises(AuthorizationError):
-                await _build(pool, _ctx(Role.VIEWER), run_id)
-
-    asyncio.run(_run())
-
-
-def test_build_concurrent_flips_once(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_run(
-                pool, state=RunState.CREATED, build_profile=copy.deepcopy(_VALID_BUILD)
-            )
-            r1, r2 = await asyncio.gather(
-                _build(pool, _ctx(), run_id), _build(pool, _ctx(), run_id)
-            )
-            assert {r1.status, r2.status} == {"queued"}
-            assert r1.object_id == r2.object_id  # one job
-            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs", ())
-            nflips = await _count(
-                pool,
-                "SELECT count(*) AS n FROM audit_log WHERE transition='created->running' "
-                "AND object_id=%s",
-                (run_id,),
-            )
-        assert njobs == 1
-        assert nflips == 1
-
-    asyncio.run(_run())
-
-
-# --- runs.build: build-host selection + capacity admission (#342) --------------------
-
-from kdive.db.build_hosts import WORKER_LOCAL_ID  # noqa: E402
-
-# A git kernel_source_ref in the {"git": {...}} discriminated form (ssh-host provenance).
-_GIT_BUILD: dict[str, Any] = {
-    "schema_version": 1,
-    "kernel_source_ref": {
-        "git": {
-            "remote": "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
-            "ref": "v6.12",
-        }
-    },
-    "config": {"kind": "local", "path": "/configs/kdump.config"},
-}
-
-
-# An ssh host seeded with max_concurrent=2 for capacity tests.
-async def _insert_ssh_host(
-    pool: AsyncConnectionPool,
-    *,
-    name: str = "build-ssh-1",
-    max_concurrent: int = 2,
-    enabled: bool = True,
-    state: str = "ready",
-) -> UUID:
-    async with pool.connection() as conn:
-        cur = await conn.execute(
-            "INSERT INTO build_hosts "
-            "  (name, kind, address, ssh_credential_ref, workspace_root,"
-            "   max_concurrent, enabled, state) "
-            "VALUES (%s, 'ssh', '10.0.0.5', 'ssh://cred/key', '/build', %s, %s, %s)"
-            " RETURNING id",
-            (name, max_concurrent, enabled, state),
-        )
-        row = await cur.fetchone()
-    assert row is not None
-    return row[0]
-
-
-async def _lease_count(pool: AsyncConnectionPool, host_id: UUID) -> int:
-    return await _count(
-        pool,
-        "SELECT count(*) AS n FROM build_host_leases WHERE build_host_id = %s",
-        (str(host_id),),
-    )
-
-
-async def _job_payload(pool: AsyncConnectionPool, run_id: str) -> dict[str, Any]:
-    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            "SELECT payload FROM jobs WHERE kind = 'build' AND dedup_key = %s",
-            (f"{run_id}:build",),
-        )
-        row = await cur.fetchone()
-    assert row is not None, f"no build job found for run {run_id}"
-    return row["payload"]  # type: ignore[return-value]
-
-
-def test_build_host_local_no_lease_enqueues_with_worker_local_id(migrated_url: str) -> None:
-    # A warm-tree profile with no build_host in the profile resolves to worker-local.
-    # Local hosts acquire no lease; the payload must carry WORKER_LOCAL_ID.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_run(
-                pool, state=RunState.CREATED, build_profile=copy.deepcopy(_VALID_BUILD)
-            )
-            resp = await _build(pool, _ctx(), run_id)
-            assert resp.status == "queued"
-            nleases = await _lease_count(pool, WORKER_LOCAL_ID)
-            payload = await _job_payload(pool, run_id)
-            state_row = await _count(
-                pool, "SELECT count(*) AS n FROM runs WHERE id=%s AND state='running'", (run_id,)
-            )
-        assert nleases == 0  # local host — no lease row
-        assert payload["build_host_id"] == str(WORKER_LOCAL_ID)
-        assert state_row == 1
-
-    asyncio.run(_run())
-
-
-def test_build_host_absent_name_is_not_found_no_job_no_state_change(migrated_url: str) -> None:
-    # A profile naming a host that does not exist → not_found; no job, no state flip.
-    async def _run() -> None:
-        profile = {**copy.deepcopy(_VALID_BUILD), "build_host": "no-such-host"}
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
-            resp = await _build(pool, _ctx(), run_id)
-            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
-            ncreated = await _count(
-                pool, "SELECT count(*) AS n FROM runs WHERE id=%s AND state='created'", (run_id,)
-            )
-        assert resp.status == "error" and resp.error_category == "not_found"
-        assert njobs == 0
-        assert ncreated == 1
-
-    asyncio.run(_run())
-
-
-def test_build_host_disabled_is_config_error_no_job(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            await _insert_ssh_host(pool, name="disabled-host", enabled=False)
-            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "disabled-host"}
-            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
-            resp = await _build(pool, _ctx(), run_id)
-            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
-            ncreated = await _count(
-                pool, "SELECT count(*) AS n FROM runs WHERE id=%s AND state='created'", (run_id,)
-            )
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert njobs == 0
-        assert ncreated == 1
-
-    asyncio.run(_run())
-
-
-def test_build_host_provenance_mismatch_ssh_with_warm_tree_is_config_error(
-    migrated_url: str,
-) -> None:
-    # An ssh host + warm-tree (string) kernel_source_ref → configuration_error.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            await _insert_ssh_host(pool, name="ssh-host-a")
-            profile = {**copy.deepcopy(_VALID_BUILD), "build_host": "ssh-host-a"}
-            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
-            resp = await _build(pool, _ctx(), run_id)
-            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert njobs == 0
-
-    asyncio.run(_run())
-
-
-def test_build_host_local_with_git_ref_is_admitted(migrated_url: str) -> None:
-    # ADR-0162: worker-local (local kind) + git kernel_source_ref is now admitted (the remote
-    # allowlist is enforced at build time on the worker, not at admission). The build job is
-    # enqueued and no capacity lease is taken for a local host.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            profile = copy.deepcopy(_GIT_BUILD)  # no build_host → resolves worker-local
-            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
-            resp = await _build(pool, _ctx(), run_id)
-            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
-            nleases = await _count(pool, "SELECT count(*) AS n FROM build_host_leases", ())
-        assert resp.status == "queued"
-        assert njobs == 1
-        assert nleases == 0  # local builds take no capacity lease
-
-    asyncio.run(_run())
-
-
-def test_build_host_capacity_exhausted_no_lease_no_job_atomic_rollback(migrated_url: str) -> None:
-    # Pre-fill all max_concurrent slots on the ssh host; a new run must get capacity_exhausted
-    # with no new lease row, no job, and the run state still 'created' (atomic rollback).
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            host_id = await _insert_ssh_host(pool, name="full-host", max_concurrent=2)
-            # Pre-insert leases for two OTHER runs to saturate capacity.
-            for _ in range(2):
-                other_run_id = uuid4()
-                async with pool.connection() as conn:
-                    await conn.execute(
-                        "INSERT INTO build_host_leases (run_id, build_host_id) VALUES (%s, %s)",
-                        (other_run_id, host_id),
-                    )
-            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "full-host"}
-            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
-            resp = await _build(pool, _ctx(), run_id)
-            nleases = await _lease_count(pool, host_id)
-            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
-            ncreated = await _count(
-                pool, "SELECT count(*) AS n FROM runs WHERE id=%s AND state='created'", (run_id,)
-            )
-        assert resp.status == "error" and resp.error_category == "capacity_exhausted"
-        assert "runs.build" in resp.suggested_next_actions
-        assert nleases == 2  # the pre-existing leases; no new one added
-        assert njobs == 0
-        assert ncreated == 1  # state not flipped (atomic rollback)
-
-    asyncio.run(_run())
-
-
-def test_build_host_ssh_free_slot_lease_and_job_committed_atomically(migrated_url: str) -> None:
-    # An ssh host with a free slot: lease row AND build job must both be present after commit.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            host_id = await _insert_ssh_host(pool, name="ssh-free", max_concurrent=3)
-            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "ssh-free"}
-            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
-            resp = await _build(pool, _ctx(), run_id)
-            nleases = await _lease_count(pool, host_id)
-            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
-            payload = await _job_payload(pool, run_id)
-        assert resp.status == "queued"
-        assert nleases == 1  # one lease for this run
-        assert njobs == 1
-        assert payload["build_host_id"] == str(host_id)
-
-    asyncio.run(_run())
-
-
-async def _insert_ephemeral_host(
-    pool: AsyncConnectionPool,
-    *,
-    name: str = "builders",
-    max_concurrent: int = 2,
-    enabled: bool = True,
-    state: str = "ready",
-) -> UUID:
-    async with pool.connection() as conn:
-        cur = await conn.execute(
-            "INSERT INTO build_hosts "
-            "  (name, kind, base_image_volume, workspace_root, max_concurrent, enabled, state) "
-            "VALUES (%s, 'ephemeral_libvirt', 'kdive-build-base.qcow2', '/build', %s, %s, %s)"
-            " RETURNING id",
-            (name, max_concurrent, enabled, state),
-        )
-        row = await cur.fetchone()
-    assert row is not None
-    return row[0]
-
-
-def test_build_host_ephemeral_provenance_mismatch_warm_tree_is_config_error(
-    migrated_url: str,
-) -> None:
-    # An ephemeral_libvirt host + warm-tree (string) kernel_source_ref → configuration_error.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            await _insert_ephemeral_host(pool, name="builders-a")
-            profile = {**copy.deepcopy(_VALID_BUILD), "build_host": "builders-a"}
-            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
-            resp = await _build(pool, _ctx(), run_id)
-            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert njobs == 0
-
-    asyncio.run(_run())
-
-
-def test_build_host_ephemeral_free_slot_lease_and_job_committed(migrated_url: str) -> None:
-    # An ephemeral_libvirt host with a free slot: git profile → lease row AND build job, both
-    # committed atomically; the BUILD payload carries the resolved host id.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            host_id = await _insert_ephemeral_host(pool, name="builders-free", max_concurrent=3)
-            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "builders-free"}
-            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
-            resp = await _build(pool, _ctx(), run_id)
-            nleases = await _lease_count(pool, host_id)
-            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
-            payload = await _job_payload(pool, run_id)
-        assert resp.status == "queued"
-        assert nleases == 1
-        assert njobs == 1
-        assert payload["build_host_id"] == str(host_id)
-
-    asyncio.run(_run())
-
-
-def test_build_running_replay_returns_existing_job_without_host_readmission(
-    migrated_url: str,
-) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            host_id = await _insert_ssh_host(pool, name="replay-host", max_concurrent=1)
-            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "replay-host"}
-            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
-            first = await _build(pool, _ctx(), run_id)
-            async with pool.connection() as conn:
-                await conn.execute(
-                    "UPDATE build_hosts SET enabled = false WHERE id = %s",
-                    (host_id,),
-                )
-            second = await _build(pool, _ctx(), run_id)
-            nleases = await _lease_count(pool, host_id)
-        assert first.status == "queued"
-        assert second.status == "queued"
-        assert second.object_id == first.object_id
-        assert nleases == 1
-
-    asyncio.run(_run())
-
-
-# --- runs.create: build-host <-> source-kind compatibility (#534) --------------------
-
-# An external-build profile (no kernel_source_ref, no build_host): the compat check skips it.
-_EXTERNAL_BUILD: dict[str, Any] = {"schema_version": 1, "source": "external"}
+WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"
 
 
 async def _run_count_on_system(pool: AsyncConnectionPool, system_id: str) -> int:
     return await _count(pool, "SELECT count(*) AS n FROM runs WHERE system_id = %s", (system_id,))
 
 
-def test_create_remote_host_with_warm_tree_is_config_error_no_run(migrated_url: str) -> None:
-    # ssh host + warm-tree (string) kernel_source_ref → rejected AT create; no run inserted.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            await _insert_ssh_host(pool, name="ssh-create")
-            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
-            sys_id = await _seed_system(pool)
-            profile = {**copy.deepcopy(_VALID_BUILD), "build_host": "ssh-create"}
-            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
-            nruns = await _run_count_on_system(pool, sys_id)
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert resp.detail == "a remote build host requires a git kernel_source_ref"
-        assert nruns == 0
-
-    asyncio.run(_run())
-
-
-def test_create_ephemeral_host_with_warm_tree_is_config_error_no_run(migrated_url: str) -> None:
-    # ephemeral_libvirt host + warm-tree string → rejected AT create with the remote message.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            await _insert_ephemeral_host(pool, name="eph-create")
-            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
-            sys_id = await _seed_system(pool)
-            profile = {**copy.deepcopy(_VALID_BUILD), "build_host": "eph-create"}
-            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
-            nruns = await _run_count_on_system(pool, sys_id)
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert resp.detail == "a remote build host requires a git kernel_source_ref"
-        assert nruns == 0
-
-    asyncio.run(_run())
-
-
-def test_create_local_host_with_git_ref_succeeds(migrated_url: str) -> None:
-    # ADR-0162: default worker-local (kind local) + git kernel_source_ref is now compatible at
-    # create (the remote is gated by the build-time allowlist); the run is created.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
-            sys_id = await _seed_system(pool)
-            profile = copy.deepcopy(_GIT_BUILD)  # no build_host → resolves worker-local
-            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
-            nruns = await _run_count_on_system(pool, sys_id)
-        assert resp.status == "created"
-        assert nruns == 1
-
-    asyncio.run(_run())
-
-
-def test_create_remote_host_with_git_ref_succeeds(migrated_url: str) -> None:
-    # ssh host + git ref → compatible; the run is created (no lease taken at create).
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            host_id = await _insert_ssh_host(pool, name="ssh-ok")
-            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
-            sys_id = await _seed_system(pool)
-            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "ssh-ok"}
-            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
-            nruns = await _run_count_on_system(pool, sys_id)
-            nleases = await _lease_count(pool, host_id)
-        assert resp.status == "created"
-        assert nruns == 1
-        assert nleases == 0  # create takes no build-host lease
-
-    asyncio.run(_run())
-
-
-def test_create_local_host_with_warm_tree_succeeds(migrated_url: str) -> None:
-    # default worker-local + warm-tree string → compatible; the run is created.
+def test_create_external_run_succeeds(migrated_url: str) -> None:
+    # Every profile is the flat external-upload profile; create inserts a CREATED run.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
@@ -3475,118 +2772,26 @@ def test_create_local_host_with_warm_tree_succeeds(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_create_absent_named_host_still_creates(migrated_url: str) -> None:
-    # A profile naming a host that is not registered: host existence is a build-time
-    # concern, so create does NOT reject — the run is inserted CREATED.
+def test_create_second_run_on_live_system_conflicts(migrated_url: str) -> None:
+    # A System that already has a non-terminal run rejects a second create with transport_conflict.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
-            sys_id = await _seed_system(pool)
-            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "no-such-host"}
-            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
-            nruns = await _run_count_on_system(pool, sys_id)
-        assert resp.status == "created"
-        assert nruns == 1
-
-    asyncio.run(_run())
-
-
-def test_create_external_profile_skips_compat_check(migrated_url: str) -> None:
-    # An external-build profile has no kernel_source_ref/build_host; the compat check is
-    # skipped and the run is created.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
-            sys_id = await _seed_system(pool)
-            resp = await _create(
-                pool, _ctx(), inv_id, sys_id, profile=copy.deepcopy(_EXTERNAL_BUILD)
-            )
-            nruns = await _run_count_on_system(pool, sys_id)
-        assert resp.status == "created"
-        assert nruns == 1
-
-    asyncio.run(_run())
-
-
-def test_create_live_run_precedes_compat_check(migrated_url: str) -> None:
-    # A System that already has a non-terminal run + an incompatible profile must return
-    # the live-run block (transport_conflict), NOT the compatibility error.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            await _insert_ssh_host(pool, name="ssh-order")
             inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
             sys_id = await _seed_system(pool)
             first = await _create(pool, _ctx(), inv_id, sys_id, profile=copy.deepcopy(_VALID_BUILD))
             assert first.status == "created"
-            profile = {**copy.deepcopy(_VALID_BUILD), "build_host": "ssh-order"}
-            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
+            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=copy.deepcopy(_VALID_BUILD))
         assert resp.status == "error" and resp.error_category == "transport_conflict"
 
     asyncio.run(_run())
 
 
-def test_build_backstop_rejects_when_host_kind_flips_after_create(migrated_url: str) -> None:
-    # Create-valid (local + warm-tree) then flip the host to ssh before build: the build-time
-    # check is the defense-in-depth backstop and still rejects an ssh+warm-tree pairing, with
-    # no build job. (ADR-0162 makes local+git valid, so the still-incompatible direction is a
-    # non-local host with a warm-tree source.)
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
-            sys_id = await _seed_system(pool)
-            profile = copy.deepcopy(_VALID_BUILD)  # warm-tree → resolves worker-local (local)
-            created = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
-            assert created.status == "created"
-            async with pool.connection() as conn:
-                await conn.execute(
-                    "UPDATE build_hosts SET kind = 'ssh', address = 'builder.example', "
-                    "ssh_credential_ref = 'ssh://builder' WHERE name = %s",
-                    ("worker-local",),
-                )
-            resp = await _build(pool, _ctx(), created.object_id)
-            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert resp.detail == "a remote build host requires a git kernel_source_ref"
-        assert njobs == 0
+# --- build-job seeding helpers (build worker retired; cancel tests still exercise inert
+# BUILD-kind jobs) --------------------------------------------------------------------
 
-    asyncio.run(_run())
-
-
-# --- build_handler (the worker) ------------------------------------------------------
-
-from kdive.build_artifacts.results import BuildOutput  # noqa: E402
 from kdive.jobs import queue  # noqa: E402
 from kdive.jobs.models import HandlerRegistry  # noqa: E402
 from kdive.jobs.payloads import BuildPayload, InstallPayload, RunPayload  # noqa: E402
-
-
-class _FakeBuilder:
-    """Records build() calls; returns a canned BuildOutput or raises."""
-
-    def __init__(self, *, error: ErrorCategory | None = None) -> None:
-        self.calls: list[UUID] = []
-        self._error = error
-
-    def build(self, run_id: UUID, profile: Any, **_: object) -> BuildOutput:
-        self.calls.append(run_id)
-        if self._error is not None:
-            raise CategorizedError("boom", category=self._error)
-        return BuildOutput(
-            kernel_ref=f"proj/runs/{run_id}/kernel",
-            debuginfo_ref=f"proj/runs/{run_id}/vmlinux",
-            build_id="abcdef0123456789",
-        )
-
-
-class _MissingBuildOutputBuilder:
-    """Raises the typed failure used when an expected build artifact is absent after make."""
-
-    def build(self, run_id: UUID, profile: Any, **_: object) -> BuildOutput:
-        raise CategorizedError(
-            "bzImage is missing or unreadable",
-            category=ErrorCategory.BUILD_FAILURE,
-            details={"output": "bzImage"},
-        )
 
 
 async def _enqueue_build_job(pool: AsyncConnectionPool, run_id: str) -> Job:
@@ -3617,315 +2822,6 @@ async def _build_job_for(conn: AsyncConnection, run_id: str) -> Job:
         row = await cur.fetchone()
     assert row is not None
     return Job.model_validate(row)
-
-
-def test_build_run_records_cmdline_in_the_build_ledger(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_run(
-                pool, state=RunState.CREATED, build_profile=copy.deepcopy(_VALID_BUILD)
-            )
-            env = await _BUILD_HANDLERS.build_run(
-                pool,
-                _ctx(Role.OPERATOR),
-                run_id,
-                cmdline="dhash_entries=1",
-            )
-            assert env.status != "error"
-            async with pool.connection() as conn:
-                job = await _build_job_for(conn, run_id)
-                await runs_handlers.build_handler(
-                    conn,
-                    job,
-                    resolver=provider_resolver(builder=_FakeBuilder()),
-                    secret_registry=SecretRegistry(),
-                )
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(
-                    "SELECT result FROM run_steps WHERE run_id=%s AND step='build'", (run_id,)
-                )
-                row = await cur.fetchone()
-            assert row is not None and row["result"]["cmdline"] == "dhash_entries=1"
-
-    asyncio.run(_run())
-
-
-def test_build_run_rejects_a_cmdline_that_overrides_platform_args(migrated_url: str) -> None:
-    # The agent's debug cmdline must not carry root=/console=/crashkernel= — the platform injects
-    # them (ADR-0061), and a duplicate would win on the kernel's last-occurrence rule.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_run(
-                pool, state=RunState.CREATED, build_profile=copy.deepcopy(_VALID_BUILD)
-            )
-            resp = await _BUILD_HANDLERS.build_run(
-                pool,
-                _ctx(Role.OPERATOR),
-                run_id,
-                cmdline="root=/dev/sda1 dhash_entries=1",
-            )
-            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs", ())
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert resp.data["reason"] == "cmdline_overrides_platform_args"
-        assert njobs == 0
-
-    asyncio.run(_run())
-
-
-def test_build_run_without_cmdline_records_none(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_run(
-                pool, state=RunState.CREATED, build_profile=copy.deepcopy(_VALID_BUILD)
-            )
-            await _BUILD_HANDLERS.build_run(
-                pool,
-                _ctx(Role.OPERATOR),
-                run_id,
-            )
-            async with pool.connection() as conn:
-                job = await _build_job_for(conn, run_id)
-                await runs_handlers.build_handler(
-                    conn,
-                    job,
-                    resolver=provider_resolver(builder=_FakeBuilder()),
-                    secret_registry=SecretRegistry(),
-                )
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(
-                    "SELECT result FROM run_steps WHERE run_id=%s AND step='build'", (run_id,)
-                )
-                row = await cur.fetchone()
-            assert row is not None and "cmdline" not in row["result"]
-
-    asyncio.run(_run())
-
-
-def test_build_handler_drives_run_succeeded_sets_refs(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_running_run(pool)
-            job = await _enqueue_build_job(pool, run_id)
-            builder = _FakeBuilder()
-            async with pool.connection() as conn:
-                result = await runs_handlers.build_handler(
-                    conn,
-                    job,
-                    resolver=provider_resolver(builder=builder),
-                    secret_registry=SecretRegistry(),
-                )
-            assert result == run_id
-            assert builder.calls == [UUID(run_id)]
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(
-                    "SELECT state, kernel_ref, debuginfo_ref FROM runs WHERE id=%s", (run_id,)
-                )
-                row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM run_steps WHERE run_id=%s AND step='build'",
-                    (run_id,),
-                )
-                steps = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM audit_log WHERE transition='running->succeeded' "
-                    "AND object_id=%s",
-                    (run_id,),
-                )
-                audit_n = await cur.fetchone()
-        assert row is not None and row["state"] == "succeeded"
-        assert row["kernel_ref"] == f"proj/runs/{run_id}/kernel"
-        assert row["debuginfo_ref"] == f"proj/runs/{run_id}/vmlinux"
-        assert steps is not None and steps["n"] == 1
-        assert audit_n is not None and audit_n["n"] == 1
-
-    asyncio.run(_run())
-
-
-def test_build_handler_replay_does_not_rebuild(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_running_run(pool)
-            job = await _enqueue_build_job(pool, run_id)
-            builder = _FakeBuilder()
-            async with pool.connection() as conn:
-                await runs_handlers.build_handler(
-                    conn,
-                    job,
-                    resolver=provider_resolver(builder=builder),
-                    secret_registry=SecretRegistry(),
-                )
-            # Re-dispatch the same job: the ledger short-circuits the rebuild.
-            async with pool.connection() as conn:
-                await runs_handlers.build_handler(
-                    conn,
-                    job,
-                    resolver=provider_resolver(builder=builder),
-                    secret_registry=SecretRegistry(),
-                )
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM runs WHERE id=%s", (run_id,))
-                row = await cur.fetchone()
-        assert builder.calls == [UUID(run_id)]  # built exactly once
-        assert row is not None and row["state"] == "succeeded"
-
-    asyncio.run(_run())
-
-
-def test_build_handler_build_failure_sets_run_failed(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_running_run(pool)
-            job = await _enqueue_build_job(pool, run_id)
-            builder = _FakeBuilder(error=ErrorCategory.BUILD_FAILURE)
-            async with pool.connection() as conn:
-                with pytest.raises(CategorizedError) as caught:
-                    await runs_handlers.build_handler(
-                        conn,
-                        job,
-                        resolver=provider_resolver(builder=builder),
-                        secret_registry=SecretRegistry(),
-                    )
-            assert caught.value.category is ErrorCategory.BUILD_FAILURE
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state, failure_category FROM runs WHERE id=%s", (run_id,))
-                row = await cur.fetchone()
-                await cur.execute("SELECT count(*) AS n FROM run_steps WHERE run_id=%s", (run_id,))
-                steps = await cur.fetchone()
-        assert row is not None and row["state"] == "failed"
-        assert row["failure_category"] == "build_failure"
-        assert steps is not None and steps["n"] == 0  # no ledger row on failure
-
-    asyncio.run(_run())
-
-
-def test_build_handler_missing_output_records_build_failure(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_running_run(pool)
-            job = await _enqueue_build_job(pool, run_id)
-            async with pool.connection() as conn:
-                with pytest.raises(CategorizedError) as caught:
-                    await runs_handlers.build_handler(
-                        conn,
-                        job,
-                        resolver=provider_resolver(builder=_MissingBuildOutputBuilder()),
-                        secret_registry=SecretRegistry(),
-                    )
-            assert caught.value.category is ErrorCategory.BUILD_FAILURE
-            assert caught.value.details == {"output": "bzImage"}
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state, failure_category FROM runs WHERE id=%s", (run_id,))
-                row = await cur.fetchone()
-        assert row is not None and row["state"] == "failed"
-        assert row["failure_category"] == "build_failure"
-
-    asyncio.run(_run())
-
-
-def test_build_handler_config_failure_sets_run_failed_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_running_run(pool)
-            job = await _enqueue_build_job(pool, run_id)
-            builder = _FakeBuilder(error=ErrorCategory.CONFIGURATION_ERROR)
-            async with pool.connection() as conn:
-                with pytest.raises(CategorizedError):
-                    await runs_handlers.build_handler(
-                        conn,
-                        job,
-                        resolver=provider_resolver(builder=builder),
-                        secret_registry=SecretRegistry(),
-                    )
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state, failure_category FROM runs WHERE id=%s", (run_id,))
-                row = await cur.fetchone()
-        assert row is not None and row["state"] == "failed"
-        assert row["failure_category"] == "configuration_error"
-
-    asyncio.run(_run())
-
-
-def test_build_handler_tolerates_concurrent_cancel(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_running_run(pool)
-            job = await _enqueue_build_job(pool, run_id)
-            # Cancel the Run before the handler finalizes (running → canceled).
-            async with pool.connection() as conn:
-                await conn.execute("UPDATE runs SET state='canceled' WHERE id=%s", (run_id,))
-            builder = _FakeBuilder()
-            async with pool.connection() as conn:
-                result = await runs_handlers.build_handler(
-                    conn,
-                    job,
-                    resolver=provider_resolver(builder=builder),
-                    secret_registry=SecretRegistry(),
-                )
-            assert result == run_id  # does not crash
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM runs WHERE id=%s", (run_id,))
-                row = await cur.fetchone()
-        assert row is not None and row["state"] == "canceled"  # cancel wins; build is inert
-
-    asyncio.run(_run())
-
-
-def test_build_handler_crash_window_re_dispatch_overwrites_no_orphan(migrated_url: str) -> None:
-    # Simulate a finalize crash: the first builder stores its artifacts then raises (after the
-    # puts). A re-dispatch with a succeeding builder must use the SAME deterministic keys and
-    # finalize without a second ledger row.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_running_run(pool)
-            job = await _enqueue_build_job(pool, run_id)
-            crashing = _FakeBuilder(error=ErrorCategory.BUILD_FAILURE)
-            async with pool.connection() as conn:
-                with pytest.raises(CategorizedError):
-                    await runs_handlers.build_handler(
-                        conn,
-                        job,
-                        resolver=provider_resolver(builder=crashing),
-                        secret_registry=SecretRegistry(),
-                    )
-            # The failure drove the Run terminal (failed); a real lease-lapse crash would not.
-            # Reset to running to model a crash that left no ledger row but the Run still running.
-            async with pool.connection() as conn:
-                await conn.execute(
-                    "UPDATE runs SET state='running', failure_category=NULL WHERE id=%s", (run_id,)
-                )
-            ok = _FakeBuilder()
-            async with pool.connection() as conn:
-                await runs_handlers.build_handler(
-                    conn,
-                    job,
-                    resolver=provider_resolver(builder=ok),
-                    secret_registry=SecretRegistry(),
-                )
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state, kernel_ref FROM runs WHERE id=%s", (run_id,))
-                row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM run_steps WHERE run_id=%s AND step='build'",
-                    (run_id,),
-                )
-                steps = await cur.fetchone()
-        assert row is not None and row["state"] == "succeeded"
-        assert row["kernel_ref"] == f"proj/runs/{run_id}/kernel"  # same deterministic key
-        assert steps is not None and steps["n"] == 1  # exactly one ledger row
-
-    asyncio.run(_run())
-
-
-def test_register_handlers_binds_build() -> None:
-    registry = HandlerRegistry()
-    runs_handlers.register_handlers(
-        registry,
-        ports=runs_handlers.RunHandlerPorts(
-            resolver=provider_resolver(builder=_FakeBuilder()),
-            secret_registry=SecretRegistry(),
-        ),
-    )
-    assert registry.get(JobKind.BUILD) is not None
 
 
 # --- runs.install / runs.boot (install + boot plane, #19) ----------------------------
@@ -5246,7 +4142,6 @@ def test_register_handlers_binds_install_and_boot() -> None:
         registry,
         ports=runs_handlers.RunHandlerPorts(
             resolver=provider_resolver(
-                builder=_FakeBuilder(),
                 installer=_FakeInstaller(),
                 booter=_FakeBooter(),
                 profile_policy=_LOCAL_POLICY,
@@ -6296,22 +5191,6 @@ def test_cancel_swallows_build_job_race_to_terminal(
     asyncio.run(_run())
 
 
-def test_finalize_build_after_cancel_does_not_resurrect_run(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_running_run(pool)
-            job = await _enqueue_build_job(pool, run_id)
-            await cancel_run(pool, _ctx(Role.OPERATOR), run_id)
-            result = run_steps.BuildStepResult(kernel_ref="k", debuginfo_ref="d", build_id="b")
-            async with pool.connection() as conn:
-                run = await RUNS.get(conn, UUID(run_id))
-                assert run is not None
-                await runs_shared.finalize_build(conn, job, run, result)
-            assert await _run_state(pool, run_id) == "canceled"
-
-    asyncio.run(_run())
-
-
 def test_run_envelope_surfaces_investigation_build_and_artifacts() -> None:
     inv_id = uuid4()
     run = Run(
@@ -6324,21 +5203,16 @@ def test_run_envelope_surfaces_investigation_build_and_artifacts() -> None:
         system_id=None,
         target_kind=ResourceKind.LOCAL_LIBVIRT,
         state=RunState.SUCCEEDED,
-        build_profile={
-            "source": "server",
-            "build_host": "build-1",
-            "kernel_source_ref": {"git": {"remote": "https://h/r", "ref": "main"}},
-        },
+        build_profile={"schema_version": 1},
         kernel_ref="s3://bucket/vmlinuz",
         debuginfo_ref="s3://bucket/vmlinux",
     )
     resp = runs_common.envelope_for_run(run)
     assert resp.data["investigation_id"] == str(inv_id)
-    assert resp.data["build_source"] == "server"
-    assert resp.data["build_host"] == "build-1"
-    assert resp.data["build_source_provenance"] == "git"
+    assert resp.data["build_source"] == "external"
+    assert "build_host" not in resp.data
+    assert "build_source_provenance" not in resp.data
     assert resp.refs == {"kernel": "s3://bucket/vmlinuz", "debuginfo": "s3://bucket/vmlinux"}
-    assert "h/r" not in str(resp.data)
 
 
 def test_failed_run_envelope_keeps_investigation_and_artifacts() -> None:

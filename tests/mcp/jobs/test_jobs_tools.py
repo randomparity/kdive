@@ -13,7 +13,6 @@ import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.domain.capacity.state import JobState
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
@@ -22,6 +21,9 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
 from kdive.mcp.tools import jobs as jobs_tools
 from kdive.security.authz.rbac import Role, RoleDenied
+
+WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
+
 
 CTX = RequestContext(principal="user-1", agent_session="s", projects=("proj",))
 OP_CTX = RequestContext(

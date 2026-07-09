@@ -13,18 +13,14 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.artifacts.storage import StoredArtifact
-from kdive.build_artifacts.results import BuildOutput
 from kdive.components.references import (
     CONFIG_COMPONENT,
     PATCH_COMPONENT,
-    LocalComponentRef,
 )
-from kdive.db.build_hosts import BuildHostKind
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.observability.console_telemetry import ConsoleTelemetry
-from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.assembly import composition
 from kdive.providers.core.discovery_registration import ProviderDiscoveryRegistration
@@ -44,7 +40,6 @@ from kdive.providers.ports.retrieve import (
     IntrospectOutput,
     LiveScriptOutput,
 )
-from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
 from kdive.providers.remote_libvirt.lifecycle.control import RemoteLibvirtControl
 from kdive.providers.remote_libvirt.lifecycle.install import RemoteLibvirtInstall
 from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtProvisioning
@@ -52,8 +47,6 @@ from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePo
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.security.secrets.secret_registry import SecretRegistry
-
-_RUN = UUID("22222222-2222-2222-2222-222222222222")
 
 _REMOTE_INVENTORY = """
 schema_version = 2
@@ -93,19 +86,6 @@ def _declare_no_remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
 
 
-def _build_profile() -> ServerBuildProfile:
-    profile = BuildProfile.parse(
-        {
-            "schema_version": 1,
-            "kernel_source_ref": "file:///src/linux",
-            "config": {"kind": "local", "path": "/configs/kdump.config"},
-            "patch_ref": None,
-        }
-    )
-    assert isinstance(profile, ServerBuildProfile)
-    return profile
-
-
 def _provisioning_profile() -> ProvisioningProfile:
     return ProvisioningProfile.parse(
         {
@@ -123,16 +103,6 @@ def _provisioning_profile() -> ProvisioningProfile:
             },
         }
     )
-
-
-class _BuildProvider:
-    def __init__(self) -> None:
-        self.calls: list[tuple[UUID, str]] = []
-
-    def build(self, run_id: UUID, profile: ServerBuildProfile, **_: object) -> BuildOutput:
-        assert isinstance(profile.config, LocalComponentRef)
-        self.calls.append((run_id, profile.config.path))
-        return BuildOutput(kernel_ref="k", debuginfo_ref="v", build_id="deadbeef")
 
 
 class _ProvisionProvider:
@@ -228,14 +198,12 @@ class _IntrospectorProvider:
 
 
 def test_provider_runtime_returns_typed_provider_ports_directly() -> None:
-    builder = _BuildProvider()
     install = _InstallProvider()
     retrieve = _RetrieveProvider()
     introspect = _IntrospectorProvider()
     runtime = ProviderRuntime(
         profile_policy=LocalLibvirtProfilePolicy(),
         provisioner=_ProvisionProvider(),
-        builder=builder,
         installer=install,
         booter=install,
         connector=_ConnectorProvider(),
@@ -246,10 +214,6 @@ def test_provider_runtime_returns_typed_provider_ports_directly() -> None:
         live_introspector=introspect,
     )
 
-    output = runtime.builder.build(_RUN, _build_profile())
-
-    assert output.build_id == "deadbeef"
-    assert builder.calls == [(_RUN, "/configs/kdump.config")]
     assert runtime.installer is install
     assert runtime.booter is install
 
@@ -267,12 +231,6 @@ def test_default_runtime_advertises_implemented_component_sources_only() -> None
         "patch": frozenset({"local"}),
         "vmlinux": frozenset({"local"}),
     }
-
-
-def test_default_runtime_exposes_build_config_validator() -> None:
-    runtime = composition.build_local_runtime(secret_registry=SecretRegistry())
-
-    assert runtime.build_config_validator is not None
 
 
 def test_default_runtime_exposes_rootfs_build_plane() -> None:
@@ -293,7 +251,6 @@ def test_provider_runtime_discovery_hook_is_optional() -> None:
     runtime = ProviderRuntime(
         profile_policy=LocalLibvirtProfilePolicy(),
         provisioner=_ProvisionProvider(),
-        builder=_BuildProvider(),
         installer=install,
         booter=install,
         connector=_ConnectorProvider(),
@@ -318,7 +275,6 @@ def test_provider_runtime_discovery_hook_noops_when_absent() -> None:
     runtime = ProviderRuntime(
         profile_policy=LocalLibvirtProfilePolicy(),
         provisioner=_ProvisionProvider(),
-        builder=_BuildProvider(),
         installer=install,
         booter=install,
         connector=_ConnectorProvider(),
@@ -647,46 +603,12 @@ def test_dump_volume_reaper_is_remote_when_enabled() -> None:
     assert isinstance(reaper, RemoteLibvirtDumpVolumeReaper)
 
 
-def test_build_vm_reaper_is_null_without_remote() -> None:
-    from kdive.providers.infra.reaping import NullBuildVmReaper
-
-    comp = composition.ProviderComposition()
-    reaper = comp.build_reconciler_build_vm_reaper(enable_remote_libvirt=False)
-    assert isinstance(reaper, NullBuildVmReaper)
-
-
-def test_build_vm_reaper_is_remote_when_enabled() -> None:
-    from kdive.providers.remote_libvirt.reaping.build_vm import RemoteLibvirtBuildVmReaper
-
-    comp = composition.ProviderComposition()
-    reaper = comp.build_reconciler_build_vm_reaper(enable_remote_libvirt=True)
-    assert isinstance(reaper, RemoteLibvirtBuildVmReaper)
-
-
 def test_console_hosting_is_none_without_remote() -> None:
     import asyncio
 
     comp = composition.ProviderComposition()
 
     assert asyncio.run(comp.build_reconciler_console_hosting(enable_remote_libvirt=False)) is None
-
-
-def test_build_host_prober_is_wired_independent_of_remote(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The SSH build-host prober is built unconditionally — not gated on remote-libvirt."""
-    from kdive.providers.remote_libvirt import config as remote_config
-    from kdive.providers.shared.build_host.reachability import BuildHostProber, SshBuildHostProber
-
-    # Force remote-libvirt to read as unconfigured; the prober must still be returned.
-    monkeypatch.setattr(remote_config, "is_remote_libvirt_configured", lambda: False)
-
-    expected_registry = SecretRegistry()
-    comp = composition.ProviderComposition(secret_registry=expected_registry)
-    prober = comp.build_reconciler_build_host_prober()
-    assert isinstance(prober, SshBuildHostProber)
-    assert isinstance(prober, BuildHostProber)
-    # The composition's shared registry is threaded into the prober (it redacts SSH
-    # credential refs); a null registry would break that redaction.
-    assert prober._secret_registry is expected_registry
 
 
 def test_console_hosting_delegates_to_remote_when_enabled(
@@ -814,19 +736,6 @@ def test_remote_discovery_registration_is_bind_only() -> None:
     assert registration.creates is False
 
 
-def test_build_host_transport_factories_follow_remote_libvirt_opt_in() -> None:
-    provider_composition = composition.ProviderComposition(secret_registry=SecretRegistry())
-
-    assert (
-        provider_composition.build_build_host_transport_factories(enable_remote_libvirt=False) == {}
-    )
-    factories = provider_composition.build_build_host_transport_factories(
-        enable_remote_libvirt=True
-    )
-
-    assert set(factories) == {BuildHostKind.EPHEMERAL_LIBVIRT}
-
-
 def test_build_runtime_helpers_thread_registry_and_real_discovery_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -934,8 +843,6 @@ def test_remote_factory_builders_thread_the_shared_registry(
 
     resetter_obj = object()
     dump_obj = object()
-    build_vm_obj = object()
-    transport_obj = object()
     monkeypatch.setattr(
         composition.remote_composition,
         "build_transport_resetter",
@@ -946,30 +853,15 @@ def test_remote_factory_builders_thread_the_shared_registry(
         "build_dump_volume_reaper",
         _capture("dump", dump_obj),
     )
-    monkeypatch.setattr(
-        composition.remote_composition,
-        "build_build_vm_reaper",
-        _capture("build_vm", build_vm_obj),
-    )
-    monkeypatch.setattr(
-        composition.remote_composition,
-        "build_ephemeral_build_transport_factory",
-        _capture("transport", transport_obj),
-    )
 
     expected_registry = SecretRegistry()
     comp = composition.ProviderComposition(secret_registry=expected_registry)
 
     assert comp.build_reconciler_transport_resetter(enable_remote_libvirt=True) is resetter_obj
     assert comp.build_reconciler_dump_volume_reaper(enable_remote_libvirt=True) is dump_obj
-    assert comp.build_reconciler_build_vm_reaper(enable_remote_libvirt=True) is build_vm_obj
-    factories = comp.build_build_host_transport_factories(enable_remote_libvirt=True)
-    assert factories[BuildHostKind.EPHEMERAL_LIBVIRT] is transport_obj
 
     assert seen["resetter"] is expected_registry
     assert seen["dump"] is expected_registry
-    assert seen["build_vm"] is expected_registry
-    assert seen["transport"] is expected_registry
 
 
 def test_remote_runtime_advertises_all_four_capture_methods() -> None:
@@ -1070,16 +962,6 @@ def test_remote_runtime_has_noop_rootfs_validator(monkeypatch: pytest.MonkeyPatc
     assert runtime.rootfs_validator is not None
 
 
-def test_remote_runtime_has_real_builder(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The remote Build plane is real from this issue on (ADR-0081); it must construct
-    # without operator config (the build env is read per op).
-    monkeypatch.delenv("KDIVE_REMOTE_LIBVIRT_URI", raising=False)
-
-    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
-
-    assert isinstance(runtime.builder, RemoteLibvirtBuild)
-
-
 def test_remote_runtime_exposes_rootfs_build_plane(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KDIVE_REMOTE_LIBVIRT_URI", raising=False)
 
@@ -1119,16 +1001,6 @@ def test_remote_runtime_wires_connect_and_introspect_ports(
     assert runtime.debug.attach_seam is remote_attach_seam
     assert isinstance(runtime.vmcore_introspector, RemoteLibvirtVmcoreIntrospect)
     assert isinstance(runtime.live_introspector, RemoteLibvirtLiveIntrospect)
-
-
-def test_remote_runtime_wires_build_config_validator(monkeypatch: pytest.MonkeyPatch) -> None:
-    # runs.build runs the config validator after the component-source gate; without it a
-    # remote build's config ref goes unvalidated. It must be the builder's validator.
-    monkeypatch.delenv("KDIVE_REMOTE_LIBVIRT_URI", raising=False)
-
-    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
-
-    assert runtime.build_config_validator is not None
 
 
 def test_remote_runtime_accepts_local_and_catalog_config_and_local_patch_sources() -> None:

@@ -22,9 +22,6 @@ NAMESPACE_TOC: dict[str, str] = {
     "allocations": "System capacity reservation, leasing, and release",
     "artifacts": "Run artifact access, uploads, and raw binary retrieval",
     "audit": "Audit log queries across operations",
-    "build_envs": "Available kernel build environment listing",
-    "build_hosts": "Build host registration, listing, and removal",
-    "buildconfig": "Kernel build configuration management",
     "control": "In-guest power cycling and crash injection (NMI / panic)",
     "debug": "Live GDB-based kernel debugging sessions (breakpoints, registers, memory)",
     "fixtures": "Test fixture profile listing and validation",
@@ -99,10 +96,6 @@ Namespace table of contents (prefix before the first dot):
 TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     # runs plane — verbs that describe what each step does
     "runs.boot": frozenset({"boot", "kernel", "start", "launch", "built", "load", "power"}),
-    "runs.build": frozenset({"build", "compile", "kernel", "modules", "source"}),
-    "runs.build_install_boot": frozenset(
-        {"build", "install", "boot", "kernel", "composite", "single", "pollable"}
-    ),
     "runs.install": frozenset({"install", "modules", "kernel", "load"}),
     "runs.create": frozenset({"create", "run", "investigation", "profile"}),
     "runs.get": frozenset({"get", "run", "status", "fetch", "lookup"}),
@@ -110,8 +103,6 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "runs.cancel": frozenset({"cancel", "stop", "abort", "run"}),
     "runs.bind": frozenset({"bind", "attach", "system", "run"}),
     "runs.complete_build": frozenset({"complete", "finish", "external", "build", "upload"}),
-    "runs.validate_profile": frozenset({"validate", "profile", "build", "check", "dry-run"}),
-    "runs.profile_examples": frozenset({"profile", "examples", "build", "template", "sample"}),
     # jobs
     "jobs.get": frozenset({"job", "status", "get", "fetch", "lookup", "result"}),
     "jobs.list": frozenset({"jobs", "list", "filter", "background", "running"}),

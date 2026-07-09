@@ -93,8 +93,8 @@ def test_bundled_with_ack_uses_post_install_migrate() -> None:
 
 def test_external_render_omits_post_install_migrate_hook() -> None:
     # The migrate Job must stay pre-* on the external path (the bundled path runs it post-install
-    # after the in-chart DB). The seed-build-configs hook is legitimately post-* on both paths, so
-    # assert on the migrate Job's phase, not a blanket output scan.
+    # after the in-chart DB). Assert on the migrate Job's phase specifically, not a blanket output
+    # scan.
     jobs = _jobs_by_name("config.KDIVE_DATABASE_URL=postgresql://x/y")
     assert "post-install" not in (jobs["migrate"]["phase"] or "")
     assert "pre-install" in jobs["migrate"]["phase"]
@@ -150,8 +150,8 @@ def _jobs_by_name(*set_args: str) -> dict[str, dict[str, Any]]:
     """Index every rendered Job by its metadata.name suffix.
 
     Returns ``{name_suffix: {"phase", "weight", "volumes", "args"}}``. Name-keyed because the
-    chart renders three Jobs (migrate, validate-systems, seed-build-configs) and the Kind-keyed
-    ``_hooks_by_kind`` cannot tell them apart.
+    chart renders two Jobs (migrate, validate-systems) and the Kind-keyed ``_hooks_by_kind``
+    cannot tell them apart.
     """
     res = _template(*set_args)
     assert res.returncode == 0, res.stderr
@@ -173,15 +173,6 @@ def _jobs_by_name(*set_args: str) -> dict[str, dict[str, Any]]:
             "env_names": [e["name"] for e in container.get("env", [])],
         }
     return jobs
-
-
-def test_seed_build_configs_is_post_hook_after_migrate() -> None:
-    jobs = _jobs_by_name("config.KDIVE_DATABASE_URL=postgresql://x/y")
-    s = jobs["seed-build-configs"]
-    assert "post-install" in s["phase"] and "post-upgrade" in s["phase"]
-    assert s["weight"] > jobs["migrate"]["weight"]  # runs after migrate
-    assert s["args"] == ["seed-build-configs"]
-    assert "kdive-systems" not in s["volumes"]  # seed does not read systems.toml
 
 
 def test_validate_hook_rendered_only_with_systems_configmap() -> None:

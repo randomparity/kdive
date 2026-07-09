@@ -11,7 +11,6 @@ import kdive.config as config
 from kdive.__main__ import build_parser
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.observability.facade import Telemetry
-from kdive.providers.infra.reaping import NullBuildVmReaper
 from kdive.reconciler.loop import ReconcileConfig
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
@@ -114,7 +113,6 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     expected_reaper = object()
     expected_resetter = object()
     expected_dump_volume_reaper = object()
-    expected_build_host_prober = object()
     expected_registry = SecretRegistry()
 
     class _FakeProviderComposition:
@@ -132,12 +130,6 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
 
         def build_reconciler_dump_volume_reaper(self) -> object:
             return expected_dump_volume_reaper
-
-        def build_reconciler_build_vm_reaper(self) -> object:
-            return NullBuildVmReaper()
-
-        def build_reconciler_build_host_prober(self) -> object:
-            return expected_build_host_prober
 
         async def build_reconciler_console_hosting(
             self,
@@ -157,7 +149,6 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
         config = cast(ReconcileConfig, kw["config"])
         constructed["resetter"] = config.resetter
         constructed["dump_volume_reaper"] = config.dump_volume_reaper
-        constructed["build_host_prober"] = config.build_host_prober
 
     async def _fake_run(self: object, stop: object) -> None:
         events.append("run")
@@ -176,4 +167,3 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     assert constructed["reaper"] is expected_reaper
     assert constructed["resetter"] is expected_resetter
     assert constructed["dump_volume_reaper"] is expected_dump_volume_reaper
-    assert constructed["build_host_prober"] is expected_build_host_prober

@@ -16,9 +16,11 @@ import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
-from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.reconciler.loop import _repair_abandoned_jobs
 from tests.adversarial.conftest import one, open_conn, seed_run
+
+WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
+
 
 _AUTHORIZING = {"principal": "reconciler-test", "agent_session": None, "project": "test"}
 

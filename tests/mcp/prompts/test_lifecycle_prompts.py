@@ -113,8 +113,7 @@ def test_each_prompt_renders_nonempty_body_naming_every_step_tool() -> None:
 
 
 def test_build_boot_debug_leads_with_external_upload_loop() -> None:
-    # ADR-0234: the build_boot_debug journey leads with the external upload loop and notes
-    # that warm-tree server build is the secondary single-host path.
+    # ADR-0234: the build_boot_debug journey is the external upload loop end to end.
     spec = next(s for s in CANONICAL_PROMPTS if s.name == "build_boot_debug")
     tools = [step.tool for step in spec.steps]
     upload_loop = [
@@ -124,18 +123,10 @@ def test_build_boot_debug_leads_with_external_upload_loop() -> None:
         "runs.complete_build",
     ]
     assert tools[: len(upload_loop)] == upload_loop
-    # runs.build (the warm-tree enqueue verb) is no longer a step in the default journey.
+    # runs.build (the warm-tree enqueue verb) is no longer a step in the journey.
     assert "runs.build" not in tools
-    lowered = spec.summary.lower()
-    assert "external upload is the default" in lowered
-    assert "secondary single-host" in lowered
-
-
-def test_build_boot_debug_names_the_composite() -> None:
-    # #940: the composite must be signposted so an agent following the canonical recipe
-    # learns the ceremony-reducing tool exists.
-    spec = next(s for s in CANONICAL_PROMPTS if s.name == "build_boot_debug")
-    assert "runs.build_install_boot" in spec.summary
+    assert "runs.complete_build" in spec.summary
+    assert "upload" in spec.summary.lower()
 
 
 def test_render_numbers_steps_sequentially_from_one_on_their_own_lines() -> None:

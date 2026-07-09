@@ -22,7 +22,6 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import Authorizing, BuildPayload
@@ -31,6 +30,8 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.ops import queue as ops_queue
 from kdive.security.authz.rbac import PlatformRole
 from tests.mcp.json_data import data_int
+
+WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
 
 
 def _ctx(

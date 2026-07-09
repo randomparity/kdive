@@ -29,44 +29,12 @@ Boot an installed run.
 
 To iterate boot parameters (e.g. `dhash_entries=1`), pass `cmdline` to `runs.install`
 against the built kernel — no rebuild — then boot here; `runs.boot` takes no cmdline. Extra
-args can also be bound at build via `runs.build`/`runs.complete_build`.
+args can also be bound at build via `runs.complete_build`.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `run_id` | string | yes | The Run whose installed kernel to boot. |
-
-## `runs.build`
-
-`implemented`
-
-Enqueue a kernel build for a run.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `cmdline` | string (nullable) | no | Kernel debug args appended to the platform-required boot args (e.g. 'dhash_entries=1'). Omit for no extra debug args. Bound on the first build of a Run. |
-| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
-| `run_id` | string | yes | The Run to build. |
-
-## `runs.build_install_boot`
-
-`implemented`
-
-Build, install, and boot a bound Run as a single pollable job.
-
-Performs build-host admission (same as runs.build) then enqueues one
-BUILD_INSTALL_BOOT job. Requires operator role — the composite includes install
-and boot, whose gate is operator. Poll the returned job handle with jobs.wait.
-
-This one-shot uses the default kdump crash-capture reservation. For a larger
-reservation (a KASAN kernel or a large guest), use the granular path instead —
-runs.build, then runs.install with a crashkernel size, then runs.boot.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `cmdline` | string (nullable) | no | Kernel debug args appended to the platform-required boot args (e.g. 'dhash_entries=1'). Bound at build time and applied through install and boot. Omit for no extra debug args. |
-| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
-| `run_id` | string | yes | A created, bound, not-yet-built Run to drive build->install->boot as a single pollable job. The Run must use a source='server' build profile. Poll the returned job with jobs.wait. |
 
 ## `runs.cancel`
 
@@ -100,47 +68,13 @@ Create a run, bound to a system or unbound against a target_kind.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object | yes | Run creation request. After source='external', call artifacts.expected_uploads and artifacts.create_run_upload, then runs.complete_build. Extra kernel cmdline args are passed later as `cmdline` on runs.build for server builds, or runs.complete_build for external builds. |
+| `request` | object | yes | Run creation request. After runs.create, call artifacts.expected_uploads and artifacts.create_run_upload, then runs.complete_build. Extra kernel cmdline args are passed later as `cmdline` on runs.complete_build. |
 
 `request` fields:
 
 - `investigation_id` (`string`, required) — Investigation to attach the Run to.
-- `build_profile` (`object(source=external) \| object(source=server)`, required) — Build profile for the Run's kernel. The recommended default is source='external': ingest a prebuilt artifact. After runs.create with source='external', call artifacts.expected_uploads to learn the exact bytes to produce, artifacts.create_run_upload to upload, then runs.complete_build (where you may also record the optional source_label/source_ref provenance of the tree you built from - an unverified client claim, surfaced in runs.get data.build_provenance). source='server' builds from a kernel tree (kernel_source_ref required) and is a single-host convenience: for a local build host a warm-tree kernel_source_ref is a provenance label only - it does not select the tree; the operator stages the actual source via KDIVE_KERNEL_SRC on the worker. That lane builds the worker's working-tree state, not HEAD: runs.get reports data.build_provenance.{label, resolved_commit (the HEAD the tree is based on, decorative when dirty), dirty (bool), and when dirty: untracked (bool), tree_sha (content digest of tracked changes), dirty_files (changed tracked paths, capped with dirty_files_truncated)} - tracked git state only. For a source='server' build, the optional 'config' is a catalog ComponentRef: paste the config_ref that buildconfig.set/list/get echo (e.g. {'kind':'catalog','provider':'system','name':'kdump'}), which fills in the required provider for you. Omit it to get the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named fragment - its merge_recipe shows the fragment layers onto defconfig (make defconfig, then merge_config.sh, then make olddefconfig), so a from-source build keeps defconfig's base rootfs/boot options and you only add on top - and runs.validate_profile to pre-flight a profile without creating a Run. Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the cmdline parameter to runs.build for server builds, or to runs.complete_build for external builds. See resource://kdive/docs/operating/external-build-upload.md for shaping a source='external' upload, or resource://kdive/docs/operating/build-source-staging.md for staging a server-build source.
-  - _variant object(source=external):_
-    - `schema_version` (``=1``, required)
-    - `source` (``=external``, required)
-    - `profile_requirements` (`object (nullable)`, optional)
-      - `provider` (`string`, required)
-      - `name` (`string`, required)
-  - _variant object(source=server):_
-    - `schema_version` (``=1``, required)
-    - `source` (``=server``, optional)
-    - `kernel_source_ref` (`string \| object`, required)
-      - `git` (`object`, required) — Remote + ref coordinates for a git-cloned kernel source.
-        - `remote` (`string`, required)
-        - `ref` (`string`, required)
-    - `config` (`object(kind=local) \| object(kind=artifact) \| object(kind=component-upload) \| object(kind=catalog) (nullable)`, optional)
-      - _variant object(kind=local):_
-        - `kind` (``=local``, required)
-        - `path` (`string`, required)
-        - `sha256` (`string (nullable)`, optional)
-      - _variant object(kind=artifact):_
-        - `kind` (``=artifact``, required)
-        - `artifact_id` (`string`, required)
-        - `sha256` (`string (nullable)`, optional)
-      - _variant object(kind=component-upload):_
-        - `kind` (``=component-upload``, required)
-        - `upload_id` (`string`, required)
-        - `sha256` (`string (nullable)`, optional)
-      - _variant object(kind=catalog):_
-        - `kind` (``=catalog``, required)
-        - `provider` (`string`, required)
-        - `name` (`string`, required)
-    - `profile_requirements` (`object (nullable)`, optional)
-      - `provider` (`string`, required)
-      - `name` (`string`, required)
-    - `patch_ref` (`string (nullable)`, optional)
-    - `build_host` (`string (nullable)`, optional)
+- `build_profile` (`object(schema_version=1)`, required) — Build profile for the Run's kernel: a thin document, currently just {'schema_version': 1}. The kernel is built locally and uploaded, so no source tree or config is named here. After runs.create, call artifacts.expected_uploads to learn the exact bytes to produce, artifacts.create_run_upload to upload, then runs.complete_build (where you may also record the optional source_label/source_ref provenance of the tree you built from - an unverified client claim, surfaced in runs.get data.build_provenance). Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the cmdline parameter to runs.complete_build. See resource://kdive/docs/operating/external-build-upload.md for shaping an upload.
+  - `schema_version` (``=1``, required)
 - `system_id` (`string (nullable)`, optional) — Ready System to bind now. Omit to create an unbound Run that targets `target_kind` and is bound later with runs.bind.
 - `target_kind` (`string (nullable)`, optional) — Resource kind the Run builds for. Required when system_id is omitted; derived from the System when system_id is set.
 - `expected_boot_failure` (`object(free-form) (nullable)`, optional) — Optional declared boot crash. Use a named preset for a maintained, version- and arch-robust signature: {'kind':'panic'}, {'kind':'oops'}, or {'kind':'hung_task'} - a preset takes no 'pattern' and expands to a canonical kernel console signature. For a custom signature use {'kind':'console_crash','pattern':'Unable to handle kernel'}; a preset and a custom 'pattern' are mutually exclusive. The pattern is matched as a case-sensitive literal substring (not a regex), tested line-by-line against the redacted console log; a single line containing the substring is a match. Use '|' to OR alternatives (e.g. 'Oops|Unable to handle kernel') - up to 16 terms, 256 characters total, each term non-empty. A match makes the expected crash the Run's success outcome.
@@ -154,37 +88,11 @@ Create a run, bound to a system or unbound against a target_kind.
 
 `build_profile` examples:
 
-_external lane, recommended default (ingest a prebuilt artifact):_
+_external-upload lane (build locally, upload the prebuilt artifact):_
 
 ```json
 {
-  "schema_version": 1,
-  "source": "external"
-}
-```
-
-_server lane, warm-tree source (single-host convenience):_
-
-```json
-{
-  "schema_version": 1,
-  "source": "server",
-  "kernel_source_ref": "v6.9"
-}
-```
-
-_server lane, git source:_
-
-```json
-{
-  "schema_version": 1,
-  "source": "server",
-  "kernel_source_ref": {
-    "git": {
-      "remote": "https://git.kernel.org/.../linux.git",
-      "ref": "v6.9"
-    }
-  }
+  "schema_version": 1
 }
 ```
 
@@ -195,8 +103,7 @@ _server lane, git source:_
 Return one run; `succeeded` means build done. `data.steps` has install/boot status.
 
 `data.required_cmdline` is the platform-required boot args; append extra kernel debug
-args (e.g. `dhash_entries=1`) with the `cmdline` parameter on `runs.build` for server
-builds, or `runs.complete_build` for external builds.
+args (e.g. `dhash_entries=1`) with the `cmdline` parameter on `runs.complete_build`.
 
 Console evidence: `refs.console` is the boot-window console snapshot and
 `data.console_access` names how to read it (`artifacts.get` windowed/paged, or jumped to
@@ -209,18 +116,12 @@ read with `artifacts.get`. It is bounded: when more exist than the cap,
 true (the oldest entries are dropped; the boot console stays at `refs.console`). The key is
 absent when the Run has no correlated console.
 
-Build provenance: `data.build_provenance` (present once the build succeeded with recorded
-provenance, absent otherwise) records what was built. A git/remote build carries
-`{remote, ref, resolved_commit, build_host}`. A local warm-tree (`source='server'`) build
-carries `{label, resolved_commit, dirty}` plus, when `dirty` is true:
-`untracked` (were non-ignored untracked files staged), `tree_sha` (content digest of the
-tracked changes), `dirty_files` (the changed tracked paths, capped — `dirty_files_truncated`
-is true when the list was capped), and, for an external upload, `client_attested: true` with
-the caller's `source_label`/`source_ref`. The warm-tree lane builds working-tree state, not
-HEAD: `resolved_commit` is the HEAD it is based on (decorative when `dirty`), and
-`dirty`/`tree_sha`/`dirty_files` cover git-tracked state only (gitignored paths are
-invisible). Compare `tree_sha` across runs to confirm two builds compiled the same tracked
-source.
+Build provenance: `data.build_provenance` (present once the build succeeded with a
+caller-supplied claim, absent otherwise) records the agent's client-attested source. On
+the upload lane KDIVE never clones or verifies a source tree, so this is the caller's own
+freeform claim: `client_attested: true` with the `source_label`/`source_ref` passed to
+`runs.complete_build`. Compare it across runs to track which local source produced each
+build.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -263,19 +164,3 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 - `state` (``created`, `running`, `succeeded`, `failed`, `canceled` (nullable)`, optional) — Only Runs in this build-phase state.
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
 - `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
-
-## `runs.profile_examples`
-
-`implemented` · `read-only`
-
-Return a ready-to-edit build profile per registered build host. Requires a token.
-
-## `runs.validate_profile`
-
-`implemented` · `read-only`
-
-Validate a build profile without inserting a Run. Requires a token.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `build_profile` | object(free-form) | yes | A build_profile document to check before runs.create, returning the typed validation envelope WITHOUT inserting a Run or consuming capacity. It runs the same checks runs.create runs: structural parse (source='server' vs 'external'; warm-tree string vs {'git':{'remote','ref'}} kernel_source_ref) and build-host/source-kind compatibility for a registered build_host. A 'valid' verdict means the document parses and (for a registered named host) is source-kind compatible — it does NOT guarantee the source tree exists, the config resolves, the kernel builds, or capacity is free; those are checked later at runs.build/runs.complete_build. To confirm now that a catalog 'config' resolves (without a build), call buildconfig.get(name) or browse buildconfig.list — both echo the fragment's existence and sha256; a kind='local' config is resolved on the worker at build time and cannot be pre-flighted server-side. An unregistered build_host is not rejected (data.build_host_registered=false discloses the compat check was skipped). Call runs.profile_examples for a ready-to-edit shape. |

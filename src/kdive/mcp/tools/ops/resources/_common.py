@@ -5,10 +5,9 @@ for runtime inventory mutation: they own ``managed_by='runtime'`` rows only, dis
 the declarative ``config`` rows the inventory reconciler owns. All are ``platform_admin``.
 
 The reachability preflight is expressed through a small injectable :class:`ResourceProbe`
-port (mirroring :class:`kdive.providers.shared.build_host.reachability.BuildHostProber`) so the tool
-stays a synchronous server-side primitive without importing the worker transport plane, and so
-tests drive the probe deterministically. The default :class:`TcpResourceProbe` does a bounded
-TCP connect to the host's ``host:port``.
+port so the tool stays a synchronous server-side primitive without importing the worker
+transport plane, and so tests drive the probe deterministically. The default
+:class:`TcpResourceProbe` does a bounded TCP connect to the host's ``host:port``.
 """
 
 from __future__ import annotations

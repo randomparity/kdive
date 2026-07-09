@@ -8,7 +8,6 @@ from uuid import uuid4
 
 import pytest
 
-from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.domain.capacity.state import JobState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.images import ImageVisibility
@@ -29,6 +28,8 @@ from kdive.jobs.payloads import (
     load_payload,
     run_id_from_payload,
 )
+
+WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
 
 
 def test_build_payload_round_trips_with_optional_cmdline() -> None:

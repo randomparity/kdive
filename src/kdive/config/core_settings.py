@@ -275,16 +275,16 @@ BUILD_ARTIFACT_RETENTION_DAYS = Setting(
     suggest="an integer number of days, e.g. 30",
 )
 
-MAX_BUILD_CONFIG_BYTES = Setting(
-    name="KDIVE_MAX_BUILD_CONFIG_BYTES",
+MAX_INVENTORY_EXPORT_BYTES = Setting(
+    name="KDIVE_MAX_INVENTORY_EXPORT_BYTES",
     parse=_int,
     default=str(256 * 1024),
     group="upload",
     processes=_SERVER,
     help=(
-        "Maximum accepted build-config fragment size in bytes for buildconfig.set "
-        "(ADR-0119). Kernel-config fragments are a few KiB; the cap bounds a hostile or "
-        "accidental large upload."
+        "Maximum accepted systems.toml document size in bytes for "
+        "ops.export_systems_toml (persist/writeback). A whole live inventory is a few "
+        "KiB; the cap bounds a hostile or accidental large document."
     ),
     suggest="an integer number of bytes, e.g. 262144 (256 KiB)",
 )
@@ -649,7 +649,7 @@ SETTINGS = [
     REPORT_ARTIFACT_RETENTION_DAYS,
     INVESTIGATION_CLEANUP_GRACE_DAYS,
     BUILD_ARTIFACT_RETENTION_DAYS,
-    MAX_BUILD_CONFIG_BYTES,
+    MAX_INVENTORY_EXPORT_BYTES,
     DEBUG_DIR,
     CRASH_DIR,
     LIVE_SCRIPT_MAX_TIMEOUT_SECONDS,

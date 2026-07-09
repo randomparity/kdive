@@ -47,6 +47,12 @@ def test_allowlist_includes_expanded_metric_label_keys() -> None:
 
 
 def test_allowlist_includes_second_cut_metric_label_keys() -> None:
-    # ADR-0191: the #610 second-cut instruments add four more label keys.
-    for key in ("build_phase", "capture_method", "transport", "build_host"):
+    # ADR-0191: the #610 second-cut instruments contribute these bounded-enum label keys.
+    # (The build-lane keys build_phase/build_host were retired with the server-build lane.)
+    for key in ("capture_method", "transport"):
         assert key in labels.ALLOWED_LABEL_KEYS
+
+
+def test_allowlist_excludes_retired_build_lane_keys() -> None:
+    for key in ("build_phase", "build_host"):
+        assert key not in labels.ALLOWED_LABEL_KEYS

@@ -12,12 +12,14 @@ import pytest
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import Authorizing, BuildPayload, InstallPayload, SystemPayload
+
+WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
+
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 

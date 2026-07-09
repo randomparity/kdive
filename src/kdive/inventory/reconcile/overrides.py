@@ -1,8 +1,8 @@
 """The inventory-override ledger GC step (ADR-0199, M2.7 #638).
 
 A ledger entry is **settled** once the file agrees with live state, so reconcile drops it to keep
-the ledger bounded. This step runs last in the inventory pass (after the resource and build-host
-sub-passes), under the same session-scoped ``inventory-reconcile`` lock, with the parsed
+the ledger bounded. This step runs last in the inventory pass (after the resource sub-pass),
+under the same session-scoped ``inventory-reconcile`` lock, with the parsed
 :class:`~kdive.inventory.model.InventoryDoc` in hand so it can compare the file's declared
 identities and values against the live rows.
 
@@ -28,7 +28,6 @@ from typing import Any
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from kdive.db.build_hosts import BuildHostKind
 from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     MEMORY_MB_KEY,
@@ -37,7 +36,6 @@ from kdive.domain.catalog.resource_capabilities import (
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.inventory.model import InventoryDoc
 from kdive.inventory.overrides import (
-    BUILD_HOST_RESOURCE_KIND,
     InventoryOverride,
     InventoryOverrideDisposition,
     InventorySourceKind,
@@ -67,7 +65,6 @@ async def reconcile_overrides_gc(conn: AsyncConnection, doc: InventoryDoc) -> in
     async with inventory_pass_lock(conn), conn.transaction():
         cleared = 0
         cleared += await _gc_resource_overrides(conn, doc)
-        cleared += await _gc_build_host_overrides(conn, doc)
         return cleared
 
 
@@ -107,47 +104,6 @@ async def _resource_entry_is_settled(
     if live_values is None:
         return await clear_override(conn, identity)
     declared_values = declared.get(key)
-    if declared_values is not None and declared_values == live_values:
-        return await clear_override(conn, identity)
-    return False
-
-
-async def _gc_build_host_overrides(conn: AsyncConnection, doc: InventoryDoc) -> int:
-    overrides = await lookup_many(conn, InventorySourceKind.BUILD_HOST)
-    if not overrides:
-        return 0
-    declared = _declared_build_host_values(doc)
-    live = await _live_build_host_values(conn, {name for _, name in overrides})
-    cleared = 0
-    for (_, name), entry in overrides.items():
-        if await _build_host_entry_is_settled(conn, entry, name=name, declared=declared, live=live):
-            cleared += 1
-    return cleared
-
-
-async def _build_host_entry_is_settled(
-    conn: AsyncConnection,
-    entry: InventoryOverride,
-    *,
-    name: str,
-    declared: Mapping[str, dict[str, Any]],
-    live: Mapping[str, dict[str, Any]],
-) -> bool:
-    """Clear a settled build-host ``entry``; return whether it was cleared."""
-    identity = OverrideIdentity(
-        source_kind=InventorySourceKind.BUILD_HOST,
-        resource_kind=BUILD_HOST_RESOURCE_KIND,
-        name=name,
-    )
-    if entry.disposition is InventoryOverrideDisposition.REMOVED:
-        if name in declared:
-            return False  # still declared: the override still suppresses it
-        return await clear_override(conn, identity)
-    # detached: GC an absent row first (never compare against a missing row), then a converged row.
-    live_values = live.get(name)
-    if live_values is None:
-        return await clear_override(conn, identity)
-    declared_values = declared.get(name)
     if declared_values is not None and declared_values == live_values:
         return await clear_override(conn, identity)
     return False
@@ -201,50 +157,6 @@ async def _live_resource_values(
             VCPUS_KEY: caps.get(VCPUS_KEY),
             MEMORY_MB_KEY: caps.get(MEMORY_MB_KEY),
             CONCURRENT_ALLOCATION_CAP_KEY: caps.get(CONCURRENT_ALLOCATION_CAP_KEY),
-        }
-    return live
-
-
-def _declared_build_host_values(doc: InventoryDoc) -> dict[str, dict[str, Any]]:
-    """The file's declared comparable values per config build host ``name``."""
-    declared: dict[str, dict[str, Any]] = {}
-    for inst in doc.build_host:
-        try:
-            kind = BuildHostKind(inst.kind)
-        except ValueError:
-            continue
-        base_image_volume = (
-            inst.base_image_volume if kind is BuildHostKind.EPHEMERAL_LIBVIRT else None
-        )
-        declared[inst.name] = {
-            "kind": kind.value,
-            "base_image_volume": base_image_volume,
-            "workspace_root": inst.workspace_root,
-            "max_concurrent": inst.max_concurrent,
-        }
-    return declared
-
-
-async def _live_build_host_values(
-    conn: AsyncConnection, names: set[str]
-) -> dict[str, dict[str, Any]]:
-    """The live comparable values per config build host present in ``names``."""
-    live: dict[str, dict[str, Any]] = {}
-    if not names:
-        return live
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            "SELECT name, kind, base_image_volume, workspace_root, max_concurrent FROM build_hosts "
-            "WHERE managed_by = 'config' AND name = ANY(%s)",
-            (list(names),),
-        )
-        rows = await cur.fetchall()
-    for row in rows:
-        live[str(row["name"])] = {
-            "kind": row["kind"],
-            "base_image_volume": row["base_image_volume"],
-            "workspace_root": row["workspace_root"],
-            "max_concurrent": row["max_concurrent"],
         }
     return live
 

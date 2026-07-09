@@ -98,35 +98,7 @@ async def _resource_has_any_allocation(cur: AsyncCursor[dict[str, Any]], row_id:
     return await cur.fetchone() is not None
 
 
-async def prune_or_cordon_build_host(conn: AsyncConnection, row_id: UUID) -> PruneOutcome:
-    """Apply the non-destructive prune contract to one config build-host row."""
-    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            "SELECT id FROM build_hosts WHERE id = %s AND managed_by = %s FOR UPDATE",
-            (row_id, CONFIG_MANAGED_BY),
-        )
-        if await cur.fetchone() is None:
-            return PruneOutcome(pruned=False, cordoned=False)
-        if await _build_host_has_live_lease(cur, row_id):
-            await cur.execute(
-                "UPDATE build_hosts SET enabled = false WHERE id = %s AND enabled", (row_id,)
-            )
-            return PruneOutcome(pruned=False, cordoned=True)
-        await cur.execute("DELETE FROM build_hosts WHERE id = %s", (row_id,))
-    return PruneOutcome(pruned=True, cordoned=False)
-
-
-async def _build_host_has_live_lease(cur: AsyncCursor[dict[str, Any]], row_id: UUID) -> bool:
-    """True when the build host holds an in-flight capacity lease."""
-    await cur.execute(
-        "SELECT 1 FROM build_host_leases WHERE build_host_id = %s LIMIT 1",
-        (row_id,),
-    )
-    return await cur.fetchone() is not None
-
-
 __all__ = [
-    "prune_or_cordon_build_host",
     "prune_or_cordon_image",
     "prune_or_cordon_removed_resource",
     "prune_or_cordon_resource",

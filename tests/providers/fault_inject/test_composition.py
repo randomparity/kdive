@@ -9,7 +9,6 @@ from uuid import uuid4
 import pytest
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
-from kdive.build_artifacts.results import BuildOutput
 from kdive.components.references import (
     CONFIG_COMPONENT,
     INITRD_COMPONENT,
@@ -22,11 +21,9 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.profiles.build import ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
 from kdive.providers.fault_inject import composition
 from kdive.providers.fault_inject._common import SYNTHETIC_BUILD_ID, TENANT
-from kdive.providers.fault_inject.build import FaultInjectBuild
 from kdive.providers.fault_inject.debug.gdb import (
     FaultInjectDebugEngine,
     fault_inject_attach_seam,
@@ -81,7 +78,6 @@ def test_build_runtime_wires_fault_inject_ports_and_capabilities() -> None:
 
     assert isinstance(runtime.profile_policy, FaultInjectProfilePolicy)
     assert isinstance(runtime.provisioner, FaultInjectProvisioning)
-    assert isinstance(runtime.builder, FaultInjectBuild)
     assert isinstance(runtime.installer, FaultInjectInstall)
     assert isinstance(runtime.booter, FaultInjectInstall)
     assert isinstance(runtime.connector, FaultInjectConnect)
@@ -197,33 +193,6 @@ class _RecordingStore:
             sensitivity=request.sensitivity,
             retention_class=request.retention_class,
         )
-
-
-def test_build_stores_redacted_kernel_and_debuginfo_and_returns_their_refs() -> None:
-    store = _RecordingStore()
-    builder = FaultInjectBuild(store_factory=lambda: store)
-    run_id = uuid4()
-
-    output = builder.build(run_id, cast(ServerBuildProfile, object()))
-
-    kernel_req, debuginfo_req = store.requests
-    assert kernel_req.name == "kernel"
-    assert kernel_req.data == b"fault-inject-kernel"
-    assert debuginfo_req.name == "vmlinux"
-    assert debuginfo_req.data == b"fault-inject-vmlinux"
-
-    for req in store.requests:
-        assert req.tenant == TENANT
-        assert req.owner_kind == "runs"
-        assert req.owner_id == str(run_id)
-        assert req.sensitivity is Sensitivity.REDACTED
-        assert req.retention_class == "kernel-build"
-
-    assert isinstance(output, BuildOutput)
-    assert output.kernel_ref == kernel_req.key()
-    assert output.debuginfo_ref == debuginfo_req.key()
-    assert output.kernel_ref != output.debuginfo_ref
-    assert output.build_id == SYNTHETIC_BUILD_ID
 
 
 def test_introspect_outputs_are_empty_but_non_null_collections() -> None:

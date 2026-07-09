@@ -7,7 +7,7 @@ runtime assembly lives next to each provider.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,7 +16,6 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.config.core_settings import FAULT_INJECT, LOCAL_LIBVIRT_ENABLED
-from kdive.db.build_hosts import BuildHostKind
 from kdive.db.resource_discovery import ensure_discovered_resource_registered
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.images.planes.base import RootfsBuildPlane
@@ -30,10 +29,8 @@ from kdive.providers.fault_inject.faulting.engine import FaultEngine
 from kdive.providers.fault_inject.inventory import FaultInjectInventory
 from kdive.providers.infra.console_hosting import DbRunningRemoteSystems
 from kdive.providers.infra.reaping import (
-    BuildVmReaper,
     DumpVolumeReaper,
     InfraReaper,
-    NullBuildVmReaper,
     NullDumpVolumeReaper,
     NullReaper,
     OwnedDomain,
@@ -41,8 +38,6 @@ from kdive.providers.infra.reaping import (
 from kdive.providers.local_libvirt import composition as local_composition
 from kdive.providers.remote_libvirt import composition as remote_composition
 from kdive.providers.remote_libvirt.config import is_remote_libvirt_configured
-from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactory
-from kdive.providers.shared.build_host.reachability import BuildHostProber, SshBuildHostProber
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 if TYPE_CHECKING:
@@ -286,30 +281,6 @@ class ProviderComposition:
             ),
         )
 
-    def _build_vm_reaper_factories(
-        self, *, enable_remote_libvirt: bool | None
-    ) -> tuple[Callable[[], BuildVmReaper], ...]:
-        if not _remote_libvirt_enabled(enable_remote_libvirt):
-            return ()
-        return (
-            lambda: remote_composition.build_build_vm_reaper(secret_registry=self._secret_registry),
-        )
-
-    def _build_host_transport_factory_maps(
-        self, *, enable_remote_libvirt: bool | None
-    ) -> tuple[Callable[[], Mapping[BuildHostKind, BuildHostTransportFactory]], ...]:
-        if not _remote_libvirt_enabled(enable_remote_libvirt):
-            return ()
-        return (
-            lambda: {
-                BuildHostKind.EPHEMERAL_LIBVIRT: (
-                    remote_composition.build_ephemeral_build_transport_factory(
-                        secret_registry=self._secret_registry
-                    )
-                )
-            },
-        )
-
     def _console_hosting_factories(
         self,
         *,
@@ -400,34 +371,6 @@ class ProviderComposition:
         ):
             return factory()
         return NullDumpVolumeReaper()
-
-    def build_reconciler_build_vm_reaper(
-        self, *, enable_remote_libvirt: bool | None = None
-    ) -> BuildVmReaper:
-        """Assemble the reconciler's ephemeral build-VM reaper (ADR-0100)."""
-        for factory in self._build_vm_reaper_factories(enable_remote_libvirt=enable_remote_libvirt):
-            return factory()
-        return NullBuildVmReaper()
-
-    def build_build_host_transport_factories(
-        self, *, enable_remote_libvirt: bool | None = None
-    ) -> dict[BuildHostKind, BuildHostTransportFactory]:
-        """Assemble provider-owned build-host transport factories."""
-        factories: dict[BuildHostKind, BuildHostTransportFactory] = {}
-        for factory_map in self._build_host_transport_factory_maps(
-            enable_remote_libvirt=enable_remote_libvirt
-        ):
-            factories.update(factory_map())
-        return factories
-
-    def build_reconciler_build_host_prober(self) -> BuildHostProber:
-        """Assemble the reconciler's SSH build-host reachability prober (ADR-0103).
-
-        Wired unconditionally: SSH build hosts are independent of the remote-libvirt
-        provider, so the prober is not gated on ``_remote_libvirt_enabled``. When no SSH
-        hosts are registered the repair's query simply returns nothing.
-        """
-        return SshBuildHostProber(secret_registry=self._secret_registry)
 
     async def build_reconciler_console_hosting(
         self,

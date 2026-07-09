@@ -165,22 +165,9 @@ under `qemu:///system`, so the constraint is surfaced before a run. The kdump-on
 [Declare your inventory](#kdump-capture-prerequisites) is one instance of this broader requirement,
 not a kdump-specific one.
 
-A root worker must **not** compile kernel source as root. The local build lane runs
-operator/agent-supplied `git clone` + `make` — arbitrary code — so when the worker is root it
-**requires** `KDIVE_BUILD_USER` set to an unprivileged account and drops to it for every build
-subprocess, keeping root only for the libvirt/console/`kexec` operations (ADR-0214). A root worker
-with `KDIVE_BUILD_USER` unset (or naming an unknown or root account) **refuses** the build with a
-`configuration_error` rather than building as root. The build account also needs the build
-workspace (`KDIVE_BUILD_WORKSPACE`, default `/var/lib/kdive/build`) traversable (`o+x`) and the warm
-tree (`KDIVE_KERNEL_SRC`) readable. So a build-and-capture-capable worker runs as **root with
-`KDIVE_BUILD_USER`** set — for example:
-
-```bash
-sudo KDIVE_KERNEL_SRC=/home/you/src/linux KDIVE_BUILD_USER=you .venv/bin/python -m kdive worker
-```
-
-See [`resource://kdive/docs/operating/build-source-staging.md`](../build-source-staging.md) for the
-full `KDIVE_BUILD_USER` resolution table.
+The kernel itself is built off-worker: you compile it locally and upload the artifacts on the
+build lane (see [Build lane](../external-build-upload.md)), so the worker never compiles kernel
+source and needs no build toolchain.
 
 ## 4. Onboard the project
 

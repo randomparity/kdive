@@ -162,15 +162,6 @@ def _handle_migrate(
     migrate()
 
 
-def _handle_seed_build_configs(
-    args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
-) -> None:
-    del args, secret_registry, telemetry
-    from kdive.admin.build_configs import seed_build_configs_step
-
-    seed_build_configs_step()
-
-
 def _handle_install_fixtures(
     args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
 ) -> None:
@@ -280,11 +271,6 @@ _COMMANDS: tuple[_Command, ...] = (
         "reconciler", "run the drift-repair reconciler loop", _handle_reconciler, runnable=True
     ),
     _Command("migrate", "apply database migrations", _handle_migrate, runnable=True),
-    _Command(
-        "seed-build-configs",
-        "publish packaged build-config fragments to the object store",
-        _handle_seed_build_configs,
-    ),
     _Command(
         "install-fixtures",
         "install default fixture catalog",
@@ -611,7 +597,6 @@ def _build_reconcile_config(
     telemetry: Telemetry,
 ) -> Any:
     from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
-    from kdive.reconciler.build_host_fleet import BuildHostTelemetry
     from kdive.reconciler.fleet import FleetTelemetry
     from kdive.reconciler.loop import ReconcileConfig
     from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
@@ -629,15 +614,12 @@ def _build_reconcile_config(
         console_registry=console_registry,
         resetter=provider_composition.build_reconciler_transport_resetter(),
         dump_volume_reaper=provider_composition.build_reconciler_dump_volume_reaper(),
-        build_vm_reaper=provider_composition.build_reconciler_build_vm_reaper(),
-        build_host_prober=provider_composition.build_reconciler_build_host_prober(),
         heartbeat=heartbeat,
         telemetry=ReconcilerTelemetry(
             tracer=telemetry.tracer_provider.get_tracer("kdive.reconciler"),
             meter=meter,
         ),
         fleet_telemetry=FleetTelemetry(meter=meter),
-        build_host_telemetry=BuildHostTelemetry(meter=meter),
         admission_metrics=AdmissionMetrics(meter=meter),
         debug_session_telemetry=DebugSessionTelemetry(meter=meter),
     )

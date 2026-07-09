@@ -34,16 +34,10 @@ fetched TLS certs, guest helpers).
 ### D1 (workstation)
 1. `just stack-up`. If it fails with `migration … checksum changed`, the persisted dev volume
    is stale: `docker compose down -v` then `just stack-up` (resets disposable dev data).
-2. **Seed the build-config catalog** (else remote `runs.build` fails — F6/#373):
-   ```
-   uv run python -c "import asyncio,kdive.config as c; from kdive.config.core_settings import DATABASE_URL; from psycopg import AsyncConnection; from kdive.build_configs.seed import seed_build_configs; from kdive.store.objectstore import object_store_from_env; \
-   asyncio.run((lambda: (lambda conn: None))())" # see seed snippet in the report; or run: kdive seed-project
-   ```
-   (Simplest: open an async connection + object store and call `seed_build_configs`.)
-3. Render `d1.env` from the root `systems.toml` (fill it from `systems.toml.example` first):
+2. Render `d1.env` from the root `systems.toml` (fill it from `systems.toml.example` first):
    `uv run python -m scripts.coverage_campaign.systems render-env > artifacts/coverage-campaign/d1.env`.
    (`setup-commands` likewise prints the remote iptables ACL + k8s port-forwards.)
-4. Start the host stack **under bash** (env.sh uses `${BASH_SOURCE[0]}`, empty under zsh →
+3. Start the host stack **under bash** (env.sh uses `${BASH_SOURCE[0]}`, empty under zsh →
    broken `//.live-build` paths):
    ```
    set -a; source scripts/live-stack/env.sh; source artifacts/coverage-campaign/d1.env; set +a
@@ -51,17 +45,17 @@ fetched TLS certs, guest helpers).
    ```
 
 ### Remote-libvirt → remote host
-5. Place the TLS client cert/key/CA under `$KDIVE_SECRETS_ROOT` as
+4. Place the TLS client cert/key/CA under `$KDIVE_SECRETS_ROOT` as
    `remote-clientcert.pem` / `remote-clientkey.pem` / `remote-ca.pem` (fetch from the host or
    generate per `remote-libvirt-host-setup.md`).
-6. **Firewall ACL** — the worker's source subnet must reach the host's `16514` **and** the
+5. **Firewall ACL** — the worker's source subnet must reach the host's `16514` **and** the
    gdbstub range (e.g. `47000:47099`). If driving from a workstation outside the worker pool
    subnet, add it on the host (revert at the end):
    ```
    sudo iptables -I INPUT -s <workstation-ip> -p tcp --dport 16514 -j ACCEPT
    sudo iptables -I INPUT -s <workstation-ip> -p tcp --dport 47000:47099 -j ACCEPT
    ```
-7. **Install the in-guest helper** into the staged base image (F7/#374), with the SELinux fix:
+6. **Install the in-guest helper** into the staged base image (F7/#374), with the SELinux fix:
    ```
    virt-customize -a <base>.qcow2 \
      --copy-in deploy/remote-libvirt-guest-helpers/kdive-install-kernel:/usr/local/sbin/ \
@@ -71,16 +65,16 @@ fetched TLS certs, guest helpers).
    ```
 
 ### D2 (k8s)
-8. `helm upgrade kdive deploy/helm/kdive -n <ns> --reuse-values --set config.KDIVE_FAULT_INJECT=1`.
-9. **Enable role tokens** on the demo OIDC (F2/#369): `kubectl set env deploy/<oidc> JSON_CONFIG-`
+7. `helm upgrade kdive deploy/helm/kdive -n <ns> --reuse-values --set config.KDIVE_FAULT_INJECT=1`.
+8. **Enable role tokens** on the demo OIDC (F2/#369): `kubectl set env deploy/<oidc> JSON_CONFIG-`
    then restart server/oidc/worker/**reconciler** (the reconciler registers providers).
-10. Drive D2 via port-forwards (`svc/<oidc>:8080`, `svc/<server>:8000`) and make the in-cluster
+9. Drive D2 via port-forwards (`svc/<oidc>:8080`, `svc/<server>:8000`) and make the in-cluster
     issuer host resolve to the forward so the minted `iss` matches (an in-process
     `socket.getaddrinfo` override, or `/etc/hosts`).
 
 ### Preflight
-11. **Identity gate:** mint a token for each of the six roles and make one authenticated read.
-12. **Providers:** `resources.list` shows the expected providers on each deployment (restart the
+10. **Identity gate:** mint a token for each of the six roles and make one authenticated read.
+11. **Providers:** `resources.list` shows the expected providers on each deployment (restart the
     reconciler if one is missing).
 
 ## Phase 1 — drive the arcs
@@ -91,7 +85,7 @@ fetched TLS certs, guest helpers).
   positional — call via the underlying client with an args dict.
 - **Lifecycle (remote build proven):** drive the `live_stack` remote spine —
   `uv run python -m pytest tests/integration/test_remote_live_stack.py -m live_stack -v -s`
-  (build→boot needs Phase-0 steps 5–7 + F8; install/boot is the open item).
+  (build→boot needs Phase-0 steps 4–6 + F8; install/boot is the open item).
 - Append each verdict to `artifacts/coverage-campaign/results.jsonl` as
   `{"tool","provider","verdict","issue","deployment","arc"}`.
 
@@ -116,7 +110,7 @@ Update the report grid + narrative; file any new findings (`gh issue create`).
 ## Phase 3 — cleanup
 
 - `ops.force_release` all active allocations; `virsh undefine` leftover `kdive-*` domains.
-- Remote host: remove the iptables ACCEPTs added in step 6.
+- Remote host: remove the iptables ACCEPTs added in step 5.
 - Workstation: `rm -rf ~/.kdive-secrets ~/.kdive-pkipath`; remove any `/etc/hosts` campaign line.
 - D2: revert the OIDC `JSON_CONFIG` patch + `KDIVE_FAULT_INJECT` if restoring the pristine demo.
 - Stop the host stack (`.live-stack.pid`), `docker compose down`, and any port-forwards.

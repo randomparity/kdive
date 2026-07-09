@@ -10,7 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 import kdive.config as config
-from kdive.config.core_settings import INVENTORY_WRITEBACK, MAX_BUILD_CONFIG_BYTES
+from kdive.config.core_settings import INVENTORY_WRITEBACK, MAX_INVENTORY_EXPORT_BYTES
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.serialize import read_inventory_snapshot, serialize_inventory
 from kdive.inventory.writeback import (
@@ -102,13 +102,14 @@ async def _persist_export(
 
 def _bound_document(text: str) -> None:
     """Reject a document past the inventory file size cap."""
-    cap = int(config.require(MAX_BUILD_CONFIG_BYTES))
+    cap = int(config.require(MAX_INVENTORY_EXPORT_BYTES))
     size = len(text.encode("utf-8"))
     if size > cap:
         raise CategorizedError(
-            f"document is {size} bytes, over the {MAX_BUILD_CONFIG_BYTES.name} cap ({cap} bytes)",
+            f"document is {size} bytes, over the {MAX_INVENTORY_EXPORT_BYTES.name} cap "
+            f"({cap} bytes)",
             category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"variable": MAX_BUILD_CONFIG_BYTES.name, "size": size, "cap": cap},
+            details={"variable": MAX_INVENTORY_EXPORT_BYTES.name, "size": size, "cap": cap},
         )
 
 

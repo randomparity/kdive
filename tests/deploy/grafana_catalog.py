@@ -20,13 +20,11 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 TELEMETRY_MODULES: tuple[str, ...] = (
     "src/kdive/mcp/middleware/telemetry.py",
-    "src/kdive/observability/build_telemetry.py",
     "src/kdive/observability/console_telemetry.py",
     "src/kdive/observability/debug_session_telemetry.py",
     "src/kdive/services/allocation/admission/metrics.py",
     "src/kdive/reconciler/fleet.py",
     "src/kdive/reconciler/loop_telemetry.py",
-    "src/kdive/reconciler/build_host_fleet.py",
     "src/kdive/jobs/worker_telemetry.py",
     "src/kdive/jobs/handlers/capture_telemetry.py",
 )

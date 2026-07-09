@@ -6,10 +6,9 @@ the XDG default ``~/.config/kdive/systems.toml``) and reconciles it through the 
 chain (:func:`kdive.inventory.reconcile.pipeline.reconcile_all`): into ``image_catalog`` via
 :func:`kdive.inventory.reconcile.images.reconcile_images`, prices ``cost_class_coefficients``
 via :func:`kdive.inventory.reconcile.coefficients.reconcile_coefficients` run **before** the
-resource pass (ADR-0115), into ``resources`` via
+resource pass (ADR-0115), and into ``resources`` via
 :func:`kdive.inventory.reconcile.resources.reconcile_resources` (the fault-inject/remote
-config overlay that supplies the sizing #385 lacked), and into ``build_hosts`` via
-:func:`kdive.inventory.reconcile.build_hosts.reconcile_build_hosts`.
+config overlay that supplies the sizing #385 lacked).
 
 Two load-bearing invariants (plan Task 1.6):
 

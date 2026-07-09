@@ -115,17 +115,6 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "artifacts.create_system_upload": _OPERATOR,
     # audit (dual: project admin or platform auditor)
     "audit.query": frozenset({ExposureScope.PROJECT_ADMIN, ExposureScope.PLATFORM_AUDITOR}),
-    # build envs (contributor-readable projection of build hosts, ADR-0242)
-    "build_envs.list": _CONTRIBUTOR,
-    # build hosts
-    "build_hosts.list": _PLAT_AUDITOR,
-    "build_hosts.disable": _PLAT_ADMIN,
-    "build_hosts.remove": _PLAT_ADMIN,
-    "build_hosts.register_ssh": _PLAT_ADMIN,
-    "build_hosts.register_ephemeral_libvirt": _PLAT_ADMIN,
-    # build config
-    "buildconfig.set": _PLAT_ADMIN,
-    "buildconfig.delete": _PLAT_ADMIN,
     # control
     "control.power": _OPERATOR,  # `on` is operator; destructive actions gate to admin
     "control.force_crash": _ADMIN,
@@ -215,8 +204,6 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "runs.create": _CONTRIBUTOR,
     "runs.bind": _CONTRIBUTOR,
     "runs.cancel": _CONTRIBUTOR,
-    "runs.build": _CONTRIBUTOR,
-    "runs.build_install_boot": _OPERATOR,
     "runs.complete_build": _CONTRIBUTOR,
     "runs.install": _CONTRIBUTOR,
     "runs.boot": _CONTRIBUTOR,
@@ -249,7 +236,6 @@ CORE_TOOLS: frozenset[str] = frozenset(
         "tools.search",
         "tools.invoke",
         "session.whoami",
-        "runs.build_install_boot",
         "runs.create",
         "runs.get",
         "runs.list",
@@ -265,8 +251,6 @@ CORE_TOOLS: frozenset[str] = frozenset(
 PUBLIC_TOOLS: frozenset[str] = frozenset(
     {
         "artifacts.expected_uploads",
-        "buildconfig.get",
-        "buildconfig.list",
         "fixtures.list",
         "fixtures.validate",
         "images.describe",
@@ -275,8 +259,6 @@ PUBLIC_TOOLS: frozenset[str] = frozenset(
         "resources.availability",
         "resources.describe",
         "resources.list",
-        "runs.profile_examples",
-        "runs.validate_profile",
         "session.whoami",
         "shapes.list",
         "systems.profile_examples",

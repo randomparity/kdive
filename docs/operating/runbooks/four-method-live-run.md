@@ -1,9 +1,8 @@
-# Runbook: four-method live run on the from-source System
+# Runbook: four-method live run
 
 Operator guide for validating all four capture methods — `kdump`, `gdbstub`, `console`, and
-`host_dump` — on a System whose kernel is built from source using the seeded kdump
-config-fragment catalog. This is the **acceptance gate for the kernel-build-config provisioning
-milestone** (ADR-0096). Like prior milestones' real-hardware runs, it is **operator-run, not CI**:
+`host_dump` — on a System running a kernel you built locally and uploaded on the build lane
+(ADR-0234). Like prior milestones' real-hardware runs, it is **operator-run, not CI**:
 the `live_stack` suite skips cleanly on hosts without the prerequisites.
 
 For the stack bring-up steps shared by every live run (backends, env, VM fixtures, host processes),
@@ -15,11 +14,9 @@ additionally needs the steps in [remote-live-stack.md](remote-live-stack.md) §1
 
 All prerequisites from the [local live-stack runbook](live-stack.md), plus:
 
-- The `build_config_catalog` migration applied (migration `0025_build_config_catalog`) and the
-  kdump fragment seeded. Both are handled by `python -m kdive migrate` (the migrate step calls the
-  build-config seed after applying migrations) or by `just stack-up`. Verify below in Step 1.
-- A kernel source tree at `KDIVE_KERNEL_SRC` (same fixture as the live-stack suite; see
-  [live-stack.md §3](live-stack.md#3-build-the-vm-fixtures)).
+- A locally-built kernel to upload: a combined `kernel` tar (`boot/vmlinuz` + `lib/modules/`)
+  with the kdump/debug symbols armed (`CONFIG_KEXEC`, `CONFIG_CRASH_DUMP`, `CONFIG_VMCORE_INFO`,
+  `CONFIG_FW_CFG_SYSFS`, …). See the [build-lane recipe](../external-build-upload.md).
 - The remote provider configured with a base-OS qcow2 and TLS, if running against a remote
   `qemu+tls://` host (see [remote-live-stack.md §1–4](remote-live-stack.md)).
 - For **local-libvirt** `kdump` capture only: the worker venv must import `guestfs` (the
@@ -27,84 +24,38 @@ All prerequisites from the [local live-stack runbook](live-stack.md), plus:
   see [Wire the worker venv](#wire-the-worker-venv-drgn--libguestfs) in §4b and
   [ADR-0203](../../adr/0203-local-libvirt-kdump-overlay-harvest.md).
 
-## 1. Verify the seed
+## 1. Provision and create the Run
 
-Confirm the `build_config_catalog` row is present and the object-store artifact is reachable.
+Allocate a System (`allocations.request` then `systems.provision`), open an investigation, and
+create a Run:
+`runs.create(investigation_id=<inv>, system_id=<B>, build_profile={"schema_version": 1})`.
 
-**Via the database:**
+## 2. Upload the kernel
 
-```bash
-uv run psql "$KDIVE_DATABASE_URL" -c \
-  "SELECT name, object_key, sha256 FROM build_config_catalog WHERE name = 'kdump';"
+Upload your locally-built artifacts, then finalize the Run:
+
+```
+# 1. artifacts.create_run_upload(run_id=<run>, artifacts=[{name, sha256, size_bytes}, ...])
+#    → PUT each object to its presigned upload_url (see the build-lane recipe)
+# 2. runs.complete_build(run_id=<run>)  → validates the upload, marks the Run installable
 ```
 
-Expected: one row with `name=kdump`, an `object_key` of the form
-`system/build-configs/kdump/kdump.config`, and a non-empty `sha256`.
+`runs.complete_build` validates the uploaded artifacts' **structure** (bzImage magic, gzip layout,
+a `lib/modules` member, manifest `sha256`/`size_bytes`, and the optional `vmlinux` build-id). It
+never inspects your `.config`: arming kdump is your responsibility at build time — a kernel missing
+`CONFIG_KEXEC`/`CONFIG_CRASH_DUMP`/`CONFIG_VMCORE_INFO` simply captures no vmcore.
 
-**Via the MCP tool** (with the stack up and a valid operator token):
+## 3. Install and boot the uploaded kernel
 
-```bash
-uv run python -c "
-import httpx, json
-token = open('/tmp/operator-token').read().strip()   # or export KDIVE_TOKEN
-resp = httpx.post(
-    'http://127.0.0.1:8000/mcp',
-    json={'method': 'tools/call', 'params': {'name': 'buildconfig.get', 'arguments': {'name': 'kdump'}}},
-    headers={'Authorization': f'Bearer {token}'},
-)
-print(json.dumps(resp.json(), indent=2))
-"
-```
-
-Expected: a `ToolResponse` with `status: available` whose `data` carries `content` (the
-`CONFIG_*` fragment), `sha256`, and `merge_recipe`. The `data.sha256` must match the database
-row's `sha256`.
-
-If the row is absent, re-run the seed step:
-
-```bash
-python -m kdive migrate   # applies migrations and calls seed_build_configs
-```
-
-## 2. Build a from-source kernel (no explicit config)
-
-Allocate a System (call `allocations.request` then `systems.provision`), then create a Run
-**without** supplying a `config` field in the build profile. The omitted field causes the build
-to default to the `kdump` catalog entry (ADR-0096). The build profile goes to `runs.create`;
-`runs.build` then takes only the resulting `run_id`.
-
-```python
-# Illustrative profile passed to runs.create — omit "config" entirely:
-build_profile = {
-    "schema_version": 1,
-    "kernel_source_ref": os.environ["KDIVE_KERNEL_SRC"],   # e.g. "file:///src/linux"
-}
-# 1. runs.create(investigation_id=<inv>, system_id=<B>, build_profile=build_profile)
-#    No "config" key in build_profile → kdump catalog default fires at build time.
-# 2. runs.build(run_id=<the run id returned by runs.create>)
-```
-
-Poll `jobs.wait` until the build job reaches `completed`. Success is silent — the build emits no
-per-symbol log line on a clean merge. The fragment-survival check fires only on a problem: if a
-fragment symbol is dropped by `make olddefconfig`, the build fails with `configuration_error` and
-the error `details.dropped` names the dropped symbol(s). A dropped symbol means the kernel tree
-does not satisfy a dependency the kdump fragment requires; either update the fragment or the
-kernel version.
-
-## 3. Install and boot the built kernel
-
-Call `runs.install` then `runs.boot`, both keyed on the build `run_id`. Poll `jobs.wait` until
-the System reaches `ready`.
+Call `runs.install` then `runs.boot`, both keyed on the `run_id`. Poll `jobs.wait` until the
+System reaches `ready`.
 
 ```
 runs.install(run_id=<...>)  → job: queued → wait → completed
 runs.boot(run_id=<...>)     → job: queued → wait → System state: ready (or boot_timeout)
 ```
 
-If the System reaches `boot_timeout`, check the console artifact for boot messages. Since a clean
-build does not log the merged config, confirm the fragment applied by calling
-`buildconfig.get name=kdump` (the symbols it lists are what the build merged) and comparing
-against the booted kernel.
+If the System reaches `boot_timeout`, check the console artifact for boot messages.
 
 ## 4. Drive the four capture methods
 
@@ -114,7 +65,7 @@ in the [M2.5 capstone](remote-live-stack.md#6-four-method-capture-capstone-m25):
 
 | method | System | how |
 |--------|--------|-----|
-| `gdbstub` | **B** (booted, from-source kernel) | `debug.start_session transport=gdbstub` → gdb-MI ops (`debug.set_breakpoint`, `debug.continue`, `debug.read_registers`) → `debug.end_session` |
+| `gdbstub` | **B** (booted, uploaded kernel) | `debug.start_session transport=gdbstub` → gdb-MI ops (`debug.set_breakpoint`, `debug.continue`, `debug.read_registers`) → `debug.end_session` |
 | `kdump` | **B** (after gdbstub, or a fresh boot) | `control.force_crash` → `vmcore.fetch method=kdump` → `introspect.from_vmcore run_id=<B's run>` |
 | `console` | **B** (over the same boot lifetime) | `artifacts.list` for the console artifact after teardown/finalize |
 | `host_dump` | **A** (separate System, provisioned and crashed) | `control.force_crash` → `vmcore.fetch method=host_dump` via host-side `virDomainCoreDumpWithFormat` |
@@ -184,8 +135,8 @@ Confirm a non-empty `tasks` dict in the response's `report`. A missing `VMCOREIN
 `configuration_error` and is **not** a 4/4 pass — do not accept a missing-build-id skip as success.
 
 **local-libvirt kdump (ADR-0203, ADR-0206).** On local-libvirt the capture is host-side, not an
-in-guest upload: a from-source kernel build publishes a `modules_ref` (the `/lib/modules/<ver>`
-tree as a tarball). `runs.install` injects the modules into the per-System qcow2 overlay via
+in-guest upload: the uploaded `kernel` tar carries the matching `/lib/modules/<ver>` tree.
+`runs.install` injects the modules into the per-System qcow2 overlay via
 host-side libguestfs, the guest's `kdumpctl` builds a crash initramfs in-guest, and on
 `control.force_crash` the guest writes a real `/var/crash/<ts>/vmcore`. The worker then
 force-stops System B's domain (over `KDIVE_LIBVIRT_URI`) and harvests the vmcore host-side
@@ -320,15 +271,12 @@ then confirm the artifact in `artifacts.list system_id=<A>`.
 
 ## 5. Record evidence
 
-A successful four-method run on the from-source System is the acceptance gate for the
-kernel-build-config provisioning milestone. Attach the following as the recorded evidence:
+A successful four-method run proves the platform captures a crash four ways on an uploaded
+kernel. Attach the following as the recorded evidence:
 
-- The `build_config_catalog` query output from Step 1 (row present, sha256 non-empty).
-- The `buildconfig.get name=kdump` response (fragment content + sha256 matches the row).
-- The completed build job from Step 2 (a clean build is the survival-check pass — it raises
-  `configuration_error` with `details.dropped` only on a dropped symbol).
+- The `runs.complete_build` response from Step 2 (the upload validated and the Run became
+  installable).
 - The `artifacts.list` output for each System showing the vmcore and console artifacts.
 
-The passing run confirms that a from-source kernel built with the kdump catalog default is
-kdump-capable, symbolizable (gdbstub/DWARF), and console-observable — the three previously
-blocked methods now work alongside `host_dump`.
+The passing run confirms that a locally-built, kdump-armed kernel is kdump-capable, symbolizable
+(gdbstub/DWARF), and console-observable — the three methods that work alongside `host_dump`.

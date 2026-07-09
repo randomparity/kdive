@@ -137,7 +137,7 @@ def test_envelope_created_run_advances_to_build() -> None:
 
     assert resp.status == "created"
     assert resp.object_id == str(run.id)
-    assert resp.suggested_next_actions == ["runs.get", "runs.build"]
+    assert resp.suggested_next_actions == ["runs.get", "runs.complete_build"]
 
 
 def test_envelope_running_run_advances_to_build() -> None:
@@ -145,7 +145,7 @@ def test_envelope_running_run_advances_to_build() -> None:
 
     resp = envelope_for_run(run)
 
-    assert resp.suggested_next_actions == ["runs.get", "runs.build"]
+    assert resp.suggested_next_actions == ["runs.get", "runs.complete_build"]
 
 
 def test_envelope_canceled_run_only_offers_get() -> None:

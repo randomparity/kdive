@@ -18,7 +18,6 @@ def _unconfigured_runtime() -> ProviderRuntime:
     return ProviderRuntime(
         profile_policy=port,
         provisioner=port,
-        builder=port,
         installer=port,
         booter=port,
         connector=port,

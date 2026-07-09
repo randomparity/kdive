@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import AbstractContextManager
 from uuid import UUID
 
 import psycopg
@@ -16,14 +15,12 @@ from kdive.components.references import (
     ComponentSourceKind,
 )
 from kdive.components.validation import ComponentSourceCapabilities
-from kdive.db.build_hosts import BuildHost
 from kdive.db.locks import CONSOLE_HOSTING_LEADER, SessionAdvisoryLock
 from kdive.db.pool import create_pool, database_url
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.observability.console_telemetry import ConsoleTelemetry
-from kdive.profiles.build import GitSourceRef
 from kdive.providers.core.discovery_registration import (
     DiscoveryRegistrationTarget,
     ProviderDiscoveryRegistration,
@@ -42,9 +39,7 @@ from kdive.providers.infra.console_hosting import (
     ConsoleHostingLoop,
     RunningSystems,
 )
-from kdive.providers.infra.reaping import BuildVmReaper, DumpVolumeReaper
-from kdive.providers.ports.build_transport import BuildTransport
-from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
+from kdive.providers.infra.reaping import DumpVolumeReaper
 from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
     is_remote_libvirt_configured,
@@ -64,18 +59,15 @@ from kdive.providers.remote_libvirt.debug.introspect import (
     RemoteLibvirtLiveIntrospect,
     RemoteLibvirtVmcoreIntrospect,
 )
-from kdive.providers.remote_libvirt.lifecycle.build_vm import ephemeral_build_session
 from kdive.providers.remote_libvirt.lifecycle.connect import RemoteLibvirtConnect
 from kdive.providers.remote_libvirt.lifecycle.control import RemoteLibvirtControl
 from kdive.providers.remote_libvirt.lifecycle.install import RemoteLibvirtInstall
 from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtProvisioning
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
-from kdive.providers.remote_libvirt.reaping.build_vm import RemoteLibvirtBuildVmReaper
 from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
 from kdive.providers.remote_libvirt.resource_details import project_resource_details
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
-from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactory
 from kdive.providers.shared.debug_common.debuginfo import real_module_debuginfo_resolver
 from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
 from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote
@@ -110,38 +102,6 @@ def build_transport_resetter(*, secret_registry: SecretRegistry) -> TransportRes
 
 def build_dump_volume_reaper(*, secret_registry: SecretRegistry) -> DumpVolumeReaper:
     return RemoteLibvirtDumpVolumeReaper.from_env(secret_registry=secret_registry)
-
-
-def build_build_vm_reaper(*, secret_registry: SecretRegistry) -> BuildVmReaper:
-    return RemoteLibvirtBuildVmReaper.from_env(secret_registry=secret_registry)
-
-
-def build_ephemeral_build_transport_factory(
-    *, secret_registry: SecretRegistry
-) -> BuildHostTransportFactory:
-    """Build the remote-libvirt factory for ephemeral build-VM transports."""
-
-    def _factory(
-        host: BuildHost,
-        _registry: SecretRegistry,
-        run_id: UUID,
-        source: GitSourceRef | None,
-    ) -> AbstractContextManager[BuildTransport]:
-        if host.base_image_volume is None:
-            raise CategorizedError(
-                "ephemeral_libvirt build host has no base_image_volume",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"run_id": str(run_id), "build_host": host.name},
-            )
-        return ephemeral_build_session(
-            host.base_image_volume,
-            secret_registry,
-            run_id=run_id,
-            resource_name=host.name,
-            source=source,
-        )
-
-    return _factory
 
 
 def resource_name_for_system(conninfo: str, system_id: UUID) -> str:
@@ -302,11 +262,9 @@ def build_runtime(
     ``config_factory`` resolves the remote host's connection config. By default it is the
     unbound resolver, which raises if a per-op port is reached without binding: the resolver
     rebinds the runtime per granted Resource via ``rebind_for_resource`` so a per-op call reaches
-    the *allocated* host (ADR-0187, #395). The ``builder`` and ``vmcore_introspector`` ports take
-    no remote config — they build on a build-host transport / operate on a fetched vmcore, not the
-    remote libvirt host.
+    the *allocated* host (ADR-0187, #395). The ``vmcore_introspector`` port takes no remote
+    config — it operates on a fetched vmcore, not the remote libvirt host.
     """
-    builder = RemoteLibvirtBuild.from_env(secret_registry=secret_registry)
     installer = RemoteLibvirtInstall.from_env(
         secret_registry=secret_registry, config_factory=config_factory
     )
@@ -323,7 +281,6 @@ def build_runtime(
         provisioner=RemoteLibvirtProvisioning(
             secret_registry=secret_registry, config_factory=config_factory
         ),
-        builder=builder,
         installer=installer,
         booter=installer,
         connector=RemoteLibvirtConnect.from_env(
@@ -351,7 +308,6 @@ def build_runtime(
         supported_introspection=frozenset({"offline-vmcore", "live", "live-script"}),
         debug=_debug_capabilities(secret_registry),
         component_sources=_component_sources(),
-        build_config_validator=builder.validate_config_ref,
         rootfs_validator=lambda _rootfs: None,
         rootfs_build_plane=RemoteLibvirtRootfsBuildPlane.from_env(),
         staged_volume_probe=_staged_volume_probe(config_factory),

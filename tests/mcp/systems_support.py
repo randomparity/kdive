@@ -102,7 +102,6 @@ def upload_profile() -> dict[str, Any]:
 def provider_resolver(
     *,
     provisioner: object | None = None,
-    builder: object | None = None,
     installer: object | None = None,
     booter: object | None = None,
     connector: object | None = None,
@@ -139,7 +138,6 @@ def provider_resolver(
             Any, profile_policy if profile_policy is not None else TEST_PROFILE_POLICY
         ),
         provisioner=cast(Any, provisioner if provisioner is not None else unused_port),
-        builder=cast(Any, builder if builder is not None else unused_port),
         installer=cast(Any, installer if installer is not None else unused_port),
         booter=cast(Any, booter if booter is not None else unused_port),
         connector=cast(Any, connector if connector is not None else unused_port),

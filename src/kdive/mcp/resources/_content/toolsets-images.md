@@ -37,7 +37,9 @@ The families ship two rootfs flavors for different jobs:
   drgn, `kdump-tools`/`makedumpfile`, and `openssh-server` — for booting the kernel under test
   and inspecting it.
 - a **build-host** image carries the kernel-build toolchain (compiler, `make`, headers,
-  `pahole`) for the server-build lane.
+  `pahole`). You build kernels locally and upload them (see
+  [Build lane](../../operating/external-build-upload.md)), so this flavor is only useful as a
+  ready-made toolchain guest, never as a platform build target.
 
 `images.describe`'s `package_versions` shows what a given image actually baked in.
 

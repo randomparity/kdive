@@ -65,7 +65,6 @@ def build_app(
         secret_registry=composition.secret_registry,
         reaper=composition.build_reconciler_reaper(),
         dump_volume_reaper=composition.build_reconciler_dump_volume_reaper(),
-        build_vm_reaper=composition.build_reconciler_build_vm_reaper(),
         object_stores=build_object_store_assembly(),
     )
     for register in PLANE_REGISTRARS:
@@ -85,7 +84,6 @@ def build_handler_registry(
     assembly = WorkerHandlerAssembly(
         resolver=composition.build_provider_resolver(),
         secret_registry=composition.secret_registry,
-        transport_factories=composition.build_build_host_transport_factories(),
         object_stores=build_object_store_assembly(),
     )
     for register in HANDLER_REGISTRARS:

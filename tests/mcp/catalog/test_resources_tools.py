@@ -80,7 +80,6 @@ def _resolver_with_staged_projector(probe: StagedVolumeProbe) -> ProviderResolve
     runtime = ProviderRuntime(
         profile_policy=unused_port,
         provisioner=unused_port,
-        builder=unused_port,
         installer=unused_port,
         booter=unused_port,
         connector=unused_port,
@@ -217,7 +216,6 @@ def _descriptor_runtime(
     return ProviderRuntime(
         profile_policy=unused_port,
         provisioner=unused_port,
-        builder=unused_port,
         installer=unused_port,
         booter=unused_port,
         connector=unused_port,
@@ -454,7 +452,6 @@ def _resolver_with_rebound_staged_probe(
         return ProviderRuntime(
             profile_policy=unused_port,
             provisioner=unused_port,
-            builder=unused_port,
             installer=unused_port,
             booter=unused_port,
             connector=unused_port,

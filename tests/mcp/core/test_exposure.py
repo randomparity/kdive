@@ -55,8 +55,10 @@ def test_project_roles_on_ungranted_projects_do_not_expose_project_tools() -> No
     other_project = _ctx(roles={"a": Role.ADMIN}, projects=("b",))
 
     assert not scope_satisfied(ExposureScope.PROJECT_VIEWER, ungranted)
-    assert not tool_visible("runs.build", ungranted)
-    assert visible_tool_names(ungranted, {"projects.list", "runs.build"}) == {"projects.list"}
+    assert not tool_visible("runs.complete_build", ungranted)
+    assert visible_tool_names(ungranted, {"projects.list", "runs.complete_build"}) == {
+        "projects.list"
+    }
     assert not scope_satisfied(ExposureScope.PROJECT_ADMIN, other_project)
 
 
@@ -101,31 +103,6 @@ def test_drain_visible_to_operator_or_admin() -> None:
     admin = _ctx(platform=frozenset({PlatformRole.PLATFORM_ADMIN}))
     assert tool_visible("resources.drain", op)
     assert tool_visible("resources.drain", admin)
-
-
-def test_build_host_list_visible_to_platform_auditor() -> None:
-    auditor = _ctx(platform=frozenset({PlatformRole.PLATFORM_AUDITOR}))
-    operator = _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR}))
-
-    assert required_scopes("build_hosts.list") == frozenset({ExposureScope.PLATFORM_AUDITOR})
-    assert tool_visible("build_hosts.list", auditor)
-    assert not tool_visible("build_hosts.list", operator)
-
-
-def test_build_host_mutations_visible_to_platform_admin_only() -> None:
-    admin = _ctx(platform=frozenset({PlatformRole.PLATFORM_ADMIN}))
-    operator = _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR}))
-    tools = {
-        "build_hosts.disable",
-        "build_hosts.remove",
-        "build_hosts.register_ssh",
-        "build_hosts.register_ephemeral_libvirt",
-    }
-
-    for tool in tools:
-        assert required_scopes(tool) == frozenset({ExposureScope.PLATFORM_ADMIN})
-        assert tool_visible(tool, admin)
-        assert not tool_visible(tool, operator)
 
 
 def test_image_retention_visible_to_platform_admin_only() -> None:
@@ -203,7 +180,6 @@ _CONTRIBUTOR_LOOP = frozenset(
     {
         "runs.create",
         "runs.bind",
-        "runs.build",
         "runs.complete_build",
         "runs.install",
         "runs.boot",
@@ -329,8 +305,8 @@ def test_project_tool_visible_member_without_role_sees_only_public() -> None:
 def test_project_tool_visible_platform_scope_uses_connection_grant() -> None:
     # A platform-gated tool is not project-scoped; the platform grant decides regardless of project.
     auditor = _ctx(platform=frozenset({PlatformRole.PLATFORM_AUDITOR}))
-    assert project_tool_visible("build_hosts.list", auditor, "a")
-    assert not project_tool_visible("build_hosts.list", _ctx(roles={"a": Role.ADMIN}), "a")
+    assert project_tool_visible("ops.tool_trail", auditor, "a")
+    assert not project_tool_visible("ops.tool_trail", _ctx(roles={"a": Role.ADMIN}), "a")
 
 
 def test_visible_next_actions_filters_preserves_order_no_dedup() -> None:

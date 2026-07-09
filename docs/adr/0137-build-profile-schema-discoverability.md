@@ -1,6 +1,10 @@
 # ADR 0137 — Build-profile schema discoverability at the MCP boundary
 
-- **Status:** Accepted
+> **Superseded by [ADR-0316](0316-remove-server-build-lane.md)** (2026-07-08) — the server-build
+> lane and its discoverable build-profile schema were removed; kdive builds only from uploaded
+> artifacts. The decision below is retained as history.
+
+- **Status:** Superseded by [ADR-0316](0316-remove-server-build-lane.md)
 - **Date:** 2026-06-16
 - **Deciders:** kdive maintainers
 
@@ -76,7 +80,7 @@ surface), mirroring ADR-0124. Specifically:
    fragment's bytes + sha256 + merge recipe so a caller can inspect what `config` selects. There
    is **no** `buildconfig.list` tool (only `buildconfig.get` read and `buildconfig.set` operator
    write); the docs name only those. Cross-reference the #481 operator doc
-   (`docs/operating/build-source-staging.md`, ADR-0136) for staging the kernel *source* rather
+   (the build-source-staging guide, ADR-0136; both removed by ADR-0316) for staging the kernel *source* rather
    than duplicating it — this ADR covers the *config* selection axis, that doc covers the
    *source* axis.
 

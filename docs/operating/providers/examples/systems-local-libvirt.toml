@@ -14,7 +14,7 @@
 # running; until discovery enumerates the host, the overlay is deferred with a benign warning.
 #
 # `KDIVE_SYSTEMS_TOML` overrides the path. This is the *starting point*; the full multi-provider
-# reference (remote fleet, build hosts, fault-inject, campaign knobs) is `systems.toml.example` at
+# reference (remote fleet, fault-inject, campaign knobs) is `systems.toml.example` at
 # the repo root. See docs/operating/providers/local-libvirt-walkthrough.md for the linear setup.
 
 schema_version = 2
@@ -67,43 +67,3 @@ concurrent_allocation_cap = 1
 [[cost_class]]
 name = "local-kvm"
 coeff = "1.0"
-
-# ---------------------------------------------------------------------------------------------
-# BUILD CONFIG — the kdump kernel-config fragment (ADR-0122).
-#
-# `kdump` is the seeded build default a from-source build resolves when its profile names no
-# config. Declaring it here makes THIS file authoritative for the fragment: it overrides the
-# packaged seed and any live `buildconfig.set`. So the content must stay COMPLETE — a partial
-# kdump fragment silently disarms kdump (a missing SQUASHFS/KEXEC_FILE/OVERLAY symbol yields no
-# vmcore; #679, #688). The arming set below mirrors the packaged seed
-# `src/kdive/build_configs/data/kdump.config`. `VMCORE_INFO`/`FW_CFG_SYSFS` arm the QEMU
-# host_dump path (a parseable core; #708) and `IKCONFIG`/`IKCONFIG_PROC` expose the built
-# kernel's effective config at `/proc/config.gz` for diagnosis. If you do not need to customize
-# it, delete this block and rely on the packaged seed (`kdive seed-build-configs`).
-# ---------------------------------------------------------------------------------------------
-[[build_config]]
-name = "kdump"
-description = "kdump/debuginfo kernel-config fragment"
-content = """
-CONFIG_KEXEC=y
-CONFIG_KEXEC_CORE=y
-CONFIG_CRASH_DUMP=y
-CONFIG_VMCORE_INFO=y
-CONFIG_PROC_VMCORE=y
-CONFIG_FW_CFG_SYSFS=y
-CONFIG_IKCONFIG=y
-CONFIG_IKCONFIG_PROC=y
-CONFIG_RELOCATABLE=y
-CONFIG_RANDOMIZE_BASE=y
-CONFIG_DEBUG_INFO=y
-CONFIG_DEBUG_INFO_DWARF5=y
-CONFIG_DEBUG_KERNEL=y
-CONFIG_MAGIC_SYSRQ=y
-CONFIG_XFS_FS=y
-CONFIG_XFS_POSIX_ACL=y
-CONFIG_SQUASHFS=y
-CONFIG_SQUASHFS_ZSTD=y
-CONFIG_BLK_DEV_LOOP=y
-CONFIG_OVERLAY_FS=y
-CONFIG_KEXEC_FILE=y
-"""

@@ -39,8 +39,8 @@ EXPECTED_CONSOLE_CRASH = "expected_console_crash"
 # ungranted-project miss, which carries no reason so the envelope cannot leak membership) maps to
 # no next actions.
 _VMCORE_NEXT_ACTIONS: dict[str, list[str]] = {
-    NO_DEBUGINFO: ["runs.get", "runs.build"],
-    NO_BUILD: ["runs.build", "runs.get"],
+    NO_DEBUGINFO: ["runs.get", "runs.complete_build"],
+    NO_BUILD: ["runs.complete_build", "runs.get"],
     NO_VMCORE: ["vmcore.fetch", "runs.get"],
 }
 

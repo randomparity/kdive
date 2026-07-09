@@ -22,7 +22,6 @@ from kdive.jobs.handlers.runs import boot as runs_boot
 from kdive.jobs.handlers.runs import boot_evidence
 from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.handlers.runs import registrar as runs_registrar
-from kdive.jobs.handlers.runs.build import BuildHostTransportFactories
 from kdive.jobs.models import HandlerRegistry
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
@@ -147,7 +146,6 @@ def _ports() -> runs.RunHandlerPorts:
     return runs.RunHandlerPorts(
         resolver=cast(ProviderResolver, object()),
         secret_registry=cast(SecretRegistry, object()),
-        transport_factories=cast(BuildHostTransportFactories, "transport-factories"),
         artifact_store=cast(ObjectStore, "artifact-store"),
     )
 
@@ -155,7 +153,7 @@ def _ports() -> runs.RunHandlerPorts:
 def test_register_handlers_binds_each_run_kind_to_its_handler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The facade must bind exactly build/install/boot, each to its own leaf handler — a
+    # The facade must bind exactly install/boot, each to its own leaf handler — a
     # mis-wired lambda (wrong kind, wrong handler) would let the worker dispatch a job to the
     # wrong run phase.
     calls: dict[str, tuple[object, object, dict[str, object]]] = {}
@@ -166,11 +164,6 @@ def test_register_handlers_binds_each_run_kind_to_its_handler(
 
     monkeypatch.setattr(
         runs_registrar,
-        "build_handler",
-        lambda conn, job, **kw: _fake("build", conn, job, **kw),
-    )
-    monkeypatch.setattr(
-        runs_registrar,
         "install_handler",
         lambda conn, job, **kw: _fake("install", conn, job, **kw),
     )
@@ -179,17 +172,12 @@ def test_register_handlers_binds_each_run_kind_to_its_handler(
         "boot_handler",
         lambda conn, job, **kw: _fake("boot", conn, job, **kw),
     )
-    monkeypatch.setattr(
-        runs_registrar,
-        "composite_handler",
-        lambda conn, job, *, ports: _fake("composite", conn, job),
-    )
 
     registry = HandlerRegistry()
     ports = _ports()
     runs.register_handlers(registry, ports=ports)
 
-    claimed = {JobKind.BUILD, JobKind.INSTALL, JobKind.BOOT, JobKind.BUILD_INSTALL_BOOT}
+    claimed = {JobKind.INSTALL, JobKind.BOOT}
     for kind in claimed:
         assert registry.get(kind) is not None
     # Every other JobKind must remain unclaimed by this facade — a mutant that
@@ -206,19 +194,10 @@ def test_register_handlers_binds_each_run_kind_to_its_handler(
         assert handler is not None
         return asyncio.run(handler(conn, job))
 
-    assert _dispatch(JobKind.BUILD) == "build"
     assert _dispatch(JobKind.INSTALL) == "install"
     assert _dispatch(JobKind.BOOT) == "boot"
-    assert _dispatch(JobKind.BUILD_INSTALL_BOOT) == "composite"
 
     # Each lambda threads the shared conn/job plus the ports the leaf handler needs.
-    assert calls["build"][0] is conn and calls["build"][1] is job
-    assert calls["build"][2] == {
-        "resolver": ports.resolver,
-        "secret_registry": ports.secret_registry,
-        "transport_factories": ports.transport_factories,
-        "build_phase_recorder": ports.build_phase_recorder,
-    }
     assert calls["install"][0] is conn and calls["install"][1] is job
     assert calls["install"][2] == {"resolver": ports.resolver}
     assert calls["boot"][0] is conn and calls["boot"][1] is job

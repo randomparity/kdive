@@ -25,7 +25,7 @@ class RowTyper:
 
     Args:
         table: The entry name embedded in raised :class:`InventoryError` messages
-            (e.g. ``"build_hosts"`` or ``"resources"``).
+            (e.g. ``"image_catalog"`` or ``"resources"``).
     """
 
     table: str

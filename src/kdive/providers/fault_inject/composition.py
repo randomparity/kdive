@@ -20,7 +20,6 @@ from kdive.providers.core.discovery_registration import (
     ProviderDiscoveryRegistration,
 )
 from kdive.providers.core.runtime import DebugCapabilities, ProviderRuntime
-from kdive.providers.fault_inject.build import FaultInjectBuild
 from kdive.providers.fault_inject.debug.gdb import (
     FaultInjectDebugEngine,
     fault_inject_attach_seam,
@@ -95,7 +94,6 @@ def build_runtime(
     return ProviderRuntime(
         profile_policy=FaultInjectProfilePolicy(),
         provisioner=FaultedProvisioning(provisioner, engine) if engine is not None else provisioner,
-        builder=FaultInjectBuild(store_factory=object_store_from_env),
         installer=faulted_install,
         booter=faulted_install,
         connector=FaultInjectConnect(),

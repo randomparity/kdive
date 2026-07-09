@@ -17,7 +17,6 @@ from kdive.components.references import (
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.providers.local_libvirt import composition
-from kdive.providers.local_libvirt.build import LocalLibvirtBuild
 from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import (
     LocalLibvirtLiveIntrospect,
@@ -59,7 +58,6 @@ def test_build_runtime_wires_local_ports_and_capabilities() -> None:
 
     assert isinstance(runtime.profile_policy, LocalLibvirtProfilePolicy)
     assert isinstance(runtime.provisioner, LocalLibvirtProvisioning)
-    assert isinstance(runtime.builder, LocalLibvirtBuild)
     assert isinstance(runtime.installer, LocalLibvirtInstall)
     assert isinstance(runtime.booter, LocalLibvirtInstall)
     assert isinstance(runtime.connector, LocalLibvirtConnect)
@@ -91,7 +89,6 @@ def test_build_runtime_wires_local_ports_and_capabilities() -> None:
         PATCH_COMPONENT: frozenset({"local"}),
         VMLINUX_COMPONENT: frozenset({"local"}),
     }
-    assert runtime.build_config_validator is not None
     assert runtime.rootfs_validator is not None
 
 
@@ -132,11 +129,9 @@ def test_build_runtime_threads_secret_registry_into_secret_aware_ports() -> None
     # The single caller-supplied registry must reach every secret-aware port, not be
     # dropped (which would silently disable redaction for that port). The runtime fields
     # are typed as ports (Protocols); narrow to the concrete impls to inspect the wiring.
-    builder = cast("LocalLibvirtBuild", runtime.builder)
     retriever = cast("LocalLibvirtRetrieve", runtime.retriever)
     vmcore_introspector = cast("LocalLibvirtVmcoreIntrospect", runtime.vmcore_introspector)
     live_introspector = cast("LocalLibvirtLiveIntrospect", runtime.live_introspector)
-    assert builder._secret_registry is registry
     assert retriever._secret_registry is registry
     assert vmcore_introspector._secret_registry is registry
     assert live_introspector._secret_registry is registry

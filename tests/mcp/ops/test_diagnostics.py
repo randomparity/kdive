@@ -94,9 +94,7 @@ class _FakeCheck(Check):
 
 
 def _factory(results: list[CheckResult]) -> diagnostics.ServiceFactory:
-    def _build(
-        provider: str | None, *, with_egress: bool = False, with_buildhost_agent: bool = False
-    ) -> DiagnosticsService:
+    def _build(provider: str | None, *, with_egress: bool = False) -> DiagnosticsService:
         return DiagnosticsService(checks=[_FakeCheck(r) for r in results], per_check_timeout=1.0)
 
     return _build
@@ -200,7 +198,7 @@ def test_with_egress_threads_the_opt_in_into_the_factory(migrated_url: str) -> N
     seen: list[bool] = []
 
     def _factory_recording(
-        provider: str | None, *, with_egress: bool = False, with_buildhost_agent: bool = False
+        provider: str | None, *, with_egress: bool = False
     ) -> DiagnosticsService:
         seen.append(with_egress)
         return DiagnosticsService(checks=[_FakeCheck(r) for r in _HEALTHY], per_check_timeout=1.0)
@@ -208,39 +206,6 @@ def test_with_egress_threads_the_opt_in_into_the_factory(migrated_url: str) -> N
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await diagnostics.run_diagnostics(pool, _factory_recording, _OPERATOR, with_egress=True)
-        assert seen == [True]
-
-    asyncio.run(_run())
-
-
-def test_with_buildhost_agent_records_a_distinct_provisioning_audit(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            await diagnostics.run_diagnostics(
-                pool, _factory(_HEALTHY), _OPERATOR, with_buildhost_agent=True
-            )
-        rows = await _platform_audit_rows(migrated_url)
-        tools = sorted(r[2] for r in rows)
-        # The mutating opt-in is audited distinctly from the read-only run (ADR-0091 §4, ADR-0167).
-        assert tools == ["ops.diagnostics", "ops.diagnostics.buildhost_agent"]
-
-    asyncio.run(_run())
-
-
-def test_with_buildhost_agent_threads_the_opt_in_into_the_factory(migrated_url: str) -> None:
-    seen: list[bool] = []
-
-    def _factory_recording(
-        provider: str | None, *, with_egress: bool = False, with_buildhost_agent: bool = False
-    ) -> DiagnosticsService:
-        seen.append(with_buildhost_agent)
-        return DiagnosticsService(checks=[_FakeCheck(r) for r in _HEALTHY], per_check_timeout=1.0)
-
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            await diagnostics.run_diagnostics(
-                pool, _factory_recording, _OPERATOR, with_buildhost_agent=True
-            )
         assert seen == [True]
 
     asyncio.run(_run())
@@ -298,11 +263,11 @@ def test_verdict_projects_resource_id(migrated_url: str) -> None:
 
 
 def test_verdict_projects_check_data(migrated_url: str) -> None:
-    # A check that discloses structured CheckResult.data (e.g. local_kernel_src's resolved path +
-    # git HEAD, #845) surfaces it under the item's nested ``data`` key; a check with none gets {}.
+    # A check that discloses structured CheckResult.data (#845) surfaces it under the item's
+    # nested ``data`` key; a check with none gets {}.
     results = [
         CheckResult(
-            check_id="local_kernel_src",
+            check_id="disclosing_check",
             status=CheckStatus.PASS,
             detail="usable",
             data={"vantage": "server", "resolved_path": "/abs/linux", "branch": "main"},
@@ -314,7 +279,7 @@ def test_verdict_projects_check_data(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             resp = await diagnostics.run_diagnostics(pool, _factory(results), _OPERATOR)
         by_check = {item.data["check"]: item for item in resp.items}
-        assert by_check["local_kernel_src"].data["data"] == {
+        assert by_check["disclosing_check"].data["data"] == {
             "vantage": "server",
             "resolved_path": "/abs/linux",
             "branch": "main",
@@ -424,9 +389,7 @@ def test_secret_ref_aggregate_carries_no_per_tenant_ref(migrated_url: str) -> No
 def test_factory_build_failure_is_error_verdict_and_audited(
     migrated_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    def _failing_factory(
-        provider: str | None, *, with_egress: bool = False, with_buildhost_agent: bool = False
-    ) -> DiagnosticsService:
+    def _failing_factory(provider: str | None, *, with_egress: bool = False) -> DiagnosticsService:
         raise RuntimeError("malformed KDIVE_* secret value")
 
     caplog.set_level(logging.ERROR, logger="kdive.mcp.tools.ops.diagnostics")

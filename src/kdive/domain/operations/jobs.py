@@ -19,6 +19,8 @@ class JobKind(StrEnum):
     PROVISION = "provision"
     REPROVISION = "reprovision"
     TEARDOWN = "teardown"
+    # BUILD / BUILD_INSTALL_BOOT are inert: the server-build lane was removed, but Postgres
+    # cannot drop a value from an existing enum, so the members (and their payload shapes) stay.
     BUILD = "build"
     INSTALL = "install"
     BOOT = "boot"
@@ -38,14 +40,6 @@ DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
     {JobKind.REPROVISION, JobKind.TEARDOWN, JobKind.FORCE_CRASH, JobKind.POWER}
 )
 """Job kinds that require destructive-operation admission checks (ADR-0130)."""
-
-BUILD_BEARING_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT})
-"""Job kinds that acquire a build-host lease and (on ephemeral hosts) a build VM.
-
-Both ``build`` and ``build_install_boot`` hold the ``build_host_leases`` slot and the
-ephemeral build-VM domain for the duration of their build phase. Reconciler liveness guards
-and composite-admission conflict checks must treat both as live build holders (ADR-0268).
-"""
 
 
 class PowerAction(StrEnum):

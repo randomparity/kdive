@@ -451,24 +451,6 @@ def test_over_quota_upload_is_denied(migrated_url: str, monkeypatch: pytest.Monk
 # ---- exit criterion 1 + 5 meta-guards ----------------------------------------------
 
 
-def test_criterion_1_regression_lives_with_both_kernel_planes() -> None:
-    # Criterion 1 (a no-op kernel patch fails patch-applied verification) is proven co-located
-    # with each kernel build plane's _apply_patch. Pin that both regressions exist so the class
-    # stays closed for BOTH planes (the #227 class is per-plane, not a shared helper).
-    root = pathlib.Path(__file__).resolve().parents[2]
-    name = "def test_exit_criterion_noop_patch_fails_patch_applied_verification"
-    build_tests = (
-        ("local_libvirt", root / "tests" / "providers" / "local_libvirt" / "test_build.py"),
-        (
-            "remote_libvirt",
-            root / "tests" / "providers" / "remote_libvirt" / "build" / "test_build.py",
-        ),
-    )
-    for plane, path in build_tests:
-        text = path.read_text(encoding="utf-8")
-        assert name in text, f"missing the criterion-1 no-op regression for the {plane} plane"
-
-
 def test_exit_criterion_proof_is_ci_tier() -> None:
     # This proof is CI-tier: it carries no live_stack/live_vm marker, so it runs in normal CI
     # against the disposable-Postgres fixture (the store + libguestfs inspect are faked). The

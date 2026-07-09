@@ -79,7 +79,7 @@ transient drop. For *mutations*, a blind retry of the initial create/enqueue cou
 double-act. To make a mutation retry safe, every object-creating / job-enqueuing tool
 accepts an optional `idempotency_key` ([ADR-0193](../adr/0193-uniform-mutation-idempotency.md)):
 
-- **What it covers.** The create/enqueue mutations — `runs.create` / `runs.build` /
+- **What it covers.** The create/enqueue mutations — `runs.create` /
   `runs.install` / `runs.boot`, `systems.provision` / `systems.define` /
   `systems.provision_defined` / `systems.reprovision` / `systems.teardown`,
   `vmcore.fetch`, `control.power` / `control.force_crash`, `investigations.open`, and

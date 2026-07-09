@@ -18,7 +18,6 @@ import kdive.config as config
 from kdive.diagnostics.checks import (
     BASE_IMAGE_STAGING_ID,
     GDBSTUB_ACL_ID,
-    LOCAL_KERNEL_SRC_ID,
     PROVIDER_TLS_ID,
     REACHABILITY_ID,
     SECRET_REF_ID,
@@ -56,7 +55,6 @@ def _factory(
     provider: str | None,
     *,
     with_egress: bool = False,
-    with_buildhost_agent: bool = False,
     pool: AsyncConnectionPool | None = None,
 ) -> DiagnosticsService:
     from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
@@ -64,7 +62,6 @@ def _factory(
     return default_service_factory(
         provider,
         with_egress=with_egress,
-        with_buildhost_agent=with_buildhost_agent,
         pool=pool,
         provider_contributions=diagnostic_provider_contributions(),
     )
@@ -114,14 +111,8 @@ volume = "fedora-kdive-remote-base-43.qcow2"
 """
 
 
-# The always-on local_kernel_src check (ADR-0163) reads KDIVE_KERNEL_SRC and FAILs when it is
-# unusable, which would flip report.has_failure and add a row to every aggregated run(). The shared
-# run-fixtures point it at `root` (an existing absolute tmp dir → USABLE) so the new check passes
-# and does not pollute the has_failure expectations the existing tests assert; tests that exercise
-# the check's FAIL path set/clear KDIVE_KERNEL_SRC explicitly instead of using these helpers.
 def _set_env(monkeypatch, root: Path, **refs: str) -> None:
     monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(root))
-    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(root))
     for name, value in refs.items():
         monkeypatch.setenv(name, value)
     config.load()
@@ -131,14 +122,12 @@ def _with_remote_instance(monkeypatch, root: Path, *, instances: str = _INSTANCE
     path = root / "systems.toml"
     path.write_text(f"schema_version = 2\n{_IMAGE}\n{instances}\n")
     monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(root))
-    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(root))
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(path))
     config.load()
 
 
 def _no_remote_instance(monkeypatch, root: Path) -> None:
     monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(root))
-    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(root))
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(root / "absent.toml"))
     config.load()
 
@@ -366,7 +355,7 @@ def test_factory_service_is_worker_unavailable_when_remote_configured(
 def test_factory_omits_remote_checks_when_not_configured(monkeypatch, tmp_path: Path) -> None:
     _no_remote_instance(monkeypatch, tmp_path)
     ids = {c.id for c in _factory(None)._checks}  # noqa: SLF001
-    assert ids == {SECRET_REF_ID, LOCAL_KERNEL_SRC_ID}
+    assert ids == {SECRET_REF_ID}
 
 
 def test_run_substitutes_tls_acl_and_runs_reachability_and_secret_ref(
@@ -451,87 +440,7 @@ def test_multiple_instances_each_get_a_reachability_check(monkeypatch, tmp_path:
     assert ids.count(BASE_IMAGE_STAGING_ID) == 2
 
 
-# ---- local build-host warm-tree source check (ADR-0163, #532) ------------------------
-
-
-def test_factory_always_includes_local_kernel_src(monkeypatch, tmp_path: Path) -> None:
-    # The seeded worker-local LOCAL host is a DB invariant, so local_kernel_src is always
-    # assembled — remote configured or not.
-    _no_remote_instance(monkeypatch, tmp_path)
-    assert LOCAL_KERNEL_SRC_ID in {c.id for c in _factory(None)._checks}  # noqa: SLF001
-    _with_remote_instance(monkeypatch, tmp_path)
-    assert LOCAL_KERNEL_SRC_ID in {c.id for c in _factory(None)._checks}  # noqa: SLF001
-
-
-def test_local_kernel_src_fails_when_unset(monkeypatch, tmp_path: Path) -> None:
-    # The #532 headline: an unset KDIVE_KERNEL_SRC is a contract fail surfaced at preflight, so
-    # the doctor gate exits nonzero (has_failure True) rather than passing while every local
-    # warm-tree build fails. Set KDIVE_KERNEL_SRC explicitly (not via the shared helper, which
-    # makes it usable) to exercise the FAIL path.
-    monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(tmp_path))
-    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
-    monkeypatch.delenv("KDIVE_KERNEL_SRC", raising=False)
-    config.load()
-    report = asyncio.run(_factory(None).run())
-    by_id = {r.check_id: r for r in report.results}
-    assert by_id[LOCAL_KERNEL_SRC_ID].status is CheckStatus.FAIL
-    assert by_id[LOCAL_KERNEL_SRC_ID].failure_category is ErrorCategory.CONFIGURATION_ERROR
-    assert by_id[LOCAL_KERNEL_SRC_ID].fix is not None
-    assert by_id[LOCAL_KERNEL_SRC_ID].provider is None
-    assert report.has_failure is True
-
-
-def test_local_kernel_src_passes_when_usable(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(tmp_path))
-    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
-    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(tmp_path))
-    config.load()
-    report = asyncio.run(_factory(None).run())
-    by_id = {r.check_id: r for r in report.results}
-    assert by_id[LOCAL_KERNEL_SRC_ID].status is CheckStatus.PASS
-    assert by_id[LOCAL_KERNEL_SRC_ID].provider is None
-    assert report.has_failure is False
-
-
-# ---- ephemeral build-host agent check opt-in (ADR-0167, #544/#531) -------------------
-
-
-def test_buildhost_agent_check_assembled_only_when_opted_in_with_pool(
-    monkeypatch, tmp_path: Path
-) -> None:
-    from typing import cast
-
-    from kdive.diagnostics.checks import BUILDHOST_AGENT_ID
-
-    _no_remote_instance(monkeypatch, tmp_path)
-    # Off by default: not assembled.
-    assert BUILDHOST_AGENT_ID not in {c.id for c in _factory(None)._checks}  # noqa: SLF001
-    # Opted in with a pool: assembled.
-    service = _factory(None, with_buildhost_agent=True, pool=cast(AsyncConnectionPool, object()))
-    assert BUILDHOST_AGENT_ID in {c.id for c in service._checks}  # noqa: SLF001
-
-
-def test_buildhost_agent_without_pool_fails_fast(monkeypatch, tmp_path: Path) -> None:
-    _no_remote_instance(monkeypatch, tmp_path)
-    with pytest.raises(CategorizedError) as exc:
-        _factory(None, with_buildhost_agent=True)
-    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-
-
-def test_buildhost_agent_service_uses_generous_per_check_timeout(
-    monkeypatch, tmp_path: Path
-) -> None:
-    from typing import cast
-
-    _no_remote_instance(monkeypatch, tmp_path)
-    service = _factory(None, with_buildhost_agent=True, pool=cast(AsyncConnectionPool, object()))
-    # The builder's wait_for_agent bound is 180s; the per-check timeout must exceed it so the probe
-    # can reach a pass/fail verdict rather than always timing out to error.
-    assert service._timeout >= 180.0  # noqa: SLF001
-    assert service._overall_timeout is None  # noqa: SLF001
-
-
-def test_default_factory_keeps_tight_timeouts_without_the_flag(monkeypatch, tmp_path: Path) -> None:
+def test_default_factory_keeps_tight_timeouts(monkeypatch, tmp_path: Path) -> None:
     _set_env(monkeypatch, tmp_path)
     service = _factory(None)
     assert service._timeout == 10.0  # noqa: SLF001

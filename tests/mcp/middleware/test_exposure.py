@@ -118,7 +118,7 @@ def test_gateway_on_returns_core_intersect_rbac(monkeypatch: pytest.MonkeyPatch)
     names = {t.name for t in result}
 
     assert names <= CORE_TOOLS
-    assert {"tools.search", "tools.invoke", "runs.build_install_boot"} <= names
+    assert {"tools.search", "tools.invoke", "runs.create"} <= names
 
 
 def test_gateway_on_fails_open_on_error(monkeypatch: pytest.MonkeyPatch) -> None:

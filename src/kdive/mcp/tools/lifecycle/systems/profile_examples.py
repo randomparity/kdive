@@ -63,8 +63,6 @@ _PLACEHOLDER_BASE_IMAGE = "REPLACE_ME-base-image-volume"
 # URI-looking string (`git:…`/`https://…`): the build checkout dispatches on the structured
 # {"git": {...}} object, so any bare string — including one that looks like a git URI — is
 # silently treated as warm-tree provenance and mirrored from KDIVE_KERNEL_SRC (workspace.py).
-# A git build needs the structured form at runs.create (build-source-staging.md). Mirrors
-# runs.profile_examples' `REPLACE_ME-warm-tree-source` (#763, BB-P3 D5).
 _PLACEHOLDER_KERNEL_SOURCE = "REPLACE_ME-warm-tree-label"
 
 _REPLACE_NOTE = (

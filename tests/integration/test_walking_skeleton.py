@@ -23,16 +23,13 @@ import pytest
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.build_artifacts.results import BuildOutput
-from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers import vmcore as vmcore_plane
-from kdive.jobs.handlers.runs import registrar as runs_handlers
-from kdive.jobs.payloads import Authorizing, BuildPayload, CaptureVmcorePayload
+from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.catalog.artifacts.reads import artifacts_get, artifacts_list
 from kdive.mcp.tools.lifecycle import control as control_tools
@@ -46,7 +43,6 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.integration._seed import (
     seed_crashed_system_with_run,
     seed_granted_allocation,
-    seed_running_run,
     seed_system,
 )
 from tests.integration.conftest import open_pool, request_context
@@ -61,21 +57,6 @@ def _admin_ctx() -> RequestContext:
 
 
 # --- fakes (injected providers; the real ops are live_vm-gated) ----------------------------
-
-
-class _RecordingBuilder:
-    """Records build() calls so a replay can assert the rebuild was skipped (#4)."""
-
-    def __init__(self) -> None:
-        self.calls: list[UUID] = []
-
-    def build(self, run_id: UUID, profile: object, **_: object) -> BuildOutput:
-        self.calls.append(run_id)
-        return BuildOutput(
-            kernel_ref=f"proj/runs/{run_id}/kernel",
-            debuginfo_ref=f"proj/runs/{run_id}/vmlinux",
-            build_id="abcdef0123456789",
-        )
 
 
 class _SecretBearingRetriever:
@@ -188,64 +169,6 @@ def test_force_crash_allowed_when_all_gate_checks_present(migrated_url: str) -> 
                 )
                 row = await cur.fetchone()
             assert row is not None and row["n"] == 1
-
-    asyncio.run(_run())
-
-
-# --- exit criterion #4: idempotent step replay ---------------------------------------------
-
-
-async def _enqueue_build(pool: AsyncConnectionPool, run_id: str) -> Job:
-    async with pool.connection() as conn:
-        return await queue.enqueue(
-            conn,
-            JobKind.BUILD,
-            BuildPayload(run_id=run_id, build_host_id=str(WORKER_LOCAL_ID)),
-            _AUTH,
-            f"{run_id}:build",
-        )
-
-
-def test_completed_step_replay_does_not_re_execute(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: object
-) -> None:
-    """#4: re-dispatching a completed build job reads the ledger and does not rebuild."""
-    # A usable warm tree so the worker-local build passes ADR-0158 admission.
-    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(tmp_path))
-
-    async def _run() -> None:
-        async with open_pool(migrated_url) as pool:
-            alloc_id = await seed_granted_allocation(pool)
-            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await seed_running_run(pool, sys_id)
-            job = await _enqueue_build(pool, run_id)
-            builder = _RecordingBuilder()
-            async with pool.connection() as conn:
-                await runs_handlers.build_handler(
-                    conn,
-                    job,
-                    resolver=provider_resolver(builder=builder),
-                    secret_registry=SecretRegistry(),
-                )
-            # Replay the same job: the (run_id, "build") ledger short-circuits the rebuild.
-            async with pool.connection() as conn:
-                await runs_handlers.build_handler(
-                    conn,
-                    job,
-                    resolver=provider_resolver(builder=builder),
-                    secret_registry=SecretRegistry(),
-                )
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM runs WHERE id = %s", (run_id,))
-                run_row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM run_steps WHERE run_id = %s AND step = 'build'",
-                    (run_id,),
-                )
-                ledger = await cur.fetchone()
-            assert builder.calls == [UUID(run_id)]  # built exactly once across the replay
-            assert run_row is not None and run_row["state"] == "succeeded"
-            assert ledger is not None and ledger["n"] == 1  # one ledger row, not two
 
     asyncio.run(_run())
 

@@ -1,6 +1,10 @@
 # ADR 0161 — Admit a local warm-tree build only when `KDIVE_KERNEL_SRC` is usable
 
-- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+> **Superseded by [ADR-0316](0316-remove-server-build-lane.md)** (2026-07-08) — the local
+> warm-tree build lane this ADR admits was removed; kdive builds only from uploaded artifacts.
+> The decision below is retained as history.
+
+- **Status:** Superseded by [ADR-0316](0316-remove-server-build-lane.md)
 - **Date:** 2026-06-17
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0099](0099-remote-build-host-targets.md)
@@ -97,7 +101,7 @@ host holds no build-host lease, the lease/retry contract is unchanged; only the 
 of the identical failure moves earlier.
 
 **(2) Give the demo a documented one-step bootstrap, not a bundled tree.** Extend
-`docs/operating/build-source-staging.md` with an explicit demo/compose bootstrap: a
+the build-source-staging guide (removed by ADR-0316) with an explicit demo/compose bootstrap: a
 host bind-mount of a kernel tree into the `worker` service plus
 `KDIVE_KERNEL_SRC=<mount path>`, shown as a commented, copy-ready stanza in
 `docker-compose.yml`'s `worker` service. We do **not** bundle or auto-download a

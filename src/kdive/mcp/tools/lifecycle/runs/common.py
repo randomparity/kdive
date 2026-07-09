@@ -12,7 +12,6 @@ from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import Job
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import job_envelope
-from kdive.mcp.tools.lifecycle._recovery import build_profile_summary
 from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
 from kdive.services.artifacts.listing import ConsoleManifest
 from kdive.services.runs import states as run_states
@@ -76,7 +75,8 @@ def _run_recovery(run: Run) -> dict[str, JsonValue]:
     return {
         "investigation_id": str(run.investigation_id),
         "label": run.label,
-        **build_profile_summary(run.build_profile),
+        # Every Run is the external-upload lane (the agent builds locally and uploads).
+        "build_source": "external",
     }
 
 
@@ -175,7 +175,7 @@ def _required_cmdline_data(required_cmdline: str | None) -> dict[str, JsonValue]
     if required_cmdline is None:
         return {}
     # The platform-owned boot args (#748). Extra kernel debug args are set via runs.install.cmdline
-    # (per-boot, no rebuild), runs.build.cmdline, or runs.complete_build.cmdline (external builds).
+    # (per-boot, no rebuild) or runs.complete_build.cmdline (at build finalization).
     return {"required_cmdline": required_cmdline}
 
 
@@ -304,7 +304,7 @@ def envelope_for_run(
         return _failed_envelope(run, category, failing_job)
 
     if run.state in (RunState.CREATED, RunState.RUNNING):
-        actions = ["runs.get", "runs.build"]
+        actions = ["runs.get", "runs.complete_build"]
     elif run.state is RunState.SUCCEEDED:
         # Build-succeeded; install/boot live in run_steps (ADR-0179). Walk the progression
         # and surface the per-step map so a caller need not infer it from Run.state.

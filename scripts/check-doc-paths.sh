@@ -6,7 +6,11 @@
 # cites a moved spec). NOT scanned:
 #   - docs/design/** — design specs narrate path moves (e.g. specs/ -> design/), so their
 #     docs/... mentions are intentional and must not be policed here;
-#   - docs/archive/** — frozen history references paths as they were when written;
+#   - docs/archive/**, docs/specs/**, docs/superpowers/** — frozen dated design records
+#     (specs and plans, named YYYY-MM-DD-*.md) reference paths as they were when written and are
+#     never edited after creation; unlike an ADR (a living decision log that is superseded, not
+#     excluded — see docs/adr/README.md), they carry no supersede mechanism, so their historical
+#     path mentions are not policed;
 #   - CHANGELOG.md — git-cliff-generated; it reproduces commit subjects verbatim, which
 #     may contain "docs"-slash tokens that are recipe names, not paths (a commit titled
 #     "Add just docs-check" rendered the recipe with a slash). Generated history, not an
@@ -27,7 +31,7 @@ set -euo pipefail
 readonly ROOT="${1:-.}"
 cd "${ROOT}"
 
-readonly EXCLUDE='^docs/(design|archive)/|^CHANGELOG\.md$|^\.(claude|agents|codex)/|^src/kdive/mcp/resources/_content/|^tests/scripts/test_check_doc_paths\.py$|^tests/scripts/test_m2_portability_gate\.py$'
+readonly EXCLUDE='^docs/(design|archive|specs|superpowers)/|^CHANGELOG\.md$|^\.(claude|agents|codex)/|^src/kdive/mcp/resources/_content/|^tests/scripts/test_check_doc_paths\.py$|^tests/scripts/test_m2_portability_gate\.py$'
 
 mapfile -t files < <(
   { git ls-files 'justfile' 'scripts/*' '*.yml' '*.yaml' '*.md' '*.py' 2>/dev/null || true; } |
@@ -38,6 +42,7 @@ if ((${#files[@]} == 0)); then
     find . -type f \( -name justfile -o -path './scripts/*' -o -name '*.yml' \
       -o -name '*.yaml' -o -name '*.md' -o -name '*.py' \) \
       -not -path './docs/design/*' -not -path './docs/archive/*' \
+      -not -path './docs/specs/*' -not -path './docs/superpowers/*' \
       -not -path './CHANGELOG.md' \
       -not -path './.claude/*' -not -path './.agents/*' -not -path './.codex/*' \
       -not -path './src/kdive/mcp/resources/_content/*' \

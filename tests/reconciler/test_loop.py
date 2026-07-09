@@ -11,7 +11,6 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.domain.capacity.state import AllocationState, DebugSessionState, RunState, SystemState
 from kdive.health.heartbeat import Heartbeat
 from kdive.providers.infra.reaping import DumpVolume, InfraReaper, NullReaper
@@ -41,6 +40,8 @@ from tests.reconciler.conftest import (
     seed_running_job,
     seed_system,
 )
+
+WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
 
 
 def test_null_reaper_is_an_infra_reaper() -> None:
@@ -1050,7 +1051,6 @@ def test_all_repair_kinds_matches_a_fully_populated_plan() -> None:
     declared bound must stay in lock-step with the plan or the cardinality guard drifts.
     """
     config = ReconcileConfig(
-        build_host_prober=cast(loop.BuildHostProber, object()),
         upload_store=cast(loop.UploadStore, object()),
         image_store=cast(loop.ImageSweepStore, object()),
         console_registry=cast(loop.CollectorRegistry, object()),

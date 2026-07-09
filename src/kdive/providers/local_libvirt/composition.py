@@ -24,7 +24,6 @@ from kdive.providers.core.discovery_registration import (
 )
 from kdive.providers.core.runtime import DebugCapabilities, ProviderRuntime
 from kdive.providers.infra.reaping import InfraReaper
-from kdive.providers.local_libvirt.build import LocalLibvirtBuild
 from kdive.providers.local_libvirt.config import local_guest_egress_for_resource
 from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import (
@@ -120,7 +119,6 @@ def build_runtime(
         local_guest_egress_for_resource(resource_name) if resource_name is not None else False
     )
     provisioner = LocalLibvirtProvisioning.from_env(guest_egress=guest_egress)
-    builder = LocalLibvirtBuild.from_env(secret_registry=secret_registry)
     install = LocalLibvirtInstall.from_env()
     connector = LocalLibvirtConnect.from_env()
     controller = LocalLibvirtControl.from_env()
@@ -130,7 +128,6 @@ def build_runtime(
     return ProviderRuntime(
         profile_policy=LocalLibvirtProfilePolicy(),
         provisioner=provisioner,
-        builder=builder,
         installer=install,
         booter=install,
         connector=connector,
@@ -158,7 +155,6 @@ def build_runtime(
             ),
         ),
         component_sources=_component_sources(),
-        build_config_validator=builder.validate_config_ref,
         rootfs_validator=provisioner.validate_rootfs_ref,
         rootfs_build_plane=LocalLibvirtRootfsBuildPlane.from_env(),
         # The per-System bootstrap key (ADR-0289, #963) is injected via virt-customize into the

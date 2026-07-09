@@ -1,7 +1,7 @@
 # Core reproduce/verify path
 
 The MCP tool surface is large — roughly 150 tools across ~30 namespaces — but
-ops, admin, accounting, and build-host tooling dominate it. An agent doing a
+ops, admin, and accounting tooling dominate it. An agent doing a
 basic *reproduce a crash, then verify it* task needs only about a dozen of them.
 This page lists that core path in order so you do not have to wade through the
 full [tool reference](reference/index.md) to find the sequence.
@@ -12,7 +12,7 @@ the prompt surface or from here.
 
 ## The twelve-step path
 
-The path has three phases: acquire capacity, build and boot the kernel, then
+The path has three phases: acquire capacity, upload and boot the kernel, then
 crash it and verify the result.
 
 ### Acquire capacity
@@ -24,13 +24,16 @@ crash it and verify the result.
 | 3 | `allocations.wait` | Wait until the allocation is granted. |
 | 4 | `systems.define` | Define the target system to build and boot on. |
 
-### Build and boot
+### Upload and boot
+
+You build the kernel locally and upload the artifacts — the platform never compiles
+kernel source. See [Build lane](../operating/external-build-upload.md) for the artifact recipe.
 
 | Step | Tool | Purpose |
 |---|---|---|
 | 5 | `runs.create` | Create a run against the system and build target. |
-| 6 | `runs.build` | Build the kernel. |
-| 7 | `runs.complete_build` | Record the build outputs. |
+| 6 | `artifacts.create_run_upload` | Declare and upload the kernel you built locally. |
+| 7 | `runs.complete_build` | Validate the uploaded artifacts and record the build outputs. |
 | 8 | `runs.install` | Install the built kernel onto the system. |
 | 9 | `runs.boot` | Boot the system into the built kernel. |
 
@@ -42,7 +45,7 @@ crash it and verify the result.
 | 11 | `vmcore.fetch` | Capture the vmcore from the crashed system. |
 | 12 | `postmortem.triage` | Run the first-pass crash triage. |
 
-`runs.build`, `runs.install`, `runs.boot`, `control.force_crash`, and
+`runs.install`, `runs.boot`, `control.force_crash`, and
 `vmcore.fetch` are long-running: each returns a job handle and you poll
 `jobs.wait` or `jobs.get` until it reaches a terminal state. See
 [async jobs](async-jobs.md). At each step, prefer the `suggested_next_actions`

@@ -19,7 +19,7 @@ from psycopg.types.json import Jsonb
 
 from kdive.inventory import serialize
 from kdive.inventory.model import InventoryDoc, StagedPathSource
-from kdive.inventory.overrides import BUILD_HOST_RESOURCE_KIND, InventorySourceKind
+from kdive.inventory.overrides import InventorySourceKind
 
 # ---- TOML emitter primitives ----------------------------------------------------------
 
@@ -117,25 +117,12 @@ def _remote(name: str = "host-a") -> serialize.ResourceRow:
     )
 
 
-def _build_host(
-    *, name: str = "bh-local", kind: str = "local", base_image_volume: str | None = None
-) -> serialize.BuildHostRow:
-    return serialize.BuildHostRow(
-        name=name,
-        kind=kind,
-        base_image_volume=base_image_volume,
-        workspace_root="/var/lib/kdive/build",
-        max_concurrent=4,
-    )
-
-
 def _snapshot(**overrides: object) -> serialize.InventorySnapshot:
     base: dict[str, object] = {
         "images": (),
         "remote_libvirt": (),
         "local_libvirt": (),
         "fault_inject": (),
-        "build_hosts": (),
         "cost_classes": (),
     }
     base.update(overrides)
@@ -179,17 +166,6 @@ def test_serialize_remote_skeleton_has_placeholders_and_live_values() -> None:
     assert "memory_mb = 16384" in text
     assert "concurrent_allocation_cap = 2" in text
     assert 'cost_class = "remote"' in text
-
-
-def test_serialize_omits_null_base_image_volume_for_local_build_host() -> None:
-    snap = _snapshot(build_hosts=(_build_host(kind="local", base_image_volume=None),))
-    text = serialize.serialize_inventory(snap)
-    assert "base_image_volume" not in text  # NULL omitted, not blanked
-    # an ephemeral host emits it
-    snap2 = _snapshot(
-        build_hosts=(_build_host(kind="ephemeral_libvirt", base_image_volume="vol-1"),)
-    )
-    assert 'base_image_volume = "vol-1"' in serialize.serialize_inventory(snap2)
 
 
 def test_serialize_omits_null_image_digest() -> None:
@@ -279,10 +255,6 @@ def test_read_snapshot_reads_config_rows_and_excludes_non_config(migrated_url: s
             await _seed_config_image(conn, name="base", volume="vol-x")
             await _seed_remote(conn, name="host-a", vcpus=8, memory_mb=16384, cap=2)
             await _seed_discovery_resource(conn, name="probed")  # excluded (managed_by=discovery)
-            await _seed_build_host(conn, name="bh-local", kind="local")
-            await _seed_build_host(
-                conn, name="bh-eph", kind="ephemeral_libvirt", base_image_volume="vol-1"
-            )
             snap = await serialize.read_inventory_snapshot(conn)
         image_names = {i.name for i in snap.images}
         assert image_names == {"base"}
@@ -292,11 +264,6 @@ def test_read_snapshot_reads_config_rows_and_excludes_non_config(migrated_url: s
         assert host.vcpus == 8
         assert host.memory_mb == 16384
         assert host.concurrent_allocation_cap == 2
-        assert {b.name for b in snap.build_hosts} == {"bh-local", "bh-eph"}
-        eph = next(b for b in snap.build_hosts if b.name == "bh-eph")
-        assert eph.base_image_volume == "vol-1"
-        local = next(b for b in snap.build_hosts if b.name == "bh-local")
-        assert local.base_image_volume is None
         # cost classes: the seeded local/remote (=1.0) are present
         by_name = dict(snap.cost_classes)
         assert by_name["remote"] == Decimal("1.0")
@@ -309,26 +276,17 @@ def test_read_snapshot_omits_removed_and_keeps_detached(migrated_url: str) -> No
         async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
             await _seed_remote(conn, name="gone", vcpus=4, memory_mb=4096, cap=1)
             await _seed_remote(conn, name="modified", vcpus=4, memory_mb=4096, cap=9)
-            await _seed_build_host(conn, name="bh-gone", kind="local")
             await _set_override(
                 conn, InventorySourceKind.RESOURCE, "remote-libvirt", "gone", "removed"
             )
             await _set_override(
                 conn, InventorySourceKind.RESOURCE, "remote-libvirt", "modified", "detached"
             )
-            await _set_override(
-                conn,
-                InventorySourceKind.BUILD_HOST,
-                BUILD_HOST_RESOURCE_KIND,
-                "bh-gone",
-                "removed",
-            )
             snap = await serialize.read_inventory_snapshot(conn)
         remote_names = {r.name for r in snap.remote_libvirt}
         assert remote_names == {"modified"}  # removed omitted; detached kept
         modified = next(r for r in snap.remote_libvirt if r.name == "modified")
         assert modified.concurrent_allocation_cap == 9  # the live (runtime-modified) value
-        assert {b.name for b in snap.build_hosts} == set()  # bh-gone removed
 
     asyncio.run(_run())
 
@@ -338,7 +296,6 @@ def test_read_then_serialize_round_trips_through_the_model(migrated_url: str) ->
         async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
             await _seed_config_image(conn, name="base", volume="vol-x")
             await _seed_remote(conn, name="host-a", vcpus=8, memory_mb=16384, cap=2)
-            await _seed_build_host(conn, name="bh-local", kind="local")
             snap = await serialize.read_inventory_snapshot(conn)
         text = serialize.serialize_inventory(snap)
         completed = _complete_remote_skeleton(text, base_image="base")
@@ -346,7 +303,6 @@ def test_read_then_serialize_round_trips_through_the_model(migrated_url: str) ->
         assert doc.remote_libvirt[0].name == "host-a"
         assert doc.remote_libvirt[0].vcpus == 8
         assert doc.remote_libvirt[0].base_image == "base"
-        assert doc.build_host[0].name == "bh-local"
         assert doc.image[0].name == "base"
 
     asyncio.run(_run())
@@ -407,21 +363,6 @@ async def _seed_discovery_resource(conn: psycopg.AsyncConnection, *, name: str) 
         "VALUES ('local-libvirt', %s, %s, 'local-libvirt', 'local', 'available', "
         " 'qemu:///system', 'discovery')",
         (name, caps),
-    )
-
-
-async def _seed_build_host(
-    conn: psycopg.AsyncConnection,
-    *,
-    name: str,
-    kind: str,
-    base_image_volume: str | None = None,
-) -> None:
-    await conn.execute(
-        "INSERT INTO build_hosts "
-        "(name, kind, base_image_volume, workspace_root, max_concurrent, managed_by) "
-        "VALUES (%s, %s, %s, '/var/lib/kdive/build', 4, 'config')",
-        (name, kind, base_image_volume),
     )
 
 

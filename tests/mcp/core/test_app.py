@@ -57,7 +57,6 @@ def test_build_app_registers_jobs_tools() -> None:
         assert {
             "runs.create",
             "runs.get",
-            "runs.build",
             "runs.complete_build",
             "runs.install",
             "runs.boot",
@@ -279,15 +278,13 @@ def test_object_store_assembly_preserves_configured_store_error(
 
 
 def test_build_handler_registry_binds_provisioning_and_build_handlers() -> None:
-    # The provisioning plane (#16) registers provision/teardown, the build plane (#18)
-    # registers build, the install + boot plane (#19) registers install/boot, and the
-    # retrieve plane (#24) registers capture_vmcore — each building its provider/builder
-    # lazily from env (no libvirt/S3/toolchain connection at registration).
+    # The provisioning plane (#16) registers provision/teardown, the install + boot plane (#19)
+    # registers install/boot, and the retrieve plane (#24) registers capture_vmcore — each
+    # building its provider lazily from env (no libvirt/S3 connection at registration).
     registry = build_handler_registry(secret_registry=SecretRegistry())
     assert isinstance(registry, HandlerRegistry)
     assert registry.get(JobKind.PROVISION) is not None
     assert registry.get(JobKind.TEARDOWN) is not None
-    assert registry.get(JobKind.BUILD) is not None
     assert registry.get(JobKind.INSTALL) is not None
     assert registry.get(JobKind.BOOT) is not None
     assert registry.get(JobKind.CAPTURE_VMCORE) is not None
@@ -299,7 +296,6 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     resolver = object()
-    transports = object()
     caller_registry = SecretRegistry()
     captured: dict[str, object | None] = {}
 
@@ -309,16 +305,12 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
         def build_provider_resolver(self) -> object:
             return resolver
 
-        def build_build_host_transport_factories(self) -> object:
-            return transports
-
     def _capture(
         _registry: HandlerRegistry,
         assembly: app_module.WorkerHandlerAssembly,
     ) -> None:
         captured["resolver"] = assembly.resolver
         captured["secret_registry"] = assembly.secret_registry
-        captured["transports"] = assembly.transport_factories
         captured["object_stores"] = assembly.object_stores
 
     monkeypatch.setattr(app_module, "HANDLER_REGISTRARS", (_capture,))
@@ -330,7 +322,6 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
 
     assert captured["resolver"] is resolver
     assert captured["secret_registry"] is caller_registry
-    assert captured["transports"] is transports
     object_stores = captured["object_stores"]
     assert isinstance(object_stores, ObjectStoreAssembly)
     assert object_stores.optional_upload_store is None
@@ -357,7 +348,6 @@ def test_image_build_handler_preserves_store_config_error(
         handler_module.WorkerHandlerAssembly(
             resolver=cast(Any, None),
             secret_registry=SecretRegistry(),
-            transport_factories=cast(Any, None),
             object_stores=ObjectStoreAssembly(
                 optional_upload_store=None,
                 optional_image_store=None,
@@ -443,7 +433,6 @@ _EXPECTED_STEP_MATURITY: dict[str, str] = {
     "systems.define": "implemented",
     "runs.create": "implemented",
     "runs.complete_build": "implemented",
-    "runs.build": "implemented",
     "runs.install": "implemented",
     "runs.boot": "implemented",
     "debug.start_session": "implemented",

@@ -13,7 +13,6 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 
-from kdive.db.build_hosts import get_by_name
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import InvestigationState, RunState
@@ -34,20 +33,12 @@ from kdive.domain.lifecycle.system_reuse import (
 )
 from kdive.domain.profile_documents import SerializedExpectedBootFailure
 from kdive.log import bind_context
-from kdive.profiles.build import (
-    BuildProfile,
-    ExternalBuildProfile,
-    ParsedBuildProfile,
-    ServerBuildProfile,
-    dump_build_profile,
-    is_git_source,
-)
+from kdive.profiles.build import BuildProfile, dump_build_profile
 from kdive.profiles.types import BuildProfileInput, ExpectedBootFailureInput
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
-from kdive.services.runs.build_host_selection import check_source_kind_compatibility
 from kdive.services.runs.states import (
     ALLOC_HOSTABLE,
     INVESTIGATION_OPEN_FOR_RUN,
@@ -145,8 +136,6 @@ class RunCreateResult:
     system_id: UUID | None = None
     expected_boot_failure_kind: str | None = None
     label: str | None = None
-    is_external: bool = False
-    """True for a source='external' build: the response chains into the upload loop, not build."""
 
 
 type RunCreateRecorder = Callable[[AsyncConnection, RunCreateResult], Awaitable[None]]
@@ -447,41 +436,11 @@ def _assertion_block_response(
     return None
 
 
-async def _compat_block_response(
-    conn: AsyncConnection, build_profile: ParsedBuildProfile, object_id: str
-) -> RunCreateError | None:
-    """Reject an incompatible build-host ↔ kernel-source pairing at create time (ADR-0157).
-
-    Returns a ``configuration_error`` envelope when the named (and registered) build host's
-    transport kind is incompatible with the profile's source provenance, else ``None`` to
-    proceed. The external-build lane (no ``kernel_source_ref``) is skipped. An **absent**
-    named host is not rejected here — host existence is re-validated at ``runs.build`` and
-    the host may be registered between create and build; create only rejects a definitively
-    incompatible pair. The shared :func:`check_source_kind_compatibility` keeps this
-    rejection identical to the build-time one for an enabled, reachable host. ``object_id`` is
-    the System for a bound Run or the Investigation for an unbound one — the build-host check
-    itself is System-independent (ADR-0169).
-    """
-    if not isinstance(build_profile, ServerBuildProfile):
-        return None
-    name = build_profile.build_host or "worker-local"
-    host = await get_by_name(conn, name)
-    if host is None:
-        return None
-    try:
-        check_source_kind_compatibility(
-            host_kind=host.kind, is_git=is_git_source(build_profile), build_host=name
-        )
-    except CategorizedError as exc:
-        return _run_create_failure(object_id, exc)
-    return None
-
-
 async def _create_locked(
     conn: AsyncConnection,
     ctx: RequestContext,
     targets: _CreateTargets,
-    build_profile: ParsedBuildProfile,
+    build_profile: BuildProfile,
     expected_boot_failure: SerializedExpectedBootFailure | None,
     *,
     project: str,
@@ -513,9 +472,6 @@ async def _create_locked(
             _raise_config(str(targets.investigation_id))
         if inv.state not in INVESTIGATION_OPEN_FOR_RUN:
             _raise_config(str(targets.investigation_id), data={"current_status": inv.state.value})
-        compat_block = await _compat_block_response(conn, build_profile, str(targets.system_id))
-        if compat_block is not None:
-            raise compat_block
         target_kind = await _resource_kind_for_system(conn, targets.system_id)
         if explicit_target_kind is not None and explicit_target_kind != target_kind.value:
             raise _config_failure(
@@ -537,12 +493,7 @@ async def _create_locked(
             label=label,
         )
         await _flip_investigation_if_open(conn, ctx, inv, targets.investigation_id, project)
-        result = _created_result(
-            run,
-            expected_boot_failure,
-            project,
-            is_external=isinstance(build_profile, ExternalBuildProfile),
-        )
+        result = _created_result(run, expected_boot_failure, project)
         if recorder is not None:
             await recorder(conn, result)
     return result
@@ -552,7 +503,7 @@ async def _insert_run(
     conn: AsyncConnection,
     ctx: RequestContext,
     targets: _CreateTargets,
-    build_profile: ParsedBuildProfile,
+    build_profile: BuildProfile,
     expected_boot_failure: SerializedExpectedBootFailure | None,
     project: str,
     *,
@@ -626,8 +577,6 @@ def _created_result(
     run: Run,
     expected_boot_failure: SerializedExpectedBootFailure | None,
     project: str,
-    *,
-    is_external: bool,
 ) -> RunCreateResult:
     kind = str(expected_boot_failure["kind"]) if expected_boot_failure is not None else None
     return RunCreateResult(
@@ -638,7 +587,6 @@ def _created_result(
         system_id=run.system_id,
         expected_boot_failure_kind=kind,
         label=run.label,
-        is_external=is_external,
     )
 
 
@@ -647,10 +595,10 @@ def _validate_unbound_target_kind(
 ) -> ResourceKind:
     """Validate an unbound Run's ``target_kind`` against the registered provider kinds.
 
-    A registered kind always has a builder (``ProviderRuntime.builder`` is required), so the
-    registered set is exactly the buildable set. The ``available_target_kinds`` vocabulary is
-    attached to the failure envelope at the tool boundary (it has the resolver), not embedded in
-    the error details — ``safe_error_details`` would drop the list anyway (ADR-0169).
+    The registered provider kinds are exactly the selectable target set. The
+    ``available_target_kinds`` vocabulary is attached to the failure envelope at the tool
+    boundary (it has the resolver), not embedded in the error details — ``safe_error_details``
+    would drop the list anyway (ADR-0169).
     """
     if value is None:
         raise _config_failure(object_id, data={"reason": "target_kind_required"})
@@ -668,7 +616,7 @@ async def _create_unbound(
     ctx: RequestContext,
     request: RunCreateRequest,
     investigation_id: UUID,
-    build_profile: ParsedBuildProfile,
+    build_profile: BuildProfile,
     expected_boot_failure: SerializedExpectedBootFailure | None,
     *,
     requirement: ReuseRequirement,
@@ -678,10 +626,9 @@ async def _create_unbound(
 ) -> RunCreateResult:
     """Create a Run with no System (ADR-0169): commit a ``target_kind``, hold no capacity.
 
-    Validates the target kind and the Investigation, runs the System-independent build-host ↔
-    source compat check, and inserts the Run under the INVESTIGATION lock only — no Allocation
-    or System is held, so no target capacity is debited. A ``reuse_requirement`` is meaningless
-    without a System and is rejected.
+    Validates the target kind and the Investigation, and inserts the Run under the INVESTIGATION
+    lock only — no Allocation or System is held, so no target capacity is debited. A
+    ``reuse_requirement`` is meaningless without a System and is rejected.
     """
     object_id = request.investigation_id
     target_kind = _validate_unbound_target_kind(object_id, request.target_kind, resolver)
@@ -701,9 +648,6 @@ async def _create_unbound(
             _raise_config(object_id)
         if locked_inv.state not in INVESTIGATION_OPEN_FOR_RUN:
             _raise_config(object_id, data={"current_status": locked_inv.state.value})
-        compat_block = await _compat_block_response(conn, build_profile, object_id)
-        if compat_block is not None:
-            raise compat_block
         run = await _insert_unbound_run(
             conn,
             ctx,
@@ -715,12 +659,7 @@ async def _create_unbound(
             label=label,
         )
         await _flip_investigation_if_open(conn, ctx, locked_inv, investigation_id, project)
-        result = _created_result(
-            run,
-            expected_boot_failure,
-            project,
-            is_external=isinstance(build_profile, ExternalBuildProfile),
-        )
+        result = _created_result(run, expected_boot_failure, project)
         if recorder is not None:
             await recorder(conn, result)
     return result
@@ -730,7 +669,7 @@ async def _insert_unbound_run(
     conn: AsyncConnection,
     ctx: RequestContext,
     investigation_id: UUID,
-    build_profile: ParsedBuildProfile,
+    build_profile: BuildProfile,
     expected_boot_failure: SerializedExpectedBootFailure | None,
     project: str,
     target_kind: ResourceKind,

@@ -1,59 +1,33 @@
-"""Source-discriminated build profile (ADR-0048 §2)."""
+"""The build profile is flat: there is no source discriminator or source-tree field."""
 
 from __future__ import annotations
 
 import pytest
 
-from kdive.components.references import LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.profiles.build import (
-    BuildProfile,
-    ExternalBuildProfile,
-    ServerBuildProfile,
-)
+from kdive.profiles.build import BuildProfile
 
 
-def test_parse_defaults_to_server() -> None:
-    parsed = BuildProfile.parse(
-        {
-            "schema_version": 1,
-            "kernel_source_ref": "git#v6.9",
-            "config": {"kind": "local", "path": "/configs/kernel.config"},
-        }
-    )
-    assert isinstance(parsed, ServerBuildProfile)
-    assert parsed.source == "server"
-    assert isinstance(parsed.config, LocalComponentRef)
-    assert parsed.config.path == "/configs/kernel.config"
+def test_flat_profile_parses() -> None:
+    parsed = BuildProfile.parse({"schema_version": 1})
+    assert isinstance(parsed, BuildProfile)
+    assert parsed.schema_version == 1
 
 
-def test_parse_external_requires_no_source_tree_fields() -> None:
-    parsed = BuildProfile.parse({"schema_version": 1, "source": "external"})
-    assert isinstance(parsed, ExternalBuildProfile)
-    assert parsed.source == "external"
+def test_source_field_is_rejected() -> None:
+    # The lane collapsed to external-upload only: a leftover `source` discriminator is now an
+    # unknown field.
+    with pytest.raises(CategorizedError) as excinfo:
+        BuildProfile.parse({"schema_version": 1, "source": "external"})
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
-def test_external_profile_rejects_server_fields() -> None:
+def test_source_tree_field_is_rejected() -> None:
     with pytest.raises(CategorizedError) as excinfo:
         BuildProfile.parse(
             {
                 "schema_version": 1,
-                "source": "external",
                 "config": {"kind": "local", "path": "/configs/kernel.config"},
             }
         )
-    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
-
-
-def test_server_profile_config_is_optional() -> None:
-    # An omitted config defaults to the seeded kdump catalog fragment at the build
-    # boundary (ADR-0096); the document parses with config left unset.
-    parsed = BuildProfile.parse({"schema_version": 1, "kernel_source_ref": "git#v6.9"})
-    assert isinstance(parsed, ServerBuildProfile)
-    assert parsed.config is None
-
-
-def test_unknown_source_is_configuration_error() -> None:
-    with pytest.raises(CategorizedError) as excinfo:
-        BuildProfile.parse({"schema_version": 1, "source": "bogus"})
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR

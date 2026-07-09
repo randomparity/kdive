@@ -30,16 +30,14 @@ class LockScope(StrEnum):
     """The advisory-lock scopes the platform serializes on (ADR-0016, ADR-0040).
 
     Operations that hold more than one scope at once acquire them in the fixed global
-    total order ``PROJECT → RESOURCE → ALLOCATION → SYSTEM → INVESTIGATION → RUN →
-    BUILD_HOST`` to avoid deadlock; e.g. ``allocations.request`` takes ``PROJECT`` then
-    ``RESOURCE`` (ADR-0040 §1), ``runs.create`` takes ``SYSTEM`` then ``INVESTIGATION``
-    (ADR-0027), and ``runs.build`` acquires ``BUILD_HOST`` inside an existing ``RUN``
-    transaction — so every co-hold takes ``RUN`` before ``BUILD_HOST``.
+    total order ``PROJECT → RESOURCE → ALLOCATION → SYSTEM → INVESTIGATION → RUN`` to avoid
+    deadlock; e.g. ``allocations.request`` takes ``PROJECT`` then ``RESOURCE`` (ADR-0040 §1)
+    and ``runs.create`` takes ``SYSTEM`` then ``INVESTIGATION`` (ADR-0027).
 
-    ``PROJECT`` is keyed by the ``project`` string; ``BUILD_CONFIG`` is keyed by the
-    build-config fragment **name** string and is always held alone (build-config set/seed
-    serialization, ADR-0119), so it sits outside the co-hold total order; every other scope
-    is keyed by an object :class:`~uuid.UUID`.
+    ``PROJECT`` is keyed by the ``project`` string; ``BUILD_HOST`` is keyed by an inventory
+    identity **name** string and is always held alone (the ``inventory.clear_override``
+    per-identity lock), so it sits outside the co-hold total order; every other scope is keyed
+    by an object :class:`~uuid.UUID`.
     """
 
     PROJECT = "project"
@@ -50,7 +48,6 @@ class LockScope(StrEnum):
     RUN = "run"
     BUILD_HOST = "build_host"
     INVENTORY = "inventory"
-    BUILD_CONFIG = "build_config"
 
 
 def _lock_key(scope: LockScope, key: UUID | str) -> int:

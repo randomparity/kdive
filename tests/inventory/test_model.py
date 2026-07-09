@@ -136,7 +136,6 @@ def test_empty_document_parses() -> None:
     assert doc.remote_libvirt == []
     assert doc.local_libvirt == []
     assert doc.fault_inject == []
-    assert doc.build_host == []
 
 
 def test_image_identity_property() -> None:
@@ -342,16 +341,6 @@ def test_duplicate_local_libvirt_name_rejected() -> None:
     assert "loc" in str(excinfo.value)
 
 
-def test_duplicate_build_host_name_rejected() -> None:
-    inst = {"name": "bh", "kind": "ssh", "workspace_root": "/srv/build"}
-    d = _doc(remote_libvirt=[], build_host=[inst, dict(inst)])
-    with pytest.raises(InventoryError) as excinfo:
-        InventoryDoc.parse(d)
-    assert excinfo.value.entry == "build_host"
-    assert excinfo.value.field == "name"
-    assert "bh" in str(excinfo.value)
-
-
 def test_multiple_distinct_remote_instances_parse() -> None:
     # ADR-0187 (#395): per-op resource selection is wired, so N remote-libvirt hosts are allowed.
     d = _doc()
@@ -406,24 +395,6 @@ def test_local_libvirt_guest_egress_opt_in_parses() -> None:
     )
     doc = InventoryDoc.parse(d)
     assert doc.local_libvirt[0].guest_egress is True
-
-
-def test_build_host_instance_parses() -> None:
-    d = _doc(
-        remote_libvirt=[],
-        build_host=[
-            {
-                "name": "bh",
-                "kind": "ssh",
-                "workspace_root": "/srv/build",
-                "max_concurrent": 2,
-            }
-        ],
-    )
-    doc = InventoryDoc.parse(d)
-    assert doc.build_host[0].workspace_root == "/srv/build"
-    assert doc.build_host[0].max_concurrent == 2
-    assert doc.build_host[0].base_image_volume is None
 
 
 def test_missing_required_field_rejected() -> None:
@@ -586,54 +557,3 @@ def test_duplicate_cost_class_name_rejected() -> None:
     assert excinfo.value.entry == "cost_class"
     assert excinfo.value.field == "name"
     assert "dup" in str(excinfo.value)
-
-
-def test_build_config_valid() -> None:
-    doc = InventoryDoc.parse(
-        {
-            "schema_version": 2,
-            "build_config": [
-                {"name": "kdump", "content": "CONFIG_KEXEC=y\n", "description": "kdump frag"}
-            ],
-        }
-    )
-    assert len(doc.build_config) == 1
-    assert doc.build_config[0].name == "kdump"
-    assert doc.build_config[0].content == "CONFIG_KEXEC=y\n"
-    assert doc.build_config[0].description == "kdump frag"
-
-
-def test_build_config_absent_is_empty_list() -> None:
-    doc = InventoryDoc.parse({"schema_version": 2})
-    assert doc.build_config == []
-
-
-def test_build_config_duplicate_name_raises() -> None:
-    with pytest.raises(InventoryError) as excinfo:
-        InventoryDoc.parse(
-            {
-                "schema_version": 2,
-                "build_config": [
-                    {"name": "kdump", "content": "a"},
-                    {"name": "kdump", "content": "b"},
-                ],
-            }
-        )
-    # The duplicate is located under ('build_config', 'name') with the colliding name in
-    # the message.
-    assert excinfo.value.entry == "build_config"
-    assert excinfo.value.field == "name"
-    assert "kdump" in str(excinfo.value)
-
-
-@pytest.mark.parametrize("name", ["", "Kdump", "kd/ump"])
-def test_build_config_bad_name_raises(name: str) -> None:
-    with pytest.raises(InventoryError):
-        InventoryDoc.parse({"schema_version": 2, "build_config": [{"name": name, "content": "a"}]})
-
-
-def test_build_config_empty_content_raises() -> None:
-    with pytest.raises(InventoryError):
-        InventoryDoc.parse(
-            {"schema_version": 2, "build_config": [{"name": "kdump", "content": ""}]}
-        )

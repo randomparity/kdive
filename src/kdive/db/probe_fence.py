@@ -1,11 +1,10 @@
 """The shared single-flight fence error for DB-backed liveness probes.
 
-Both the egress probe (:mod:`kdive.diagnostics.egress_probe`) and the build-host agent
-probe (:mod:`kdive.db.buildhost_agent_probes`) register a row guarded by a partial-unique
-index so only one probe per subject can be live at a time. When a second caller loses that
-race, the registration raises :class:`ProbeInFlightError` carrying the conflicting subject
-key, so the check reports "a probe is already in flight" rather than a generic registration
-failure (the cross-process second-caller signal).
+The egress probe (:mod:`kdive.diagnostics.egress_probe`) registers a row guarded by a
+partial-unique index so only one probe per subject can be live at a time. When a second
+caller loses that race, the registration raises :class:`ProbeInFlightError` carrying the
+conflicting subject key, so the check reports "a probe is already in flight" rather than a
+generic registration failure (the cross-process second-caller signal).
 """
 
 from __future__ import annotations

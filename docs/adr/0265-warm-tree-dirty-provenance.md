@@ -1,6 +1,10 @@
 # ADR-0265: report warm-tree build dirtiness and a content digest (#861)
 
-- Status: Accepted
+> **Superseded by [ADR-0316](0316-remove-server-build-lane.md)** (2026-07-08) — warm-tree
+> server builds were removed; kdive builds only from uploaded artifacts. The decision below is
+> retained as history.
+
+- Status: Superseded by [ADR-0316](0316-remove-server-build-lane.md)
 - Date: 2026-06-27
 
 ## Context
@@ -61,7 +65,7 @@ whole path — `BuildOutput.build_provenance`, the warm-tree/git dispatch helper
 `str | bool` values instead of `_optional_str_map`'s str-only filter), and the `runs.get`
 surfacing helper. `JsonValue` already admits `bool`, so the wire envelope is unchanged.
 
-Document, in the warm-tree section of `docs/operating/build-source-staging.md` and the
+Document, in the warm-tree section of the build-source-staging guide (removed by ADR-0316) and the
 `runs.create` `build_profile` description, that the warm-tree lane builds **working-tree
 state, not HEAD**, that `resolved_commit` is the HEAD the working tree is based on
 (decorative when `dirty`), and what `dirty`/`tree_sha` mean. Regenerate the committed tool

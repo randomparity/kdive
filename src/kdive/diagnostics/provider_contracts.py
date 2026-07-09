@@ -5,8 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from psycopg_pool import AsyncConnectionPool
-
 from kdive.diagnostics.checks import Check
 
 
@@ -27,4 +25,3 @@ class DiagnosticProviderContribution:
     checks: Callable[[], Sequence[Check]]
     unavailable_worker_checks: Callable[[], Sequence[WorkerVantageDescriptor]]
     worker_checks: Callable[[], Sequence[Check]]
-    buildhost_agent_check: Callable[[AsyncConnectionPool], Check] | None = None

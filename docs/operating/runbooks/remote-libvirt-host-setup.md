@@ -379,42 +379,10 @@ and image staging are all in place. Drive the end-to-end spine per
 The `host_dump` capture method needs only a provisioned-to-`ready` System: `control.force_crash`
 then `vmcore.fetch method=host_dump` dumps host-side and the **worker** uploads the core, so it
 exercises the control and retrieve planes without an in-guest kdump kernel and without the guest
-reaching the object store. The from-source kernel build (`runs.build` → `install` → `boot`, and
-the `gdbstub`/`kdump`/`introspect.from_vmcore` legs that depend on a Run) needs a worker that is a
-kernel-build host — a toolchain (`git`, `flex`, `bison`, `bc`, libelf/openssl headers) and a
-`KDIVE_KERNEL_SRC` tree — which a lightweight app-pod worker is not.
-
-### Offloading the from-source build to an ephemeral build VM (ADR-0100)
-
-Instead of putting the toolchain on the worker, register an **ephemeral remote-libvirt build
-host**: each server-lane build provisions a throwaway VM on this same remote-libvirt host, runs
-`make` in-guest over the guest-agent exec channel, publishes the kernel bundle + `vmlinux` via
-presigned PUT, and tears the VM down. The reconciler reaps a leaked builder by its
-`kdive-build-<run_id>` domain marker + the owning BUILD job's liveness.
-
-Operator steps:
-
-1. **Stage a base build image** as a volume in the configured storage pool
-   (`KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`). It must carry the kernel toolchain (`git`, `flex`,
-   `bison`, `bc`, libelf/openssl headers, `make`, `objcopy`, `tar`), the `qemu-guest-agent`
-   (enabled at boot — provisioning waits for its channel), and `/bin/sh`/`curl`/`base64`. The
-   build VM also needs network egress to the object store (the same guest→MinIO hop the
-   `doctor --with-egress` check verifies; a host `FORWARD DROP` surfaces as a publish failure).
-2. **Register the build host** (`platform_admin`):
-
-   ```bash
-   kdivectl tool call build_hosts.register_ephemeral_libvirt --json '{
-     "name": "builders",
-     "base_image_volume": "kdive-build-base.qcow2",
-     "workspace_root": "/build", "max_concurrent": 2 }'
-   ```
-
-   `max_concurrent` bounds in-flight build leases; size the host's CPU/RAM/disk headroom above
-   it, since a crash-leaked VM can briefly exceed it until the next reconciler sweep.
-3. **Author the server profile** with `build_host: builders` and a git
-   `kernel_source_ref` (`{"git": {"remote": "...", "ref": "v6.x"}}`) — an ephemeral host builds
-   from a fresh clone, so a warm-tree string is rejected as `configuration_error`. Then
-   `runs.build` → `install` → `boot` runs without a build toolchain on the worker.
+reaching the object store. The kernel under test (and the `gdbstub`/`kdump`/`introspect.from_vmcore`
+legs that depend on a Run) comes from the upload lane: you build it locally and `runs.complete_build`
+ingests it (see [build lane](../external-build-upload.md)), so the worker never compiles kernel
+source and needs no build toolchain.
 
 ## Appendix: kdivectl operator commands
 

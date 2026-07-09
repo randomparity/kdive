@@ -46,7 +46,7 @@ def test_record_usage_round_trips_args_digest(migrated_url: str) -> None:
                     principal="alice",
                     agent_session="s1",
                     project=None,
-                    tool="runs.build",
+                    tool="runs.install",
                     outcome="ok",
                     actor="agent",
                     client_id=None,

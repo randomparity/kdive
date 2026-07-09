@@ -152,11 +152,9 @@ Driving a **remote-libvirt** host (e.g. a `qemu+tls://` target) from this demo i
 the same tool flow below — the host just has to be registered in the deployment's
 `systems.toml` inventory and reachable from the worker; see the
 [remote-libvirt host-setup runbook](../../operating/runbooks/remote-libvirt-host-setup.md).
-The worker pod is a lightweight app process, so a from-source `runs.build` needs a
-registered build host (runbook §"Offloading the from-source build to an ephemeral
-build VM"); `host_dump` capture and provisioning do not. The simplest path that needs
-none of this is the default external-build lane — build the kernel in your own checkout
-and upload it; see [external-build lane](../../operating/external-build-upload.md).
+The platform never compiles kernel source: you build the kernel in your own checkout and
+upload the artifacts on the build lane; see
+[build lane](../../operating/external-build-upload.md).
 
 ## First-call smoke sequence
 

@@ -12,13 +12,11 @@ from dataclasses import dataclass, field
 
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.components.references import ComponentRef
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.domain.capture import CaptureMethod
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import RootfsSource
-from kdive.providers.ports.build import Builder
 from kdive.providers.ports.console import ConsoleSnapshotter
 from kdive.providers.ports.debug import (
     AttachSeam,
@@ -42,7 +40,6 @@ from kdive.providers.ports.retrieve import (
 from kdive.serialization import JsonValue
 
 type DiscoveryRegistrar = Callable[[AsyncConnectionPool], Awaitable[None]]
-type BuildConfigValidator = Callable[[ComponentRef], None]
 type RootfsValidator = Callable[[RootfsSource], None]
 type StagedVolumeProbe = Callable[[list[str]], Awaitable[dict[str, str]]]
 type ResourceDetailProjector = Callable[
@@ -68,7 +65,6 @@ class ProviderRuntime:
 
     profile_policy: ProfilePolicy
     provisioner: Provisioner
-    builder: Builder
     installer: Installer
     booter: Booter
     connector: Connector
@@ -96,7 +92,6 @@ class ProviderRuntime:
     component_sources: ComponentSourceCapabilities = field(
         default_factory=_unconfigured_component_sources
     )
-    build_config_validator: BuildConfigValidator | None = None
     rootfs_validator: RootfsValidator | None = None
     rootfs_build_plane: RootfsBuildPlane | None = None
     staged_volume_probe: StagedVolumeProbe | None = None

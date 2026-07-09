@@ -50,13 +50,18 @@ def test_illustrative_ellipsis_ignored(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_design_and_archive_markdown_not_scanned(tmp_path: Path) -> None:
-    # Design specs narrate path moves and archive is frozen history: their docs/...
-    # mentions of missing/old paths must not fail the check.
-    (tmp_path / "docs" / "design").mkdir(parents=True)
-    (tmp_path / "docs" / "archive").mkdir(parents=True)
+def test_frozen_design_records_not_scanned(tmp_path: Path) -> None:
+    # docs/{design,archive,specs,superpowers} are frozen dated design records: their docs/...
+    # mentions of missing/old paths must not fail the check. (ADRs stay policed — they are a
+    # living decision log, superseded rather than excluded.)
+    for d in ("design", "archive", "specs", "superpowers/plans"):
+        (tmp_path / "docs" / d).mkdir(parents=True)
     (tmp_path / "docs" / "design" / "spec.md").write_text("we move docs/specs to docs/design\n")
     (tmp_path / "docs" / "archive" / "old.md").write_text("see docs/plans/m0-implementation.md\n")
+    (tmp_path / "docs" / "specs" / "s.md").write_text("references docs/operating/removed.md\n")
+    (tmp_path / "docs" / "superpowers" / "plans" / "p.md").write_text(
+        "references docs/guide/reference/gone.md\n"
+    )
     result = _run(tmp_path)
     assert result.returncode == 0, result.stderr
 

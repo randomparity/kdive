@@ -74,7 +74,7 @@ def test_requirement_values_encode_adr_0234() -> None:
     assert EXTERNAL_BUILD_CONTRACTS["kernel"].requirement == "required"
     assert EXTERNAL_BUILD_CONTRACTS["vmlinux"].requirement == "optional"
     assert EXTERNAL_BUILD_CONTRACTS["initrd"].requirement == "optional"
-    assert EXTERNAL_BUILD_CONTRACTS["effective_config"].requirement == "conditional"
+    assert EXTERNAL_BUILD_CONTRACTS["effective_config"].requirement == "optional"
 
 
 def test_kernel_required_matches_validator_behavior() -> None:
