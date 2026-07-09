@@ -303,6 +303,15 @@ def test_publish_qcow2_replaces_destination_with_scratch(tmp_path: Path) -> None
     assert not scratch.exists()
 
 
+def test_kernel_config_probe_default_is_the_real_probe() -> None:
+    from kdive.images.planes._build_common import (
+        DEFAULT_KERNEL_CONFIG_PROBE,
+        probe_kernel_config,
+    )
+
+    assert DEFAULT_KERNEL_CONFIG_PROBE is probe_kernel_config
+
+
 def test_build_workspace_creates_parent_and_cleans_temporary_directory(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
 

@@ -266,6 +266,55 @@ def probe_makedumpfile_marker(qcow2_path: Path) -> str | None:  # pragma: no cov
 
 DEFAULT_MAKEDUMPFILE_PROBE: MakedumpfileProbeSeam = probe_makedumpfile_marker
 
+type KernelConfigProbeSeam = Callable[[Path, str], str | None]
+
+
+def probe_kernel_config(qcow2_path: Path, version: str) -> str | None:  # pragma: no cover - live_vm
+    """Read ``/boot/config-<version>`` from ``qcow2_path``, read-only via ``guestfish`` (ADR-0317).
+
+    The build-time operand of the kernel-config offer: the caller writes the returned text to the
+    object store so the agent can fetch its selected image's known-good starting config. Reads with
+    a read-only ``guestfish -i cat /boot/config-<version>``.
+
+    Returns:
+        The config file text, or ``None`` when it is absent (a non-zero ``guestfish`` exit or an
+        empty body) — never raising for a merely-missing config; the caller treats ``None`` as "no
+        config offered" and omits it.
+
+    Raises:
+        CategorizedError: ``MISSING_DEPENDENCY`` if ``guestfish`` is absent;
+            ``INFRASTRUCTURE_FAILURE`` on timeout. Both are caught by the advisory caller and
+            degrade to an omitted config, so a probe failure never fails a build.
+    """
+    guest_path = f"/boot/config-{version}"
+    argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "cat", guest_path]
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; image path is a data arg
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=_GUESTFISH_TIMEOUT_S,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise CategorizedError(
+            "guestfish is not installed; cannot read the kernel config",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+            details={"tool": "guestfish"},
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise CategorizedError(
+            "guestfish exceeded its timeout reading the kernel config",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"timeout_s": _GUESTFISH_TIMEOUT_S},
+        ) from exc
+    if result.returncode != 0:
+        return None  # an absent /boot/config-<ver> is not an error; caller omits the config
+    return result.stdout or None
+
+
+DEFAULT_KERNEL_CONFIG_PROBE: KernelConfigProbeSeam = probe_kernel_config
+
 type BootEntriesProbeSeam = Callable[[Path], list[str] | None]
 
 
