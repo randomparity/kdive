@@ -431,7 +431,7 @@ def test_concurrent_extend_under_lock_is_honored(migrated_url: str) -> None:
                 (row_id,),
             )
             store = _FakeImageStore({key: timedelta(hours=2)})
-            deleted = await _expire_one_private_image(conn, store, row_id, key)
+            deleted = await _expire_one_private_image(conn, store, row_id, key, None)
         assert deleted is False  # the re-read observes the extend
         assert store.deleted == []
         async with await connect(migrated_url) as check:
@@ -454,9 +454,34 @@ def test_expire_one_private_image_deletes_when_still_expired(migrated_url: str) 
                 expires_in=timedelta(seconds=-1),
             )
             store = _FakeImageStore({key: timedelta(hours=2)})
-            deleted = await _expire_one_private_image(conn, store, row_id, key)
+            deleted = await _expire_one_private_image(conn, store, row_id, key, None)
         assert deleted is True
         assert store.deleted == [key]
+
+    asyncio.run(_run())
+
+
+def test_private_expiry_deletes_config_object(migrated_url: str) -> None:
+    # A private image's .config sibling is eagerly deleted alongside the qcow2 on expiry (ADR-0317).
+    qcow2_key = "images/local-libvirt__proj/withcfg/x86_64.qcow2"
+    config_key = "images/local-libvirt__proj/withcfg/x86_64.config"
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as conn:
+            await _insert_image_row(
+                conn,
+                name="withcfg",
+                visibility="private",
+                owner="proj",
+                object_key=qcow2_key,
+                kernel_config_key=config_key,
+                expires_in=timedelta(seconds=-1),
+            )
+        store = _FakeImageStore({qcow2_key: timedelta(hours=2), config_key: timedelta(hours=2)})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            pruned = await run_repair(pool, lambda c: _repair_expired_private_images(c, store))
+        assert pruned == 1
+        assert {qcow2_key, config_key} <= set(store.deleted)
 
     asyncio.run(_run())
 
@@ -478,7 +503,7 @@ def test_expire_one_private_image_defers_when_referenced_under_lock(migrated_url
             system_id = await seed_system(conn)  # non-terminal
             await _set_catalog_rootfs(conn, system_id, provider="local-libvirt", name="locked")
             store = _FakeImageStore({key: timedelta(hours=2)})
-            deleted = await _expire_one_private_image(conn, store, row_id, key)
+            deleted = await _expire_one_private_image(conn, store, row_id, key, None)
         assert deleted is False
         assert store.deleted == []
         async with await connect(migrated_url) as check:

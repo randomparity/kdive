@@ -50,14 +50,16 @@ async def repair_expired_private_images(conn: AsyncConnection, store: ImageSweep
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT id, object_key FROM image_catalog "
+            "SELECT id, object_key, kernel_config_key FROM image_catalog "
             "WHERE visibility = %s AND expires_at IS NOT NULL AND expires_at < now()",
             (_PRIVATE_VISIBILITY,),
         )
         candidates = await cur.fetchall()
     pruned = 0
     for cand in candidates:
-        if await expire_one_private_image(conn, store, cand["id"], cand["object_key"]):
+        if await expire_one_private_image(
+            conn, store, cand["id"], cand["object_key"], cand["kernel_config_key"]
+        ):
             pruned += 1
     return pruned
 
@@ -108,14 +110,20 @@ async def image_referenced_by_live_system(cur: AsyncCursor[DictRow], row_id: UUI
 
 
 async def expire_one_private_image(
-    conn: AsyncConnection, store: ImageSweepStore, row_id: UUID, object_key: str | None
+    conn: AsyncConnection,
+    store: ImageSweepStore,
+    row_id: UUID,
+    object_key: str | None,
+    config_key: str | None,
 ) -> bool:
-    """Delete one expired private image's object and row if no retention guard blocks it.
+    """Delete one expired private image's objects and row if no retention guard blocks it.
 
     The locked ``expires_at < now()`` re-read is the extend fence: a concurrent operator extend
     committed after candidate selection turns this into a no-op. The reference guard runs under
     the same transaction so a System that still uses the image defers expiry. Object deletion
-    precedes row deletion so a crash leaves at most a dangling row for the reconciler to heal.
+    precedes row deletion so a crash leaves at most a dangling row for the reconciler to heal; the
+    kernel ``.config`` sibling (``config_key``, ADR-0317) is deleted alongside the qcow2 for prompt
+    reclamation (the leaked-sweep is the backstop for the other row-deletion paths).
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -135,6 +143,8 @@ async def expire_one_private_image(
             return False
         if object_key is not None:
             await asyncio.to_thread(store.delete, object_key)
+        if config_key is not None:
+            await asyncio.to_thread(store.delete, config_key)
         await cur.execute("DELETE FROM image_catalog WHERE id = %s", (row_id,))
     _log.info("images: expired private image %s pruned (object + row deleted)", row_id)
     return True
