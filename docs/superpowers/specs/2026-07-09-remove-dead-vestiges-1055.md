@@ -61,7 +61,14 @@ Files:
   set: the success `ToolResponse` `data` payload (agent-facing output), the denial-audit `scope`
   f-string and `args` dict (the f-string references the removed parameter, so it must change
   regardless), and `_audit_clear`'s `scope` string and `args` dict. Each drops to
-  `{resource_kind, name}`. Update the wrapper docstring to `clear_override(resource_kind, name)`.
+  `{resource_kind, name}`. Correct **every** docstring in this handler that describes the removed
+  parameter or the build-host path — no lint/type/test/`docs-check` guardrail reads docstring prose,
+  and this tool is absent from the generated `tools.md`, so a stale docstring survives silently: the
+  `@app.tool` wrapper docstring (to `clear_override(resource_kind, name)`), the handler
+  `clear_override` docstring (the "`(source_kind, resource_kind)` pairing" line, the "illegal kind
+  pairing" phrasing, and the `source_kind` / `build-host` sentinel `Args`), and the
+  `_parse_override_identity` ("Validate the ledger PK … pairing") and `_override_identity_lock`
+  ("matching the override's family") helper docstrings.
 - Tests: `tests/inventory/test_overrides.py`, `tests/mcp/ops/test_inventory_clear_override.py`,
   `tests/db/test_locks.py` — delete the `build_host` cases; update resource cases that pass
   `source_kind` to the tool.
@@ -90,7 +97,10 @@ Files:
    `removed` resource override (success), returns `not_found` when none exists (idempotent), and
    returns `configuration_error` on an invalid `resource_kind`. Its wrapper docstring and `Field`
    text match the new signature, and no `source_kind` key appears in the success `data` payload, the
-   denial-audit scope/args, or the `_audit_clear` scope/args.
+   denial-audit scope/args, or the `_audit_clear` scope/args. No `source_kind` / `build_host` /
+   `build-host` token remains anywhere in `src/kdive/mcp/tools/ops/inventory.py` — including
+   docstrings and `Args` blocks — falsifiable via
+   `rg 'source_kind|build_host|build-host' src/kdive/mcp/tools/ops/inventory.py` returning zero hits.
 7. The `db/locks.py` `LockScope` docstring no longer claims a `BUILD_HOST` scope exists or that it is
    the `inventory.clear_override` lock.
 8. `just lint`, `just type` (whole tree), and `just test` all pass.
