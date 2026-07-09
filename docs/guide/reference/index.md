@@ -53,6 +53,7 @@
 | [`images.delete`](images.md#imagesdelete) | `implemented` |
 | [`images.describe`](images.md#imagesdescribe) | `implemented` |
 | [`images.extend`](images.md#imagesextend) | `implemented` |
+| [`images.kernel_config`](images.md#imageskernel_config) | `implemented` |
 | [`images.list`](images.md#imageslist) | `implemented` |
 | [`images.prune_expired`](images.md#imagesprune_expired) | `implemented` |
 | [`images.publish`](images.md#imagespublish) | `implemented` |

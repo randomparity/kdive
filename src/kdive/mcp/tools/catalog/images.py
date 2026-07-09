@@ -11,14 +11,20 @@ included — so the operator can see in-flight and seeded images.
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+import asyncio
+from collections.abc import Callable
+from typing import Annotated, Any, Protocol
 
 from fastmcp import FastMCP
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
+import kdive.config as config
+from kdive.artifacts.storage import HeadResult
+from kdive.config.core_settings import ARTIFACT_DOWNLOAD_TTL_SECONDS
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageVisibility
+from kdive.domain.errors import CategorizedError
 from kdive.images.capability_signals import REGISTERED_SIGNALS
 from kdive.images.kdump_support import (
     DEFAULT_KERNEL_BASIS,
@@ -32,6 +38,7 @@ from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidC
 from kdive.mcp.tools._common import ConfigErrorReason as _ConfigErrorReason
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
+from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import decode_cursor as _decode_cursor
 from kdive.mcp.tools._common import encode_cursor as _encode_cursor
@@ -42,6 +49,7 @@ from kdive.mcp.tools._common import paginate as _paginate
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, projects_with_role
 from kdive.serialization import JsonValue
+from kdive.store.objectstore import object_store_from_env
 
 _LIST_TOOL = "images.list"
 _LIST_TAG = "images.list"
@@ -266,6 +274,78 @@ async def describe_image(
     return _describe_envelope(ImageCatalogEntry.model_validate(row), basis)
 
 
+_KERNEL_CONFIG_TOOL = "images.kernel_config"
+_KERNEL_CONFIG_UNAVAILABLE = "kernel_config_unavailable"
+
+
+class _ConfigStore(Protocol):
+    """The narrow object-store capability the config fetch needs (an ObjectStore satisfies it)."""
+
+    def head(self, key: str) -> HeadResult | None: ...
+    def presign_get(self, key: str, *, expires_in: int) -> str: ...
+
+
+async def kernel_config(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    image_id: str,
+    *,
+    store_factory: Callable[[], _ConfigStore] = object_store_from_env,
+) -> ToolResponse:
+    """Mint a presigned download URL for a catalog image's kernel ``.config`` (ADR-0317).
+
+    Resolves the row under the ``images.describe`` visibility predicate (public, or owned-private
+    with ``viewer``), HEADs the stored ``/boot/config-<ver>`` object, and presigns a short-lived
+    GET (``KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS``). A malformed id is a ``configuration_error``; a
+    valid id with no visible row is ``not_found`` (byte-identical whether absent or invisible). A
+    visible row with no stored config (no ``kernel_config_key`` — a staged/pre-feature image or a
+    best-effort config-write failure) or a missing object is a ``configuration_error`` with reason
+    ``kernel_config_unavailable``. The config is never inspected or validated; the egress is not
+    audited (REDACTED-class, visibility-gated like ``images.describe``).
+    """
+    uid = _as_uuid(image_id)
+    if uid is None:
+        return _invalid_uuid_error("image_id", image_id)
+    with bind_context(principal=ctx.principal):
+        params = {
+            "id": str(uid),
+            "public": ImageVisibility.PUBLIC.value,
+            "private": ImageVisibility.PRIVATE.value,
+            "projects": projects_with_role(ctx, Role.VIEWER),
+        }
+        async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(_DESCRIBE_SQL, params)
+            row = await cur.fetchone()
+    if row is None:
+        return _not_found(image_id)
+    entry = ImageCatalogEntry.model_validate(row)
+    if entry.kernel_config_key is None:
+        return _config_error(image_id, data={"reason": _KERNEL_CONFIG_UNAVAILABLE})
+    try:
+        store = store_factory()
+        head = await asyncio.to_thread(store.head, entry.kernel_config_key)
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(image_id, exc)
+    if head is None:
+        return _config_error(image_id, data={"reason": _KERNEL_CONFIG_UNAVAILABLE})
+    ttl = config.require(ARTIFACT_DOWNLOAD_TTL_SECONDS)
+    try:
+        url = await asyncio.to_thread(store.presign_get, entry.kernel_config_key, expires_in=ttl)
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(image_id, exc)
+    return ToolResponse.success(
+        image_id,
+        "available",
+        suggested_next_actions=[_KERNEL_CONFIG_TOOL],
+        refs={"download_uri": url},
+        data={
+            "default_kernel_version": _default_kernel_version(entry.provenance),
+            "size_bytes": head.size_bytes,
+            "ttl": ttl,
+        },
+    )
+
+
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the ``images.list``/``images.describe`` read tools on ``app``, bound to ``pool``."""
 
@@ -323,3 +403,22 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         multi-kernel image does not burn an allocation on a fail-closed selection).
         """
         return await describe_image(pool, current_context(), image_id, target_kernel)
+
+    @app.tool(
+        name=_KERNEL_CONFIG_TOOL,
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def images_kernel_config(
+        image_id: Annotated[str, Field(description="The catalog image row id (UUID).")],
+    ) -> ToolResponse:
+        """Return a short-lived download URL for the image's kernel ``.config`` starting point.
+
+        The URL under ``refs.download_uri`` fetches the image's ``/boot/config-<ver>`` — a
+        known-good config to build a kernel from, never validated by kdive.
+        ``data.default_kernel_version`` names the version, ``data.size_bytes`` the config size, and
+        ``data.ttl`` the URL lifetime. An image with no offered config (a staged or pre-feature
+        image, or one whose ``/boot`` lacked a single kernel/config) returns a
+        ``configuration_error`` with ``data.reason`` = ``kernel_config_unavailable``.
+        """
+        return await kernel_config(pool, current_context(), image_id)

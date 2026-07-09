@@ -61,6 +61,23 @@ Extend an image catalog entry lease.
 | `reason` | string | yes | Mandatory non-blank break-glass justification (audited). |
 | `seconds` | integer | yes | Seconds from now (clamped to the ceiling). |
 
+## `images.kernel_config`
+
+`implemented` · `read-only`
+
+Return a short-lived download URL for the image's kernel ``.config`` starting point.
+
+The URL under ``refs.download_uri`` fetches the image's ``/boot/config-<ver>`` — a
+known-good config to build a kernel from, never validated by kdive.
+``data.default_kernel_version`` names the version, ``data.size_bytes`` the config size, and
+``data.ttl`` the URL lifetime. An image with no offered config (a staged or pre-feature
+image, or one whose ``/boot`` lacked a single kernel/config) returns a
+``configuration_error`` with ``data.reason`` = ``kernel_config_unavailable``.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `image_id` | string | yes | The catalog image row id (UUID). |
+
 ## `images.list`
 
 `implemented` · `read-only`
