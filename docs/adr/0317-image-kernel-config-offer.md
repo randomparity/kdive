@@ -58,8 +58,13 @@ sensitivity.
 - The agent selects an image on merit (distro, version, **default kernel version**) in
   one `images.list` call, then fetches its known-good starting config in one
   `images.kernel_config` call — no N+1, no libguestfs on the read path.
-- One ~250 KB text object per built image, owner-scoped and sharing the image's
-  retention class, so it is swept with the image. Negligible next to the qcow2.
+- One ~250 KB text object per built image, owner-scoped and sharing the image's prefix.
+  Negligible next to the qcow2. It joins the object lifecycle by extending the
+  leaked-object cross-check (`reconciler/cleanup/images.py`) to protect an object
+  referenced by `object_key` **or** `kernel_config_key`, and the private-expiry path
+  (`services/images/retention.py`) to delete it alongside the qcow2 — without this the
+  sweep would delete a live image's config as "leaked" and orphan a deleted image's
+  config.
 - The config offer is best-effort: staged `path`/`volume` images, pre-feature rows, and
   images whose `/boot` lacks a single baseline kernel or a `config-<ver>` file have no
   stored config, and the fetch degrades to a `kernel_config_unavailable`

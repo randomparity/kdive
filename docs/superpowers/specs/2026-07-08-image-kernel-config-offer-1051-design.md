@@ -75,9 +75,10 @@ never inspects or validates the config.
    `make`, so a windowed inline read (`artifacts.get`) is useless and 250 KB inline is
    large. It resolves the row under the **same visibility predicate** as
    `images.describe` (public, or owned-private with `viewer`), HEADs the config object,
-   presigns a short-lived GET (`KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS`), and returns the
-   URL under `refs.download_uri` with `data.default_kernel_version` / `data.size_bytes`
-   / `data.ttl`.
+   presigns a short-lived GET (`KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS`), **records an audit
+   event** for the egress (mirroring `fetch_raw`), and returns the URL under
+   `refs.download_uri` with `data.default_kernel_version` / `data.size_bytes` /
+   `data.ttl`.
 
 4. **No validation, anywhere.** kdive stores the config bytes verbatim and never parses
    or checks them. The config is REDACTED-class (kernel `CONFIG_*` symbols carry no
@@ -88,6 +89,34 @@ never inspects or validates the config.
    the build plane (operator-staged `path`/`volume` images), simply has no stored
    config. `images.kernel_config` returns a `configuration_error` with reason
    `kernel_config_unavailable` in that case (mirroring `vmcore_unavailable`).
+
+6. **The config object joins the existing object lifecycle by extending the leaked-object
+   cross-check.** The catalog's reclamation model (ADR-0092) is: a row-deletion path may
+   delete the object eagerly *and* `repair_leaked_images` reclaims any image-prefix object
+   no row references, past the publish grace. Both mechanisms key **only** off `object_key`
+   today, so a second object under `images/` would be (a) deleted as "leaked" for a live,
+   registered image, and (b) never a false-positive reclaim only because it *is* referenced
+   — the opposite failures. The fix is one change plus one symmetry:
+   - **Leaked-sweep cross-check** (`reconciler/cleanup/images.py`): protect an object
+     referenced by `object_key` **OR** `kernel_config_key` (`SELECT EXISTS(... WHERE
+     object_key = %s OR kernel_config_key = %s)`). This protects a live image's config and,
+     because the check is per-object, still reclaims a config whose owning row is gone (no
+     row carries that key) — so every row-deletion path is backstopped exactly as the qcow2
+     is.
+   - **Eager delete on private expiry** (`services/images/retention.py`): `expire_one_
+     private_image` deletes the config object alongside the qcow2 when `kernel_config_key`
+     is set (prompt reclamation, mirroring the qcow2's eager delete). Dangling-row removal
+     and inventory prune delete only the row and rely on the leaked-sweep backstop — the
+     same treatment those paths already give the qcow2.
+
+7. **Publish crash-window recovery reuses the deterministic key.** The config is written
+   at the deterministic `{arch}.config` key, so a re-run of publish overwrites it
+   idempotently (like the qcow2). A crash *after* the config write but *before* the
+   `registered` flip leaves the config object with no persisted `kernel_config_key`; it is
+   reclaimed by the (fixed) leaked-sweep exactly as a crashed qcow2 write is — no bespoke
+   rollback. The config leg is ordered after the qcow2 HEAD-gate and its key is persisted
+   in the same `registered`-flip statement, so a registered row's `kernel_config_key` is
+   set iff its config object was written.
 
 ## What changes
 
@@ -121,11 +150,19 @@ never inspects or validates the config.
   version.
 - **`services/images/publish.py`** — when `PublishRequest.kernel_config` is present,
   write it as a second object (`{arch}.config`) after the qcow2 HEAD-gate and set the
-  row's `kernel_config_key`. Add `kernel_config: bytes | None` + a
-  `kernel_config_key` write to the `pending`→`registered` flip. The config write is
-  best-effort-ordered **after** the qcow2 (the qcow2 is the image identity); a config
-  write failure fails the publish (the row stays `pending` for the reconciler), keeping
-  the two-write invariant.
+  row's `kernel_config_key` in the `pending`→`registered` `UPDATE ... RETURNING`. Add
+  `kernel_config: bytes | None` to `PublishRequest`. The config write is ordered **after**
+  the qcow2 (the qcow2 is the image identity); a config-write failure fails the publish
+  (the row stays `pending` for the reconciler), and the config leg's recovery is the
+  deterministic-key idempotent re-run + leaked-sweep backstop of Decision 7 — not a
+  bespoke rollback.
+- **`reconciler/cleanup/images.py`** — extend the `_delete_if_leaked` cross-check to
+  protect an object referenced by `object_key` **OR** `kernel_config_key` (Decision 6),
+  so the leaked-sweep never deletes a live image's config and still reclaims an orphaned
+  one.
+- **`services/images/retention.py`** — `repair_expired_private_images` selects
+  `kernel_config_key` alongside `object_key`; `expire_one_private_image` deletes the
+  config object (when set) alongside the qcow2, object-before-row like today (Decision 6).
 - **`jobs/handlers/image_build.py`** — pass `output.kernel_config` into
   `PublishRequest`.
 - **`domain/catalog/images.py`** (`ImageCatalogEntry`) — add `kernel_config_key: str |
@@ -171,6 +208,10 @@ build plane (live_vm, libguestfs)
   unchanged and unchecked.
 - **Migration:** `tests/db/test_migrate.py` covers the additive column; a pre-feature
   row (no `kernel_config_key`) reads back `None`.
+- **Config-object lifecycle:** the leaked-sweep leaves a registered image's config object
+  in place past grace (protected via `kernel_config_key`) but reclaims one whose row was
+  deleted; a private-image expiry deletes both the qcow2 and the config object; a
+  crash-before-flip config object (no persisted key) is reclaimed by the leaked-sweep.
 - **Guardrails:** `just lint`, `just type`, `just test`, `just docs-check` green; the
   generated MCP tool reference regenerated for the new `images.kernel_config` tool.
 - **Live smoke (not CI-gated):** build a real image → `images.describe` shows
@@ -185,10 +226,17 @@ build plane (live_vm, libguestfs)
 - **Second object-store write in publish.** Adds a failure point to a two-write that is
   currently one write. Mitigation: the config write is ordered after the qcow2 HEAD-gate
   and before the `registered` flip, so a config failure leaves the row `pending` (the
-  reconciler's existing recovery path), never a half-registered image.
+  reconciler's existing recovery path), never a half-registered image (Decision 7).
+- **Second object under the `images/` prefix breaks the object-key-only sweeps.** The
+  leaked-sweep and the private-expiry delete both key only off `object_key` today, so an
+  unmodified sweep would delete a live image's config as "leaked" and orphan a deleted
+  image's config. Mitigation: Decision 6 extends the leaked cross-check to
+  `object_key OR kernel_config_key` and the private-expiry path to delete the config too;
+  covered by the config-object-lifecycle tests. This is the load-bearing correctness fix,
+  not an afterthought.
 - **Object-store growth.** One ~250 KB text object per built image. Negligible next to
-  the multi-GB qcow2; shares the image's retention class and owner-scoped prefix, so it
-  is swept with the image.
+  the multi-GB qcow2; shares the image's retention class and owner-scoped prefix, and is
+  reclaimed with the image via the extended sweep (Decision 6).
 
 ## Relationship to the other specs
 
