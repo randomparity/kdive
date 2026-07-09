@@ -1,0 +1,72 @@
+# 0318 — Advertise debug-feature kernel-config requirements; arm only supported features
+
+- **Status:** Accepted
+- **Date:** 2026-07-08
+- **Issue:** #1052
+- **Spec:** [Spec 3 of 3](../superpowers/specs/2026-07-08-debug-feature-config-gate-1052-design.md)
+- **Builds on:** ADR-0316 (remove server-build lane), ADR-0317 (image kernel-config offer)
+
+## Context
+
+The build/config redesign made agent-builds-locally + upload-only the sole kernel lane.
+Spec 1 deleted all `.config` validation but kept `effective_config` (the agent's `.config`)
+as an accepted-but-unread upload. kdive has no runtime knowledge of the booted kernel's
+config: feature gating uses profile bits + live probes, never the kernel's real `CONFIG_*`.
+So the agent is never told which symbols a debug feature needs, and kdive arms features the
+uploaded kernel cannot support — failures surface late (a crash that never dumps, a sysrq
+that does nothing).
+
+## Decision
+
+Introduce a `kernel_config` package holding a single declarative registry of
+feature → required `CONFIG_*` (each requirement an ordered list of OR-group clauses), a pure
+`.config` parser, a pure support check, and a read helper for the uploaded artifact. Use it
+two ways:
+
+1. **Advertise** — a static read-only tool `catalog.feature_config_requirements` returns the
+   full manifest (feature, summary, `gated`, OR-group requirements). Advisory; cross-linked
+   from `runs.create` / `artifacts.expected_uploads` `suggested_next_actions`. The agent
+   decides what to build.
+2. **Gate** — at the three config-dependent arming seams (kdump crashkernel reservation in
+   `install`; kdump-method vmcore fetch; sysrq diagnostic), fetch the Run's uploaded
+   `effective_config`, parse it, and **refuse the action with `CONFIGURATION_ERROR` naming
+   the missing symbols** when a required clause is provably unmet.
+
+Two boundary rules:
+
+- **Absent config arms as today.** `effective_config` is optional and commonly absent; kdive
+  cannot prove a missing feature, so it does not gate. R2 applies only when a config exists.
+- **gdbstub is not gated.** The QEMU gdbstub attaches to vCPU state regardless of guest
+  config and is armed at provision time before any kernel is uploaded, from a seam with no
+  DB/store. It is advertised (via `debuginfo`) but never disabled — a deliberate deviation
+  from the issue's literal four-seam list.
+
+No schema change: the gate reads the existing `effective_config` artifact row + object.
+
+## Consequences
+
+- The agent gets an advisory contract (build these symbols for these features) and, when it
+  builds without them, a loud categorized refusal at the exact action instead of a silent
+  late failure.
+- kdive gains its first runtime read of the kernel's own config — a new gating input beside
+  profile bits and live probes.
+- A `SENSITIVE` artifact is now read server-side; only derived booleans and `CONFIG_*` names
+  (public knowledge) leave the seam — never the config bytes.
+- host_dump vmcore capture stays ungated (host-side, needs no guest config); only the KDUMP
+  method gates on `crash_capture`.
+- The registry is advisory; drift over-advertises harmless extra symbols or over-refuses an
+  explicitly-requested feature (surfaced by the named-symbol reason), never silently mis-boots.
+
+## Considered & rejected
+
+- **Gate gdbstub literally** — the raw stub works without any kernel config and is armed
+  before the kernel exists; gating it would refuse a working capability and is
+  ordering-impossible.
+- **Disable all features when no config is uploaded** — a strict reading of R2 that breaks
+  every current kdump/sysrq/vmcore flow, since the upload is optional.
+- **A run-scoped "will my config work" tool** — duplicates what the agent already computes
+  from its own `.config` and pushes a SENSITIVE read onto a response path.
+- **A cached supported-features column** — adds a migration and a staleness surface; the
+  per-run object read is cheap.
+- **Silently disabling instead of refusing** — a silent no-op on an explicit agent action
+  reads as success; categorized refusal is diagnosable.
