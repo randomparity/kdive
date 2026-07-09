@@ -296,9 +296,13 @@ def test_config_absent_keeps_version_drops_config(build_plane_factory):
     assert output.kernel_config is None
 ```
 
-Adapt `_tools_with` / `build_plane_factory` / `_spec` to the module's existing helpers
-(the current tests already inject `probe_boot_entries`; reuse that harness and add the new
-`probe_kernel_config` seam to it).
+The names above are illustrative — use the module's **real** helpers:
+`tests/providers/local_libvirt/test_rootfs_build.py` exposes `_plane(tmp_path, rec,
+probe_boot_entries=..., ...)` and a `_tools(...)`/`RootfsBuildTools` builder (the existing
+`boot_kernel_count` tests use `_plane` around lines 391–417). Add the new
+`probe_kernel_config=` seam to that harness and drive it through `_plane`. `_capture_boot_
+kernel_count` has no external/test callers, so replacing it with `_capture_boot_facts`
+breaks nothing.
 
 - [ ] **Step 3: Run tests to verify they fail**
 
@@ -472,11 +476,18 @@ git commit -m "feat(images): capture default kernel version + config at build (#
 
 ---
 
-## Task 4: Best-effort config write in publish
+## Task 4: Best-effort config write in publish + leaked-sweep protection
+
+**Ordering invariant:** the leaked-sweep protection (`_delete_if_leaked` cross-check on
+`kernel_config_key`) is committed **in this same task**, before/with the first config-object
+write. The ADR requires the protector to exist the instant a config object can exist —
+otherwise a config object older than the publish grace, in the window between "write ships"
+and "protection ships", is deleted as leaked. Do not split these across commits.
 
 **Files:**
 - Modify: `src/kdive/services/images/publish.py`
-- Test: `tests/services/images/test_publish.py`
+- Modify: `src/kdive/reconciler/cleanup/images.py` (leaked cross-check — ships with the write)
+- Test: `tests/services/images/test_publish.py`, `tests/reconciler/test_image_sweeps.py`
 
 **Interfaces:**
 - Consumes: `PublishRequest` (existing), `_FakeStore` test double (existing, `put_artifact`
@@ -657,10 +668,53 @@ Expected: PASS (new config tests + all existing publish tests).
 Run: `just lint && just type`
 Expected: clean.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Add the leaked-sweep protection (same commit) + its tests**
+
+The config object lives under the `images/` prefix, so `repair_leaked_images` lists it and
+would delete it as "leaked" (its key is in `kernel_config_key`, never `object_key`). Ship the
+protection now. In `tests/reconciler/test_image_sweeps.py` add:
+
+```python
+async def test_leaked_sweep_protects_live_image_config(...):
+    # registered row with object_key=K_qcow2, kernel_config_key=K_cfg; both objects past grace
+    deleted = await repair_leaked_images(conn, store, grace)
+    assert store.deleted == []  # both protected via object_key OR kernel_config_key
+
+
+async def test_leaked_sweep_reclaims_orphaned_config(...):
+    # object K_cfg present past grace but NO row references it -> deleted
+    await repair_leaked_images(conn, store, grace)
+    assert K_cfg in store.deleted
+```
+
+Run: `uv run python -m pytest tests/reconciler/test_image_sweeps.py -k "leaked" -v`
+Expected: FAIL (live config deleted).
+
+In `src/kdive/reconciler/cleanup/images.py`, `_delete_if_leaked`, change the query:
+
+```python
+        await cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM image_catalog "
+            "WHERE object_key = %s OR kernel_config_key = %s) OR %s >= now() - %s",
+            (obj.key, obj.key, obj.last_modified, grace),
+        )
+```
+
+Update the module docstring's `repair_leaked_images` bullet to note an object is protected
+when referenced by `object_key` **or** `kernel_config_key`.
+
+Run: `uv run python -m pytest tests/reconciler/test_image_sweeps.py -q`
+Expected: PASS (new + existing sweep tests).
+
+- [ ] **Step 7: Lint + type**
+
+Run: `just lint && just type`
+Expected: clean.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/kdive/services/images/publish.py tests/services/images/test_publish.py
+git add src/kdive/services/images/publish.py src/kdive/reconciler/cleanup/images.py tests/services/images/test_publish.py tests/reconciler/test_image_sweeps.py
 git commit -m "feat(images): best-effort publish of the kernel .config sibling (#1051)"
 ```
 
@@ -670,7 +724,7 @@ git commit -m "feat(images): best-effort publish of the kernel .config sibling (
 
 **Files:**
 - Modify: `src/kdive/jobs/handlers/image_build.py`
-- Test: `tests/jobs/handlers/test_image_build.py` (existing handler test)
+- Test: `tests/jobs/test_image_build_handler.py` (existing handler test; fakes the build plane + store, constructs `RootfsBuildOutput`)
 
 **Interfaces:**
 - Consumes: `RootfsBuildOutput.kernel_config` (Task 3), `PublishRequest.kernel_config` (Task 4).
@@ -691,7 +745,7 @@ async def test_handler_passes_kernel_config_to_publish(...):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `uv run python -m pytest tests/jobs/handlers/test_image_build.py -k "kernel_config" -v`
+Run: `uv run python -m pytest tests/jobs/test_image_build_handler.py -k "kernel_config" -v`
 Expected: FAIL (request carries `None`).
 
 - [ ] **Step 3: Implement**
@@ -705,73 +759,53 @@ in `image_build_handler`:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `uv run python -m pytest tests/jobs/handlers/test_image_build.py -q`
+Run: `uv run python -m pytest tests/jobs/test_image_build_handler.py -q`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/kdive/jobs/handlers/image_build.py tests/jobs/handlers/test_image_build.py
+git add src/kdive/jobs/handlers/image_build.py tests/jobs/test_image_build_handler.py
 git commit -m "feat(images): thread kernel_config from build output to publish (#1051)"
 ```
 
 ---
 
-## Task 6: Protect + reclaim the config object in the sweeps
+## Task 6: Delete the config object on private-image expiry
+
+(The leaked-sweep protection ships in Task 4 — see its Step 6. This task adds only the
+prompt eager-delete on private-image expiry; a dangling/prune row leaves the config for the
+Task 4 leaked-sweep backstop.)
 
 **Files:**
-- Modify: `src/kdive/reconciler/cleanup/images.py` (leaked cross-check)
 - Modify: `src/kdive/services/images/retention.py` (private-expiry delete)
 - Test: `tests/reconciler/test_image_sweeps.py`
 
 **Interfaces:**
 - Consumes: `ImageSweepStore` (existing: `list_image_objects`/`head_present`/`delete`).
+- **Existing call sites of `expire_one_private_image` that gain the new arg:**
+  `src/kdive/services/images/retention.py:60` (production) and three tests —
+  `tests/reconciler/test_image_sweeps.py:398`, `:421`, `:445` (each calls
+  `_expire_one_private_image(conn, store, row_id, key)` today; each must pass the new
+  `config_key` — pass `None` where the test seeds no config).
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing test**
 
 In `tests/reconciler/test_image_sweeps.py`:
 
 ```python
-async def test_leaked_sweep_protects_live_image_config(...):
-    # registered row with object_key=K_qcow2, kernel_config_key=K_cfg; both objects past grace
-    # -> neither deleted
-    deleted = await repair_leaked_images(conn, store, grace)
-    assert store.deleted == []  # both protected
-
-
-async def test_leaked_sweep_reclaims_orphaned_config(...):
-    # object K_cfg present past grace but NO row references it -> deleted
-    deleted = await repair_leaked_images(conn, store, grace)
-    assert "…/x86_64.config" in store.deleted
-
-
 async def test_private_expiry_deletes_config(...):
     # expired private row with object_key + kernel_config_key -> both objects deleted, row gone
     pruned = await repair_expired_private_images(conn, store)
     assert {qcow2_key, config_key} <= set(store.deleted)
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 2: Run test to verify it fails**
 
-Run: `uv run python -m pytest tests/reconciler/test_image_sweeps.py -k "config" -v`
-Expected: FAIL (leaked sweep deletes the live config; expiry leaves the config).
+Run: `uv run python -m pytest tests/reconciler/test_image_sweeps.py -k "private_expiry_deletes_config" -v`
+Expected: FAIL (expiry leaves the config object).
 
-- [ ] **Step 3: Implement the leaked cross-check**
-
-In `src/kdive/reconciler/cleanup/images.py`, `_delete_if_leaked`, change the query:
-
-```python
-        await cur.execute(
-            "SELECT EXISTS (SELECT 1 FROM image_catalog "
-            "WHERE object_key = %s OR kernel_config_key = %s) OR %s >= now() - %s",
-            (obj.key, obj.key, obj.last_modified, grace),
-        )
-```
-
-Update the module docstring's `repair_leaked_images` bullet to note an object is protected
-when referenced by `object_key` **or** `kernel_config_key`.
-
-- [ ] **Step 4: Implement the private-expiry delete**
+- [ ] **Step 3: Implement the private-expiry delete**
 
 In `src/kdive/services/images/retention.py`:
 
@@ -811,24 +845,27 @@ async def expire_one_private_image(
         await cur.execute("DELETE FROM image_catalog WHERE id = %s", (row_id,))
 ```
 
-If any other caller of `expire_one_private_image` exists (grep first:
-`rg -n "expire_one_private_image" src/ tests/`), update it to pass the new argument.
+Update the three existing test call sites named in **Interfaces** above
+(`tests/reconciler/test_image_sweeps.py:398/421/445`) to pass `None` as the new
+`config_key` argument — they seed no config, so `_expire_one_private_image(conn, store,
+row_id, key, None)`. (Confirm with `rg -n "expire_one_private_image" src/ tests/` that no
+other caller remains.)
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run python -m pytest tests/reconciler/test_image_sweeps.py -q`
-Expected: PASS (new config tests + existing sweep tests).
+Expected: PASS (new config test + existing expiry tests with the updated arity).
 
-- [ ] **Step 6: Lint + type**
+- [ ] **Step 5: Lint + type**
 
 Run: `just lint && just type`
 Expected: clean.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/kdive/reconciler/cleanup/images.py src/kdive/services/images/retention.py tests/reconciler/test_image_sweeps.py
-git commit -m "feat(images): protect + reclaim the kernel .config object in sweeps (#1051)"
+git add src/kdive/services/images/retention.py tests/reconciler/test_image_sweeps.py
+git commit -m "feat(images): delete the kernel .config object on private expiry (#1051)"
 ```
 
 ---
@@ -941,9 +978,14 @@ Expected: FAIL (`kernel_config` handler does not exist).
 
 In `src/kdive/mcp/tools/catalog/images.py`:
 
-- Add imports: `object_store_from_env` (from `kdive.store.objectstore`), `config` +
-  `ARTIFACT_DOWNLOAD_TTL_SECONDS` (as `raw_fetch` does), `HeadResult`, a `Callable`/`Protocol`
-  store type mirroring `raw_fetch._RawStore` (`head` + `presign_get`).
+- Add imports: `object_store_from_env` (from `kdive.store.objectstore`); `import
+  kdive.config as config` + `ARTIFACT_DOWNLOAD_TTL_SECONDS` (from
+  `kdive.config.core_settings`, as `raw_fetch` does); `HeadResult` (from
+  `kdive.artifacts.storage`); `asyncio`; **and the plain config-error helper the handler
+  uses — `from kdive.mcp.tools._common import config_error as _config_error`** (the module
+  imports only `config_error_reason as _config_error_reason` today, not the plain alias).
+  Define a `_ConfigStore` `Protocol` mirroring `raw_fetch._RawStore` (`head(key) ->
+  HeadResult | None` and `presign_get(key, *, expires_in: int) -> str`).
 
 - Add the handler (visibility via the existing `_DESCRIBE_SQL`; note it selects `*`, so the
   row carries `kernel_config_key` and `provenance`):
@@ -984,11 +1026,7 @@ async def kernel_config(
         return _not_found(image_id)
     entry = ImageCatalogEntry.model_validate(row)
     if entry.kernel_config_key is None:
-        return _config_error_reason(
-            image_id, _ConfigErrorReason(_KERNEL_CONFIG_UNAVAILABLE)
-            if False else _ConfigErrorReason.__members__.get("KERNEL_CONFIG_UNAVAILABLE"),
-            detail="image has no offered kernel config",
-        )  # see Step 3 note on the reason enum
+        return _config_error(image_id, data={"reason": _KERNEL_CONFIG_UNAVAILABLE})
     try:
         store = store_factory()
         head = await asyncio.to_thread(store.head, entry.kernel_config_key)
@@ -1014,12 +1052,9 @@ async def kernel_config(
     )
 ```
 
-**Step 3 note (reason value):** use the plainest available failure helper. `raw_fetch`
-returns `_config_error(run_id, data={"reason": "vmcore_unavailable"})` with a free-form
-string. Mirror that exactly: `return _config_error(image_id, data={"reason":
-_KERNEL_CONFIG_UNAVAILABLE})` for the no-key case (drop the enum lookup shown above). Define
-`_ConfigStore` as a `Protocol` with `head(key) -> HeadResult | None` and `presign_get(key,
-*, expires_in: int) -> str`.
+**Step 3 note (reason value):** the no-key and object-absent cases both use the free-form
+`_config_error(image_id, data={"reason": _KERNEL_CONFIG_UNAVAILABLE})` — the same
+free-string idiom `raw_fetch` uses for `vmcore_unavailable` (no reason enum needed).
 
 - Register the tool inside the existing `register(app, pool)`:
 
@@ -1109,10 +1144,13 @@ git commit -m "test(images): assert the offered config is stored unvalidated (#1
   the absence of any parse/gate. Config-object lifecycle (spec Decisions 6–8) → Tasks 4+6.
   Migration/model → Task 1.
 - **Ordering:** Task 1 (schema/model) precedes every reader/writer of the column; Task 2
-  (probe) precedes Task 3 (capture); Tasks 3→4→5 form the build→publish→handler chain;
-  Task 6 (sweeps) depends only on the column (Task 1) and can run after Task 4; Tasks 7–8
-  depend on the column + provenance. Guardrails stay green at each commit because each task
-  is self-contained and additive.
+  (probe) precedes Task 3 (capture); Tasks 3→4→5 form the build→publish→handler chain.
+  **The leaked-sweep `kernel_config_key` protection ships inside Task 4, in the same commit
+  as the first config-object write** — the protector must exist the instant a config object
+  can exist (ADR-0317 protect-before-write invariant), so it is never a strictly-later
+  commit. Task 6 adds only the prompt private-expiry delete (dangling/prune rows rely on
+  the Task 4 leaked-sweep backstop). Tasks 7–8 depend on the column + provenance.
+  Guardrails stay green at each commit because each task is self-contained and additive.
 - **Type consistency:** `kernel_config: bytes | None` is the wire type end-to-end
   (`RootfsBuildOutput` → `PublishRequest`); the probe returns `str | None` (text) and the
   build plane encodes to `bytes` (`_capture_kernel_config`); `kernel_config_key: str | None`
