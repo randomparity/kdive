@@ -282,6 +282,9 @@ Collapses the profile model and removes every remaining reader of `ServerBuildPr
   `services/runs/steps.py` `platform_owned_cmdline_token` — that is the real install/boot cmdline
   gate and stays. `components/validation.py` was already stripped of its `build_host_selection`
   use in Task 2.
+- `src/kdive/providers/core/runtime.py` + each `*/composition.py` — remove the now-dead
+  `build_config_validator` field on `ProviderRuntime` (Task 2 deleted its only writer) and drop it
+  from every provider construction; sweep `rg -n build_config_validator src`.
 
 **Files — modify tests:**
 - `tests/profiles/test_build.py`, `tests/profiles/test_build_profile_source.py` — drop
@@ -350,7 +353,23 @@ Collapses the profile model and removes every remaining reader of `ServerBuildPr
 
 ---
 
-### Task 5: Drop the orphaned server-build tables
+### Task 5: Remove inventory build-host machinery + drop the orphaned tables
+
+**Prerequisite surgery (must land in this commit, BEFORE the DROP can be safe).** The inventory
+subsystem still models `build_hosts` as a config-owned resource type and **reads the table at
+runtime** — dropping the table without removing these readers crashes inventory export. Remove:
+- `src/kdive/inventory/serialize.py` — `BuildHostRow`, `_read_build_hosts`, the `build_hosts`
+  field on the snapshot, the `build_hosts=await _read_build_hosts(...)` call (~369), and the
+  build_hosts mentions in the header comment.
+- `src/kdive/inventory/model.py` — `BuildHostInstance` (~198) and the `build_host:
+  list[BuildHostInstance]` field (~263).
+- `src/kdive/inventory/reconcile/prune.py` — `prune_or_cordon_build_host` and its dispatch.
+- `src/kdive/inventory/overrides.py` — the build-host override GC branch (and stale docstring).
+- `src/kdive/inventory/_row_typing.py` — the `"build_hosts"` row-kind reference.
+- Adjust the inventory tests that assert a `build_hosts` snapshot section
+  (`rg -ln build_host tests/inventory`).
+Sweep `rg -n 'build_hosts|BuildHostInstance|BuildHostRow|prune_or_cordon_build_host' src/kdive/inventory`
+must be empty before the migration.
 
 **Files — create:** the next-numbered migration under `src/kdive/db/schema/` (check the highest
 existing number; use `NNNN_drop_server_build_tables.sql`).
@@ -379,7 +398,7 @@ Do **not** drop `egress_probe_guests` (0022) — separate, surviving table.
   (`just test tests/db` or the migration harness); confirm it applies cleanly and the drop order
   does not trip an FK.
 - [ ] **Step 4: Guardrails** `just lint && just type && just test`.
-- [ ] **Step 5: Commit** — `feat(db)!: drop orphaned server-build tables`.
+- [ ] **Step 5: Commit** — `feat(db)!: remove inventory build-host machinery and drop orphaned tables`.
 
 ---
 
@@ -392,6 +411,8 @@ Do **not** drop `egress_probe_guests` (0022) — separate, surviving table.
 - Regenerate all generated docs: `just docs` (MCP reference, agent guides). Stage the diffs.
 - `AGENTS.md` / `docs/**` narrative that describes the server-build lane — update to
   upload-only. Find with `rg -ln 'runs\.build|build_host|server.build|buildconfig' docs AGENTS.md`.
+- `src/kdive/observability/labels.py` — drop the now-inert `build_phase` / `build_host` label-key
+  allowlist entries (no code path emits them after Tasks 2–5).
 - Any straggler test that still imports a deleted symbol (final `rg` sweep across `tests`).
 
 **Interfaces:**
