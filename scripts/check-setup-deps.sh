@@ -57,6 +57,7 @@ package_for() {
   python-headers:fedora | python-headers:opensuse) printf "python3-devel" ;;
   python-headers:arch) printf "python" ;;
   python-headers:*) printf "python3-dev" ;;
+  shellcheck:fedora) printf "ShellCheck" ;;
   libelf-headers:fedora) printf "elfutils-libelf-devel" ;;
   libelf-headers:opensuse) printf "libelf-devel" ;;
   libelf-headers:arch) printf "libelf" ;;
@@ -170,6 +171,8 @@ require_header required python-headers python3 "${distro}"
 # RECOMMENDED — needed to reproduce the full local CI gate.
 require_command recommended git "${distro}"
 require_command recommended make "${distro}"
+require_command recommended shellcheck "${distro}"
+require_command recommended shfmt "${distro}"
 require_tool recommended just "uv tool install rust-just"
 require_tool recommended prek "uv tool install prek"
 require_command recommended docker "${distro}"
