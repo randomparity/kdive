@@ -359,10 +359,12 @@ class LocalLibvirtRootfsBuildPlane:
             return _BootFacts(None, None, None)
         if entries is None:
             return _BootFacts(None, None, None)
-        count = len(baseline_kernel_names(entries))
-        version = _default_kernel_version(entries)
+        kernels = baseline_kernel_names(entries)
+        # The default kernel is unambiguous only when /boot holds exactly one non-rescue kernel;
+        # zero/many omit the version (and skip the config probe), matching boot_kernel_count.
+        version = kernels[0][len("vmlinuz-") :] if len(kernels) == 1 else None
         config = self._capture_kernel_config(scratch, version)
-        return _BootFacts(count, version, config)
+        return _BootFacts(len(kernels), version, config)
 
     def _capture_kernel_config(self, scratch: Path, version: str | None) -> bytes | None:
         """The image's ``/boot/config-<version>`` bytes verbatim, or ``None`` (ADR-0317).
@@ -444,14 +446,6 @@ class _BootFacts:
     boot_kernel_count: int | None
     default_kernel_version: str | None
     kernel_config: bytes | None
-
-
-def _default_kernel_version(entries: list[str]) -> str | None:
-    """The lone non-rescue ``vmlinuz-<ver>`` version in ``entries``, else ``None`` (ambiguous)."""
-    kernels = baseline_kernel_names(entries)
-    if len(kernels) != 1:
-        return None
-    return kernels[0][len("vmlinuz-") :]
 
 
 def _provenance(

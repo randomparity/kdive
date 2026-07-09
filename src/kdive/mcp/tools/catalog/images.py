@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from typing import Annotated, Any, Protocol
+from uuid import UUID
 
 from fastmcp import FastMCP
 from psycopg.rows import dict_row
@@ -181,6 +182,28 @@ _DESCRIBE_SQL = """
 """
 
 
+async def _fetch_visible_image(
+    pool: AsyncConnectionPool, ctx: RequestContext, uid: UUID
+) -> ImageCatalogEntry | None:
+    """The catalog row ``uid`` visible to ``ctx`` (public, or owned-private viewer), else ``None``.
+
+    Filters in SQL on the caller's viewer-authorized project set, so an unauthorized private row
+    never leaves the database; the ``None`` case is byte-identical for an absent or an invisible id
+    (no existence/membership leak). Shared by ``images.describe`` and ``images.kernel_config``.
+    """
+    with bind_context(principal=ctx.principal):
+        params = {
+            "id": str(uid),
+            "public": ImageVisibility.PUBLIC.value,
+            "private": ImageVisibility.PRIVATE.value,
+            "projects": projects_with_role(ctx, Role.VIEWER),
+        }
+        async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(_DESCRIBE_SQL, params)
+            row = await cur.fetchone()
+    return ImageCatalogEntry.model_validate(row) if row is not None else None
+
+
 def _capability_signals(entry: ImageCatalogEntry, basis: KernelVersion) -> dict[str, JsonValue]:
     """The computed capability signals for ``entry`` against ``basis`` (ADR-0286/0295).
 
@@ -259,19 +282,10 @@ async def describe_image(
                 detail=f"target_kernel {_short_id(target_kernel)!r} is not a recognized "
                 "kernel version",
             )
-    with bind_context(principal=ctx.principal):
-        params = {
-            "id": str(uid),
-            "public": ImageVisibility.PUBLIC.value,
-            "private": ImageVisibility.PRIVATE.value,
-            "projects": projects_with_role(ctx, Role.VIEWER),
-        }
-        async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(_DESCRIBE_SQL, params)
-            row = await cur.fetchone()
-    if row is None:
+    entry = await _fetch_visible_image(pool, ctx, uid)
+    if entry is None:
         return _not_found(image_id)
-    return _describe_envelope(ImageCatalogEntry.model_validate(row), basis)
+    return _describe_envelope(entry, basis)
 
 
 _KERNEL_CONFIG_TOOL = "images.kernel_config"
@@ -306,30 +320,17 @@ async def kernel_config(
     uid = _as_uuid(image_id)
     if uid is None:
         return _invalid_uuid_error("image_id", image_id)
-    with bind_context(principal=ctx.principal):
-        params = {
-            "id": str(uid),
-            "public": ImageVisibility.PUBLIC.value,
-            "private": ImageVisibility.PRIVATE.value,
-            "projects": projects_with_role(ctx, Role.VIEWER),
-        }
-        async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(_DESCRIBE_SQL, params)
-            row = await cur.fetchone()
-    if row is None:
+    entry = await _fetch_visible_image(pool, ctx, uid)
+    if entry is None:
         return _not_found(image_id)
-    entry = ImageCatalogEntry.model_validate(row)
     if entry.kernel_config_key is None:
         return _config_error(image_id, data={"reason": _KERNEL_CONFIG_UNAVAILABLE})
     try:
         store = store_factory()
         head = await asyncio.to_thread(store.head, entry.kernel_config_key)
-    except CategorizedError as exc:
-        return ToolResponse.failure_from_error(image_id, exc)
-    if head is None:
-        return _config_error(image_id, data={"reason": _KERNEL_CONFIG_UNAVAILABLE})
-    ttl = config.require(ARTIFACT_DOWNLOAD_TTL_SECONDS)
-    try:
+        if head is None:
+            return _config_error(image_id, data={"reason": _KERNEL_CONFIG_UNAVAILABLE})
+        ttl = config.require(ARTIFACT_DOWNLOAD_TTL_SECONDS)
         url = await asyncio.to_thread(store.presign_get, entry.kernel_config_key, expires_in=ttl)
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(image_id, exc)

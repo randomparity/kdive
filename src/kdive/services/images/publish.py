@@ -115,14 +115,19 @@ def _object_owner_kind(request: PublishRequest) -> str:
     return request.provider
 
 
-def _image_write_request(
-    request: PublishRequest, data: bytes
+def _write_request(
+    request: PublishRequest, data: bytes, *, suffix: str
 ) -> artifact_types.ArtifactWriteRequest:
+    """An image-tenant write request scoped to the request's visibility/owner, named by ``suffix``.
+
+    The qcow2 (``suffix="qcow2"``) and its kernel-config sibling (``suffix="config"``) share the
+    same tenant/owner-scoped prefix and differ only in the object-name suffix.
+    """
     return artifact_types.ArtifactWriteRequest(
         tenant="images",
         owner_kind=_object_owner_kind(request),
         owner_id=request.name,
-        name=f"{request.arch}.qcow2",
+        name=f"{request.arch}.{suffix}",
         data=data,
         sensitivity=Sensitivity.REDACTED,
         retention_class=_RETENTION_CLASS,
@@ -138,21 +143,7 @@ def image_object_key(request: PublishRequest) -> str:
     the materialization fetch reads it from the row (it never recomputes the key), so the scheme is
     free to encode owner without a fetch-side change.
     """
-    return _image_write_request(request, b"").key()
-
-
-def _config_write_request(
-    request: PublishRequest, data: bytes
-) -> artifact_types.ArtifactWriteRequest:
-    return artifact_types.ArtifactWriteRequest(
-        tenant="images",
-        owner_kind=_object_owner_kind(request),
-        owner_id=request.name,
-        name=f"{request.arch}.config",
-        data=data,
-        sensitivity=Sensitivity.REDACTED,
-        retention_class=_RETENTION_CLASS,
-    )
+    return _write_request(request, b"", suffix="qcow2").key()
 
 
 def kernel_config_object_key(request: PublishRequest) -> str:
@@ -162,7 +153,7 @@ def kernel_config_object_key(request: PublishRequest) -> str:
     from the ``{arch}.qcow2`` object. Persisted on the row's ``kernel_config_key`` when a config is
     offered, ``None`` otherwise.
     """
-    return _config_write_request(request, b"").key()
+    return _write_request(request, b"", suffix="config").key()
 
 
 async def _adopt_or_insert_pending(
@@ -265,7 +256,7 @@ def _verify_source_digest(data: bytes, digest: str) -> None:
 
 
 async def _write_object(store: ImageObjectStore, request: PublishRequest, data: bytes) -> None:
-    await asyncio.to_thread(store.put_artifact, _image_write_request(request, data))
+    await asyncio.to_thread(store.put_artifact, _write_request(request, data, suffix="qcow2"))
 
 
 async def _write_config_best_effort(
@@ -279,7 +270,7 @@ async def _write_config_best_effort(
     """
     if config_key is None or request.kernel_config is None:
         return False
-    write = _config_write_request(request, request.kernel_config)
+    write = _write_request(request, request.kernel_config, suffix="config")
     try:
         await asyncio.to_thread(store.put_artifact, write)
         head = await asyncio.to_thread(store.head, config_key)
@@ -306,18 +297,12 @@ async def _write_config_best_effort(
 async def _registered(
     conn: AsyncConnection, row_id: UUID, *, clear_config_key: bool = False
 ) -> ImageCatalogEntry:
+    set_clause = "state = %s" + (", kernel_config_key = NULL" if clear_config_key else "")
     async with conn.cursor(row_factory=dict_row) as cur:
-        if clear_config_key:
-            await cur.execute(
-                "UPDATE image_catalog SET state = %s, kernel_config_key = NULL "
-                "WHERE id = %s RETURNING *",
-                (ImageState.REGISTERED.value, row_id),
-            )
-        else:
-            await cur.execute(
-                "UPDATE image_catalog SET state = %s WHERE id = %s RETURNING *",
-                (ImageState.REGISTERED.value, row_id),
-            )
+        await cur.execute(
+            f"UPDATE image_catalog SET {set_clause} WHERE id = %s RETURNING *",
+            (ImageState.REGISTERED.value, row_id),
+        )
         row = await cur.fetchone()
     if row is None:  # Invariant: the row was just written as pending.
         raise RuntimeError(f"image_catalog row {row_id} vanished before registration")
