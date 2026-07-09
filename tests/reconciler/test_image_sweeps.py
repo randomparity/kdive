@@ -86,15 +86,16 @@ async def _insert_image_row(
     owner: str | None = None,
     pending_age: timedelta = timedelta(hours=2),
     expires_in: timedelta | None = None,
+    kernel_config_key: str | None = None,
 ) -> UUID:
     """Insert one image_catalog row with DB-clock-relative pending_since/expires_at."""
     expires_clause = "now() + make_interval(secs => %(expires_secs)s)" if expires_in else "NULL"
     cur = await conn.execute(
         "INSERT INTO image_catalog "
-        "(provider, name, arch, format, root_device, object_key, digest, visibility, owner, "
-        " expires_at, state, pending_since) "
+        "(provider, name, arch, format, root_device, object_key, kernel_config_key, digest, "
+        " visibility, owner, expires_at, state, pending_since) "
         "VALUES (%(provider)s, %(name)s, %(arch)s, 'qcow2', '/dev/vda', %(object_key)s, "
-        " %(digest)s, %(visibility)s, %(owner)s, "
+        " %(kernel_config_key)s, %(digest)s, %(visibility)s, %(owner)s, "
         f"{expires_clause}, %(state)s, now() - make_interval(secs => %(pending_secs)s)) "
         "RETURNING id",
         {
@@ -102,6 +103,7 @@ async def _insert_image_row(
             "name": name,
             "arch": arch,
             "object_key": object_key,
+            "kernel_config_key": kernel_config_key,
             "digest": None if object_key is None else "sha256:abc",
             "visibility": visibility,
             "owner": owner,
@@ -163,6 +165,40 @@ def test_leaked_object_inside_grace_is_protected(migrated_url: str) -> None:
             count = await run_repair(pool, lambda c: _repair_leaked_images(c, store, _grace()))
         assert count == 0
         assert store.deleted == []
+
+    asyncio.run(_run())
+
+
+def test_leaked_sweep_protects_live_image_config(migrated_url: str) -> None:
+    # A registered image's .config sibling is referenced via kernel_config_key, never object_key;
+    # the sweep must protect it (ADR-0317) even though it lives under the images/ prefix.
+    qcow2_key = "images/local-libvirt/debian/x86_64.qcow2"
+    config_key = "images/local-libvirt/debian/x86_64.config"
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as conn:
+            await _insert_image_row(conn, object_key=qcow2_key, kernel_config_key=config_key)
+        store = _FakeImageStore(
+            {qcow2_key: timedelta(hours=2), config_key: timedelta(hours=2)}  # both past grace
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: _repair_leaked_images(c, store, _grace()))
+        assert count == 0
+        assert store.deleted == []  # both protected via object_key OR kernel_config_key
+
+    asyncio.run(_run())
+
+
+def test_leaked_sweep_reclaims_orphaned_config(migrated_url: str) -> None:
+    # A .config object past grace that NO row references is reclaimed, exactly like an orphan qcow2.
+    orphan_config = "images/local-libvirt/gone/x86_64.config"
+
+    async def _run() -> None:
+        store = _FakeImageStore({orphan_config: timedelta(hours=2)})  # no row references it
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: _repair_leaked_images(c, store, _grace()))
+        assert count == 1
+        assert store.deleted == [orphan_config]
 
     asyncio.run(_run())
 

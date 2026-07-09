@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,8 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.image_format import ImageFormat
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
+
+_log = logging.getLogger(__name__)
 
 _RETENTION_CLASS = "image"
 
@@ -72,6 +75,9 @@ class PublishRequest:
         visibility: ``ImageVisibility.PUBLIC`` or ``ImageVisibility.PRIVATE``.
         owner: The owning project — set iff ``visibility`` is ``"private"``.
         expires_at: The private-image TTL deadline — set iff ``visibility`` is ``"private"``.
+        kernel_config: The image's extracted ``/boot/config-<ver>`` bytes, or ``None`` when no
+            config was captured (ADR-0317). Written best-effort as a sibling object of the qcow2;
+            a failure degrades to a registered image with no config offered, never failing publish.
     """
 
     provider: str
@@ -85,6 +91,7 @@ class PublishRequest:
     visibility: ImageVisibility
     owner: str | None = None
     expires_at: datetime | None = None
+    kernel_config: bytes | None = None
 
     def __post_init__(self) -> None:
         private = self.visibility is ImageVisibility.PRIVATE
@@ -134,8 +141,32 @@ def image_object_key(request: PublishRequest) -> str:
     return _image_write_request(request, b"").key()
 
 
+def _config_write_request(
+    request: PublishRequest, data: bytes
+) -> artifact_types.ArtifactWriteRequest:
+    return artifact_types.ArtifactWriteRequest(
+        tenant="images",
+        owner_kind=_object_owner_kind(request),
+        owner_id=request.name,
+        name=f"{request.arch}.config",
+        data=data,
+        sensitivity=Sensitivity.REDACTED,
+        retention_class=_RETENTION_CLASS,
+    )
+
+
+def kernel_config_object_key(request: PublishRequest) -> str:
+    """The object-store key for the image's ``/boot/config-<ver>`` sibling of the qcow2 (ADR-0317).
+
+    Same tenant/owner scoping as :func:`image_object_key`; the ``.config`` suffix distinguishes it
+    from the ``{arch}.qcow2`` object. Persisted on the row's ``kernel_config_key`` when a config is
+    offered, ``None`` otherwise.
+    """
+    return _config_write_request(request, b"").key()
+
+
 async def _adopt_or_insert_pending(
-    conn: AsyncConnection, request: PublishRequest, object_key: str
+    conn: AsyncConnection, request: PublishRequest, object_key: str, config_key: str | None
 ) -> UUID:
     """Adopt this scope's existing non-registered row, or insert a fresh ``pending`` row.
 
@@ -170,15 +201,16 @@ async def _adopt_or_insert_pending(
         if existing is not None:
             await cur.execute(
                 "UPDATE image_catalog "
-                "SET state = %s, object_key = %s, pending_since = now() WHERE id = %s",
-                (ImageState.PENDING.value, object_key, existing["id"]),
+                "SET state = %s, object_key = %s, kernel_config_key = %s, pending_since = now() "
+                "WHERE id = %s",
+                (ImageState.PENDING.value, object_key, config_key, existing["id"]),
             )
             return existing["id"]
-        return await _insert_pending(cur, request, object_key)
+        return await _insert_pending(cur, request, object_key, config_key)
 
 
 async def _insert_pending(
-    cur: AsyncCursor[DictRow], request: PublishRequest, object_key: str
+    cur: AsyncCursor[DictRow], request: PublishRequest, object_key: str, config_key: str | None
 ) -> UUID:
     """Insert a fresh ``pending`` row from ``request`` and return its id.
 
@@ -186,11 +218,11 @@ async def _insert_pending(
     """
     insert_q = (
         "INSERT INTO image_catalog "
-        "(provider, name, arch, format, root_device, object_key, digest, capabilities, "
-        " provenance, visibility, owner, expires_at, state, pending_since) "
+        "(provider, name, arch, format, root_device, object_key, kernel_config_key, digest, "
+        " capabilities, provenance, visibility, owner, expires_at, state, pending_since) "
         "VALUES (%(provider)s, %(name)s, %(arch)s, %(format)s, %(root_device)s, %(object_key)s, "
-        " %(digest)s, %(capabilities)s, %(provenance)s, %(visibility)s, %(owner)s, "
-        " %(expires_at)s, %(state)s, now()) RETURNING id"
+        " %(kernel_config_key)s, %(digest)s, %(capabilities)s, %(provenance)s, %(visibility)s, "
+        " %(owner)s, %(expires_at)s, %(state)s, now()) RETURNING id"
     )
     params = {
         "provider": request.provider,
@@ -199,6 +231,7 @@ async def _insert_pending(
         "format": request.format,
         "root_device": request.root_device,
         "object_key": object_key,
+        "kernel_config_key": config_key,
         "digest": request.digest,
         "capabilities": list(request.capabilities),
         "provenance": Jsonb(request.provenance),
@@ -235,12 +268,45 @@ async def _write_object(store: ImageObjectStore, request: PublishRequest, data: 
     await asyncio.to_thread(store.put_artifact, _image_write_request(request, data))
 
 
-async def _registered(conn: AsyncConnection, row_id: UUID) -> ImageCatalogEntry:
+async def _write_config_best_effort(
+    store: ImageObjectStore, request: PublishRequest, config_key: str | None
+) -> bool:
+    """Write the config sibling object; return whether it is present. Never raises (advisory).
+
+    The config is an advisory artifact (ADR-0317): a write/HEAD failure degrades to "no config
+    offered" so the image still publishes — only the qcow2 write is fatal. A ``None`` key means no
+    config was captured, so nothing is written.
+    """
+    if config_key is None or request.kernel_config is None:
+        return False
+    write = _config_write_request(request, request.kernel_config)
+    try:
+        await asyncio.to_thread(store.put_artifact, write)
+        head = await asyncio.to_thread(store.head, config_key)
+    except CategorizedError:
+        _log.warning("image kernel-config write failed; registering with no config offered")
+        return False
+    if head is None:
+        _log.warning("image kernel-config object absent after write; no config offered")
+        return False
+    return True
+
+
+async def _registered(
+    conn: AsyncConnection, row_id: UUID, *, clear_config_key: bool = False
+) -> ImageCatalogEntry:
     async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            "UPDATE image_catalog SET state = %s WHERE id = %s RETURNING *",
-            (ImageState.REGISTERED.value, row_id),
-        )
+        if clear_config_key:
+            await cur.execute(
+                "UPDATE image_catalog SET state = %s, kernel_config_key = NULL "
+                "WHERE id = %s RETURNING *",
+                (ImageState.REGISTERED.value, row_id),
+            )
+        else:
+            await cur.execute(
+                "UPDATE image_catalog SET state = %s WHERE id = %s RETURNING *",
+                (ImageState.REGISTERED.value, row_id),
+            )
         row = await cur.fetchone()
     if row is None:  # Invariant: the row was just written as pending.
         raise RuntimeError(f"image_catalog row {row_id} vanished before registration")
@@ -260,6 +326,12 @@ async def publish_image(
     for different owners, intentionally do not adopt each other. Realizing a seeded ``defined``
     baseline is this same path.
 
+    When ``request.kernel_config`` is present its deterministic ``{arch}.config`` key is set on the
+    ``pending`` row before any object is written (so the leaked-sweep protects it the instant the
+    row exists, ADR-0317), and the config object is written **best-effort** after the qcow2
+    HEAD-gate: a config write/HEAD failure degrades to a registered image with ``kernel_config_key``
+    cleared (no config offered), never failing the publish. Only the qcow2 write/HEAD is fatal.
+
     Args:
         conn: An async Postgres connection (autocommit; the adopt step opens its own
             transaction).
@@ -277,7 +349,8 @@ async def publish_image(
             ``pending`` for the reconciler to recover).
     """
     object_key = image_object_key(request)
-    row_id = await _adopt_or_insert_pending(conn, request, object_key)
+    config_key = kernel_config_object_key(request) if request.kernel_config is not None else None
+    row_id = await _adopt_or_insert_pending(conn, request, object_key, config_key)
 
     data = await asyncio.to_thread(source.read_bytes)
     _verify_source_digest(data, request.digest)
@@ -290,4 +363,7 @@ async def publish_image(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"object_key": object_key},
         )
-    return await _registered(conn, row_id)
+    config_written = await _write_config_best_effort(store, request, config_key)
+    return await _registered(
+        conn, row_id, clear_config_key=config_key is not None and not config_written
+    )

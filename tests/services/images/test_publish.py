@@ -29,7 +29,11 @@ from kdive.domain.catalog.images import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.catalog import resolve_rootfs
-from kdive.services.images.publish import PublishRequest, publish_image
+from kdive.services.images.publish import (
+    PublishRequest,
+    kernel_config_object_key,
+    publish_image,
+)
 
 _QCOW2 = b"qcow2-bytes-for-publish-test"
 _DIGEST = "sha256:" + hashlib.sha256(_QCOW2).hexdigest()
@@ -39,10 +43,17 @@ _DT = datetime(2026, 1, 1, tzinfo=UTC)
 class _FakeStore:
     """An in-memory ObjectStore stand-in: put records bytes, head reflects them."""
 
-    def __init__(self, *, fail_put: bool = False, drop_object: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_put: bool = False,
+        drop_object: bool = False,
+        fail_config: bool = False,
+    ) -> None:
         self._objects: dict[str, bytes] = {}
         self._fail_put = fail_put
         self._drop_object = drop_object
+        self._fail_config = fail_config
         self.puts: list[str] = []
         self.heads: list[str] = []
 
@@ -51,7 +62,7 @@ class _FakeStore:
     ) -> artifact_types.StoredArtifact:
         key = request.key()
         self.puts.append(key)
-        if self._fail_put:
+        if self._fail_put or (self._fail_config and key.endswith(".config")):
             raise CategorizedError(
                 "object store unreachable",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -400,5 +411,70 @@ def test_private_publish_records_owner_and_expiry(migrated_url: str, tmp_path: P
             # A private image resolves for its owner, not for another project.
             assert await resolve_rootfs(conn, "local-libvirt", "base", project="proj") is not None
             assert await resolve_rootfs(conn, "local-libvirt", "base", project="other") is None
+
+    asyncio.run(_run())
+
+
+_CONFIG = b"# CONFIG_X is not set\nCONFIG_Y=y\n"
+
+
+def test_publish_writes_config_object_and_sets_key(migrated_url: str, tmp_path: Path) -> None:
+    store = _FakeStore()
+    source = _qcow2_source(tmp_path)
+    request = replace(_PUBLIC_REQUEST, kernel_config=_CONFIG)
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            entry = await publish_image(conn, store, request=request, source=source)
+            ckey = kernel_config_object_key(request)
+            assert entry.kernel_config_key == ckey
+            assert store._objects[ckey] == _CONFIG
+
+    asyncio.run(_run())
+
+
+def test_publish_without_config_sets_no_key(migrated_url: str, tmp_path: Path) -> None:
+    store = _FakeStore()
+    source = _qcow2_source(tmp_path)
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            entry = await publish_image(conn, store, request=_PUBLIC_REQUEST, source=source)
+            assert entry.kernel_config_key is None
+            assert len(store._objects) == 1  # qcow2 only, no .config sibling
+
+    asyncio.run(_run())
+
+
+def test_config_write_failure_registers_without_config(migrated_url: str, tmp_path: Path) -> None:
+    # A store whose .config put fails models a best-effort config leg failure (ADR-0317).
+    store = _FakeStore(fail_config=True)
+    source = _qcow2_source(tmp_path)
+    request = replace(_PUBLIC_REQUEST, kernel_config=_CONFIG)
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            entry = await publish_image(conn, store, request=request, source=source)
+            assert entry.state is ImageState.REGISTERED  # image still publishes
+            assert entry.kernel_config_key is None  # key cleared on best-effort failure
+            assert entry.object_key is not None  # qcow2 present and referenced
+            assert store.head(entry.object_key) is not None
+
+    asyncio.run(_run())
+
+
+def test_arbitrary_config_is_stored_unvalidated(migrated_url: str, tmp_path: Path) -> None:
+    # kdive never validates the offered config: bytes the old server-build gate would reject
+    # round-trip byte-identical (ADR-0316/0317).
+    weird = b"# CONFIG_SQUASHFS is not set\nCONFIG_NONSENSE=42\n"
+    store = _FakeStore()
+    source = _qcow2_source(tmp_path)
+    request = replace(_PUBLIC_REQUEST, kernel_config=weird)
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            entry = await publish_image(conn, store, request=request, source=source)
+            assert entry.kernel_config_key is not None
+            assert store._objects[entry.kernel_config_key] == weird
 
     asyncio.run(_run())
