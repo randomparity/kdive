@@ -4,10 +4,10 @@ The handler is called directly with an injected pool + RequestContext (the repo'
 contract). It deletes a ledger entry for a config-declared identity so the next no-entry
 reconcile pass re-asserts the file. Coverage:
 
-* clears a `removed` resource override and a `removed` build-host override → success.
+* clears a `removed` resource override → success (and the success payload carries no
+  `source_kind`, ADR-0319).
 * clearing a non-existent override → `not_found`; a second clear → `not_found` (idempotent).
-* an unknown `source_kind`, or an illegal `(source_kind, resource_kind)` pairing →
-  `configuration_error`.
+* an invalid `resource_kind` → `configuration_error`.
 * a non-admin token → `authorization_denied` (audited iff it holds ≥1 platform role).
 * a cleared override is gone (a reconcile pass would re-assert the file).
 """
@@ -24,7 +24,6 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.inventory.overrides import (
-    BUILD_HOST_RESOURCE_KIND,
     InventoryOverrideDisposition,
     InventorySourceKind,
     OverrideIdentity,
@@ -128,47 +127,17 @@ def test_clear_override_removed_resource(migrated_url: str) -> None:
             resp = await inventory_tools.clear_override(
                 pool,
                 _admin_ctx(),
-                source_kind="resource",
                 resource_kind=ResourceKind.REMOTE_LIBVIRT.value,
                 name="rl-back",
             )
         assert resp.status == "cleared", resp.model_dump()
+        assert "source_kind" not in (resp.data or {})
         assert (
             await _override_exists(
                 migrated_url,
                 source_kind="resource",
                 resource_kind=ResourceKind.REMOTE_LIBVIRT.value,
                 name="rl-back",
-            )
-            is False
-        )
-
-    asyncio.run(_run())
-
-
-def test_clear_override_removed_build_host(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            await _seed_override(
-                pool,
-                source_kind=InventorySourceKind.BUILD_HOST,
-                resource_kind=BUILD_HOST_RESOURCE_KIND,
-                name="bh-back",
-            )
-            resp = await inventory_tools.clear_override(
-                pool,
-                _admin_ctx(),
-                source_kind="build_host",
-                resource_kind=BUILD_HOST_RESOURCE_KIND,
-                name="bh-back",
-            )
-        assert resp.status == "cleared", resp.model_dump()
-        assert (
-            await _override_exists(
-                migrated_url,
-                source_kind="build_host",
-                resource_kind=BUILD_HOST_RESOURCE_KIND,
-                name="bh-back",
             )
             is False
         )
@@ -182,49 +151,17 @@ def test_clear_override_absent_is_not_found_and_idempotent(migrated_url: str) ->
             first = await inventory_tools.clear_override(
                 pool,
                 _admin_ctx(),
-                source_kind="resource",
                 resource_kind=ResourceKind.REMOTE_LIBVIRT.value,
                 name="never-set",
             )
             second = await inventory_tools.clear_override(
                 pool,
                 _admin_ctx(),
-                source_kind="resource",
                 resource_kind=ResourceKind.REMOTE_LIBVIRT.value,
                 name="never-set",
             )
         assert first.error_category == ErrorCategory.NOT_FOUND.value
         assert second.error_category == ErrorCategory.NOT_FOUND.value
-
-    asyncio.run(_run())
-
-
-def test_clear_override_unknown_source_kind_rejected(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await inventory_tools.clear_override(
-                pool,
-                _admin_ctx(),
-                source_kind="bogus",
-                resource_kind=ResourceKind.REMOTE_LIBVIRT.value,
-                name="x",
-            )
-        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
-
-    asyncio.run(_run())
-
-
-def test_clear_override_illegal_build_host_resource_kind_rejected(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await inventory_tools.clear_override(
-                pool,
-                _admin_ctx(),
-                source_kind="build_host",
-                resource_kind=ResourceKind.REMOTE_LIBVIRT.value,  # not the build-host sentinel
-                name="x",
-            )
-        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
 
     asyncio.run(_run())
 
@@ -235,7 +172,6 @@ def test_clear_override_illegal_resource_kind_rejected(migrated_url: str) -> Non
             resp = await inventory_tools.clear_override(
                 pool,
                 _admin_ctx(),
-                source_kind="resource",
                 resource_kind="not-a-kind",
                 name="x",
             )
@@ -250,7 +186,6 @@ def test_clear_override_non_admin_denied_and_audited_for_operator(migrated_url: 
             resp = await inventory_tools.clear_override(
                 pool,
                 _operator_ctx(),
-                source_kind="resource",
                 resource_kind=ResourceKind.REMOTE_LIBVIRT.value,
                 name="x",
             )
@@ -267,7 +202,6 @@ def test_clear_override_project_only_denied_unaudited(migrated_url: str) -> None
             resp = await inventory_tools.clear_override(
                 pool,
                 _project_only_ctx(),
-                source_kind="resource",
                 resource_kind=ResourceKind.REMOTE_LIBVIRT.value,
                 name="x",
             )
