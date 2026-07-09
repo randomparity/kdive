@@ -43,6 +43,7 @@ Task 1 (Part 1) is independent of Tasks 2–3. Task 2 must run **before** Task 3
 - Modify: `src/kdive/components/catalog.py` (drop import, `ProfileRequirements`, `RootfsRequirements`, `ProfileCatalogEntry.requires`)
 - Modify: `src/kdive/admin/default_fixtures.py` (`_PROFILE_YAML` literal + module docstring)
 - Modify: `fixtures/local-libvirt/profiles/console-ready_x86_64.yaml`
+- Modify: `docs/design/operator-fixture-profile-write-path.md` (stale live design doc)
 - Delete: `fixtures/local-libvirt/configs/console-ready.required.config`
 - Test: `tests/provider_components/test_catalog.py`, `tests/admin/test_default_fixtures.py`, `tests/mcp/catalog/test_fixtures_validate.py`
 
@@ -144,6 +145,29 @@ name: console-ready_x86_64
 arch: x86_64
 ```
 
+- [ ] **Step 6b: Mark the stale live design doc superseded**
+
+`docs/design/operator-fixture-profile-write-path.md` (ADR-0120/#439) documents a write path for a profile's `requires` apparatus. That apparatus is now doubly-dead: ADR-0316 already deleted its build consumers (its lines 41/108/109 point at `_external_config_requirements` and `providers/shared/build_host/config.py`, both gone), and this change removes the `requires` data shape itself. Rather than rewrite the body (out of scope), prepend a superseded banner and drop the deleted class from the models row — no guardrail catches a stale markdown reference, so this is the only thing keeping the doc honest.
+
+Prepend immediately after the H1 title (before the first section):
+
+```markdown
+> **Superseded (2026-07-09).** The server-build lane that read a profile's `requires` was removed by
+> [ADR-0316](../adr/0316-remove-server-build-lane.md); the `requires` data shape itself
+> (`ProfileRequirements` / `ConfigRequirements` / `CmdlineRequirements`) was removed by
+> [ADR-0319](../adr/0319-remove-dead-profile-requirements-buildhost-vestiges.md) (#1055). A fixture
+> profile now carries only `(provider, name, arch)`; the consumer references below no longer exist.
+> Retained for historical context only.
+```
+
+Edit line 37 to drop the deleted class:
+
+```markdown
+| Fixture catalog models (`FixtureManifest`, `ProfileCatalogEntry`) | `src/kdive/components/catalog.py` |
+```
+
+Leave the rest of the body unchanged — the banner disclaims it. Confirm `just docs-links` still resolves the two new ADR links.
+
 - [ ] **Step 7: Delete the orphaned materialized config**
 
 Run: `git rm fixtures/local-libvirt/configs/console-ready.required.config`
@@ -152,13 +176,14 @@ Run: `git rm fixtures/local-libvirt/configs/console-ready.required.config`
 - [ ] **Step 8: Run the guardrail suite**
 
 Run: `just lint && just type && just test`
-Expected: PASS. If `ty` reports an unused import in `catalog.py`, remove it; if `ruff` reports one, `just format` fixes it. Confirm `rg 'ConfigRequirements|CmdlineRequirements|ProfileRequirements|RootfsRequirements|\.required\.config' src/` returns zero hits.
+Expected: PASS. If `ty` reports an unused import in `catalog.py`, remove it; if `ruff` reports one, `just format` fixes it. Confirm `rg 'ConfigRequirements|CmdlineRequirements|ProfileRequirements|RootfsRequirements|\.required\.config' src/` returns zero hits. Also scan **live docs** (historical ADRs legitimately name the symbols as they were, so exclude them): `rg 'ProfileRequirements|ConfigRequirements|CmdlineRequirements|RootfsRequirements|\.required\.config' docs/ --glob '!docs/adr/**' --glob '!docs/archive/**' --glob '!docs/superpowers/**'` returns zero hits (the design-doc reference is gone; the superseded banner names the classes only inside a `> ` blockquote pointing at the removal ADRs, which is expected — if the grep flags the banner line, that single blockquote hit is the accepted residual).
 
 - [ ] **Step 9: Commit**
 
 ```bash
 git add src/kdive/components/catalog.py src/kdive/admin/default_fixtures.py \
         fixtures/local-libvirt/profiles/console-ready_x86_64.yaml \
+        docs/design/operator-fixture-profile-write-path.md \
         tests/provider_components/test_catalog.py tests/admin/test_default_fixtures.py \
         tests/mcp/catalog/test_fixtures_validate.py
 git add -u src/kdive/components/requirements.py fixtures/local-libvirt/configs/console-ready.required.config
