@@ -41,11 +41,14 @@ error merge green, so `tests/` is type-checked only here. Don't narrow it back.
 
 ## Host prerequisites
 
-- `libvirt-dev` system headers — `libvirt-python` has no wheels and compiles against
-  them; `uv sync` fails without them. CI apt-installs them; the README lists the distro
-  command. `drgn` and `psycopg[binary]` need nothing extra.
+- `libvirt-dev` and `python3-dev` system headers — `libvirt-python` has no wheels and
+  compiles against both the libvirt and Python headers; `uv sync` fails without them. CI
+  apt-installs them; the README lists the distro command. `drgn` and `psycopg[binary]`
+  need nothing extra.
 - `just` and `prek` must be installed before `just setup` (it can't bootstrap its own
-  runner): `uv tool install rust-just && uv tool install prek`.
+  runner): `uv tool install rust-just && uv tool install prek`. On arches without prebuilt
+  wheels/binaries (e.g. `ppc64le`), these plus `pydantic-core` build from source, so a
+  Rust toolchain ([rustup](https://rustup.rs)) must be on `PATH` first.
 - The db/integration tests need a reachable Docker daemon (disposable Postgres via
   testcontainers). They **skip** when Docker is absent — unless `KDIVE_REQUIRE_DOCKER=1`
   (set in CI), which turns the skip into a hard failure so a broken runner can't mask the
