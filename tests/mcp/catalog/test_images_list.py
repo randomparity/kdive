@@ -305,13 +305,17 @@ def test_list_row_carries_capabilities_os_description(migrated_url: str) -> None
                 pool,
                 name="fedora-kdive-ready-43",
                 capabilities=["kdump", "drgn", "ssh"],
-                provenance={"os_release": {"id": "fedora", "version_id": "43"}},
+                provenance={
+                    "os_release": {"id": "fedora", "version_id": "43"},
+                    "default_kernel_version": "6.19.10-300.fc44.x86_64",
+                },
                 description="RHEL-family debug host",
             )
             resp = await catalog_images.list_images(pool, _ctx())
         data = _item(resp, "fedora-kdive-ready-43").data
         assert data["capabilities"] == ["kdump", "drgn", "ssh"]
         assert data["os"] == {"id": "fedora", "version_id": "43"}
+        assert data["default_kernel_version"] == "6.19.10-300.fc44.x86_64"
         assert data["description"] == "RHEL-family debug host"
 
     asyncio.run(_run())
@@ -331,6 +335,7 @@ def test_list_row_omits_os_and_empties_description_when_unset(migrated_url: str)
         data = _item(resp, "bare-image").data
         assert data["capabilities"] == []
         assert data["os"] == {}
+        assert data["default_kernel_version"] == ""
         assert data["description"] == ""
 
     asyncio.run(_run())

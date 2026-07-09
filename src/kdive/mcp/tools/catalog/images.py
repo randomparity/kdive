@@ -76,6 +76,17 @@ def _compact_os(provenance: dict[str, Any]) -> dict[str, JsonValue]:
     return compact
 
 
+def _default_kernel_version(provenance: dict[str, Any]) -> str:
+    """The build-recorded default kernel version, or ``""`` when absent (ADR-0317).
+
+    The image's default kernel for informed agent selection: the version the image ships and
+    boots by default, captured at build time. ``""`` when the build could not name a single
+    baseline kernel (zero/many) or the row predates the feature.
+    """
+    value = provenance.get("default_kernel_version")
+    return str(value) if value else ""
+
+
 def _row_envelope(entry: ImageCatalogEntry) -> ToolResponse:
     """One image row as a sub-envelope: identity, scope, publish state, and merit signals.
 
@@ -96,6 +107,7 @@ def _row_envelope(entry: ImageCatalogEntry) -> ToolResponse:
             "volume": entry.volume or "",
             "capabilities": [cap.value for cap in entry.capabilities],
             "os": _compact_os(entry.provenance),
+            "default_kernel_version": _default_kernel_version(entry.provenance),
             "description": entry.description or "",
         },
     )
@@ -197,6 +209,7 @@ def _describe_envelope(entry: ImageCatalogEntry, basis: KernelVersion) -> ToolRe
             "digest": entry.digest or "",
             "capabilities": [cap.value for cap in entry.capabilities],
             "os": _compact_os(entry.provenance),
+            "default_kernel_version": _default_kernel_version(entry.provenance),
             "description": entry.description or "",
             "provenance": entry.provenance,
             "capability_signals": _capability_signals(entry, basis),
@@ -272,8 +285,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         """List published image catalog entries.
 
-        Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-        ``cursor`` for the next page.
+        Each row carries the build-fact ``data.capabilities``, a compact verified ``data.os``
+        identity, and ``data.default_kernel_version`` (the kernel the image ships and boots by
+        default, ``""`` when unknown) so an agent can compare images on merit — distro, version,
+        default kernel — in one call. Keyset-paginated: when ``data.truncated`` is true, pass
+        ``data.next_cursor`` back as ``cursor`` for the next page.
         """
         return await list_images(pool, current_context(), limit=limit, cursor=cursor)
 
@@ -296,9 +312,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         """Return full detail for one catalog image visible to the caller.
 
-        Includes boot layout, digest, capabilities, scope, publish state, build ``provenance``
-        (with captured ``package_versions``/``makedumpfile_version``/``boot_kernel_count`` when
-        present), and computed ``data.capability_signals`` (each signal keyed by name): ``kdump``
+        Includes boot layout, digest, capabilities, scope, publish state,
+        ``data.default_kernel_version`` (the image's default kernel, ``""`` when unknown), build
+        ``provenance`` (with captured
+        ``package_versions``/``makedumpfile_version``/``boot_kernel_count`` when present), and
+        computed ``data.capability_signals`` (each signal keyed by name): ``kdump``
         (the capability for ``target_kernel``, kernel basis disclosed) and ``direct_kernel``
         (``status`` ``provisionable`` when ``/boot`` holds exactly one non-rescue kernel, else
         ``not_provisionable``/``unverified`` — read it before a direct-kernel provision so a

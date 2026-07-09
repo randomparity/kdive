@@ -34,9 +34,11 @@ Delete an image catalog entry.
 
 Return full detail for one catalog image visible to the caller.
 
-Includes boot layout, digest, capabilities, scope, publish state, build ``provenance``
-(with captured ``package_versions``/``makedumpfile_version``/``boot_kernel_count`` when
-present), and computed ``data.capability_signals`` (each signal keyed by name): ``kdump``
+Includes boot layout, digest, capabilities, scope, publish state,
+``data.default_kernel_version`` (the image's default kernel, ``""`` when unknown), build
+``provenance`` (with captured
+``package_versions``/``makedumpfile_version``/``boot_kernel_count`` when present), and
+computed ``data.capability_signals`` (each signal keyed by name): ``kdump``
 (the capability for ``target_kernel``, kernel basis disclosed) and ``direct_kernel``
 (``status`` ``provisionable`` when ``/boot`` holds exactly one non-rescue kernel, else
 ``not_provisionable``/``unverified`` — read it before a direct-kernel provision so a
@@ -65,8 +67,11 @@ Extend an image catalog entry lease.
 
 List published image catalog entries.
 
-Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-``cursor`` for the next page.
+Each row carries the build-fact ``data.capabilities``, a compact verified ``data.os``
+identity, and ``data.default_kernel_version`` (the kernel the image ships and boots by
+default, ``""`` when unknown) so an agent can compare images on merit — distro, version,
+default kernel — in one call. Keyset-paginated: when ``data.truncated`` is true, pass
+``data.next_cursor`` back as ``cursor`` for the next page.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
