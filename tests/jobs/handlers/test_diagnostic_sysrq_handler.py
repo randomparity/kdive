@@ -226,6 +226,9 @@ def test_no_console_output_fails_configuration_error(
         asyncio.run(_go())
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert excinfo.value.details["reason"] == "no_console_output"
+    # ADR-0318: sysrq is System-addressed (no per-Run config gate), so its kernel-config
+    # requirement is surfaced in the runtime no-output remediation instead.
+    assert "MAGIC_SYSRQ" in str(excinfo.value.details["remediation"])
 
 
 def test_disabled_sysrq_fails_configuration_error_and_stores_nothing(
