@@ -18,5 +18,7 @@ read each tool's own description.
 
 - `artifacts.expected_uploads` — learn the exact artifacts and byte layout a run expects
   before you upload.
+- `artifacts.feature_config_requirements` — advisory map of each debug feature to the
+  kernel `CONFIG_*` it needs, so you can build them in before uploading.
 - `artifacts.create_run_upload` — mint presigned PUTs for a run's build artifacts.
 - `artifacts.create_system_upload` — mint presigned PUTs for a system's artifacts.
