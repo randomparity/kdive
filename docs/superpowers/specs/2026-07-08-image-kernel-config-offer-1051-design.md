@@ -126,12 +126,24 @@ never inspects or validates the config.
    the deterministic `{arch}.config` key on the `pending` row alongside `object_key`,
    *before* either object is written. The config object is then written after the qcow2
    HEAD-gate. So during the whole `pending` window the config object — once written — is
-   **row-protected**, not merely grace-protected, exactly like the qcow2. A crash before
-   the object write leaves a key on the row with no object (recovered by the
-   deterministic-key idempotent re-publish); a crash after leaves a row-protected object
-   the re-publish overwrites. `kernel_config_key` does not participate in the
-   `object_key`/`volume`/`path` exactly-one CHECK, so setting it on a `pending` row is
-   unconstrained.
+   **row-protected**, not merely grace-protected, exactly like the qcow2.
+   `kernel_config_key` does not participate in the `object_key`/`volume`/`path`
+   exactly-one CHECK, so setting it on a `pending` row is unconstrained.
+
+8. **The config object write is best-effort; it never fails the publish.** The config is
+   an advisory artifact (Decision 5), so a config-write/HEAD failure follows the same
+   degrade-and-still-publish rule as every other build-time capture
+   (`makedumpfile_version` / `os_release` / `boot_kernel_count`, ADR-0252/0253/0295/0311):
+   the image still registers, with **no config offered** (`kernel_config_key` cleared to
+   `NULL` in the same `registered`-flip `UPDATE`, so a registered row's
+   `kernel_config_key` is set iff its config object exists). Only the qcow2 write/HEAD is
+   fatal to the publish — it is the image identity. This closes the stuck-`pending` state a
+   fatal config write would create: `repair_dangling_images` only reclaims a `pending` row
+   whose *qcow2* is missing, so a fatal config failure (qcow2 present, config absent) would
+   strand the row and its qcow2 forever. Degrading instead means the publish always reaches
+   `registered` or leaves a normal qcow2-missing `pending` row the dangling sweep already
+   heals. A partially-written config object left by the failure is unreferenced
+   (`kernel_config_key` cleared) and reclaimed by the leaked-sweep.
 
 ## What changes
 
@@ -168,11 +180,11 @@ never inspects or validates the config.
   `{arch}.config` key). When `request.kernel_config` is present,
   `_adopt_or_insert_pending` / `_insert_pending` set `kernel_config_key` on the `pending`
   row alongside `object_key` (before any object write, Decision 7); after the qcow2
-  HEAD-gate, write the config object and HEAD-gate it. A config-write/HEAD failure fails
-  the publish (the row stays `pending` for the reconciler); recovery is the
-  deterministic-key idempotent re-run + leaked-sweep backstop of Decisions 6–7 — not a
-  bespoke rollback. When `request.kernel_config` is absent, no key is set and no second
-  object is written.
+  HEAD-gate, write the config object and HEAD-gate it. The config leg is **best-effort**
+  (Decision 8): a config-write/HEAD failure is caught and logged, and the
+  `pending`→`registered` flip clears `kernel_config_key` to `NULL` so the image still
+  registers with no config offered. Only the qcow2 write/HEAD stays fatal. When
+  `request.kernel_config` is absent, no key is set and no second object is written.
 - **`reconciler/cleanup/images.py`** — extend the `_delete_if_leaked` cross-check to
   protect an object referenced by `object_key` **OR** `kernel_config_key` (Decision 6),
   so the leaked-sweep never deletes a live image's config and still reclaims an orphaned
@@ -215,6 +227,10 @@ build plane (live_vm, libguestfs)
 - **Publish:** a `PublishRequest` with `kernel_config` writes a second object and sets
   `kernel_config_key`; without it, no second write and the column stays `NULL`. Reuse
   the existing fake object store.
+- **Best-effort config write (Decision 8):** a fake store whose config-object write (or
+  its HEAD) fails still registers the image with `kernel_config_key` cleared to `NULL`
+  (no stuck `pending` row, qcow2 present and referenced); the qcow2 write staying fatal is
+  unchanged.
 - **MCP `images.kernel_config`:** row with `kernel_config_key` + present object →
   `refs.download_uri` + `data.default_kernel_version`/`size_bytes`; row without the key,
   or object absent → `configuration_error` reason `kernel_config_unavailable`; a
@@ -240,10 +256,13 @@ build plane (live_vm, libguestfs)
 - **Config absent for non-build-plane images.** Staged `path`/`volume` images and
   pre-feature rows have no config. Mitigation: `kernel_config_key` is nullable and the
   fetch degrades to `kernel_config_unavailable`; no reader assumes presence.
-- **Second object-store write in publish.** Adds a failure point to a two-write that is
-  currently one write. Mitigation: the config write is ordered after the qcow2 HEAD-gate
-  and before the `registered` flip, so a config failure leaves the row `pending` (the
-  reconciler's existing recovery path), never a half-registered image (Decision 7).
+- **Second object-store write in publish.** Adds a failure point to a write that is
+  currently one write. Mitigation: the config leg is best-effort (Decision 8) — a
+  config-write/HEAD failure degrades to a registered image with no config offered
+  (`kernel_config_key` cleared), never a half-registered image and never a stuck
+  `pending` row. A fatal config write would have stranded the row (qcow2 present, config
+  absent) because `repair_dangling_images` only reclaims a qcow2-missing `pending` row;
+  degrading avoids that. Only the qcow2 write/HEAD is fatal.
 - **Second object under the `images/` prefix breaks the object-key-only sweeps.** The
   leaked-sweep and the private-expiry delete both key only off `object_key` today, so an
   unmodified sweep would delete a live image's config as "leaked" and orphan a deleted

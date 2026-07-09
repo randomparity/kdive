@@ -36,14 +36,19 @@ default is then ambiguous and `boot_kernel_count` already reports the image
 non-provisionable. `images.list` and `images.describe` surface it as
 `data.default_kernel_version`.
 
-**2. The `.config` is stored as a separate object-store artifact.** During publish the
-extracted config bytes are written as a sibling object of the qcow2 at
+**2. The `.config` is stored as a separate, best-effort object-store artifact.** During
+publish the extracted config bytes are written as a sibling object of the qcow2 at
 `images/{owner_kind}/{name}/{arch}.config`, ordered after the qcow2 HEAD-gate and before
 the `registered` flip. Its deterministic key is persisted on a new nullable
 `image_catalog.kernel_config_key` column (additive, forward-only), set on the `pending`
 row *before* the object is written — so the leaked-sweep protects a pending row's config
 the instant the row exists, exactly as it protects the qcow2 via `object_key`. The column
-is withheld from the agent surface like `object_key`.
+is withheld from the agent surface like `object_key`. The config write is **best-effort**
+— like every other build-time capture, a failure degrades to a registered image with no
+config offered (`kernel_config_key` cleared), never failing the publish; only the qcow2
+write is fatal. This keeps the invariant that a registered row's `kernel_config_key` is
+set iff its config object exists, and avoids a stuck-`pending` row the dangling sweep
+(which reclaims only a qcow2-missing row) could not heal.
 
 **3. `images.kernel_config` hands the agent a presigned download URL.** A new read tool
 resolves the row under the same visibility predicate as `images.describe` (public, or
@@ -76,9 +81,10 @@ sensitivity.
   images whose `/boot` lacks a single baseline kernel or a `config-<ver>` file have no
   stored config, and the fetch degrades to a `kernel_config_unavailable`
   `configuration_error`. No reader assumes presence.
-- Publish gains a second object write. It is ordered so a config-write failure leaves the
-  row `pending` (the reconciler's existing recovery), never a half-registered image — the
-  row-first two-write invariant is preserved.
+- Publish gains a second, best-effort object write. A config-write failure degrades to a
+  registered image with no config offered (`kernel_config_key` cleared), never a
+  half-registered image and never a stuck `pending` row; only the qcow2 write is fatal, so
+  the row-first identity invariant is preserved.
 
 ## Considered & rejected
 
