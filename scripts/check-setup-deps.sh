@@ -54,6 +54,9 @@ package_for() {
   libvirt-headers:fedora | libvirt-headers:opensuse) printf "libvirt-devel" ;;
   libvirt-headers:arch) printf "libvirt" ;;
   libvirt-headers:*) printf "libvirt-dev" ;;
+  python-headers:fedora | python-headers:opensuse) printf "python3-devel" ;;
+  python-headers:arch) printf "python" ;;
+  python-headers:*) printf "python3-dev" ;;
   libelf-headers:fedora) printf "elfutils-libelf-devel" ;;
   libelf-headers:opensuse) printf "libelf-devel" ;;
   libelf-headers:arch) printf "libelf" ;;
@@ -160,6 +163,9 @@ distro="$(load_distro_id)"
 require_tool required uv "curl -LsSf https://astral.sh/uv/install.sh | sh"
 require_command required pkg-config "${distro}"
 require_header required libvirt-headers libvirt "${distro}"
+# libvirt-python and any wheel-less C/Rust extension (e.g. pydantic-core, grpcio on
+# arches without prebuilt wheels) compile against the Python development headers.
+require_header required python-headers python3 "${distro}"
 
 # RECOMMENDED — needed to reproduce the full local CI gate.
 require_command recommended git "${distro}"
