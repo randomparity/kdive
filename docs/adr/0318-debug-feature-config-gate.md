@@ -19,9 +19,15 @@ that does nothing).
 ## Decision
 
 Introduce a `kernel_config` package holding a single declarative registry of
-feature → required `CONFIG_*` (each requirement an ordered list of OR-group clauses), a pure
-`.config` parser, a pure support check, and a read helper for the uploaded artifact. Use it
-two ways:
+feature → `CONFIG_*` requirements, a pure `.config` parser, a pure support check, and a read
+helper for the uploaded artifact. Each feature carries two clause lists (each clause an
+OR-group): an **`advertised`** superset shown by the tool, and a deliberately narrower
+**`gate_required`** subset the gate refuses on. Keeping them separate is load-bearing: the
+advertised set is guidance ("everything worth building"), the gate set is "the kernel
+provably cannot do this without these." Gating on the superset would refuse working kernels —
+e.g. `RANDOMIZE_BASE` (KASLR) is routinely disabled on debug kernels and kdump works without
+it, so it is advertised but not gated; the two kexec load syscalls are an OR-group so a
+kernel with either passes. Use the registry two ways:
 
 1. **Advertise** — a static read-only tool `catalog.feature_config_requirements` returns the
    full manifest (feature, summary, `gated`, OR-group requirements). Advisory; cross-linked
@@ -34,6 +40,11 @@ two ways:
 
 Two boundary rules:
 
+- **The gate fails open.** `load_effective_config` returns "cannot check, arm as today" for
+  an absent artifact row, an unconfigured/unreachable store or a raising fetch, and a
+  degenerate (zero-enabled-symbol) config that signals a truncated/wrong-file upload. A
+  benign advisory read never converts into an install/vmcore/sysrq failure, and kdive does
+  not verify config↔kernel correspondence, so a stale config cannot block a working kernel.
 - **Absent config arms as today.** `effective_config` is optional and commonly absent; kdive
   cannot prove a missing feature, so it does not gate. R2 applies only when a config exists.
 - **gdbstub is not gated.** The QEMU gdbstub attaches to vCPU state regardless of guest
@@ -70,3 +81,8 @@ No schema change: the gate reads the existing `effective_config` artifact row + 
   per-run object read is cheap.
 - **Silently disabling instead of refusing** — a silent no-op on an explicit agent action
   reads as success; categorized refusal is diagnosable.
+- **Gating on the advertised superset** — refuses working kernels (KASLR-off debug kernels;
+  kernels with only one kexec load syscall); the gate keys on a minimal `gate_required`
+  subset instead.
+- **Failing the arming action on a config-read/degenerate config** — turns a benign advisory
+  read into a new failure surface; the gate fails open.
