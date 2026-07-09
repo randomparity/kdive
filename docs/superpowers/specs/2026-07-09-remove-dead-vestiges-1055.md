@@ -63,8 +63,10 @@ Files:
   regardless), and `_audit_clear`'s `scope` string and `args` dict. Each drops to
   `{resource_kind, name}`. Correct **every** docstring in this handler that describes the removed
   parameter or the build-host path — no lint/type/test/`docs-check` guardrail reads docstring prose,
-  and this tool is absent from the generated `tools.md`, so a stale docstring survives silently: the
-  `@app.tool` wrapper docstring (to `clear_override(resource_kind, name)`), the handler
+  and this tool is absent from the generated `tools.md`, so a stale docstring survives silently. (The
+  `@app.tool` wrapper docstring carries no `source_kind` token today — the wrapper's concrete
+  removals are the `source_kind` parameter and its `Field`; keep its prose consistent with the new
+  `(resource_kind, name)` signature.) The stale-prose emitters are the handler
   `clear_override` docstring (the "`(source_kind, resource_kind)` pairing" line, the "illegal kind
   pairing" phrasing, and the `source_kind` / `build-host` sentinel `Args`), and the
   `_parse_override_identity` ("Validate the ledger PK … pairing") and `_override_identity_lock`
@@ -126,12 +128,21 @@ Files:
 `load_fixture_catalog` validates each on-disk profile YAML under the new `extra="forbid"`
 `ProfileCatalogEntry`. The source-tree default (`DEFAULT_FIXTURE_CATALOG_PATH`) is updated in this
 change, so the default path is consistent. But an operator who set `KDIVE_FIXTURE_CATALOG_PATH` to a
-directory populated by `install-fixtures` **before** this change has a profile YAML that still
-carries the `requires:` block; after upgrade its parse raises `ValidationError` →
-`CategorizedError(INFRASTRUCTURE_FAILURE)` at catalog load. `install_fixtures` refuses to overwrite
-without `--force` and, even with `--force`, never deletes the now-orphaned on-disk
-`console-ready.required.config`. Remediation (documented, not automated — pre-release, no external
-consumers): re-run `install-fixtures --force` and manually delete the stale `.required.config`.
+directory populated **before** this change has a profile YAML that still carries the `requires:`
+block; after upgrade its parse raises `ValidationError` → `CategorizedError(INFRASTRUCTURE_FAILURE)`
+at catalog load. Two cases, with distinct remediation (documented, not automated — pre-release, no
+external consumers):
+
+- **Populated by `install-fixtures`** (the common case): the directory holds only `manifest.yaml`
+  and `profiles/console-ready_x86_64.yaml` — `install_fixtures` writes exactly the keys of
+  `LOCAL_LIBVIRT_FIXTURES` and never emits anything under `configs/`. The only stale artifact is the
+  profile YAML's `requires:` block, so re-running `install-fixtures --force` rewrites it
+  requires-free and fully resolves the failure. There is no `.required.config` in such a directory.
+- **A hand-copied full source tree** (`fixtures/local-libvirt/` copied verbatim, `configs/`
+  included): besides the profile YAML, this also carries the now-orphaned
+  `configs/console-ready.required.config` (deleted from the source tree by AC4). Re-sync the tree
+  or delete that file manually; nothing reads it either way.
+
 Auto-pruning orphaned files from `install_fixtures --force` is out of scope for this cleanup.
 
 ## Rollback

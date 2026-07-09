@@ -75,11 +75,13 @@ removed `LockScope.BUILD_HOST`.
   `Field` text (the agent-facing contract, per AGENTS.md) are updated in the same change.
 - A stored fixture profile YAML that still carries a `requires:` block now fails `extra="forbid"`
   parse. The source-tree default is updated in lockstep, so the default catalog path stays valid.
-  An install directory populated by `install-fixtures` **before** this change (reached via
-  `KDIVE_FIXTURE_CATALOG_PATH`) — or an operator's hand-authored profile — still carries the block
-  and would fail catalog load with `INFRASTRUCTURE_FAILURE`; remediation is to re-run
-  `install-fixtures --force` and delete the orphaned `.required.config` (accepted pre-release break;
-  the block was never read). See the spec's "Operational note" for the full failure mode.
+  An install directory reached via `KDIVE_FIXTURE_CATALOG_PATH` and populated **before** this change
+  still carries the block and would fail catalog load with `INFRASTRUCTURE_FAILURE`. Remediation
+  depends on how it was populated: a directory written by `install-fixtures` (only `manifest.yaml` +
+  the profile YAML — never a `configs/` file) is fixed by re-running `install-fixtures --force`; a
+  hand-copied full source tree also carries the orphaned `configs/console-ready.required.config`
+  (deleted here by the spec) to re-sync or remove (accepted pre-release break; the block was never
+  read). See the spec's "Operational note" for the full failure mode.
 - `inventory.clear_override`'s success `data` payload and the clear/denial audit rows drop the
   now-constant `source_kind`, so nothing agent-facing or audited carries a field the caller cannot
   set. The platform-audit `scope` string format changes from `source_kind:resource_kind:name` to
