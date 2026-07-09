@@ -34,10 +34,10 @@ class LockScope(StrEnum):
     deadlock; e.g. ``allocations.request`` takes ``PROJECT`` then ``RESOURCE`` (ADR-0040 §1)
     and ``runs.create`` takes ``SYSTEM`` then ``INVESTIGATION`` (ADR-0027).
 
-    ``PROJECT`` is keyed by the ``project`` string; ``BUILD_HOST`` is keyed by an inventory
-    identity **name** string and is always held alone (the ``inventory.clear_override``
-    per-identity lock), so it sits outside the co-hold total order; every other scope is keyed
-    by an object :class:`~uuid.UUID`.
+    ``PROJECT`` is keyed by the ``project`` string; ``RESOURCE`` the inventory per-identity lock
+    keys by a ``"{kind}:{name}"`` string (the ``inventory.clear_override`` / reconcile lock, held
+    alone outside the co-hold total order); every other scope is keyed by an object
+    :class:`~uuid.UUID`.
     """
 
     PROJECT = "project"
@@ -46,7 +46,6 @@ class LockScope(StrEnum):
     RESOURCE = "resource"
     INVESTIGATION = "investigation"
     RUN = "run"
-    BUILD_HOST = "build_host"
     INVENTORY = "inventory"
 
 

@@ -13,7 +13,6 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.inventory.overrides import (
-    BUILD_HOST_RESOURCE_KIND,
     InventoryOverrideDisposition,
     InventorySourceKind,
     OverrideIdentity,
@@ -24,17 +23,10 @@ from kdive.inventory.overrides import (
 )
 
 _RESOURCE = InventorySourceKind.RESOURCE
-_BUILD_HOST = InventorySourceKind.BUILD_HOST
 
 
 def _resource_identity(name: str, kind: str = "remote-libvirt") -> OverrideIdentity:
     return OverrideIdentity(source_kind=_RESOURCE, resource_kind=kind, name=name)
-
-
-def _build_host_identity(name: str) -> OverrideIdentity:
-    return OverrideIdentity(
-        source_kind=_BUILD_HOST, resource_kind=BUILD_HOST_RESOURCE_KIND, name=name
-    )
 
 
 def test_set_then_lookup_round_trips(migrated_url: str) -> None:
@@ -135,7 +127,7 @@ def test_clear_returns_true_then_false(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_lookup_many_filters_by_source_kind_and_keys_correctly(migrated_url: str) -> None:
+def test_lookup_many_keys_by_resource_kind_and_name(migrated_url: str) -> None:
     async def _run() -> None:
         async with (
             AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
@@ -155,15 +147,7 @@ def test_lookup_many_filters_by_source_kind_and_keys_correctly(migrated_url: str
                 reason="r",
                 actor="a",
             )
-            await set_override(
-                conn,
-                _build_host_identity("bh1"),
-                disposition=InventoryOverrideDisposition.REMOVED,
-                reason="r",
-                actor="a",
-            )
             resources = await lookup_many(conn, _RESOURCE)
-            build_hosts = await lookup_many(conn, _BUILD_HOST)
         # Same name across two resource kinds coexists, keyed by (resource_kind, name).
         assert set(resources) == {("remote-libvirt", "h1"), ("fault-inject", "h1")}
         assert resources[("remote-libvirt", "h1")].disposition is (
@@ -172,8 +156,6 @@ def test_lookup_many_filters_by_source_kind_and_keys_correctly(migrated_url: str
         assert resources[("fault-inject", "h1")].disposition is (
             InventoryOverrideDisposition.DETACHED
         )
-        # The build-host family is filtered out of the resource lookup, and vice versa.
-        assert set(build_hosts) == {(BUILD_HOST_RESOURCE_KIND, "bh1")}
 
     asyncio.run(_run())
 
