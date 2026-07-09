@@ -9,8 +9,8 @@
 #   * `[[image]]`           -> reconciled into `image_catalog` (replaces the former in-code
 #                             `images/seed_data/*.yaml` + `admin/default_fixtures.py` rootfs YAML
 #                             and the `REMOTE_BASE_IMAGE_NAME` literal — all removed in Phase 1).
-#   * `[[remote_libvirt]]` / `[[local_libvirt]]` / `[[fault_inject]]` / `[[build_host]]`
-#                           -> reconciled into `resources` / `build_hosts` (Phases 2-3).
+#   * `[[remote_libvirt]]` / `[[local_libvirt]]` / `[[fault_inject]]`
+#                           -> reconciled into `resources` (Phases 2-3).
 #                             Multiple `[[remote_libvirt]]` instances are now supported (ADR-0187,
 #                             #395): per-op provider config selects the granted Resource's host by
 #                             name, so you can pool several remote-libvirt hosts in one fleet.
@@ -20,7 +20,7 @@
 # mounted ConfigMap).
 #
 # WHOLE-FILE PARSE, ALL-OR-NOTHING: a present-but-malformed file fails the ENTIRE reconcile pass
-# for that iteration — images, cost-class coefficients, resources, and build_hosts are all skipped
+# for that iteration — images, cost-class coefficients, and resources are all skipped
 # until the file is corrected (the reconciler logs it and retries next pass). One bad block stalls
 # every entity, not just its own. UPGRADE NOTE: `[[remote_libvirt]]` now REQUIRES `vcpus` and
 # `memory_mb` (the billable size ceiling; admission denies any allocation on a host without it).
@@ -299,23 +299,6 @@ volume = "fedora-kdive-remote-base-43.qcow2"
 # seed = 7331
 
 # ---------------------------------------------------------------------------------------------
-# BUILD HOSTS — reconciled into build_hosts (Phase 3, #394).
-# ---------------------------------------------------------------------------------------------
-#
-# Only `local` and `ephemeral_libvirt` hosts are config-expressible: the v2 [[build_host]] model
-# carries no address/ssh_credential_ref, so an `ssh` host is registered imperatively via
-# `build_hosts.register` (which carries those fields) and is warned-and-skipped if declared here.
-# An `ephemeral_libvirt` host requires `base_image_volume`; a `local` host must omit it.
-# Declaring the seeded `worker-local` row here ADOPTS it (flips managed_by runtime -> config).
-
-# [[build_host]]
-# name = "ub24-big-ephemeral"
-# kind = "ephemeral_libvirt"
-# base_image_volume = "fedora-kdive-remote-base-43.qcow2"
-# workspace_root = "/var/lib/kdive/build"
-# max_concurrent = 2
-
-# ---------------------------------------------------------------------------------------------
 # COST CLASSES — reconciled into cost_class_coefficients (ADR-0115).
 #
 # Each [[cost_class]] declares the pricing coefficient for a cost_class label a host carries
@@ -332,35 +315,6 @@ volume = "fedora-kdive-remote-base-43.qcow2"
 [[cost_class]]
 name = "remote"
 coeff = "1.0"
-
-# ---------------------------------------------------------------------------------------------
-# BUILD-CONFIG FRAGMENTS — reconciled into build_config_catalog (ADR-0122).
-#
-# Each [[build_config]] declares a named kernel-config fragment inline. reconcile-systems
-# publishes the `content` bytes to the reserved object key and upserts the catalog row with
-# source='config'. The file is AUTHORITATIVE: a declared fragment overrides a live
-# `buildconfig.set` (which writes source='operator') and is re-asserted on every reconcile, so
-# edit this file to change a declared fragment — a buildconfig.set on a declared name is
-# transient (break-glass only). A name NOT declared here keeps buildconfig.set's durability.
-#
-# Removing a [[build_config]] block is a no-op: the catalog row persists at its last bytes
-# (upsert-only, never pruned). `content` is capped at KDIVE_MAX_BUILD_CONFIG_BYTES (256 KiB);
-# an over-cap fragment fails `reconcile-systems --check` at deploy.
-# ---------------------------------------------------------------------------------------------
-
-# [[build_config]]
-# name = "kdump"
-# description = "kdump/debuginfo kernel-config fragment"
-# content = """
-# CONFIG_KEXEC=y
-# CONFIG_CRASH_DUMP=y
-# CONFIG_DEBUG_INFO=y
-# # remote-libvirt's base image root is XFS; keep these or the built kernel cannot mount it
-# # and boots to emergency mode (ADR-0183). Declaring this fragment overrides the packaged
-# # seed, so a remote deployment must carry them here too.
-# CONFIG_XFS_FS=y
-# CONFIG_XFS_POSIX_ACL=y
-# """
 
 # ---------------------------------------------------------------------------------------------
 # COVERAGE-CAMPAIGN KNOBS — read ONLY by scripts/coverage_campaign/systems.py, ignored by the
