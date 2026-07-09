@@ -18,6 +18,9 @@ from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.runs.common import abandon_run_step_best_effort
 from kdive.jobs.payloads import InstallPayload, RunPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
+from kdive.kernel_config.fetch import load_effective_config
+from kdive.kernel_config.requirements import CRASH_CAPTURE, feature_requirement
+from kdive.kernel_config.support import missing_symbols, unmet_clauses
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.security import audit
@@ -82,6 +85,28 @@ async def install_handler(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "crashkernel_requires_kdump", "method": method.value},
         )
+    if crashkernel is not None:
+        # Kernel-config gate (ADR-0318): a crashkernel reservation is useless if the uploaded
+        # kernel cannot kdump. When the agent uploaded an effective_config that provably lacks the
+        # crash symbols, refuse loudly rather than reserve memory for a dump that can never happen.
+        # load_effective_config fails open (None) on no upload / read error / degenerate config.
+        config = await load_effective_config(conn, run_id)
+        if config is not None:
+            unmet = unmet_clauses(config, feature_requirement(CRASH_CAPTURE))
+            if unmet:
+                raise CategorizedError(
+                    "uploaded kernel config lacks symbols required for kdump crash capture",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                    details={
+                        "reason": "kernel_missing_crash_config",
+                        "missing": missing_symbols(unmet),
+                        "remediation": (
+                            "rebuild the kernel with the missing CONFIG_* (see "
+                            "artifacts.feature_config_requirements), or install "
+                            "without a crashkernel"
+                        ),
+                    },
+                )
     kernel_ref = run.kernel_ref
     # One read of the build step result feeds the cmdline, initrd, and debuginfo below.
     build_result = await existing_build_result(conn, run_id)
