@@ -22,6 +22,9 @@ from kdive.mcp.tools.catalog.artifacts.expected_uploads import (
     EXTERNAL_BUILD_UPLOAD_DOC,
     expected_uploads,
 )
+from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
+    FEATURE_CONFIG_REQUIREMENTS_TOOL,
+)
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     CREATE_RUN_UPLOAD_TOOL,
     CREATE_SYSTEM_UPLOAD_TOOL,
@@ -102,7 +105,11 @@ def test_expected_uploads_items_carry_ok_status() -> None:
 
 def test_expected_uploads_chains_to_the_create_tools() -> None:
     resp = expected_uploads()
-    assert resp.suggested_next_actions == [CREATE_RUN_UPLOAD_TOOL, CREATE_SYSTEM_UPLOAD_TOOL]
+    assert resp.suggested_next_actions == [
+        FEATURE_CONFIG_REQUIREMENTS_TOOL,
+        CREATE_RUN_UPLOAD_TOOL,
+        CREATE_SYSTEM_UPLOAD_TOOL,
+    ]
 
 
 def _ctx() -> RequestContext:

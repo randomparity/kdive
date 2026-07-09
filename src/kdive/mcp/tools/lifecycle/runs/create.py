@@ -18,6 +18,9 @@ from kdive.mcp.tools._idempotency import (
     validate_idempotency_key,
 )
 from kdive.mcp.tools.catalog.artifacts.expected_uploads import EXPECTED_UPLOADS_TOOL
+from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
+    FEATURE_CONFIG_REQUIREMENTS_TOOL,
+)
 from kdive.mcp.tools.catalog.artifacts.uploads import CREATE_RUN_UPLOAD_TOOL
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
@@ -129,7 +132,12 @@ def _created_response(result: RunCreateResult) -> ToolResponse:
     return ToolResponse.success(
         str(result.run_id),
         "created",
-        suggested_next_actions=["runs.get", EXPECTED_UPLOADS_TOOL, CREATE_RUN_UPLOAD_TOOL],
+        suggested_next_actions=[
+            "runs.get",
+            EXPECTED_UPLOADS_TOOL,
+            FEATURE_CONFIG_REQUIREMENTS_TOOL,
+            CREATE_RUN_UPLOAD_TOOL,
+        ],
         data=data,
     )
 

@@ -1697,6 +1697,7 @@ def test_created_response_chains_to_the_upload_loop() -> None:
     assert resp.suggested_next_actions == [
         "runs.get",
         "artifacts.expected_uploads",
+        "artifacts.feature_config_requirements",
         "artifacts.create_run_upload",
     ]
 
@@ -1719,6 +1720,7 @@ def test_create_external_run_chains_to_upload_loop(migrated_url: str) -> None:
         assert resp.suggested_next_actions == [
             "runs.get",
             "artifacts.expected_uploads",
+            "artifacts.feature_config_requirements",
             "artifacts.create_run_upload",
         ]
 
