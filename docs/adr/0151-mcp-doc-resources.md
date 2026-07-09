@@ -10,8 +10,8 @@
 `ListMcpResourcesTool` returns nothing (`mcp/app.py` `_PLANE_REGISTRARS`). Yet the tool
 surface routinely *cites* operator documentation an agent cannot reach over MCP:
 
-- `runs.create`'s `build_profile` schema says "See docs/operating/build-source-staging.md
-  for staging the source" (`mcp/tools/lifecycle/runs/registrar.py`).
+- `runs.create`'s `build_profile` schema says "See docs/operating/external-build-upload.md
+  for shaping the upload" (`mcp/tools/lifecycle/runs/registrar.py`).
 - `systems.profile_examples` and a remote-base-volume helper cite ADR-0080
   (`mcp/tools/lifecycle/systems/profile_examples.py`).
 
@@ -44,7 +44,7 @@ Initial allowlist (the docs the tool surface already cites):
 
 | URI | Source doc |
 |---|---|
-| `resource://kdive/docs/operating/build-source-staging.md` | `docs/operating/build-source-staging.md` |
+| `resource://kdive/docs/operating/external-build-upload.md` | `docs/operating/external-build-upload.md` |
 | `resource://kdive/adr/0080` | `docs/adr/0080-remote-provisioning-disk-image-profile.md` |
 
 Both are mime type `text/markdown`.

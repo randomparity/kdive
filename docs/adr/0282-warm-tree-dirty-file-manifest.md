@@ -1,6 +1,10 @@
 # ADR-0282: warm-tree dirty-file manifest and discoverable build provenance (#938)
 
-- Status: Accepted
+> **Superseded by [ADR-0316](0316-remove-server-build-lane.md)** (2026-07-08) — warm-tree
+> server builds and their build provenance were removed; kdive builds only from uploaded
+> artifacts. The decision below is retained as history.
+
+- Status: Superseded by [ADR-0316](0316-remove-server-build-lane.md)
 - Date: 2026-06-30
 - Extends: [ADR-0265](0265-warm-tree-dirty-provenance.md)
 
@@ -69,7 +73,7 @@ by the `dirty_files_truncated` boolean, not a count (keeping ADR-0265's numeric 
 Document the `data.build_provenance` shape — all fields including `dirty_files` / `untracked`,
 the "tracked git state only" scope, and "`resolved_commit` decorative when dirty" — directly on
 the `runs.get` wrapper docstring. Extend the `runs.create` `build_profile` enumeration and the
-`docs/operating/build-source-staging.md` warm-tree section with the new fields. Regenerate the
+build-source-staging guide's warm-tree section (removed by ADR-0316) with the new fields. Regenerate the
 committed tool reference (`just docs`).
 
 No schema, migration, RBAC, or config change.
