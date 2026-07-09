@@ -33,8 +33,8 @@ kernel with either passes. Use the registry two ways:
    full manifest (feature, summary, `gated`, OR-group requirements). Advisory; cross-linked
    from `runs.create` / `artifacts.expected_uploads` `suggested_next_actions`. The agent
    decides what to build.
-2. **Gate** — at the three config-dependent arming seams (kdump crashkernel reservation in
-   `install`; kdump-method vmcore fetch; sysrq diagnostic), fetch the Run's uploaded
+2. **Gate** — at the two **Run-addressed** config-dependent seams (kdump crashkernel
+   reservation in `install`; kdump-method vmcore fetch), fetch the Run's uploaded
    `effective_config`, parse it, and **refuse the action with `CONFIGURATION_ERROR` naming
    the missing symbols** when a required clause is provably unmet.
 
@@ -49,8 +49,17 @@ Two boundary rules:
   cannot prove a missing feature, so it does not gate. R2 applies only when a config exists.
 - **gdbstub is not gated.** The QEMU gdbstub attaches to vCPU state regardless of guest
   config and is armed at provision time before any kernel is uploaded, from a seam with no
-  DB/store. It is advertised (via `debuginfo`) but never disabled — a deliberate deviation
-  from the issue's literal four-seam list.
+  DB/store. It is advertised (via `debuginfo`) but never disabled.
+- **sysrq is runtime-gated, not pre-gated.** `diagnostic_sysrq` is System-addressed and there
+  is no first-class System→booted-Run link, so a config pre-check would risk false-refusing a
+  working sysrq off a stale Run's config. sysrq is advertised (`MAGIC_SYSRQ`) and enforced by
+  its existing runtime detection (a kernel without `MAGIC_SYSRQ` yields no console delta →
+  `CONFIGURATION_ERROR`), whose remediation is enriched to name `MAGIC_SYSRQ`.
+
+Together these gate two of the issue's four named seams with a config pre-check and enforce
+the other two by the mechanism that can actually observe the condition (provision-time QEMU
+for gdbstub; runtime keystroke for sysrq) — a deliberate, operator-confirmed refinement of the
+literal four-seam list.
 
 No schema change: the gate reads the existing `effective_config` artifact row + object.
 

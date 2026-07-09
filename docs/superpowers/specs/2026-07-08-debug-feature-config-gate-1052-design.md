@@ -133,21 +133,40 @@ would only duplicate what it can compute).
   corresponds to the uploaded `kernel`; the fail-open bias keeps a stale/mismatched config
   from blocking a working kernel.
 
-### 4. Gate three seams; refuse loudly when provably unsupported
+### 4. Gate two Run-addressed seams with the config pre-check
 
-Only the config-dependent seams are gated. The gate fires **only when a config is present
-and a required clause is provably unmet**; absent config → arm as today (see Decision 5).
+The two **Run-addressed** config-dependent seams get a config pre-check: the uploaded
+`effective_config` is Run-owned, so the gate reads it directly from the Run in scope. The gate
+fires **only when a config is present and a required clause is provably unmet**; absent config
+→ arm as today (Decision 6).
 
 | seam | file | feature | when it gates | refusal |
 |---|---|---|---|---|
 | kdump crashkernel reservation | `jobs/handlers/runs/install.py` | `crash_capture` | only when `crashkernel` was requested (kdump path) | `CategorizedError(CONFIGURATION_ERROR, reason=kernel_missing_crash_config, missing=[...])` before baking the cmdline |
 | kdump vmcore fetch | `mcp/tools/lifecycle/vmcore_handlers.py` | `crash_capture` | only when resolved capture method is **KDUMP** (host_dump is host-side, needs no guest config) | `ToolResponse` failure, `CONFIGURATION_ERROR`, names the missing symbols |
-| sysrq diagnostic | `jobs/handlers/diagnostic_sysrq.py` | `sysrq` | before injecting the keystroke | `CategorizedError(CONFIGURATION_ERROR, reason=kernel_missing_sysrq_config, missing=[MAGIC_SYSRQ])` — complements the existing runtime `disabled`-marker check |
 
 Refusals name the missing `CONFIG_*` symbols and a remediation, following the existing
 sysrq `CategorizedError(details={reason, remediation})` shape. "Refuse loudly" over "silently
-disable" is chosen for all three because each is an **explicit agent action** (the agent
-asked for crash capture / a vmcore / a sysrq) — a silent no-op would read as success.
+disable" is chosen because each is an **explicit agent action** (the agent asked for crash
+capture / a vmcore) — a silent no-op would read as success.
+
+### 4a. sysrq is System-addressed → runtime-gated, not pre-gated
+
+`sysrq` is advertised (`MAGIC_SYSRQ`) but **not** given a config pre-check. The
+`diagnostic_sysrq` job is **System-addressed** (`SysRqPayload` carries `system_id`, no
+`run_id`), and there is **no first-class link** from a System to the Run whose kernel is
+currently booted (`System` has no installed-kernel/current-Run field). A best-effort
+"most-recent Run" lookup would risk a **false refusal** — a stale Run's config could lack
+`MAGIC_SYSRQ` while the actually-booted kernel has it — which is worse than not pre-gating.
+
+sysrq's config support is instead enforced by its **existing runtime detection**: a kernel
+built without `MAGIC_SYSRQ` swallows the injected keystroke, producing no console delta, and
+`diagnostic_sysrq_handler` already raises `CONFIGURATION_ERROR` (reason `no_console_output`).
+This spec **enriches that remediation** to name `MAGIC_SYSRQ` among the causes (alongside the
+existing PS/2-keyboard-driver and `kernel.sysrq` guidance), so R2's "clear, categorized
+reason" is met for sysrq without a fragile mapping. R1 is met by the manifest. This parallels
+the gdbstub exclusion (Decision 5): a seam the issue named, gated by the mechanism that can
+actually see the condition rather than by a fetch that cannot.
 
 ### 5. gdbstub is **not** gated (excluded by design)
 
@@ -179,9 +198,11 @@ everything when no config) would break every current kdump/sysrq/vmcore flow.
   `mcp/tools/catalog/artifacts/registrar.py` beside `expected_uploads` (no new namespace, so
   no `tool_index.NAMESPACE_TOC` change); `suggested_next_actions` additions on `runs.create`
   + `artifacts.expected_uploads`.
-- **Gate wiring** in the three seam handlers (each already has DB access; each fetches via
-  its store — `diagnostic_sysrq` has `artifact_store` injected, `install`/`vmcore` build
-  `object_store_from_env()`).
+- **Gate wiring** in the two Run-addressed seam handlers (`install`, `vmcore`) — each has a
+  DB `conn` in scope and reads the config via `object_store_from_env()`; the gate lands after
+  each seam's existing preconditions and before the arming action.
+- **sysrq remediation** — enrich the `no_console_output` `CategorizedError` remediation in
+  `jobs/handlers/diagnostic_sysrq.py` to name `MAGIC_SYSRQ` (no config fetch).
 - **Docs:** regenerate the MCP tool reference; ADR-0318 + README row.
 
 ## No schema change
@@ -204,13 +225,15 @@ migration. (Contrast spec 2, which added `image_catalog.kernel_config_key`.)
 - **Gate predicate** — a `crash_capture` config with `RANDOMIZE_BASE` off but the
   `gate_required` set present is **supported** (KASLR-off regression guard); a config with
   only `KEXEC` (not `KEXEC_FILE`) satisfies the kexec OR-group.
-- **Each gated seam** — three cases: (a) no config → arms as today; (b) config present &
-  supported → arms; (c) config present & `gate_required` provably unmet → refused with
-  `CONFIGURATION_ERROR` naming the missing symbols. For vmcore: host_dump path never gates
-  even with an unsupported config.
+- **Each Run-addressed gated seam** (`install`, `vmcore`) — three cases: (a) no config → arms
+  as today; (b) config present & supported → arms; (c) config present & `gate_required`
+  provably unmet → refused with `CONFIGURATION_ERROR` naming the missing symbols. For vmcore:
+  host_dump path never gates even with an unsupported config.
+- **sysrq remediation** — the existing `no_console_output` refusal names `MAGIC_SYSRQ` (assert
+  the remediation string mentions it); no new pre-gate test (unchanged control flow).
 - Guardrails green (`just lint`, `just type`, `just test`, docs regen).
-- Live smoke (plan-time, not CI-gated): upload a `.config` lacking `MAGIC_SYSRQ` → sysrq
-  refused; upload one with it → sysrq works.
+- Live smoke (plan-time, not CI-gated): upload a `.config` lacking the crash symbols →
+  `runs.install` with a crashkernel is refused; upload one with them → install proceeds.
 
 ## Risks
 
