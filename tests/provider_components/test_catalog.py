@@ -35,19 +35,7 @@ def test_load_fixture_catalog_filters_provider(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (fixture / "profiles" / "console.yaml").write_text(
-        "provider: local-libvirt\n"
-        "name: console-ready_x86_64\n"
-        "arch: x86_64\n"
-        "requires:\n"
-        "  config:\n"
-        "    required: {CONFIG_VIRTIO_BLK: y}\n"
-        "  cmdline:\n"
-        "    required_tokens: [console=ttyS0]\n"
-        "    protected_prefixes: [console=]\n"
-        "  rootfs:\n"
-        "    format: qcow2\n"
-        "    root_device: /dev/vda\n"
-        "    capabilities: [agent]\n",
+        "provider: local-libvirt\nname: console-ready_x86_64\narch: x86_64\n",
         encoding="utf-8",
     )
 

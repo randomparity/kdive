@@ -10,7 +10,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import kdive.config as config
 from kdive.components.references import ComponentRef
-from kdive.components.requirements import CmdlineRequirements, ConfigRequirements
 from kdive.components.visibility import PUBLIC_VISIBILITY, Visibility
 from kdive.config.core_settings import FIXTURE_CATALOG_PATH
 from kdive.domain.catalog.image_format import ImageFormat
@@ -26,22 +25,6 @@ class FixtureStorage(BaseModel):
     allowed_component_roots: list[Path]
     cache_dir: Path
     overlay_dir: Path
-
-
-class RootfsRequirements(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    format: ImageFormat
-    root_device: str
-    capabilities: list[Capability] = Field(default_factory=list)
-
-
-class ProfileRequirements(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    config: ConfigRequirements = Field(default_factory=ConfigRequirements)
-    cmdline: CmdlineRequirements = Field(default_factory=CmdlineRequirements)
-    rootfs: RootfsRequirements
 
 
 class FixtureManifest(BaseModel):
@@ -73,7 +56,6 @@ class ProfileCatalogEntry(BaseModel):
     provider: str
     name: str
     arch: str
-    requires: ProfileRequirements
 
 
 class FixtureCatalog(BaseModel):

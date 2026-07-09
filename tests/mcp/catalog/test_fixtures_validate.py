@@ -31,20 +31,6 @@ profiles: []
 _PROFILE_TEMPLATE = """provider: {provider}
 name: {name}
 arch: {arch}
-requires:
-  config:
-    required:
-      CONFIG_VIRTIO_BLK: y
-  cmdline:
-    required_tokens:
-      - root=/dev/vda
-    protected_prefixes:
-      - root=
-  rootfs:
-    format: qcow2
-    root_device: /dev/vda
-    capabilities:
-      - agent
 """
 
 
