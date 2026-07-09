@@ -46,10 +46,12 @@ from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.kdump_support import MakedumpfileVersion
 from kdive.images.planes._build_common import (
     DEFAULT_BOOT_ENTRIES_PROBE,
+    DEFAULT_KERNEL_CONFIG_PROBE,
     DEFAULT_MAKEDUMPFILE_PROBE,
     DEFAULT_OS_RELEASE_PROBE,
     DEFAULT_VERSION_INSPECT,
     BootEntriesProbeSeam,
+    KernelConfigProbeSeam,
     MakedumpfileProbeSeam,
     OsReleaseProbeSeam,
     VersionInspectSeam,
@@ -191,6 +193,7 @@ class RootfsBuildTools:
     probe_makedumpfile: MakedumpfileProbeSeam = DEFAULT_MAKEDUMPFILE_PROBE
     probe_boot_entries: BootEntriesProbeSeam = DEFAULT_BOOT_ENTRIES_PROBE
     probe_os_release: OsReleaseProbeSeam = DEFAULT_OS_RELEASE_PROBE
+    probe_kernel_config: KernelConfigProbeSeam = DEFAULT_KERNEL_CONFIG_PROBE
     verify_cloud_init: VerifyCloudInit = _real_verify_cloud_init
 
 
@@ -260,12 +263,13 @@ class LocalLibvirtRootfsBuildPlane:
             installed = self._inspect_installed(scratch)
             package_versions = {n: installed[n] for n in spec.packages if n in installed}
             makedumpfile_version = self._capture_makedumpfile(scratch, installed)
-            boot_kernel_count = self._capture_boot_kernel_count(scratch)
+            boot_facts = self._capture_boot_facts(scratch)
             qcow2 = publish_qcow2(self._workspace, image_name=spec.name, scratch=staged)
         digest = digest_file(qcow2)
         return RootfsBuildOutput(
             qcow2_path=qcow2,
             digest=digest,
+            kernel_config=boot_facts.kernel_config,
             provenance=_provenance(
                 spec,
                 entry,
@@ -273,7 +277,8 @@ class LocalLibvirtRootfsBuildPlane:
                 size=self._size,
                 package_versions=package_versions,
                 makedumpfile_version=makedumpfile_version,
-                boot_kernel_count=boot_kernel_count,
+                boot_kernel_count=boot_facts.boot_kernel_count,
+                default_kernel_version=boot_facts.default_kernel_version,
                 os_release=self._capture_os_release(scratch),
             ),
         )
@@ -334,25 +339,45 @@ class LocalLibvirtRootfsBuildPlane:
             return None
         return _parse_os_release(raw) if raw is not None else None
 
-    def _capture_boot_kernel_count(self, scratch: Path) -> int | None:
-        """The number of non-rescue ``vmlinuz-*`` kernels in the built image's ``/boot`` (ADR-0295).
+    def _capture_boot_facts(self, scratch: Path) -> _BootFacts:
+        """Boot facts from one ``/boot`` listing: kernel count, default version, and config.
 
-        Lists ``/boot`` via the injected probe and classifies with ``baseline_kernel_names`` — the
-        same rule the fail-closed provision selection uses — so the recorded count predicts whether
-        a direct-kernel provision will succeed (exactly one is provisionable). Advisory like the
-        makedumpfile capture: any probe failure (``CategorizedError``) or an unproduceable listing
-        (``None``) degrades to ``None`` so the build still publishes and the operand is simply
-        omitted. Returns ``0`` for a kernel-less ``/boot`` (a meaningful "not provisionable"
-        operand), distinct from ``None`` (unknown).
+        Lists ``/boot`` once via the injected probe and derives (a) ``boot_kernel_count`` via
+        ``baseline_kernel_names`` — the same rule the fail-closed provision selection uses, so the
+        count predicts whether a direct-kernel provision will succeed (exactly one is provisionable,
+        ADR-0295); (b) the ``default_kernel_version`` — the lone non-rescue kernel, else ``None``
+        when zero/many (ambiguous); and (c) the ``/boot/config-<ver>`` bytes for that version via
+        ``probe_kernel_config`` (ADR-0317). Advisory like the makedumpfile capture: any probe
+        failure (``CategorizedError``) or an unproduceable listing (``None``) degrades every fact to
+        absent so the build still publishes. ``boot_kernel_count`` is ``0`` for a kernel-less
+        ``/boot`` (a meaningful "not provisionable" operand), distinct from ``None`` (unknown).
         """
         try:
             entries = self._tools.probe_boot_entries(scratch)
         except CategorizedError:
-            _log.warning("boot-kernel count probe failed; provenance omits boot_kernel_count")
-            return None
+            _log.warning("boot-entries probe failed; provenance omits boot facts")
+            return _BootFacts(None, None, None)
         if entries is None:
+            return _BootFacts(None, None, None)
+        count = len(baseline_kernel_names(entries))
+        version = _default_kernel_version(entries)
+        config = self._capture_kernel_config(scratch, version)
+        return _BootFacts(count, version, config)
+
+    def _capture_kernel_config(self, scratch: Path, version: str | None) -> bytes | None:
+        """The image's ``/boot/config-<version>`` bytes, or ``None`` (ADR-0317).
+
+        Only probed when ``version`` is known (a single baseline kernel). Advisory: a probe failure
+        (``CategorizedError``) or an absent config degrades to ``None`` so the build still ships.
+        """
+        if version is None:
             return None
-        return len(baseline_kernel_names(entries))
+        try:
+            text = self._tools.probe_kernel_config(scratch, version)
+        except CategorizedError:
+            _log.warning("kernel-config probe failed; provenance omits the config offer")
+            return None
+        return text.encode("utf-8") if text is not None else None
 
     def _customize(
         self,
@@ -408,6 +433,23 @@ def _parse_os_release(text: str) -> dict[str, str] | None:
     return record if record.get("id") else None
 
 
+@dataclass(frozen=True, slots=True)
+class _BootFacts:
+    """Facts derived from one read-only ``/boot`` listing (ADR-0295/0317)."""
+
+    boot_kernel_count: int | None
+    default_kernel_version: str | None
+    kernel_config: bytes | None
+
+
+def _default_kernel_version(entries: list[str]) -> str | None:
+    """The lone non-rescue ``vmlinuz-<ver>`` version in ``entries``, else ``None`` (ambiguous)."""
+    kernels = baseline_kernel_names(entries)
+    if len(kernels) != 1:
+        return None
+    return kernels[0][len("vmlinuz-") :]
+
+
 def _provenance(
     spec: RootfsBuildSpec,
     entry: RootfsCatalogEntry,
@@ -417,6 +459,7 @@ def _provenance(
     package_versions: dict[str, str],
     makedumpfile_version: str | None,
     boot_kernel_count: int | None,
+    default_kernel_version: str | None,
     os_release: dict[str, str] | None,
 ) -> dict[str, object]:
     """Record the pinned inputs and build args that produced the image (falsifiable contract).
@@ -440,6 +483,10 @@ def _provenance(
     ``/etc/os-release``) is the verified OS identity surfaced by ``images.list``/``describe``; added
     only when captured, omitted otherwise so a degraded build's row stays byte-identical to a
     pre-feature one (ADR-0311).
+    ``default_kernel_version`` (the lone non-rescue ``vmlinuz-<ver>`` version in ``/boot``) is the
+    image's default kernel surfaced by ``images.list``/``describe`` for informed agent selection;
+    added only when a single baseline kernel is present, omitted when zero/many (ambiguous) so a
+    degraded build's row stays byte-identical to a pre-feature one (ADR-0317).
     """
     record: dict[str, object] = {
         "plane": "local-libvirt",
@@ -460,6 +507,8 @@ def _provenance(
         record["makedumpfile_version"] = makedumpfile_version
     if boot_kernel_count is not None:
         record["boot_kernel_count"] = boot_kernel_count
+    if default_kernel_version:
+        record["default_kernel_version"] = default_kernel_version
     if os_release:
         record["os_release"] = os_release
     return record

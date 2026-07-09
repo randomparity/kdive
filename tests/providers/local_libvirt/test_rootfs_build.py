@@ -22,6 +22,7 @@ from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.families.rhel import RhelFamily
 from kdive.images.planes._build_common import (
     BootEntriesProbeSeam,
+    KernelConfigProbeSeam,
     MakedumpfileProbeSeam,
     OsReleaseProbeSeam,
     VersionInspectSeam,
@@ -149,6 +150,11 @@ def _no_os_release(_qcow2: Path) -> str | None:
     return None
 
 
+def _no_kernel_config(_qcow2: Path, _version: str) -> str | None:
+    # Hermetic default: no config text, so the default build path offers no config (ADR-0317).
+    return None
+
+
 def _tools(
     rec: _Recorder,
     inspect_versions: VersionInspectSeam = _no_versions,
@@ -156,6 +162,7 @@ def _tools(
     verify_cloud_init: object | None = None,
     probe_boot_entries: BootEntriesProbeSeam = _no_boot_entries,
     probe_os_release: OsReleaseProbeSeam = _no_os_release,
+    probe_kernel_config: KernelConfigProbeSeam = _no_kernel_config,
 ) -> RootfsBuildTools:
     return RootfsBuildTools(
         acquire_base=rec.acquire_base,
@@ -166,6 +173,7 @@ def _tools(
         probe_makedumpfile=probe_makedumpfile,
         probe_boot_entries=probe_boot_entries,
         probe_os_release=probe_os_release,
+        probe_kernel_config=probe_kernel_config,
         verify_cloud_init=verify_cloud_init or rec.verify_cloud_init,  # ty: ignore[invalid-argument-type]
     )
 
@@ -177,6 +185,7 @@ def _plane(
     probe_makedumpfile: MakedumpfileProbeSeam = _no_makedumpfile,
     probe_boot_entries: BootEntriesProbeSeam = _no_boot_entries,
     probe_os_release: OsReleaseProbeSeam = _no_os_release,
+    probe_kernel_config: KernelConfigProbeSeam = _no_kernel_config,
 ) -> LocalLibvirtRootfsBuildPlane:
     return LocalLibvirtRootfsBuildPlane(
         workspace=tmp_path / "work",
@@ -186,6 +195,7 @@ def _plane(
             probe_makedumpfile,
             probe_boot_entries=probe_boot_entries,
             probe_os_release=probe_os_release,
+            probe_kernel_config=probe_kernel_config,
         ),
     )
 
@@ -428,6 +438,72 @@ def test_provenance_omits_boot_kernel_count_on_probe_error(tmp_path: Path) -> No
     rec = _Recorder()
     out = _plane(tmp_path, rec, probe_boot_entries=_boom).build(_spec())
     assert "boot_kernel_count" not in out.provenance
+
+
+def test_single_kernel_captures_version_and_config(tmp_path: Path) -> None:
+    rec = _Recorder()
+    out = _plane(
+        tmp_path,
+        rec,
+        probe_boot_entries=lambda _q: list(_ONE_KERNEL),
+        probe_kernel_config=lambda _q, ver: f"# config for {ver}\nCONFIG_X=y\n",
+    ).build(_spec())
+    assert out.provenance["default_kernel_version"] == "6.19.10-300.fc44.x86_64"
+    assert out.kernel_config == b"# config for 6.19.10-300.fc44.x86_64\nCONFIG_X=y\n"
+
+
+def test_multi_kernel_omits_version_and_config(tmp_path: Path) -> None:
+    def _must_not_probe(_q: Path, _ver: str) -> str | None:
+        raise AssertionError("kernel-config probe must not run for an ambiguous multi-kernel /boot")
+
+    rec = _Recorder()
+    out = _plane(
+        tmp_path,
+        rec,
+        probe_boot_entries=lambda _q: list(_TWO_KERNELS),
+        probe_kernel_config=_must_not_probe,
+    ).build(_spec())
+    assert "default_kernel_version" not in out.provenance
+    assert out.kernel_config is None
+
+
+def test_config_absent_keeps_version_drops_config(tmp_path: Path) -> None:
+    rec = _Recorder()
+    out = _plane(
+        tmp_path,
+        rec,
+        probe_boot_entries=lambda _q: list(_ONE_KERNEL),
+        probe_kernel_config=lambda _q, _ver: None,
+    ).build(_spec())
+    assert out.provenance["default_kernel_version"] == "6.19.10-300.fc44.x86_64"
+    assert out.kernel_config is None
+
+
+def test_config_probe_error_degrades_but_keeps_version(tmp_path: Path) -> None:
+    def _boom(_q: Path, _ver: str) -> str | None:
+        raise CategorizedError("no tool", category=ErrorCategory.MISSING_DEPENDENCY)
+
+    rec = _Recorder()
+    out = _plane(
+        tmp_path,
+        rec,
+        probe_boot_entries=lambda _q: list(_ONE_KERNEL),
+        probe_kernel_config=_boom,
+    ).build(_spec())
+    assert out.provenance["default_kernel_version"] == "6.19.10-300.fc44.x86_64"
+    assert out.kernel_config is None
+
+
+def test_rescue_plus_one_kernel_captures_the_non_rescue_version(tmp_path: Path) -> None:
+    rec = _Recorder()
+    out = _plane(
+        tmp_path,
+        rec,
+        probe_boot_entries=lambda _q: list(_RESCUE_AND_ONE),
+        probe_kernel_config=lambda _q, ver: f"CONFIG_FOR={ver}\n",
+    ).build(_spec())
+    assert out.provenance["default_kernel_version"] == "6.19.10-300.fc44.x86_64"
+    assert out.kernel_config == b"CONFIG_FOR=6.19.10-300.fc44.x86_64\n"
 
 
 def test_parse_os_release_quoted_and_unquoted() -> None:

@@ -64,11 +64,15 @@ class RootfsBuildOutput:
             identity. Distinct from a kernel ``build_id``; a rootfs image has none.
         provenance: The pinned inputs and build args that produced the image, JSONB-serializable
             for the catalog row's ``provenance`` column (the falsifiable contract).
+        kernel_config: The image's extracted ``/boot/config-<ver>`` bytes, or ``None`` when there
+            is no single baseline kernel, no config file, or a probe failure (ADR-0317); publish
+            stores it best-effort.
     """
 
     qcow2_path: Path
     digest: str
     provenance: dict[str, object]
+    kernel_config: bytes | None = None
 
 
 @runtime_checkable
