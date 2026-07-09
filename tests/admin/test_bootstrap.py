@@ -7,15 +7,12 @@ import psycopg
 import pytest
 
 import kdive.config as config
-from kdive.admin.build_configs import seed_build_configs_step
 from kdive.admin.fixtures import default_fixture_files, install_fixtures
 from kdive.admin.migrations import migrate
 from kdive.admin.projects import (
     seed_project,
     seed_project_statements,
 )
-from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
-from kdive.domain.catalog.artifacts import Sensitivity
 
 
 def test_seed_project_sql_contains_budget_and_quota_upserts() -> None:
@@ -142,29 +139,15 @@ def _write_baseline_systems_toml(tmp_path: Path) -> Path:
     return path
 
 
-class _FakeStore:
-    """Object-store double for the build-config seed (it only writes bytes via put_artifact)."""
-
-    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
-        return StoredArtifact(
-            key=request.key(),
-            etag="fake-etag",
-            sensitivity=Sensitivity.REDACTED,
-            retention_class="build-config",
-        )
-
-
 def test_migrate_is_sql_only(
     monkeypatch: pytest.MonkeyPatch, postgres_url: str, tmp_path: Path
 ) -> None:
-    # migrate() applies the schema and nothing else: even with a systems.toml present and an
-    # object store available, it creates no image_catalog config rows and no build_config rows.
-    # Inventory reconcile is the reconciler's job (ADR-0112); the build-config seed is its own
-    # command (ADR-0121). A failed "migrate" therefore always means SQL failed.
+    # migrate() applies the schema and nothing else: even with a systems.toml present it creates
+    # no image_catalog config rows. Inventory reconcile is the reconciler's job (ADR-0112); a
+    # failed "migrate" therefore always means SQL failed.
     with psycopg.connect(postgres_url, autocommit=True) as conn:
         conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(_write_baseline_systems_toml(tmp_path)))
-    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: _FakeStore())
 
     applied = migrate(postgres_url)
 
@@ -173,59 +156,7 @@ def test_migrate_is_sql_only(
         images = conn.execute(
             "SELECT count(*) FROM image_catalog WHERE managed_by = 'config'"
         ).fetchone()
-        configs = conn.execute("SELECT count(*) FROM build_config_catalog").fetchone()
     assert images is not None and images[0] == 0
-    assert configs is not None and configs[0] == 0
-
-
-def test_seed_build_configs_step_without_s3_returns_zero(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str
-) -> None:
-    # No KDIVE_S3_* configured: the seed is a clean skip (ADR-0096), returns 0.
-    with psycopg.connect(postgres_url, autocommit=True) as conn:
-        conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-    for var in ("KDIVE_S3_ENDPOINT_URL", "KDIVE_S3_BUCKET", "KDIVE_S3_REGION"):
-        monkeypatch.delenv(var, raising=False)
-    migrate(postgres_url)
-
-    assert seed_build_configs_step(postgres_url) == 0
-    with psycopg.connect(postgres_url, autocommit=True) as conn:
-        configs = conn.execute("SELECT count(*) FROM build_config_catalog").fetchone()
-    assert configs is not None and configs[0] == 0
-
-
-def test_seed_build_configs_step_with_s3_seeds_and_is_idempotent(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str
-) -> None:
-    with psycopg.connect(postgres_url, autocommit=True) as conn:
-        conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: _FakeStore())
-    migrate(postgres_url)
-
-    assert seed_build_configs_step(postgres_url) == 1
-    assert seed_build_configs_step(postgres_url) == 0  # idempotent
-    with psycopg.connect(postgres_url, autocommit=True) as conn:
-        row = conn.execute("SELECT name FROM build_config_catalog WHERE name = 'kdump'").fetchone()
-    assert row is not None and row[0] == "kdump"
-
-
-def test_seed_build_configs_command_dispatches_to_step(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Drive the parser + dispatch table directly rather than main(): main() runs the logging
-    # bootstrap (bootstrap_stdout_floor), which reconfigures global logging and pollutes
-    # caplog-based tests that run later in the suite. This still proves the subcommand is
-    # registered, parses, and that its handler invokes the seed step.
-    from kdive import __main__ as main_mod
-    from kdive.security.secrets.secret_registry import SecretRegistry
-
-    called: list[str] = []
-    monkeypatch.setattr(
-        "kdive.admin.build_configs.seed_build_configs_step",
-        lambda: called.append("seeded"),
-    )
-    args = main_mod.build_parser().parse_args(["seed-build-configs"])
-    assert args.command == "seed-build-configs"
-    main_mod._COMMAND_BY_NAME[args.command].handler(args, SecretRegistry(), None)
-    assert called == ["seeded"]
 
 
 def test_install_fixtures_refuses_overwrite_without_force(tmp_path: Path) -> None:

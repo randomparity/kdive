@@ -41,7 +41,6 @@ def test_pipeline_invokes_coefficients_before_resources(monkeypatch: pytest.Monk
         "reconcile_images",
         "reconcile_coefficients",
         "reconcile_resources",
-        "reconcile_build_configs",
     ):
         monkeypatch.setattr(reconcile_pipeline, name, _recorder(name, calls, received))
     monkeypatch.setattr(
@@ -71,7 +70,6 @@ def test_pipeline_invokes_coefficients_before_resources(monkeypatch: pytest.Monk
         "reconcile_images",
         "reconcile_coefficients",
         "reconcile_resources",
-        "reconcile_build_configs",
         "reconcile_overrides_gc",
     ]
 
@@ -80,5 +78,4 @@ def test_pipeline_invokes_coefficients_before_resources(monkeypatch: pytest.Monk
     assert received["reconcile_images"] == (conn, doc, store)
     assert received["reconcile_coefficients"] == (conn, doc)
     assert received["reconcile_resources"] == (conn, doc)
-    assert received["reconcile_build_configs"] == (conn, doc, store)
     assert received["reconcile_overrides_gc"] == (conn, doc)

@@ -23,9 +23,6 @@ from pathlib import Path
 
 from psycopg_pool import AsyncConnectionPool
 
-import kdive.config as config
-from kdive.build_configs.rules import exceeds_build_config_cap
-from kdive.config.core_settings import MAX_BUILD_CONFIG_BYTES
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory, load_inventory_optional
 from kdive.inventory.model import InventoryDoc
@@ -83,33 +80,10 @@ def validate_systems(path: Path | None) -> int:
         ``0`` on a valid file (or an absent default), ``1`` on an ``InventoryError``.
     """
     try:
-        doc = _load_doc(path)
+        _load_doc(path)
     except InventoryError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return _EXIT_INVENTORY_ERROR
-    if doc is not None:
-        return _validate_build_config_caps(doc)
-    return _EXIT_OK
-
-
-def _validate_build_config_caps(doc: InventoryDoc) -> int:
-    """Reject an over-cap ``[[build_config]]`` fragment (deploy-time cap gate; ADR-0122).
-
-    The byte cap is config-dependent, so the pure model/loader cannot enforce it; this
-    validate-only path already reads config (for ``SYSTEMS_TOML``) and an env read is within its
-    no-DB/no-S3 contract, so it enforces the same ``MAX_BUILD_CONFIG_BYTES`` the reconcile pass
-    reads. An over-cap fragment fails the ``pre-install`` gate instead of deploying green and
-    silently not publishing.
-    """
-    cap = int(config.require(MAX_BUILD_CONFIG_BYTES))
-    for frag in doc.build_config:
-        if exceeds_build_config_cap(frag.content.encode("utf-8"), cap):
-            print(
-                f"error: build_config[{frag.name}]: content exceeds "
-                f"KDIVE_MAX_BUILD_CONFIG_BYTES ({cap} bytes)",
-                file=sys.stderr,
-            )
-            return _EXIT_INVENTORY_ERROR
     return _EXIT_OK
 
 
