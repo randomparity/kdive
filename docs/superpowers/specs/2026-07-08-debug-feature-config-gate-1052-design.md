@@ -79,16 +79,19 @@ bool(gate_required)`) for the manifest.
 
 ### 2. A read-only MCP method advertises the manifest
 
-`catalog.feature_config_requirements` — a **static**, **`PUBLIC`/viewer-visible** reference
-tool (no arguments, no run/system scope), returning the full feature manifest with the
-per-feature `advertised` requirements, `summary`, and `gated` flag. `PUBLIC` matches its
-sibling `catalog.*` reference tools and guarantees the tool is visible to every
-role that reaches `runs.create` / `artifacts.expected_uploads`, so the cross-referenced
-`suggested_next_actions` never point at an invisible tool (Finding 4). The manifest exposes
+`artifacts.feature_config_requirements` — a **static, read-only, auth-only** reference tool
+in the **existing `artifacts` namespace** (the direct sibling of `artifacts.expected_uploads`,
+which is the same static/auth-only shape, ADR-0117). No arguments, no run/system scope; it
+returns the full feature manifest with the per-feature `advertised` requirements, `summary`,
+and `gated` flag. The auth-only posture (a valid token, no project/RBAC gate — matching
+`expected_uploads`) guarantees the tool is visible to every authenticated role that reaches
+`runs.create` / `artifacts.expected_uploads`, so the cross-referenced `suggested_next_actions`
+never point at an invisible tool (Finding 4). Living in `artifacts` avoids minting a new tool
+namespace (`tool_index.NAMESPACE_TOC` + its completeness guard). The manifest exposes
 `advertised` (guidance), **not** `gate_required` — the agent needs the full recommended set,
-and the internal gate subset is an implementation detail. It is cross-referenced from the
-build-a-kernel journey so the agent finds it before building. The response is advisory and
-names no ADRs.
+and the internal gate subset is an implementation detail. It pairs with `expected_uploads`
+(what to upload → what config the uploaded kernel needs), so the agent finds it before
+building. The response is advisory and names no ADRs.
 
 `data` shape (one entry per feature):
 `{feature, summary, gated, requirements: [[symbol, ...], ...]}` where each inner list is an
@@ -171,9 +174,11 @@ everything when no config) would break every current kdump/sysrq/vmcore flow.
 ## What changes (files)
 
 - **New** `src/kdive/kernel_config/{__init__,requirements,parse,support,fetch}.py`.
-- **New tool** `catalog.feature_config_requirements` (`mcp/tools/catalog/`), registered in
-  the catalog registrar; keyword entry in `mcp/tool_index.py`; `suggested_next_actions`
-  additions on `runs.create` + `artifacts.expected_uploads`.
+- **New tool** `artifacts.feature_config_requirements` — logic in
+  `mcp/tools/catalog/artifacts/feature_requirements.py`, registered in
+  `mcp/tools/catalog/artifacts/registrar.py` beside `expected_uploads` (no new namespace, so
+  no `tool_index.NAMESPACE_TOC` change); `suggested_next_actions` additions on `runs.create`
+  + `artifacts.expected_uploads`.
 - **Gate wiring** in the three seam handlers (each already has DB access; each fetches via
   its store — `diagnostic_sysrq` has `artifact_store` injected, `install`/`vmcore` build
   `object_store_from_env()`).

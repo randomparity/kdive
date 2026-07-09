@@ -29,7 +29,7 @@ e.g. `RANDOMIZE_BASE` (KASLR) is routinely disabled on debug kernels and kdump w
 it, so it is advertised but not gated; the two kexec load syscalls are an OR-group so a
 kernel with either passes. Use the registry two ways:
 
-1. **Advertise** — a static read-only tool `catalog.feature_config_requirements` returns the
+1. **Advertise** — a static read-only tool `artifacts.feature_config_requirements` returns the
    full manifest (feature, summary, `gated`, OR-group requirements). Advisory; cross-linked
    from `runs.create` / `artifacts.expected_uploads` `suggested_next_actions`. The agent
    decides what to build.
