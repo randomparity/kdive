@@ -16,6 +16,8 @@ types, and return schema, read each tool's own description.
     feature is live end to end (that is what the signals below verify).
   - `os` — the verified base OS identity (`id`, and `version_id` when known), read from the
     built image itself. Use it to match the target distro/release.
+  - `default_kernel_version` — the kernel the image ships and boots by default (`""` when
+    unknown). Use it to know what version you are starting from before building your own.
   - `description` — an optional operator-attested hint about what an image is for. Advisory
     context only, never a capability guarantee — verify with the signals below.
   Do not just reuse the image named in a `systems.profile_examples` example: that one is picked
@@ -28,6 +30,10 @@ types, and return schema, read each tool's own description.
   - `direct_kernel` — `provisionable` only when `/boot` holds exactly one non-rescue kernel;
     a multi-kernel image reads `not_provisionable`/`unverified`, so a direct-kernel provision
     would fail closed. Read it first so a multi-kernel image does not waste an allocation.
+- `images.kernel_config` — a short-lived download URL for the image's own `/boot/config-<ver>`.
+  Use it as a **known-good starting `.config`** when you build a kernel locally: it already
+  boots this image. kdive never validates the config you build from it. An image with no
+  offered config returns `kernel_config_unavailable`.
 
 ## debug vs build images
 

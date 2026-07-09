@@ -92,6 +92,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "images.delete": ("tests/mcp/ops/test_images_tools.py",),
     "images.describe": ("tests/mcp/catalog/test_images_describe.py",),
     "images.extend": ("tests/mcp/ops/test_images_tools.py",),
+    "images.kernel_config": ("tests/mcp/catalog/test_images_kernel_config.py",),
     "images.list": ("tests/mcp/catalog/test_images_list.py",),
     "images.prune_expired": ("tests/mcp/ops/test_images_tools.py",),
     "images.publish": ("tests/mcp/ops/test_images_tools.py",),
