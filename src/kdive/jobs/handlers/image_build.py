@@ -86,6 +86,7 @@ async def image_build_handler(
         visibility=payload.visibility,
         owner=payload.owner,
         expires_at=payload.expires_at,
+        kernel_config=output.kernel_config,
     )
     entry = await publish_image(conn, store, request=request, source=output.qcow2_path)
     if entry.object_key is None:  # Invariant: a registered row always carries its object key.

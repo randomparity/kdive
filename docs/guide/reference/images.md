@@ -34,9 +34,11 @@ Delete an image catalog entry.
 
 Return full detail for one catalog image visible to the caller.
 
-Includes boot layout, digest, capabilities, scope, publish state, build ``provenance``
-(with captured ``package_versions``/``makedumpfile_version``/``boot_kernel_count`` when
-present), and computed ``data.capability_signals`` (each signal keyed by name): ``kdump``
+Includes boot layout, digest, capabilities, scope, publish state,
+``data.default_kernel_version`` (the image's default kernel, ``""`` when unknown), build
+``provenance`` (with captured
+``package_versions``/``makedumpfile_version``/``boot_kernel_count`` when present), and
+computed ``data.capability_signals`` (each signal keyed by name): ``kdump``
 (the capability for ``target_kernel``, kernel basis disclosed) and ``direct_kernel``
 (``status`` ``provisionable`` when ``/boot`` holds exactly one non-rescue kernel, else
 ``not_provisionable``/``unverified`` — read it before a direct-kernel provision so a
@@ -59,14 +61,34 @@ Extend an image catalog entry lease.
 | `reason` | string | yes | Mandatory non-blank break-glass justification (audited). |
 | `seconds` | integer | yes | Seconds from now (clamped to the ceiling). |
 
+## `images.kernel_config`
+
+`implemented` · `read-only`
+
+Return a short-lived download URL for the image's kernel ``.config`` starting point.
+
+The URL under ``refs.download_uri`` fetches the image's ``/boot/config-<ver>`` — a
+known-good config to build a kernel from, never validated by kdive.
+``data.default_kernel_version`` names the version, ``data.size_bytes`` the config size, and
+``data.ttl`` the URL lifetime. An image with no offered config (a staged or pre-feature
+image, or one whose ``/boot`` lacked a single kernel/config) returns a
+``configuration_error`` with ``data.reason`` = ``kernel_config_unavailable``.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `image_id` | string | yes | The catalog image row id (UUID). |
+
 ## `images.list`
 
 `implemented` · `read-only`
 
 List published image catalog entries.
 
-Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-``cursor`` for the next page.
+Each row carries the build-fact ``data.capabilities``, a compact verified ``data.os``
+identity, and ``data.default_kernel_version`` (the kernel the image ships and boots by
+default, ``""`` when unknown) so an agent can compare images on merit — distro, version,
+default kernel — in one call. Keyset-paginated: when ``data.truncated`` is true, pass
+``data.next_cursor`` back as ``cursor`` for the next page.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

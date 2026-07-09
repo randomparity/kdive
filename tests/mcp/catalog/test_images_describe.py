@@ -121,6 +121,27 @@ def test_describe_carries_compact_os_and_operator_description(migrated_url: str)
     asyncio.run(_run())
 
 
+def test_describe_reports_default_kernel_version(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            with_version = await _insert(
+                pool,
+                name="fedora-kdive-ready-43",
+                visibility="public",
+                owner=None,
+                provenance='{"default_kernel_version": "6.19.10-300.fc44.x86_64"}',
+            )
+            without = await _insert(
+                pool, name="no-kernel", visibility="public", owner=None, provenance="{}"
+            )
+            present = await catalog_images.describe_image(pool, _ctx(), image_id=with_version)
+            absent = await catalog_images.describe_image(pool, _ctx(), image_id=without)
+        assert present.data["default_kernel_version"] == "6.19.10-300.fc44.x86_64"
+        assert absent.data["default_kernel_version"] == ""
+
+    asyncio.run(_run())
+
+
 def test_describe_omits_os_and_empties_description_when_unset(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

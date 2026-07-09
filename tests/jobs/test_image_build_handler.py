@@ -44,9 +44,12 @@ _AUTHORIZING = Authorizing(principal="op", agent_session=None, project="platform
 class _FakePlane:
     """A RootfsBuildPlane stand-in writing fixed qcow2 bytes and recording the calling thread."""
 
-    def __init__(self, tmp_path: Path, *, qcow2: bytes = b"built-qcow2") -> None:
+    def __init__(
+        self, tmp_path: Path, *, qcow2: bytes = b"built-qcow2", kernel_config: bytes | None = None
+    ) -> None:
         self._tmp_path = tmp_path
         self._qcow2 = qcow2
+        self._kernel_config = kernel_config
         self.build_thread: int | None = None
         self.spec: RootfsBuildSpec | None = None
 
@@ -56,7 +59,12 @@ class _FakePlane:
         out = self._tmp_path / "out.qcow2"
         out.write_bytes(self._qcow2)
         digest = "sha256:" + hashlib.sha256(self._qcow2).hexdigest()
-        return RootfsBuildOutput(qcow2_path=out, digest=digest, provenance={"releasever": "43"})
+        return RootfsBuildOutput(
+            qcow2_path=out,
+            digest=digest,
+            provenance={"releasever": "43"},
+            kernel_config=self._kernel_config,
+        )
 
 
 class _FakeStore:
@@ -148,6 +156,32 @@ def test_handler_builds_validates_publishes_registered(migrated_url: str, tmp_pa
             assert plane.spec is not None
             assert plane.spec.releasever == "43"
             assert plane.spec.source_image_digest == "virt-builder:fedora-43"
+
+    asyncio.run(_run())
+
+
+def test_handler_passes_kernel_config_to_publish(migrated_url: str, tmp_path: Path) -> None:
+    config = b"# CONFIG_X is not set\nCONFIG_Y=y\n"
+    plane = _FakePlane(tmp_path, kernel_config=config)
+    store = _FakeStore()
+
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            job = await queue.enqueue(
+                conn, JobKind.IMAGE_BUILD, _payload(), _AUTHORIZING, "dedup-config"
+            )
+            await image_build_handler(
+                conn,
+                job,
+                resolver=_resolver_with_plane(plane),
+                store=store,
+                inspect=_all_present,
+            )
+            rows = await IMAGE_CATALOG.list_all(conn)
+            assert len(rows) == 1
+            key = rows[0].kernel_config_key
+            assert key is not None
+            assert store._objects[key] == config
 
     asyncio.run(_run())
 

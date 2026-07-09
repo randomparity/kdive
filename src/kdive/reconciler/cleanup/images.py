@@ -5,11 +5,12 @@ Two deadline-guarded sweeps, modeled on
 window + a table cross-check, never an eager delete), each isolated on a fresh pooled
 connection and each evaluating time in Postgres ``now()`` (never a Python clock):
 
-* :func:`repair_leaked_images` — an object under the image prefix with **no catalog row** at all,
-  older than the publish grace (keyed off the object's store mtime): delete the object. A
-  ``pending`` row owns its object (the row is written before the object in the row-first publish),
-  so a live publish is never raced; the mtime grace is the second fence against a just-written
-  object whose row commit is in flight.
+* :func:`repair_leaked_images` — an object under the image prefix referenced by **no catalog row**
+  (via either ``object_key`` or ``kernel_config_key``, so a live image's ``.config`` sibling is
+  protected, ADR-0317), older than the publish grace (keyed off the object's store mtime): delete
+  the object. A ``pending`` row owns its objects (both keys are written before their objects in the
+  row-first publish), so a live publish is never raced; the mtime grace is the second fence against
+  a just-written object whose row commit is in flight.
 * :func:`repair_dangling_images` — a non-``defined`` row (``object_key IS NOT NULL``) whose object
   HEAD is missing **past its publish deadline** (``pending_since + grace``): remove the row. An
   object-less ``defined`` baseline is object-less by design and never dangling — it is skipped.
@@ -67,8 +68,9 @@ async def _delete_if_leaked(
     """Delete ``obj`` iff no catalog row references it and it is older than the grace window."""
     async with conn.cursor() as cur:
         await cur.execute(
-            "SELECT EXISTS (SELECT 1 FROM image_catalog WHERE object_key = %s) OR %s >= now() - %s",
-            (obj.key, obj.last_modified, grace),
+            "SELECT EXISTS (SELECT 1 FROM image_catalog "
+            "WHERE object_key = %s OR kernel_config_key = %s) OR %s >= now() - %s",
+            (obj.key, obj.key, obj.last_modified, grace),
         )
         row = await cur.fetchone()
     protected = bool(row[0]) if row is not None else True

@@ -254,6 +254,7 @@ PUBLIC_TOOLS: frozenset[str] = frozenset(
         "fixtures.list",
         "fixtures.validate",
         "images.describe",
+        "images.kernel_config",
         "images.list",
         "projects.list",
         "resources.availability",

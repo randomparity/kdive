@@ -66,11 +66,12 @@ def test_spec_is_frozen() -> None:
 
 def test_output_fields() -> None:
     fields = {f.name for f in dataclasses.fields(RootfsBuildOutput)}
-    assert fields == {"qcow2_path", "digest", "provenance"}
+    assert fields == {"qcow2_path", "digest", "provenance", "kernel_config"}
     out = RootfsBuildOutput(qcow2_path=Path("/x.qcow2"), digest="sha256:y", provenance={"k": 1})
     assert isinstance(out.qcow2_path, Path)
     assert out.digest == "sha256:y"
     assert out.provenance == {"k": 1}
+    assert out.kernel_config is None  # optional; only set when the build captured a config
 
 
 def test_plane_is_runtime_checkable_protocol() -> None:
