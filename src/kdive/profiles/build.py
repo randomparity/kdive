@@ -30,10 +30,11 @@ from kdive.profiles.types import BuildProfileInput
 class BuildProfile(BaseModel):
     """External-build profile: a thin, versioned document with no source-tree fields.
 
-    Kept as the home a later image-selection change will extend. Today it carries only its
-    schema version; the artifact set is delivered through the upload lane
+    It carries only its schema version; the artifact set is delivered through the upload lane
     (``artifacts.expected_uploads`` -> ``artifacts.create_run_upload`` -> ``runs.complete_build``),
-    not named here.
+    not named here. It remains the persisted ``build_profile`` jsonb envelope, and :meth:`parse`
+    is the boundary that maps a structural ``ValidationError`` onto ``configuration_error`` and
+    scrubs submitted values from the error detail (ADR-0029) — a bare ``model_validate`` would not.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

@@ -20,15 +20,6 @@ def iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
 
 
-def build_profile_summary(_profile: Mapping[str, object]) -> dict[str, JsonValue]:
-    """Return the allowlisted build summary.
-
-    Every Run is the external-upload lane (the agent builds locally and uploads), so the
-    summary is a fixed ``build_source`` marker; no source-tree or host field is derived.
-    """
-    return {"build_source": "external"}
-
-
 def provisioning_profile_summary(profile: Mapping[str, object]) -> dict[str, JsonValue]:
     """Return the allowlisted provisioning summary: arch, boot method, and sizing."""
     summary: dict[str, JsonValue] = {}

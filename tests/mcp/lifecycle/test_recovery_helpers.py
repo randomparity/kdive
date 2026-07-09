@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from kdive.mcp.tools.lifecycle._recovery import (
-    build_profile_summary,
     iso,
     provisioning_profile_summary,
 )
@@ -15,19 +14,6 @@ def test_iso_serializes_and_passes_through_none() -> None:
     dt = datetime(2026, 6, 18, 12, 0, tzinfo=UTC)
     assert iso(dt) == dt.isoformat()
     assert iso(None) is None
-
-
-def test_build_summary_is_external_for_any_profile() -> None:
-    # Every Run is the external-upload lane, so the summary is a fixed marker regardless of the
-    # stored document's shape (and it never echoes a stray field).
-    summary = build_profile_summary({"schema_version": 1})
-    assert summary == {"build_source": "external"}
-
-
-def test_build_summary_ignores_stray_stored_fields() -> None:
-    summary = build_profile_summary({"schema_version": 1, "bogus": "https://user:tok@h/r"})
-    assert summary == {"build_source": "external"}
-    assert "tok" not in str(summary)
 
 
 def test_provisioning_summary_allowlists_only_safe_fields() -> None:

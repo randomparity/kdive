@@ -12,7 +12,6 @@ from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import Job
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import job_envelope
-from kdive.mcp.tools.lifecycle._recovery import build_profile_summary
 from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
 from kdive.services.artifacts.listing import ConsoleManifest
 from kdive.services.runs import states as run_states
@@ -76,7 +75,8 @@ def _run_recovery(run: Run) -> dict[str, JsonValue]:
     return {
         "investigation_id": str(run.investigation_id),
         "label": run.label,
-        **build_profile_summary(run.build_profile),
+        # Every Run is the external-upload lane (the agent builds locally and uploads).
+        "build_source": "external",
     }
 
 
