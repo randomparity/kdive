@@ -43,9 +43,6 @@ from tests.mcp.systems_support import granted_allocation as _granted_allocation
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _EXTERNAL_PROFILE: dict[str, Any] = {"schema_version": 1}
-# A stored profile the flat schema cannot parse (unknown source-tree field); a Run carrying it
-# cannot accept an upload.
-_MALFORMED_PROFILE: dict[str, Any] = {"schema_version": 1, "kernel_source_ref": "x"}
 
 
 class _FakeStore:
@@ -319,24 +316,6 @@ def test_create_upload_accepts_effective_config_for_external_run(migrated_url: s
         }
         assert manifest is not None
         assert {e.name for e in manifest.entries} == {"kernel", "effective_config"}
-
-    asyncio.run(_run())
-
-
-def test_create_upload_rejects_malformed_profile_run(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_created_run(pool, build_profile=_MALFORMED_PROFILE)
-            store = _FakeStore()
-            out = await create_run_upload(
-                pool,
-                _ctx(),
-                run_id=run_id,
-                artifacts=[{"name": "kernel", "sha256": "aaa", "size_bytes": 100}],
-                store=store,
-            )
-        assert out.error_category == ErrorCategory.CONFIGURATION_ERROR.value
-        assert store.calls == []
 
     asyncio.run(_run())
 

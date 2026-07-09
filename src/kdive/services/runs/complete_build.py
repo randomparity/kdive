@@ -29,7 +29,6 @@ from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import Run
-from kdive.profiles.build import BuildProfile
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.serialization import JsonValue
@@ -118,7 +117,6 @@ class CompleteBuildFinalizer:
         conn: AsyncConnection,
         run: Run,
     ) -> _ExternalBuildCompletion:
-        _require_external_run(run)
         _require_created_run(run)
 
         manifest_row = await upload_manifest.get_manifest(conn, "runs", run.id)
@@ -244,11 +242,6 @@ async def _reassemble_artifacts(
                 final_key=f"{manifest_row.prefix}{entry.name}",
                 entry=entry,
             )
-
-
-def _require_external_run(run: Run) -> None:
-    # Parsing validates the stored build profile; a malformed document is a configuration error.
-    BuildProfile.parse(run.build_profile)
 
 
 def _require_created_run(run: Run) -> None:

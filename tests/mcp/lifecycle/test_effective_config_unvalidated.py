@@ -115,6 +115,51 @@ async def _artifact_keys(pool: AsyncConnectionPool, run_id: Any) -> set[str]:
         return {row["object_key"] for row in await cur.fetchall()}
 
 
+# A build_profile persisted under the OLD (pre-Spec-1) schema: a server-lane document with keys
+# the flat BuildProfile no longer declares. The re-read sites must NOT re-parse it (extra="forbid"
+# would reject the legacy keys and brick an in-flight CREATED run across a deploy).
+_LEGACY_PROFILE = {
+    "schema_version": 1,
+    "source": "server",
+    "kernel_source_ref": "warm-tree",
+    "config": None,
+    "profile_requirements": None,
+    "patch_ref": None,
+    "build_host": None,
+}
+
+
+def test_legacy_build_profile_uploads_and_completes(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, _LEGACY_PROFILE)
+            # _run_accepts_upload must not reject on the legacy profile shape.
+            responses = await _create_upload(
+                pool,
+                _ctx(),
+                run_id=str(run_id),
+                artifacts=[{"name": "kernel", "sha256": "ck", "size_bytes": len(_KERNEL_TAR)}],
+                store=_UploadStore(),
+            )
+            assert {response.status for response in responses.items} == {"upload_ready"}
+
+            kernel_key = f"local/runs/{run_id}/kernel"
+            store = _ValidationStore(
+                {kernel_key: _KERNEL_TAR},
+                {kernel_key: HeadResult(len(_KERNEL_TAR), "ck", "e-k")},
+            )
+            resp = await CompleteBuildHandlers(object_store_factory=lambda: store).complete_build(
+                pool, _ctx(), str(run_id), build_id=None, cmdline="x"
+            )
+            async with pool.connection() as conn:
+                run = await RUNS.get(conn, run_id)
+
+        assert resp.status == "succeeded", resp
+        assert run is not None and run.state is RunState.SUCCEEDED
+
+    asyncio.run(_run())
+
+
 def test_bad_effective_config_uploads_and_completes(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
