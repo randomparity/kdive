@@ -55,14 +55,14 @@ present before `uv sync`. `just check-deps` reports any gaps without installing 
 
 ```bash
 sudo apt install build-essential pkg-config libvirt-dev python3-dev \
-  libelf-dev shellcheck nodejs npm git curl ca-certificates
+  libelf-dev shellcheck shfmt nodejs npm git curl ca-certificates
 ```
 
 **Fedora:**
 
 ```bash
 sudo dnf install gcc make pkgconf-pkg-config libvirt-devel python3-devel \
-  elfutils-libelf-devel ShellCheck nodejs npm git curl
+  elfutils-libelf-devel ShellCheck shfmt nodejs npm git curl
 ```
 
 Then install [uv](https://docs.astral.sh/uv/) and the `just` / `prek` CLIs:
@@ -82,8 +82,9 @@ Ubuntu, and add your user to the `docker` group.
 ### ppc64le (POWER) notes
 
 On architectures without prebuilt Python wheels or tool release binaries — notably
-`ppc64le` — the components above build from source instead. This is automatic once the
-toolchain is present, but two extra requirements apply:
+`ppc64le` — the components above build from source instead. This is mostly automatic once
+the toolchain is present, but four extra requirements apply. Validated on Ubuntu 26.04
+(`resolute`, ppc64el).
 
 - **A Rust toolchain is required.** `pydantic-core` (a `uv sync` dependency) and the
   `just` / `prek` CLIs have no `ppc64le` wheels or release binaries, so they compile from
@@ -95,13 +96,35 @@ toolchain is present, but two extra requirements apply:
   . "$HOME/.cargo/env"
   ```
 
+- **`grpcio` must build against the system OpenSSL.** `grpcio` (an OpenTelemetry
+  dependency) has no `ppc64le` wheel, and its vendored BoringSSL does not recognize the
+  architecture (`#error "Unknown target CPU"`), so the default source build fails. Install
+  the system OpenSSL headers and set the documented build flag so `uv sync` uses them:
+
+  ```bash
+  sudo apt install libssl-dev zlib1g-dev
+  export GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
+  export GRPC_PYTHON_BUILD_SYSTEM_ZLIB=1
+  uv sync --locked
+  ```
+
+  `uv sync --locked` validates the source-distribution hash, not the build flags, so this
+  stays lock-faithful. Ubuntu 26.04 ships OpenSSL 3.5.5, which has full POWER support.
+
+- **A Go toolchain is required for `just lint-workflows`.** `actionlint-py` ships only a
+  source distribution and builds the `actionlint` Go binary at install time, and upstream
+  publishes no `ppc64le` release binary to download. Install Go: `sudo apt install
+  golang-go`.
+
 - **Expect long first builds.** Wheel-less native dependencies compile the first time
-  they are installed and are then cached. `grpcio` (an OpenTelemetry dependency) and
-  `aws-lc-sys` (pulled in by `prek`) are large C/C++/Rust builds that can each take tens
-  of minutes on a POWER core budget. Subsequent `uv sync` runs reuse the cached wheels.
+  they are installed and are then cached. `grpcio` and `aws-lc-sys` (pulled in by the
+  `prek` and `zizmor` Rust CLIs) are large C/C++/Rust builds that can each take from tens
+  of minutes to over an hour on a POWER core budget. Subsequent runs reuse the cached
+  artifacts.
 
 Docker Engine's official apt repository publishes `ppc64el` packages for current Ubuntu
-releases, so the standard install path works unchanged.
+releases, and the `postgres` and `minio/minio` test images are multi-arch (they include
+`ppc64le`), so the standard Docker path and the disposable-container tests work unchanged.
 
 Before the first start, run the provider preflight for the libvirt backend you intend to
 use. The preflight reports what is missing without changing the host:
