@@ -120,6 +120,7 @@ def feature_manifest() -> list[dict[str, JsonValue]]:
     """Render the advertised manifest (advisory): one entry per feature, ``advertised`` only."""
     manifest: list[dict[str, JsonValue]] = []
     for f in FEATURE_REQUIREMENTS:
+        # Inner comprehension (not bare sorted()) widens list[str] -> list[JsonValue].
         requirements: list[JsonValue] = [
             [symbol for symbol in sorted(clause)] for clause in f.advertised
         ]

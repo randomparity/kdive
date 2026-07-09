@@ -15,11 +15,6 @@ def unmet_clauses(config: KernelConfig, feature: FeatureRequirement) -> tuple[Cl
     )
 
 
-def feature_supported(config: KernelConfig, feature: FeatureRequirement) -> bool:
-    """True when every ``gate_required`` clause is satisfied by ``config``."""
-    return not unmet_clauses(config, feature)
-
-
 def missing_symbols(unmet: tuple[Clause, ...]) -> list[str]:
     """Flatten unmet clauses into a sorted symbol list for a refusal reason."""
     return sorted({symbol for clause in unmet for symbol in clause})

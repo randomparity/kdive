@@ -339,9 +339,7 @@ def test_fetch_vmcore_kdump_refused_when_config_lacks_crash_symbols(migrated_url
         async with _pool(migrated_url) as pool:
             sys_id, run_id = await _crashed_run(pool)
             handlers = _real_local_handlers()
-            with patch(
-                "kdive.mcp.tools.lifecycle.vmcore_handlers.load_effective_config", _fake_load
-            ):
+            with patch("kdive.kernel_config.gate.load_effective_config", _fake_load):
                 resp = await handlers.fetch_vmcore(pool, _ctx(), run_id=run_id, method="kdump")
             jobs = await _job_count(pool)
         assert resp.error_category == "configuration_error"
@@ -368,9 +366,7 @@ def test_fetch_vmcore_host_dump_ungated_even_with_unsupported_config(migrated_ur
         async with _pool(migrated_url) as pool:
             sys_id, run_id = await _crashed_run(pool)
             handlers = _real_local_handlers()
-            with patch(
-                "kdive.mcp.tools.lifecycle.vmcore_handlers.load_effective_config", _fake_load
-            ):
+            with patch("kdive.kernel_config.gate.load_effective_config", _fake_load):
                 resp = await handlers.fetch_vmcore(pool, _ctx(), run_id=run_id, method="host_dump")
         assert resp.status == "queued"  # host_dump path never gates
 

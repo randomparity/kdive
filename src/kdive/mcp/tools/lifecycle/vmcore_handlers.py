@@ -16,9 +16,7 @@ from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import CaptureVmcorePayload
-from kdive.kernel_config.fetch import load_effective_config
-from kdive.kernel_config.requirements import CRASH_CAPTURE, feature_requirement
-from kdive.kernel_config.support import missing_symbols, unmet_clauses
+from kdive.kernel_config.gate import crash_capture_refusal
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import ConfigErrorReason, job_envelope
@@ -44,7 +42,6 @@ from kdive.security.artifacts.crash_commands import validate_crash_commands
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.serialization import JsonValue
 from kdive.services.artifacts.listing import list_redacted_run_artifacts
 
 _TRIAGE_COMMANDS: tuple[str, ...] = ("log", "bt")
@@ -257,19 +254,14 @@ async def _fetch_vmcore(
             if capture_method is CaptureMethod.KDUMP:
                 # Kernel-config gate (ADR-0318): a kdump vmcore is produced by the guest kernel, so
                 # it needs the crash_capture symbols. host_dump is host-side (QEMU) and never gates.
-                # load_effective_config fails open (None) on no upload / read error / degenerate.
-                config = await load_effective_config(conn, uid)
-                if config is not None:
-                    unmet = unmet_clauses(config, feature_requirement(CRASH_CAPTURE))
-                    if unmet:
-                        missing: list[JsonValue] = list(missing_symbols(unmet))
-                        return _config_error(
-                            run_id,
-                            detail=(
-                                "uploaded kernel config lacks symbols required for a kdump vmcore"
-                            ),
-                            data={"reason": "kernel_missing_crash_config", "missing": missing},
-                        )
+                # crash_capture_refusal fails open (None) on no upload / read error / degenerate.
+                refusal = await crash_capture_refusal(conn, uid)
+                if refusal is not None:
+                    return _config_error(
+                        run_id,
+                        detail="uploaded kernel config lacks symbols required for a kdump vmcore",
+                        data=refusal,
+                    )
 
             async def _enqueue() -> ToolResponse:
                 job = await queue.enqueue(

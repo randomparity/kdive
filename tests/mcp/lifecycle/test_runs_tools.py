@@ -3885,7 +3885,7 @@ def test_install_handler_refuses_crashkernel_when_config_lacks_crash_symbols(
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install", crashkernel="512M")
             installer = _FakeInstaller()
             with (
-                patch("kdive.jobs.handlers.runs.install.load_effective_config", _fake_load),
+                patch("kdive.kernel_config.gate.load_effective_config", _fake_load),
                 pytest.raises(CategorizedError) as exc,
             ):
                 async with pool.connection() as conn:
@@ -3925,7 +3925,7 @@ def test_install_handler_arms_crashkernel_when_config_supports_it(migrated_url: 
             )
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install", crashkernel="512M")
             installer = _FakeInstaller()
-            with patch("kdive.jobs.handlers.runs.install.load_effective_config", _fake_load):
+            with patch("kdive.kernel_config.gate.load_effective_config", _fake_load):
                 async with pool.connection() as conn:
                     await runs_handlers.install_handler(
                         conn,

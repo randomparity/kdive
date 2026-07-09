@@ -17,6 +17,12 @@ _RAW_VMCORE_KEY_SQL: LiteralString = (
 _RAW_VMCORE_KEY_LIKE = "%/vmcore-%"
 _REDACTED_VMCORE_LIKE = "%-redacted"
 
+_EFFECTIVE_CONFIG_KEY_SQL: LiteralString = (
+    "SELECT object_key FROM artifacts "
+    "WHERE owner_kind = 'runs' AND owner_id = %s AND object_key LIKE %s LIMIT 1"
+)
+_EFFECTIVE_CONFIG_KEY_LIKE = "%/effective_config"
+
 _DEBUGINFO_REF_SQL: LiteralString = "SELECT debuginfo_ref FROM runs WHERE id = %s"
 
 _KERNEL_REF_SQL: LiteralString = "SELECT kernel_ref FROM runs WHERE id = %s"
@@ -76,6 +82,18 @@ async def raw_vmcore_key(conn: AsyncConnection, run_id: UUID) -> str | None:
             _RAW_VMCORE_KEY_SQL,
             (run_id, _RAW_VMCORE_KEY_LIKE, _REDACTED_VMCORE_LIKE),
         )
+        row = await cur.fetchone()
+    return None if row is None else str(row["object_key"])
+
+
+async def effective_config_key(conn: AsyncConnection, run_id: UUID) -> str | None:
+    """Return the Run's uploaded ``effective_config`` object key, or ``None`` (ADR-0318).
+
+    The agent's ``.config`` is a Run-owned (``owner_kind='runs'``) upload accepted but not
+    validated; its object key is read here for the debug-feature config gate.
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(_EFFECTIVE_CONFIG_KEY_SQL, (run_id, _EFFECTIVE_CONFIG_KEY_LIKE))
         row = await cur.fetchone()
     return None if row is None else str(row["object_key"])
 

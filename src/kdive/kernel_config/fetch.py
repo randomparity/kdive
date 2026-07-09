@@ -16,21 +16,14 @@ from uuid import UUID
 
 import psycopg
 from psycopg import AsyncConnection
-from psycopg.rows import dict_row
 
 from kdive.artifacts.storage import FetchedArtifact
+from kdive.db.artifact_queries import effective_config_key
 from kdive.domain.errors import CategorizedError
 from kdive.kernel_config.parse import KernelConfig, parse_kernel_config
 from kdive.store.objectstore import object_store_from_env
 
 _log = logging.getLogger(__name__)
-
-# The Run-owned effective_config artifact (complete_build inserts owner_kind='runs').
-_ROW_SQL = (
-    "SELECT object_key FROM artifacts "
-    "WHERE owner_kind = 'runs' AND owner_id = %s AND object_key LIKE %s LIMIT 1"
-)
-_KEY_SUFFIX = "%/effective_config"
 
 
 class ConfigStore(Protocol):
@@ -52,12 +45,12 @@ async def load_effective_config(
     action failure.
     """
     try:
-        async with conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(_ROW_SQL, (run_id, _KEY_SUFFIX))
-            row = await cur.fetchone()
-        if row is None:
+        key = await effective_config_key(conn, run_id)
+        if key is None:
             return None
-        fetched = await asyncio.to_thread(store_factory().get_artifact, row["object_key"], None)
+        # Build the store and fetch on a worker thread — object_store_from_env constructs a
+        # boto3 client (blocking) and get_artifact does blocking I/O; keep both off the loop.
+        fetched = await asyncio.to_thread(lambda: store_factory().get_artifact(key, None))
     except (CategorizedError, psycopg.Error, OSError) as exc:
         _log.warning("effective_config read failed for run %s; arming as today: %s", run_id, exc)
         return None
