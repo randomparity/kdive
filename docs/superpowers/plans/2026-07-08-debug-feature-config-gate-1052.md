@@ -478,16 +478,17 @@ git commit -m "feat(kernel-config): gate_required support check (#1052)"
 
 - [ ] **Step 1: Write the failing test**
 
+> **Async-test convention (verified):** this repo has **no** pytest-asyncio/anyio plugin (`pyproject.toml [tool.pytest.ini_options]` sets no `asyncio_mode`; there are zero `pytest.mark.asyncio` tests). Async code is tested with a **sync** `def test_*()` that wraps the coroutine in `asyncio.run(_impl())` — see `tests/jobs/handlers/test_diagnostic_sysrq_handler.py:157,175,209`. Follow that convention exactly; a bare `async def test_*` would be silently uncollected (false green).
+
 ```python
 # tests/kernel_config/test_fetch.py
-import pytest
+import asyncio
+from uuid import uuid4
 
 from kdive.artifacts.storage import FetchedArtifact
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.sensitivity import Sensitivity
+from kdive.domain.sensitivity import Sensitivity  # confirm module: `rg -n "class Sensitivity" src/kdive`
 from kdive.kernel_config.fetch import load_effective_config
-
-pytestmark = pytest.mark.anyio
 
 _GOOD = b"CONFIG_KEXEC=y\nCONFIG_PROC_VMCORE=y\n"
 
@@ -527,39 +528,35 @@ class _Store:
         return FetchedArtifact(self._data, Sensitivity.SENSITIVE, "build")
 
 
-async def test_no_row_returns_none(anyio_backend):
-    from uuid import uuid4
-
-    got = await load_effective_config(_FakeConn(None), uuid4(), store_factory=lambda: _Store())
+def test_no_row_returns_none():
+    got = asyncio.run(
+        load_effective_config(_FakeConn(None), uuid4(), store_factory=lambda: _Store())
+    )
     assert got is None
 
 
-async def test_present_config_parses(anyio_backend):
-    from uuid import uuid4
-
+def test_present_config_parses():
     conn = _FakeConn({"object_key": "local/runs/x/effective_config"})
-    got = await load_effective_config(conn, uuid4(), store_factory=lambda: _Store(_GOOD))
+    got = asyncio.run(load_effective_config(conn, uuid4(), store_factory=lambda: _Store(_GOOD)))
     assert got is not None and got.is_enabled("KEXEC")
 
 
-async def test_store_error_fails_open_to_none(anyio_backend):
-    from uuid import uuid4
-
+def test_store_error_fails_open_to_none():
     conn = _FakeConn({"object_key": "k"})
     exc = CategorizedError("gone", category=ErrorCategory.STALE_HANDLE)
-    got = await load_effective_config(conn, uuid4(), store_factory=lambda: _Store(exc=exc))
+    got = asyncio.run(
+        load_effective_config(conn, uuid4(), store_factory=lambda: _Store(exc=exc))
+    )
     assert got is None
 
 
-async def test_degenerate_config_fails_open_to_none(anyio_backend):
-    from uuid import uuid4
-
+def test_degenerate_config_fails_open_to_none():
     conn = _FakeConn({"object_key": "k"})
-    got = await load_effective_config(conn, uuid4(), store_factory=lambda: _Store(b"# empty\n"))
+    got = asyncio.run(
+        load_effective_config(conn, uuid4(), store_factory=lambda: _Store(b"# empty\n"))
+    )
     assert got is None
 ```
-
-> Note: `tests/conftest.py` provides the `anyio_backend` fixture used across the async suite; confirm the exact async-test convention there (some suites use `@pytest.mark.anyio`, others `asyncio`). Match the neighboring handler tests if this differs.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -690,7 +687,7 @@ def test_returns_advisory_manifest_of_every_feature():
     assert "ADR" not in str(resp.data)
 ```
 
-> Confirm the `ToolResponse` field names by reading `expected_uploads.py` (uses `ToolResponse.success(object_id, "ok", data=...)`) and `kdive/mcp/responses.py`. Adjust `.status`/`.data` access if the model exposes them differently (e.g. `resp.structured_content`).
+> **Confirm `ToolResponse` read attributes first** (`rg -n "class ToolResponse" -A40 src/kdive/mcp/responses.py`): this test reads `resp.status` and `resp.data`; Task 6 reads `resp.suggested_next_actions`. `ToolResponse.success(object_id, "ok", data=...)` and `ToolResponse.collection(..., suggested_next_actions=...)` are the constructors used by `expected_uploads.py`, so those attributes exist — but verify the exact names (some models expose `structured_content` instead of `data`) and adjust all three tasks' asserts consistently before writing them.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -826,17 +823,32 @@ git commit -m "feat(mcp): surface feature_config_requirements in the build next-
 
 - [ ] **Step 1: Write the failing test**
 
-Read `tests/jobs/handlers/test_runs_install.py` for the existing install-handler harness (how it builds a `conn`, a Run with `kernel_ref`, a `System`, a `resolver`, and an `InstallPayload` with `crashkernel`). Add a test that seeds a Run whose `effective_config` artifact lacks `PROC_VMCORE` and asserts `install_handler` raises `CategorizedError` with `category == ErrorCategory.CONFIGURATION_ERROR` and `details["reason"] == "kernel_missing_crash_config"` and `"PROC_VMCORE" in details["missing"]`. Add a second test that a supported config (or no config) installs normally (crashkernel path proceeds). Reuse the suite's object-store fixture / monkeypatch `load_effective_config`'s `store_factory` or the seeded artifact row per the harness convention.
+Read `tests/jobs/handlers/test_runs_install.py` for the existing install-handler harness (how it builds a `conn`, a Run with `kernel_ref`, a `System`, a `resolver`, and an `InstallPayload` with `crashkernel`, and how it runs the coroutine — likely `asyncio.run`).
+
+**Pin the config injection with `monkeypatch`, not artifact seeding.** Do **not** try to seed a real `SENSITIVE` `effective_config` artifact row + object bytes — patch the gate's read at its **import site in the handler module** so the seam test is independent of the object store:
 
 ```python
-def test_install_refuses_crashkernel_when_config_lacks_crash_symbols(<harness fixtures>):
-    # seed run.effective_config artifact = a .config missing PROC_VMCORE; InstallPayload(crashkernel="256M")
-    with pytest.raises(CategorizedError) as ei:
-        await install_handler(conn, job, resolver=resolver, ...)
+from unittest.mock import patch
+from kdive.kernel_config.parse import KernelConfig
+
+# a config with every crash gate_required symbol EXCEPT PROC_VMCORE
+_MISSING = KernelConfig(frozenset({
+    "KEXEC_CORE", "KEXEC", "CRASH_DUMP", "VMCORE_INFO", "FW_CFG_SYSFS", "RELOCATABLE",
+}))
+
+
+def test_install_refuses_crashkernel_when_config_lacks_crash_symbols(<harness>):
+    async def _fake_load(conn, run_id, *, store_factory=None):
+        return _MISSING
+    with patch("kdive.jobs.handlers.runs.install.load_effective_config", _fake_load):
+        with pytest.raises(CategorizedError) as ei:
+            asyncio.run(install_handler(conn, job, resolver=resolver, ...))  # crashkernel="256M"
     assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert ei.value.details["reason"] == "kernel_missing_crash_config"
     assert "PROC_VMCORE" in ei.value.details["missing"]
 ```
+
+Add a second test asserting that with `_fake_load` returning `None` (no config) — **or** the default (unpatched) path when no crashkernel is requested — the install proceeds normally (no raise). Patching at the handler's import path (`kdive.jobs.handlers.runs.install.load_effective_config`) is required: patching `kdive.kernel_config.fetch.load_effective_config` would not affect the name already bound in the handler module.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -902,7 +914,28 @@ git commit -m "feat(runs): gate kdump crashkernel on uploaded config (#1052)"
 
 - [ ] **Step 1: Write the failing test**
 
-In `tests/mcp/lifecycle/test_vmcore_tools.py`, following the existing `_fetch_vmcore` harness (seeds a CRASHED System bound to a Run, a runtime whose `supported_capture_methods` includes KDUMP), add a test: seed the Run's `effective_config` artifact missing `KEXEC_CORE`; call the vmcore-fetch handler resolving to KDUMP; assert the returned `ToolResponse` is a failure with `error_category == "configuration_error"` and `data["reason"] == "kernel_missing_crash_config"` and `"KEXEC_CORE" in data["missing"]`. Add a HOST_DUMP test: same missing config but method resolves/`method="host_dump"` → **not** gated (job enqueued).
+In `tests/mcp/lifecycle/test_vmcore_tools.py`, following the existing `_fetch_vmcore` harness (seeds a CRASHED System bound to a Run, a runtime whose `supported_capture_methods` includes KDUMP; runs via `asyncio.run`). As in Task 7, **patch the gate read at the handler's import site** rather than seeding an artifact:
+
+```python
+from unittest.mock import patch
+from kdive.kernel_config.parse import KernelConfig
+
+_MISSING = KernelConfig(frozenset({  # every crash gate symbol except KEXEC_CORE
+    "KEXEC", "CRASH_DUMP", "PROC_VMCORE", "VMCORE_INFO", "FW_CFG_SYSFS", "RELOCATABLE",
+}))
+
+
+def test_vmcore_kdump_refused_when_config_lacks_crash_symbols(<harness>):
+    async def _fake_load(conn, run_id, *, store_factory=None):
+        return _MISSING
+    with patch("kdive.mcp.tools.lifecycle.vmcore_handlers.load_effective_config", _fake_load):
+        resp = asyncio.run(_fetch_vmcore(pool, ctx, run_id=str(run_id), method="kdump", runtime=rt))
+    assert resp.error_category == "configuration_error"
+    assert resp.data["reason"] == "kernel_missing_crash_config"
+    assert "KEXEC_CORE" in resp.data["missing"]
+```
+
+Add a **host_dump** test: same `_fake_load` (missing config) but `method="host_dump"` → the gate is skipped (`capture_method is CaptureMethod.KDUMP` is false), so the job enqueues normally (assert a success/`job` envelope, no `configuration_error`). Confirm `ToolResponse`'s failure attributes (`.error_category`, `.data`) against `kdive/mcp/responses.py` before writing the asserts.
 
 - [ ] **Step 2: Run to verify it fails**
 
