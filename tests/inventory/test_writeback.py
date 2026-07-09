@@ -81,7 +81,6 @@ def _empty_snapshot(**rows: object) -> serialize.InventorySnapshot:
         "remote_libvirt": (),
         "local_libvirt": (),
         "fault_inject": (),
-        "build_hosts": (),
         "cost_classes": (),
     }
     base.update(rows)
@@ -119,17 +118,7 @@ def test_guard_does_not_flag_a_clean_export() -> None:
     # The export header explains REPLACE_ME_* in prose; a clean inventory (no remote host, no
     # defined image) must NOT trip the guard even though the header mentions the marker.
     rendered = serialize.serialize_inventory(
-        _empty_snapshot(
-            build_hosts=(
-                serialize.BuildHostRow(
-                    name="bh-local",
-                    kind="local",
-                    base_image_volume=None,
-                    workspace_root="/var/lib/kdive/build",
-                    max_concurrent=4,
-                ),
-            )
-        )
+        _empty_snapshot(local_libvirt=(_resource_row("l-local"),))
     )
     assert "REPLACE_ME_" in rendered  # the header prose mentions it
     writeback.assert_persistable(rendered)  # but the guard does not fire
@@ -429,53 +418,6 @@ def test_serialize_fault_missing_memory_raises_named_error() -> None:
     assert "'f-1'" in str(exc.value)
 
 
-def test_serialize_build_host_with_base_image_volume_exact() -> None:
-    rendered = serialize.serialize_inventory(
-        _empty_snapshot(
-            build_hosts=(
-                serialize.BuildHostRow(
-                    name="bh-1",
-                    kind="remote",
-                    base_image_volume="pool/base",
-                    workspace_root="/var/lib/kdive/build",
-                    max_concurrent=4,
-                ),
-            )
-        )
-    )
-    expected_block = "\n".join(
-        [
-            "[[build_host]]",
-            'name = "bh-1"',
-            'kind = "remote"',
-            'workspace_root = "/var/lib/kdive/build"',
-            "max_concurrent = 4",
-            'base_image_volume = "pool/base"',
-            "",
-        ]
-    )
-    assert expected_block in rendered
-
-
-def test_serialize_build_host_without_volume_omits_field() -> None:
-    rendered = serialize.serialize_inventory(
-        _empty_snapshot(
-            build_hosts=(
-                serialize.BuildHostRow(
-                    name="bh-1",
-                    kind="local",
-                    base_image_volume=None,
-                    workspace_root="/ws",
-                    max_concurrent=2,
-                ),
-            )
-        )
-    )
-    assert "[[build_host]]" in rendered
-    assert "base_image_volume" not in rendered
-    assert "max_concurrent = 2" in rendered
-
-
 def test_serialize_cost_class_emits_coeff_as_quoted_string() -> None:
     from decimal import Decimal
 
@@ -486,27 +428,18 @@ def test_serialize_cost_class_emits_coeff_as_quoted_string() -> None:
     assert expected_block in rendered
 
 
-def test_serialize_resources_and_build_hosts_sorted_by_name() -> None:
+def test_serialize_resources_sorted_by_name() -> None:
     # Each collection gets two rows in reverse-name order so a dropped/constant sort key
     # (insertion order) or a key=None sort (ResourceRow is unorderable → TypeError) is caught.
     snapshot = _empty_snapshot(
         remote_libvirt=(_resource_row("r-zzz"), _resource_row("r-aaa")),
         local_libvirt=(_resource_row("zzz"), _resource_row("aaa")),
         fault_inject=(_resource_row("fi-zzz"), _resource_row("fi-aaa")),
-        build_hosts=(
-            serialize.BuildHostRow(
-                name="bh-z", kind="k", base_image_volume=None, workspace_root="/w", max_concurrent=1
-            ),
-            serialize.BuildHostRow(
-                name="bh-a", kind="k", base_image_volume=None, workspace_root="/w", max_concurrent=1
-            ),
-        ),
     )
     rendered = serialize.serialize_inventory(snapshot)
     assert rendered.index('name = "r-aaa"') < rendered.index('name = "r-zzz"')
     assert rendered.index('name = "aaa"') < rendered.index('name = "zzz"')
     assert rendered.index('name = "fi-aaa"') < rendered.index('name = "fi-zzz"')
-    assert rendered.index('name = "bh-a"') < rendered.index('name = "bh-z"')
 
 
 def test_serialize_cost_classes_sorted_by_name_not_coeff() -> None:
@@ -527,11 +460,6 @@ def test_serialize_section_order_is_fixed() -> None:
         remote_libvirt=(_resource_row("r1"),),
         local_libvirt=(_resource_row("l1"),),
         fault_inject=(_resource_row("fi1"),),
-        build_hosts=(
-            serialize.BuildHostRow(
-                name="bh1", kind="k", base_image_volume=None, workspace_root="/w", max_concurrent=1
-            ),
-        ),
         cost_classes=(("cc1", Decimal("1")),),
     )
     body = _body(snapshot)
@@ -540,7 +468,6 @@ def test_serialize_section_order_is_fixed() -> None:
         body.index("[[remote_libvirt]]"),
         body.index("[[local_libvirt]]"),
         body.index("[[fault_inject]]"),
-        body.index("[[build_host]]"),
         body.index("[[cost_class]]"),
     ]
     assert positions == sorted(positions)

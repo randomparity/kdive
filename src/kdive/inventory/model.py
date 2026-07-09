@@ -2,8 +2,7 @@
 
 The model mirrors the ``systems.toml`` schema v2: a list of ``[[image]]`` entries
 (each with a discriminated :data:`ImageSource` union), and per-provider instance
-lists (``[[remote_libvirt]]`` / ``[[local_libvirt]]`` / ``[[fault_inject]]`` /
-``[[build_host]]``).
+lists (``[[remote_libvirt]]`` / ``[[local_libvirt]]`` / ``[[fault_inject]]``).
 
 Parse-time validation enforces three structural invariants:
 
@@ -194,16 +193,6 @@ class FaultInjectInstance(_Instance):
     seed: int = 0
 
 
-class BuildHostInstance(BaseModel):
-    """A ``[[build_host]]`` declaration."""
-
-    name: str
-    kind: str
-    base_image_volume: str | None = None
-    workspace_root: str
-    max_concurrent: int = 1
-
-
 class CostClassEntry(BaseModel):
     """A single ``[[cost_class]]`` declaration: a pricing coefficient for a cost class.
 
@@ -235,7 +224,6 @@ class InventoryDoc(BaseModel):
     remote_libvirt: list[RemoteLibvirtInstance] = Field(default_factory=list)
     local_libvirt: list[LocalLibvirtInstance] = Field(default_factory=list)
     fault_inject: list[FaultInjectInstance] = Field(default_factory=list)
-    build_host: list[BuildHostInstance] = Field(default_factory=list)
     cost_class: list[CostClassEntry] = Field(default_factory=list)
 
     def _check_image_identities(self) -> None:
@@ -264,7 +252,6 @@ class InventoryDoc(BaseModel):
             ("remote_libvirt", [i.name for i in self.remote_libvirt]),
             ("local_libvirt", [i.name for i in self.local_libvirt]),
             ("fault_inject", [i.name for i in self.fault_inject]),
-            ("build_host", [i.name for i in self.build_host]),
         )
         for kind, names in groups:
             dupes = sorted({n for n in names if names.count(n) > 1})

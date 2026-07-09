@@ -3,7 +3,7 @@
 The ledger records, per inventory identity, an operator's intent to **override**
 ``systems.toml``. It is the provenance record that lets a runtime mutation of a config-declared
 identity win over the file without losing drift repair for identities that carry no entry: the
-reconcile inventory pass (``reconcile_resources`` / ``reconcile_build_hosts``) consults it under
+reconcile inventory pass (``reconcile_resources``) consults it under
 the session-scoped ``inventory-reconcile`` lock, and a GC step (``reconciler/inventory.py``) drops
 a settled entry once the file agrees with live state.
 

@@ -572,11 +572,6 @@ async def _seed_inventory(conn: psycopg.AsyncConnection) -> None:
         " 'qemu+tls://host/system', 'config')",
         (Jsonb(caps),),
     )
-    await conn.execute(
-        "INSERT INTO build_hosts "
-        "(name, kind, workspace_root, max_concurrent, managed_by) "
-        "VALUES ('bh-local', 'local', '/var/lib/kdive/build', 4, 'config')"
-    )
 
 
 def test_export_systems_toml_requires_platform_operator(migrated_url: str) -> None:
@@ -614,7 +609,6 @@ def test_export_systems_toml_emits_and_audits(migrated_url: str) -> None:
             toml_text = str(resp.data["toml"])
             assert "schema_version = 2" in toml_text
             assert 'name = "host-a"' in toml_text
-            assert 'name = "bh-local"' in toml_text
         rows = await _platform_audit_rows(migrated_url)
         export_rows = [r for r in rows if r[2] == "ops.export_systems_toml"]
         assert len(export_rows) == 1
@@ -654,7 +648,7 @@ def test_export_systems_toml_omits_removed_identity(migrated_url: str) -> None:
 
 def test_export_systems_toml_round_trips_through_reconcile(migrated_url: str) -> None:
     # Export, fill the remote skeleton, re-parse, and reconcile against a fresh DB; the resulting
-    # config rows match the original state for images/build_hosts + resource identity/sizing.
+    # config rows match the original state for images + resource identity/sizing.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
@@ -667,7 +661,6 @@ def test_export_systems_toml_round_trips_through_reconcile(migrated_url: str) ->
         assert doc.remote_libvirt[0].vcpus == 8
         assert doc.remote_libvirt[0].memory_mb == 16384
         assert doc.remote_libvirt[0].concurrent_allocation_cap == 2
-        assert doc.build_host[0].name == "bh-local"
         assert doc.image[0].name == "base"
 
     asyncio.run(_run())
@@ -679,10 +672,6 @@ def test_export_systems_toml_round_trips_through_reconcile(migrated_url: str) ->
 async def _seed_non_remote_inventory(conn: psycopg.AsyncConnection) -> None:
     # An inventory with NO remote_libvirt host and NO defined image — its export carries no
     # REPLACE_ME_* placeholder, so a live-serialization persist is allowed.
-    await conn.execute(
-        "INSERT INTO build_hosts (name, kind, workspace_root, max_concurrent, managed_by) "
-        "VALUES ('bh-local', 'local', '/var/lib/kdive/build', 4, 'config')"
-    )
     await conn.execute(
         "INSERT INTO cost_class_coefficients (cost_class, coeff) VALUES ('local', '1.0') "
         "ON CONFLICT (cost_class) DO NOTHING"
@@ -731,7 +720,7 @@ def test_persist_clean_export_writes_and_reports(migrated_url: str) -> None:
 
     asyncio.run(_run())
     assert fake.written is not None
-    assert "bh-local" in fake.written
+    assert 'name = "local"' in fake.written
 
 
 def test_persist_skeleton_is_refused_and_writes_nothing(migrated_url: str) -> None:

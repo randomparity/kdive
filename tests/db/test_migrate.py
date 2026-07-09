@@ -36,7 +36,6 @@ CHECK_ENUMS = [
     ("image_state_check", images.ImageState),
     ("image_catalog_managed_by_check", resources.ManagedBy),
     ("resources_managed_by_check", resources.ManagedBy),
-    ("build_hosts_managed_by_check", resources.ManagedBy),
     ("run_steps_state_check", idempotency._RunStepState),
     ("component_uploads_state_check", ComponentUploadState),
     ("inventory_overrides_disposition_check", InventoryOverrideDisposition),
@@ -53,8 +52,6 @@ OBJECT_TABLES = {
     "jobs",
     "artifacts",
     "audit_log",
-    "build_hosts",
-    "build_host_leases",
 }
 
 # Tables migration 0002 adds (M1 accounting/admission data layer).
@@ -165,6 +162,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0059",
         "0060",
         "0061",
+        "0062",
     ]
     assert second == []
 
@@ -599,6 +597,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0059",
         "0060",
         "0061",
+        "0062",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -939,6 +938,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0059",
         "0060",
         "0061",
+        "0062",
     ]
 
 
@@ -1175,11 +1175,11 @@ def test_migration_0016_adds_requested_backlog_index(pg_conn: psycopg.Connection
 
 
 # Migration 0030 authors all schema the systems.toml inventory design needs (ADR-0112):
-# the managed_by ownership column on image_catalog/resources/build_hosts, image_catalog.volume
+# the managed_by ownership column on image_catalog/resources, image_catalog.volume
 # with a relaxed image_object_present CHECK, resources stable-name + affinity + lease columns,
 # and the load-bearing managed_by backfill.
 
-_MANAGED_BY_TABLES = ("image_catalog", "resources", "build_hosts")
+_MANAGED_BY_TABLES = ("image_catalog", "resources")
 
 
 def _insert_public_image(
@@ -1373,18 +1373,6 @@ def test_migration_0030_backfills_pre_existing_rows(pg_conn: psycopg.Connection)
     assert pub is not None and pub[0] == "config"
     priv = pg_conn.execute("SELECT managed_by FROM image_catalog WHERE name = 'priv'").fetchone()
     assert priv is not None and priv[0] == "runtime"
-
-
-def test_migration_0030_does_not_backfill_build_hosts(pg_conn: psycopg.Connection) -> None:
-    # build_hosts is intentionally NOT backfilled — it keeps the 'runtime' default because build
-    # hosts are imperatively registered, so the first reconcile never prunes them. The seeded
-    # worker-local row (from 0027) must read 'runtime', not 'config'/'discovery'.
-    _apply_through(pg_conn, "0029")
-    migrate.apply_migrations(pg_conn)
-    row = pg_conn.execute(
-        "SELECT managed_by FROM build_hosts WHERE name = 'worker-local'"
-    ).fetchone()
-    assert row is not None and row[0] == "runtime"
 
 
 def _apply_through(conn: psycopg.Connection, last_version: str) -> None:

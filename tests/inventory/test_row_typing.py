@@ -10,13 +10,13 @@ import pytest
 from kdive.inventory._row_typing import RowTyper
 from kdive.inventory.errors import InventoryError
 
-_TYPER = RowTyper("build_hosts")
+_TYPER = RowTyper("resources")
 
 
 def test_error_names_table_field_and_expected() -> None:
     err = _TYPER.error("host", "uuid")
     assert isinstance(err, InventoryError)
-    assert err.entry == "build_hosts"
+    assert err.entry == "resources"
     assert err.field == "host"
     assert "database row expected uuid" in str(err)
 
