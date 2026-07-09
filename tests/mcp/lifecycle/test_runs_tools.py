@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, LiteralString
+from typing import Any, LiteralString, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -1697,6 +1697,7 @@ def test_created_response_chains_to_the_upload_loop() -> None:
     assert resp.suggested_next_actions == [
         "runs.get",
         "artifacts.expected_uploads",
+        "artifacts.feature_config_requirements",
         "artifacts.create_run_upload",
     ]
 
@@ -1719,6 +1720,7 @@ def test_create_external_run_chains_to_upload_loop(migrated_url: str) -> None:
         assert resp.suggested_next_actions == [
             "runs.get",
             "artifacts.expected_uploads",
+            "artifacts.feature_config_requirements",
             "artifacts.create_run_upload",
         ]
 
@@ -3842,6 +3844,98 @@ def test_install_handler_rejects_crashkernel_on_non_kdump_system(migrated_url: s
             assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
             assert exc.value.details["reason"] == "crashkernel_requires_kdump"
             assert len(installer.calls) == 0  # never staged
+
+    asyncio.run(_run())
+
+
+_CRASH_GATE_SUPPORTED = frozenset(
+    {
+        "KEXEC_CORE",
+        "KEXEC",
+        "CRASH_DUMP",
+        "PROC_VMCORE",
+        "VMCORE_INFO",
+        "FW_CFG_SYSFS",
+        "RELOCATABLE",
+    }
+)
+
+
+def test_install_handler_refuses_crashkernel_when_config_lacks_crash_symbols(
+    migrated_url: str,
+) -> None:
+    # ADR-0318: a kdump System whose uploaded effective_config lacks a required crash symbol
+    # (PROC_VMCORE here) refuses the crashkernel install with a categorized, symbol-naming reason.
+    from unittest.mock import patch
+
+    from kdive.kernel_config.parse import KernelConfig
+
+    missing = KernelConfig(_CRASH_GATE_SUPPORTED - {"PROC_VMCORE"})
+
+    async def _fake_load(conn: Any, run_id: Any, *, store_factory: Any = None) -> KernelConfig:
+        return missing
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(
+                pool,
+                build_profile={**_VALID_BUILD, "cmdline": "dhash_entries=1"},
+                provisioning_profile=_profile_dump(crashkernel="256M"),
+            )
+            job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install", crashkernel="512M")
+            installer = _FakeInstaller()
+            with (
+                patch("kdive.kernel_config.gate.load_effective_config", _fake_load),
+                pytest.raises(CategorizedError) as exc,
+            ):
+                async with pool.connection() as conn:
+                    await runs_handlers.install_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(
+                            installer=installer, profile_policy=_LOCAL_POLICY
+                        ),
+                    )
+            assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+            assert exc.value.details["reason"] == "kernel_missing_crash_config"
+            assert "PROC_VMCORE" in cast(list[str], exc.value.details["missing"])
+            assert len(installer.calls) == 0  # never staged
+
+    asyncio.run(_run())
+
+
+def test_install_handler_arms_crashkernel_when_config_supports_it(migrated_url: str) -> None:
+    # A supported config does not block the crashkernel install (the gate keys on gate_required,
+    # so a KASLR-off config with the full crash set still arms).
+    from unittest.mock import patch
+
+    from kdive.kernel_config.parse import KernelConfig
+
+    supported = KernelConfig(_CRASH_GATE_SUPPORTED)  # no RANDOMIZE_BASE — still supported
+
+    async def _fake_load(conn: Any, run_id: Any, *, store_factory: Any = None) -> KernelConfig:
+        return supported
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(
+                pool,
+                build_profile={**_VALID_BUILD, "cmdline": "dhash_entries=1"},
+                provisioning_profile=_profile_dump(crashkernel="256M"),
+            )
+            job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install", crashkernel="512M")
+            installer = _FakeInstaller()
+            with patch("kdive.kernel_config.gate.load_effective_config", _fake_load):
+                async with pool.connection() as conn:
+                    await runs_handlers.install_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(
+                            installer=installer, profile_policy=_LOCAL_POLICY
+                        ),
+                    )
+            assert len(installer.calls) == 1
+            assert "crashkernel=512M" in installer.calls[0].cmdline
 
     asyncio.run(_run())
 

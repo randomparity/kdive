@@ -22,6 +22,9 @@ from kdive.build_artifacts.validation import (
     FormatContract,
 )
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
+    FEATURE_CONFIG_REQUIREMENTS_TOOL,
+)
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     CREATE_RUN_UPLOAD_TOOL,
     CREATE_SYSTEM_UPLOAD_TOOL,
@@ -41,8 +44,13 @@ EXPECTED_UPLOADS_TOOL = "artifacts.expected_uploads"
 # reference resolved by the docs-link guard.
 EXTERNAL_BUILD_UPLOAD_DOC = "resource://kdive/docs/operating/external-build-upload.md"
 
-# Next tools a caller follows once it knows the vocabulary.
-_NEXT_ACTIONS = [CREATE_RUN_UPLOAD_TOOL, CREATE_SYSTEM_UPLOAD_TOOL]
+# Next tools a caller follows once it knows the vocabulary: learn which CONFIG_* the debug
+# features need (ADR-0318), then upload.
+_NEXT_ACTIONS = [
+    FEATURE_CONFIG_REQUIREMENTS_TOOL,
+    CREATE_RUN_UPLOAD_TOOL,
+    CREATE_SYSTEM_UPLOAD_TOOL,
+]
 
 # The system (rootfs) upload contract. rootfs is not the combined-tar validator's concern and
 # enforces no magic at this seam, so its contract is minimal — but it is surfaced in the same

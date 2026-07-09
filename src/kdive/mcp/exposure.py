@@ -251,6 +251,7 @@ CORE_TOOLS: frozenset[str] = frozenset(
 PUBLIC_TOOLS: frozenset[str] = frozenset(
     {
         "artifacts.expected_uploads",
+        "artifacts.feature_config_requirements",
         "fixtures.list",
         "fixtures.validate",
         "images.describe",

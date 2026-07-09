@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -306,6 +306,69 @@ def test_fetch_vmcore_kdump_admitted_on_local(migrated_url: str) -> None:
             jobs = await _job_count(pool)
         assert resp.status == "queued"
         assert jobs == 1
+
+    asyncio.run(_run())
+
+
+_CRASH_GATE_FULL = frozenset(
+    {
+        "KEXEC_CORE",
+        "KEXEC",
+        "CRASH_DUMP",
+        "PROC_VMCORE",
+        "VMCORE_INFO",
+        "FW_CFG_SYSFS",
+        "RELOCATABLE",
+    }
+)
+
+
+def test_fetch_vmcore_kdump_refused_when_config_lacks_crash_symbols(migrated_url: str) -> None:
+    # ADR-0318: a KDUMP vmcore on a kernel whose uploaded config provably lacks a crash symbol is
+    # refused with a categorized, symbol-naming reason and enqueues no job.
+    from unittest.mock import patch
+
+    from kdive.kernel_config.parse import KernelConfig
+
+    missing = KernelConfig(_CRASH_GATE_FULL - {"KEXEC_CORE"})
+
+    async def _fake_load(conn: Any, run_id: Any, *, store_factory: Any = None) -> KernelConfig:
+        return missing
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id, run_id = await _crashed_run(pool)
+            handlers = _real_local_handlers()
+            with patch("kdive.kernel_config.gate.load_effective_config", _fake_load):
+                resp = await handlers.fetch_vmcore(pool, _ctx(), run_id=run_id, method="kdump")
+            jobs = await _job_count(pool)
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "kernel_missing_crash_config"
+        assert "KEXEC_CORE" in cast(list[str], resp.data["missing"])
+        assert jobs == 0  # refused before enqueue
+
+    asyncio.run(_run())
+
+
+def test_fetch_vmcore_host_dump_ungated_even_with_unsupported_config(migrated_url: str) -> None:
+    # host_dump is host-side (QEMU dump-guest-memory), so it needs no guest kernel config: the gate
+    # never fires for it even when the uploaded config would fail the kdump gate.
+    from unittest.mock import patch
+
+    from kdive.kernel_config.parse import KernelConfig
+
+    empty = KernelConfig(frozenset())
+
+    async def _fake_load(conn: Any, run_id: Any, *, store_factory: Any = None) -> KernelConfig:
+        return empty
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id, run_id = await _crashed_run(pool)
+            handlers = _real_local_handlers()
+            with patch("kdive.kernel_config.gate.load_effective_config", _fake_load):
+                resp = await handlers.fetch_vmcore(pool, _ctx(), run_id=run_id, method="host_dump")
+        assert resp.status == "queued"  # host_dump path never gates
 
     asyncio.run(_run())
 

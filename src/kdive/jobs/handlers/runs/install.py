@@ -18,6 +18,7 @@ from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.runs.common import abandon_run_step_best_effort
 from kdive.jobs.payloads import InstallPayload, RunPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
+from kdive.kernel_config.gate import crash_capture_refusal
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.security import audit
@@ -82,6 +83,17 @@ async def install_handler(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "crashkernel_requires_kdump", "method": method.value},
         )
+    if crashkernel is not None:
+        # Kernel-config gate (ADR-0318): a crashkernel reservation is useless if the uploaded
+        # kernel cannot kdump. Refuse loudly rather than reserve memory for a dump that can never
+        # happen; the helper fails open (None) on no upload / read error / degenerate config.
+        refusal = await crash_capture_refusal(conn, run_id)
+        if refusal is not None:
+            raise CategorizedError(
+                "uploaded kernel config lacks symbols required for kdump crash capture",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details=dict(refusal),
+            )
     kernel_ref = run.kernel_ref
     # One read of the build step result feeds the cmdline, initrd, and debuginfo below.
     build_result = await existing_build_result(conn, run_id)

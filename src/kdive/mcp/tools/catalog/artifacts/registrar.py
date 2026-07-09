@@ -18,6 +18,9 @@ from kdive.mcp.tools.catalog.artifacts import uploads as artifact_uploads
 from kdive.mcp.tools.catalog.artifacts.expected_uploads import (
     expected_uploads as _expected_uploads,
 )
+from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
+    feature_config_requirements as _feature_config_requirements,
+)
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.artifacts.artifact_jump import JumpDirection
 from kdive.serialization import JsonValue
@@ -48,6 +51,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_artifacts_create_run_upload(app, pool, resolver)
     _register_artifacts_create_system_upload(app, pool, resolver)
     _register_artifacts_expected_uploads(app)
+    _register_artifacts_feature_config_requirements(app)
 
 
 def _register_artifacts_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -267,3 +271,24 @@ def _register_artifacts_expected_uploads(app: FastMCP) -> None:
         # projection is the public upload-name vocabulary only (ADR-0166).
         current_context()
         return _expected_uploads()
+
+
+def _register_artifacts_feature_config_requirements(app: FastMCP) -> None:
+    @app.tool(
+        name="artifacts.feature_config_requirements",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def artifacts_feature_config_requirements() -> ToolResponse:
+        """Advisory map of each debug/platform feature to the kernel ``CONFIG_*`` it needs.
+
+        Read this before building a kernel to upload. Each ``data.features`` entry lists the
+        ``feature``, a ``summary``, ``gated`` (whether kdive refuses to arm it without the
+        config), and ``requirements`` (OR-groups of ``CONFIG_*`` — any symbol in a group
+        satisfies it). Advisory only: kdive never validates your config; skip any feature you do
+        not need. Requires a token.
+        """
+        # Auth-only (ADR-0117), like artifacts.expected_uploads: the manifest is a static public
+        # vocabulary, so enforce token presence only — no platform/project gate, no audit.
+        current_context()
+        return _feature_config_requirements()

@@ -116,6 +116,18 @@ Examples for `artifacts`:
 
 Return the accepted upload-artifact names per owner-kind. Requires a token.
 
+## `artifacts.feature_config_requirements`
+
+`implemented` · `read-only`
+
+Advisory map of each debug/platform feature to the kernel ``CONFIG_*`` it needs.
+
+Read this before building a kernel to upload. Each ``data.features`` entry lists the
+``feature``, a ``summary``, ``gated`` (whether kdive refuses to arm it without the
+config), and ``requirements`` (OR-groups of ``CONFIG_*`` — any symbol in a group
+satisfies it). Advisory only: kdive never validates your config; skip any feature you do
+not need. Requires a token.
+
 ## `artifacts.fetch_raw`
 
 `implemented` · `read-only`
