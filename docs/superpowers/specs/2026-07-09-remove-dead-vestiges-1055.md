@@ -62,15 +62,22 @@ Files:
   f-string and `args` dict (the f-string references the removed parameter, so it must change
   regardless), and `_audit_clear`'s `scope` string and `args` dict. Each drops to
   `{resource_kind, name}`. Correct **every** docstring in this handler that describes the removed
-  parameter or the build-host path — no lint/type/test/`docs-check` guardrail reads docstring prose,
-  and this tool is absent from the generated `tools.md`, so a stale docstring survives silently. (The
-  `@app.tool` wrapper docstring carries no `source_kind` token today — the wrapper's concrete
-  removals are the `source_kind` parameter and its `Field`; keep its prose consistent with the new
-  `(resource_kind, name)` signature.) The stale-prose emitters are the handler
-  `clear_override` docstring (the "`(source_kind, resource_kind)` pairing" line, the "illegal kind
-  pairing" phrasing, and the `source_kind` / `build-host` sentinel `Args`), and the
-  `_parse_override_identity` ("Validate the ledger PK … pairing") and `_override_identity_lock`
-  ("matching the override's family") helper docstrings.
+  parameter or the build-host path — the internal handler/helper docstrings are read by no
+  lint/type/test/`docs-check` guardrail (they are not in any generated doc), so a stale one survives
+  silently and only the AC6 grep guard catches it. (The `@app.tool` wrapper docstring carries no
+  `source_kind` token today — the wrapper's concrete removals are the `source_kind` parameter and its
+  `Field`; keep its prose consistent with the new `(resource_kind, name)` signature.) The stale-prose
+  emitters are the handler `clear_override` docstring (the "`(source_kind, resource_kind)` pairing"
+  line, the "illegal kind pairing" phrasing, and the `source_kind` / `build-host` sentinel `Args`),
+  and the `_parse_override_identity` ("Validate the ledger PK … pairing") and
+  `_override_identity_lock` ("matching the override's family") helper docstrings.
+- `docs/guide/reference/inventory.md` — **regenerate** via `just docs` after the `Field` removal. The
+  `source_kind` `Field` description feeds the generated per-namespace reference: this file's parameter
+  table lists `source_kind` and the `resource_kind` "or 'build-host' for a build host" sentinel, and
+  `just docs-check` (CI-gated) diffs the committed copy against a fresh generation. Removing the
+  `Field` drops the `source_kind` row and requires re-running `just docs`; commit the regenerated
+  file. (`docs/guide/reference/index.md` lists the tool by name + maturity only — no parameters — so
+  it is unaffected. The `tools.md` summary carries no parameter table either.)
 - Tests: `tests/inventory/test_overrides.py`, `tests/mcp/ops/test_inventory_clear_override.py`,
   `tests/db/test_locks.py` — delete the `build_host` cases; update resource cases that pass
   `source_kind` to the tool.
@@ -105,7 +112,10 @@ Files:
    `rg 'source_kind|build_host|build-host' src/kdive/mcp/tools/ops/inventory.py` returning zero hits.
 7. The `db/locks.py` `LockScope` docstring no longer claims a `BUILD_HOST` scope exists or that it is
    the `inventory.clear_override` lock.
-8. `just lint`, `just type` (whole tree), and `just test` all pass.
+8. `docs/guide/reference/inventory.md` is regenerated (via `just docs`) and committed:
+   `rg 'source_kind|build-host' docs/guide/reference/inventory.md` returns zero hits, and
+   `just docs-check` passes (the committed reference matches a fresh generation).
+9. `just lint`, `just type` (whole tree), `just test`, and `just docs-check` all pass.
 
 ## Verification
 
@@ -121,7 +131,10 @@ Files:
 - Targeted tests: `tests/provider_components/test_catalog.py`, `tests/admin/test_default_fixtures.py`,
   `tests/mcp/ops/test_inventory_clear_override.py`, `tests/inventory/test_overrides.py`,
   `tests/db/test_locks.py`.
-- Full guardrail: `just lint && just type && just test`.
+- Full guardrail: `just lint && just type && just test && just docs-check` — `docs-check` is
+  required because removing the `source_kind` `Field` changes the generated
+  `docs/guide/reference/inventory.md`, and `just test` alone does not regenerate or verify reference
+  docs.
 
 ## Operational note — previously-installed fixtures
 
