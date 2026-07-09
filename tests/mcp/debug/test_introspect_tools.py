@@ -188,7 +188,7 @@ def test_from_vmcore_core_present_null_debuginfo_is_no_debuginfo(migrated_url: s
             )
         assert resp.status == "error" and resp.error_category == "not_found"
         assert resp.data["reason"] == "no_debuginfo"
-        assert resp.suggested_next_actions == ["runs.get", "runs.build"]
+        assert resp.suggested_next_actions == ["runs.get", "runs.complete_build"]
 
     asyncio.run(_run())
 
@@ -206,7 +206,7 @@ def test_from_vmcore_no_build_step_is_not_found(migrated_url: str) -> None:
             )
         assert resp.status == "error" and resp.error_category == "not_found"
         assert resp.data["reason"] == "no_build"
-        assert resp.suggested_next_actions == ["runs.build", "runs.get"]
+        assert resp.suggested_next_actions == ["runs.complete_build", "runs.get"]
 
     asyncio.run(_run())
 

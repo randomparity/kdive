@@ -1007,16 +1007,12 @@ def test_structured_params_render_nested_detail() -> None:
 
 
 def test_build_profile_examples_are_valid() -> None:
-    # ADR-0177 decision 2: every documented runs.create build_profile example must parse,
-    # and the set must cover both source lanes, so a schema change that invalidates a
-    # documented example fails here rather than drifting silently.
+    # ADR-0177 decision 2: every documented runs.create build_profile example must parse, so a
+    # schema change that invalidates a documented example fails here rather than drifting silently.
     assert _BUILD_PROFILE_EXAMPLES, "build_profile examples must be non-empty"
-    sources = set()
     for label, payload in _BUILD_PROFILE_EXAMPLES:
-        parsed = BuildProfile.parse(payload)  # raises CategorizedError on an invalid example
-        sources.add(parsed.source)
+        BuildProfile.parse(payload)  # raises CategorizedError on an invalid example
         assert label.strip(), "each example needs a human label"
-    assert sources == {"server", "external"}, f"examples must cover both lanes, got {sources}"
 
 
 def test_schema_renderer_rejects_unresolved_ref() -> None:

@@ -47,11 +47,7 @@ from tests.mcp.systems_support import fault_inject_profile, granted_allocation, 
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
-_RUN_BUILD_PROFILE: dict[str, Any] = {
-    "schema_version": 1,
-    "kernel_source_ref": "git+https://git.kernel.org#v6.9",
-    "config": {"kind": "local", "path": "/configs/kdump.config"},
-}
+_RUN_BUILD_PROFILE: dict[str, Any] = {"schema_version": 1}
 
 
 def _verifier() -> JWTVerifier:

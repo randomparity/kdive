@@ -35,7 +35,7 @@ from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
-from kdive.profiles.build import BuildProfile, ExternalBuildProfile
+from kdive.profiles.build import BuildProfile
 from kdive.profiles.provider_policy import rootfs_upload_window_allowed
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
@@ -346,8 +346,11 @@ async def _run_accepts_upload(
     run = await RUNS.get(conn, owner_id)
     if run is None or run.state is not RunState.CREATED:
         return False
-    parsed = BuildProfile.parse(run.build_profile)
-    return isinstance(parsed, ExternalBuildProfile)
+    try:
+        BuildProfile.parse(run.build_profile)
+    except CategorizedError:
+        return False
+    return True
 
 
 async def _system_accepts_upload(

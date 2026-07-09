@@ -68,47 +68,13 @@ Create a run, bound to a system or unbound against a target_kind.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object | yes | Run creation request. After source='external', call artifacts.expected_uploads and artifacts.create_run_upload, then runs.complete_build. Extra kernel cmdline args are passed later as `cmdline` on runs.complete_build. |
+| `request` | object | yes | Run creation request. After runs.create, call artifacts.expected_uploads and artifacts.create_run_upload, then runs.complete_build. Extra kernel cmdline args are passed later as `cmdline` on runs.complete_build. |
 
 `request` fields:
 
 - `investigation_id` (`string`, required) — Investigation to attach the Run to.
-- `build_profile` (`object(source=external) \| object(source=server)`, required) — Build profile for the Run's kernel. Use source='external': ingest a prebuilt artifact. After runs.create with source='external', call artifacts.expected_uploads to learn the exact bytes to produce, artifacts.create_run_upload to upload, then runs.complete_build (where you may also record the optional source_label/source_ref provenance of the tree you built from - an unverified client claim, surfaced in runs.get data.build_provenance). Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the cmdline parameter to runs.complete_build. See resource://kdive/docs/operating/external-build-upload.md for shaping a source='external' upload.
-  - _variant object(source=external):_
-    - `schema_version` (``=1``, required)
-    - `source` (``=external``, required)
-    - `profile_requirements` (`object (nullable)`, optional)
-      - `provider` (`string`, required)
-      - `name` (`string`, required)
-  - _variant object(source=server):_
-    - `schema_version` (``=1``, required)
-    - `source` (``=server``, optional)
-    - `kernel_source_ref` (`string \| object`, required)
-      - `git` (`object`, required) — Remote + ref coordinates for a git-cloned kernel source.
-        - `remote` (`string`, required)
-        - `ref` (`string`, required)
-    - `config` (`object(kind=local) \| object(kind=artifact) \| object(kind=component-upload) \| object(kind=catalog) (nullable)`, optional)
-      - _variant object(kind=local):_
-        - `kind` (``=local``, required)
-        - `path` (`string`, required)
-        - `sha256` (`string (nullable)`, optional)
-      - _variant object(kind=artifact):_
-        - `kind` (``=artifact``, required)
-        - `artifact_id` (`string`, required)
-        - `sha256` (`string (nullable)`, optional)
-      - _variant object(kind=component-upload):_
-        - `kind` (``=component-upload``, required)
-        - `upload_id` (`string`, required)
-        - `sha256` (`string (nullable)`, optional)
-      - _variant object(kind=catalog):_
-        - `kind` (``=catalog``, required)
-        - `provider` (`string`, required)
-        - `name` (`string`, required)
-    - `profile_requirements` (`object (nullable)`, optional)
-      - `provider` (`string`, required)
-      - `name` (`string`, required)
-    - `patch_ref` (`string (nullable)`, optional)
-    - `build_host` (`string (nullable)`, optional)
+- `build_profile` (`object(schema_version=1)`, required) — Build profile for the Run's kernel: a thin document, currently just {'schema_version': 1}. The kernel is built locally and uploaded, so no source tree or config is named here. After runs.create, call artifacts.expected_uploads to learn the exact bytes to produce, artifacts.create_run_upload to upload, then runs.complete_build (where you may also record the optional source_label/source_ref provenance of the tree you built from - an unverified client claim, surfaced in runs.get data.build_provenance). Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the cmdline parameter to runs.complete_build. See resource://kdive/docs/operating/external-build-upload.md for shaping an upload.
+  - `schema_version` (``=1``, required)
 - `system_id` (`string (nullable)`, optional) — Ready System to bind now. Omit to create an unbound Run that targets `target_kind` and is bound later with runs.bind.
 - `target_kind` (`string (nullable)`, optional) — Resource kind the Run builds for. Required when system_id is omitted; derived from the System when system_id is set.
 - `expected_boot_failure` (`object(free-form) (nullable)`, optional) — Optional declared boot crash. Use a named preset for a maintained, version- and arch-robust signature: {'kind':'panic'}, {'kind':'oops'}, or {'kind':'hung_task'} - a preset takes no 'pattern' and expands to a canonical kernel console signature. For a custom signature use {'kind':'console_crash','pattern':'Unable to handle kernel'}; a preset and a custom 'pattern' are mutually exclusive. The pattern is matched as a case-sensitive literal substring (not a regex), tested line-by-line against the redacted console log; a single line containing the substring is a match. Use '|' to OR alternatives (e.g. 'Oops|Unable to handle kernel') - up to 16 terms, 256 characters total, each term non-empty. A match makes the expected crash the Run's success outcome.
@@ -122,37 +88,11 @@ Create a run, bound to a system or unbound against a target_kind.
 
 `build_profile` examples:
 
-_external lane, recommended default (ingest a prebuilt artifact):_
+_external-upload lane (build locally, upload the prebuilt artifact):_
 
 ```json
 {
-  "schema_version": 1,
-  "source": "external"
-}
-```
-
-_server lane, warm-tree source (single-host convenience):_
-
-```json
-{
-  "schema_version": 1,
-  "source": "server",
-  "kernel_source_ref": "v6.9"
-}
-```
-
-_server lane, git source:_
-
-```json
-{
-  "schema_version": 1,
-  "source": "server",
-  "kernel_source_ref": {
-    "git": {
-      "remote": "https://git.kernel.org/.../linux.git",
-      "ref": "v6.9"
-    }
-  }
+  "schema_version": 1
 }
 ```
 

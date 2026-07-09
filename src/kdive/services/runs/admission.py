@@ -33,12 +33,7 @@ from kdive.domain.lifecycle.system_reuse import (
 )
 from kdive.domain.profile_documents import SerializedExpectedBootFailure
 from kdive.log import bind_context
-from kdive.profiles.build import (
-    BuildProfile,
-    ExternalBuildProfile,
-    ParsedBuildProfile,
-    dump_build_profile,
-)
+from kdive.profiles.build import BuildProfile, dump_build_profile
 from kdive.profiles.types import BuildProfileInput, ExpectedBootFailureInput
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
@@ -141,8 +136,6 @@ class RunCreateResult:
     system_id: UUID | None = None
     expected_boot_failure_kind: str | None = None
     label: str | None = None
-    is_external: bool = False
-    """True for a source='external' build: the response chains into the upload loop, not build."""
 
 
 type RunCreateRecorder = Callable[[AsyncConnection, RunCreateResult], Awaitable[None]]
@@ -447,7 +440,7 @@ async def _create_locked(
     conn: AsyncConnection,
     ctx: RequestContext,
     targets: _CreateTargets,
-    build_profile: ParsedBuildProfile,
+    build_profile: BuildProfile,
     expected_boot_failure: SerializedExpectedBootFailure | None,
     *,
     project: str,
@@ -500,12 +493,7 @@ async def _create_locked(
             label=label,
         )
         await _flip_investigation_if_open(conn, ctx, inv, targets.investigation_id, project)
-        result = _created_result(
-            run,
-            expected_boot_failure,
-            project,
-            is_external=isinstance(build_profile, ExternalBuildProfile),
-        )
+        result = _created_result(run, expected_boot_failure, project)
         if recorder is not None:
             await recorder(conn, result)
     return result
@@ -515,7 +503,7 @@ async def _insert_run(
     conn: AsyncConnection,
     ctx: RequestContext,
     targets: _CreateTargets,
-    build_profile: ParsedBuildProfile,
+    build_profile: BuildProfile,
     expected_boot_failure: SerializedExpectedBootFailure | None,
     project: str,
     *,
@@ -589,8 +577,6 @@ def _created_result(
     run: Run,
     expected_boot_failure: SerializedExpectedBootFailure | None,
     project: str,
-    *,
-    is_external: bool,
 ) -> RunCreateResult:
     kind = str(expected_boot_failure["kind"]) if expected_boot_failure is not None else None
     return RunCreateResult(
@@ -601,7 +587,6 @@ def _created_result(
         system_id=run.system_id,
         expected_boot_failure_kind=kind,
         label=run.label,
-        is_external=is_external,
     )
 
 
@@ -631,7 +616,7 @@ async def _create_unbound(
     ctx: RequestContext,
     request: RunCreateRequest,
     investigation_id: UUID,
-    build_profile: ParsedBuildProfile,
+    build_profile: BuildProfile,
     expected_boot_failure: SerializedExpectedBootFailure | None,
     *,
     requirement: ReuseRequirement,
@@ -674,12 +659,7 @@ async def _create_unbound(
             label=label,
         )
         await _flip_investigation_if_open(conn, ctx, locked_inv, investigation_id, project)
-        result = _created_result(
-            run,
-            expected_boot_failure,
-            project,
-            is_external=isinstance(build_profile, ExternalBuildProfile),
-        )
+        result = _created_result(run, expected_boot_failure, project)
         if recorder is not None:
             await recorder(conn, result)
     return result
@@ -689,7 +669,7 @@ async def _insert_unbound_run(
     conn: AsyncConnection,
     ctx: RequestContext,
     investigation_id: UUID,
-    build_profile: ParsedBuildProfile,
+    build_profile: BuildProfile,
     expected_boot_failure: SerializedExpectedBootFailure | None,
     project: str,
     target_kind: ResourceKind,

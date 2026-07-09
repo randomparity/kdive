@@ -49,9 +49,6 @@ from tests.mcp.complete_build_support import (
 from tests.mcp.complete_build_support import (
     seed_run as _seed_run,
 )
-from tests.mcp.complete_build_support import (
-    seed_server_run as _seed_server_run,
-)
 from tests.mcp.systems_support import provider_resolver
 
 
@@ -70,14 +67,7 @@ def _combined_kernel_tar() -> bytes:
 
 
 _KERNEL_TAR = _combined_kernel_tar()
-_EXTERNAL_PROFILE_WITH_REQUIREMENTS = {
-    "schema_version": 1,
-    "source": "external",
-    "profile_requirements": {
-        "provider": "local-libvirt",
-        "name": "console-ready_x86_64",
-    },
-}
+_EXTERNAL_PROFILE = {"schema_version": 1}
 _DEFAULT_BUILD_HANDLERS = CompleteBuildHandlers()
 
 
@@ -421,18 +411,6 @@ def test_complete_build_is_idempotent(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_complete_build_rejects_server_run(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_server_run(pool)
-            resp = await _DEFAULT_BUILD_HANDLERS.complete_build(
-                pool, _ctx(), str(run_id), build_id=None, cmdline="x"
-            )
-        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
-
-    asyncio.run(_run())
-
-
 def test_complete_build_maps_validation_build_failure(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -535,12 +513,12 @@ def test_complete_build_writes_artifact_rows_and_deletes_manifest(migrated_url: 
     asyncio.run(_run())
 
 
-def test_complete_build_writes_artifacts_after_effective_config_validation(
+def test_complete_build_writes_effective_config_artifact(
     migrated_url: str,
 ) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            run_id = await _seed_run(pool, _EXTERNAL_PROFILE_WITH_REQUIREMENTS)
+            run_id = await _seed_run(pool, _EXTERNAL_PROFILE)
             config = b"CONFIG_SERIAL_8250_CONSOLE=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_VIRTIO_PCI=y\n"
             responses = await create_run_upload(
                 pool,
@@ -577,46 +555,6 @@ def test_complete_build_writes_artifacts_after_effective_config_validation(
 
         assert resp.status == "succeeded", resp
         assert keys == {kernel_key, config_key}
-
-    asyncio.run(_run())
-
-
-def test_complete_build_rejects_missing_effective_config_without_artifacts(
-    migrated_url: str,
-) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_run(pool, _EXTERNAL_PROFILE_WITH_REQUIREMENTS)
-            responses = await create_run_upload(
-                pool,
-                _ctx(),
-                run_id=str(run_id),
-                artifacts=[
-                    {"name": "kernel", "sha256": "ck", "size_bytes": len(_KERNEL_TAR)},
-                ],
-                store=_UploadStore(),
-            )
-            assert {response.status for response in responses.items} == {"upload_ready"}
-            kernel_key = f"local/runs/{run_id}/kernel"
-            store = _ValidationStore(
-                {kernel_key: _KERNEL_TAR},
-                {kernel_key: HeadResult(len(_KERNEL_TAR), "ck", "e-k")},
-            )
-
-            resp = await CompleteBuildHandlers(
-                object_store_factory=lambda: store,
-            ).complete_build(
-                pool,
-                _ctx(),
-                str(run_id),
-                build_id=None,
-                cmdline="x",
-            )
-            keys = await _artifact_keys(pool, run_id)
-
-        assert resp.status == "error"
-        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
-        assert keys == set()
 
     asyncio.run(_run())
 

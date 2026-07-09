@@ -20,25 +20,13 @@ def iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
 
 
-def _provenance(source: str, kernel_source_ref: object) -> str:
-    """Derive the source provenance label without echoing the reference itself."""
-    if source == "external":
-        return "external"
-    if isinstance(kernel_source_ref, Mapping) and "git" in kernel_source_ref:
-        return "git"
-    return "warm-tree"
+def build_profile_summary(_profile: Mapping[str, object]) -> dict[str, JsonValue]:
+    """Return the allowlisted build summary.
 
-
-def build_profile_summary(profile: Mapping[str, object]) -> dict[str, JsonValue]:
-    """Return the allowlisted build summary: source lane, host, and derived provenance."""
-    raw_source = profile.get("source", "server")
-    source = raw_source if isinstance(raw_source, str) else "server"
-    summary: dict[str, JsonValue] = {"build_source": source}
-    host = profile.get("build_host")
-    if isinstance(host, str):
-        summary["build_host"] = host
-    summary["build_source_provenance"] = _provenance(source, profile.get("kernel_source_ref"))
-    return summary
+    Every Run is the external-upload lane (the agent builds locally and uploads), so the
+    summary is a fixed ``build_source`` marker; no source-tree or host field is derived.
+    """
+    return {"build_source": "external"}
 
 
 def provisioning_profile_summary(profile: Mapping[str, object]) -> dict[str, JsonValue]:

@@ -78,9 +78,9 @@ def test_run_item_states_the_unified_provider_neutral_contract() -> None:
     assert "build_id" in " ".join(run["contracts"]["vmlinux"]["notes"])
 
     effective = run["contracts"]["effective_config"]
-    assert effective["requirement"] == "conditional"
+    assert effective["requirement"] == "optional"
     assert effective["format"]["max_bytes"] == EFFECTIVE_CONFIG_MAX_BYTES
-    assert "profile_requirements" in " ".join(effective["notes"])
+    assert "never validated" in " ".join(effective["notes"])
 
 
 def test_system_rootfs_contract_is_minimal() -> None:

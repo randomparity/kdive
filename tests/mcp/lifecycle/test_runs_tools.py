@@ -61,11 +61,7 @@ from tests.db_waits import wait_until_any_backend_waiting
 from tests.mcp.systems_support import provider_resolver
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
-_PROFILE: dict[str, Any] = {
-    "schema_version": 1,
-    "kernel_source_ref": "git+https://git.kernel.org#v6.9",
-    "config": {"kind": "local", "path": "/configs/kdump.config"},
-}
+_PROFILE: dict[str, Any] = {"schema_version": 1}
 
 
 @pytest.fixture(autouse=True)
@@ -432,10 +428,10 @@ def test_cancel_unbound_run_succeeds(migrated_url: str) -> None:
 
 
 def test_with_runtime_for_run_target_kind_resolves_unbound_run(migrated_url: str) -> None:
-    """The runs.build / runs.complete_build admission path resolves an unbound Run (ADR-0169).
+    """The runs.complete_build admission path resolves an unbound Run (ADR-0169).
 
-    The runs.build wrapper uses the target-kind helper, not the bound-run helper, because a Run can
-    be built before it is attached to a System. The runtime is selected from the Run's committed
+    The wrapper uses the target-kind helper, not the bound-run helper, because a Run can be built
+    before it is attached to a System. The runtime is selected from the Run's committed
     target_kind.
     """
 
@@ -481,8 +477,8 @@ def test_envelope_for_run_failed_uses_run_failure_category() -> None:
     assert resp.error_category == "build_failure"
     assert resp.data["current_status"] == "failed"
     assert "investigation_id" in resp.data
-    assert resp.data["build_source"] == "server"  # _profile() default
-    assert resp.data["build_source_provenance"] == "warm-tree"  # _profile() has string ref
+    assert resp.data["build_source"] == "external"  # every run is the upload lane
+    assert "build_source_provenance" not in resp.data
 
 
 def test_envelope_for_run_failed_defaults_to_infrastructure_failure() -> None:
@@ -615,7 +611,7 @@ def test_envelope_for_run_expected_boot_failure_detail_is_structured() -> None:
     )
 
     assert resp.status == "created"
-    assert resp.suggested_next_actions == ["runs.get", "runs.build"]
+    assert resp.suggested_next_actions == ["runs.get", "runs.complete_build"]
     assert resp.data["required_cmdline"] == "panic_on_oops=1"
     assert resp.data["expected_boot_failure"] == "console_crash"
     assert resp.data["expected_boot_failure_detail"] == expected
@@ -866,8 +862,8 @@ def test_envelope_for_run_ready_boot_outcome_omitted_for_remote_libvirt() -> Non
 @pytest.mark.parametrize(
     ("state", "actions"),
     [
-        (RunState.CREATED, ["runs.get", "runs.build"]),
-        (RunState.RUNNING, ["runs.get", "runs.build"]),
+        (RunState.CREATED, ["runs.get", "runs.complete_build"]),
+        (RunState.RUNNING, ["runs.get", "runs.complete_build"]),
         (RunState.SUCCEEDED, ["runs.get", "runs.install"]),
         (RunState.CANCELED, ["runs.get"]),
     ],
@@ -928,7 +924,7 @@ def test_get_created_run(migrated_url: str) -> None:
             run_id = await _seed_run(pool, state=RunState.CREATED)
             resp = await get_run(pool, _ctx(), run_id)
         assert resp.status == "created"
-        assert resp.suggested_next_actions == ["runs.get", "runs.build"]
+        assert resp.suggested_next_actions == ["runs.get", "runs.complete_build"]
 
     asyncio.run(_run())
 
@@ -1686,30 +1682,24 @@ def test_get_run_surfaces_expected_boot_failure_matched_line(migrated_url: str) 
     asyncio.run(_run())
 
 
-def _create_result(*, is_external: bool) -> RunCreateResult:
+def _create_result() -> RunCreateResult:
     return RunCreateResult(
         run_id=uuid4(),
         project="proj",
         investigation_id=uuid4(),
         target_kind=ResourceKind.LOCAL_LIBVIRT,
         system_id=None,
-        is_external=is_external,
     )
 
 
-def test_created_response_external_chains_to_the_upload_loop() -> None:
-    resp = _created_response(_create_result(is_external=True))
+def test_created_response_chains_to_the_upload_loop() -> None:
+    resp = _created_response(_create_result())
     assert resp.status == "created"
     assert resp.suggested_next_actions == [
         "runs.get",
         "artifacts.expected_uploads",
         "artifacts.create_run_upload",
     ]
-
-
-def test_created_response_server_chains_to_build() -> None:
-    resp = _created_response(_create_result(is_external=False))
-    assert resp.suggested_next_actions == ["runs.get", "runs.build"]
 
 
 def test_create_external_run_chains_to_upload_loop(migrated_url: str) -> None:
@@ -1724,7 +1714,7 @@ def test_create_external_run_chains_to_upload_loop(migrated_url: str) -> None:
                 _ctx(),
                 inv_id,
                 sys_id,
-                profile={"schema_version": 1, "source": "external"},
+                profile={"schema_version": 1},
             )
         assert resp.status == "created"
         assert resp.suggested_next_actions == [
@@ -1911,7 +1901,7 @@ def test_create_first_run_flips_investigation_active(migrated_url: str) -> None:
                 )
                 flip = await cur.fetchone()
         assert run_row is not None and run_row["state"] == "created"
-        assert run_row["build_profile"]["source"] == "server"
+        assert run_row["build_profile"] == {"schema_version": 1}
         assert inv_row is not None and inv_row["state"] == "active"
         assert inv_row["last_run_at"] is not None
         assert flip is not None and flip["n"] == 1
@@ -1947,7 +1937,7 @@ def test_create_unbound_run_succeeds(migrated_url: str) -> None:
         assert row["target_kind"] == "local-libvirt"
         assert resp.data["system_id"] is None
         assert resp.data["target_kind"] == "local-libvirt"
-        assert "runs.build" in resp.suggested_next_actions
+        assert "artifacts.expected_uploads" in resp.suggested_next_actions
         assert inv is not None and inv["state"] == "active"
 
     asyncio.run(_run())
@@ -2274,9 +2264,9 @@ def test_create_non_dict_build_profile_is_config_error(migrated_url: str) -> Non
 
 
 def test_create_bare_url_build_profile_does_not_leak_token(migrated_url: str) -> None:
-    # ADR-0242 / ADR-0029: a bare-URL kernel_source_ref that carries a credential must not
-    # appear anywhere in the response — neither in data, detail, nor as a literal "input" key.
-    # The error propagates through BuildProfile.parse (include_input=False) → RunCreateError →
+    # A build_profile carrying a credential-looking value in an unknown field must not appear
+    # anywhere in the response — neither in data, detail, nor as a literal "input" key. The
+    # error propagates through BuildProfile.parse (include_input=False) → RunCreateError →
     # ToolResponse.failure_from_error; this test asserts the full pipeline is leak-free.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -2741,11 +2731,7 @@ def test_reuse_does_not_deadlock_against_release_under_lock_order(migrated_url: 
 
 # --- shared build fixtures + helpers -------------------------------------------------
 
-_VALID_BUILD: dict[str, Any] = {
-    "schema_version": 1,
-    "kernel_source_ref": "git+https://git.kernel.org#v6.9",
-    "config": {"kind": "local", "path": "/configs/kdump.config"},
-}
+_VALID_BUILD: dict[str, Any] = {"schema_version": 1}
 
 
 async def _count(pool: AsyncConnectionPool, query: LiteralString, params: tuple[Any, ...]) -> int:
@@ -2764,100 +2750,17 @@ async def _system_id_of(pool: AsyncConnectionPool, run_id: str) -> str:
     return str(row["system_id"])
 
 
-# --- build-host fixtures (shared by the create-compat tests below) -------------------
+# --- build-job fixtures --------------------------------------------------------------
 
-WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
-
-# A git kernel_source_ref in the {"git": {...}} discriminated form (ssh-host provenance).
-_GIT_BUILD: dict[str, Any] = {
-    "schema_version": 1,
-    "kernel_source_ref": {
-        "git": {
-            "remote": "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
-            "ref": "v6.12",
-        }
-    },
-    "config": {"kind": "local", "path": "/configs/kdump.config"},
-}
-
-
-# An ssh host seeded with max_concurrent=2 for capacity tests.
-async def _insert_ssh_host(
-    pool: AsyncConnectionPool,
-    *,
-    name: str = "build-ssh-1",
-    max_concurrent: int = 2,
-    enabled: bool = True,
-    state: str = "ready",
-) -> UUID:
-    async with pool.connection() as conn:
-        cur = await conn.execute(
-            "INSERT INTO build_hosts "
-            "  (name, kind, address, ssh_credential_ref, workspace_root,"
-            "   max_concurrent, enabled, state) "
-            "VALUES (%s, 'ssh', '10.0.0.5', 'ssh://cred/key', '/build', %s, %s, %s)"
-            " RETURNING id",
-            (name, max_concurrent, enabled, state),
-        )
-        row = await cur.fetchone()
-    assert row is not None
-    return row[0]
-
-
-async def _lease_count(pool: AsyncConnectionPool, host_id: UUID) -> int:
-    return await _count(
-        pool,
-        "SELECT count(*) AS n FROM build_host_leases WHERE build_host_id = %s",
-        (str(host_id),),
-    )
-
-
-# --- runs.create: build-host <-> source-kind compatibility (#534) --------------------
-
-# An external-build profile (no kernel_source_ref, no build_host): the compat check skips it.
-_EXTERNAL_BUILD: dict[str, Any] = {"schema_version": 1, "source": "external"}
+WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"
 
 
 async def _run_count_on_system(pool: AsyncConnectionPool, system_id: str) -> int:
     return await _count(pool, "SELECT count(*) AS n FROM runs WHERE system_id = %s", (system_id,))
 
 
-def test_create_local_host_with_git_ref_succeeds(migrated_url: str) -> None:
-    # ADR-0162: default worker-local (kind local) + git kernel_source_ref is now compatible at
-    # create (the remote is gated by the build-time allowlist); the run is created.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
-            sys_id = await _seed_system(pool)
-            profile = copy.deepcopy(_GIT_BUILD)  # no build_host → resolves worker-local
-            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
-            nruns = await _run_count_on_system(pool, sys_id)
-        assert resp.status == "created"
-        assert nruns == 1
-
-    asyncio.run(_run())
-
-
-def test_create_remote_host_with_git_ref_succeeds(migrated_url: str) -> None:
-    # ssh host + git ref → compatible; the run is created (no lease taken at create).
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            host_id = await _insert_ssh_host(pool, name="ssh-ok")
-            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
-            sys_id = await _seed_system(pool)
-            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "ssh-ok"}
-            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
-            nruns = await _run_count_on_system(pool, sys_id)
-            nleases = await _lease_count(pool, host_id)
-        assert resp.status == "created"
-        assert nruns == 1
-        assert nleases == 0  # create takes no build-host lease
-
-    asyncio.run(_run())
-
-
-def test_create_local_host_with_warm_tree_succeeds(migrated_url: str) -> None:
-    # default worker-local + warm-tree string → compatible; the run is created.
+def test_create_external_run_succeeds(migrated_url: str) -> None:
+    # Every profile is the flat external-upload profile; create inserts a CREATED run.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
@@ -2870,51 +2773,15 @@ def test_create_local_host_with_warm_tree_succeeds(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_create_absent_named_host_still_creates(migrated_url: str) -> None:
-    # A profile naming a host that is not registered: host existence is a build-time
-    # concern, so create does NOT reject — the run is inserted CREATED.
+def test_create_second_run_on_live_system_conflicts(migrated_url: str) -> None:
+    # A System that already has a non-terminal run rejects a second create with transport_conflict.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
-            sys_id = await _seed_system(pool)
-            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "no-such-host"}
-            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
-            nruns = await _run_count_on_system(pool, sys_id)
-        assert resp.status == "created"
-        assert nruns == 1
-
-    asyncio.run(_run())
-
-
-def test_create_external_profile_skips_compat_check(migrated_url: str) -> None:
-    # An external-build profile has no kernel_source_ref/build_host; the compat check is
-    # skipped and the run is created.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
-            sys_id = await _seed_system(pool)
-            resp = await _create(
-                pool, _ctx(), inv_id, sys_id, profile=copy.deepcopy(_EXTERNAL_BUILD)
-            )
-            nruns = await _run_count_on_system(pool, sys_id)
-        assert resp.status == "created"
-        assert nruns == 1
-
-    asyncio.run(_run())
-
-
-def test_create_live_run_precedes_compat_check(migrated_url: str) -> None:
-    # A System that already has a non-terminal run + an incompatible profile must return
-    # the live-run block (transport_conflict), NOT the compatibility error.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            await _insert_ssh_host(pool, name="ssh-order")
             inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
             sys_id = await _seed_system(pool)
             first = await _create(pool, _ctx(), inv_id, sys_id, profile=copy.deepcopy(_VALID_BUILD))
             assert first.status == "created"
-            profile = {**copy.deepcopy(_VALID_BUILD), "build_host": "ssh-order"}
-            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
+            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=copy.deepcopy(_VALID_BUILD))
         assert resp.status == "error" and resp.error_category == "transport_conflict"
 
     asyncio.run(_run())
@@ -5353,21 +5220,16 @@ def test_run_envelope_surfaces_investigation_build_and_artifacts() -> None:
         system_id=None,
         target_kind=ResourceKind.LOCAL_LIBVIRT,
         state=RunState.SUCCEEDED,
-        build_profile={
-            "source": "server",
-            "build_host": "build-1",
-            "kernel_source_ref": {"git": {"remote": "https://h/r", "ref": "main"}},
-        },
+        build_profile={"schema_version": 1},
         kernel_ref="s3://bucket/vmlinuz",
         debuginfo_ref="s3://bucket/vmlinux",
     )
     resp = runs_common.envelope_for_run(run)
     assert resp.data["investigation_id"] == str(inv_id)
-    assert resp.data["build_source"] == "server"
-    assert resp.data["build_host"] == "build-1"
-    assert resp.data["build_source_provenance"] == "git"
+    assert resp.data["build_source"] == "external"
+    assert "build_host" not in resp.data
+    assert "build_source_provenance" not in resp.data
     assert resp.refs == {"kernel": "s3://bucket/vmlinuz", "debuginfo": "s3://bucket/vmlinux"}
-    assert "h/r" not in str(resp.data)
 
 
 def test_failed_run_envelope_keeps_investigation_and_artifacts() -> None:

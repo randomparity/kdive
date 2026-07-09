@@ -21,17 +21,15 @@ from kdive.artifacts.storage import HeadResult, StoredArtifact, chunk_key
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.build_artifacts.validation import validate_external_artifacts
-from kdive.components.catalog import load_fixture_catalog
-from kdive.components.requirements import ConfigRequirements
 from kdive.config.core_settings import UPLOAD_TTL_SECONDS
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import Run
-from kdive.profiles.build import BuildProfile, ExternalBuildProfile
+from kdive.profiles.build import BuildProfile
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.serialization import JsonValue
@@ -61,7 +59,7 @@ class ExternalBuildStore(Protocol):
 
 
 type CompleteBuildValidation = Callable[
-    [Sequence[ManifestEntry], Mapping[str, str], str | None, ConfigRequirements | None],
+    [Sequence[ManifestEntry], Mapping[str, str], str | None],
     ValidatedUpload,
 ]
 type ObjectStoreFactory = Callable[[], ExternalBuildStore]
@@ -120,8 +118,7 @@ class CompleteBuildFinalizer:
         conn: AsyncConnection,
         run: Run,
     ) -> _ExternalBuildCompletion:
-        profile = _external_build_profile(run)
-        requirements = _external_config_requirements(profile)
+        _require_external_run(run)
         _require_created_run(run)
 
         manifest_row = await upload_manifest.get_manifest(conn, "runs", run.id)
@@ -134,7 +131,6 @@ class CompleteBuildFinalizer:
             run=run,
             manifest_row=manifest_row,
             keys=keys,
-            requirements=requirements,
             has_chunks=has_chunks,
             store=store,
         )
@@ -159,7 +155,6 @@ class CompleteBuildFinalizer:
                 list(prepared.manifest_row.entries),
                 prepared.keys,
                 build_id,
-                prepared.requirements,
             )
         except CategorizedError as exc:
             raise CompleteBuildValidationError(exc) from exc
@@ -180,18 +175,14 @@ class CompleteBuildFinalizer:
         manifest: Sequence[ManifestEntry],
         keys: Mapping[str, str],
         declared_build_id: str | None,
-        profile_requirements: ConfigRequirements | None,
     ) -> ValidatedUpload:
         if self.validate_complete_build is not None:
-            return self.validate_complete_build(
-                manifest, keys, declared_build_id, profile_requirements
-            )
+            return self.validate_complete_build(manifest, keys, declared_build_id)
         return validate_external_artifacts(
             self.object_store_factory(),
             manifest=manifest,
             keys=keys,
             declared_build_id=declared_build_id,
-            profile_requirements=profile_requirements,
         )
 
 
@@ -200,7 +191,6 @@ class _ExternalBuildCompletion:
     run: Run
     manifest_row: upload_manifest.UploadManifest
     keys: dict[str, str]
-    requirements: ConfigRequirements | None
     has_chunks: bool
     store: ExternalBuildStore | None
 
@@ -256,34 +246,14 @@ async def _reassemble_artifacts(
             )
 
 
-def _external_build_profile(run: Run) -> ExternalBuildProfile:
-    parsed = BuildProfile.parse(run.build_profile)
-    if not isinstance(parsed, ExternalBuildProfile):
-        raise CategorizedError(
-            "run is not an external build",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
-    return parsed
+def _require_external_run(run: Run) -> None:
+    # Parsing validates the stored build profile; a malformed document is a configuration error.
+    BuildProfile.parse(run.build_profile)
 
 
 def _require_created_run(run: Run) -> None:
     if run.state is not RunState.CREATED:
         raise CompleteBuildConfigurationError({"current_status": run.state.value})
-
-
-def _external_config_requirements(profile: ExternalBuildProfile) -> ConfigRequirements | None:
-    if profile.profile_requirements is None:
-        return None
-    entry = load_fixture_catalog().profile(
-        profile.profile_requirements.provider,
-        profile.profile_requirements.name,
-    )
-    if entry is None:
-        raise CategorizedError(
-            "unknown build profile requirements",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
-    return entry.requires.config
 
 
 async def _finalize_external_build(

@@ -131,7 +131,7 @@ async def seed_run(conn_pool: AsyncConnectionPool, build_profile: dict[str, Any]
 
 async def seed_external_run(conn_pool: AsyncConnectionPool) -> UUID:
     """A CREATED external Run with no upload manifest."""
-    return await seed_run(conn_pool, {"schema_version": 1, "source": "external"})
+    return await seed_run(conn_pool, {"schema_version": 1})
 
 
 async def seed_external_run_with_manifest(
@@ -153,18 +153,6 @@ async def seed_external_run_with_manifest(
     return run_id
 
 
-async def seed_server_run(conn_pool: AsyncConnectionPool) -> UUID:
-    """A CREATED Run with a server build profile."""
-    return await seed_run(
-        conn_pool,
-        {
-            "schema_version": 1,
-            "kernel_source_ref": "x",
-            "config": {"kind": "local", "path": "/configs/c"},
-        },
-    )
-
-
 class FakeValidator:
     def __init__(self, output: BuildOutput | Exception) -> None:
         self._output = output
@@ -175,9 +163,8 @@ class FakeValidator:
         manifest,
         keys,
         declared_build_id,
-        profile_requirements,
     ) -> ValidatedUpload:
-        _ = (manifest, declared_build_id, profile_requirements)
+        _ = (manifest, declared_build_id)
         self.calls += 1
         if isinstance(self._output, Exception):
             raise self._output

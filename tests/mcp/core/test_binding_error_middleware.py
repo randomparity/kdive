@@ -24,7 +24,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload
-from kdive.profiles.build import ExternalBuildProfile, ServerBuildProfile
+from kdive.profiles.build import BuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
 
 
@@ -71,18 +71,17 @@ class _BuildCallModel(BaseModel):
     """Mirrors the binding model FastMCP builds for ``runs.create``: a typed ``build_profile``."""
 
     model_config = ConfigDict(extra="forbid")
-    build_profile: ServerBuildProfile | ExternalBuildProfile
+    build_profile: BuildProfile
 
 
 def _build_profile_validation_error() -> ValidationError:
     """A raw pydantic ``ValidationError`` whose locations are under ``build_profile``.
 
     Exactly the shape FastMCP raises at argument binding for a malformed ``runs.create``
-    ``build_profile`` — the plain union tries both members, so every error ``loc`` starts with
-    ``"build_profile"`` (then the member name).
+    ``build_profile`` — every error ``loc`` starts with ``"build_profile"`` (then the field).
     """
     try:
-        _BuildCallModel.model_validate({"build_profile": {"schema_version": 1}})
+        _BuildCallModel.model_validate({"build_profile": {"schema_version": 1, "bogus": 1}})
     except ValidationError as exc:
         return exc
     raise AssertionError("expected a ValidationError")
@@ -285,8 +284,8 @@ def test_end_to_end_malformed_profile_returns_envelope_not_toolerror() -> None:
 
 
 def test_end_to_end_runs_create_typed_build_profile_publishes_schema_and_envelopes() -> None:
-    # The integration proof for #482: runs.create with a typed `build_profile` union publishes the
-    # anyOf input schema, accepts a valid profile, and returns the envelope (not a ToolError) for a
+    # The integration proof for #482: runs.create with a typed flat `build_profile` publishes its
+    # input schema, accepts a valid profile, and returns the envelope (not a ToolError) for a
     # malformed one — exercising the real _BINDING_CONVERSIONS["runs.create"] entry.
     from kdive.mcp.schema_advertising import advertise_envelope_output_schema
 
@@ -294,10 +293,10 @@ def test_end_to_end_runs_create_typed_build_profile_publishes_schema_and_envelop
     app.add_middleware(BindingErrorMiddleware())
 
     @app.tool(name="runs.create")
-    async def _create(
-        system_id: str, build_profile: ServerBuildProfile | ExternalBuildProfile
-    ) -> ToolResponse:
-        return ToolResponse.success(system_id, "created", data={"source": build_profile.source})
+    async def _create(system_id: str, build_profile: BuildProfile) -> ToolResponse:
+        return ToolResponse.success(
+            system_id, "created", data={"schema_version": build_profile.schema_version}
+        )
 
     advertise_envelope_output_schema(app)
 
@@ -307,21 +306,18 @@ def test_end_to_end_runs_create_typed_build_profile_publishes_schema_and_envelop
             schema = tools["runs.create"].inputSchema["properties"]["build_profile"]
             valid = await client.call_tool(
                 "runs.create",
-                {
-                    "system_id": "sys-1",
-                    "build_profile": {"schema_version": 1, "kernel_source_ref": "linux-6.9"},
-                },
+                {"system_id": "sys-1", "build_profile": {"schema_version": 1}},
             )
             malformed = await client.call_tool(
                 "runs.create",
-                {"system_id": "sys-1", "build_profile": {"schema_version": 1}},
+                {"system_id": "sys-1", "build_profile": {"schema_version": 1, "bogus": 1}},
             )
             return schema, valid.structured_content, malformed.structured_content
 
     schema, valid_data, malformed_data = asyncio.run(_run())
-    assert "anyOf" in schema  # both build lanes published, discoverable from the tool surface
+    assert schema  # the build_profile schema is published, discoverable from the tool surface
     assert valid_data is not None and valid_data["status"] == "created"
-    assert valid_data["data"]["source"] == "server"  # server-default union dispatch
+    assert valid_data["data"]["schema_version"] == 1
     assert malformed_data is not None
     assert malformed_data["status"] == "error"
     assert malformed_data["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value

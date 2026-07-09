@@ -17,56 +17,17 @@ def test_iso_serializes_and_passes_through_none() -> None:
     assert iso(None) is None
 
 
-def test_build_summary_git_provenance_omits_remote() -> None:
-    profile = {
-        "source": "server",
-        "build_host": "build-1",
-        "kernel_source_ref": {"git": {"remote": "https://h/r", "ref": "main"}},
-    }
-    summary = build_profile_summary(profile)
-    assert summary == {
-        "build_source": "server",
-        "build_host": "build-1",
-        "build_source_provenance": "git",
-    }
-    assert "h/r" not in str(summary)
+def test_build_summary_is_external_for_any_profile() -> None:
+    # Every Run is the external-upload lane, so the summary is a fixed marker regardless of the
+    # stored document's shape (and it never echoes a stray field).
+    summary = build_profile_summary({"schema_version": 1})
+    assert summary == {"build_source": "external"}
 
 
-def test_build_summary_warm_tree_and_default_source() -> None:
-    summary = build_profile_summary({"kernel_source_ref": "REPLACE_ME-warm-tree"})
-    assert summary["build_source"] == "server"
-    assert summary["build_source_provenance"] == "warm-tree"
-    assert "build_host" not in summary
-
-
-def test_build_summary_external_provenance() -> None:
-    summary = build_profile_summary({"source": "external"})
-    assert summary["build_source"] == "external"
-    assert summary["build_source_provenance"] == "external"
-
-
-def test_build_summary_mapping_ref_without_git_is_warm_tree() -> None:
-    # A Mapping kernel_source_ref that lacks a "git" key is warm-tree, NOT git: provenance is
-    # "git" only when the mapping actually carries a git block (both the Mapping check AND the
-    # "git" membership must hold).
-    summary = build_profile_summary(
-        {"source": "server", "kernel_source_ref": {"warm_tree": {"path": "/srv/tree"}}}
-    )
-    assert summary["build_source_provenance"] == "warm-tree"
-
-
-def test_build_summary_none_ref_falls_back_to_warm_tree() -> None:
-    # A missing/None kernel_source_ref must derive warm-tree without raising (the Mapping
-    # guard short-circuits before any membership test on a non-mapping).
-    summary = build_profile_summary({"source": "server"})
-    assert summary["build_source_provenance"] == "warm-tree"
-
-
-def test_build_summary_non_string_source_falls_back_to_server() -> None:
-    # A stored document with a non-string source must surface the literal "server" lane, not
-    # a mangled fallback token.
-    summary = build_profile_summary({"source": 123})
-    assert summary["build_source"] == "server"
+def test_build_summary_ignores_stray_stored_fields() -> None:
+    summary = build_profile_summary({"schema_version": 1, "bogus": "https://user:tok@h/r"})
+    assert summary == {"build_source": "external"}
+    assert "tok" not in str(summary)
 
 
 def test_provisioning_summary_allowlists_only_safe_fields() -> None:

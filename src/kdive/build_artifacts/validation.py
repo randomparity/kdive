@@ -14,7 +14,6 @@ from kdive.artifacts.chunks import HeadStore
 from kdive.artifacts.storage import HeadResult
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
-from kdive.components.requirements import ConfigRequirements, validate_config_requirements
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.serialization import JsonValue
 
@@ -98,7 +97,7 @@ class ArtifactContract:
     """The full upload contract for one externally uploaded build artifact (#769, ADR-0234 §5)."""
 
     name: str
-    requirement: Literal["required", "optional", "conditional"]
+    requirement: Literal["required", "optional"]
     summary: str
     format: FormatContract
     layout: tuple[LayoutMember, ...] = ()
@@ -181,15 +180,15 @@ EXTERNAL_BUILD_CONTRACTS: Mapping[str, ArtifactContract] = {
     ),
     "effective_config": ArtifactContract(
         name="effective_config",
-        requirement="conditional",
+        requirement="optional",
         summary="The kernel .config used for the build.",
         format=FormatContract(
             container="kernel .config (text)",
             max_bytes=EFFECTIVE_CONFIG_MAX_BYTES,
         ),
         notes=(
-            "Required when the Run's build profile carries profile_requirements; validated against "
-            "that profile's required Kconfig symbols — the config install/boot expect to match.",
+            "Optional and never validated: kdive stores the .config verbatim but does not inspect "
+            "or check any Kconfig symbol.",
         ),
     ),
 }
@@ -234,9 +233,12 @@ def validate_external_artifacts(
     manifest: Sequence[ManifestEntry],
     keys: Mapping[str, str],
     declared_build_id: str | None,
-    profile_requirements: ConfigRequirements | None = None,
 ) -> ValidatedUpload:
-    """Validate uploaded build artifacts; return the ``BuildOutput`` plus object heads."""
+    """Validate uploaded build artifacts; return the ``BuildOutput`` plus object heads.
+
+    The kernel bytes and any uploaded ``vmlinux`` build-id are checked, but the uploaded
+    ``effective_config`` is accepted verbatim and never inspected (no Kconfig validation).
+    """
     by_name = {e.name: e for e in manifest}
     if "kernel" not in by_name or "kernel" not in keys:
         raise CategorizedError(
@@ -253,13 +255,6 @@ def validate_external_artifacts(
                 details={"name": name},
             )
         heads[name] = _validate_one_artifact(store, name, entry, key)
-    if profile_requirements is not None:
-        _validate_effective_config(
-            store,
-            keys=keys,
-            heads=heads,
-            profile_requirements=profile_requirements,
-        )
 
     build_id = ""
     if "vmlinux" in by_name:
@@ -281,34 +276,6 @@ def validate_external_artifacts(
         build_id=build_id,
     )
     return ValidatedUpload(output=output, heads=heads)
-
-
-def _validate_effective_config(
-    store: ValidatorStore,
-    *,
-    keys: Mapping[str, str],
-    heads: Mapping[str, HeadResult],
-    profile_requirements: ConfigRequirements,
-) -> None:
-    key = keys.get("effective_config")
-    head = heads.get("effective_config")
-    if key is None or head is None:
-        raise CategorizedError(
-            "external build profile requirements need an effective_config artifact",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
-    if head.size_bytes > EFFECTIVE_CONFIG_MAX_BYTES:
-        raise CategorizedError(
-            "effective_config exceeds the readable size cap",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={
-                "name": "effective_config",
-                "size_bytes": head.size_bytes,
-                "max_size_bytes": EFFECTIVE_CONFIG_MAX_BYTES,
-            },
-        )
-    data = store.get_range(key, start=0, length=head.size_bytes)
-    validate_config_requirements(data.decode("utf-8", errors="replace"), profile_requirements)
 
 
 def extract_build_id_ranged(store: ValidatorStore, key: str, *, max_size: int) -> str:

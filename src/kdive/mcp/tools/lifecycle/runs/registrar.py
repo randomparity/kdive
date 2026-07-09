@@ -36,11 +36,7 @@ from kdive.mcp.tools.lifecycle.runs.list import list_runs as _list_runs
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run as _boot_run
 from kdive.mcp.tools.lifecycle.runs.steps import install_run as _install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
-from kdive.profiles.build import (
-    ExternalBuildProfile,
-    ServerBuildProfile,
-    dump_build_profile,
-)
+from kdive.profiles.build import BuildProfile, dump_build_profile
 from kdive.profiles.types import ExpectedBootFailureInput
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.artifacts.artifact_search import MAX_PATTERN_CHARS, MAX_TERMS
@@ -52,18 +48,17 @@ class _RunsCreatePayload(ToolPayload):
     """Public payload for ``runs.create``."""
 
     investigation_id: str = Field(description="Investigation to attach the Run to.")
-    build_profile: ExternalBuildProfile | ServerBuildProfile = Field(
+    build_profile: BuildProfile = Field(
         description=(
-            "Build profile for the Run's kernel. Use source='external': ingest a prebuilt "
-            "artifact. After runs.create with source='external', call "
-            "artifacts.expected_uploads to learn the exact bytes to produce, "
-            "artifacts.create_run_upload to upload, then runs.complete_build (where you may also "
-            "record the optional source_label/source_ref provenance of the tree you built from - "
-            "an unverified client claim, surfaced in runs.get data.build_provenance). Extra "
-            "kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the cmdline "
-            "parameter to runs.complete_build. See "
-            "resource://kdive/docs/operating/external-build-upload.md for shaping a "
-            "source='external' upload."
+            "Build profile for the Run's kernel: a thin document, currently just "
+            "{'schema_version': 1}. The kernel is built locally and uploaded, so no source tree "
+            "or config is named here. After runs.create, call artifacts.expected_uploads to learn "
+            "the exact bytes to produce, artifacts.create_run_upload to upload, then "
+            "runs.complete_build (where you may also record the optional source_label/source_ref "
+            "provenance of the tree you built from - an unverified client claim, surfaced in "
+            "runs.get data.build_provenance). Extra kernel cmdline args (e.g. 'dhash_entries=1') "
+            "are not set here: pass the cmdline parameter to runs.complete_build. See "
+            "resource://kdive/docs/operating/external-build-upload.md for shaping an upload."
         )
     )
     system_id: str | None = Field(
@@ -253,10 +248,9 @@ def _register_runs_create(
             _RunsCreatePayload,
             Field(
                 description=(
-                    "Run creation request. After source='external', call "
-                    "artifacts.expected_uploads and artifacts.create_run_upload, then "
-                    "runs.complete_build. Extra kernel cmdline args are passed later as "
-                    "`cmdline` on runs.complete_build."
+                    "Run creation request. After runs.create, call artifacts.expected_uploads and "
+                    "artifacts.create_run_upload, then runs.complete_build. Extra kernel cmdline "
+                    "args are passed later as `cmdline` on runs.complete_build."
                 )
             ),
         ],
