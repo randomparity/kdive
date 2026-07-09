@@ -107,17 +107,20 @@ Files:
    returns `configuration_error` on an invalid `resource_kind`. Its wrapper docstring and `Field`
    text match the new signature, and no `source_kind` key appears in the success `data` payload, the
    denial-audit scope/args, or the `_audit_clear` scope/args. Two falsifiable grep checks over
-   `src/kdive/mcp/tools/ops/inventory.py`: (a) `rg 'build_host|build-host' …` returns **zero** hits —
-   the build-host path is fully gone; (b) `rg 'source_kind' …` returns **exactly one** line, the
-   internal `OverrideIdentity(source_kind=InventorySourceKind.RESOURCE, resource_kind=…, name=…)`
-   constructor, which names the real ledger PK column (the codebase constructs `OverrideIdentity`
-   with that keyword everywhere; keyword form is kept for style consistency). `source_kind` appears in
-   no tool parameter, `Field`, docstring, `Args` block, response `data` key, or audit scope/arg.
+   `src/kdive/mcp/tools/ops/inventory.py` (use **word-bounded** `-w` — an unbounded `source_kind`
+   matches `resource_kind` as a substring): (a) `rg -w 'build_host' …` (and `build-host`) returns
+   **zero** hits — the build-host path is fully gone; (b) `rg -w 'source_kind' …` returns **exactly
+   one** line, the internal `OverrideIdentity(source_kind=InventorySourceKind.RESOURCE,
+   resource_kind=…, name=…)` constructor, which names the real ledger PK column (the codebase
+   constructs `OverrideIdentity` with that keyword everywhere; keyword form is kept for style
+   consistency). `source_kind` appears in no tool parameter, `Field`, docstring, `Args` block,
+   response `data` key, or audit scope/arg.
 7. The `db/locks.py` `LockScope` docstring no longer claims a `BUILD_HOST` scope exists or that it is
    the `inventory.clear_override` lock.
 8. `docs/guide/reference/inventory.md` is regenerated (via `just docs`) and committed:
-   `rg 'source_kind|build-host' docs/guide/reference/inventory.md` returns zero hits, and
-   `just docs-check` passes (the committed reference matches a fresh generation).
+   `rg -w 'source_kind' docs/guide/reference/inventory.md` and `rg 'build-host' …` return zero hits
+   (word-bounded `source_kind`, since `resource_kind` — which stays — contains it as a substring),
+   and `just docs-check` passes (the committed reference matches a fresh generation).
 9. `just lint`, `just type` (whole tree), `just test`, and `just docs-check` all pass.
 
 ## Verification

@@ -326,7 +326,7 @@ Delete the entire `_override_identity_lock` helper (lines 330–336).
 
 - [ ] **Step 4: Remove `source_kind` from the `@app.tool` wrapper**
 
-In the `inventory_clear_override` wrapper (lines 396–423), make three removals: (a) delete the `source_kind: Annotated[str, Field(...)]` parameter (lines 397–399); (b) **rewrite the `resource_kind` Field description** to drop the "or 'build-host' for a build host" sentinel (current text: "Resource kind (e.g. 'remote-libvirt') for a resource, or 'build-host' for a build host." at lines 400–408) — that Field text is exactly what renders the `build-host` string into `inventory.md:18`, so leaving it fails AC8's `rg 'source_kind|build-host' docs/guide/reference/inventory.md` gate after `just docs`; (c) drop `source_kind=source_kind,` from the inner `clear_override(...)` call. The wrapper docstring already carries no `source_kind` token — no change needed there. Target state:
+In the `inventory_clear_override` wrapper (lines 396–423), make three removals: (a) delete the `source_kind: Annotated[str, Field(...)]` parameter (lines 397–399); (b) **rewrite the `resource_kind` Field description** to drop the "or 'build-host' for a build host" sentinel (current text: "Resource kind (e.g. 'remote-libvirt') for a resource, or 'build-host' for a build host." at lines 400–408) — that Field text is exactly what renders the `build-host` string into `inventory.md:18`, so leaving it fails AC8's `rg -w 'source_kind'` / `rg 'build-host' docs/guide/reference/inventory.md` gate after `just docs`; (c) drop `source_kind=source_kind,` from the inner `clear_override(...)` call. The wrapper docstring already carries no `source_kind` token — no change needed there. Target state:
 
 ```python
     async def inventory_clear_override(
@@ -355,18 +355,18 @@ In the `inventory_clear_override` wrapper (lines 396–423), make three removals
 Run: `uv run python -m pytest tests/mcp/ops/test_inventory_clear_override.py -q`
 Expected: PASS.
 
-Run: `rg 'build_host|build-host' src/kdive/mcp/tools/ops/inventory.py`
+Run: `rg -w 'build_host' src/kdive/mcp/tools/ops/inventory.py` (and `rg 'build-host' …`)
 Expected: zero hits.
 
-Run: `rg 'source_kind' src/kdive/mcp/tools/ops/inventory.py`
+Run: `rg -w 'source_kind' src/kdive/mcp/tools/ops/inventory.py` (word-bounded — an unbounded match hits `resource_kind` as a substring)
 Expected: exactly one line — the `OverrideIdentity(source_kind=InventorySourceKind.RESOURCE, …)` constructor.
 
 - [ ] **Step 6: Regenerate the agent-facing reference doc**
 
 Run: `just docs`
 This regenerates `docs/guide/reference/inventory.md` from the live tool schema; the `source_kind` parameter row disappears.
-Run: `rg 'source_kind|build-host' docs/guide/reference/inventory.md`
-Expected: zero hits.
+Run: `rg -w 'source_kind' docs/guide/reference/inventory.md` and `rg 'build-host' docs/guide/reference/inventory.md`
+Expected: zero hits (word-bounded `source_kind`; `resource_kind` stays and contains it as a substring).
 Run: `just docs-check`
 Expected: PASS (committed reference matches a fresh generation).
 
@@ -508,7 +508,7 @@ git commit -m "refactor: narrow InventorySourceKind, drop LockScope.BUILD_HOST (
 
 Run: `just lint && just type && just test && just docs-check`
 Expected: all PASS. Then the spec's grep guard (Task 3 Step 5) returns zero hits, and
-`rg 'source_kind' src/kdive/mcp/tools/ops/inventory.py` returns exactly the one constructor line.
+`rg -w 'source_kind' src/kdive/mcp/tools/ops/inventory.py` returns exactly the one constructor line.
 
 ## Rollback
 
