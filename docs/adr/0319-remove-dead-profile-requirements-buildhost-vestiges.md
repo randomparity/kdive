@@ -20,8 +20,12 @@ because removing them touches artifacts outside a diff-only cleanup:
    catalog still parses — its own module docstring admits "No code reads them for gating." The
    consuming chain is dead: `ProfileRequirements` / `RootfsRequirements` and the
    `ProfileCatalogEntry.requires` field are populated from fixture profile YAML but read by no code
-   in `src/` (`FixtureCatalog.profile()` is called, but `.requires` is never read). A materialized
-   `fixtures/local-libvirt/configs/console-ready.required.config` is referenced by nothing.
+   in `src/`. The live entry point is `load_fixture_catalog` (called by the `fixtures.validate`
+   tool), which validates the profile YAML but reads none of its `requires` data;
+   `FixtureCatalog.profile()` itself has no `src/` caller (only tests), so `.requires` has no reader
+   at all. (`profile()` being dead too is a separate, adjacent cleanup left out of this change's
+   scope.) A materialized `fixtures/local-libvirt/configs/console-ready.required.config` is
+   referenced by nothing.
 
 2. **BUILD_HOST inventory/lock vestige.** No `build_host` override row can ever be created
    (the inventory family, its reconcile pass, and its table are gone), and every internal caller of
@@ -70,9 +74,17 @@ removed `LockScope.BUILD_HOST`.
   argument. This is a pre-release cleanup with no external consumers; the wrapper docstring and
   `Field` text (the agent-facing contract, per AGENTS.md) are updated in the same change.
 - A stored fixture profile YAML that still carries a `requires:` block now fails `extra="forbid"`
-  parse. The only shipped profile (`console-ready_x86_64`) is updated in lockstep; an operator's
-  hand-authored profile carrying the block would need the block removed (accepted pre-release break;
-  the block was never read).
+  parse. The source-tree default is updated in lockstep, so the default catalog path stays valid.
+  An install directory populated by `install-fixtures` **before** this change (reached via
+  `KDIVE_FIXTURE_CATALOG_PATH`) — or an operator's hand-authored profile — still carries the block
+  and would fail catalog load with `INFRASTRUCTURE_FAILURE`; remediation is to re-run
+  `install-fixtures --force` and delete the orphaned `.required.config` (accepted pre-release break;
+  the block was never read). See the spec's "Operational note" for the full failure mode.
+- `inventory.clear_override`'s success `data` payload and the clear/denial audit rows drop the
+  now-constant `source_kind`, so nothing agent-facing or audited carries a field the caller cannot
+  set. The platform-audit `scope` string format changes from `source_kind:resource_kind:name` to
+  `resource_kind:name`; the scope is a free-form human/audit string with no parser, so the format
+  change is safe.
 - `InventorySourceKind` remains a (single-member) enum so the DB column↔value mapping stays explicit
   and the diff stays minimal; `lookup_many`, `set_override`, `serialize`, and the reconcile passes
   are unchanged.

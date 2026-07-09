@@ -52,12 +52,16 @@ Files:
   paragraph that describes `BUILD_HOST` as "the `inventory.clear_override` per-identity lock" (the
   resource path locks on `LockScope.RESOURCE`).
 - `src/kdive/mcp/tools/ops/inventory.py` — **remove** the `source_kind` parameter from the
-  `inventory_clear_override` wrapper (and its `Field`), the `clear_override` handler, and the
-  denial-audit args; drop the `BUILD_HOST` branches in `_parse_override_identity` (now takes only
-  `resource_kind`, `name`; validates `resource_kind` as a `ResourceKind`; builds an
-  `OverrideIdentity` with `source_kind=InventorySourceKind.RESOURCE`) and `_override_identity_lock`
-  (always `resource_identity_lock`). Update the wrapper docstring to `clear_override(resource_kind,
-  name)`.
+  `inventory_clear_override` wrapper (and its `Field`) and the `clear_override` handler. Drop the
+  `BUILD_HOST` branches in `_parse_override_identity` (now takes only `resource_kind`, `name`;
+  validates `resource_kind` as a `ResourceKind`; builds an `OverrideIdentity` with
+  `source_kind=InventorySourceKind.RESOURCE`) and `_override_identity_lock` (always
+  `resource_identity_lock`). Also drop the now-constant `'resource'` `source_kind` from **every
+  other emitter** in the handler so no agent-facing or audit row carries a field the caller cannot
+  set: the success `ToolResponse` `data` payload (agent-facing output), the denial-audit `scope`
+  f-string and `args` dict (the f-string references the removed parameter, so it must change
+  regardless), and `_audit_clear`'s `scope` string and `args` dict. Each drops to
+  `{resource_kind, name}`. Update the wrapper docstring to `clear_override(resource_kind, name)`.
 - Tests: `tests/inventory/test_overrides.py`, `tests/mcp/ops/test_inventory_clear_override.py`,
   `tests/db/test_locks.py` — delete the `build_host` cases; update resource cases that pass
   `source_kind` to the tool.
@@ -85,22 +89,43 @@ Files:
 6. `inventory.clear_override` takes `(resource_kind, name)` — no `source_kind` — and still: clears a
    `removed` resource override (success), returns `not_found` when none exists (idempotent), and
    returns `configuration_error` on an invalid `resource_kind`. Its wrapper docstring and `Field`
-   text match the new signature.
+   text match the new signature, and no `source_kind` key appears in the success `data` payload, the
+   denial-audit scope/args, or the `_audit_clear` scope/args.
 7. The `db/locks.py` `LockScope` docstring no longer claims a `BUILD_HOST` scope exists or that it is
    the `inventory.clear_override` lock.
 8. `just lint`, `just type` (whole tree), and `just test` all pass.
 
 ## Verification
 
-- Grep guard: `rg 'BUILD_HOST|build_host|ConfigRequirements|CmdlineRequirements|ProfileRequirements|RootfsRequirements|\.required\.config'`
-  over `src/` returns only unrelated hits (e.g. `jobs.payloads.build_host_id`, the live
-  `kernel_config` package, `build-host` toolchain image comments) — none of the removed symbols.
+- Grep guard (exact removed symbols — must return **zero** hits over `src/`):
+  `rg 'ConfigRequirements|CmdlineRequirements|ProfileRequirements|RootfsRequirements|BUILD_HOST_RESOURCE_KIND|LockScope\.BUILD_HOST|InventorySourceKind\.BUILD_HOST|\.required\.config' src/`.
+  A checkable equality, not a judgement call: every one of these names is being deleted, so any
+  post-removal hit is a missed removal.
+  - The generic word `build_host` / `build-host` deliberately is **not** in the guard: it has many
+    live residuals that stay — `jobs.payloads.build_host_id`, the image-family `build-host`
+    toolchain comments, `diagnostics/egress_probe.py`, and every historical
+    `db/schema/*.sql` migration (`0027_build_hosts.sql` … `0062_drop_server_build_tables.sql`).
+    Those are expected and out of scope.
 - Targeted tests: `tests/provider_components/test_catalog.py`, `tests/admin/test_default_fixtures.py`,
   `tests/mcp/ops/test_inventory_clear_override.py`, `tests/inventory/test_overrides.py`,
   `tests/db/test_locks.py`.
 - Full guardrail: `just lint && just type && just test`.
 
+## Operational note — previously-installed fixtures
+
+`load_fixture_catalog` validates each on-disk profile YAML under the new `extra="forbid"`
+`ProfileCatalogEntry`. The source-tree default (`DEFAULT_FIXTURE_CATALOG_PATH`) is updated in this
+change, so the default path is consistent. But an operator who set `KDIVE_FIXTURE_CATALOG_PATH` to a
+directory populated by `install-fixtures` **before** this change has a profile YAML that still
+carries the `requires:` block; after upgrade its parse raises `ValidationError` →
+`CategorizedError(INFRASTRUCTURE_FAILURE)` at catalog load. `install_fixtures` refuses to overwrite
+without `--force` and, even with `--force`, never deletes the now-orphaned on-disk
+`console-ready.required.config`. Remediation (documented, not automated — pre-release, no external
+consumers): re-run `install-fixtures --force` and manually delete the stale `.required.config`.
+Auto-pruning orphaned files from `install_fixtures --force` is out of scope for this cleanup.
+
 ## Rollback
 
 Pure deletion on a feature branch; revert the branch. No migration, no data change, nothing to
-un-apply.
+un-apply. (An operator who already re-installed fixtures on the new format keeps a valid catalog;
+the reverted code still parses a profile with no `requires:` block.)
