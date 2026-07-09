@@ -150,8 +150,8 @@ def _no_os_release(_qcow2: Path) -> str | None:
     return None
 
 
-def _no_kernel_config(_qcow2: Path, _version: str) -> str | None:
-    # Hermetic default: no config text, so the default build path offers no config (ADR-0317).
+def _no_kernel_config(_qcow2: Path, _version: str) -> bytes | None:
+    # Hermetic default: no config bytes, so the default build path offers no config (ADR-0317).
     return None
 
 
@@ -446,14 +446,14 @@ def test_single_kernel_captures_version_and_config(tmp_path: Path) -> None:
         tmp_path,
         rec,
         probe_boot_entries=lambda _q: list(_ONE_KERNEL),
-        probe_kernel_config=lambda _q, ver: f"# config for {ver}\nCONFIG_X=y\n",
+        probe_kernel_config=lambda _q, ver: f"# config for {ver}\nCONFIG_X=y\n".encode(),
     ).build(_spec())
     assert out.provenance["default_kernel_version"] == "6.19.10-300.fc44.x86_64"
     assert out.kernel_config == b"# config for 6.19.10-300.fc44.x86_64\nCONFIG_X=y\n"
 
 
 def test_multi_kernel_omits_version_and_config(tmp_path: Path) -> None:
-    def _must_not_probe(_q: Path, _ver: str) -> str | None:
+    def _must_not_probe(_q: Path, _ver: str) -> bytes | None:
         raise AssertionError("kernel-config probe must not run for an ambiguous multi-kernel /boot")
 
     rec = _Recorder()
@@ -480,7 +480,7 @@ def test_config_absent_keeps_version_drops_config(tmp_path: Path) -> None:
 
 
 def test_config_probe_error_degrades_but_keeps_version(tmp_path: Path) -> None:
-    def _boom(_q: Path, _ver: str) -> str | None:
+    def _boom(_q: Path, _ver: str) -> bytes | None:
         raise CategorizedError("no tool", category=ErrorCategory.MISSING_DEPENDENCY)
 
     rec = _Recorder()
@@ -500,7 +500,7 @@ def test_rescue_plus_one_kernel_captures_the_non_rescue_version(tmp_path: Path) 
         tmp_path,
         rec,
         probe_boot_entries=lambda _q: list(_RESCUE_AND_ONE),
-        probe_kernel_config=lambda _q, ver: f"CONFIG_FOR={ver}\n",
+        probe_kernel_config=lambda _q, ver: f"CONFIG_FOR={ver}\n".encode(),
     ).build(_spec())
     assert out.provenance["default_kernel_version"] == "6.19.10-300.fc44.x86_64"
     assert out.kernel_config == b"CONFIG_FOR=6.19.10-300.fc44.x86_64\n"

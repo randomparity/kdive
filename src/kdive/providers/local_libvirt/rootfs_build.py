@@ -365,19 +365,23 @@ class LocalLibvirtRootfsBuildPlane:
         return _BootFacts(count, version, config)
 
     def _capture_kernel_config(self, scratch: Path, version: str | None) -> bytes | None:
-        """The image's ``/boot/config-<version>`` bytes, or ``None`` (ADR-0317).
+        """The image's ``/boot/config-<version>`` bytes verbatim, or ``None`` (ADR-0317).
 
-        Only probed when ``version`` is known (a single baseline kernel). Advisory: a probe failure
-        (``CategorizedError``) or an absent config degrades to ``None`` so the build still ships.
+        Only probed when ``version`` is known (a single baseline kernel). The probe returns raw
+        bytes so the offered config is byte-identical to the on-image file. Advisory: a probe
+        failure (``CategorizedError``) or an absent config degrades to ``None`` so the build ships.
         """
         if version is None:
             return None
         try:
-            text = self._tools.probe_kernel_config(scratch, version)
+            return self._tools.probe_kernel_config(scratch, version)
         except CategorizedError:
-            _log.warning("kernel-config probe failed; provenance omits the config offer")
+            _log.warning(
+                "kernel-config probe failed for %s; provenance omits the config offer",
+                version,
+                exc_info=True,
+            )
             return None
-        return text.encode("utf-8") if text is not None else None
 
     def _customize(
         self,

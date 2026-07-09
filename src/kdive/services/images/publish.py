@@ -284,10 +284,21 @@ async def _write_config_best_effort(
         await asyncio.to_thread(store.put_artifact, write)
         head = await asyncio.to_thread(store.head, config_key)
     except CategorizedError:
-        _log.warning("image kernel-config write failed; registering with no config offered")
+        _log.warning(
+            "image kernel-config write failed for %s/%s (%s); registering with no config offered",
+            request.name,
+            request.arch,
+            config_key,
+            exc_info=True,
+        )
         return False
     if head is None:
-        _log.warning("image kernel-config object absent after write; no config offered")
+        _log.warning(
+            "image kernel-config object %s absent after write for %s/%s; no config offered",
+            config_key,
+            request.name,
+            request.arch,
+        )
         return False
     return True
 

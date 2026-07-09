@@ -266,18 +266,22 @@ def probe_makedumpfile_marker(qcow2_path: Path) -> str | None:  # pragma: no cov
 
 DEFAULT_MAKEDUMPFILE_PROBE: MakedumpfileProbeSeam = probe_makedumpfile_marker
 
-type KernelConfigProbeSeam = Callable[[Path, str], str | None]
+type KernelConfigProbeSeam = Callable[[Path, str], bytes | None]
 
 
-def probe_kernel_config(qcow2_path: Path, version: str) -> str | None:  # pragma: no cover - live_vm
+def probe_kernel_config(  # pragma: no cover - live_vm
+    qcow2_path: Path, version: str
+) -> bytes | None:
     """Read ``/boot/config-<version>`` from ``qcow2_path``, read-only via ``guestfish`` (ADR-0317).
 
-    The build-time operand of the kernel-config offer: the caller writes the returned text to the
-    object store so the agent can fetch its selected image's known-good starting config. Reads with
-    a read-only ``guestfish -i cat /boot/config-<version>``.
+    The build-time operand of the kernel-config offer: the caller writes the returned **bytes**
+    verbatim to the object store so the agent can fetch its selected image's known-good starting
+    config unaltered. Reads raw bytes (no ``text=True`` decode or newline translation) with a
+    read-only ``guestfish -i cat /boot/config-<version>``, so the stored object is byte-identical to
+    the on-image file (ADR-0317 §Decision 4, no validation).
 
     Returns:
-        The config file text, or ``None`` when it is absent (a non-zero ``guestfish`` exit or an
+        The config file bytes, or ``None`` when it is absent (a non-zero ``guestfish`` exit or an
         empty body) — never raising for a merely-missing config; the caller treats ``None`` as "no
         config offered" and omits it.
 
@@ -292,7 +296,6 @@ def probe_kernel_config(qcow2_path: Path, version: str) -> str | None:  # pragma
         result = subprocess.run(  # noqa: S603 - fixed guestfish argv; image path is a data arg
             argv,
             capture_output=True,
-            text=True,
             timeout=_GUESTFISH_TIMEOUT_S,
             check=False,
         )
