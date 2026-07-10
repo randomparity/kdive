@@ -11,17 +11,21 @@ from kdive.components.validation import (
     reject_unsupported_component_source,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.operations.jobs import DESTRUCTIVE_JOB_KINDS
+from kdive.domain.operations.jobs import OPT_IN_DESTRUCTIVE_JOB_KINDS
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource, _UploadRootfs
 
 type RootfsValidator = Callable[[RootfsSource], None]
 
-_VALID_DESTRUCTIVE_OP_VALUES = frozenset(kind.value for kind in DESTRUCTIVE_JOB_KINDS)
+# The accepted tokens are exactly the ops whose opt-in factor is resolved from
+# ``destructive_ops`` (ADR-0320) — not every destructive job kind. ``power`` (contributor
+# lifecycle) and ``teardown`` (role-only gate, ADR-0129) gate nothing via this list, so they
+# are rejected as non-gating tokens rather than silently accepted as inert phantom knobs.
+_VALID_DESTRUCTIVE_OP_VALUES = frozenset(kind.value for kind in OPT_IN_DESTRUCTIVE_JOB_KINDS)
 
 
 def _reject_unknown_destructive_ops(profile: ProvisioningProfile) -> None:
-    """Reject opt-in tokens outside the closed destructive-op set (ADR-0130).
+    """Reject opt-in tokens outside the opt-in-consuming destructive-op set (ADR-0130, ADR-0320).
 
     Once profile opt-in is the load-bearing grant, a typo would be a silent permanent denial
     indistinguishable from an intentional empty list. Runs at the write boundary only;

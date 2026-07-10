@@ -37,9 +37,21 @@ class JobKind(StrEnum):
 
 
 DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
-    {JobKind.REPROVISION, JobKind.TEARDOWN, JobKind.FORCE_CRASH, JobKind.POWER}
+    {JobKind.REPROVISION, JobKind.TEARDOWN, JobKind.FORCE_CRASH}
 )
-"""Job kinds that require destructive-operation admission checks (ADR-0130)."""
+"""Job kinds gated by the destructive-operation admission gate (ADR-0130, ADR-0320).
+
+Power left this set (ADR-0320): it is contributor leaseholder lifecycle, not destructive
+administration.
+"""
+
+OPT_IN_DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
+    {JobKind.FORCE_CRASH, JobKind.REPROVISION}
+)
+"""Destructive ops whose opt-in factor is resolved from a profile's ``destructive_ops`` list
+(ADR-0320). ``teardown`` is gated by role only (ADR-0129); ``power`` is not destructive — so
+neither is a valid ``destructive_ops`` token.
+"""
 
 
 class PowerAction(StrEnum):
@@ -77,6 +89,7 @@ class Job(DomainModel):
 
 __all__ = [
     "DESTRUCTIVE_JOB_KINDS",
+    "OPT_IN_DESTRUCTIVE_JOB_KINDS",
     "Job",
     "JobAuthorizing",
     "JobKind",
