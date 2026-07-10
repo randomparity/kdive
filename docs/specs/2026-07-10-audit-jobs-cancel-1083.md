@@ -75,8 +75,8 @@ attribution trail, and today it leaves no record.
 transaction on a single pooled connection:
 
 ```
-prior_state = existing.state.value  # from the pre-authz read (see D2)
 async with pool.connection() as conn, conn.transaction():
+    prior_state = await _locked_job_state(conn, uid)  # locked read, see D2
     job = await JOBS.update_state(conn, uid, JobState.CANCELED)
     await audit.record(conn, ctx, audit.AuditEvent(
         tool="jobs.cancel",
@@ -99,18 +99,23 @@ already established `_in_scope(existing, ctx)` (the owning project is granted)
 before mutating, and a job's owning project never changes, so the guard cannot
 fire on the success path.
 
-### D2 — `prior_state` source
+### D2 — `prior_state` source (locked read inside the transaction)
 
-The `transition` string uses `existing.state.value` — the job state observed by
-the pre-mutation authz read (`existing = await JOBS.get(conn, uid)`). Rationale:
-`update_state`'s `can_transition` guard permits `queued`→`canceled` and
-`running`→`canceled` only, so if the mutation succeeds the recorded prior state
-was a legal cancel source. The two legal sources (`queued`/`running`) are the
-only values `existing.state` can hold on the success path unless a concurrent
-transition intervened between the read and `update_state`'s `FOR UPDATE` — in
-which case `update_state` raises `IllegalTransition` and no row is written. The
-prior state is an audit annotation, not a control decision, so an
-already-in-hand value is preferred over a second `SELECT ... FOR UPDATE`.
+The `transition` string names the state the cancel actually transitions **from**,
+read inside the mutation transaction under `FOR UPDATE`
+(`_locked_job_state(conn, uid)`), not the pre-authz `existing.state`. This is
+required for fidelity: `queued`→`running` and `running`→`queued` are **both** legal
+non-terminal edges (`domain/capacity/state.py`), and `queued`→`canceled` /
+`running`→`canceled` are both legal cancels. So a worker that claims (`queued`→
+`running`) or requeues (`running`→`queued`) the job between the pre-authz read and
+`update_state`'s `FOR UPDATE` leaves the cancel legal — `update_state` does **not**
+raise — yet the pre-authz snapshot would mislabel the prior state. Reading the
+state under the row lock held continuously through the update closes that window,
+so the audited `from` state is always the real one. The extra read is one
+primary-key `SELECT ... FOR UPDATE` on a row `update_state` locks a moment later
+anyway (re-locking within the same transaction is free), preferred over the
+riskier alternative of changing the shared `StatefulRepository.update_state`
+signature to return the prior state.
 
 ### D3 — No-op cancel records nothing
 
@@ -163,11 +168,15 @@ destructive-op gate precedent that puts the op kind in `transition`
 
 ## Failure modes and edge cases
 
-- **Concurrent transition (read→update race).** `existing.state` reads
-  `running`, a worker completes the job to `succeeded` before our
+- **Concurrent transition to terminal (read→update race).** The pre-authz read
+  sees `running`; a worker completes the job to `succeeded` before our
   `update_state`; `update_state`'s `FOR UPDATE` sees `succeeded`, raises
-  `IllegalTransition`, we return the error envelope and write no row. No
-  mis-attributed transition is recorded.
+  `IllegalTransition`, we return the error envelope and write no row.
+- **Concurrent legal non-terminal transition (`queued`↔`running`).** The
+  pre-authz read sees `queued`; a worker claims the job (`queued`→`running`)
+  before the mutation. The cancel is still legal, so no error — but the audited
+  prior state is read under the row lock (`_locked_job_state`, D2), so it records
+  the true `running`, not the stale `queued`.
 - **`ObjectNotFound` at update.** Job deleted between read and update: return
   `_not_found`, no audit row.
 - **`audit.record` raising.** The outer `conn.transaction()` rolls back the

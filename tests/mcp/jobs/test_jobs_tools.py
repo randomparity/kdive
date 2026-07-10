@@ -298,6 +298,38 @@ def test_cancel_queued_destructive_job_by_operator_writes_audit_row(migrated_url
     asyncio.run(_run())
 
 
+def test_cancel_audits_locked_prior_state_not_stale_read(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #1083 review: prior_state must come from the FOR UPDATE read inside the cancel transaction,
+    # not the pre-authz read. queued<->running are both legal non-terminal edges, so a worker
+    # claim landing between the two reads leaves the cancel legal yet would mislabel the prior
+    # state. Simulate that skew: the pre-authz JOBS.get returns a stale `queued` snapshot while
+    # the DB row is really `running`. The audit must label the real (running) state.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue(pool, "audit-stale")
+            await _mark_running(pool, job_id)  # DB row is now running
+            real_get = jobs_tools.JOBS.get
+
+            async def _stale_get(conn: Any, key: Any) -> Any:
+                job = await real_get(conn, key)
+                if job is not None and str(job.id) == job_id:
+                    return job.model_copy(update={"state": JobState.QUEUED})
+                return job
+
+            monkeypatch.setattr(jobs_tools.JOBS, "get", _stale_get)
+            resp = await jobs_tools.cancel_job(pool, CONTRIB_CTX, job_id)
+            monkeypatch.undo()  # restore before reading the audit row
+            rows = await _audit_rows(pool, job_id)
+        assert resp.status == "canceled"
+        assert len(rows) == 1
+        # Labeled from the locked real state (running), not the stale pre-read (queued).
+        assert rows[0][5] == "build:running->canceled"
+
+    asyncio.run(_run())
+
+
 def test_cancel_terminal_job_writes_no_audit_row(migrated_url: str) -> None:
     # #1083 / spec D3: an audit event records a transition. A no-op cancel of an already-terminal
     # job performs none, so it writes nothing — only the first, real cancel is attributed.
