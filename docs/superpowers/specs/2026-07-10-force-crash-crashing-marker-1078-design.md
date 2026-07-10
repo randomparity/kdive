@@ -36,9 +36,9 @@ deliberate `force_crash` racing a power op in a sub-second window).
   op. This closes the case #1078 names — a power op that dequeues/re-checks during the
   NMI-to-`CRASHED` window. It does **not** mathematically eliminate the fully-concurrent
   interleaving where a power op already passed its READY re-check *before* the marker was
-  committed and then fires its own unlocked physical op after the NMI; that residual is narrowed
-  to a microsecond window by handler ordering (below) and named as a bounded, accepted remainder
-  (see "Residual: the symmetric power-side window").
+  committed and then fires its own unlocked physical op after the NMI; that residual is
+  `power_handler`'s existing check→dispatch gap (unchanged by this work) and is named as a
+  bounded, accepted remainder (see "Residual: the symmetric power-side window").
 - **R2.** The admission-time `control.power` check must also reject a System in `crashing`
   (defence in depth; admission is the first gate an agent hits).
 - **R3.** A `force_crash` handler that dies **after** entering the crash window but before
@@ -47,8 +47,8 @@ deliberate `force_crash` racing a power op in a sub-second window).
   `admin` + the two-check destructive gate, drives the System to `CRASHED`, and detaches
   every non-terminal DebugSession.
 - **R5.** No new agent-facing tool, parameter, or gate bypass. The change is internal to the
-  `force_crash` state machine, the reconciler, and a behaviour-preserving reorder in
-  `power_handler` (no new power guard).
+  `force_crash` state machine and the reconciler; `power_handler` is unchanged (the existing
+  non-`READY` guards refuse `crashing` automatically).
 
 ## Decision (summary; full rationale in ADR-0325)
 
@@ -56,12 +56,11 @@ Introduce a durable transient System state **`crashing`** between `ready` and `c
 `force_crash` transitions `ready → crashing` **under the `SYSTEM` lock, before** firing the
 NMI, and `crashing → crashed` after. Because the power path already rejects any non-`READY`
 System at both admission and execution, a `crashing` System is **automatically** refused by
-the existing power guards — no new power-path check is added (a behaviour-preserving reorder in
-`power_handler` tightens the symmetric power-side window; see the residual note). Leak recovery
-is handled by a reconciler repair that resolves a stalled `crashing` System (one with no active
-`force_crash` job) **to `crashed`** (evidence-first). The marker closes the interleaving #1078
-names (a power op arriving during the crash window); a fully-concurrent power op that already
-passed its READY re-check before the marker is a narrowed, bounded residual, not fully closed.
+the existing power guards — no power-path change at all. Leak recovery is handled by a
+reconciler repair that resolves a stalled `crashing` System (one with no active `force_crash`
+job) **to `crashed`** (evidence-first). The marker closes the interleaving #1078 names (a power
+op arriving during the crash window); a fully-concurrent power op that already passed its READY
+re-check before the marker is the irreducible residual (interleaving B), not closed here.
 
 ## Behaviour
 
@@ -158,24 +157,18 @@ flow, and both are accepted deliberately: the alternative to each — re-firing 
 marking `FAILED` on any raise — risks destroying the crash memory of a guest that *did* crash,
 which is the worse outcome for a crash-debugging tool. Evidence-first is the chosen default.
 
-### Power path (guards unchanged; one ordering hardening)
+### Power path (guards unchanged — no power-side code change)
 
 `power_system` admission (`is not SystemState.READY → configuration_error`) and
 `_power_target` execution (`is not SystemState.READY → terminal CategorizedError`) already
-reject any non-`READY` System, so both automatically refuse `CRASHING` — **no new guard**. The
-only agent-facing effect is that the returned `current_status` may now read `crashing` (a
-transient) in addition to `crashed`; the `control.power` wrapper docstring is updated to name
-`crashing` alongside `crashed` as a refused, evidence-protecting state so the contract the agent
-reads matches the behaviour.
-
-**One ordering hardening in `power_handler`.** Today `power_handler` runs `_power_target` (the
-READY re-check, under the lock) → `_controller` (a DB-backed binding resolution) → the unlocked
-`control.power`. Reorder so `_controller` runs **first** and `_power_target` is the **last** DB
-read immediately before dispatch. This is behaviour-preserving (same checks) and symmetric to the
-`force_crash` ordering rule: it removes the binding resolution from the power op's "checked
-READY → fired physical op" gap, leaving only the `to_thread` dispatch hand-off (bounded by
-executor-thread availability, per the window note above — not a hard microsecond bound). No new
-check, no lock held across the physical op.
+reject any non-`READY` System, so both automatically refuse `CRASHING` — **no new guard, no
+reorder, no change to `power_handler` at all**. The only agent-facing effect is that the
+returned `current_status` may now read `crashing` (a transient) in addition to `crashed`; the
+`control.power` wrapper docstring is updated to name `crashing` alongside `crashed` as a
+refused, evidence-protecting state so the contract the agent reads matches the behaviour.
+Leaving `power_handler` untouched preserves its existing error precedence (a non-`READY` System,
+including `crashing`, is refused with the configuration_error signal that directs to the crash
+workflow) and keeps this change purely additive.
 
 #### Residual: the symmetric power-side window (bounded, accepted)
 
@@ -186,19 +179,19 @@ with no per-System single-flight, so both can run on separate workers):
 - **A — closed.** `force_crash` commits `CRASHING` before the power job's `_power_target`
   re-check → power reads `crashing` and is refused. This is the #1078 case (a power op arriving
   during the crash window) and AC3 tests it.
-- **B — narrowed, not eliminated.** The power job's `_power_target` re-check reads `READY`
-  *before* `_enter_crashing` commits `CRASHING`; power then fires its unlocked `control.power`
-  after the NMI. No marker checked *before* the physical op can close B, because at the instant
-  power decided, the marker did not yet exist. The ordering hardening above shrinks B to the gap
-  between power's under-lock re-check and its `to_thread` dispatch (symmetric to the marker→NMI
-  gap on the `force_crash` side) — bounded by executor-thread availability, so it degrades under
-  `to_thread` saturation rather than being a hard microsecond ceiling. Fully eliminating B
-  requires **serializing the two physical ops** — a per-System single-flight making `power` and
-  `force_crash` mutually exclusive, or holding the lock across the blocking op (the anti-pattern
-  ADR-0320 avoids). That is a larger change, deliberately out of scope here and left as a
-  possible follow-up. The residual is deliberately accepted as a narrowing (both the marker→NMI
-  and re-check→dispatch gaps are as small as we can make them without cross-op serialization),
-  not a proof of elimination.
+- **B — not eliminated (accepted residual).** The power job's `_power_target` re-check reads
+  `READY` *before* `_enter_crashing` commits `CRASHING`; power then fires its unlocked
+  `control.power` after the NMI. No marker checked *before* the physical op can close B, because
+  at the instant power decided, the marker did not yet exist. B's window is `power_handler`'s
+  own existing check→dispatch gap (`_power_target` → `_controller` DB resolution → `to_thread`
+  dispatch) — a window that exists today, unchanged by this work; this change neither widens nor
+  fully closes it. Closing B requires **serializing the two physical ops** — a per-System
+  single-flight making `power` and `force_crash` mutually exclusive, or holding the lock across
+  the blocking op (the anti-pattern ADR-0320 avoids). That is a larger concurrency change,
+  deliberately out of scope here and left as a possible follow-up. The marker's contribution is
+  eliminating interleaving A (every power op that arrives after `force_crash` enters the window);
+  B is the irreducible fully-concurrent remainder, strictly narrower than the pre-change exposure
+  where *any* power op during the whole NMI-to-`CRASHED` span could pass.
 
 ### Leak recovery (reconciler → `crashed`, evidence-first)
 
@@ -230,20 +223,28 @@ runs each tick **after** `repair_abandoned_jobs` (which already dead-letters a z
      worst-case pre-recovery stall is bounded by the force_crash retry budget × backoff; if the
      entire fleet is down, *every* job stalls (not specific to `crashing`), which is out of scope.
 
-   **Invariant (verified):** the `force_crash` job row must remain discoverable for at least as
-   long as any System can read `crashing`. This holds — no code path deletes a job row (there is
-   no `DELETE FROM jobs` anywhere; retention sweeps touch `idempotency_keys`, `artifacts`,
-   `image_catalog`, `upload_manifests`, `resources`, never `jobs`). The "absent row" branch above
-   is a belt-and-suspenders backstop, not a live path.
+   **Invariants the predicate depends on:**
+   - *At most one active force_crash job per System.* The stable dedup_key
+     `{system_id}:force_crash` blocks a second concurrent enqueue, so at most one `force_crash`
+     job is `queued`/`running` for a System at any instant. Across a System's lifecycle
+     (crash → capture → reprovision → `ready` → force_crash again) **multiple** terminal rows can
+     share that key, so the recovery query must filter on **active state (`queued`/`running`)**,
+     not "the latest row by key" — a prior-cycle terminal row sharing the key must not confuse the
+     "no active job" test. (Reprovision-back-to-ready after a `crashing`→`crashed` recovery is a
+     separate cycle; this feature does not change that path.)
+   - *The job row outlives any `crashing` System (verified).* No code path deletes a job row
+     (there is no `DELETE FROM jobs` anywhere; retention sweeps touch `idempotency_keys`,
+     `artifacts`, `image_catalog`, `upload_manifests`, `resources`, never `jobs`). The "absent
+     row" branch above is a belt-and-suspenders backstop, not a live path.
 2. Under the `SYSTEM` lock, re-reads the state (skip if it left `crashing`) and transitions
    `crashing → crashed`, records an audit event (`tool="control.force_crash"`,
    `transition="crashing->crashed"`, reconciler principal), and detaches every non-terminal
    DebugSession (the same effect `_finalize_force_crash` would have had).
 
 **Why `crashed`, not `ready`:** because the controller is pre-resolved and the marker is
-committed microseconds before the NMI dispatch, and the reaper fires only after the job's full
-lease + retry budget is exhausted (minutes), a stall almost always means the NMI already fired
-and the guest is down. Recovering to `crashed` preserves crash memory (the feature's own
+committed with no DB/binding work left before the NMI dispatch, and the reaper fires only after
+the job's full lease + retry budget is exhausted (minutes), a stall almost always means the NMI
+already fired and the guest is down. Recovering to `crashed` preserves crash memory (the feature's own
 purpose) and hands the System to the standard crash workflow
 (`capture_vmcore` → `teardown`/`reprovision`). Recovering to `ready` to "unblock power" would,
 in that likely case, let the next power op destroy the very evidence this change protects —
@@ -284,9 +285,9 @@ Adding `CRASHING` is not a one-line enum change; each set that enumerates states
 - **AC3b (R1 residual, interleaving B — documents, does not eliminate).** A test where the power
   op's `_power_target` re-check reads `READY` **before** `force_crash` commits `CRASHING`
   asserts the marker does not retroactively stop that already-decided power op — encoding the
-  known, accepted residual (the ordering hardening shrinks it to microseconds; full closure
-  needs per-System single-flight, deferred). This AC exists so the residual is proven-understood,
-  not silently claimed closed.
+  known, accepted residual (`power_handler` is unchanged; full closure needs per-System
+  single-flight, deferred). This AC exists so the residual is proven-understood, not silently
+  claimed closed.
 - **AC4 (R4).** `force_crash` end-to-end still drives `ready → crashing → crashed` and
   detaches every non-terminal DebugSession; the audit trail shows the `crashing->crashed`
   transition.
@@ -309,6 +310,12 @@ Adding `CRASHING` is not a one-line enum change; each set that enumerates states
   `RUNNING` (valid lease) **or `QUEUED`** (mid-retry) is **not** touched by the repair — it is
   left for the worker/retry path to finalize. This proves the reconciler backstops only jobs
   that will never run again (the worker-liveness boundary).
+- **AC5b (R3, lease-lapsed reclaim — the hardest case).** A `crashing` System whose `force_crash`
+  job is `RUNNING` with a **lapsed lease and attempts remaining** (dead worker, not yet
+  dead-lettered): assert (a) `repair_stalled_crashing_systems` leaves it untouched that tick
+  (it is still "active"), and (b) `queue.dequeue` reclaims it in place (charging an attempt) and a
+  subsequent worker finalizes `crashing → crashed`. This gives the reclaimability argument its
+  own falsifiable signal — it is the path R3 promptness leans on most.
 - **AC6 (fan-out).** Quota accounting counts a `crashing` System; the allocation reaper does
   not reclaim an `active` allocation whose only System is `crashing`; console
   hosting/rotation treat `crashing` as live.

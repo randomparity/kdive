@@ -61,25 +61,24 @@ must be a durable marker the power path already respects.
    retry. `_finalize_force_crash` transitions `CRASHING → CRASHED` (was `READY → CRASHED`),
    audits `crashing->crashed`, and detaches every non-terminal DebugSession.
 
-3. **Power path: guards unchanged, one ordering hardening.** `power_system` admission and
-   `_power_target` execution already refuse any non-`READY` System, so a `CRASHING` System is
-   **automatically** rejected at both points — no new power-path check. The only agent-facing
-   effect is that `current_status` may read `crashing`; the `control.power` wrapper docstring
-   names it alongside `crashed`. `power_handler` is reordered (behaviour-preserving) so
-   `_controller` resolves **before** the final `_power_target` READY re-check, making that
-   re-check the last DB read before the unlocked `control.power` dispatch — symmetric to the
-   `force_crash` ordering, removing the binding resolution from the power-side race window
-   (leaving only the `to_thread` dispatch hand-off, bounded by executor-thread availability).
+3. **Power path: unchanged.** `power_system` admission and `_power_target` execution already
+   refuse any non-`READY` System, so a `CRASHING` System is **automatically** rejected at both
+   points — no new power-path check and **no change to `power_handler`** (which preserves its
+   existing error precedence: a non-`READY`/`crashing` System is refused with the
+   configuration_error that directs to the crash workflow). The only agent-facing effect is that
+   `current_status` may read `crashing`; the `control.power` wrapper docstring names it alongside
+   `crashed`.
 
    **Bounded residual.** The marker serializes the two state *reads*. It closes the interleaving
    #1078 names — a power op that re-checks *at or after* the `CRASHING` commit is refused. It
    does not close the fully-concurrent interleaving where a power op read `READY` *before* the
    marker and then fires its unlocked physical op after the NMI; no marker checked before the
-   physical op can. The ordering hardening narrows that residual to the `to_thread` dispatch
-   hand-off (bounded by executor-thread availability, degrading under saturation — not a hard
-   microsecond bound); eliminating it needs per-System single-flight of `power` vs `force_crash`
-   (or a lock held across the blocking op — the ADR-0320 anti-pattern), a larger change left as a
-   possible follow-up. The residual is accepted as a narrowing, not a proof of elimination.
+   physical op can. That residual is `power_handler`'s own existing check→dispatch gap, unchanged
+   by this work (neither widened nor closed). Eliminating it needs per-System single-flight of
+   `power` vs `force_crash` (or a lock held across the blocking op — the ADR-0320 anti-pattern), a
+   larger change left as a possible follow-up. The marker's contribution is removing interleaving
+   A entirely, leaving only the irreducible fully-concurrent remainder — strictly narrower than
+   the pre-change exposure where any power op during the whole NMI-to-`CRASHED` span could pass.
 
 4. **Leak recovery (reconciler → `crashed`).** A new `repair_stalled_crashing_systems`
    (`reconciler/repairs/systems.py`) runs after `repair_abandoned_jobs` and transitions a
@@ -158,5 +157,8 @@ must be a durable marker the power path already respects.
 - **Close the symmetric power-side window now (per-System single-flight).** Making `power` and
   `force_crash` mutually exclusive per System would eliminate the residual interleaving B, but it
   is a larger concurrency change (a per-System job-kind mutex or lock-across-op) beyond #1078's
-  scope. Deferred: the ordering hardening reduces the residual to microseconds and it is named as
-  a bounded, accepted remainder / possible follow-up rather than claimed closed.
+  scope. Deferred: interleaving B stays at `power_handler`'s existing check→dispatch gap
+  (unchanged by this work) and is named as a bounded, accepted remainder / possible follow-up
+  rather than claimed closed. (An earlier draft reordered `power_handler` to shrink B; dropped
+  because it changed error precedence for a System that is both non-`READY` and
+  binding-unresolvable, for a marginal gain.)
