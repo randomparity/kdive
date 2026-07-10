@@ -111,16 +111,33 @@ the toolchain is present, but four extra requirements apply. Validated on Ubuntu
   `uv sync --locked` validates the source-distribution hash, not the build flags, so this
   stays lock-faithful. Ubuntu 26.04 ships OpenSSL 3.5.5, which has full POWER support.
 
-- **A Go toolchain is required for `just lint-workflows`.** `actionlint-py` ships only a
-  source distribution and builds the `actionlint` Go binary at install time, and upstream
-  publishes no `ppc64le` release binary to download. Install Go: `sudo apt install
-  golang-go`.
+- **`actionlint` must be built from Go source for `just lint-workflows`.** `actionlint-py`
+  only downloads a prebuilt `actionlint`, and upstream publishes no `ppc64le` binary, so it
+  fails to install. `actionlint` is pure Go and builds natively; the recipe uses a PATH
+  `actionlint` on `ppc64le`. Install Go and build it:
+
+  ```bash
+  sudo apt install golang-go
+  go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+  export PATH="$(go env GOPATH)/bin:$PATH"   # persist in your shell profile
+  ```
 
 - **Expect long first builds.** Wheel-less native dependencies compile the first time
   they are installed and are then cached. `grpcio` and `aws-lc-sys` (pulled in by the
   `prek` and `zizmor` Rust CLIs) are large C/C++/Rust builds that can each take from tens
   of minutes to over an hour on a POWER core budget. Subsequent runs reuse the cached
-  artifacts.
+  artifacts. On high-core hosts, disabling LTO speeds the `zizmor` build markedly:
+  `export CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16`.
+
+- **Cap the test worker count on high-core hosts.** `just test` runs `pytest -n auto`,
+  and the suite starts a Postgres + MinIO container *per worker*. On a machine with many
+  cores (e.g. 32), `auto` starts dozens of containers at once and overwhelms the Docker
+  daemon (container-start and connection-pool timeouts). Cap the workers — this is a
+  general high-core knob, not ppc64le-specific:
+
+  ```bash
+  export PYTEST_XDIST_AUTO_NUM_WORKERS=6   # tune to taste; 6-8 is comfortable
+  ```
 
 Docker Engine's official apt repository publishes `ppc64el` packages for current Ubuntu
 releases, and the `postgres` and `minio/minio` test images are multi-arch (they include
