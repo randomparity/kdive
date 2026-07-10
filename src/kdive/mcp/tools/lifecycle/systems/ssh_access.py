@@ -108,7 +108,7 @@ async def authorize_ssh_key(
     *,
     resolver: ProviderResolver,
 ) -> ToolResponse:
-    """Authorize an agent public key in a ready System's guest (mutating, OPERATOR worker job)."""
+    """Authorize an agent public key in a ready System's guest (mutating, contributor gate)."""
     uid = _as_uuid(system_id)
     if uid is None:
         return _invalid_uuid_error("system_id", system_id)
@@ -117,7 +117,7 @@ async def authorize_ssh_key(
             system = await SYSTEMS.get(conn, uid)
             if system is None or system.project not in ctx.projects:
                 return _not_found(system_id)
-            require_role(ctx, system.project, Role.OPERATOR)
+            require_role(ctx, system.project, Role.CONTRIBUTOR)
             if system.state is not SystemState.READY:
                 return ToolResponse.failure(
                     system_id, ErrorCategory.READINESS_FAILURE, detail=_NOT_READY_DETAIL

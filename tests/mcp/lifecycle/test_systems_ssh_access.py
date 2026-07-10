@@ -184,6 +184,23 @@ def test_authorize_ssh_key_viewer_denied(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_authorize_ssh_key_contributor_can_enqueue(migrated_url: str) -> None:
+    # Leaseholder-control (#1080, ADR-0320): adding a key to a VM the caller already sudos is
+    # weaker than the contributor's existing powers, so the gate is contributor, not operator.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(("127.0.0.1", 22022)))
+            resp = await authorize_ssh_key(
+                pool, _ctx(role=Role.CONTRIBUTOR), sys_id, _GOOD_KEY, resolver=resolver
+            )
+        assert resp.status == "queued"
+        assert resp.data["kind"] == "authorize_ssh_key"
+
+    asyncio.run(_run())
+
+
 def test_authorize_ssh_key_happy_path_enqueues_job(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -231,7 +248,7 @@ def test_check_ssh_reachable_ready_enqueues_job(migrated_url: str) -> None:
 
 
 def test_check_ssh_reachable_viewer_can_enqueue(migrated_url: str) -> None:
-    # Unlike authorize_ssh_key (OPERATOR), the probe is read-only observability gated at VIEWER.
+    # Unlike authorize_ssh_key (CONTRIBUTOR), the probe is read-only observability gated at VIEWER.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)

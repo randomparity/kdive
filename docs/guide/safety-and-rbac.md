@@ -47,7 +47,7 @@ visible to every authenticated token regardless of grants.
 | Profile | Tools visible |
 |---|--:|
 | Viewer | 41 |
-| Contributor | 82 |
+| Contributor | 84 |
 | Operator | 91 |
 | Admin | 96 |
 | Plat-Op | 34 |
@@ -124,7 +124,7 @@ visible to every authenticated token regardless of grants.
 | `investigations.open` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `investigations.set` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `investigations.unlink` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
-| `jobs.cancel` | operator |  |  | ✓ | ✓ |  |  |  |
+| `jobs.cancel` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `jobs.get` | viewer | ✓ | ✓ | ✓ | ✓ |  |  |  |
 | `jobs.list` | viewer | ✓ | ✓ | ✓ | ✓ |  |  |  |
 | `jobs.wait` | viewer | ✓ | ✓ | ✓ | ✓ |  |  |  |
@@ -171,7 +171,7 @@ visible to every authenticated token regardless of grants.
 | `shapes.delete` | plat-operator |  |  |  |  | ✓ |  |  |
 | `shapes.list` | *(public)* | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `shapes.set` | plat-operator |  |  |  |  | ✓ |  |  |
-| `systems.authorize_ssh_key` | operator |  |  | ✓ | ✓ |  |  |  |
+| `systems.authorize_ssh_key` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `systems.check_ssh_reachable` | viewer | ✓ | ✓ | ✓ | ✓ |  |  |  |
 | `systems.define` | operator |  |  | ✓ | ✓ |  |  |  |
 | `systems.get` | viewer | ✓ | ✓ | ✓ | ✓ |  |  |  |

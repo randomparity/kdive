@@ -29,6 +29,9 @@ CTX = RequestContext(principal="user-1", agent_session="s", projects=("proj",))
 OP_CTX = RequestContext(
     principal="user-1", agent_session="s", projects=("proj",), roles={"proj": Role.OPERATOR}
 )
+CONTRIB_CTX = RequestContext(
+    principal="user-1", agent_session="s", projects=("proj",), roles={"proj": Role.CONTRIBUTOR}
+)
 VIEWER_CTX = RequestContext(
     principal="user-1", agent_session="s", projects=("proj",), roles={"proj": Role.VIEWER}
 )
@@ -143,6 +146,18 @@ def test_cancel_queued_job_transitions(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
             resp = await jobs_tools.cancel_job(pool, OP_CTX, job_id)
+        assert resp.status == "canceled"
+
+    asyncio.run(_run())
+
+
+def test_cancel_job_contributor_can_cancel(migrated_url: str) -> None:
+    # Leaseholder-control (#1080, ADR-0320): cancelling your own enqueued job is contributor,
+    # matching runs.cancel. A contributor cancels a queued job they own.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue(pool, "d1")
+            resp = await jobs_tools.cancel_job(pool, CONTRIB_CTX, job_id)
         assert resp.status == "canceled"
 
     asyncio.run(_run())
@@ -416,7 +431,8 @@ def test_cancel_job_in_unowned_project_is_denied_and_does_not_mutate(migrated_ur
     asyncio.run(_run())
 
 
-def test_cancel_job_requires_operator_role(migrated_url: str) -> None:
+def test_cancel_job_requires_contributor_role(migrated_url: str) -> None:
+    # Leaseholder-control (#1080, ADR-0320): a viewer cannot cancel — the gate is contributor.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
@@ -426,7 +442,7 @@ def test_cancel_job_requires_operator_role(migrated_url: str) -> None:
         assert excinfo.value.principal == "user-1"
         assert excinfo.value.project == "proj"
         assert excinfo.value.held is Role.VIEWER
-        assert excinfo.value.required is Role.OPERATOR
+        assert excinfo.value.required is Role.CONTRIBUTOR
         assert owned.status == "queued"
 
     asyncio.run(_run())
@@ -470,7 +486,7 @@ def test_cancel_job_requires_a_project_role(migrated_url: str) -> None:
         assert excinfo.value.principal == "user-1"
         assert excinfo.value.project == "proj"
         assert excinfo.value.held is None
-        assert excinfo.value.required is Role.OPERATOR
+        assert excinfo.value.required is Role.CONTRIBUTOR
         assert owned.status == "queued"
 
     asyncio.run(_run())

@@ -8,7 +8,8 @@ error :class:`~kdive.mcp.responses.ToolResponse` (with the most specific
 
 Every read/cancel is **project-scoped**: a job is visible only to a caller with
 ``viewer`` on the owning project (``authorizing->>'project'``), while cancellation requires
-``operator``. A by-id read or cancel of a job in an ungranted project returns the same
+``contributor`` — cancelling your own enqueued job is leaseholder lifecycle, matching
+``runs.cancel``. A by-id read or cancel of a job in an ungranted project returns the same
 not-found-shaped error as a missing job, so existence is not leaked (matching
 ``systems``/``runs``/``allocations`` getters); ``list`` returns only readable jobs.
 """
@@ -212,7 +213,7 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str
             existing = await JOBS.get(conn, uid)
         if existing is None or not _in_scope(existing, ctx):
             return _not_found(job_id)
-        denied = _require_job_role(existing, ctx, Role.OPERATOR, job_id)
+        denied = _require_job_role(existing, ctx, Role.CONTRIBUTOR, job_id)
         if denied is not None:
             return denied
         try:
