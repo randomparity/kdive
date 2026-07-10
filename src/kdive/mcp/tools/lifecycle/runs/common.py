@@ -374,5 +374,15 @@ def _failed_envelope(run: Run, category: ErrorCategory, failing_job: Job | None)
     )
 
 
-def run_job_envelope(job: Job, run_id: UUID) -> ToolResponse:
-    return job_envelope(job, "run_id", run_id)
+def run_job_envelope(job: Job, run_id: UUID, *, replayed: bool | None = None) -> ToolResponse:
+    """Render a Run's step job as an envelope, optionally marking a replayed job.
+
+    ``replayed`` is surfaced as ``data.replayed`` only when supplied (the boot path, #1063):
+    ``True`` when a pre-existing job was returned unchanged (a settled boot deduped, or an
+    in-flight boot deduped — no fresh boot enqueued), ``False`` for a fresh or recycled boot.
+    Call sites that pass ``None`` (e.g. ``runs.install``) emit no ``replayed`` key.
+    """
+    envelope = job_envelope(job, "run_id", run_id)
+    if replayed is None:
+        return envelope
+    return envelope.model_copy(update={"data": {**envelope.data, "replayed": replayed}})

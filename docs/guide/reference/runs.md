@@ -31,8 +31,14 @@ To iterate boot parameters (e.g. `dhash_entries=1`), pass `cmdline` to `runs.ins
 against the built kernel — no rebuild — then boot here; `runs.boot` takes no cmdline. Extra
 args can also be bound at build via `runs.complete_build`.
 
+The response `data.replayed` is `true` when this call returned an existing job without
+enqueuing a fresh boot (an already-booted or in-flight Run), and `false` for a fresh or
+force-recycled boot. Absent `force`, a fresh boot of an already-booted Run needs a
+`runs.install` re-stage (a changed cmdline/crashkernel) or `force=true`.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `force` | boolean | no | Re-boot an already-booted Run. By default runs.boot is idempotent: a repeat call on a Run whose boot already succeeded returns the prior job unchanged (data.replayed=true) and does NOT re-boot. Set force=true to recycle the boot and run a fresh boot of the same installed variant without a re-stage — use this to reboot a wedged guest. A force call that reuses a prior idempotency_key replays the stored envelope instead of re-booting; pass a distinct (or no) idempotency_key to force a boot. Rejected with configuration_error (step_in_progress) while a boot is already running. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `run_id` | string | yes | The Run whose installed kernel to boot. |
 

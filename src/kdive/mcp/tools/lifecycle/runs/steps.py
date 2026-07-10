@@ -183,7 +183,9 @@ async def _restage_and_enqueue_install(
         if progress.install == "succeeded" and variant_changed:
             await delete_run_step(conn, run.id, "install")
             await delete_run_step(conn, run.id, "boot")
-        job = await _locked_enqueue(
+        # The install envelope carries no ``replayed`` marker (boot-only, #1063); discard the
+        # recycle decision.
+        job, _ = await _locked_enqueue(
             conn,
             ctx,
             run,
@@ -201,9 +203,17 @@ async def boot_run(
     ctx: RequestContext,
     run_id: str,
     *,
+    force: bool = False,
     idempotency_key: str | None = None,
 ) -> ToolResponse:
-    """Admit an idempotent boot for a built, installed Run."""
+    """Admit an idempotent boot for a built, installed Run.
+
+    Absent ``force``, a repeat call on an already-booted Run returns the prior job unchanged
+    (``data.replayed=true``) and does not re-boot. ``force`` recycles the settled ``boot`` step
+    so a fresh boot of the same installed variant runs without a re-stage (#1063). A ``force``
+    call that reuses a prior ``idempotency_key`` replays the stored envelope — pass a distinct
+    or no key to actually re-boot.
+    """
     uid = _as_uuid(run_id)
     if uid is None:
         return _config_error(run_id)
@@ -233,6 +243,7 @@ async def boot_run(
                     "boot",
                     "runs.boot",
                     payload=RunPayload(run_id=str(run.id)),
+                    force=force,
                 ),
             )
 
@@ -272,13 +283,17 @@ async def _locked_enqueue(
     tool: str,
     payload: RunPayload,
     audit_args: dict[str, str],
-) -> Job:
+) -> tuple[Job, bool]:
     """Enqueue a step job + record its audit, assuming the caller holds the per-Run lock.
 
     The recycle decision is ledger-driven (ADR-0299): a terminal job is recycled iff the step's
     ``run_steps`` row is absent. A present ``succeeded`` row is an idempotent no-op (the existing
     job is returned); a ``failed`` step's row was deleted by ``abandon_run_step`` so a retry
     recycles it; a re-stage (which deletes the row) likewise recycles, carrying the new payload.
+
+    Returns the enqueued/returned :class:`Job` and the ``recycle`` decision — ``True`` when fresh
+    work was enqueued or a terminal job recycled, ``False`` when a pre-existing job was returned
+    unchanged (the boot path surfaces this as ``data.replayed``; #1063).
     """
     recycle = not await _has_step_row(conn, run.id, step)
     job = await queue.enqueue(
@@ -301,7 +316,7 @@ async def _locked_enqueue(
             project=run.project,
         ),
     )
-    return job
+    return job, recycle
 
 
 async def _enqueue_step(
@@ -313,10 +328,26 @@ async def _enqueue_step(
     tool: str,
     *,
     payload: RunPayload,
+    force: bool = False,
 ) -> ToolResponse:
-    """Enqueue a boot step job under the per-Run lock (the install path re-stages separately)."""
+    """Enqueue a boot step job under the per-Run lock (the install path re-stages separately).
+
+    ``force`` recycles a settled ``succeeded`` boot step so a fresh boot of the same installed
+    variant runs without a re-stage (#1063): it deletes the ``run_steps`` row so the shared
+    ledger-driven recycle resets the terminal boot job to a fresh ``queued`` attempt. A ``running``
+    boot is rejected (``step_in_progress``) rather than recycled mid-flight, mirroring the
+    ``runs.install`` re-stage guard. The returned envelope carries ``data.replayed``: ``True`` when
+    a pre-existing job was returned unchanged (no fresh boot enqueued), ``False`` for a fresh or
+    recycled boot.
+    """
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
-        job = await _locked_enqueue(
+        if force:
+            progress = await step_progress(conn, run.id)
+            if progress.boot == "running":
+                return _config_error(str(run.id), data={"reason": "step_in_progress"})
+            if progress.boot == "succeeded":
+                await delete_run_step(conn, run.id, step)
+        job, recycle = await _locked_enqueue(
             conn, ctx, run, kind, step, tool, payload, {"run_id": str(run.id)}
         )
-    return run_job_envelope(job, run.id)
+    return run_job_envelope(job, run.id, replayed=not recycle)
