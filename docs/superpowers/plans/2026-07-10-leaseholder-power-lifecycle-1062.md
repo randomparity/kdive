@@ -195,12 +195,13 @@ def test_power_handler_refuses_non_ready_system(migrated_url: str) -> None:
                         conn, job, resolver=provider_resolver(controller=ctrl)
                     )
             assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+            assert exc.value.terminal is True  # dead-letters, does not retry (Req 1a)
             assert ctrl.powered == []  # physical power op never invoked
 
     asyncio.run(_run())
 ```
 
-  Use `_granted_allocation` (the helper the existing power-handler test uses), not `_seed_alloc`; confirm the helper name against the neighbouring test before writing.
+  Use `_granted_allocation` (the helper the existing power-handler test uses), not `_seed_alloc`; confirm the helper name against the neighbouring test before writing. The `terminal is True` assertion directly verifies the terminal contract without wiring the whole worker/`queue.fail` path.
 
 - [ ] **Step 2: Run the test, verify it fails.**
 
@@ -225,11 +226,12 @@ async def _control_target(conn: AsyncConnection, system_id: UUID, *, op: str) ->
                 "protected from the power path",
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"system_id": str(system_id), "current_status": system.state.value},
+                terminal=True,
             )
         return _ControlTarget(_resolved_domain_name(system), system.project)
 ```
 
-  The physical `control.power` call at `power_handler` stays **after** this locked read (do not hold the lock across it). No other handler uses `_control_target`.
+  `terminal=True` is required (Req 1a: "fail the job terminally"): a power job whose System is no longer `READY` must dead-letter, not retry — the state will not improve on re-attempt, and re-reading `CRASHED` each retry is churn. This matches the `exc.terminal = True` idiom in `jobs/handlers/systems.py:277,334`. The physical `control.power` call at `power_handler` stays **after** this locked read (do not hold the lock across it). No other handler uses `_control_target`.
 
 - [ ] **Step 4: Run the tests, verify they pass.**
 
@@ -300,8 +302,8 @@ _VALID_DESTRUCTIVE_OP_VALUES = frozenset(kind.value for kind in OPT_IN_DESTRUCTI
 
 - [ ] **Step 4: Run tests, verify they pass.**
 
-Run: `uv run python -m pytest tests/services/systems/test_system_validation.py tests/security -q`
-Expected: PASS.
+Run: `uv run python -m pytest tests/services/systems/test_system_validation.py tests/security tests/mcp/lifecycle/test_systems_tools.py::test_reprovision_without_profile_opt_in_denied -q`
+Expected: PASS (the reprovision-opt-in regression guard confirms narrowing `destructive_ops`'s scope did not drop reprovision).
 
 - [ ] **Step 5: Lint + type, then commit.**
 
@@ -317,7 +319,7 @@ git commit -m "feat(control): power leaves destructive set; validator accepts op
 ### Task 4: Profile docstrings + `profile_examples` destructive_ops note
 
 **Files:**
-- Modify: `src/kdive/profiles/provisioning.py` (3 `destructive_ops` field docstrings, lines ~115, ~150/164), `src/kdive/mcp/tools/lifecycle/systems/profile_examples.py`
+- Modify: `src/kdive/profiles/provisioning.py` (2 `destructive_ops` class docstrings — local-libvirt ~115, remote ~164; the fault-inject section omits it, leave unchanged), `src/kdive/mcp/tools/lifecycle/systems/profile_examples.py`
 - Test: the existing profile-examples test (find via `rg -l profile_examples tests/`)
 
 **Interfaces:**
@@ -410,5 +412,6 @@ Expected: only `force_crash`/historical-ADR references remain; no live claim tha
 ## Self-Review notes
 
 - **Spec coverage:** Req 1/1a → Tasks 1+2; Req 2 (force_crash unchanged) → untouched, asserted by existing green tests; Req 3 + taxonomy + validator → Task 3; Req 4 (contract) → Task 1 Step 3; Req 5 (profile_examples) → Task 4; Req 6 (recovery note) → Task 5 Step 4; docs list → Task 5.
+- **Reprovision opt-in regression** (spec test plan): already covered by the existing green test `tests/mcp/lifecycle/test_systems_tools.py::test_reprovision_without_profile_opt_in_denied` (a profile lacking `"reprovision"` is denied `profile_opt_in`). Since Task 3 keeps `REPROVISION` in `OPT_IN_DESTRUCTIVE_JOB_KINDS` and `_reprovision_opt_in` is unchanged, that test must stay green — no new test needed; run it in Task 3 Step 4 as a guard: `uv run python -m pytest tests/mcp/lifecycle/test_systems_tools.py::test_reprovision_without_profile_opt_in_denied -q`.
 - **Ordering:** Task 1 (removes the power→gate construction) precedes Task 3 (removes `POWER` from `DESTRUCTIVE_JOB_KINDS`) so no code constructs `DestructiveOp(POWER)` against a set that no longer contains it. Task 2 depends on nothing but is grouped with the handler. Tasks 4–5 are docs.
 - **Residual (#1078):** not implemented here; Task 5 keeps the design doc honest about scope.
