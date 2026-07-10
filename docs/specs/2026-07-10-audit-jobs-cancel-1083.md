@@ -46,16 +46,19 @@ attribution trail, and today it leaves no record.
    `admin.py`/`control.py` pattern (ADR-0028: the audit is inside the mutation's
    transaction and cannot itself raise past the mutation).
 2. The row carries: `tool="jobs.cancel"`, `object_kind="jobs"`,
-   `object_id=<job id>`, `project=<job's owning project>`,
-   `transition="<prior_state>->canceled"`, and
-   `args={"job_id": <id>, "kind": <job kind>}` (so `args_digest` and the
-   transition both record the job kind).
+   `object_id=<job id>`, `project=<job's owning project>`, a **readable**
+   `transition="<kind>:<prior_state>->canceled"` that names the job kind in a
+   plaintext column, and `args={"job_id": <id>, "kind": <job kind>}` for
+   `args_digest` correlation. The kind must be in the transition string, not only
+   in `args`: `args` is stored one-way as `args_digest` (SHA-256), so a kind that
+   lived only there would not be readable back from the `audit_log` row — and
+   "which job kind was cancelled" is an explicit issue goal (see D4).
 3. Denial auditing (`DenialAuditMiddleware`) is unchanged.
 
 ## Non-goals
 
 - **No audit row for a no-op cancel** of an already-terminal job (see Decision
-  D2). Denials remain the middleware's job; a terminal-state `IllegalTransition`
+  D3). Denials remain the middleware's job; a terminal-state `IllegalTransition`
   is neither a denial nor a transition.
 - No change to `audit.record`, the `audit_log` schema, `DenialAuditMiddleware`,
   or `JOBS.update_state`. No DB migration.
@@ -72,13 +75,14 @@ attribution trail, and today it leaves no record.
 transaction on a single pooled connection:
 
 ```
+prior_state = existing.state.value  # from the pre-authz read (see D2)
 async with pool.connection() as conn, conn.transaction():
     job = await JOBS.update_state(conn, uid, JobState.CANCELED)
     await audit.record(conn, ctx, audit.AuditEvent(
         tool="jobs.cancel",
         object_kind="jobs",
         object_id=uid,
-        transition=f"{prior_state}->canceled",
+        transition=f"{job.kind.value}:{prior_state}->canceled",
         args={"job_id": job_id, "kind": job.kind.value},
         project=_project(job),
     ))
@@ -118,23 +122,43 @@ carrying `current_status` and writes **no** audit row. An audit event records a
 actually changes. (Authz denials are separately covered by
 `DenialAuditMiddleware` and are out of this handler.)
 
+### D4 — Job kind lives in the readable `transition` column, not only `args`
+
+`audit.record` stores `args` one-way as `args_digest = SHA-256(args)`
+(`security/audit.py:34-35,119`) — tamper-evidence/correlation, not a readable
+field. So a kind that lived only in `args` would not be recoverable from an
+`audit_log` row, yet "which job kind was cancelled" is an explicit issue goal.
+The readable `audit_log` columns are `tool`, `object_kind`, `object_id`,
+`transition`, `project`; `object_kind="jobs"` names the table, not the
+build/teardown/force_crash kind. The job kind is therefore encoded in the
+`transition` string as `"<kind>:<prior_state>->canceled"`, following the
+destructive-op gate precedent that puts the op kind in `transition`
+(`f"{op_kind.value}:denied"`, `control.py:154`, `admin.py:216`). `kind` is
+*also* kept in `args` so `args_digest` correlates the row to the tool call.
+
 ## Acceptance criteria
 
 - [ ] A contributor cancelling a running leaseholder-kind job
       (e.g. `authorize_ssh_key`) writes exactly **one** `audit_log` row with
       `principal`=caller, `tool="jobs.cancel"`, `object_kind="jobs"`,
       `object_id`=job id, `project`=job's owning project, and
-      `transition="running->canceled"`.
+      `transition="authorize_ssh_key:running->canceled"` (the readable kind is
+      recoverable from the row without reversing `args_digest`).
 - [ ] An operator cancelling a queued destructive-kind job (e.g. `teardown`)
-      writes exactly **one** `audit_log` row with `transition="queued->canceled"`
-      and `args_digest` covering `{"job_id", "kind"}`.
+      writes exactly **one** `audit_log` row with
+      `transition="teardown:queued->canceled"` and `args_digest` covering
+      `{"job_id", "kind"}`.
 - [ ] A no-op cancel of an already-terminal job writes **zero** `audit_log`
       rows and still returns the `current_status`-bearing error envelope.
 - [ ] A cancel denied by role (`RoleDenied`) writes **zero** rows from
       `cancel_job` itself (the middleware's denial row is unchanged and out of
       scope for this handler's test).
-- [ ] The audit write and the `canceled` state commit atomically: no state where
-      the job is `canceled` without its audit row, or vice versa.
+- [ ] Structural: the `update_state` and `audit.record` calls sit inside one
+      outer `conn.transaction()` on the same connection (code-review check), so
+      the mutation and its audit row commit or roll back together. A
+      fault-injection test (forcing `audit.record` to raise and asserting the
+      job stays non-terminal) is optional given the D1 argument that the guard
+      cannot fire on the success path.
 - [ ] `just ci` is green.
 
 ## Failure modes and edge cases
