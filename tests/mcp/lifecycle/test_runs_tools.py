@@ -3735,6 +3735,31 @@ def test_boot_repeat_on_succeeded_boot_marks_replayed(migrated_url: str) -> None
     asyncio.run(_run())
 
 
+def test_boot_repeat_before_worker_claim_marks_replayed(migrated_url: str) -> None:
+    # Regression: the boot run_steps row is written only when a worker CLAIMS the job, so a boot
+    # that is enqueued (queued) but not yet claimed has no row. A second runs.boot in that window
+    # dedups to the queued job unchanged and must report replayed=true — a row-presence proxy for
+    # the marker would wrongly report replayed=false here (#1063).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            await _record_install_step(pool, run_id)
+            first = await _boot(pool, _ctx(), run_id)
+            assert first.data["replayed"] is False  # fresh enqueue, no row yet
+            again = await _boot(pool, _ctx(), run_id)  # worker has not claimed → still no row
+            njobs = await _count(
+                pool,
+                "SELECT count(*) AS n FROM jobs WHERE kind='boot' AND dedup_key=%s",
+                (f"{run_id}:boot",),
+            )
+        assert again.object_id == first.object_id  # deduped to the same queued job
+        assert again.status == "queued"
+        assert again.data["replayed"] is True  # no fresh boot enqueued
+        assert njobs == 1
+
+    asyncio.run(_run())
+
+
 def test_boot_force_recycles_succeeded_boot(migrated_url: str) -> None:
     # force=true recycles the settled boot step so a fresh boot runs without a re-stage: the
     # succeeded boot job resets in place to a fresh queued attempt, marked replayed=false (#1063).

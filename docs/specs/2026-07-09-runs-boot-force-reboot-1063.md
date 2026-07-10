@@ -87,16 +87,26 @@ advisory-lock transaction, before enqueue:
 
 ### `replayed` marker
 
-`_enqueue_step` already learns the `recycle` decision. Return it from
-`_locked_enqueue` (now `-> tuple[Job, bool]`) so the boot path can surface it.
-The boot envelope becomes `run_job_envelope(job, run.id, replayed=not recycle)`:
+`_locked_enqueue` (now `-> tuple[Job, bool]`) computes and returns `replayed` —
+whether `queue.enqueue` returned a **pre-existing job unchanged** (no fresh work
+enqueued or recycled). It reads the prior job by dedup key
+(`queue.get_by_dedup_key`) *before* enqueue, not the `run_steps` row: the row is
+written only when a **worker claims** the boot job (`claim_run_step`), so a boot
+that is enqueued (`queued`) but not yet claimed has no row — a row-presence proxy
+would wrongly report a repeat call in that window as a fresh boot. `replayed` is:
 
-- `replayed=True` — the returned job is a pre-existing one (`recycle=False`): a
-  settled `succeeded` boot returned unchanged, or an in-flight `queued`/`running`
-  boot deduped. **No new boot was enqueued.**
-- `replayed=False` — a fresh boot was enqueued or a terminal job recycled
-  (first boot, retry after failure, or `force`).
+```
+replayed = prior is not None and not (recycle and prior.state in {failed, succeeded})
+```
 
+mirroring `queue.enqueue`'s `state IN ('failed','succeeded')` reset fence:
+
+- `replayed=True` — a prior job was returned unchanged: a settled `succeeded`
+  boot deduped, or an in-flight `queued`/`running` boot deduped. **No new boot.**
+- `replayed=False` — a brand-new insert (no prior) or an in-place terminal
+  recycle (retry after failure, or `force` on a succeeded boot).
+
+The boot path surfaces `run_job_envelope(job, run.id, replayed=replayed)`.
 `run_job_envelope(job, run_id, *, replayed: bool | None = None)` injects
 `data["replayed"]` only when `replayed is not None`. The `runs.install` call site
 passes nothing → its envelope is unchanged (no `replayed` key). Boot always
