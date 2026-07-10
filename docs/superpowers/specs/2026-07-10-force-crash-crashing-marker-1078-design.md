@@ -80,32 +80,36 @@ constraint. No existing row is `crashing`, so there is no data backfill.
 
 ### `force_crash` handler flow
 
-**Ordering matters: resolve the controller *before* marking `CRASHING`.** The provider
-binding lookup (`_controller` → `resolver.binding_for_system`) is a DB + provider call that
-can be slow or **fail** when the provider is degraded. It must run while the System is still
-`READY`, so a resolution outage fails the handler with the System unchanged (`READY`,
-power-recoverable, exactly today's behaviour) — never with a committed `CRASHING` marker whose
-NMI never fired. The `READY → CRASHING` commit is the **last DB write immediately before** the
-NMI dispatch, so the marker→NMI window is a few microseconds of Python (no I/O, no provider
-call).
+The flow is **state-conditional**, not a flat step list, to satisfy two ordering constraints at
+once: on a **first attempt** the provider controller must resolve *before* the `CRASHING`
+marker (so a resolution failure leaves the System `READY`, not a committed marker whose NMI
+never fired); on a **finalize-only retry** the controller is not needed at all and must not gate
+finalize. `_controller → resolver.binding_for_system` is a **DB-backed** resolution (a `systems`
+row read + in-memory port lookup — *not* a provider network round-trip; the only real provider
+call is the NMI itself), which can still fail with `NOT_FOUND` / a DB error.
 
-1. **`_controller`** — resolve the provider controller (may fail; leaves the System `READY`).
-2. **`_enter_crashing`** (under `SYSTEM` lock) returns `(target, fire_nmi)`:
-   - terminal (`torn_down`/`failed`) or `CRASHED` → return `None` (nothing to do / already
-     finalized; e.g. a retry after a completed finalize).
-   - `CRASHING` → return `(target, fire_nmi=False)` — a **retry**: the marker means the NMI
-     was already dispatched on a prior attempt, so finalize only (see below).
-   - `READY` → transition `READY → CRASHING`, return `(target, fire_nmi=True)`.
+1. **`_force_crash_precheck`** (under `SYSTEM` lock, **no transition**) reads state and classifies:
+   - terminal (`torn_down`/`failed`) or `CRASHED` → **done** (nothing to do / already finalized).
+   - `CRASHING` → **finalize-only** (a retry): skip the controller and the NMI, go straight to
+     step 4. The marker means the NMI was already dispatched on a prior attempt.
+   - `READY` → **first attempt**: proceed to steps 2–3.
    - any other non-terminal state (`defined`/`provisioning`/`reprovisioning`) → terminal
      `CONFIGURATION_ERROR`; admission already blocked these, so this is defence in depth.
-3. If `fire_nmi`: fire the physical NMI **unlocked**. If `control.force_crash` **raises**, let
+2. **First attempt only:** resolve the controller (`_controller`; may fail → the System is still
+   `READY`, power-recoverable, exactly today's behaviour), then **`_enter_crashing`** (under the
+   `SYSTEM` lock) re-reads and transitions `READY → CRASHING`. This commit is the **last DB write
+   immediately before** the NMI dispatch. If the re-read finds the state already moved (a raced
+   teardown, etc.), skip the NMI and fall through to finalize/return. The marker→NMI gap holds no
+   DB read and no binding lookup — only the `asyncio.to_thread` dispatch hand-off (see the window
+   note under the residual, below).
+3. Fire the physical NMI **unlocked**. If `control.force_crash` **raises**, let
    the exception **propagate** (no special-casing). The provider does not tell us whether the
    NMI landed: `LocalLibvirtControl.force_crash` raises `CONTROL_FAILURE` for a missing domain
    **and** for any `libvirt.libvirtError`, and a `libvirtError` can be a transport/RPC error
    raised *after* the NMI was already delivered to QEMU. So we do **not** assume "raise ⇒ NMI
    did not land." `CONTROL_FAILURE` is non-terminal, so `queue.fail` requeues the job to
-   `QUEUED`; the retry re-enters `_enter_crashing`, sees `CRASHING`, and finalizes to `CRASHED`
-   (finalize-only, below), and if retries exhaust the reconciler backstop does the same — both
+   `QUEUED`; the retry re-enters `_force_crash_precheck`, sees `CRASHING`, and finalizes to
+   `CRASHED` (finalize-only), and if retries exhaust the reconciler backstop does the same — both
    resolve the ambiguity evidence-first. (Marking the System `FAILED` on a raise was considered
    and rejected: it discards the crash memory of a genuinely-crashed guest whose NMI landed but
    whose response timed out, and it converts today's retryable NMI error into a non-retried
@@ -119,20 +123,35 @@ call).
 **Retry is finalize-only — it never re-fires the NMI.** The stable dedup key
 (`{system_id}:force_crash`) prevents a second concurrent `force_crash` job. A handler that
 died after `READY → CRASHING` is recovered by job retry (`fail()` requeues to `QUEUED`): the
-retry re-enters `_enter_crashing`, sees `CRASHING`, and finalizes **without** re-injecting the
-NMI. Re-injecting is deliberately avoided: after `CRASHING` the guest is (overwhelmingly)
+retry re-enters `_force_crash_precheck`, sees `CRASHING`, and finalizes **without** re-injecting
+the NMI. Re-injecting is deliberately avoided: after `CRASHING` the guest is (overwhelmingly)
 mid-kdump writing the vmcore this feature protects, and a second NMI into the running crash
 kernel is not demonstrably inert — it can abort or corrupt the in-progress dump. Because the
-controller is pre-resolved and the marker is committed microseconds before the NMI dispatch, a
-`CRASHING` System means "NMI dispatch attempted"; finalize-only resolves the ambiguous outcome
-(landed / raised-after-delivery / raised-before-delivery) evidence-first to `CRASHED`. The
-reconciler recovery below is the backstop for when retries **are** exhausted.
+controller is pre-resolved and the marker is committed with no DB read or binding lookup left
+before the NMI dispatch, a `CRASHING` System means "NMI dispatch attempted"; finalize-only
+resolves the ambiguous outcome (landed / raised-after-delivery / raised-before-delivery)
+evidence-first to `CRASHED`. The reconciler recovery below is the backstop for when retries
+**are** exhausted.
+
+**On the size of the marker→NMI gap.** The gap between the `CRASHING` commit and the NMI
+actually starting is not "a few microseconds of Python": both the NMI and the power op fire via
+a bare `asyncio.to_thread(...)`, which submits onto the event loop's **shared default
+`ThreadPoolExecutor`**. Between the submit and the callable starting on a worker thread, the
+submission can wait behind other concurrent blocking ops, so the gap is bounded by
+executor-thread availability — typically sub-millisecond, but it **degrades under executor
+saturation**, not a hard microsecond bound. The claim this design rests on is the weaker,
+defensible one: the ordering hardening removes the DB read and the binding lookup from the gap
+(the parts we control), leaving only the executor hand-off; it **narrows** the window, it does
+not prove a microsecond ceiling. Giving the physical ops a dedicated/bounded executor so they
+are not starved by unrelated `to_thread` work is a possible further hardening, out of scope
+here.
 
 **Windows where `CRASHING` sits on a possibly-healthy guest (mislabel cost, stated honestly).**
 Finalize-only + reconciler-to-`CRASHED` means a guest whose NMI never actually landed can be
-mislabelled `CRASHED` and torn down. This can arise two ways: (1) a worker kill in the
-microsecond gap between the `CRASHING` commit and the NMI dispatch (controller pre-resolved, so
-no I/O sits in this gap); (2) an `injectNMI` raise where the NMI did **not** reach QEMU (e.g. a
+mislabelled `CRASHED` and torn down. This can arise two ways: (1) a worker kill in the gap
+between the `CRASHING` commit and the NMI dispatch (no DB/binding work in this gap, but bounded
+by executor-dispatch latency per the note above, not strictly microseconds); (2) an `injectNMI`
+raise where the NMI did **not** reach QEMU (e.g. a
 missing domain or a pre-delivery transport error) followed by finalize/reconciler resolving to
 `CRASHED`. Both are confined to the worker-crash / degraded-provider paths, not the normal
 flow, and both are accepted deliberately: the alternative to each — re-firing the NMI, or
@@ -150,12 +169,13 @@ transient) in addition to `crashed`; the `control.power` wrapper docstring is up
 reads matches the behaviour.
 
 **One ordering hardening in `power_handler`.** Today `power_handler` runs `_power_target` (the
-READY re-check, under the lock) → `_controller` (a provider-binding lookup, a real time gap) →
-the unlocked `control.power`. Reorder so `_controller` runs **first** and `_power_target` is the
-**last** DB read immediately before dispatch. This is behaviour-preserving (same checks) and
-symmetric to the `force_crash` ordering rule: it shrinks the power op's "checked READY → fired
-physical op" gap from the provider-lookup duration to microseconds, minimizing the residual
-below. No new check, no lock held across the physical op.
+READY re-check, under the lock) → `_controller` (a DB-backed binding resolution) → the unlocked
+`control.power`. Reorder so `_controller` runs **first** and `_power_target` is the **last** DB
+read immediately before dispatch. This is behaviour-preserving (same checks) and symmetric to the
+`force_crash` ordering rule: it removes the binding resolution from the power op's "checked
+READY → fired physical op" gap, leaving only the `to_thread` dispatch hand-off (bounded by
+executor-thread availability, per the window note above — not a hard microsecond bound). No new
+check, no lock held across the physical op.
 
 #### Residual: the symmetric power-side window (bounded, accepted)
 
@@ -169,14 +189,16 @@ with no per-System single-flight, so both can run on separate workers):
 - **B — narrowed, not eliminated.** The power job's `_power_target` re-check reads `READY`
   *before* `_enter_crashing` commits `CRASHING`; power then fires its unlocked `control.power`
   after the NMI. No marker checked *before* the physical op can close B, because at the instant
-  power decided, the marker did not yet exist. The ordering hardening above shrinks B to the
-  microseconds between power's under-lock re-check and its `to_thread` dispatch (symmetric to the
-  marker→NMI microsecond gap on the `force_crash` side). Fully eliminating B requires
-  **serializing the two physical ops** — a per-System single-flight making `power` and
+  power decided, the marker did not yet exist. The ordering hardening above shrinks B to the gap
+  between power's under-lock re-check and its `to_thread` dispatch (symmetric to the marker→NMI
+  gap on the `force_crash` side) — bounded by executor-thread availability, so it degrades under
+  `to_thread` saturation rather than being a hard microsecond ceiling. Fully eliminating B
+  requires **serializing the two physical ops** — a per-System single-flight making `power` and
   `force_crash` mutually exclusive, or holding the lock across the blocking op (the anti-pattern
   ADR-0320 avoids). That is a larger change, deliberately out of scope here and left as a
-  possible follow-up; the microsecond residual is accepted as strictly smaller than the
-  sub-second window ADR-0320 §1a documented.
+  possible follow-up. The residual is deliberately accepted as a narrowing (both the marker→NMI
+  and re-check→dispatch gaps are as small as we can make them without cross-op serialization),
+  not a proof of elimination.
 
 ### Leak recovery (reconciler → `crashed`, evidence-first)
 
@@ -195,14 +217,18 @@ runs each tick **after** `repair_abandoned_jobs` (which already dead-letters a z
      **forever** with power permanently blocked — the permanent limbo R3 forbids. A cancel
      cannot un-fire an already-dispatched NMI, so evidence-first `crashed` is right.
    - Owning row **absent** → recovered defensively (see invariant below). This should not occur.
-   - `RUNNING` (valid lease) or **`QUEUED`** → **left alone.** A `running` handler may yet
-     finalize; a `queued` job is a force_crash mid-retry (e.g. after a non-terminal
-     `CONTROL_FAILURE`) that a worker will dequeue and finalize. These are recovered by **normal
-     job retry, not the reconciler** — the reconciler backstops only jobs that will *never* run
-     again. This makes R3 depend on an explicit **worker-liveness assumption**: if the entire
-     worker fleet is down, *every* queued job stalls (not specific to `crashing`), and the
-     worst-case pre-recovery stall for a mid-retry `crashing` System is bounded by the
-     force_crash retry budget × backoff.
+   - `RUNNING` or **`QUEUED`** → **left alone**, because **a worker can still reclaim the job.**
+     A `queued` job (force_crash mid-retry after a non-terminal `CONTROL_FAILURE`) will be
+     dequeued; a `running` job with a valid lease has a live handler that may finalize; and a
+     `running` job whose lease **lapsed** with attempts remaining (worker died, not yet
+     dead-lettered) is re-dequeued in place by `queue.dequeue` and finalized by the next worker
+     (only when attempts are *exhausted* does `repair_abandoned_jobs` move it to `FAILED`, which
+     then satisfies the "no active job" predicate). So "leave alone" is keyed on *reclaimability*,
+     not on a live handler. These are recovered by **normal job processing, not the reconciler** —
+     the reconciler backstops only jobs that will *never* run again. R3 **promptness** therefore
+     rests on an explicit **worker-liveness assumption**: while the fleet is dequeuing, the
+     worst-case pre-recovery stall is bounded by the force_crash retry budget × backoff; if the
+     entire fleet is down, *every* job stalls (not specific to `crashing`), which is out of scope.
 
    **Invariant (verified):** the `force_crash` job row must remain discoverable for at least as
    long as any System can read `crashing`. This holds — no code path deletes a job row (there is
@@ -264,9 +290,11 @@ Adding `CRASHING` is not a one-line enum change; each set that enumerates states
 - **AC4 (R4).** `force_crash` end-to-end still drives `ready → crashing → crashed` and
   detaches every non-terminal DebugSession; the audit trail shows the `crashing->crashed`
   transition.
-- **AC4a (retry / F2).** A retry that re-enters the handler with the System already `crashing`
-  finalizes to `crashed` **without** calling the provider NMI method a second time (spy on
-  `control.force_crash` sees exactly one call across the two attempts).
+- **AC4a (finalize-only retry).** A retry that re-enters the handler with the System already
+  `crashing` finalizes to `crashed` **without** calling the provider NMI method a second time
+  (spy on `control.force_crash` sees exactly one call across the two attempts) **and without
+  resolving the controller** (the finalize-only branch skips `_controller`, so finalize is not
+  gated on binding resolution).
 - **AC4b (NMI-dispatch failure).** When the provider NMI call raises a (non-terminal)
   `CONTROL_FAILURE`, the exception propagates and the job requeues; the retry finalizes the
   already-`crashing` System to `crashed` **without** re-firing the NMI (spy sees one NMI call).

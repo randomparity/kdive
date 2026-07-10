@@ -44,12 +44,16 @@ must be a durable marker the power path already respects.
    TORN_DOWN}`, `CRASHED → {TORN_DOWN, FAILED}` (unchanged). Migration `0065` adds `'crashing'`
    to the `systems_state_check` CHECK (forward-only; no row is `crashing`, no backfill).
 
-2. **`force_crash` handler.** The controller is resolved **first** (a provider-binding lookup
-   that can fail must fail while the System is still `READY`, not after the marker); then
-   `_enter_crashing` transitions `READY → CRASHING` under the lock as the last DB write before
-   the NMI, so the marker→NMI window is microseconds. A retry that re-enters with the System
-   already `CRASHING` is **finalize-only** — it does **not** re-fire the NMI (the marker means
-   "NMI already dispatched"; a second NMI into a mid-kdump guest is not demonstrably inert). If
+2. **`force_crash` handler (state-conditional).** A locked precheck classifies the state without
+   transitioning. On a **first attempt** (`READY`) the controller resolves **first** (a DB-backed
+   binding resolution — not a provider round-trip — that can still fail with `NOT_FOUND`/DB error;
+   it must fail while the System is still `READY`, not after the marker), then `_enter_crashing`
+   transitions `READY → CRASHING` under the lock as the last DB write before the NMI. On a
+   **finalize-only retry** (`CRASHING`) the controller and NMI are skipped entirely — finalize is
+   not gated on resolution. The marker→NMI gap holds no DB read or binding lookup, only the
+   `asyncio.to_thread` dispatch hand-off (bounded by executor-thread availability, not a hard
+   microsecond bound). A retry never re-fires the NMI (the marker means "NMI already dispatched";
+   a second NMI into a mid-kdump guest is not demonstrably inert). If
    the NMI *call itself* raises, the exception **propagates** (a `libvirt` `injectNMI` raise can
    be a transport error *after* delivery, so a raise does not prove the NMI missed); the
    non-terminal `CONTROL_FAILURE` requeues the job and the retry finalizes evidence-first —
@@ -64,16 +68,18 @@ must be a durable marker the power path already respects.
    names it alongside `crashed`. `power_handler` is reordered (behaviour-preserving) so
    `_controller` resolves **before** the final `_power_target` READY re-check, making that
    re-check the last DB read before the unlocked `control.power` dispatch — symmetric to the
-   `force_crash` ordering, shrinking the power-side race window to microseconds.
+   `force_crash` ordering, removing the binding resolution from the power-side race window
+   (leaving only the `to_thread` dispatch hand-off, bounded by executor-thread availability).
 
    **Bounded residual.** The marker serializes the two state *reads*. It closes the interleaving
    #1078 names — a power op that re-checks *at or after* the `CRASHING` commit is refused. It
    does not close the fully-concurrent interleaving where a power op read `READY` *before* the
    marker and then fires its unlocked physical op after the NMI; no marker checked before the
-   physical op can. The ordering hardening shrinks that residual to microseconds; eliminating it
-   needs per-System single-flight of `power` vs `force_crash` (or a lock held across the blocking
-   op — the ADR-0320 anti-pattern), a larger change left as a possible follow-up. The residual is
-   strictly smaller than the sub-second window ADR-0320 §1a documented.
+   physical op can. The ordering hardening narrows that residual to the `to_thread` dispatch
+   hand-off (bounded by executor-thread availability, degrading under saturation — not a hard
+   microsecond bound); eliminating it needs per-System single-flight of `power` vs `force_crash`
+   (or a lock held across the blocking op — the ADR-0320 anti-pattern), a larger change left as a
+   possible follow-up. The residual is accepted as a narrowing, not a proof of elimination.
 
 4. **Leak recovery (reconciler → `crashed`).** A new `repair_stalled_crashing_systems`
    (`reconciler/repairs/systems.py`) runs after `repair_abandoned_jobs` and transitions a
@@ -81,9 +87,11 @@ must be a durable marker the power path already respects.
    the `SYSTEM` lock, auditing and detaching sessions exactly as finalize would. That one
    predicate covers a `FAILED` (dead-lettered) job, a `CANCELED` job (operator `jobs.cancel`;
    `force_crash` *is* operator-cancelable while `RUNNING`, so `CANCELED` **must** be recovered or
-   the System strands forever — the R3 limbo), and the invariant-only absent-row case. A
-   `running` job (may finalize) or a `queued` job (mid-retry a worker will run) is left to the
-   normal retry path, not the reconciler — so R3 rests on an explicit worker-liveness assumption.
+   the System strands forever — the R3 limbo), and the invariant-only absent-row case. An active
+   job — `queued`, valid-lease `running`, or lease-lapsed `running` with attempts remaining (a
+   worker re-dequeues it in place) — is left to the normal retry path, keyed on **reclaimability**
+   (a worker can still run it), not on a live handler. So R3 promptness rests on an explicit
+   worker-liveness assumption.
    The job row outlives any `crashing` System (verified: no `DELETE FROM jobs` exists).
 
 5. **State-set fan-out.** Every enumerated `SystemState` set is audited (see spec table).
