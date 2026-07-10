@@ -42,6 +42,18 @@ async def _control_target(conn: AsyncConnection, system_id: UUID, *, op: str) ->
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"system_id": str(system_id)},
             )
+        # Re-check READY under the SYSTEM lock before the physical op: a power job admitted
+        # while READY may dequeue after a ready->crashed transition, and a CRASHED System
+        # holds crash evidence that must not be destroyed through the power path (ADR-0320).
+        # terminal=True: the state will not improve on retry, so dead-letter rather than churn.
+        if system.state is not SystemState.READY:
+            raise CategorizedError(
+                f"{op} requires a READY system; crash evidence on a non-READY system is "
+                "protected from the power path",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"system_id": str(system_id), "current_status": system.state.value},
+                terminal=True,
+            )
         return _ControlTarget(_resolved_domain_name(system), system.project)
 
 

@@ -419,6 +419,34 @@ def test_power_handler_calls_provider_and_audits(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_power_handler_refuses_non_ready_system(migrated_url: str) -> None:
+    # A power job admitted READY but executed after ready->crashed must fail terminally and
+    # never drive the physical domain — protecting crash evidence at execution (ADR-0320).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.CRASHED, domain_name="kdive-x")
+            async with pool.connection() as conn:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.POWER,
+                    PowerPayload(system_id=sys_id, action=PowerAction.RESET),
+                    {"principal": "user-1", "agent_session": "s", "project": "proj"},
+                    f"{sys_id}:power:reset:{uuid4()}",
+                )
+            ctrl = _FakeControl()
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError) as exc:
+                    await control_plane.power_handler(
+                        conn, job, resolver=provider_resolver(controller=ctrl)
+                    )
+            assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+            assert exc.value.terminal is True  # dead-letters, does not retry (ADR-0320)
+            assert ctrl.powered == []  # physical power op never invoked
+
+    asyncio.run(_run())
+
+
 def test_power_handler_missing_system_is_infra_failure(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
