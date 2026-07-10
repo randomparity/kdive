@@ -49,7 +49,12 @@ yours to shape:
 - **The guest package manager is yours.** Install whatever the investigation needs at
   runtime — `apt install trace-cmd`, a compiler toolchain, `stress-ng`, `bpftrace`. Do not
   assume a capability is missing because a tool is absent; install it. Most "the platform
-  can't do that" conclusions are one package (or one config symbol) away.
+  can't do that" conclusions are one package (or one config symbol) away. On
+  **local-libvirt**, installs need the operator to have enabled guest egress first (no
+  outbound network by default); see the systems guide's "Reaching the guest over SSH"
+  section if `dnf`/`apt install` can't resolve a host.
+- **Mind disk headroom.** Installing toolchains, building reproducers, and capturing traces
+  all consume guest disk; size the shape for the work or clean up as you go.
 - **Mind disk headroom.** Installing toolchains, building reproducers, and capturing traces
   all consume guest disk; size the shape for the work or clean up as you go.
 
