@@ -51,9 +51,11 @@ def render_domain_xml(
 
     A local-libvirt domain is always direct-kernel (the profile validator pairs ``disk-image`` with
     remote-libvirt only), so the ``<os>`` always carries a ``<kernel>`` pointing at the rootfs's own
-    baseline kernel (``kernel_path``), an optional ``<initrd>`` (``initrd_path``), and a fixed
-    ``<cmdline>`` of ``root=/dev/vda console=ttyS0 rw``. ``kernel_path`` is required: a ``None`` is
-    a ``CONFIGURATION_ERROR``, not a silently disk-booting (and so non-booting) domain.
+    baseline kernel (``kernel_path``), an optional ``<initrd>`` (``initrd_path``), and a
+    ``<cmdline>`` of ``root=/dev/vda console=<device> rw`` whose serial console is arch-resolved
+    (``ttyS0`` on x86, ``hvc0`` on pseries — see ``kdive.domain.platform``). ``kernel_path`` is
+    required: a ``None`` is a ``CONFIGURATION_ERROR``, not a silently disk-booting (and so
+    non-booting) domain.
 
     When ``profile.provider.local_libvirt.debug.gdbstub`` is set, a loopback QEMU gdbstub is
     rendered on ``gdb_port`` via the ``<qemu:commandline>`` passthrough (ADR-0210 §1); ``gdb_port``
