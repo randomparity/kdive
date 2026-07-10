@@ -66,15 +66,31 @@ instead of breaking it: no new tool, no bypass, no ADR-0006/0020/0130 exception.
      the crash workflow (`capture_vmcore` → `systems.teardown`/`systems.reprovision`).
    - **Execution** (`power_handler`): admission alone is insufficient because power is an
      async durable job — a job admitted while `READY` could dequeue after the guest has
-     gone `CRASHED` (e.g. an interleaved `force_crash`, also `READY`-only, so both admit),
-     and `power_handler` today drives the domain with no state re-check. So the handler
-     re-reads `system.state` **under the `SYSTEM` advisory lock it already takes**, before
-     the physical `control.power()` call, and fails the job terminally (clear reason) when
-     the System is not `READY`. Because crash evidence exists only in `CRASHED` and power
-     runs only on `READY`, power never coexists with capturable evidence; the `SYSTEM`
-     lock serializes the re-check against the `ready→crashed` transition (which
-     `force_crash` takes under the same lock). This closes both the destroy-during-capture
-     race and the mislabel-after-reboot window that an admission-only guard leaves open.
+     gone `CRASHED`, and `power_handler` today drives the domain with no state re-check.
+     So the handler re-reads `system.state` **under the `SYSTEM` advisory lock**, and fails
+     the job terminally (clear reason) when the System is not `READY`; the physical
+     `control.power()` call runs only past that guard. The lock must be *held across* the
+     state re-read (the existing `_control_target` already reads under the lock — reuse
+     that read as the guard); the physical libvirt op then runs after the lock is released,
+     matching today's structure and `force_crash`'s own unlocked-physical-op pattern (do
+     **not** hold a Postgres transaction + advisory lock across the multi-second blocking
+     libvirt reset — that would block every other `SYSTEM`-lock contender: reconciler
+     dead-session detach, teardown, reprovision, `force_crash` finalize).
+   - **What this closes and the residual.** The re-check closes the realistic cases: a
+     `force_crash` (or any `CRASHED` transition) that *completed* before the power job
+     dequeues, and the sequential mislabel-after-reboot. It does **not** fully close one
+     narrow window: `force_crash_handler` fires its physical NMI *unlocked* and writes
+     `CRASHED` only afterward (`jobs/handlers/control.py` — target read+release, NMI, then
+     finalize), so between the NMI and the `CRASHED` write the DB still reads `READY` and a
+     concurrent power job's re-check can pass and reset a crashing guest mid-kdump. This
+     residual is bounded: `CRASHED` (hence any capturable crash evidence) is produced
+     **only** by `force_crash`, which is `admin` + opt-in-gated, so the interleaving
+     requires a privileged, deliberate `force_crash` racing a power op in a sub-second
+     window — a within-project coordination race, not an unprivileged path. Fully closing
+     it needs a pre-NMI durable "crashing" marker on `force_crash` that the power re-check
+     also rejects; that expands `force_crash`'s state machine (and adds a marker-leak
+     failure mode) and is **out of scope for #1062**, tracked as a follow-up. See
+     Non-goals.
 2. `control.force_crash` is **unchanged**: `admin` + the two-check destructive gate +
    `destructive_ops` opt-in. It is the deliberate fault-injection primitive (drives
    `ready → crashed`, detaches DebugSessions, ties to vmcore capture), not a recovery
@@ -110,6 +126,12 @@ instead of breaking it: no new tool, no bypass, no ADR-0006/0020/0130 exception.
   project boundary is the trust boundary in this RBAC model, exactly as every other op is
   scoped today. A power action is therefore reachable by any project contributor, not only
   the actor who provisioned or is debugging the System (see the DebugSession note below).
+- No change to `force_crash`'s locking. The sub-second physical-crash-window race (Req 1a
+  residual) — where `force_crash`'s unlocked NMI has fired but `CRASHED` is not yet written,
+  so a concurrent power op's READY re-check can still pass — is **not** closed here. Closing
+  it requires a pre-NMI durable "crashing" marker on `force_crash` (a change to its state
+  machine, with a marker-leak failure mode). It is admin-gated and narrow (see Req 1a);
+  tracked as a follow-up, not fixed in #1062.
 - No change to DebugSession handling on power. `control.force_crash` detaches every
   non-terminal DebugSession (the crashed kernel is gone); power off/cycle/reset do **not**
   — this is pre-existing, unchanged behavior. A power reboot can therefore leave a live
@@ -144,13 +166,18 @@ classification. Changing it is out of scope.
 
 `power_handler` drives the physical domain (`control.power(domain, action)`) with no
 state check today, and the op is async — so the READY-only invariant must also hold at
-execution (Req 1a). Add a `system.state == READY` re-read **inside** the `SYSTEM`
-advisory-lock transaction the handler already opens, *before* the physical power call, and
-fail the job terminally with a clear reason (e.g. `configuration_error`-category message
-naming `current_status`) when the System is not `READY`. The lock makes the re-check
-atomic against the `ready→crashed` transition (`force_crash` takes the same `SYSTEM`
-lock). No new lock, no new job kind. Verify during build that the physical `control.power`
-call is moved under (or after) the same locked state check so the check is load-bearing.
+execution (Req 1a). Extend `_control_target` (or add a peer read) so the `SYSTEM`
+advisory-lock transaction it already opens also reads `system.state` and raises a terminal
+error (message naming `current_status`) when the System is not `READY`. The physical
+`control.power` call stays *after* the lock transaction (as today) — do **not** hold the
+advisory lock across the blocking libvirt op. No new lock, no new job kind, no new durable
+state.
+
+This guard is load-bearing for the DB-state race (a completed `CRASHED` transition before
+the power job runs) but not for the sub-second window where `force_crash`'s physical NMI
+has fired and its `CRASHED` write has not yet landed — see Req 1a's residual note and
+Non-goals. That window is out of scope here (it requires an admin-gated `force_crash`
+racing power, and closing it means changing `force_crash`).
 
 ### Domain taxonomy (`domain/operations/jobs.py`)
 

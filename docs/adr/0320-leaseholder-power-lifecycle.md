@@ -70,12 +70,18 @@ opt-in).**
    insufficient — a job admitted while `READY` could execute after a `ready→crashed`
    transition (e.g. an interleaved `force_crash`, also `READY`-only). So `power_handler`
    re-reads `system.state` **under the `SYSTEM` advisory lock it already holds**, before
-   the physical `control.power()` call, and fails the job terminally when not `READY`. The
-   lock serializes the re-check against the `ready→crashed` transition (`force_crash` takes
-   the same lock), and since evidence exists only in `CRASHED`, power never coexists with
-   it — closing both the destroy-during-capture race and the mislabel-after-reboot window.
-   `force_crash` (already `READY`-only) and `diagnostic_sysrq` are unaffected — they never
-   used `_STARTED_SYSTEM`.
+   the physical `control.power()` call (the physical libvirt op runs after the lock is
+   released — the lock is not held across the blocking op), and fails the job terminally
+   when not `READY`. This closes the DB-state race (a `CRASHED` transition that completed
+   before the power job dequeues) and the sequential mislabel-after-reboot. It does **not**
+   close one narrow residual: `force_crash_handler` fires its physical NMI *unlocked* and
+   writes `CRASHED` only afterward, so between the NMI and that write the DB reads `READY`
+   and a concurrent power re-check can still pass. That residual is bounded — `CRASHED`
+   (hence capturable evidence) is produced only by the `admin`+opt-in-gated `force_crash`,
+   so it is a privileged, sub-second coordination race, not an unprivileged path — and
+   fully closing it requires a pre-NMI `crashing` marker on `force_crash`, deferred as a
+   follow-up. `force_crash` (already `READY`-only) and `diagnostic_sysrq` are unaffected —
+   they never used `_STARTED_SYSTEM`.
 
 2. **Taxonomy.** `POWER` leaves `DESTRUCTIVE_JOB_KINDS`
    (`domain/operations/jobs.py`), which becomes `{REPROVISION, TEARDOWN, FORCE_CRASH}`.
@@ -163,7 +169,9 @@ agent caution hint (a hard reset interrupts the guest), orthogonal to authorizat
   existing `admin` + `destructive_ops` opt-in gate — reintroduces a meaningful `"power"`
   token, contradicting its removal; (ii) uniform contributor power plus a "refuse while a
   non-terminal `capture_vmcore` exists" interlock — more code, and still allows destroying
-  uncaptured evidence and the post-reset mislabel. Denying power on non-`READY` at
-  admission is the simplest choice that closes the race and the mislabel and keeps power
-  fully out of `destructive_ops`; the crash workflow (`capture_vmcore` →
-  `teardown`/`reprovision`) is the path for a CRASHED System.
+  uncaptured evidence and the post-reset mislabel. Denying power on non-`READY` at both
+  admission and execution keeps power fully out of `destructive_ops` and closes the DB-state
+  race and the mislabel; the crash workflow (`capture_vmcore` → `teardown`/`reprovision`)
+  is the path for a CRASHED System. The remaining sub-second physical-crash-window race
+  (`force_crash`'s unlocked NMI before its `CRASHED` write) is a bounded, admin-gated
+  follow-up (a pre-NMI `crashing` marker on `force_crash`), deliberately not taken here.
