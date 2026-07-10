@@ -116,7 +116,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     # audit (dual: project admin or platform auditor)
     "audit.query": frozenset({ExposureScope.PROJECT_ADMIN, ExposureScope.PLATFORM_AUDITOR}),
     # control
-    "control.power": _OPERATOR,  # `on` is operator; destructive actions gate to admin
+    "control.power": _CONTRIBUTOR,  # leaseholder lifecycle over a READY transient VM (ADR-0320)
     "control.force_crash": _ADMIN,
     "control.diagnostic_sysrq": _CONTRIBUTOR,  # non-destructive diagnostic capture, ADR-0285
     # debug

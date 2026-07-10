@@ -47,7 +47,7 @@ visible to every authenticated token regardless of grants.
 | Profile | Tools visible |
 |---|--:|
 | Viewer | 41 |
-| Contributor | 81 |
+| Contributor | 82 |
 | Operator | 91 |
 | Admin | 96 |
 | Plat-Op | 34 |
@@ -80,7 +80,7 @@ visible to every authenticated token regardless of grants.
 | `audit.query` | admin / plat-auditor |  |  |  | ✓ |  | ✓ | ✓ |
 | `control.diagnostic_sysrq` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `control.force_crash` | admin |  |  |  | ✓ |  |  |  |
-| `control.power` | operator |  |  | ✓ | ✓ |  |  |  |
+| `control.power` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.backtrace` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.clear_breakpoint` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.clear_watchpoint` | contributor |  | ✓ | ✓ | ✓ |  |  |  |

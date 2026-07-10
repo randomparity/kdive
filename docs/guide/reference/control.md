@@ -36,11 +36,13 @@ Inject an NMI to crash a ready System; drives ready->crashed. Requires admin + g
 
 `implemented` · `destructive`
 
-Power action on a started System: `on` is reversible (operator); off/cycle/reset
-are destructive (admin). Enqueues a power job.
+Power action on a READY System: on/off/cycle/reset, all contributor-level
+leaseholder control. reset/cycle recover a wedged READY guest. Refused on a
+non-READY System (a CRASHED System holds crash evidence — use the crash workflow).
+Enqueues a power job.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `action` | string | yes | Power action: `on` (operator) or `off`/`cycle`/`reset` (admin). |
+| `action` | string | yes | Power action: `on`/`off`/`cycle`/`reset`. All require `contributor` (leaseholder control over your transient VM). Use `reset`/`cycle` to recover a wedged but READY guest. Admitted only on a READY System. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
-| `system_id` | string | yes | The started System to act on. |
+| `system_id` | string | yes | The READY System to act on. |

@@ -227,15 +227,13 @@ async def _power(
 # --- control.power tool --------------------------------------------------------------------
 
 
-def test_power_off_with_gate_checks_enqueues_job(migrated_url: str) -> None:
-    # power off/cycle/reset are destructive-administration ops: gate + admin (ADR-0037 §2).
+def test_power_off_enqueues_job(migrated_url: str) -> None:
+    # power off/cycle/reset are contributor leaseholder lifecycle — no opt-in (ADR-0320).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(
-                pool, alloc_id, SystemState.READY, destructive_ops=["power"]
-            )
-            resp = await _power(pool, _admin_ctx(), system_id=sys_id, action="off")
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resp = await _power(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, action="off")
             assert resp.status == "queued"
             assert resp.data["system_id"] == sys_id
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -290,39 +288,29 @@ def test_power_unkeyed_calls_are_distinct_jobs(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_power_on_is_operator_and_enqueues_job(migrated_url: str) -> None:
-    # power on brings a System up — a reversible lifecycle move at operator (ADR-0037 §1).
+def test_power_on_is_contributor_and_enqueues_job(migrated_url: str) -> None:
+    # power on brings a READY System up — contributor leaseholder lifecycle (ADR-0320).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            resp = await _power(pool, _ctx(), system_id=sys_id, action="on")
+            resp = await _power(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, action="on")
         assert resp.status == "queued"
 
     asyncio.run(_run())
 
 
 @pytest.mark.parametrize("action", ["off", "cycle", "reset"])
-def test_power_destructive_action_refused_for_operator(migrated_url: str, action: str) -> None:
+def test_power_destructive_action_allowed_for_contributor_no_optin(
+    migrated_url: str, action: str
+) -> None:
+    # off/cycle/reset need no destructive_ops opt-in and no admin: contributor suffices (ADR-0320).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(
-                pool, alloc_id, SystemState.READY, destructive_ops=["power"]
-            )
-            resp = await _power(pool, _ctx(), system_id=sys_id, action=action)
-            assert resp.status == "error" and resp.error_category == "authorization_denied"
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'power'")
-                jobs_row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM audit_log "
-                    "WHERE object_id = %s AND transition = 'power:denied'",
-                    (sys_id,),
-                )
-                audit_row = await cur.fetchone()
-        assert jobs_row is not None and jobs_row["n"] == 0
-        assert audit_row is not None and audit_row["n"] == 1
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resp = await _power(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, action=action)
+            assert resp.status == "queued"
 
     asyncio.run(_run())
 
@@ -338,16 +326,28 @@ def test_power_unknown_action_is_config_error(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_power_non_started_system_is_config_error(migrated_url: str) -> None:
+def test_power_non_ready_system_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(
-                pool, alloc_id, SystemState.DEFINED, destructive_ops=["power"]
-            )
-            resp = await _power(pool, _admin_ctx(), system_id=sys_id, action="off")
+            sys_id = await _seed_system(pool, alloc_id, SystemState.DEFINED)
+            resp = await _power(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, action="off")
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert resp.data["current_status"] == "defined"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("action", ["on", "off", "cycle", "reset"])
+def test_power_on_crashed_system_is_config_error(migrated_url: str, action: str) -> None:
+    # A CRASHED System holds crash evidence: power is refused, protecting it (ADR-0320).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.CRASHED)
+            resp = await _power(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, action=action)
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["current_status"] == "crashed"
 
     asyncio.run(_run())
 
@@ -372,14 +372,15 @@ def test_power_malformed_uuid_is_config_error(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_power_on_without_operator_raises(migrated_url: str) -> None:
-    # power on is operator; a viewer is refused even the non-destructive action.
+@pytest.mark.parametrize("action", ["on", "off", "cycle", "reset"])
+def test_power_denied_for_viewer(migrated_url: str, action: str) -> None:
+    # contributor is the floor for every power action; a viewer is refused (ADR-0320).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
             with pytest.raises(AuthorizationError):
-                await _power(pool, _ctx(Role.VIEWER), system_id=sys_id, action="on")
+                await _power(pool, _ctx(Role.VIEWER), system_id=sys_id, action=action)
 
     asyncio.run(_run())
 
