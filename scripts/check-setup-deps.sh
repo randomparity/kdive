@@ -71,8 +71,6 @@ package_for() {
   qemu-system-x86_64:*) printf "qemu-system-x86" ;;
   qemu-system-ppc64:opensuse) printf "qemu-ppc" ;;
   qemu-system-ppc64:*) printf "qemu-system-ppc" ;;
-  qemu-system-aarch64:opensuse) printf "qemu-arm" ;;
-  qemu-system-aarch64:*) printf "qemu-system-arm" ;;
   qemu-img:debian) printf "qemu-utils" ;;
   qemu-img:opensuse) printf "qemu-tools" ;;
   qemu-img:*) printf "qemu-img" ;;
@@ -164,11 +162,11 @@ report_tier() {
 
 # The QEMU system-emulator binary is arch-named, and the name is not a plain `uname -m`:
 # ppc64le maps to `qemu-system-ppc64` (not `-ppc64le`). Report the binary for the running host
-# so a POWER/ARM box is not told to install the x86 emulator.
+# so a POWER box is not told to install the x86 emulator. Only the arches KDIVE actually
+# provisions (x86_64, ppc64le) are mapped; others fall back to the x86 default.
 qemu_system_binary() {
   case "$(uname -m)" in
   ppc64le | ppc64) printf "qemu-system-ppc64" ;;
-  aarch64 | arm64) printf "qemu-system-aarch64" ;;
   *) printf "qemu-system-x86_64" ;;
   esac
 }
