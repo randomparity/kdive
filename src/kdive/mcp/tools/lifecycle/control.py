@@ -1,11 +1,12 @@
 """The `control.*` MCP tools (ADR-0028).
 
-`control.power` (``on`` → operator; ``off``/``cycle``/``reset`` → two-check gated,
-admin, ADR-0037 §1/§2, ADR-0130) and `control.force_crash` (two-check gated, admin) admit
-synchronously and enqueue a durable job. Worker-owned execution lives in
-``kdive.jobs.handlers.control``; `power` moves no System state (a domain restart is not a
-reprovision), while `force_crash` drives System ``ready -> crashed`` and every non-terminal
-DebugSession of the System ``-> detached`` (joined through ``runs``).
+`control.power` (all actions ``on``/``off``/``cycle``/``reset`` → ``contributor``,
+ADR-0320) admits only a ``READY`` System — a ``CRASHED`` System holds crash evidence and is
+refused. `control.force_crash` (two-check gated, admin) admits synchronously and enqueues a
+durable job. Worker-owned execution lives in ``kdive.jobs.handlers.control``; `power` moves
+no System state (a domain restart is not a reprovision), while `force_crash` drives System
+``ready -> crashed`` and every non-terminal DebugSession of the System ``-> detached``
+(joined through ``runs``).
 
 `power` uses a per-call-unique ``dedup_key`` (``{system_id}:power:{action}:{uuid4}``) so a
 repeated power op is always a fresh job; `force_crash` uses a stable
@@ -57,10 +58,7 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
 from kdive.security.authz.rbac import Role, require_role
 
-# Systems that have a started libvirt domain (so a power op has something to act on).
-_STARTED_SYSTEM = frozenset({SystemState.READY, SystemState.CRASHED})
 _FORCE_CRASH = JobKind.FORCE_CRASH
-_POWER = JobKind.POWER
 # Idempotency-store kinds (the registered tool names); ADR-0193.
 _POWER_KIND = "control.power"
 _FORCE_CRASH_KIND = "control.force_crash"
@@ -68,15 +66,6 @@ _DIAGNOSTIC_SYSRQ_KIND = "control.diagnostic_sysrq"
 # The agent-facing allowlist rendered into the `command` Field description (single source of
 # truth is `SysRqCommand`; ADR-0285).
 _SYSRQ_COMMANDS = ", ".join(command.value for command in SysRqCommand)
-# Power on is a reversible lifecycle move (operator); off/cycle/reset tear into a running
-# guest and are destructive-administration ops (admin) — ADR-0037 §1/§2.
-_POWER_ON_ACTIONS = frozenset({PowerAction.ON})
-_DESTRUCTIVE_POWER_ACTIONS = frozenset({PowerAction.OFF, PowerAction.CYCLE, PowerAction.RESET})
-
-
-def _power_required_role(action: PowerAction) -> Role:
-    """The lowest role that may issue ``action``: ``operator`` for ``on``, else ``admin``."""
-    return Role.OPERATOR if action in _POWER_ON_ACTIONS else Role.ADMIN
 
 
 async def power_system(
@@ -85,16 +74,16 @@ async def power_system(
     *,
     system_id: str,
     action: str,
-    resolver: ProviderResolver,
     idempotency_key: str | None = None,
 ) -> ToolResponse:
-    """Admit a power op on a started System and enqueue a `power` job.
+    """Admit a power op on a ``READY`` System and enqueue a `power` job.
 
-    ``power on`` requires ``operator`` (a reversible lifecycle move); the destructive
-    actions ``off``/``cycle``/``reset`` pass the full destructive-operation gate with the
-    ``admin`` role factor (ADR-0037 §1/§2). The checks bind to the target System's project
-    and run after the in-project check, so they cannot be evaluated against a foreign
-    project.
+    Every action (``on``/``off``/``cycle``/``reset``) requires ``contributor`` — leaseholder
+    control over a transient VM (ADR-0320), not destructive administration. The role check
+    binds to the target System's project and runs after the in-project check, so it cannot be
+    evaluated against a foreign project. Admits only a ``READY`` System: a ``CRASHED`` (or any
+    non-``READY``) System is refused with a ``configuration_error`` so crash evidence that
+    ``capture_vmcore`` reads is not destroyed through the power path.
     """
     uid = _as_uuid(system_id)
     if uid is None:
@@ -108,15 +97,8 @@ async def power_system(
             system = await SYSTEMS.get(conn, uid)
             if system is None or system.project not in ctx.projects:
                 return _config_error(system_id)
-            if power_action in _DESTRUCTIVE_POWER_ACTIONS:
-                gated = await _authorize_destructive(
-                    conn, ctx, system, uid, _POWER, resolver=resolver, tool="control.power"
-                )
-                if isinstance(gated, ToolResponse):
-                    return gated
-            else:
-                require_role(ctx, system.project, _power_required_role(power_action))
-            if system.state not in _STARTED_SYSTEM:
+            require_role(ctx, system.project, Role.CONTRIBUTOR)
+            if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
             # A supplied key makes the power action idempotent by replacing the per-call uuid4
             # in the dedup key; absent, every call is a distinct power job (ADR-0193).
@@ -305,24 +287,31 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
         meta=_docmeta.maturity_meta("implemented"),
     )
     async def control_power(
-        system_id: Annotated[str, Field(description="The started System to act on.")],
+        system_id: Annotated[str, Field(description="The READY System to act on.")],
         action: Annotated[
             str,
-            Field(description="Power action: `on` (operator) or `off`/`cycle`/`reset` (admin)."),
+            Field(
+                description=(
+                    "Power action: `on`/`off`/`cycle`/`reset`. All require `contributor` "
+                    "(leaseholder control over your transient VM). Use `reset`/`cycle` to "
+                    "recover a wedged but READY guest. Admitted only on a READY System."
+                )
+            ),
         ],
         idempotency_key: Annotated[
             str | None,
             Field(description="Replay-safe key; a repeated key returns the prior envelope."),
         ] = None,
     ) -> ToolResponse:
-        """Power action on a started System: `on` is reversible (operator); off/cycle/reset
-        are destructive (admin). Enqueues a power job."""
+        """Power action on a READY System: on/off/cycle/reset, all contributor-level
+        leaseholder control. reset/cycle recover a wedged READY guest. Refused on a
+        non-READY System (a CRASHED System holds crash evidence — use the crash workflow).
+        Enqueues a power job."""
         return await power_system(
             pool,
             current_context(),
             system_id=system_id,
             action=action,
-            resolver=resolver,
             idempotency_key=idempotency_key,
         )
 

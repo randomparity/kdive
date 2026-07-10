@@ -713,7 +713,6 @@ def test_backstop_actually_detects_the_known_gate_callers() -> None:
     # longer reaches the gate (it stays in DESTRUCTIVE_TOOLS via its destructive() annotation).
     assert _gate_reachers() == {
         "control.force_crash",
-        "control.power",
         "systems.reprovision",
     }
 

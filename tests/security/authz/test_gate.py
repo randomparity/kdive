@@ -70,6 +70,14 @@ def test_non_destructive_job_kind_is_rejected() -> None:
         DestructiveOp(kind=JobKind.BUILD, profile_opt_in=True)
 
 
+def test_power_is_no_longer_a_destructive_job_kind() -> None:
+    # Power left DESTRUCTIVE_JOB_KINDS (ADR-0320): it can no longer be routed through the gate,
+    # while reprovision (an opt-in-consuming destructive op) still constructs.
+    with pytest.raises(ValueError, match="power is not a destructive job kind"):
+        DestructiveOp(kind=JobKind.POWER, profile_opt_in=True)
+    DestructiveOp(kind=JobKind.REPROVISION, profile_opt_in=True)
+
+
 def test_both_absent_lists_role_then_opt_in() -> None:
     with pytest.raises(DestructiveOpDenied) as exc:
         assert_destructive_allowed(_ctx(Role.OPERATOR), _allocation(), _op(False))

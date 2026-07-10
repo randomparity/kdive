@@ -193,6 +193,7 @@ _CONTRIBUTOR_LOOP = frozenset(
         "vmcore.fetch",
         "allocations.request",
         "investigations.open",
+        "control.power",  # leaseholder power lifecycle over a READY transient VM (ADR-0320)
     }
 )
 
@@ -203,7 +204,6 @@ _ABOVE_CONTRIBUTOR = frozenset(
         "systems.provision",
         "images.upload",
         "artifacts.create_system_upload",  # system upload stays operator
-        "control.power",
         "systems.teardown",  # admin
         "control.force_crash",  # admin
     }

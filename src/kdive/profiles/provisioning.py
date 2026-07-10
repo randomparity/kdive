@@ -112,11 +112,11 @@ class LibvirtProfile(_ProfileBase):
     ``baseline_kernel`` is an optional hint naming the baseline kernel to boot when the
     rootfs ``/boot`` holds more than one kernel; ``None`` (the common single-kernel case) keeps
     fail-closed selection.
-    ``destructive_ops`` is the optionally-empty list of destructive op kinds this profile
-    opts in (e.g. ``["force_crash"]``); the control plane's gate resolves the opt-in
-    factor from it (deny-by-default — an absent or empty list refuses every destructive
-    op). ``debug`` declares which crash-capture methods the
-    System is provisioned for; defaults to all flags disabled.
+    ``destructive_ops`` is the optionally-empty opt-in list for ``force_crash`` and
+    ``reprovision`` (e.g. ``["force_crash"]``); the control plane's gate resolves the opt-in
+    factor from it (deny-by-default — an absent or empty list refuses both). ``control.power``
+    is contributor leaseholder lifecycle and is not gated by it. ``debug`` declares
+    which crash-capture methods the System is provisioned for; defaults to all flags disabled.
     """
 
     domain_xml_params: dict[NonEmptyStr, NonEmptyStr] = Field(default_factory=dict)
@@ -162,7 +162,8 @@ class RemoteLibvirtProfile(_ProfileBase):
     provisioning verifies the volume exists, not its contents.
     ``crashkernel`` mirrors the local section (the kdump prerequisite token; the
     booted kernel is the arbiter of its grammar). ``destructive_ops`` is the
-    deny-by-default destructive-op opt-in factor. There is no rootfs,
+    deny-by-default opt-in factor for ``force_crash`` and ``reprovision`` (not
+    ``control.power``, which is contributor lifecycle). There is no rootfs,
     SSH credential, or gdbstub flag: the base image is the rootfs, in-guest access
     rides the guest-agent seam, and the gdbstub is unconditionally enabled with a
     per-System port the provisioning plane allocates.

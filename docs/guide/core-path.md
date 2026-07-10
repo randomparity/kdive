@@ -62,10 +62,10 @@ The core path stops at first-pass triage. Two common extensions:
 - **Inspect the captured core** — after `vmcore.fetch`, confirm the reference
   with `vmcore.list` and inspect kernel state with `introspect.from_vmcore`.
 
-`control.force_crash`, `control.power`, and `systems.reprovision` are
-destructive and pass a two-check gate (RBAC role plus profile opt-in);
-`systems.teardown` requires the `admin` role. See
-[safety and RBAC](safety-and-rbac.md).
+`control.force_crash` and `systems.reprovision` are destructive and pass a
+two-check gate (RBAC role plus profile opt-in); `systems.teardown` requires the
+`admin` role. `control.power` is contributor leaseholder lifecycle over a READY
+transient VM (not gated). See [safety and RBAC](safety-and-rbac.md).
 
 ## Curated MCP prompts
 

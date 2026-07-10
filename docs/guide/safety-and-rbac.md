@@ -47,7 +47,7 @@ visible to every authenticated token regardless of grants.
 | Profile | Tools visible |
 |---|--:|
 | Viewer | 41 |
-| Contributor | 81 |
+| Contributor | 82 |
 | Operator | 91 |
 | Admin | 96 |
 | Plat-Op | 34 |
@@ -80,7 +80,7 @@ visible to every authenticated token regardless of grants.
 | `audit.query` | admin / plat-auditor |  |  |  | ✓ |  | ✓ | ✓ |
 | `control.diagnostic_sysrq` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `control.force_crash` | admin |  |  |  | ✓ |  |  |  |
-| `control.power` | operator |  |  | ✓ | ✓ |  |  |  |
+| `control.power` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.backtrace` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.clear_breakpoint` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.clear_watchpoint` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
@@ -197,13 +197,13 @@ Destructive operations are protected at two tiers
 
 ### The two-check gate
 
-`control.force_crash`, `control.power` (`off`/`cycle`/`reset`), and
-`systems.reprovision` pass through the full `assert_destructive_allowed` gate,
-which evaluates two independent checks that must both pass (deny-by-default):
+`control.force_crash` and `systems.reprovision` pass through the full
+`assert_destructive_allowed` gate, which evaluates two independent checks that
+must both pass (deny-by-default):
 
-1. **RBAC role** — `force_crash` and destructive `power` actions require
-   `admin`; `reprovision` requires `operator` (reprovisioning your own granted
-   System is iterating, not administering).
+1. **RBAC role** — `force_crash` requires `admin`; `reprovision` requires
+   `operator` (reprovisioning your own granted System is iterating, not
+   administering).
 2. **Provisioning-profile opt-in** — the controlling provisioning profile
    explicitly opts in to the operation (e.g. `destructive_ops: ["force_crash"]`).
    The default is an empty list; an unmodified profile cannot force-crash.
@@ -214,8 +214,15 @@ attempt is audited with `transition="<op>:denied"`, so a refusal leaves a trail.
 ### Admin-only destructive administration
 
 `systems.teardown` enforces a direct `require_role(..., admin)` check: no
-profile-opt-in factor applies. The reversible `control.power on` requires only
-`operator`.
+profile-opt-in factor applies.
+
+### Leaseholder power control
+
+`control.power` (all actions `on`/`off`/`cycle`/`reset`) is contributor
+leaseholder lifecycle over a transient VM, not destructive administration — it
+requires only `contributor` and no profile opt-in, and is admitted only on a
+`READY` System (a `CRASHED` System holds crash evidence; use the crash workflow).
+Use `control.power reset` to recover a wedged but READY guest (ADR-0320).
 
 ## Secrets by reference
 
