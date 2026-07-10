@@ -235,7 +235,7 @@ def test_required_cmdline_root_matches_the_rendered_disk_target() -> None:
     assert target is not None
     # local-libvirt's runtime injects this root device (platform_root_cmdline default).
     assert f"root=/dev/{target.get('dev')}" in system_required_cmdline(
-        CaptureMethod.CONSOLE, "root=/dev/vda"
+        CaptureMethod.CONSOLE, "root=/dev/vda", arch="x86_64"
     )
 
 
@@ -251,6 +251,29 @@ def test_render_has_baseline_kernel_and_cmdline() -> None:
     root = _safe_fromstring(_render())
     assert root.findtext("os/kernel") == str(_KERNEL)
     assert root.findtext("os/cmdline") == "root=/dev/vda console=ttyS0 rw"
+
+
+def _ppc64le_profile() -> ProvisioningProfile:
+    # A ppc64le profile with no machine override, so the arch traits pick pseries.
+    data = copy.deepcopy(_VALID)
+    data["arch"] = "ppc64le"
+    data["provider"]["local-libvirt"].pop("domain_xml_params", None)
+    return ProvisioningProfile.parse(data)
+
+
+def test_render_ppc64le_uses_pseries_hvc0_and_unpinned_nic() -> None:
+    # ppc64le has no q35/ttyS0: the domain must use the pseries machine, the hvc0 serial console,
+    # and let libvirt assign the SSH NIC slot (the spapr-pci-host-bridge allocates addresses).
+    root = _safe_fromstring(_render(profile=_ppc64le_profile()))
+    os_type = root.find("os/type")
+    assert os_type is not None
+    assert os_type.get("machine") == "pseries"
+    assert root.findtext("os/cmdline") == "root=/dev/vda console=hvc0 rw"
+    args = [
+        arg.get("value") for arg in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
+    ]
+    assert "virtio-net-pci,netdev=kdivessh" in args
+    assert "virtio-net-pci,netdev=kdivessh,addr=0x10" not in args
 
 
 def test_render_requires_a_kernel_path() -> None:

@@ -3495,7 +3495,7 @@ def test_cmdline_default_is_kdump_reserving_for_kdump(migrated_url: str) -> None
                 run = await RUNS.get(conn, UUID(run_id))
                 assert run is not None
                 cmdline = await run_steps.cmdline_for(
-                    conn, run, CaptureMethod.KDUMP, root_cmdline="root=/dev/vda"
+                    conn, run, CaptureMethod.KDUMP, root_cmdline="root=/dev/vda", arch="x86_64"
                 )
             assert "crashkernel=" in cmdline
             assert "root=/dev/vda" in cmdline  # the platform injects the root device
@@ -3511,7 +3511,7 @@ def test_cmdline_default_omits_crashkernel_for_non_kdump(migrated_url: str) -> N
                 run = await RUNS.get(conn, UUID(run_id))
                 assert run is not None
                 cmdline = await run_steps.cmdline_for(
-                    conn, run, CaptureMethod.CONSOLE, root_cmdline="root=/dev/vda"
+                    conn, run, CaptureMethod.CONSOLE, root_cmdline="root=/dev/vda", arch="x86_64"
                 )
             assert "crashkernel=" not in cmdline
             assert "root=/dev/vda" in cmdline
@@ -3530,7 +3530,7 @@ def test_cmdline_appends_ledger_debug_args_after_the_required_base(migrated_url:
                 run = await RUNS.get(conn, UUID(run_id))
                 assert run is not None
                 cmdline = await run_steps.cmdline_for(
-                    conn, run, CaptureMethod.KDUMP, root_cmdline="root=/dev/vda"
+                    conn, run, CaptureMethod.KDUMP, root_cmdline="root=/dev/vda", arch="x86_64"
                 )
             # The platform-required args lead; the agent's debug args are appended after them.
             assert cmdline == "console=ttyS0 root=/dev/vda crashkernel=256M dhash_entries=1"

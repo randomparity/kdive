@@ -49,7 +49,7 @@ def test_readiness_unit_ordered_after_the_family_kdump_unit(kdump_unit: str) -> 
     → ``kdump-tools.service``) so the edge always names the real unit; ``After=`` against an absent
     unit is a no-op, so a non-kdump (build) image is unaffected (#824).
     """
-    after_targets = _after_targets(readiness_unit(kdump_unit))
+    after_targets = _after_targets(readiness_unit(kdump_unit, "ttyS0"))
     assert kdump_unit in after_targets, (
         f"kdive-ready must be ordered After={kdump_unit} so the serial readiness signal cannot "
         "precede kdump arming (#817 race); a wrong/absent unit name silently reopens it"
@@ -59,6 +59,15 @@ def test_readiness_unit_ordered_after_the_family_kdump_unit(kdump_unit: str) -> 
         "kdive-ready must be ordered After=network-online.target so `ready` implies the cloud-init "
         "DHCP lease (ADR-0288); else authorize_ssh_key at ready races the lease (live-found)"
     )
+
+
+def test_readiness_unit_targets_the_arch_console_device() -> None:
+    # On pseries there is no ttyS0; the serial console is hvc0. The unit must order after
+    # dev-hvc0.device and echo the marker to /dev/hvc0 or the marker never reaches the host log.
+    unit = readiness_unit("kdump.service", "hvc0")
+    assert "dev-hvc0.device" in _after_targets(unit)
+    assert "> /dev/hvc0" in unit
+    assert "ttyS0" not in unit
 
 
 def _ci_ctx(tmp_path: Path, *, is_cloud_image: bool) -> CustomizeContext:

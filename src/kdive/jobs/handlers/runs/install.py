@@ -26,6 +26,7 @@ from kdive.services.runs.steps import (
     cmdline_for,
     existing_build_result,
     install_method_for,
+    system_arch,
 )
 
 _log = logging.getLogger(__name__)
@@ -108,6 +109,7 @@ async def install_handler(
         run,
         method,
         root_cmdline=runtime.platform_root_cmdline,
+        arch=system_arch(system),
         override=applied_extra,
         crashkernel=crashkernel,
     )

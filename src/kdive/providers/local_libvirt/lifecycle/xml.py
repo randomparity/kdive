@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import UUID
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.platform import arch_traits
 from kdive.profiles.provisioning import ProvisioningProfile, require_concrete_sizing
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.shared.libvirt_xml import (
@@ -17,14 +18,14 @@ from kdive.providers.shared.libvirt_xml import (
 )
 from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for
 
-_DEFAULT_MACHINE = "q35"
 # loopback-only: local transports never listen off-host (ADR-0210/0218).
 _LOOPBACK_HOST = "127.0.0.1"
 _PROFILE_POLICY = LocalLibvirtProfilePolicy()
-# The bare-fs rootfs roots on the lone virtio disk (`/dev/vda`); `console=ttyS0` makes the readiness
-# tail and SSH/drgn path observable. kdump's `crashkernel` is the install/boot lane's job, sized
-# against the kernel-under-test — never added to the baseline boot (ADR-0272).
-_BASELINE_CMDLINE = "root=/dev/vda console=ttyS0 rw"
+# The bare-fs rootfs roots on the lone virtio disk (`/dev/vda`); the serial `console=` (ttyS0 on
+# x86, hvc0 on pseries — see kdive.domain.platform) makes the readiness tail and SSH/drgn path
+# observable. kdump's `crashkernel` is the install/boot lane's job, sized against the
+# kernel-under-test — never added to the baseline boot (ADR-0272).
+_BASELINE_CMDLINE_TEMPLATE = "root=/dev/vda console={console} rw"
 
 
 def _ensure_namespaces_registered() -> None:
@@ -82,7 +83,8 @@ def render_domain_xml(
     _PROFILE_POLICY.validate_profile(profile)
     require_concrete_sizing(profile)
     section = profile.provider.local_libvirt
-    machine = section.domain_xml_params.get("machine", _DEFAULT_MACHINE)
+    traits = arch_traits(profile.arch)
+    machine = section.domain_xml_params.get("machine", traits.machine)
 
     domain = ET.Element("domain", type="kvm")
     ET.SubElement(domain, "name").text = domain_name_for(system_id)
@@ -98,7 +100,8 @@ def render_domain_xml(
     ET.SubElement(domain, "cpu", mode="host-passthrough")
     os_el = ET.SubElement(domain, "os")
     ET.SubElement(os_el, "type", arch=profile.arch, machine=machine).text = "hvm"
-    _append_direct_kernel(os_el, kernel_path, initrd_path)
+    baseline_cmdline = _BASELINE_CMDLINE_TEMPLATE.format(console=traits.console_device)
+    _append_direct_kernel(os_el, kernel_path, initrd_path, baseline_cmdline)
     features = ET.SubElement(domain, "features")
     # On x86 the guest's qemu_fw_cfg driver locates the fw_cfg device only via ACPI, so the
     # VMCOREINFO note below is written only when ACPI is present; mirror remote (issue #708,
@@ -131,17 +134,20 @@ def render_domain_xml(
     # credential, so every ready System is reachable by `systems.ssh_info`/`authorize_ssh_key`
     # without a destructive reprovision. drgn-live authenticates with the per-System bootstrap key
     # (ADR-0289/0315), independent of the forward's presence.
-    _append_ssh_forward(domain, ssh_port, guest_egress=guest_egress)
+    _append_ssh_forward(
+        domain, ssh_port, guest_egress=guest_egress, pin_nic_slot=traits.pin_nic_slot
+    )
 
     return ET.tostring(domain, encoding="unicode")
 
 
 def _append_direct_kernel(
-    os_el: ET.Element, kernel_path: Path | None, initrd_path: Path | None
+    os_el: ET.Element, kernel_path: Path | None, initrd_path: Path | None, cmdline: str
 ) -> None:
     """Render the direct-kernel `<os>` body (ADR-0272); a local domain always boots a kernel.
 
-    Built with ElementTree (no string interpolation), so no path can inject XML.
+    Built with ElementTree (no string interpolation), so no path can inject XML. ``cmdline`` is
+    the arch-resolved baseline (``root=/dev/vda console=<device> rw``).
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` when no kernel path is supplied — a local-libvirt
@@ -155,7 +161,7 @@ def _append_direct_kernel(
     ET.SubElement(os_el, "kernel").text = str(kernel_path)
     if initrd_path is not None:
         ET.SubElement(os_el, "initrd").text = str(initrd_path)
-    ET.SubElement(os_el, "cmdline").text = _BASELINE_CMDLINE
+    ET.SubElement(os_el, "cmdline").text = cmdline
 
 
 def _append_preserve_on_crash(domain: ET.Element, devices: ET.Element) -> None:
@@ -194,7 +200,11 @@ def _append_gdbstub(domain: ET.Element, gdb_port: int | None) -> None:
 
 
 def _append_ssh_forward(
-    domain: ET.Element, ssh_port: int | None, *, guest_egress: bool = False
+    domain: ET.Element,
+    ssh_port: int | None,
+    *,
+    guest_egress: bool = False,
+    pin_nic_slot: bool = True,
 ) -> None:
     """Append a loopback QEMU user-mode SSH port-forward + NIC for drgn-live (ADR-0218 §1).
 
@@ -224,12 +234,15 @@ def _append_ssh_forward(
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-netdev")
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=netdev)
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-device")
-    # Pin an explicit PCI slot. Without ``addr=`` QEMU auto-assigns the first free slot (0x1 on
-    # the q35 ``pcie.0`` root complex), which collides with a libvirt-managed ``pcie-root-port``:
-    # because this NIC is added via raw ``-device`` on the qemu commandline, libvirt's PCI
-    # allocator cannot see it and routes its own devices over the same slot, so ``define``/``start``
-    # fails (``slot 1 function 0 not available``). Slot 0x10 sits in the gap between libvirt's
-    # low-numbered root-ports and its high-numbered integrated devices (LPC/USB/SATA at 0x1a-0x1f).
-    ET.SubElement(
-        commandline, f"{{{QEMU_NS}}}arg", value="virtio-net-pci,netdev=kdivessh,addr=0x10"
-    )
+    # On q35 (``pin_nic_slot``) pin an explicit PCI slot. Without ``addr=`` QEMU auto-assigns the
+    # first free slot (0x1 on the ``pcie.0`` root complex), which collides with a libvirt-managed
+    # ``pcie-root-port``: because this NIC is added via raw ``-device`` on the qemu commandline,
+    # libvirt's PCI allocator cannot see it and routes its own devices over the same slot, so
+    # ``define``/``start`` fails (``slot 1 function 0 not available``). Slot 0x10 sits in the gap
+    # between libvirt's low-numbered root-ports and its high-numbered integrated devices
+    # (LPC/USB/SATA at 0x1a-0x1f). The pseries spapr-pci-host-bridge assigns addresses itself, so a
+    # pinned slot is left off there and QEMU/libvirt allocate.
+    device = "virtio-net-pci,netdev=kdivessh"
+    if pin_nic_slot:
+        device = f"{device},addr=0x10"
+    ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=device)

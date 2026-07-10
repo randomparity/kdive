@@ -21,6 +21,7 @@ from kdive.services.runs.steps import existing_build_result as _existing_build_r
 from kdive.services.runs.steps import failed_boot_attempt as _failed_boot_attempt
 from kdive.services.runs.steps import install_method_for as _install_method_for
 from kdive.services.runs.steps import step_progress as _step_progress
+from kdive.services.runs.steps import system_arch as _system_arch
 from kdive.services.runs.steps import system_required_cmdline
 
 
@@ -71,7 +72,9 @@ async def get_run(
             )
         required = (
             system_required_cmdline(
-                _install_method_for(system, runtime.profile_policy), runtime.platform_root_cmdline
+                _install_method_for(system, runtime.profile_policy),
+                runtime.platform_root_cmdline,
+                arch=_system_arch(system),
             )
             if system is not None and runtime is not None
             else None

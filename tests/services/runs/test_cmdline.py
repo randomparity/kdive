@@ -20,6 +20,7 @@ from kdive.services.runs.steps import (
 )
 
 _LOCAL_ROOT = "root=/dev/vda"
+_X86 = "x86_64"
 
 
 def _fake_run() -> Run:
@@ -29,29 +30,45 @@ def _fake_run() -> Run:
 
 def test_local_root_kdump_keeps_root_and_crashkernel() -> None:
     assert (
-        system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT)
+        system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT, arch=_X86)
         == "console=ttyS0 root=/dev/vda crashkernel=256M"
     )
 
 
 def test_remote_none_root_kdump_omits_root_keeps_crashkernel() -> None:
     # Remote-libvirt owns no platform root= (the in-guest GRUB supplies root=UUID via copy-default).
-    assert system_required_cmdline(CaptureMethod.KDUMP, None) == "console=ttyS0 crashkernel=256M"
+    assert (
+        system_required_cmdline(CaptureMethod.KDUMP, None, arch=_X86)
+        == "console=ttyS0 crashkernel=256M"
+    )
 
 
 def test_remote_none_root_console_is_console_only() -> None:
-    assert system_required_cmdline(CaptureMethod.CONSOLE, None) == "console=ttyS0"
+    assert system_required_cmdline(CaptureMethod.CONSOLE, None, arch=_X86) == "console=ttyS0"
 
 
 def test_empty_root_is_treated_as_no_root_not_a_stray_token() -> None:
     # An empty root device means the platform injects none; it must not leave a stray empty token.
-    assert system_required_cmdline(CaptureMethod.CONSOLE, "") == "console=ttyS0"
-    assert system_required_cmdline(CaptureMethod.KDUMP, "") == "console=ttyS0 crashkernel=256M"
+    assert system_required_cmdline(CaptureMethod.CONSOLE, "", arch=_X86) == "console=ttyS0"
+    assert (
+        system_required_cmdline(CaptureMethod.KDUMP, "", arch=_X86)
+        == "console=ttyS0 crashkernel=256M"
+    )
 
 
 def test_local_root_console_omits_crashkernel() -> None:
     assert (
-        system_required_cmdline(CaptureMethod.CONSOLE, _LOCAL_ROOT) == "console=ttyS0 root=/dev/vda"
+        system_required_cmdline(CaptureMethod.CONSOLE, _LOCAL_ROOT, arch=_X86)
+        == "console=ttyS0 root=/dev/vda"
+    )
+
+
+def test_ppc64le_leads_with_the_hvc0_console() -> None:
+    # pseries has no ttyS0; the serial console is hvc0 (spapr-vty). A ppc64le System must lead with
+    # console=hvc0 or the readiness marker never reaches the host serial log and boot times out.
+    assert (
+        system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT, arch="ppc64le")
+        == "console=hvc0 root=/dev/vda crashkernel=256M"
     )
 
 
@@ -60,21 +77,21 @@ def test_gdbstub_appends_nokaslr_so_vmlinux_symbols_match_running_base() -> None
     # running kernel away from the fetched vmlinux's link base, so breakpoints set by symbol
     # never fire (#711). nokaslr pins the running base to the symbol addresses.
     assert (
-        system_required_cmdline(CaptureMethod.GDBSTUB, _LOCAL_ROOT)
+        system_required_cmdline(CaptureMethod.GDBSTUB, _LOCAL_ROOT, arch=_X86)
         == "console=ttyS0 root=/dev/vda nokaslr"
     )
 
 
 def test_non_gdbstub_boots_never_carry_nokaslr() -> None:
     # nokaslr is debug-only: a normal console/kdump boot keeps KASLR enabled.
-    assert "nokaslr" not in system_required_cmdline(CaptureMethod.CONSOLE, _LOCAL_ROOT)
-    assert "nokaslr" not in system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT)
-    assert "nokaslr" not in system_required_cmdline(CaptureMethod.HOST_DUMP, _LOCAL_ROOT)
+    assert "nokaslr" not in system_required_cmdline(CaptureMethod.CONSOLE, _LOCAL_ROOT, arch=_X86)
+    assert "nokaslr" not in system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT, arch=_X86)
+    assert "nokaslr" not in system_required_cmdline(CaptureMethod.HOST_DUMP, _LOCAL_ROOT, arch=_X86)
 
 
 def test_console_is_always_first_then_root_then_crashkernel() -> None:
     # Deterministic token order regardless of method/root.
-    assert system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT).split() == [
+    assert system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT, arch=_X86).split() == [
         "console=ttyS0",
         "root=/dev/vda",
         "crashkernel=256M",
@@ -91,7 +108,7 @@ def test_platform_owned_tokens_still_reject_root_on_any_provider() -> None:
 def test_kdump_crashkernel_override_replaces_default_size() -> None:
     # A per-install crashkernel reservation (ADR-0300, #989) replaces the default 256M.
     assert (
-        system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT, crashkernel="512M")
+        system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT, arch=_X86, crashkernel="512M")
         == "console=ttyS0 root=/dev/vda crashkernel=512M"
     )
 
@@ -99,14 +116,16 @@ def test_kdump_crashkernel_override_replaces_default_size() -> None:
 def test_kdump_crashkernel_accepts_a_range_token() -> None:
     # The token is opaque (the booted kernel is the grammar arbiter): a multi-range value rides.
     assert (
-        system_required_cmdline(CaptureMethod.KDUMP, None, crashkernel="1G-2G:128M,2G-:256M")
+        system_required_cmdline(
+            CaptureMethod.KDUMP, None, arch=_X86, crashkernel="1G-2G:128M,2G-:256M"
+        )
         == "console=ttyS0 crashkernel=1G-2G:128M,2G-:256M"
     )
 
 
 def test_kdump_crashkernel_none_falls_back_to_default() -> None:
     assert (
-        system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT, crashkernel=None)
+        system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT, arch=_X86, crashkernel=None)
         == "console=ttyS0 root=/dev/vda crashkernel=256M"
     )
 
@@ -114,11 +133,11 @@ def test_kdump_crashkernel_none_falls_back_to_default() -> None:
 def test_non_kdump_ignores_crashkernel_override() -> None:
     # crashkernel is a kdump-only token: a non-kdump method never emits it, even when supplied.
     assert (
-        system_required_cmdline(CaptureMethod.CONSOLE, _LOCAL_ROOT, crashkernel="512M")
+        system_required_cmdline(CaptureMethod.CONSOLE, _LOCAL_ROOT, arch=_X86, crashkernel="512M")
         == "console=ttyS0 root=/dev/vda"
     )
     assert "crashkernel" not in system_required_cmdline(
-        CaptureMethod.GDBSTUB, _LOCAL_ROOT, crashkernel="512M"
+        CaptureMethod.GDBSTUB, _LOCAL_ROOT, arch=_X86, crashkernel="512M"
     )
 
 
@@ -137,6 +156,7 @@ def test_cmdline_for_threads_crashkernel_orthogonal_to_override(
             _fake_run(),
             CaptureMethod.KDUMP,
             root_cmdline=_LOCAL_ROOT,
+            arch=_X86,
             override="dhash_entries=1",
             crashkernel="512M",
         )
@@ -157,6 +177,7 @@ def test_cmdline_for_override_replaces_build_extra(monkeypatch: pytest.MonkeyPat
             _fake_run(),
             CaptureMethod.HOST_DUMP,
             root_cmdline=_LOCAL_ROOT,
+            arch=_X86,
             override="  dhash_entries=1 ",
         )
 
@@ -177,6 +198,7 @@ def test_cmdline_for_no_override_appends_build_extra(monkeypatch: pytest.MonkeyP
             _fake_run(),
             CaptureMethod.HOST_DUMP,
             root_cmdline=_LOCAL_ROOT,
+            arch=_X86,
         )
 
     assert asyncio.run(_run()) == "console=ttyS0 root=/dev/vda dhash_entries=9"
