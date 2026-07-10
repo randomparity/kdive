@@ -38,6 +38,7 @@ from kdive.mcp.tools._common import config_error as _config_error
 from kdive.profiles.provider_policy import rootfs_upload_window_allowed
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.serialization import JsonValue
@@ -165,6 +166,7 @@ class _UploadOwnerSpec:
     lock_scope: LockScope
     allowed_names: frozenset[str]
     next_action: str
+    audit_object_kind: str  # the owner table for the audit_log row ("runs" / "systems")
     project: Callable[[AsyncConnection, UUID], Awaitable[str | None]]
     accepts_upload: Callable[[AsyncConnection, UUID, ProviderResolver], Awaitable[bool]]
 
@@ -363,6 +365,7 @@ _RUN_UPLOAD = _UploadOwnerSpec(
     lock_scope=LockScope.RUN,
     allowed_names=RUN_ARTIFACT_NAMES,
     next_action="runs.complete_build",
+    audit_object_kind="runs",
     project=_run_project,
     accepts_upload=_run_accepts_upload,
 )
@@ -372,6 +375,7 @@ _SYSTEM_UPLOAD = _UploadOwnerSpec(
     lock_scope=LockScope.SYSTEM,
     allowed_names=SYSTEM_ARTIFACT_NAMES,
     next_action="systems.provision_defined",
+    audit_object_kind="systems",
     project=_system_project,
     accepts_upload=_system_accepts_upload,
 )
@@ -432,6 +436,22 @@ async def _create_upload(
                             prefix=prefix,
                             entries=entries,
                             ttl=_upload_ttl(),
+                        ),
+                    )
+                    # Minting presigned PUTs replaces the durable manifest and grants write
+                    # access to object-store keys; audit it inside the same transaction (ADR-0028)
+                    # so the grant and its attribution row commit together, symmetric with
+                    # artifacts.fetch_raw auditing its presigned GET.
+                    await audit.record(
+                        conn,
+                        ctx,
+                        audit.AuditEvent(
+                            tool=_upload_tool_name(spec),
+                            object_kind=spec.audit_object_kind,
+                            object_id=uid,
+                            transition="create_upload",
+                            args={"owner_id": owner_id, "artifacts": [e.name for e in entries]},
+                            project=project,
                         ),
                     )
             except CategorizedError as exc:

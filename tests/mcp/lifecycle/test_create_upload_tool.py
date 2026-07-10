@@ -37,9 +37,22 @@ from kdive.mcp.tools.catalog.artifacts.uploads import (
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     create_run_upload as _create_run_upload,
 )
+from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, Role
 from tests.mcp.systems_support import SYSTEM_PROVISION_HANDLERS, provider_resolver
 from tests.mcp.systems_support import granted_allocation as _granted_allocation
+
+
+async def _audit_rows(pool: AsyncConnectionPool, object_id: str) -> list[tuple[Any, ...]]:
+    """Return every audit_log row for ``object_id`` (readable columns)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT principal, tool, object_kind, object_id::text, project, "
+            "transition, args_digest FROM audit_log WHERE object_id = %s ORDER BY ts DESC",
+            (object_id,),
+        )
+        return await cur.fetchall()
+
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _EXTERNAL_PROFILE: dict[str, Any] = {"schema_version": 1}
@@ -283,6 +296,115 @@ def test_create_upload_mints_presigned_puts_and_persists_manifest(migrated_url: 
                 manifest = await upload_manifest.get_manifest(conn, "runs", UUID(run_id))
             assert manifest is not None
             assert {e.name for e in manifest.entries} == {"kernel", "vmlinux"}
+
+    asyncio.run(_run())
+
+
+def test_create_run_upload_writes_audit_row(migrated_url: str) -> None:
+    # A successful create_run_upload replaces the durable manifest and mints presigned PUT
+    # (write) grants; that must leave an attribution trail, symmetric with artifacts.fetch_raw
+    # auditing its presigned GET. One row per manifest-replace call, artifact names in args.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_created_run(pool, build_profile=_EXTERNAL_PROFILE)
+            await create_run_upload(
+                pool,
+                _ctx(role=Role.CONTRIBUTOR),
+                run_id=run_id,
+                artifacts=[
+                    {"name": "kernel", "sha256": "aaa", "size_bytes": 100},
+                    {"name": "vmlinux", "sha256": "bbb", "size_bytes": 200},
+                ],
+                store=_FakeStore(),
+            )
+            rows = await _audit_rows(pool, run_id)
+        assert len(rows) == 1
+        principal, tool, object_kind, object_id, project, transition, digest = rows[0]
+        assert principal == "user-1"
+        assert tool == "artifacts.create_run_upload"
+        assert object_kind == "runs"
+        assert object_id == run_id
+        assert project == "proj"
+        assert transition == "create_upload"
+        assert digest == args_digest({"owner_id": run_id, "artifacts": ["kernel", "vmlinux"]})
+
+    asyncio.run(_run())
+
+
+def test_create_system_upload_writes_audit_row(migrated_url: str) -> None:
+    # The operator-gated system-upload half is the cross-principal action that most needs a
+    # trail. object_kind names the owner table (systems), tool distinguishes the two upload tools.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            # Seed via raw insert (not the audited systems.define tool) so the only audit row on
+            # this system is the one create_system_upload writes.
+            sys_id = await _seed_system(pool, state=SystemState.DEFINED, rootfs_kind="upload")
+            await create_system_upload(
+                pool,
+                _ctx(),
+                system_id=sys_id,
+                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
+                resolver=provider_resolver(),
+                store=_FakeStore(),
+            )
+            rows = await _audit_rows(pool, sys_id)
+        assert len(rows) == 1
+        assert rows[0][1] == "artifacts.create_system_upload"
+        assert rows[0][2] == "systems"
+        assert rows[0][5] == "create_upload"
+        assert rows[0][6] == args_digest({"owner_id": sys_id, "artifacts": ["rootfs"]})
+
+    asyncio.run(_run())
+
+
+def test_create_upload_rejected_owner_writes_no_audit_row(migrated_url: str) -> None:
+    # An owner not accepting uploads returns before replace_manifest — no manifest, no row.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _seed_system(pool, state=SystemState.DEFINED, rootfs_kind="local")
+            out = await create_system_upload(
+                pool,
+                _ctx(),
+                system_id=sys_id,
+                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
+                resolver=provider_resolver(),
+                store=_FakeStore(),
+            )
+            rows = await _audit_rows(pool, sys_id)
+        assert out.data["reason"] == "owner_not_accepting_upload"
+        assert rows == []
+
+    asyncio.run(_run())
+
+
+def test_create_upload_audit_failure_rolls_back_manifest(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ADR-0028: the audit row and the manifest replace commit atomically in one transaction.
+    # If audit.record raises, the manifest write rolls back too — no upload window is opened
+    # without its attribution row.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_created_run(pool, build_profile=_EXTERNAL_PROFILE)
+
+            async def _boom(*_args: Any, **_kwargs: Any) -> Any:
+                raise RuntimeError("audit sink down")
+
+            monkeypatch.setattr(artifact_uploads.audit, "record", _boom)
+            with pytest.raises(RuntimeError, match="audit sink down"):
+                await create_run_upload(
+                    pool,
+                    _ctx(role=Role.CONTRIBUTOR),
+                    run_id=run_id,
+                    artifacts=[{"name": "kernel", "sha256": "aaa", "size_bytes": 100}],
+                    store=_FakeStore(),
+                )
+            monkeypatch.undo()
+            async with pool.connection() as conn:
+                manifest = await upload_manifest.get_manifest(conn, "runs", UUID(run_id))
+            rows = await _audit_rows(pool, run_id)
+        assert manifest is None  # rolled back with the audit failure
+        assert rows == []
 
     asyncio.run(_run())
 
