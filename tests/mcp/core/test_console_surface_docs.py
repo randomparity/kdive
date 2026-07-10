@@ -37,11 +37,27 @@ def _description(name: str) -> str:
     raise AssertionError(f"tool {name} is not registered")
 
 
+def _parameters(name: str) -> dict[str, Any]:
+    for tool in _TOOLS:
+        if tool.name == name:
+            return tool.parameters or {}
+    raise AssertionError(f"tool {name} is not registered")
+
+
 def test_runs_get_docstring_names_console_surface() -> None:
     desc = _description("runs.get")
     assert "console_artifacts" in desc, "runs.get must name the Run-scoped console manifest"
     assert "console_access" in desc
     assert "refs.console" in desc or 'refs["console"]' in desc or "`console`" in desc
+
+
+def test_runs_get_console_manifest_is_opt_in() -> None:
+    # #1067 (ADR-0324): the manifest is opt-in behind include_console_artifacts, defaulting off.
+    props = _parameters("runs.get").get("properties", {})
+    assert "include_console_artifacts" in props, "runs.get must expose the opt-in flag"
+    assert props["include_console_artifacts"].get("default") is False
+    desc = _description("runs.get")
+    assert "include_console_artifacts" in desc, "runs.get docstring must document the opt-in flag"
 
 
 def test_artifacts_list_docstring_documents_system_scope_and_naming() -> None:

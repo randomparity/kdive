@@ -31,8 +31,14 @@ async def get_run(
     run_id: str,
     *,
     resolver: ProviderResolver,
+    include_console_artifacts: bool = False,
 ) -> ToolResponse:
-    """Return a Run the caller's project owns, advertising the boot's required cmdline."""
+    """Return a Run the caller's project owns, advertising the boot's required cmdline.
+
+    The Run-scoped console manifest (`data.console_artifacts`, ADR-0279) is opt-in: it is fetched
+    and inlined only when ``include_console_artifacts`` is true (#1067, ADR-0324). By default the
+    manifest is neither queried nor rendered — the boot snapshot stays at ``refs.console``.
+    """
     uid = _as_uuid(run_id)
     if uid is None:
         return _invalid_uuid_error("run_id", run_id)
@@ -63,11 +69,12 @@ async def get_run(
                 if progress is not None and progress.boot != "succeeded"
                 else None
             )
-            # The Run-scoped console manifest (ADR-0279). Queried inside the open connection (it
-            # closes before envelope_for_run); skipped for a failed Run, whose envelope omits it.
+            # The Run-scoped console manifest (ADR-0279), opt-in per #1067/ADR-0324. Queried inside
+            # the open connection (it closes before envelope_for_run) only when the caller asked;
+            # always skipped for a failed Run, whose envelope omits it.
             console_manifest = (
                 await list_run_console_artifacts(conn, run.id)
-                if run.state is not RunState.FAILED
+                if include_console_artifacts and run.state is not RunState.FAILED
                 else None
             )
         required = (
