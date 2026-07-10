@@ -48,10 +48,12 @@ Tests to add:
    `transition == "build:running->canceled"`,
    `args_digest == args_digest({"job_id": job_id, "kind": "build"})`.
 2. `test_cancel_queued_destructive_job_by_operator_writes_audit_row` — enqueue a
-   destructive-kind job (`_enqueue_system_job(JobKind.TEARDOWN, "d-teardown")`;
-   stays `queued`), `cancel_job(pool, OP_CTX, job_id)`. Assert one row with
-   `transition == "teardown:queued->canceled"` and
-   `args_digest == args_digest({"job_id": job_id, "kind": "teardown"})`.
+   destructive-kind job (`_enqueue_system_job(JobKind.FORCE_CRASH, "d-fc")`;
+   stays `queued` — this is the proven kind/payload pairing already used by
+   `test_cancel_operator_gated_job_allowed_to_operator`), then
+   `cancel_job(pool, OP_CTX, job_id)`. Assert one row with
+   `transition == "force_crash:queued->canceled"` and
+   `args_digest == args_digest({"job_id": job_id, "kind": "force_crash"})`.
 3. `test_cancel_terminal_job_writes_no_audit_row` — enqueue, cancel once (now
    terminal), then cancel again; assert the second call is the
    `configuration_error`/`current_status` envelope **and** that exactly **one**

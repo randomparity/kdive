@@ -144,9 +144,9 @@ destructive-op gate precedent that puts the op kind in `transition`
       `object_id`=job id, `project`=job's owning project, and
       `transition="authorize_ssh_key:running->canceled"` (the readable kind is
       recoverable from the row without reversing `args_digest`).
-- [ ] An operator cancelling a queued destructive-kind job (e.g. `teardown`)
+- [ ] An operator cancelling a queued destructive-kind job (e.g. `force_crash`)
       writes exactly **one** `audit_log` row with
-      `transition="teardown:queued->canceled"` and `args_digest` covering
+      `transition="force_crash:queued->canceled"` and `args_digest` covering
       `{"job_id", "kind"}`.
 - [ ] A no-op cancel of an already-terminal job writes **zero** `audit_log`
       rows and still returns the `current_status`-bearing error envelope.
