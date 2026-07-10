@@ -171,7 +171,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "jobs.list": _VIEWER,
     "jobs.wait": _VIEWER,
     "jobs.cancel": _CONTRIBUTOR,  # lowest bar: contributor cancels leaseholder-kind jobs; the
-    # handler keeps operator for destructive kinds (teardown/reprovision/force_crash)
+    # handler keeps operator for the provision lane and destructive kinds
     # ops (platform)
     "ops.diagnostics": _PLAT_OP,
     "ops.export_cost_classes": _PLAT_OP,

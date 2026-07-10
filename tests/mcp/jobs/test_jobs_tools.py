@@ -80,12 +80,12 @@ async def _enqueue(pool: AsyncConnectionPool, dedup: str) -> str:
     return await _enqueue_in(pool, dedup, "proj")
 
 
-async def _enqueue_force_crash(pool: AsyncConnectionPool, dedup: str) -> str:
-    """Enqueue a destructive-kind (force_crash) job owned by ``proj``."""
+async def _enqueue_system_job(pool: AsyncConnectionPool, kind: JobKind, dedup: str) -> str:
+    """Enqueue a SystemPayload job of ``kind`` (provision/force_crash) owned by ``proj``."""
     async with pool.connection() as conn:
         job = await queue.enqueue(
             conn,
-            JobKind.FORCE_CRASH,
+            kind,
             SystemPayload(system_id=str(uuid4())),
             Authorizing(principal="p", project="proj"),
             dedup,
@@ -176,13 +176,15 @@ def test_cancel_job_contributor_can_cancel(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_cancel_destructive_job_denied_to_contributor(migrated_url: str) -> None:
-    # Per-kind gate (#1080, ADR-0320): a destructive job (teardown/reprovision/force_crash)
-    # keeps the operator gate, so a contributor cannot veto an admin/operator's destructive op.
-    # The cancel must not land: the job stays queued.
+@pytest.mark.parametrize("kind", [JobKind.FORCE_CRASH, JobKind.PROVISION])
+def test_cancel_operator_gated_job_denied_to_contributor(migrated_url: str, kind: JobKind) -> None:
+    # Per-kind gate (#1080, ADR-0320): a destructive job (force_crash) and the operator-gated
+    # provision lane both keep the operator gate, so a contributor cannot veto an operator's op.
+    # PROVISION in particular is deliberately out of #1080's scope (the provision-lane RBAC
+    # review). The cancel must not land: the job stays queued.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            job_id = await _enqueue_force_crash(pool, "fc1")
+            job_id = await _enqueue_system_job(pool, kind, f"opgate-{kind.value}")
             with pytest.raises(RoleDenied) as excinfo:
                 await jobs_tools.cancel_job(pool, CONTRIB_CTX, job_id)
             owned = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
@@ -193,16 +195,44 @@ def test_cancel_destructive_job_denied_to_contributor(migrated_url: str) -> None
     asyncio.run(_run())
 
 
-def test_cancel_destructive_job_allowed_to_operator(migrated_url: str) -> None:
-    # An operator may still cancel a destructive job — the pre-#1080 gate is preserved for
-    # destructive kinds, so #1080 does not change who may cancel them.
+def test_cancel_operator_gated_job_allowed_to_operator(migrated_url: str) -> None:
+    # An operator may still cancel an operator-gated job — the pre-#1080 gate is preserved, so
+    # #1080 does not change who may cancel provision/destructive jobs.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            job_id = await _enqueue_force_crash(pool, "fc2")
+            job_id = await _enqueue_system_job(pool, JobKind.FORCE_CRASH, "opgate-op")
             resp = await jobs_tools.cancel_job(pool, OP_CTX, job_id)
         assert resp.status == "canceled"
 
     asyncio.run(_run())
+
+
+def test_cancel_role_classification_covers_every_kind_and_fails_closed() -> None:
+    # Guard the per-kind cancel gate against fail-open drift: every JobKind must map to an
+    # intended cancel role, and a kind absent from the contributor allowlist must default to
+    # operator — so a newly added privileged kind is never silently contributor-cancellable.
+    contributor_kinds = {
+        JobKind.BUILD,
+        JobKind.INSTALL,
+        JobKind.BOOT,
+        JobKind.BUILD_INSTALL_BOOT,
+        JobKind.POWER,
+        JobKind.DIAGNOSTIC_SYSRQ,
+        JobKind.CAPTURE_VMCORE,
+        JobKind.AUTHORIZE_SSH_KEY,
+        JobKind.CHECK_SSH_REACHABLE,
+    }
+    for kind in JobKind:
+        expected = Role.CONTRIBUTOR if kind in contributor_kinds else Role.OPERATOR
+        assert jobs_tools._cancel_role(kind) is expected, kind
+    # The provision lane and every destructive kind stay operator (out of #1080's leaseholder set).
+    for operator_kind in (
+        JobKind.PROVISION,
+        JobKind.REPROVISION,
+        JobKind.TEARDOWN,
+        JobKind.FORCE_CRASH,
+    ):
+        assert jobs_tools._cancel_role(operator_kind) is Role.OPERATOR
 
 
 def test_cancel_terminal_job_is_error_envelope(migrated_url: str) -> None:

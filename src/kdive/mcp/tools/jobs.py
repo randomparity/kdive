@@ -9,8 +9,9 @@ error :class:`~kdive.mcp.responses.ToolResponse` (with the most specific
 Every read/cancel is **project-scoped**: a job is visible only to a caller with
 ``viewer`` on the owning project (``authorizing->>'project'``). Cancellation requires
 ``contributor`` for leaseholder-lifecycle kinds (matching ``runs.cancel``) and ``operator`` for
-destructive kinds (teardown/reprovision/force_crash), keyed off the job's kind, not its
-enqueuing principal. A by-id read or cancel of a job in an ungranted project returns the same
+the provision lane and destructive kinds (provision/reprovision/teardown/force_crash), keyed off
+the job's kind, not its enqueuing principal. A by-id read or cancel of a job in an ungranted
+project returns the same
 not-found-shaped error as a missing job, so existence is not leaked (matching
 ``systems``/``runs``/``allocations`` getters); ``list`` returns only readable jobs.
 """
@@ -30,7 +31,7 @@ from pydantic import Field
 from kdive.db.repositories import JOBS, ObjectNotFound
 from kdive.domain.capacity.state import IllegalTransition, JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.operations.jobs import DESTRUCTIVE_JOB_KINDS, Job, JobKind
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
@@ -115,16 +116,36 @@ def _readable_projects(ctx: RequestContext) -> list[str]:
     return readable
 
 
-def _cancel_role(kind: JobKind) -> Role:
-    """The role required to cancel a job of ``kind`` (ADR-0320 leaseholder principle).
+#: Job kinds a contributor may cancel: the leaseholder-lifecycle jobs a contributor (or a lower
+#: role) can itself enqueue, so cancelling one is acting on its own transient resource — matching
+#: ``runs.cancel`` over the build/install/boot lane (ADR-0320). Everything else keeps the operator
+#: gate: the destructive kinds (reprovision/teardown/force_crash), the operator-gated provision
+#: lane (whose cancel classification is deferred to the separate provision-lane RBAC review), and
+#: the platform/internal kinds (image_build/diagnostics_worker_check/console_rotate).
+_CONTRIBUTOR_CANCELABLE_KINDS: frozenset[JobKind] = frozenset(
+    {
+        JobKind.BUILD,
+        JobKind.INSTALL,
+        JobKind.BOOT,
+        JobKind.BUILD_INSTALL_BOOT,
+        JobKind.POWER,
+        JobKind.DIAGNOSTIC_SYSRQ,
+        JobKind.CAPTURE_VMCORE,
+        JobKind.AUTHORIZE_SSH_KEY,
+        JobKind.CHECK_SSH_REACHABLE,
+    }
+)
 
-    A contributor may cancel their own leaseholder-lifecycle jobs (build/install/boot/power/
-    authorize_ssh_key/…), matching ``runs.cancel``. Destructive kinds
-    (teardown/reprovision/force_crash) keep the operator gate: cancelling a destructive op an
-    admin/operator deliberately initiated is not leaseholder lifecycle, so a contributor must
-    not be able to veto it.
+
+def _cancel_role(kind: JobKind) -> Role:
+    """The role required to cancel a job of ``kind``, keyed off kind not enqueuing principal.
+
+    A contributor may cancel a leaseholder-lifecycle job it can itself start (see
+    ``_CONTRIBUTOR_CANCELABLE_KINDS``). Every other kind keeps the operator gate. The mapping
+    fails closed — a kind absent from the allowlist requires operator — so a newly added
+    privileged kind is never silently contributor-cancellable.
     """
-    return Role.OPERATOR if kind in DESTRUCTIVE_JOB_KINDS else Role.CONTRIBUTOR
+    return Role.CONTRIBUTOR if kind in _CONTRIBUTOR_CANCELABLE_KINDS else Role.OPERATOR
 
 
 def _require_job_role(
@@ -371,8 +392,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """Cancel a queued or running job.
 
         A contributor may cancel their own lifecycle jobs (build/install/boot/power/
-        authorize_ssh_key/…). Cancelling a destructive job (teardown/reprovision/force_crash)
-        requires operator.
+        authorize_ssh_key/…). Cancelling a provisioning or destructive job
+        (provision/reprovision/teardown/force_crash) requires operator.
         """
         return await cancel_job(pool, current_context(), job_id)
 
