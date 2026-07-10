@@ -312,6 +312,113 @@ def test_set_breakpoint_returns_set(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+async def _audit_rows(pool: AsyncConnectionPool, object_id: str) -> list[tuple[Any, ...]]:
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT principal, tool, object_kind, object_id::text, project, transition "
+            "FROM audit_log WHERE object_id = %s ORDER BY ts DESC",
+            (object_id,),
+        )
+        return await cur.fetchall()
+
+
+def test_op_audit_descriptor_covers_only_mutating_and_sensitive_ops() -> None:
+    # The audited set is the state-mutating engine ops + the sensitive raw-memory read. Bounded
+    # pure reads return None (no per-op row; covered by the session + transcript).
+    assert debug_ops._op_audit("debug.read_memory", address="0x1", byte_count=4) == (
+        debug_ops._OpAudit(
+            tool="debug.read_memory",
+            transition="read_memory",
+            args={"address": "0x1", "byte_count": 4},
+        )
+    )
+    for audited in ("debug.set_breakpoint", "debug.continue", "debug.load_module_symbols"):
+        assert debug_ops._op_audit(audited) is not None
+    for bounded in ("debug.backtrace", "debug.read_registers", "debug.resolve_symbol"):
+        assert debug_ops._op_audit(bounded) is None
+
+
+def test_read_memory_writes_audit_row(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-data-read-memory-bytes 0x1000 4": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {"memory": [{"contents": "deadbeef"}]},
+                        }
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for("read_memory", runtime, session_id, address=0x1000, byte_count=4),
+                audit=debug_ops._op_audit("debug.read_memory", address="0x1000", byte_count=4),
+            )
+            rows = await _audit_rows(pool, session_id)
+        assert len(rows) == 1
+        principal, tool, object_kind, object_id, project, transition = rows[0]
+        assert (principal, tool, object_kind, object_id, project, transition) == (
+            "user-1",
+            "debug.read_memory",
+            "debug_sessions",
+            session_id,
+            "proj",
+            "read_memory",
+        )
+
+    asyncio.run(_run())
+
+
+def test_non_audited_op_writes_no_audit_row(migrated_url: str) -> None:
+    # A bounded read passes no audit descriptor (its handler calls _op_audit, which returns None).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            runtime = _runtime(_CountingAttach())
+            await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for("read_registers", runtime, session_id, registers=["rip"]),
+                audit=debug_ops._op_audit("debug.read_registers"),
+            )
+            rows = await _audit_rows(pool, session_id)
+        assert rows == []
+
+    asyncio.run(_run())
+
+
+def test_gate_failure_writes_no_audit_row(migrated_url: str) -> None:
+    # A non-live session is rejected by the gate before the op runs, so no audit row is written
+    # even though an audit descriptor was supplied.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.DETACHED)
+            runtime = _runtime(_CountingAttach())
+            resp = await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for("read_memory", runtime, session_id, address=0x1000, byte_count=4),
+                audit=debug_ops._op_audit("debug.read_memory", address="0x1000", byte_count=4),
+            )
+            rows = await _audit_rows(pool, session_id)
+        assert resp.status == "error"
+        assert rows == []
+
+    asyncio.run(_run())
+
+
 def test_read_memory_returns_verbatim_hex(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

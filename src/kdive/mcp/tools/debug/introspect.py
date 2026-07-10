@@ -53,6 +53,7 @@ from kdive.providers.ports.retrieve import (
     LiveScriptOutput,
     VmcoreIntrospector,
 )
+from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 from kdive.serialization import JsonValue
@@ -366,13 +367,48 @@ async def introspect_script(
                 private_key=private_key,
             )
 
-        return await _with_live_introspection(
+        resp = await _with_live_introspection(
             pool=pool,
             resolver=resolver,
             ctx=ctx,
             session_id=session_id,
             mode=_LIVE_SCRIPT,
             action=_run_live_script_callback,
+        )
+        if resp.error_category is None:
+            await _audit_introspect_script(pool, ctx, session_id, script)
+        return resp
+
+
+async def _audit_introspect_script(
+    pool: AsyncConnectionPool, ctx: RequestContext, session_id: str, script: str
+) -> None:
+    """Attribute a successful introspect.script (arbitrary in-guest drgn exec) to the caller.
+
+    Post-hoc (the script already ran in-guest): one audit_log row against the DebugSession. The
+    script text rides ``args`` for ``args_digest`` correlation only — it is hashed one-way, never
+    stored plaintext, consistent with the sensitive-transcript handling.
+    """
+    async with pool.connection() as conn, conn.transaction():
+        resolved = await resolve_debug_session_context(conn, ctx, session_id, require_live=True)
+        if isinstance(resolved, ToolResponse):  # unreachable on the success path
+            return
+        session = resolved.session
+        await audit.record(
+            conn,
+            ctx,
+            audit.AuditEvent(
+                tool="introspect.script",
+                object_kind="debug_sessions",
+                object_id=session.id,
+                transition="script",
+                args={
+                    "session_id": session_id,
+                    "run_id": str(session.run_id),
+                    "script": script,
+                },
+                project=session.project,
+            ),
         )
 
 
