@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -498,15 +498,17 @@ async def _seed_live_drgn_session(
     transport_handle: str | None = None,
     project: str = "proj",
     with_bootstrap_key: bool = True,
+    debuginfo_ref: str | None = "k/runs/r/vmlinux",
 ) -> str:
     """Seed a DebugSession on a crashed System; by default also seeds its bootstrap key row.
 
     ``with_bootstrap_key=False`` seeds a session on a System with no `system_bootstrap_keys` row,
-    for testing the fail-closed CONFIGURATION_ERROR path (ADR-0289).
+    for testing the fail-closed CONFIGURATION_ERROR path (ADR-0289). ``debuginfo_ref=None`` seeds a
+    Run with no uploaded host vmlinux, so the ADR-0322 debuginfo warning is not suppressed.
     """
     sys_id = await seed_crashed_system(pool, project=project)
     run_id = await seed_run_on_system(
-        pool, sys_id, debuginfo_ref="k/runs/r/vmlinux", build_id="deadbeef", project=project
+        pool, sys_id, debuginfo_ref=debuginfo_ref, build_id="deadbeef", project=project
     )
     if with_bootstrap_key:
         async with pool.connection() as conn:
@@ -963,3 +965,89 @@ def test_script_over_size_cap_is_configuration_error(migrated_url: str) -> None:
         assert port.kwargs == {}  # rejected before the seam ran
 
     asyncio.run(_run())
+
+
+# --- live introspect missing_debuginfo warning (ADR-0322, #1064) ---------------------------------
+
+
+def _patch_effective_config(config: Any) -> Any:
+    from unittest.mock import patch
+
+    async def _fake_load(conn: Any, run_id: Any, *, store_factory: Any = None) -> Any:
+        return config
+
+    return patch("kdive.kernel_config.gate.load_effective_config", _fake_load)
+
+
+def test_run_live_warns_missing_debuginfo_but_still_succeeds(migrated_url: str) -> None:
+    # ADR-0322: introspect.run over a debuginfo-less kernel (no uploaded vmlinux) still reports
+    # `succeeded` (non-fatal) but carries a symbol-naming warning so the agent knows it was blind.
+    from kdive.kernel_config.parse import KernelConfig
+
+    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_KERNEL"}))  # no DWARF/BTF
+
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_drgn_session(pool, debuginfo_ref=None)
+            port = _FakeLiveIntrospector()
+            with _patch_effective_config(cfg):
+                return await introspect_tools.introspect_run(
+                    pool,
+                    _live_ctx(),
+                    session_id=session_id,
+                    helper="tasks",
+                    resolver=_live_resolver(port),
+                )
+
+    resp = asyncio.run(_run())
+    assert resp.status == "succeeded"
+    warning = cast(dict[str, Any], resp.data["missing_debuginfo"])
+    assert warning["reason"] == "missing_debuginfo"
+    assert "DEBUG_INFO_BTF" in cast(list[str], warning["missing"])
+
+
+def test_script_live_warns_missing_debuginfo_but_still_succeeds(migrated_url: str) -> None:
+    from kdive.kernel_config.parse import KernelConfig
+
+    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_KERNEL"}))
+
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_drgn_session(pool, debuginfo_ref=None)
+            port = _FakeLiveIntrospector()
+            with _patch_effective_config(cfg):
+                return await introspect_tools.introspect_script(
+                    pool,
+                    _live_ctx(),
+                    session_id=session_id,
+                    script="pass",
+                    timeout_sec=5.0,
+                    resolver=_live_resolver(port),
+                )
+
+    resp = asyncio.run(_run())
+    assert resp.status == "succeeded"
+    assert cast(dict[str, Any], resp.data["missing_debuginfo"])["reason"] == "missing_debuginfo"
+
+
+def test_run_live_uploaded_vmlinux_suppresses_warning(migrated_url: str) -> None:
+    # An uploaded host vmlinux (default debuginfo_ref) suppresses the warning even when the config
+    # lacks in-kernel debuginfo — DWARF-via-vmlinux must keep working (ADR-0322).
+    from kdive.kernel_config.parse import KernelConfig
+
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_drgn_session(pool)  # default debuginfo_ref set
+            port = _FakeLiveIntrospector()
+            with _patch_effective_config(KernelConfig(frozenset())):
+                return await introspect_tools.introspect_run(
+                    pool,
+                    _live_ctx(),
+                    session_id=session_id,
+                    helper="tasks",
+                    resolver=_live_resolver(port),
+                )
+
+    resp = asyncio.run(_run())
+    assert resp.status == "succeeded"
+    assert "missing_debuginfo" not in resp.data
