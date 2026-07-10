@@ -14,13 +14,13 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Run, System
+from kdive.domain.platform import arch_traits
 from kdive.images.families._fedora_customize import READINESS_MARKER
 from kdive.jobs import queue
 from kdive.profiles.provider_policy import ProfilePolicy, capture_method
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.serialization import JsonValue
 
-_REQUIRED_CONSOLE = "console=ttyS0"
 DEFAULT_CRASHKERNEL = "256M"
 # Disable KASLR on a gdbstub-debug boot so the running kernel's base matches the fetched
 # vmlinux's link-time symbol addresses. With CONFIG_RANDOMIZE_BASE=y (the kdump fragment
@@ -332,11 +332,17 @@ async def installed_debuginfo_ref(conn: AsyncConnection, run_id: UUID) -> str | 
 
 
 def system_required_cmdline(
-    method: CaptureMethod, root_cmdline: str | None, *, crashkernel: str | None = None
+    method: CaptureMethod,
+    root_cmdline: str | None,
+    *,
+    arch: str,
+    crashkernel: str | None = None,
 ) -> str:
     """Compose the platform-owned kernel cmdline (ADR-0183, ADR-0300).
 
-    ``console=ttyS0`` (serial console capture parity) leads; ``root_cmdline`` follows when the
+    ``console=<device>`` (serial console capture parity) leads; the device is arch-resolved
+    (``ttyS0`` on x86, ``hvc0`` on pseries — see ``kdive.domain.platform``), so a ppc64le guest
+    emits the readiness marker on the console it actually has. ``root_cmdline`` follows when the
     provider owns the root device (``"root=/dev/vda"`` for local-libvirt's direct-kernel boot,
     ``None`` for remote-libvirt where the in-guest bootloader supplies ``root=UUID=…``); the kdump
     crashkernel reservation, or the gdbstub ``nokaslr`` pin (#711), is last. The trailing token is
@@ -350,7 +356,7 @@ def system_required_cmdline(
     path — a non-kdump method never emits the token, so a supplied value there is inert (the tool
     boundary rejects that request; this stays a pure composition function).
     """
-    tokens = [_REQUIRED_CONSOLE]
+    tokens = [f"console={arch_traits(arch).console_device}"]
     if root_cmdline:
         tokens.append(root_cmdline)
     if method is CaptureMethod.KDUMP:
@@ -372,19 +378,22 @@ async def cmdline_for(
     method: CaptureMethod,
     *,
     root_cmdline: str | None,
+    arch: str,
     override: str | None = None,
     crashkernel: str | None = None,
 ) -> str:
     """Compose the boot cmdline (ADR-0183, ADR-0299, ADR-0300).
 
-    ``override`` is the ``runs.install`` cmdline (#988): when set it **replaces** the build-baked
-    extra args for this install so an agent can iterate boot-parameter variants without a rebuild;
-    when ``None`` the build step's recorded extra is appended (unchanged). ``crashkernel`` is the
-    per-install kdump reservation size (#989): it tunes the platform ``crashkernel=<size>`` token
-    and is orthogonal to ``override`` (both may be set). The platform-required tokens
-    (``system_required_cmdline``) always lead and are never modifiable either way.
+    ``arch`` is the System's provisioning-profile architecture; it selects the leading
+    ``console=`` device (``ttyS0``/``hvc0``). ``override`` is the ``runs.install`` cmdline (#988):
+    when set it **replaces** the build-baked extra args for this install so an agent can iterate
+    boot-parameter variants without a rebuild; when ``None`` the build step's recorded extra is
+    appended (unchanged). ``crashkernel`` is the per-install kdump reservation size (#989): it tunes
+    the platform ``crashkernel=<size>`` token and is orthogonal to ``override`` (both may be set).
+    The platform-required tokens (``system_required_cmdline``) always lead and are never modifiable
+    either way.
     """
-    required = system_required_cmdline(method, root_cmdline, crashkernel=crashkernel)
+    required = system_required_cmdline(method, root_cmdline, arch=arch, crashkernel=crashkernel)
     if override is not None:
         return f"{required} {override.strip()}"
     result = await existing_build_result(conn, run.id)
@@ -396,3 +405,8 @@ async def cmdline_for(
 def install_method_for(system: System, profile_policy: ProfilePolicy) -> CaptureMethod:
     profile = ProvisioningProfile.parse(system.provisioning_profile)
     return capture_method(profile_policy, profile)
+
+
+def system_arch(system: System) -> str:
+    """The System's provisioning-profile architecture, for arch-resolved cmdline composition."""
+    return ProvisioningProfile.parse(system.provisioning_profile).arch

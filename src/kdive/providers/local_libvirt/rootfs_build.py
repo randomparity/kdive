@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError
+from kdive.domain.platform import arch_traits
 from kdive.images.base_source import Downloader, _real_download, acquire_base
 from kdive.images.families import family_for
 from kdive.images.families._fedora_customize import (
@@ -396,7 +397,7 @@ class LocalLibvirtRootfsBuildPlane:
         """Render the kdive-ready unit, build the family argv, and run ``virt-customize``."""
         cleanup: list[Path] = []
         with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as unit:
-            unit.write(_readiness_unit(family.kdump_unit))
+            unit.write(_readiness_unit(family.kdump_unit, arch_traits(spec.arch).console_device))
             unit_path = Path(unit.name)
         cleanup.append(unit_path)
         try:

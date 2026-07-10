@@ -31,11 +31,13 @@ just setup   # check host deps, sync the venv, install and run the git hooks
 ```
 
 `libvirt-python` has no prebuilt wheels and compiles against the system libvirt
-headers, so install `libvirt-dev` (or your distro's equivalent) first;
-`just check-deps` reports any missing host packages without installing anything.
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development loop and
-[`docs/operating/install.md`](docs/operating/install.md) for the full
-host-prerequisite list.
+and Python headers, so install `libvirt-dev` and `python3-dev` (or your distro's
+equivalents) first; `just check-deps` reports any missing host packages without
+installing anything. On architectures without prebuilt wheels (e.g. `ppc64le`) a
+Rust toolchain ([rustup](https://rustup.rs)) is also required, since `pydantic-core`,
+`just`, and `prek` build from source. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the
+development loop and [`docs/operating/install.md`](docs/operating/install.md) for the
+full host-prerequisite list.
 
 ## Test environments
 

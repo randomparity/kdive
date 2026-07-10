@@ -24,6 +24,7 @@ _CLOUD_URL = "https://example.test/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
 # computed (kdump_support), not stored.
 _EXPECTED_MAKEDUMPFILE: dict[str, str] = {
     "fedora-kdive-ready-44": "1.7.9",
+    "fedora-kdive-ready-44-ppc64le": "1.7.9",
     "fedora-kdive-ready-43": "1.7.8",
     "rocky-kdive-ready-10": "1.7.8",
     "rocky-kdive-ready-9": "1.7.6",
@@ -72,6 +73,15 @@ def test_loads_debian_entries() -> None:
         assert cat[name].family == "debian", name
 
 
+def test_loads_the_ppc64le_entry() -> None:
+    # The one ppc64le row proves the catalog `arch` column and the arch-aware provisioning seam.
+    entry = load_rootfs_catalog()["fedora-kdive-ready-44-ppc64le"]
+    assert entry.arch == "ppc64le"
+    assert entry.family == "rhel"
+    assert isinstance(entry.source, CloudImageSource)
+    assert "ppc64le" in entry.source.url
+
+
 def test_cloud_image_entries_are_sha256_pinned() -> None:
     cat = load_rootfs_catalog()
     for name in _EXPECTED_MAKEDUMPFILE:
@@ -89,8 +99,11 @@ def test_catalog_makedumpfile_versions_match_snapshot() -> None:
         assert cat[name].makedumpfile_version == version, name
 
 
+_CAPABLE_ROWS = {"fedora-kdive-ready-44", "fedora-kdive-ready-44-ppc64le"}
+
+
 def test_only_fedora_44_is_capable_for_the_default_basis() -> None:
-    """Guard: against the characterized basis, only the >= 1.7.9 row computes ``capable``."""
+    """Guard: against the characterized basis, only the >= 1.7.9 rows compute ``capable``."""
     cat = load_rootfs_catalog()
     for name in _EXPECTED_MAKEDUMPFILE:
         cap = kdump_capability(
@@ -98,7 +111,7 @@ def test_only_fedora_44_is_capable_for_the_default_basis() -> None:
             target_kernel=DEFAULT_KERNEL_BASIS,
             kdump_tooling=True,
         )
-        expected = "capable" if name == "fedora-kdive-ready-44" else "incapable"
+        expected = "capable" if name in _CAPABLE_ROWS else "incapable"
         assert cap.status == expected, name
 
 

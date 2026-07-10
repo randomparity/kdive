@@ -42,6 +42,20 @@ kind = "build"
 makedumpfile_version = "1.7.9"  # irrelevant to build hosts, but required by the schema
 source = { kind = "cloud-image", url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2", sha256 = "28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f" }  # pragma: allowlist secret
 
+# ppc64le (POWER) row (fedora-secondary tree — Fedora publishes ppc64le as a secondary arch).
+# Proves the catalog `arch` column and the arch-aware provisioning seam (machine=pseries,
+# console=hvc0, kdive.domain.platform) end-to-end. Live VM provisioning on POWER is unproven — the
+# POWER host has /dev/kvm but no qemu-system-ppc64/libvirt yet.
+[[image]]
+name = "fedora-kdive-ready-44-ppc64le"
+distro = "fedora"
+version = "44"
+family = "rhel"
+arch = "ppc64le"
+kind = "debug"
+makedumpfile_version = "1.7.9"  # Fedora 44 ships the same makedumpfile across arches
+source = { kind = "cloud-image", url = "https://dl.fedoraproject.org/pub/fedora-secondary/releases/44/Cloud/ppc64le/images/Fedora-Cloud-Base-Generic-44-1.7.ppc64le.qcow2", sha256 = "3bea270eba46cdedf3c6c71b20c6ffb03b54131631497a27ff826a497c1dfac6" }  # pragma: allowlist secret
+
 [[image]]
 name = "rocky-kdive-ready-8"
 distro = "rocky"

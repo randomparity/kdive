@@ -389,7 +389,8 @@ def _register_runs_install(
                 description=(
                     "Kernel debug args applied against the already-built kernel — no rebuild "
                     "needed. Replaces any build-time extra args. These platform args are always "
-                    "present and cannot be overridden: console=ttyS0, root=/dev/vda, plus "
+                    "present and cannot be overridden: the platform serial console "
+                    "(console=ttyS0 on x86, console=hvc0 on pseries), root=/dev/vda, plus "
                     "crashkernel=256M (kdump) or nokaslr (gdbstub) per the System's capture "
                     "method. Passing a value different from the currently installed one re-stages "
                     "the boot; sweep boot-parameter variants (e.g. 'dhash_entries=1' then "

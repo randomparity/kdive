@@ -123,7 +123,7 @@ def cloud_init_first_boot_args(ctx: CustomizeContext) -> list[str]:
     return argv
 
 
-def readiness_unit(kdump_unit: str) -> str:
+def readiness_unit(kdump_unit: str, console_device: str) -> str:
     """Render the kdive-ready serial unit ordered ``After=<kdump_unit>`` (#817, #824).
 
     ``After=<kdump_unit>`` closes the arm-vs-ready race (#817): the family's kdump unit and this
@@ -148,15 +148,20 @@ def readiness_unit(kdump_unit: str) -> str:
         kdump_unit: The family's kdump systemd unit (``kdump.service`` on ``rhel``,
             ``kdump-tools.service`` on ``debian``); a wrong/absent name silently reopens the race
             (#824).
+        console_device: The arch-resolved serial console device (``ttyS0`` on x86, ``hvc0`` on
+            pseries — see ``kdive.domain.platform``). The unit orders after ``dev-<device>.device``
+            and echoes the marker to ``/dev/<device>``; on pseries a ``ttyS0`` unit would order
+            after a device that never appears and write to a console that does not exist, so the
+            marker would never reach the host serial log and provisioning would time out.
     """
     return f"""[Unit]
 Description=Signal kdive serial readiness
-After=dev-ttyS0.device {kdump_unit} network-online.target
-Wants=dev-ttyS0.device network-online.target
+After=dev-{console_device}.device {kdump_unit} network-online.target
+Wants=dev-{console_device}.device network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'echo {READINESS_MARKER} > /dev/ttyS0'
+ExecStart=/bin/sh -c 'echo {READINESS_MARKER} > /dev/{console_device}'
 RemainAfterExit=yes
 
 [Install]

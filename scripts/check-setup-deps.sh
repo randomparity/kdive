@@ -54,6 +54,10 @@ package_for() {
   libvirt-headers:fedora | libvirt-headers:opensuse) printf "libvirt-devel" ;;
   libvirt-headers:arch) printf "libvirt" ;;
   libvirt-headers:*) printf "libvirt-dev" ;;
+  python-headers:fedora | python-headers:opensuse) printf "python3-devel" ;;
+  python-headers:arch) printf "python" ;;
+  python-headers:*) printf "python3-dev" ;;
+  shellcheck:fedora) printf "ShellCheck" ;;
   libelf-headers:fedora) printf "elfutils-libelf-devel" ;;
   libelf-headers:opensuse) printf "libelf-devel" ;;
   libelf-headers:arch) printf "libelf" ;;
@@ -65,6 +69,8 @@ package_for() {
   docker:*) printf "docker" ;;
   qemu-system-x86_64:opensuse) printf "qemu-x86" ;;
   qemu-system-x86_64:*) printf "qemu-system-x86" ;;
+  qemu-system-ppc64:opensuse) printf "qemu-ppc" ;;
+  qemu-system-ppc64:*) printf "qemu-system-ppc" ;;
   qemu-img:debian) printf "qemu-utils" ;;
   qemu-img:opensuse) printf "qemu-tools" ;;
   qemu-img:*) printf "qemu-img" ;;
@@ -154,16 +160,32 @@ report_tier() {
   fi
 }
 
+# The QEMU system-emulator binary is arch-named, and the name is not a plain `uname -m`:
+# ppc64le maps to `qemu-system-ppc64` (not `-ppc64le`). Report the binary for the running host
+# so a POWER box is not told to install the x86 emulator. Only the arches KDIVE actually
+# provisions (x86_64, ppc64le) are mapped; others fall back to the x86 default.
+qemu_system_binary() {
+  case "$(uname -m)" in
+  ppc64le | ppc64) printf "qemu-system-ppc64" ;;
+  *) printf "qemu-system-x86_64" ;;
+  esac
+}
+
 distro="$(load_distro_id)"
 
 # REQUIRED — `uv sync` and the core dev loop fail without these.
 require_tool required uv "curl -LsSf https://astral.sh/uv/install.sh | sh"
 require_command required pkg-config "${distro}"
 require_header required libvirt-headers libvirt "${distro}"
+# libvirt-python and any wheel-less C/Rust extension (e.g. pydantic-core, grpcio on
+# arches without prebuilt wheels) compile against the Python development headers.
+require_header required python-headers python3 "${distro}"
 
 # RECOMMENDED — needed to reproduce the full local CI gate.
 require_command recommended git "${distro}"
 require_command recommended make "${distro}"
+require_command recommended shellcheck "${distro}"
+require_command recommended shfmt "${distro}"
 require_tool recommended just "uv tool install rust-just"
 require_tool recommended prek "uv tool install prek"
 require_command recommended docker "${distro}"
@@ -172,7 +194,7 @@ command_exists node || command_exists nodejs ||
 require_command recommended npm "${distro}"
 
 # FUTURE — live_vm and kernel-build milestones; warn only, never block setup.
-for cmd in qemu-system-x86_64 virsh gdb crash virt-builder virt-tar-out \
+for cmd in "$(qemu_system_binary)" virsh gdb crash virt-builder virt-tar-out \
   virt-make-fs guestfish qemu-img bc flex bison; do
   require_command future "${cmd}" "${distro}"
 done

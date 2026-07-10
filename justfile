@@ -168,9 +168,13 @@ test-ansible:
     uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-gdbstub-acl-prune.sh
 
 # Lint and security-scan the GitHub Actions workflows.
+# actionlint-py bundles a prebuilt actionlint and upstream ships no ppc64le binary, so its
+# install fails there. On ppc64le use a PATH actionlint (build from Go source:
+# `go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12`); elsewhere keep the
+# pinned wrapper for a reproducible version.
 lint-workflows:
     uv run --with 'zizmor==1.25.2' zizmor .github/workflows
-    uv run --with 'actionlint-py==1.7.12.24' actionlint
+    if [ "$(uname -m)" = "ppc64le" ]; then actionlint; else uv run --with 'actionlint-py==1.7.12.24' actionlint; fi
 
 # Browserless syntax check of every mermaid block in tracked Markdown.
 # -z/-0 keeps paths with spaces intact; -r skips the run when nothing matches.
