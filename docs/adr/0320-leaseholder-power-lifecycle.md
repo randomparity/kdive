@@ -61,17 +61,21 @@ opt-in).**
    and `_power_required_role` are removed. `_authorize_destructive`/`_op_opt_in` and the
    `resolver` dependency remain for `force_crash`.
 
-1a. **Power admits only `READY`.** The power-only admission set narrows from
-   `_STARTED_SYSTEM = {READY, CRASHED}` to `{READY}`. A `CRASHED` System holds preserved
-   crash memory that `capture_vmcore` (contributor-admissible, `CRASHED`-gated) reads;
-   `power_handler` moves no System state and runs the physical power op outside any shared
-   lock (SYSTEM-scoped audit vs. capture's RUN-scoped lock — no mutual exclusion), so a
-   contributor `reset`/`off` on a CRASHED System would destroy or race that evidence and
-   leave the row `CRASHED` so a later capture mislabels a booted kernel as the crash core.
-   Destroying crash evidence is not leaseholder lifecycle. Power on a non-`READY` System
-   returns `configuration_error` directing to the crash workflow (`capture_vmcore` →
-   `teardown`/`reprovision`). `force_crash` (already `READY`-only) and `diagnostic_sysrq`
-   are unaffected — they never used `_STARTED_SYSTEM`.
+1a. **Power acts only on `READY`, enforced at admission and execution.** A `CRASHED`
+   System holds preserved crash memory that `capture_vmcore` (contributor-admissible,
+   `CRASHED`-gated) reads; destroying it is not leaseholder lifecycle. Admission narrows
+   the power-only `_STARTED_SYSTEM = {READY, CRASHED}` set to `{READY}`, returning
+   `configuration_error` (directing to the crash workflow) otherwise. Because power is an
+   async durable job and `power_handler` re-checks nothing today, admission alone is
+   insufficient — a job admitted while `READY` could execute after a `ready→crashed`
+   transition (e.g. an interleaved `force_crash`, also `READY`-only). So `power_handler`
+   re-reads `system.state` **under the `SYSTEM` advisory lock it already holds**, before
+   the physical `control.power()` call, and fails the job terminally when not `READY`. The
+   lock serializes the re-check against the `ready→crashed` transition (`force_crash` takes
+   the same lock), and since evidence exists only in `CRASHED`, power never coexists with
+   it — closing both the destroy-during-capture race and the mislabel-after-reboot window.
+   `force_crash` (already `READY`-only) and `diagnostic_sysrq` are unaffected — they never
+   used `_STARTED_SYSTEM`.
 
 2. **Taxonomy.** `POWER` leaves `DESTRUCTIVE_JOB_KINDS`
    (`domain/operations/jobs.py`), which becomes `{REPROVISION, TEARDOWN, FORCE_CRASH}`.

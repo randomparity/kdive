@@ -56,16 +56,25 @@ instead of breaking it: no new tool, no bypass, no ADR-0006/0020/0130 exception.
    — the lowest role that runs the full crash-investigation loop and holds the lease —
    and nothing else. No `admin` requirement and no `destructive_ops` opt-in for any power
    action.
-1a. `control.power` is admitted **only on a `READY` System**, not on `CRASHED`. A CRASHED
-   System holds preserved crash memory that `capture_vmcore` (contributor-admissible,
-   `CRASHED`-gated) reads, and `power_handler` moves no System state and runs the physical
-   power op outside any shared lock — so a contributor `reset`/`off` on a CRASHED System
-   would destroy or race that evidence and, because the row stays `CRASHED` after the
-   reboot, let a later capture mislabel a booted kernel as the crash core. Destroying crash
-   evidence is not leaseholder lifecycle. Power on a non-`READY` System returns
-   `configuration_error` (`current_status` in `data`) directing the caller to the crash
-   workflow (`capture_vmcore` → `systems.teardown`/`systems.reprovision`). This narrows the
-   power-only `_STARTED_SYSTEM = {READY, CRASHED}` admission set to `READY`.
+1a. `control.power` acts **only on a `READY` System**, not on `CRASHED`, enforced at
+   **both** admission and execution. A CRASHED System holds preserved crash memory that
+   `capture_vmcore` (contributor-admissible, `CRASHED`-gated) reads; destroying it is not
+   leaseholder lifecycle. Enforcement:
+   - **Admission** (`power_system`): narrow the power-only
+     `_STARTED_SYSTEM = {READY, CRASHED}` set to `{READY}`. Power on a non-`READY` System
+     returns `configuration_error` (`current_status` in `data`) directing the caller to
+     the crash workflow (`capture_vmcore` → `systems.teardown`/`systems.reprovision`).
+   - **Execution** (`power_handler`): admission alone is insufficient because power is an
+     async durable job — a job admitted while `READY` could dequeue after the guest has
+     gone `CRASHED` (e.g. an interleaved `force_crash`, also `READY`-only, so both admit),
+     and `power_handler` today drives the domain with no state re-check. So the handler
+     re-reads `system.state` **under the `SYSTEM` advisory lock it already takes**, before
+     the physical `control.power()` call, and fails the job terminally (clear reason) when
+     the System is not `READY`. Because crash evidence exists only in `CRASHED` and power
+     runs only on `READY`, power never coexists with capturable evidence; the `SYSTEM`
+     lock serializes the re-check against the `ready→crashed` transition (which
+     `force_crash` takes under the same lock). This closes both the destroy-during-capture
+     race and the mislabel-after-reboot window that an admission-only guard leaves open.
 2. `control.force_crash` is **unchanged**: `admin` + the two-check destructive gate +
    `destructive_ops` opt-in. It is the deliberate fault-injection primitive (drives
    `ready → crashed`, detaches DebugSessions, ties to vmcore capture), not a recovery
@@ -124,9 +133,24 @@ evaluated against a foreign project). Deleted as now-dead: `_DESTRUCTIVE_POWER_A
 `_POWER_ON_ACTIONS`, `_power_required_role`. `_authorize_destructive`, `_op_opt_in`, and
 the `resolver` dependency **remain** — `force_crash` still uses them.
 
+`power_system` also narrows its state admission from `_STARTED_SYSTEM` (`{READY, CRASHED}`)
+to `{READY}` — a non-`READY` System returns `configuration_error` (see Req 1a).
+
 The `control.power` MCP annotation stays `_docmeta.destructive()`: the annotation is an
 agent *caution hint* (a hard reset still interrupts the guest), orthogonal to the authz
 classification. Changing it is out of scope.
+
+### Worker-side state re-check (`jobs/handlers/control.py`)
+
+`power_handler` drives the physical domain (`control.power(domain, action)`) with no
+state check today, and the op is async — so the READY-only invariant must also hold at
+execution (Req 1a). Add a `system.state == READY` re-read **inside** the `SYSTEM`
+advisory-lock transaction the handler already opens, *before* the physical power call, and
+fail the job terminally with a clear reason (e.g. `configuration_error`-category message
+naming `current_status`) when the System is not `READY`. The lock makes the re-check
+atomic against the `ready→crashed` transition (`force_crash` takes the same `SYSTEM`
+lock). No new lock, no new job kind. Verify during build that the physical `control.power`
+call is moved under (or after) the same locked state check so the check is load-bearing.
 
 ### Domain taxonomy (`domain/operations/jobs.py`)
 
@@ -221,9 +245,14 @@ drivers — they must flip):
 - A power action on a `READY` System with a non-terminal DebugSession succeeds and leaves
   the DebugSession untouched (documents the unchanged no-detach boundary).
 - A `CRASHED` System returns `configuration_error` (`current_status: "crashed"`) on
-  `control.power reset`/`off`/`cycle`/`on` — crash evidence is protected; power admits
-  only `READY`. (This is the red-to-green flip for any existing test that admitted power on
-  CRASHED.)
+  `control.power reset`/`off`/`cycle`/`on` at admission — crash evidence is protected;
+  power admits only `READY`. (Red-to-green flip for any existing test that admitted power
+  on CRASHED.)
+- Worker-side execution guard: a `power` job whose System is `CRASHED` at execution time
+  (admitted `READY`, then transitioned — e.g. `force_crash` interleaved before the power
+  job dequeues) fails terminally in `power_handler` and does **not** call the physical
+  `control.power` op (the evidence-protection invariant holds at execution, not just
+  admission). A `READY`-at-execution System still powers normally.
 - A pre-`READY` System (e.g. `provisioning`) returns `configuration_error` on
   `control.power reset` (recovery boundary; re-stage is the fallback).
 - Idempotency-key replay on a power action is unchanged.
