@@ -113,14 +113,15 @@ args (e.g. `dhash_entries=1`) with the `cmdline` parameter on `runs.complete_bui
 
 Console evidence: `refs.console` is the boot-window console snapshot and
 `data.console_access` names how to read it (`artifacts.get` windowed/paged, or jumped to
-a literal match with its `find` parameter). `data.console_artifacts` is the Run-scoped
-console manifest —
-an ordered, newest-first list of `{artifact_id, object_key, created_at}` for every console
-artifact correlated to this Run (the boot snapshot plus the post-readiness rotating parts),
-read with `artifacts.get`. It is bounded: when more exist than the cap,
+a literal match with its `find` parameter) — both always present on a booted Run.
+`data.console_artifacts` is the Run-scoped console manifest and is **opt-in**: it appears
+only when you pass `include_console_artifacts=true`. When requested it is an ordered,
+newest-first list of `{artifact_id, object_key, created_at}` for every console artifact
+correlated to this Run (the boot snapshot plus the post-readiness rotating parts), read
+with `artifacts.get`. It is bounded: when more exist than the cap,
 `data.console_artifacts_total` is the full count and `data.console_artifacts_truncated` is
 true (the oldest entries are dropped; the boot console stays at `refs.console`). The key is
-absent when the Run has no correlated console.
+absent when not requested or when the Run has no correlated console.
 
 Build provenance: `data.build_provenance` (present once the build succeeded with a
 caller-supplied claim, absent otherwise) records the agent's client-attested source. On
@@ -131,6 +132,7 @@ build.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `include_console_artifacts` | boolean | no | Inline the Run-scoped console manifest under `data.console_artifacts`. Defaults false: a status read stays token-cheap and the boot console snapshot is always at `refs.console`. Set true only when you need the full correlated console listing (boot snapshot plus rotating parts). |
 | `run_id` | string | yes | The Run to render. |
 
 ## `runs.install`

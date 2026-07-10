@@ -135,8 +135,20 @@ async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
         await pool.close()
 
 
-async def get_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) -> Any:
-    return await _get_run(pool, ctx, run_id, resolver=provider_resolver())
+async def get_run(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    run_id: str,
+    *,
+    include_console_artifacts: bool = False,
+) -> Any:
+    return await _get_run(
+        pool,
+        ctx,
+        run_id,
+        resolver=provider_resolver(),
+        include_console_artifacts=include_console_artifacts,
+    )
 
 
 async def _seed_system(
@@ -778,6 +790,51 @@ def test_envelope_for_run_omits_empty_console_manifest() -> None:
     assert (
         "console_artifacts" not in runs_common.envelope_for_run(_run_model(RunState.RUNNING)).data
     )
+
+
+async def _seed_run_console_artifact(pool: AsyncConnectionPool, run_id: str, name: str) -> None:
+    """Insert a redacted, Run-correlated console artifact owned by the Run's System."""
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT system_id FROM runs WHERE id = %s", (run_id,))
+        row = await cur.fetchone()
+        assert row is not None
+        sys_id = row[0]
+        await conn.execute(
+            "INSERT INTO artifacts (created_at, updated_at, owner_kind, owner_id, object_key, "
+            "etag, sensitivity, retention_class, run_id) "
+            "VALUES (%s, %s, 'systems', %s, %s, 'e', 'redacted', 'console', %s)",
+            (_DT, _DT, sys_id, f"local/systems/{sys_id}/{name}", run_id),
+        )
+
+
+def test_get_run_omits_console_manifest_by_default(migrated_url: str) -> None:
+    # #1067 (ADR-0324): runs.get is a per-token status read; the Run-scoped console manifest is
+    # opt-in. Default reads must not inline data.console_artifacts even when the Run has console.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _seed_run_console_artifact(pool, run_id, f"console-{run_id}")
+            return await get_run(pool, _ctx(), run_id)
+
+    resp = asyncio.run(_run())
+    assert "console_artifacts" not in resp.data
+    assert "console_artifacts_total" not in resp.data
+    assert "console_artifacts_truncated" not in resp.data
+
+
+def test_get_run_includes_console_manifest_when_opted_in(migrated_url: str) -> None:
+    # include_console_artifacts=True restores the ADR-0279 inlined manifest verbatim.
+    async def _run() -> tuple[ToolResponse, str]:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _seed_run_console_artifact(pool, run_id, f"console-{run_id}")
+            return await get_run(pool, _ctx(), run_id, include_console_artifacts=True), run_id
+
+    resp, run_id = asyncio.run(_run())
+    listed = cast(list[dict[str, str]], resp.data["console_artifacts"])
+    assert len(listed) == 1
+    assert listed[0]["object_key"].endswith(f"console-{run_id}")
+    assert set(listed[0]) == {"artifact_id", "object_key", "created_at"}
 
 
 def test_envelope_for_run_console_access_hint_for_expected_crash() -> None:

@@ -179,6 +179,17 @@ def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: Provid
     )
     async def runs_get(
         run_id: Annotated[str, Field(description="The Run to render.")],
+        include_console_artifacts: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Inline the Run-scoped console manifest under `data.console_artifacts`. "
+                    "Defaults false: a status read stays token-cheap and the boot console "
+                    "snapshot is always at `refs.console`. Set true only when you need the full "
+                    "correlated console listing (boot snapshot plus rotating parts)."
+                )
+            ),
+        ] = False,
     ) -> ToolResponse:
         """Return one run; `succeeded` means build done. `data.steps` has install/boot status.
 
@@ -187,14 +198,15 @@ def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: Provid
 
         Console evidence: `refs.console` is the boot-window console snapshot and
         `data.console_access` names how to read it (`artifacts.get` windowed/paged, or jumped to
-        a literal match with its `find` parameter). `data.console_artifacts` is the Run-scoped
-        console manifest —
-        an ordered, newest-first list of `{artifact_id, object_key, created_at}` for every console
-        artifact correlated to this Run (the boot snapshot plus the post-readiness rotating parts),
-        read with `artifacts.get`. It is bounded: when more exist than the cap,
+        a literal match with its `find` parameter) — both always present on a booted Run.
+        `data.console_artifacts` is the Run-scoped console manifest and is **opt-in**: it appears
+        only when you pass `include_console_artifacts=true`. When requested it is an ordered,
+        newest-first list of `{artifact_id, object_key, created_at}` for every console artifact
+        correlated to this Run (the boot snapshot plus the post-readiness rotating parts), read
+        with `artifacts.get`. It is bounded: when more exist than the cap,
         `data.console_artifacts_total` is the full count and `data.console_artifacts_truncated` is
         true (the oldest entries are dropped; the boot console stays at `refs.console`). The key is
-        absent when the Run has no correlated console.
+        absent when not requested or when the Run has no correlated console.
 
         Build provenance: `data.build_provenance` (present once the build succeeded with a
         caller-supplied claim, absent otherwise) records the agent's client-attested source. On
@@ -203,7 +215,13 @@ def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: Provid
         `runs.complete_build`. Compare it across runs to track which local source produced each
         build.
         """
-        return await _get_run(pool, current_context(), run_id, resolver=resolver)
+        return await _get_run(
+            pool,
+            current_context(),
+            run_id,
+            resolver=resolver,
+            include_console_artifacts=include_console_artifacts,
+        )
 
 
 def _register_runs_list(app: FastMCP, pool: AsyncConnectionPool) -> None:

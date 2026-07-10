@@ -71,8 +71,9 @@ def _register_artifacts_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         and so mixes all of the System's Runs and debug sessions. Console artifacts use two naming
         conventions — `console-<run_id>` is a Run's one-time boot-window snapshot, and
         `console-part-<gen>-<index>` are the rotating post-readiness console parts. Neither is
-        correlated to a Run by this listing; to get the console artifacts for a specific Run, read
-        `runs.get` `data.console_artifacts` (its Run-scoped console manifest) instead.
+        correlated to a Run by this listing; to get the console artifacts for a specific Run, call
+        `runs.get` with `include_console_artifacts=true` and read its opt-in
+        `data.console_artifacts` (the Run-scoped console manifest) instead.
         """
         return await artifact_reads.artifacts_list(pool, current_context(), system_id=system_id)
 
