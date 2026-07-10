@@ -67,8 +67,11 @@ opt-in).**
    can no longer be routed through the gate even by mistake.
 
 3. **`destructive_ops` scope.** The per-provider provisioning-profile `destructive_ops`
-   list now governs **only** `force_crash`. Its field docstrings and
-   `systems.profile_examples` say so. The freeform `list[str]` shape is unchanged.
+   list now governs the opt-in factor for `force_crash` **and** `systems.reprovision`
+   (`_reprovision_opt_in` → `destructive_opt_in(profile, REPROVISION)`), and no power
+   action. (`systems.teardown` is gated by role only and never consulted `destructive_ops`
+   — ADR-0129.) Its field docstrings and `systems.profile_examples` say so. The freeform
+   `list[str]` shape is unchanged.
 
 4. **Contract.** The `control.power` wrapper docstring + `action` `Field` state the
    contributor classification and name `reset`/`cycle` as the leaseholder's recovery path
@@ -86,14 +89,20 @@ agent caution hint (a hard reset interrupts the guest), orthogonal to authorizat
 - The P2 recovery gap closes on the normal MCP path: a `contributor` with no opt-in can
   `control.power reset` a wedged System — no new tool, no gate bypass, no invariant
   exception.
-- The two-check destructive gate is **untouched** and still guards `force_crash`,
-  `systems.reprovision`, and `systems.teardown`. This ADR narrows *what the gate governs*,
-  not *how it works*.
-- `destructive_ops` is simpler to reason about: one op, one meaning.
+- The two-check destructive gate is **untouched** and still guards `force_crash`
+  (admin + `destructive_ops` opt-in), `systems.reprovision` (operator + `destructive_ops`
+  opt-in), and `systems.teardown` (admin role only). This ADR narrows *what the gate
+  governs*, not *how it works*.
+- `destructive_ops` keeps two consumers (`force_crash`, `reprovision`) — power leaves it.
 - Any client or doc that assumed `admin` for `control.power off/cycle/reset` sees the op
   succeed at `contributor`. This is a deliberate widening of a self-service capability
-  over one's own transient VM, consistent with in-guest sudo; it is not a cross-project or
-  cross-tenant grant (the project-role check is retained).
+  over one's own transient VM, consistent with in-guest sudo on the default provider; it
+  is not a cross-project or cross-tenant grant (the project-role check is retained). Any
+  project contributor — not only the provisioning/debugging actor — may power a System;
+  power off/cycle/reset does not detach live DebugSessions (unchanged from today), so a
+  reboot can leave a session stale for the reconciler's dead-session detach (ADR-0021) to
+  reap. Making power reboot detach live sessions like `force_crash` is a possible
+  follow-up, out of scope here.
 
 ## Considered & rejected
 

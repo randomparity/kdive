@@ -25,12 +25,26 @@ because a bypass would break the two-check destructive gate invariant
 ### Root cause is a mis-classification, not a missing bypass
 
 The premise "a leaseholder may not reboot their own guest without a provision-time
-opt-in" is the defect. A `contributor` who holds the lease already has in-guest sudo on
-the transient VM — they can `reboot`/`poweroff` **in-band**. Gating the *out-of-band*
-power path therefore protects nothing: it only removes the leaseholder's sole recovery
-at the exact moment the in-band path is wedged. The two-check gate's real job is guarding
-genuinely-destructive *administration* (deliberate crash, cross-project teardown), and
-the project-role check already scopes power to the allocation's project.
+opt-in" is the defect. The power lifecycle is not destructive *administration* at all:
+
+- **It moves no System state and has no side effects on other objects.** `control.py`'s
+  own docstring notes "power moves no System state (a domain restart is not a
+  reprovision)"; power has no accounting, lease, or reconciler consequence. It is pure
+  runtime lifecycle over a transient, project-scoped VM.
+- **On the default provider it is already reachable in-band.** For local-libvirt — the
+  motivating black-box case — a `contributor` who holds the lease has in-guest sudo and
+  can `reboot`/`poweroff` from inside the guest, so gating the *out-of-band* power path
+  protects nothing an in-band `reboot` doesn't already bypass; it only removes the
+  leaseholder's sole recovery when the in-band path is wedged.
+
+The in-band-equivalence argument is strongest for local-libvirt; it is weaker for
+remote-libvirt (guest access rides the guest-agent seam) and vacuous for fault-inject (a
+mock with no real guest). But the classification does not depend on it: on every provider,
+power over one's own transient allocated VM is leaseholder lifecycle, not project
+administration, and the project-role check already scopes it to the allocation's project.
+Lowering it to `contributor` on remote-libvirt/fault-inject is therefore a deliberate,
+bounded self-service widening (a contributor may already provision/boot/reprovision on
+those providers), not a cross-project grant.
 
 So the fix is to **reclassify** the power lifecycle out of the destructive gate rather
 than to add a gate-bypassing break-glass tool. This dissolves the invariant tension
@@ -47,16 +61,23 @@ instead of breaking it: no new tool, no bypass, no ADR-0006/0020/0130 exception.
    `ready → crashed`, detaches DebugSessions, ties to vmcore capture), not a recovery
    path.
 3. `destructive_ops` (the per-provider provisioning-profile list) consequently governs
-   **only** `force_crash`.
+   the opt-in factor for `force_crash` **and** `systems.reprovision` — the two
+   gated ops that still resolve their opt-in from it. (`systems.teardown` is also gated
+   but by role only — it does not consult `destructive_ops`, ADR-0129.) It no longer
+   governs any power action.
 4. The agent-facing contract (`control.power` wrapper docstring + `action` `Field`
    description) states the new role classification and names `reset`/`cycle` as the
    leaseholder's recovery path for a wedged guest.
-5. `systems.profile_examples` surfaces `destructive_ops` with a note that it now governs
-   only `force_crash` (fault injection), so an agent learns the knob's scope from the MCP
-   surface (issue quick-win 1).
+5. `systems.profile_examples` surfaces `destructive_ops` with a note that it opts into
+   `force_crash` (deliberate kernel crash / fault injection) and `systems.reprovision`,
+   and that power/reboot no longer require it, so an agent learns the knob's scope from
+   the MCP surface (issue quick-win 1).
 6. A short wedged-guest recovery note documents `control.power reset` as the first-class
-   recovery, with the `runs.install`(changed cmdline) + `runs.boot` re-stage as the
-   fallback when the guest will not respond to reset (issue quick-win 2).
+   recovery **for a System in a started state (`READY`/`CRASHED`)** — `power_system` only
+   admits started Systems — with the `runs.install`(changed cmdline) + `runs.boot`
+   re-stage as the fallback when the guest will not respond to reset **or** wedged before
+   reaching `READY` (e.g. hung during boot), where `control.power` returns a
+   `configuration_error` (issue quick-win 2).
 7. A new superseding ADR (0320) records the classification change; ADR-0037 §1 and
    ADR-0130 are cited and superseded in the affected part only (not edited in place).
 
@@ -64,9 +85,18 @@ instead of breaking it: no new tool, no bypass, no ADR-0006/0020/0130 exception.
 
 - No new tool; no platform-admin break-glass; no gate-bypass parameter.
 - `control.force_crash` classification is not changed.
-- No per-principal lease binding — authorization stays project-role-scoped (any
-  `contributor` in the allocation's project may power the System, exactly as every other
-  op is scoped today).
+- No per-principal lease binding — authorization stays project-role-scoped. "Leaseholder"
+  here means *any* `contributor` in the allocation's project, not an exclusive owner; the
+  project boundary is the trust boundary in this RBAC model, exactly as every other op is
+  scoped today. A power action is therefore reachable by any project contributor, not only
+  the actor who provisioned or is debugging the System (see the DebugSession note below).
+- No change to DebugSession handling on power. `control.force_crash` detaches every
+  non-terminal DebugSession (the crashed kernel is gone); power off/cycle/reset do **not**
+  — this is pre-existing, unchanged behavior. A power reboot can therefore leave a live
+  gdbstub/drgn DebugSession pointing at a now-stale guest; the reconciler's dead-session
+  detach (ADR-0021) is the existing cleanup. Whether a power reboot should also detach live
+  sessions (as force_crash does) is a separate classification decision, deliberately out of
+  this issue's scope and noted as a possible follow-up.
 - No DB migration and no schema change (see below).
 
 ## Design
@@ -100,8 +130,11 @@ gate's validation. `JobKind.POWER` itself is unchanged (the job still exists and
 ### Provisioning profile (`profiles/`)
 
 No code change to the `destructive_ops` field: it stays a freeform
-`list[NonEmptyStr]` on each provider section. Its *meaning* narrows to force_crash-only,
-documented in field docstrings and `profile_examples`.
+`list[NonEmptyStr]` on each provider section. Its *meaning* narrows from
+`{force_crash, reprovision, power}` to `{force_crash, reprovision}` (power leaves;
+`reprovision` still resolves its opt-in here via `_reprovision_opt_in` →
+`destructive_opt_in(profile, REPROVISION)`), documented in field docstrings and
+`profile_examples`.
 
 ### Migration / compatibility
 
@@ -138,10 +171,18 @@ drivers — they must flip):
 - A System with no `destructive_ops` opt-in: power `reset` succeeds (the exact
   black-box scenario), while `force_crash` is still denied (`missing=["profile_opt_in"]`).
 - `force_crash` unchanged: still requires `admin` + opt-in (existing tests stay green).
+- `systems.reprovision` unchanged: its opt-in still reads `destructive_ops` — a profile
+  without `"reprovision"` is still denied `profile_opt_in` (guards against the regression
+  where narrowing `destructive_ops`'s scope accidentally drops reprovision).
+- A power action on a started System with a non-terminal DebugSession succeeds and leaves
+  the DebugSession untouched (documents the unchanged no-detach boundary).
+- A pre-`READY` System returns `configuration_error` on `control.power reset` (recovery
+  boundary; re-stage is the fallback).
 - Idempotency-key replay on a power action is unchanged.
-- `profile_examples` output carries the `destructive_ops` note/field.
+- `profile_examples` output carries the `destructive_ops` note naming `force_crash` and
+  `reprovision`.
 - `DestructiveOp(kind=JobKind.POWER)` raises `ValueError` (POWER left the destructive
-  set).
+  set); `DestructiveOp(kind=JobKind.REPROVISION)` still constructs.
 
 ## Acceptance criteria
 
