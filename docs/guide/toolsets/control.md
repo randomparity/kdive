@@ -16,4 +16,17 @@ each tool's own description.
 
 ## Power
 
-- `control.power` — power actions (such as stop or reset) on a started system.
+- `control.power` — power actions (`on`/`off`/`cycle`/`reset`) on a **READY** system.
+  Contributor leaseholder control over your transient VM, not destructive administration:
+  it requires only `contributor` and no `destructive_ops` opt-in. Refused on a non-READY
+  system — a `CRASHED` system holds crash evidence and must not be reset through the power
+  path.
+
+## Recovering a wedged guest
+
+If a guest stops responding (for example SSH can no longer connect) but the System is still
+`READY`, `control.power reset` (contributor) reboots it in place — the first-class recovery.
+If the guest will not respond to a reset, or the System is not `READY` (wedged before boot,
+or `CRASHED`), fall back to `runs.install` with a changed cmdline + `runs.boot` to re-stage.
+For a `CRASHED` System, use the crash workflow instead — `capture_vmcore` (via `vmcore.fetch`)
+then `systems.teardown` or `systems.reprovision`.

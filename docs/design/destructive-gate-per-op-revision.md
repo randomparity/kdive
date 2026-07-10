@@ -3,6 +3,11 @@
 - **Issue:** #465 (spun out of #463 / ADR-0129)
 - **ADR:** [0130](../adr/0130-destructive-gate-per-op-revision.md)
 - **Status:** Draft
+- **Superseded in part by [ADR-0320](../adr/0320-leaseholder-power-lifecycle.md):**
+  `control.power` (`on`/`off`/`cycle`/`reset`) is no longer a destructive-gated op. It is
+  contributor leaseholder lifecycle over a `READY` transient VM — no `admin` role and no
+  `destructive_ops` opt-in. Everything below about `control.power` as a gated op is
+  historical; the gate now covers only `force_crash` and `reprovision`.
 
 ## Problem
 
@@ -54,13 +59,16 @@ at lease time" question ADR-0129 already flagged. Rejected; see ADR-0130.
 
 ## Affected behavior, after the change
 
+> Historical as of ADR-0320: the `control.power` rows below are superseded — power is now
+> `contributor`, `READY`-only, and not gated (see the note at the top). The current gate
+> covers only `force_crash` and `reprovision`.
+
 | Op | Role factor | Other check | Grantable in production? |
 |----|-------------|-------------|--------------------------|
-| `control.power` off/cycle/reset | `admin` | profile opt-in (`power` in profile `destructive_ops`) | yes |
 | `control.force_crash` | `admin` | profile opt-in (`force_crash`) | yes |
 | `systems.reprovision` | `operator` | profile opt-in (`reprovision`) | yes |
 | `systems.teardown` | `admin` | none (ADR-0129) | yes (unchanged) |
-| `control.power on` | `operator` | none | yes (unchanged; not gated) |
+| `control.power` (all actions) | `contributor` | none (ADR-0320); READY-only | yes (not gated) |
 
 `profile_opt_in` resolves from the System's provisioning profile
 (`profile.provider.<runtime>.destructive_ops`, a list the agent supplies at `systems.provision`

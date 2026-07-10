@@ -2,10 +2,11 @@
 
 A destructive operation is allowed only when both independent checks pass: the principal
 holds the required role on the allocation's project, and the controlling profile explicitly
-opted the op in. The role factor is `admin` for the project-administration ops
-(force_crash/power) and `operator` for reprovision (ADR-0038 §3) — reprovisioning your own
-granted System is iterating, not administering — so the gate takes the required role as a
-per-op parameter (defaulting to `admin`). The gate is pure policy over `(ctx, allocation,
+opted the op in. The role factor is `admin` for the project-administration op `force_crash`
+and `operator` for `reprovision` (ADR-0038 §3) — reprovisioning your own granted System is
+iterating, not administering — so the gate takes the required role as a per-op parameter
+(defaulting to `admin`). `control.power` is not gated here: it is contributor leaseholder
+lifecycle over a transient VM (ADR-0320). The gate is pure policy over `(ctx, allocation,
 op)`; it reads the role check from data and trusts the handler to resolve the
 `profile_opt_in` factor. ADR-0130 dropped the former third check — the allocation's
 `capability_scope` — because it was never populated in production (admission always wrote
