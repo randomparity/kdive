@@ -47,6 +47,7 @@ from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_erro
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
+from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, Role, RoleDenied, require_role
 
@@ -227,9 +228,25 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str
         denied = _require_job_role(existing, ctx, _cancel_role(existing.kind), job_id)
         if denied is not None:
             return denied
+        prior_state = existing.state.value
         try:
-            async with pool.connection() as conn:
+            async with pool.connection() as conn, conn.transaction():
                 job = await JOBS.update_state(conn, uid, JobState.CANCELED)
+                # Audit the transition inside the mutation's transaction (ADR-0028): both commit
+                # or neither does. The job kind rides the readable `transition` column — args is
+                # stored one-way as args_digest, so a kind only there is not recoverable (#1083).
+                await audit.record(
+                    conn,
+                    ctx,
+                    audit.AuditEvent(
+                        tool="jobs.cancel",
+                        object_kind="jobs",
+                        object_id=uid,
+                        transition=f"{job.kind.value}:{prior_state}->canceled",
+                        args={"job_id": job_id, "kind": job.kind.value},
+                        project=_project(job),
+                    ),
+                )
         except ObjectNotFound:
             return _not_found(job_id)
         except IllegalTransition:

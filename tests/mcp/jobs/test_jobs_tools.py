@@ -24,6 +24,7 @@ from kdive.jobs.payloads import Authorizing, BuildPayload, SystemPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
 from kdive.mcp.tools import jobs as jobs_tools
+from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import Role, RoleDenied
 
 WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
@@ -103,6 +104,23 @@ async def _mark_failed_without_category(pool: AsyncConnectionPool, job_id: str) 
             "UPDATE jobs SET state = 'failed', error_category = NULL WHERE id = %s",
             (job_id,),
         )
+
+
+async def _mark_running(pool: AsyncConnectionPool, job_id: str) -> None:
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute("UPDATE jobs SET state = 'running' WHERE id = %s", (job_id,))
+
+
+async def _audit_rows(pool: AsyncConnectionPool, job_id: str) -> list[tuple[Any, ...]]:
+    """Return every audit_log row for ``job_id`` (readable columns, newest first)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT principal, tool, object_kind, object_id::text, project, "
+            "transition, args_digest FROM audit_log WHERE object_id = %s "
+            "ORDER BY ts DESC",
+            (job_id,),
+        )
+        return await cur.fetchall()
 
 
 def test_get_known_job_returns_status(migrated_url: str) -> None:
@@ -235,6 +253,77 @@ def test_cancel_terminal_job_is_error_envelope(migrated_url: str) -> None:
         assert resp.error_category == "configuration_error"
         # The agent learns the current state without a second jobs.get.
         assert resp.data == {"current_status": "canceled"}
+
+    asyncio.run(_run())
+
+
+def test_cancel_running_leaseholder_job_writes_audit_row(migrated_url: str) -> None:
+    # #1083: a successful cancel writes one readable audit row attributing the actor, tool,
+    # object, project, and a transition that names the job kind in plaintext (not only in the
+    # one-way args_digest). BUILD is a contributor-cancelable leaseholder kind.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue(pool, "audit-run")
+            await _mark_running(pool, job_id)
+            resp = await jobs_tools.cancel_job(pool, CONTRIB_CTX, job_id)
+            rows = await _audit_rows(pool, job_id)
+        assert resp.status == "canceled"
+        assert len(rows) == 1
+        principal, tool, object_kind, object_id, project, transition, digest = rows[0]
+        assert principal == "user-1"
+        assert tool == "jobs.cancel"
+        assert object_kind == "jobs"
+        assert object_id == job_id
+        assert project == "proj"
+        assert transition == "build:running->canceled"
+        assert digest == args_digest({"job_id": job_id, "kind": "build"})
+
+    asyncio.run(_run())
+
+
+def test_cancel_queued_destructive_job_by_operator_writes_audit_row(migrated_url: str) -> None:
+    # #1083: an operator cancelling a queued destructive-kind job is the cross-principal action
+    # that most needs attribution. force_crash is the proven kind/payload pairing used by
+    # test_cancel_operator_gated_job_allowed_to_operator.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue_system_job(pool, JobKind.FORCE_CRASH, "audit-fc")
+            resp = await jobs_tools.cancel_job(pool, OP_CTX, job_id)
+            rows = await _audit_rows(pool, job_id)
+        assert resp.status == "canceled"
+        assert len(rows) == 1
+        assert rows[0][5] == "force_crash:queued->canceled"
+        assert rows[0][6] == args_digest({"job_id": job_id, "kind": "force_crash"})
+
+    asyncio.run(_run())
+
+
+def test_cancel_terminal_job_writes_no_audit_row(migrated_url: str) -> None:
+    # #1083 / spec D3: an audit event records a transition. A no-op cancel of an already-terminal
+    # job performs none, so it writes nothing — only the first, real cancel is attributed.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue(pool, "audit-terminal")
+            await jobs_tools.cancel_job(pool, OP_CTX, job_id)  # -> canceled (one row)
+            resp = await jobs_tools.cancel_job(pool, OP_CTX, job_id)  # no-op, no row
+            rows = await _audit_rows(pool, job_id)
+        assert resp.status == "error"
+        assert resp.data == {"current_status": "canceled"}
+        assert len(rows) == 1  # exactly the first cancel, not the no-op
+
+    asyncio.run(_run())
+
+
+def test_cancel_denied_by_role_writes_no_audit_row(migrated_url: str) -> None:
+    # #1083: cancel_job re-raises RoleDenied before mutating, so it writes no row of its own;
+    # denial auditing stays the DenialAuditMiddleware's job (unchanged, out of this handler).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue(pool, "audit-denied")
+            with pytest.raises(RoleDenied):
+                await jobs_tools.cancel_job(pool, VIEWER_CTX, job_id)
+            rows = await _audit_rows(pool, job_id)
+        assert rows == []
 
     asyncio.run(_run())
 
