@@ -88,12 +88,18 @@ call).
    - `READY` → transition `READY → CRASHING`, return `(target, fire_nmi=True)`.
    - any other non-terminal state (`defined`/`provisioning`/`reprovisioning`) → terminal
      `CONFIGURATION_ERROR`; admission already blocked these, so this is defence in depth.
-3. If `fire_nmi`: fire the physical NMI **unlocked**. If `control.force_crash` **raises** (the
-   NMI call itself failed — for libvirt `injectNMI`, a raise means the NMI did **not** land and
-   the guest is healthy), transition `CRASHING → FAILED` under the lock and re-raise. This is
-   the honest terminal signal ("force_crash could not inject") and never mislabels a healthy
-   guest `CRASHED`; the System is recoverable via teardown/reprovision, and power stays
-   correctly refused on a System whose crash outcome is unknown.
+3. If `fire_nmi`: fire the physical NMI **unlocked**. If `control.force_crash` **raises**, let
+   the exception **propagate** (no special-casing). The provider does not tell us whether the
+   NMI landed: `LocalLibvirtControl.force_crash` raises `CONTROL_FAILURE` for a missing domain
+   **and** for any `libvirt.libvirtError`, and a `libvirtError` can be a transport/RPC error
+   raised *after* the NMI was already delivered to QEMU. So we do **not** assume "raise ⇒ NMI
+   did not land." `CONTROL_FAILURE` is non-terminal, so `queue.fail` requeues the job to
+   `QUEUED`; the retry re-enters `_enter_crashing`, sees `CRASHING`, and finalizes to `CRASHED`
+   (finalize-only, below), and if retries exhaust the reconciler backstop does the same — both
+   resolve the ambiguity evidence-first. (Marking the System `FAILED` on a raise was considered
+   and rejected: it discards the crash memory of a genuinely-crashed guest whose NMI landed but
+   whose response timed out, and it converts today's retryable NMI error into a non-retried
+   terminal failure — see AC4b and the mislabel-window note.)
 4. **`_finalize_force_crash`** (under `SYSTEM` lock):
    - terminal → return.
    - `CRASHED` → sessions already detached by the transition owner; return (idempotent).
@@ -107,12 +113,21 @@ retry re-enters `_enter_crashing`, sees `CRASHING`, and finalizes **without** re
 NMI. Re-injecting is deliberately avoided: after `CRASHING` the guest is (overwhelmingly)
 mid-kdump writing the vmcore this feature protects, and a second NMI into the running crash
 kernel is not demonstrably inert — it can abort or corrupt the in-progress dump. Because the
-marker is committed microseconds before the NMI dispatch (controller pre-resolved, per the
-ordering rule above), a `CRASHING` System means "NMI dispatched"; the only case a retry
-finalizes a guest whose NMI never fired is a worker kill in that microsecond gap — orders of
-magnitude rarer than a kill during/after the NMI, and accepted as evidence-first. (An NMI-call
-*raise* is handled separately in step 3 → `FAILED`, not left for the retry to mislabel.) The
+controller is pre-resolved and the marker is committed microseconds before the NMI dispatch, a
+`CRASHING` System means "NMI dispatch attempted"; finalize-only resolves the ambiguous outcome
+(landed / raised-after-delivery / raised-before-delivery) evidence-first to `CRASHED`. The
 reconciler recovery below is the backstop for when retries **are** exhausted.
+
+**Windows where `CRASHING` sits on a possibly-healthy guest (mislabel cost, stated honestly).**
+Finalize-only + reconciler-to-`CRASHED` means a guest whose NMI never actually landed can be
+mislabelled `CRASHED` and torn down. This can arise two ways: (1) a worker kill in the
+microsecond gap between the `CRASHING` commit and the NMI dispatch (controller pre-resolved, so
+no I/O sits in this gap); (2) an `injectNMI` raise where the NMI did **not** reach QEMU (e.g. a
+missing domain or a pre-delivery transport error) followed by finalize/reconciler resolving to
+`CRASHED`. Both are confined to the worker-crash / degraded-provider paths, not the normal
+flow, and both are accepted deliberately: the alternative to each — re-firing the NMI, or
+marking `FAILED` on any raise — risks destroying the crash memory of a guest that *did* crash,
+which is the worse outcome for a crash-debugging tool. Evidence-first is the chosen default.
 
 ### Power path (no change to the guards)
 
@@ -131,16 +146,18 @@ runs each tick **after** `repair_abandoned_jobs` (which already dead-letters a z
 `force_crash` job whose lease expired and attempts are exhausted → `FAILED`). It:
 
 1. Selects Systems in `crashing` whose `force_crash` job (dedup_key `{system_id}:force_crash`)
-   is in the **`FAILED`** state — i.e. dead-lettered by `repair_abandoned_jobs` after its lease
-   expired and attempts were exhausted (definitively dead, not merely slow). A still-`running`
-   (valid-lease) or `succeeded` job is left alone (a `succeeded` job already wrote `CRASHED`, so
-   the System would not read `crashing`). **`canceled` is deliberately excluded:** a cancel is
-   an operator action with arbitrary timing that can land *before* the NMI fires, so completing
-   its System to `crashed` would both contradict the cancel intent and risk tearing down a
-   healthy guest. (Build-time verification: confirm `FORCE_CRASH` is not in the `jobs.cancel`
-   allowlist while `RUNNING`, so a job that reached `CRASHING` cannot be canceled and no
-   `canceled` + `crashing` System can be stranded; if that assumption does not hold, revisit
-   this selection.)
+   is in a **terminal non-success** state — `FAILED` (dead-lettered by `repair_abandoned_jobs`
+   after its lease expired and attempts were exhausted) **or `CANCELED`** (an operator
+   `jobs.cancel`; `force_crash` **is** operator-cancelable while `RUNNING` —
+   `cancel_job`/`mcp/tools/jobs.py` transitions `running → canceled` and does not interrupt the
+   in-flight handler). Both must be recovered: once `CRASHING` is set the NMI has (over­
+   whelmingly) fired, so a terminal owning job whose System still reads `crashing` means the
+   handler stopped before finalize — leaving the System stranded unless the reconciler resolves
+   it. A still-`running` (valid-lease) or `succeeded` job is left alone (a `succeeded` job
+   already wrote `CRASHED`, so its System would not read `crashing`; a `running` job may yet
+   finalize). Recovering `CANCELED` evidence-first to `crashed` is deliberate: a cancel cannot
+   un-fire the NMI, and excluding it would strand the System in `crashing` **forever** with
+   power permanently blocked — exactly the permanent limbo R3 forbids.
 2. Under the `SYSTEM` lock, re-reads the state (skip if it left `crashing`) and transitions
    `crashing → crashed`, records an audit event (`tool="control.force_crash"`,
    `transition="crashing->crashed"`, reconciler principal), and detaches every non-terminal
@@ -149,16 +166,15 @@ runs each tick **after** `repair_abandoned_jobs` (which already dead-letters a z
 **Why `crashed`, not `ready`:** because the controller is pre-resolved and the marker is
 committed microseconds before the NMI dispatch, and the reaper fires only after the job's full
 lease + retry budget is exhausted (minutes), a stall almost always means the NMI already fired
-and the guest is down. (An NMI *call that raised* was already resolved to `FAILED` by the
-handler — step 3 above — so it never reaches this repair as `crashing`.) Recovering to `crashed` preserves
-crash memory (the feature's own purpose) and hands the System to the standard crash workflow
+and the guest is down. Recovering to `crashed` preserves crash memory (the feature's own
+purpose) and hands the System to the standard crash workflow
 (`capture_vmcore` → `teardown`/`reprovision`). Recovering to `ready` to "unblock power" would,
 in that likely case, let the next power op destroy the very evidence this change protects —
 reopening the race on the recovery path. The System is **not** wedged: `crashed` is a normal,
-terminal-capable state, so R3 is met — the marker never leaks into a permanent limbo. (The
-tiny sub-window where the handler died *before* dispatching the NMI mislabels a healthy guest
-`crashed`; that cost is accepted because the window is orders of magnitude smaller than the
-NMI-to-`CRASHED` window and evidence-first is the safe default for a crash-debugging tool.)
+terminal-capable state, so R3 is met — the marker never leaks into a permanent limbo. The
+possibly-healthy-guest mislabel windows are the two enumerated above (worker kill in the
+pre-dispatch gap; `injectNMI` raised without delivery); both are confined to worker-crash /
+degraded-provider paths and accepted as the evidence-first tradeoff.
 
 ## State-set fan-out (every enumerated `SystemState` set audited)
 
@@ -194,14 +210,18 @@ Adding `CRASHING` is not a one-line enum change; each set that enumerates states
 - **AC4a (retry / F2).** A retry that re-enters the handler with the System already `crashing`
   finalizes to `crashed` **without** calling the provider NMI method a second time (spy on
   `control.force_crash` sees exactly one call across the two attempts).
-- **AC4b (NMI-dispatch failure / F1).** When the provider NMI call raises, the handler
-  transitions the System `crashing → failed` and re-raises; the System is never left `crashing`
-  and never driven to `crashed`. When controller resolution raises (before the marker), the
-  System stays `ready`.
-- **AC5 (R3).** With a `force_crash` job dead-lettered (`FAILED`) while its System is
-  `crashing`, `repair_stalled_crashing_systems` transitions the System to `crashed` (not left
+- **AC4b (NMI-dispatch failure).** When the provider NMI call raises a (non-terminal)
+  `CONTROL_FAILURE`, the exception propagates and the job requeues; the retry finalizes the
+  already-`crashing` System to `crashed` **without** re-firing the NMI (spy sees one NMI call).
+  The System is never marked `failed` by the handler on a raise. When controller resolution
+  raises *before* the marker, the System stays `ready` (no `crashing` marker written).
+- **AC5 (R3, dead-letter).** With a `force_crash` job dead-lettered (`FAILED`) while its System
+  is `crashing`, `repair_stalled_crashing_systems` transitions the System to `crashed` (not left
   `crashing`), detaches sessions, and audits; a System with a still-`running` force_crash job is
-  untouched, and a `canceled` job is **not** recovered by this repair.
+  untouched.
+- **AC5a (R3, operator cancel).** An operator `jobs.cancel` on a `RUNNING` force_crash whose
+  System is `crashing` (handler no longer finalizing) does **not** strand the System:
+  `repair_stalled_crashing_systems` recovers the `canceled` + `crashing` System to `crashed`.
 - **AC6 (fan-out).** Quota accounting counts a `crashing` System; the allocation reaper does
   not reclaim an `active` allocation whose only System is `crashing`; console
   hosting/rotation treat `crashing` as live.

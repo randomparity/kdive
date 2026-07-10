@@ -50,11 +50,12 @@ must be a durable marker the power path already respects.
    the NMI, so the marker→NMI window is microseconds. A retry that re-enters with the System
    already `CRASHING` is **finalize-only** — it does **not** re-fire the NMI (the marker means
    "NMI already dispatched"; a second NMI into a mid-kdump guest is not demonstrably inert). If
-   the NMI *call itself* raises (for libvirt `injectNMI`, a raise means the NMI did not land),
-   the handler transitions `CRASHING → FAILED` and re-raises — an honest failure that never
-   mislabels a healthy guest `CRASHED`. `_finalize_force_crash` transitions `CRASHING → CRASHED`
-   (was `READY → CRASHED`), audits `crashing->crashed`, and detaches every non-terminal
-   DebugSession.
+   the NMI *call itself* raises, the exception **propagates** (a `libvirt` `injectNMI` raise can
+   be a transport error *after* delivery, so a raise does not prove the NMI missed); the
+   non-terminal `CONTROL_FAILURE` requeues the job and the retry finalizes evidence-first —
+   marking `FAILED` on a raise was rejected as it discards a real crash's memory and defeats
+   retry. `_finalize_force_crash` transitions `CRASHING → CRASHED` (was `READY → CRASHED`),
+   audits `crashing->crashed`, and detaches every non-terminal DebugSession.
 
 3. **Power path unchanged.** `power_system` admission and `_power_target` execution already
    refuse any non-`READY` System, so a `CRASHING` System is **automatically** rejected at both
@@ -63,13 +64,14 @@ must be a durable marker the power path already respects.
 
 4. **Leak recovery (reconciler → `crashed`).** A new `repair_stalled_crashing_systems`
    (`reconciler/repairs/systems.py`) runs after `repair_abandoned_jobs` and transitions a
-   `crashing` System whose `force_crash` job is **`FAILED`** (dead-lettered: lease expired +
-   attempts exhausted) to `crashed` under the `SYSTEM` lock — auditing and detaching sessions
-   exactly as finalize would. A System whose `force_crash` job is still `running` (valid lease)
-   or `succeeded` is left alone. `canceled` is excluded (a cancel can land pre-NMI; completing
-   it to `crashed` would contradict the operator and risk tearing down a healthy guest —
-   `FORCE_CRASH` is not `jobs.cancel`-able while `RUNNING`, so a `canceled` + `crashing` System
-   cannot arise).
+   `crashing` System whose `force_crash` job is in a **terminal non-success** state — `FAILED`
+   (dead-lettered: lease expired + attempts exhausted) or `CANCELED` (operator `jobs.cancel`;
+   `force_crash` *is* operator-cancelable while `RUNNING`) — to `crashed` under the `SYSTEM`
+   lock, auditing and detaching sessions exactly as finalize would. A System whose `force_crash`
+   job is still `running` (valid lease) or `succeeded` is left alone. `CANCELED` must be
+   recovered, not excluded: a cancel cannot un-fire an already-dispatched NMI, and leaving a
+   `canceled` + `crashing` System unrecovered would strand it forever with power permanently
+   blocked — the permanent limbo R3 forbids.
 
 5. **State-set fan-out.** Every enumerated `SystemState` set is audited (see spec table).
    `CRASHING` is added to the "live/non-terminal" sets — `_NON_TERMINAL_SYSTEM` (quota),
@@ -119,3 +121,16 @@ must be a durable marker the power path already respects.
   NMI directly, but holds a DB advisory lock across a blocking hardware round-trip — the
   anti-pattern ADR-0320 explicitly avoids (a stuck NMI would wedge every lock waiter on that
   System, including the reconciler).
+- **Mark `CRASHING → FAILED` when the `injectNMI` call raises.** Reads a raise as "NMI missed,
+  guest healthy," but a `libvirt` transport error can raise *after* the NMI reached QEMU, so
+  this discards the crash memory of a genuinely-crashed guest and turns today's retryable NMI
+  error into a non-retried terminal failure. Rejected: let the (non-terminal) error propagate
+  and resolve evidence-first on retry/reconciler.
+- **Re-fire the NMI on retry.** A retry that re-injects into a guest already mid-kdump can abort
+  or corrupt the in-progress dump. Rejected in favour of finalize-only (the marker means "NMI
+  already dispatched").
+- **Exclude `canceled` force_crash jobs from the reconciler recovery.** Considered to honour a
+  cancel's abort intent, but `force_crash` is operator-cancelable while `RUNNING`, so excluding
+  `canceled` would strand a `canceled` + `crashing` System forever (permanent power block).
+  Rejected: recover `canceled` evidence-first to `crashed` like `failed` — a cancel cannot
+  un-fire an already-dispatched NMI.
