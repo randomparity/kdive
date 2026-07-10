@@ -44,9 +44,15 @@ must be a durable marker the power path already respects.
    TORN_DOWN}`, `CRASHED → {TORN_DOWN, FAILED}` (unchanged). Migration `0065` adds `'crashing'`
    to the `systems_state_check` CHECK (forward-only; no row is `crashing`, no backfill).
 
-2. **`force_crash` handler.** `_force_crash_target` transitions `READY → CRASHING` under the
-   lock before returning the target (idempotent for a retry: `CRASHING` re-fires the NMI,
-   `CRASHED`/terminal short-circuit). `_finalize_force_crash` transitions `CRASHING → CRASHED`
+2. **`force_crash` handler.** The controller is resolved **first** (a provider-binding lookup
+   that can fail must fail while the System is still `READY`, not after the marker); then
+   `_enter_crashing` transitions `READY → CRASHING` under the lock as the last DB write before
+   the NMI, so the marker→NMI window is microseconds. A retry that re-enters with the System
+   already `CRASHING` is **finalize-only** — it does **not** re-fire the NMI (the marker means
+   "NMI already dispatched"; a second NMI into a mid-kdump guest is not demonstrably inert). If
+   the NMI *call itself* raises (for libvirt `injectNMI`, a raise means the NMI did not land),
+   the handler transitions `CRASHING → FAILED` and re-raises — an honest failure that never
+   mislabels a healthy guest `CRASHED`. `_finalize_force_crash` transitions `CRASHING → CRASHED`
    (was `READY → CRASHED`), audits `crashing->crashed`, and detaches every non-terminal
    DebugSession.
 
@@ -57,10 +63,13 @@ must be a durable marker the power path already respects.
 
 4. **Leak recovery (reconciler → `crashed`).** A new `repair_stalled_crashing_systems`
    (`reconciler/repairs/systems.py`) runs after `repair_abandoned_jobs` and transitions a
-   `crashing` System whose `force_crash` job is in a terminal **non-success** state
-   (`failed`/`canceled`) to `crashed` under the `SYSTEM` lock — auditing and detaching sessions
+   `crashing` System whose `force_crash` job is **`FAILED`** (dead-lettered: lease expired +
+   attempts exhausted) to `crashed` under the `SYSTEM` lock — auditing and detaching sessions
    exactly as finalize would. A System whose `force_crash` job is still `running` (valid lease)
-   is left alone.
+   or `succeeded` is left alone. `canceled` is excluded (a cancel can land pre-NMI; completing
+   it to `crashed` would contradict the operator and risk tearing down a healthy guest —
+   `FORCE_CRASH` is not `jobs.cancel`-able while `RUNNING`, so a `canceled` + `crashing` System
+   cannot arise).
 
 5. **State-set fan-out.** Every enumerated `SystemState` set is audited (see spec table).
    `CRASHING` is added to the "live/non-terminal" sets — `_NON_TERMINAL_SYSTEM` (quota),

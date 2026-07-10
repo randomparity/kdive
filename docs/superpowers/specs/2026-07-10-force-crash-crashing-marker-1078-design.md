@@ -70,26 +70,49 @@ constraint. No existing row is `crashing`, so there is no data backfill.
 
 ### `force_crash` handler flow
 
-1. **`_force_crash_target`** (under `SYSTEM` lock):
-   - terminal (`torn_down`/`failed`) → return `None` (nothing to do).
-   - `CRASHED` → return `None` (already finalized; e.g. a retry after a completed finalize).
-   - `CRASHING` → return the target (retry re-fires the NMI; an NMI to an already-crashed
-     guest is a harmless no-op, and finalize still needs to run).
-   - `READY` → transition `READY → CRASHING`, then return the target.
-   - any other non-terminal state (`defined`/`provisioning`/`reprovisioning`) → treat as a
-     precondition failure (terminal `CONFIGURATION_ERROR`); admission already blocked these,
-     so this is defence in depth.
-2. Fire the physical NMI **unlocked** (unchanged).
-3. **`_finalize_force_crash`** (under `SYSTEM` lock):
+**Ordering matters: resolve the controller *before* marking `CRASHING`.** The provider
+binding lookup (`_controller` → `resolver.binding_for_system`) is a DB + provider call that
+can be slow or **fail** when the provider is degraded. It must run while the System is still
+`READY`, so a resolution outage fails the handler with the System unchanged (`READY`,
+power-recoverable, exactly today's behaviour) — never with a committed `CRASHING` marker whose
+NMI never fired. The `READY → CRASHING` commit is the **last DB write immediately before** the
+NMI dispatch, so the marker→NMI window is a few microseconds of Python (no I/O, no provider
+call).
+
+1. **`_controller`** — resolve the provider controller (may fail; leaves the System `READY`).
+2. **`_enter_crashing`** (under `SYSTEM` lock) returns `(target, fire_nmi)`:
+   - terminal (`torn_down`/`failed`) or `CRASHED` → return `None` (nothing to do / already
+     finalized; e.g. a retry after a completed finalize).
+   - `CRASHING` → return `(target, fire_nmi=False)` — a **retry**: the marker means the NMI
+     was already dispatched on a prior attempt, so finalize only (see below).
+   - `READY` → transition `READY → CRASHING`, return `(target, fire_nmi=True)`.
+   - any other non-terminal state (`defined`/`provisioning`/`reprovisioning`) → terminal
+     `CONFIGURATION_ERROR`; admission already blocked these, so this is defence in depth.
+3. If `fire_nmi`: fire the physical NMI **unlocked**. If `control.force_crash` **raises** (the
+   NMI call itself failed — for libvirt `injectNMI`, a raise means the NMI did **not** land and
+   the guest is healthy), transition `CRASHING → FAILED` under the lock and re-raise. This is
+   the honest terminal signal ("force_crash could not inject") and never mislabels a healthy
+   guest `CRASHED`; the System is recoverable via teardown/reprovision, and power stays
+   correctly refused on a System whose crash outcome is unknown.
+4. **`_finalize_force_crash`** (under `SYSTEM` lock):
    - terminal → return.
    - `CRASHED` → sessions already detached by the transition owner; return (idempotent).
    - `CRASHING` → transition `CRASHING → CRASHED`, audit `crashing->crashed`, detach every
      non-terminal DebugSession of the System.
 
-The stable dedup key (`{system_id}:force_crash`) already prevents a second concurrent
-`force_crash` job. Job retry (attempts not yet exhausted) recovers a handler that died after
-`READY → CRASHING`: the retry re-enters `_force_crash_target`, sees `CRASHING`, re-fires, and
-finalizes. The reconciler recovery below is the backstop for when attempts **are** exhausted.
+**Retry is finalize-only — it never re-fires the NMI.** The stable dedup key
+(`{system_id}:force_crash`) prevents a second concurrent `force_crash` job. A handler that
+died after `READY → CRASHING` is recovered by job retry (`fail()` requeues to `QUEUED`): the
+retry re-enters `_enter_crashing`, sees `CRASHING`, and finalizes **without** re-injecting the
+NMI. Re-injecting is deliberately avoided: after `CRASHING` the guest is (overwhelmingly)
+mid-kdump writing the vmcore this feature protects, and a second NMI into the running crash
+kernel is not demonstrably inert — it can abort or corrupt the in-progress dump. Because the
+marker is committed microseconds before the NMI dispatch (controller pre-resolved, per the
+ordering rule above), a `CRASHING` System means "NMI dispatched"; the only case a retry
+finalizes a guest whose NMI never fired is a worker kill in that microsecond gap — orders of
+magnitude rarer than a kill during/after the NMI, and accepted as evidence-first. (An NMI-call
+*raise* is handled separately in step 3 → `FAILED`, not left for the retry to mislabel.) The
+reconciler recovery below is the backstop for when retries **are** exhausted.
 
 ### Power path (no change to the guards)
 
@@ -108,18 +131,26 @@ runs each tick **after** `repair_abandoned_jobs` (which already dead-letters a z
 `force_crash` job whose lease expired and attempts are exhausted → `FAILED`). It:
 
 1. Selects Systems in `crashing` whose `force_crash` job (dedup_key `{system_id}:force_crash`)
-   is in a **terminal non-success** state (`failed`/`canceled`) — i.e. the handler is
-   definitively dead, not merely slow. A still-`running` (valid-lease) or `succeeded` job is
-   left alone (a `succeeded` job already wrote `CRASHED`, so the System would not read
-   `crashing`).
+   is in the **`FAILED`** state — i.e. dead-lettered by `repair_abandoned_jobs` after its lease
+   expired and attempts were exhausted (definitively dead, not merely slow). A still-`running`
+   (valid-lease) or `succeeded` job is left alone (a `succeeded` job already wrote `CRASHED`, so
+   the System would not read `crashing`). **`canceled` is deliberately excluded:** a cancel is
+   an operator action with arbitrary timing that can land *before* the NMI fires, so completing
+   its System to `crashed` would both contradict the cancel intent and risk tearing down a
+   healthy guest. (Build-time verification: confirm `FORCE_CRASH` is not in the `jobs.cancel`
+   allowlist while `RUNNING`, so a job that reached `CRASHING` cannot be canceled and no
+   `canceled` + `crashing` System can be stranded; if that assumption does not hold, revisit
+   this selection.)
 2. Under the `SYSTEM` lock, re-reads the state (skip if it left `crashing`) and transitions
    `crashing → crashed`, records an audit event (`tool="control.force_crash"`,
    `transition="crashing->crashed"`, reconciler principal), and detaches every non-terminal
    DebugSession (the same effect `_finalize_force_crash` would have had).
 
-**Why `crashed`, not `ready`:** the marker is set microseconds before the NMI, and the reaper
-fires only after the job's full lease + retry budget is exhausted (minutes), so a stall almost
-always means the NMI already fired and the guest is down. Recovering to `crashed` preserves
+**Why `crashed`, not `ready`:** because the controller is pre-resolved and the marker is
+committed microseconds before the NMI dispatch, and the reaper fires only after the job's full
+lease + retry budget is exhausted (minutes), a stall almost always means the NMI already fired
+and the guest is down. (An NMI *call that raised* was already resolved to `FAILED` by the
+handler — step 3 above — so it never reaches this repair as `crashing`.) Recovering to `crashed` preserves
 crash memory (the feature's own purpose) and hands the System to the standard crash workflow
 (`capture_vmcore` → `teardown`/`reprovision`). Recovering to `ready` to "unblock power" would,
 in that likely case, let the next power op destroy the very evidence this change protects —
@@ -154,13 +185,23 @@ Adding `CRASHING` is not a one-line enum change; each set that enumerates states
   `configuration_error` with `current_status: "crashing"`.
 - **AC3 (R1, the race).** An adversarial/interleaving test drives `force_crash` to the point
   where `CRASHING` is written and the NMI has fired but `CRASHED` has not, and asserts a
-  concurrent power op is refused (the guest is never physically reset in that window).
+  concurrent power op is refused **and the provider `control.power` method receives zero
+  calls** in that window (spy call-count `== 0`) — so the test observes the load-bearing
+  property (no physical reset), not merely that the DB guard raised.
 - **AC4 (R4).** `force_crash` end-to-end still drives `ready → crashing → crashed` and
   detaches every non-terminal DebugSession; the audit trail shows the `crashing->crashed`
   transition.
-- **AC5 (R3).** With a `force_crash` job dead-lettered while its System is `crashing`,
-  `repair_stalled_crashing_systems` transitions the System to `crashed` (not left `crashing`),
-  detaches sessions, and audits; a System with a still-`running` force_crash job is untouched.
+- **AC4a (retry / F2).** A retry that re-enters the handler with the System already `crashing`
+  finalizes to `crashed` **without** calling the provider NMI method a second time (spy on
+  `control.force_crash` sees exactly one call across the two attempts).
+- **AC4b (NMI-dispatch failure / F1).** When the provider NMI call raises, the handler
+  transitions the System `crashing → failed` and re-raises; the System is never left `crashing`
+  and never driven to `crashed`. When controller resolution raises (before the marker), the
+  System stays `ready`.
+- **AC5 (R3).** With a `force_crash` job dead-lettered (`FAILED`) while its System is
+  `crashing`, `repair_stalled_crashing_systems` transitions the System to `crashed` (not left
+  `crashing`), detaches sessions, and audits; a System with a still-`running` force_crash job is
+  untouched, and a `canceled` job is **not** recovered by this repair.
 - **AC6 (fan-out).** Quota accounting counts a `crashing` System; the allocation reaper does
   not reclaim an `active` allocation whose only System is `crashing`; console
   hosting/rotation treat `crashing` as live.
