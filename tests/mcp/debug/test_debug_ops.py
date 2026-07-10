@@ -21,6 +21,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 import pytest
+from fastmcp import Client, FastMCP
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
@@ -323,8 +324,19 @@ async def _audit_rows(pool: AsyncConnectionPool, object_id: str) -> list[tuple[A
 
 
 def test_op_audit_descriptor_covers_only_mutating_and_sensitive_ops() -> None:
-    # The audited set is the state-mutating engine ops + the sensitive raw-memory read. Bounded
-    # pure reads return None (no per-op row; covered by the session + transcript).
+    # The audited set is the state-mutating engine ops + the sensitive raw-memory read. Pinning
+    # the exact set catches drift: an added privileged op is unaudited until listed, and a bounded
+    # read wrongly added here would start emitting per-op rows.
+    assert {
+        "debug.read_memory",
+        "debug.set_breakpoint",
+        "debug.clear_breakpoint",
+        "debug.set_watchpoint",
+        "debug.clear_watchpoint",
+        "debug.continue",
+        "debug.interrupt",
+        "debug.load_module_symbols",
+    } == debug_ops._AUDITED_OPS
     assert debug_ops._op_audit("debug.read_memory", address="0x1", byte_count=4) == (
         debug_ops._OpAudit(
             tool="debug.read_memory",
@@ -332,10 +344,60 @@ def test_op_audit_descriptor_covers_only_mutating_and_sensitive_ops() -> None:
             args={"address": "0x1", "byte_count": 4},
         )
     )
-    for audited in ("debug.set_breakpoint", "debug.continue", "debug.load_module_symbols"):
-        assert debug_ops._op_audit(audited) is not None
     for bounded in ("debug.backtrace", "debug.read_registers", "debug.resolve_symbol"):
         assert debug_ops._op_audit(bounded) is None
+
+
+async def _call_registered_debug_tool(
+    pool: AsyncConnectionPool,
+    runtime: DebugEngineRuntime,
+    *,
+    tool: str,
+    arguments: dict[str, object],
+    ctx: RequestContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> ToolResponse:
+    """Register the gdb-MI tools and invoke one through the FastMCP transport (the wrapper path)."""
+    monkeypatch.setattr(debug_ops, "current_context", lambda: ctx)
+    app: FastMCP = FastMCP(name="t")
+    debug_ops._register_debug_ops(app, pool, runtime)
+    async with Client(app) as client:
+        result = await client.call_tool(tool, arguments, raise_on_error=False)
+    assert result.structured_content is not None
+    return ToolResponse.model_validate(result.structured_content)
+
+
+def test_registered_set_breakpoint_handler_writes_audit_row(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Drive a mutating op through the REGISTERED wrapper (not run_engine_op directly) so the
+    # handler's own `audit=_op_audit("debug.set_breakpoint", ...)` wiring is exercised end-to-end.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-break-insert panic": [
+                        {"type": "result", "message": "done", "payload": {"bkpt": {"number": "1"}}}
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await _call_registered_debug_tool(
+                pool,
+                runtime,
+                tool="debug.set_breakpoint",
+                arguments={"session_id": session_id, "location": "panic"},
+                ctx=_ctx(),
+                monkeypatch=monkeypatch,
+            )
+            rows = await _audit_rows(pool, session_id)
+        assert resp.status == "set"
+        assert len(rows) == 1
+        assert rows[0][1] == "debug.set_breakpoint"
+        assert rows[0][5] == "set_breakpoint"
+
+    asyncio.run(_run())
 
 
 def test_read_memory_writes_audit_row(migrated_url: str) -> None:

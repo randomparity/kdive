@@ -358,7 +358,7 @@ async def introspect_script(
         async def _run_live_script_callback(
             resolved: LiveDrgnSession, runtime: ProviderRuntime, private_key: str
         ) -> ToolResponse:
-            return await _run_live_script(
+            resp = await _run_live_script(
                 session_id,
                 resolved=resolved,
                 script=script,
@@ -366,8 +366,11 @@ async def introspect_script(
                 introspector=runtime.live_introspector,
                 private_key=private_key,
             )
+            if resp.error_category is None:
+                await _audit_introspect_script(pool, ctx, resolved, script)
+            return resp
 
-        resp = await _with_live_introspection(
+        return await _with_live_introspection(
             pool=pool,
             resolver=resolver,
             ctx=ctx,
@@ -375,39 +378,33 @@ async def introspect_script(
             mode=_LIVE_SCRIPT,
             action=_run_live_script_callback,
         )
-        if resp.error_category is None:
-            await _audit_introspect_script(pool, ctx, session_id, script)
-        return resp
 
 
 async def _audit_introspect_script(
-    pool: AsyncConnectionPool, ctx: RequestContext, session_id: str, script: str
+    pool: AsyncConnectionPool, ctx: RequestContext, resolved: LiveDrgnSession, script: str
 ) -> None:
     """Attribute a successful introspect.script (arbitrary in-guest drgn exec) to the caller.
 
-    Post-hoc (the script already ran in-guest): one audit_log row against the DebugSession. The
-    script text rides ``args`` for ``args_digest`` correlation only — it is hashed one-way, never
-    stored plaintext, consistent with the sensitive-transcript handling.
+    Post-hoc (the script already ran in-guest): one audit_log row against the DebugSession, built
+    from the session ``resolved`` inside the gate (not a second ``require_live`` resolve, which a
+    concurrent ``end_session`` could turn into a silently-dropped row). The script text rides
+    ``args`` for ``args_digest`` correlation only — hashed one-way, never stored plaintext.
     """
     async with pool.connection() as conn, conn.transaction():
-        resolved = await resolve_debug_session_context(conn, ctx, session_id, require_live=True)
-        if isinstance(resolved, ToolResponse):  # unreachable on the success path
-            return
-        session = resolved.session
         await audit.record(
             conn,
             ctx,
             audit.AuditEvent(
                 tool="introspect.script",
                 object_kind="debug_sessions",
-                object_id=session.id,
+                object_id=resolved.session_id,
                 transition="script",
                 args={
-                    "session_id": session_id,
-                    "run_id": str(session.run_id),
+                    "session_id": str(resolved.session_id),
+                    "run_id": str(resolved.run_id),
                     "script": script,
                 },
-                project=session.project,
+                project=resolved.project,
             ),
         )
 
