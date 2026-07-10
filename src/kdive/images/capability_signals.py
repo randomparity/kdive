@@ -19,6 +19,18 @@ from kdive.serialization import JsonValue
 type SignalRender = Callable[[ImageCatalogEntry, KernelVersion], dict[str, JsonValue]]
 
 
+def _provenance_basis(entry: ImageCatalogEntry) -> str:
+    """The evidence basis for a present operand: an operator claim vs a KDIVE-verified fact.
+
+    ``operator_attested`` when the row's provenance was declared by an operator
+    (``image_catalog.provenance_attested``, an ``s3`` image's ``[image.attested]`` operands,
+    ADR-0323); ``build_verified`` when it was recorded by a KDIVE build/publish or build-fs sidecar.
+    Surfaced on each **present**-operand signal block so a confident answer discloses whether it
+    rests on a claim or a fact — the ADR-0286 honesty invariant, made explicit rather than blurred.
+    """
+    return "operator_attested" if entry.provenance_attested else "build_verified"
+
+
 @dataclass(frozen=True, slots=True)
 class CapabilitySignal:
     """A computed capability answer over an image's build-recorded provenance.
@@ -53,18 +65,22 @@ def render_kdump_signal(
     data — an unparseable stored version degrades to ``unverified``.
     """
     raw = entry.provenance.get("makedumpfile_version")
+    has_operand = isinstance(raw, str) and bool(raw)
     cap = kdump_capability(
-        makedumpfile_version=raw if isinstance(raw, str) and raw else None,
+        makedumpfile_version=raw if has_operand else None,
         target_kernel=target_kernel,
         kdump_tooling=Capability.KDUMP in entry.capabilities,
     )
-    return {
+    block: dict[str, JsonValue] = {
         "makedumpfile_version": raw if isinstance(raw, str) else "",
         "target_kernel": cap.target_kernel,
         "capability": cap.status,
         "min_makedumpfile_required": cap.min_makedumpfile_required,
         "note": cap.note,
     }
+    if has_operand:
+        block["basis"] = _provenance_basis(entry)
+    return block
 
 
 KDUMP_SIGNAL = CapabilitySignal(
@@ -94,15 +110,16 @@ def render_direct_kernel_signal(
             "note": "boot kernel count is not recorded; rebuild the image to characterize "
             "direct-kernel provisionability",
         }
+    basis = _provenance_basis(entry)
     if count == 1:
-        return {"boot_kernel_count": 1, "status": "provisionable", "note": ""}
+        return {"boot_kernel_count": 1, "status": "provisionable", "note": "", "basis": basis}
     note = (
         "rootfs /boot has no bootable non-rescue kernel"
         if count == 0
         else f"rootfs /boot has {count} non-rescue kernels; direct-kernel selection is ambiguous "
         "and fails closed at provision"
     )
-    return {"boot_kernel_count": count, "status": "not_provisionable", "note": note}
+    return {"boot_kernel_count": count, "status": "not_provisionable", "note": note, "basis": basis}
 
 
 DIRECT_KERNEL_SIGNAL = CapabilitySignal(

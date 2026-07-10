@@ -42,7 +42,13 @@ computed ``data.capability_signals`` (each signal keyed by name): ``kdump``
 (the capability for ``target_kernel``, kernel basis disclosed) and ``direct_kernel``
 (``status`` ``provisionable`` when ``/boot`` holds exactly one non-rescue kernel, else
 ``not_provisionable``/``unverified`` — read it before a direct-kernel provision so a
-multi-kernel image does not burn an allocation on a fail-closed selection).
+multi-kernel image does not burn an allocation on a fail-closed selection). A signal reads
+``unverified`` whenever its operand was never recorded — the normal, honest state for an
+externally-baked image the operator has not attested and KDIVE has not built. When the
+operand *is* present, ``basis`` discloses its evidence: ``build_verified`` (recorded by a
+KDIVE build/publish) or ``operator_attested`` (declared by the operator, also flagged by
+``data.provenance_attested``); an ``operator_attested`` signal is a claim kdive did not
+verify.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

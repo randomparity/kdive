@@ -2494,3 +2494,130 @@ def test_reconcile_never_overwrites_build_row_provenance(migrated_url: str, tmp_
         assert row["provenance"] == publish_prov  # unchanged
 
     asyncio.run(_run())
+
+
+# --- operator-attested s3 provenance (#1065, ADR-0323) --------------------------------
+
+
+def _s3_body(*, name: str = "attested-img", attested: str = "", digest: str = "") -> str:
+    digest_line = f'digest = "{digest}"\n' if digest else ""
+    return (
+        "schema_version = 2\n"
+        "[[image]]\n"
+        'provider = "local-libvirt"\n'
+        f'name = "{name}"\n'
+        'arch = "x86_64"\n'
+        'format = "qcow2"\n'
+        'root_device = "/dev/vda"\n'
+        'visibility = "public"\n'
+        'capabilities = ["kdump"]\n'
+        "[image.source]\n"
+        'kind = "s3"\n'
+        f'object_key = "rootfs/local/{name}.qcow2"\n'
+        f"{digest_line}"
+        f"{attested}"
+    )
+
+
+_ATTEST_44 = '[image.attested]\nboot_kernel_count = 1\nmakedumpfile_version = "1.7.9"\n'
+
+
+def test_s3_attested_synthesizes_operator_provenance(migrated_url: str, tmp_path: Path) -> None:
+    """An un-digested (defined) s3 image with [image.attested] gets an actionable signal."""
+
+    async def _run() -> None:
+        doc = load_inventory(_write_toml(tmp_path, _s3_body(attested=_ATTEST_44)))
+        await _reconcile(migrated_url, doc, _FakeImageStore())
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "attested-img")
+        assert row["state"] == "defined"  # no digest yet, but still characterized
+        assert row["provenance"] == {"boot_kernel_count": 1, "makedumpfile_version": "1.7.9"}
+        assert row["provenance_attested"] is True
+        entry = ImageCatalogEntry.model_validate(row)
+        block = render_direct_kernel_signal(entry, _ANY_KERNEL)
+        assert block["status"] == "provisionable"
+        assert block["basis"] == "operator_attested"  # a claim, not a verified fact
+
+    asyncio.run(_run())
+
+
+def test_s3_without_attested_stays_unverified(migrated_url: str, tmp_path: Path) -> None:
+    """An s3 image with no [image.attested] carries no provenance and reads unverified (crit 3)."""
+
+    async def _run() -> None:
+        doc = load_inventory(_write_toml(tmp_path, _s3_body()))
+        await _reconcile(migrated_url, doc, _FakeImageStore())
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "attested-img")
+        assert row["provenance"] == {}
+        assert row["provenance_attested"] is False
+        entry = ImageCatalogEntry.model_validate(row)
+        assert render_direct_kernel_signal(entry, _ANY_KERNEL)["status"] == "unverified"
+
+    asyncio.run(_run())
+
+
+def test_s3_attested_change_detection_and_steady_state(migrated_url: str, tmp_path: Path) -> None:
+    """Editing an attested operand updates the row; an unchanged one is a clean no-op (crit 6)."""
+
+    async def _run() -> None:
+        two = "[image.attested]\nboot_kernel_count = 2\n"
+        doc2 = load_inventory(_write_toml(tmp_path, _s3_body(attested=two)))
+        await _reconcile(migrated_url, doc2, _FakeImageStore())
+        one = "[image.attested]\nboot_kernel_count = 1\n"
+        doc1 = load_inventory(_write_toml(tmp_path, _s3_body(attested=one)))
+        diff = await _reconcile(migrated_url, doc1, _FakeImageStore())
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "attested-img")
+        assert row["provenance"] == {"boot_kernel_count": 1}
+        assert "attested-img" in {r.name for r in diff.updated}
+        steady = await _reconcile(migrated_url, doc1, _FakeImageStore())
+        assert steady.updated == []
+
+    asyncio.run(_run())
+
+
+def test_s3_removing_attestation_table_preserves_prior_attestation(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    """Removing [image.attested] preserves a prior attestation (like an absent sidecar, ADR-0323).
+
+    ``ops.export_systems_toml`` does not re-emit the table, so a clear-on-absence would strip an
+    attestation on an export round-trip; the reconciler therefore never wipes a populated row.
+    """
+
+    async def _run() -> None:
+        attested_doc = load_inventory(_write_toml(tmp_path, _s3_body(attested=_ATTEST_44)))
+        await _reconcile(migrated_url, attested_doc, _FakeImageStore())
+        bare_doc = load_inventory(_write_toml(tmp_path, _s3_body()))
+        diff = await _reconcile(migrated_url, bare_doc, _FakeImageStore())
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "attested-img")
+        assert row["provenance"] == {"boot_kernel_count": 1, "makedumpfile_version": "1.7.9"}
+        assert row["provenance_attested"] is True  # preserved, not wiped
+        assert "attested-img" not in {r.name for r in diff.updated}  # no phantom drift
+
+    asyncio.run(_run())
+
+
+def test_published_s3_provenance_survives_unattested_reconcile(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    """A registered s3 row's publish provenance is never cleared by the un-attest path (crit 5)."""
+
+    async def _run() -> None:
+        key = "rootfs/local/attested-img.qcow2"
+        doc = load_inventory(_write_toml(tmp_path, _s3_body(digest="sha256:beef")))
+        await _reconcile(migrated_url, doc, _FakeImageStore(present={key}))  # registers
+        publish_prov: dict[str, object] = {"boot_kernel_count": 1, "source": "publish"}
+        async with await _connect(migrated_url) as seed:
+            await _set_provenance(seed, "attested-img", publish_prov)
+        # Reconcile again with the same un-attested doc: the row was never operator-attested, so
+        # publish_image's provenance must be preserved, not treated as a removed attestation.
+        await _reconcile(migrated_url, doc, _FakeImageStore(present={key}))
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "attested-img")
+        assert row["provenance"] == publish_prov  # untouched
+        assert row["provenance_attested"] is False
+
+    asyncio.run(_run())

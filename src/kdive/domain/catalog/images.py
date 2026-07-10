@@ -80,6 +80,11 @@ class ImageCatalogEntry(DomainModel):
     digest: str | None = None
     capabilities: list[Capability] = Field(default_factory=list)
     provenance: dict[str, Any] = Field(default_factory=dict)
+    #: True when ``provenance`` was declared by an operator (an ``s3`` image's
+    #: ``[image.attested]`` operands, ADR-0323) rather than recorded by a KDIVE build/publish or
+    #: build-fs sidecar. Drives the ``capability_signals`` ``basis`` (``operator_attested`` vs
+    #: ``build_verified``), so a confident signal discloses whether it rests on a claim or a fact.
+    provenance_attested: bool = False
     visibility: ImageVisibility
     owner: str | None = None
     expires_at: datetime | None = None
