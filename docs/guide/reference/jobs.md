@@ -8,6 +8,10 @@
 
 Cancel a queued or running job.
 
+A contributor may cancel their own lifecycle jobs (build/install/boot/power/
+authorize_ssh_key/…). Cancelling a destructive job (teardown/reprovision/force_crash)
+requires operator.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `job_id` | string | yes | The Job to cancel. |

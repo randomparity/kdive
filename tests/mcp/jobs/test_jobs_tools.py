@@ -80,6 +80,19 @@ async def _enqueue(pool: AsyncConnectionPool, dedup: str) -> str:
     return await _enqueue_in(pool, dedup, "proj")
 
 
+async def _enqueue_force_crash(pool: AsyncConnectionPool, dedup: str) -> str:
+    """Enqueue a destructive-kind (force_crash) job owned by ``proj``."""
+    async with pool.connection() as conn:
+        job = await queue.enqueue(
+            conn,
+            JobKind.FORCE_CRASH,
+            SystemPayload(system_id=str(uuid4())),
+            Authorizing(principal="p", project="proj"),
+            dedup,
+        )
+    return str(job.id)
+
+
 async def _mark_failed_without_category(pool: AsyncConnectionPool, job_id: str) -> None:
     async with pool.connection() as conn, conn.transaction():
         await conn.execute(
@@ -152,12 +165,41 @@ def test_cancel_queued_job_transitions(migrated_url: str) -> None:
 
 
 def test_cancel_job_contributor_can_cancel(migrated_url: str) -> None:
-    # Leaseholder-control (#1080, ADR-0320): cancelling your own enqueued job is contributor,
-    # matching runs.cancel. A contributor cancels a queued job they own.
+    # Leaseholder-control (#1080, ADR-0320): cancelling your own leaseholder-kind job is
+    # contributor, matching runs.cancel. A contributor cancels a queued build job they own.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
             resp = await jobs_tools.cancel_job(pool, CONTRIB_CTX, job_id)
+        assert resp.status == "canceled"
+
+    asyncio.run(_run())
+
+
+def test_cancel_destructive_job_denied_to_contributor(migrated_url: str) -> None:
+    # Per-kind gate (#1080, ADR-0320): a destructive job (teardown/reprovision/force_crash)
+    # keeps the operator gate, so a contributor cannot veto an admin/operator's destructive op.
+    # The cancel must not land: the job stays queued.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue_force_crash(pool, "fc1")
+            with pytest.raises(RoleDenied) as excinfo:
+                await jobs_tools.cancel_job(pool, CONTRIB_CTX, job_id)
+            owned = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+        assert excinfo.value.held is Role.CONTRIBUTOR
+        assert excinfo.value.required is Role.OPERATOR
+        assert owned.status == "queued"
+
+    asyncio.run(_run())
+
+
+def test_cancel_destructive_job_allowed_to_operator(migrated_url: str) -> None:
+    # An operator may still cancel a destructive job — the pre-#1080 gate is preserved for
+    # destructive kinds, so #1080 does not change who may cancel them.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue_force_crash(pool, "fc2")
+            resp = await jobs_tools.cancel_job(pool, OP_CTX, job_id)
         assert resp.status == "canceled"
 
     asyncio.run(_run())

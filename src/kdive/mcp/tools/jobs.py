@@ -7,9 +7,10 @@ error :class:`~kdive.mcp.responses.ToolResponse` (with the most specific
 ``ErrorCategory``), never an unhandled 500.
 
 Every read/cancel is **project-scoped**: a job is visible only to a caller with
-``viewer`` on the owning project (``authorizing->>'project'``), while cancellation requires
-``contributor`` — cancelling your own enqueued job is leaseholder lifecycle, matching
-``runs.cancel``. A by-id read or cancel of a job in an ungranted project returns the same
+``viewer`` on the owning project (``authorizing->>'project'``). Cancellation requires
+``contributor`` for leaseholder-lifecycle kinds (matching ``runs.cancel``) and ``operator`` for
+destructive kinds (teardown/reprovision/force_crash), keyed off the job's kind, not its
+enqueuing principal. A by-id read or cancel of a job in an ungranted project returns the same
 not-found-shaped error as a missing job, so existence is not leaked (matching
 ``systems``/``runs``/``allocations`` getters); ``list`` returns only readable jobs.
 """
@@ -29,7 +30,7 @@ from pydantic import Field
 from kdive.db.repositories import JOBS, ObjectNotFound
 from kdive.domain.capacity.state import IllegalTransition, JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.operations.jobs import Job, JobKind
+from kdive.domain.operations.jobs import DESTRUCTIVE_JOB_KINDS, Job, JobKind
 from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
@@ -112,6 +113,18 @@ def _readable_projects(ctx: RequestContext) -> list[str]:
             continue
         readable.append(project)
     return readable
+
+
+def _cancel_role(kind: JobKind) -> Role:
+    """The role required to cancel a job of ``kind`` (ADR-0320 leaseholder principle).
+
+    A contributor may cancel their own leaseholder-lifecycle jobs (build/install/boot/power/
+    authorize_ssh_key/…), matching ``runs.cancel``. Destructive kinds
+    (teardown/reprovision/force_crash) keep the operator gate: cancelling a destructive op an
+    admin/operator deliberately initiated is not leaseholder lifecycle, so a contributor must
+    not be able to veto it.
+    """
+    return Role.OPERATOR if kind in DESTRUCTIVE_JOB_KINDS else Role.CONTRIBUTOR
 
 
 def _require_job_role(
@@ -213,7 +226,7 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str
             existing = await JOBS.get(conn, uid)
         if existing is None or not _in_scope(existing, ctx):
             return _not_found(job_id)
-        denied = _require_job_role(existing, ctx, Role.CONTRIBUTOR, job_id)
+        denied = _require_job_role(existing, ctx, _cancel_role(existing.kind), job_id)
         if denied is not None:
             return denied
         try:
@@ -355,7 +368,12 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def jobs_cancel(
         job_id: Annotated[str, Field(description="The Job to cancel.")],
     ) -> ToolResponse:
-        """Cancel a queued or running job."""
+        """Cancel a queued or running job.
+
+        A contributor may cancel their own lifecycle jobs (build/install/boot/power/
+        authorize_ssh_key/…). Cancelling a destructive job (teardown/reprovision/force_crash)
+        requires operator.
+        """
         return await cancel_job(pool, current_context(), job_id)
 
     @app.tool(
