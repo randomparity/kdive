@@ -18,8 +18,8 @@ from uuid import UUID
 from psycopg import AsyncConnection
 
 from kdive.kernel_config.fetch import load_effective_config
-from kdive.kernel_config.requirements import CRASH_CAPTURE, DEBUGINFO, feature_requirement
-from kdive.kernel_config.support import missing_symbols, unmet_advertised_clauses, unmet_clauses
+from kdive.kernel_config.requirements import CRASH_CAPTURE, feature_requirement
+from kdive.kernel_config.support import missing_symbols, unmet_clauses
 from kdive.serialization import JsonValue
 
 CRASH_CONFIG_REASON = "kernel_missing_crash_config"
@@ -28,9 +28,14 @@ _REMEDIATION = (
 )
 
 MISSING_DEBUGINFO_REASON = "missing_debuginfo"
+# In-guest drgn-live resolves symbols from the running kernel's BTF (/sys/kernel/btf/vmlinux).
+# DWARF built into the kernel .config does NOT help: the DWARF-carrying vmlinux is not on the guest
+# rootfs. The only other in-guest source is a host vmlinux uploaded as the Run's debuginfo_ref, so
+# the warning keys on BTF specifically and is suppressed when a vmlinux was uploaded.
+_BTF_SYMBOL = "DEBUG_INFO_BTF"
 _DEBUGINFO_REMEDIATION = (
-    "rebuild the kernel with DWARF or BTF debuginfo, or upload a matching vmlinux, so drgn can "
-    "resolve symbols (see artifacts.feature_config_requirements)"
+    "enable CONFIG_DEBUG_INFO_BTF (in-guest drgn reads BTF from /sys/kernel/btf), or upload a "
+    "matching vmlinux, so drgn can resolve symbols (see artifacts.feature_config_requirements)"
 )
 
 
@@ -58,23 +63,19 @@ async def debuginfo_warning(
     """Non-fatal ``missing_debuginfo`` warning for a drgn-live seam, or ``None`` (ADR-0322).
 
     Returns ``None`` (no warning) when a host ``vmlinux``/``debuginfo_ref`` was uploaded (drgn can
-    resolve via DWARF), when no ``effective_config`` was uploaded or it cannot be read/trusted
-    (:func:`load_effective_config` fails open), and when the config provably carries DWARF/BTF
-    debuginfo. Otherwise returns ``{reason, missing, remediation}`` — the payload the drgn-live
-    seams spread into their response ``data`` so a blind session is no longer silently successful.
-    Warns, never refuses: the uploaded-``vmlinux`` path must keep working.
+    resolve via that vmlinux), when no ``effective_config`` was uploaded or it cannot be
+    read/trusted (:func:`load_effective_config` fails open), and when the config provably enables
+    BTF (the in-guest symbol source). Otherwise returns ``{reason, missing, remediation}`` — the
+    payload the drgn-live seams spread into their response ``data`` so a blind session is no longer
+    silently successful. Warns, never refuses: the uploaded-``vmlinux`` path must keep working.
     """
     if has_uploaded_vmlinux:
         return None
     config = await load_effective_config(conn, run_id)
-    if config is None:
+    if config is None or config.is_enabled(_BTF_SYMBOL):
         return None
-    unmet = unmet_advertised_clauses(config, feature_requirement(DEBUGINFO))
-    if not unmet:
-        return None
-    missing: list[JsonValue] = list(missing_symbols(unmet))
     return {
         "reason": MISSING_DEBUGINFO_REASON,
-        "missing": missing,
+        "missing": [_BTF_SYMBOL],
         "remediation": _DEBUGINFO_REMEDIATION,
     }

@@ -56,10 +56,19 @@ def test_config_with_btf_produces_no_warning():
     assert _call(config=cfg, has_uploaded_vmlinux=False) is None
 
 
-def test_config_lacking_debuginfo_warns_and_names_symbols():
-    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_KERNEL"}))  # no DWARF/BTF
+def test_config_with_dwarf_but_no_btf_still_warns():
+    # In-guest drgn-live reads BTF, not the kernel .config's DWARF (the DWARF vmlinux is not on the
+    # guest rootfs). A DWARF-only config with no uploaded vmlinux is still blind, so it must warn.
+    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_DWARF5", "DEBUG_KERNEL"}))
+    warning = _call(config=cfg, has_uploaded_vmlinux=False)
+    assert warning is not None
+    assert warning["missing"] == ["DEBUG_INFO_BTF"]
+
+
+def test_config_lacking_btf_warns_and_names_btf():
+    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_KERNEL"}))  # no BTF
     warning = _call(config=cfg, has_uploaded_vmlinux=False)
     assert warning is not None
     assert warning["reason"] == MISSING_DEBUGINFO_REASON
-    assert warning["missing"] == ["DEBUG_INFO_BTF", "DEBUG_INFO_DWARF4", "DEBUG_INFO_DWARF5"]
+    assert warning["missing"] == ["DEBUG_INFO_BTF"]
     assert "vmlinux" in warning["remediation"]

@@ -27,6 +27,10 @@ class DebugSessionContext:
     project: str
     transport_handle: str | None
     system_id: UUID | None = None
+    # The owning Run's uploaded host vmlinux ref, resolved from the same Run fetch as ``system_id``
+    # when ``include_system`` is set. ``None`` when no vmlinux was uploaded or the System was not
+    # requested.
+    debuginfo_ref: str | None = None
 
 
 def debug_session_error(
@@ -63,15 +67,18 @@ async def resolve_debug_session_context(
     if required_transport is not None and session.transport_handle is None:
         return debug_session_error(session_id, "missing_transport_handle")
     system_id: UUID | None = None
+    debuginfo_ref: str | None = None
     if include_system:
         run = await RUNS.get(conn, session.run_id)
         if run is None:
             return debug_session_error(session_id, "unknown_session")
         system_id = run.system_id
+        debuginfo_ref = run.debuginfo_ref
     return DebugSessionContext(
         session=session,
         session_id=uid,
         project=session.project,
         transport_handle=session.transport_handle,
         system_id=system_id,
+        debuginfo_ref=debuginfo_ref,
     )

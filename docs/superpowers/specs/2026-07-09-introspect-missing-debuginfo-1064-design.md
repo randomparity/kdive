@@ -39,9 +39,10 @@ The warning fires when **all** of:
 - the transport is `drgn-live` (the in-guest drgn path; gdbstub/offline-vmcore resolve symbols
   from the host-side uploaded `vmlinux` and are out of scope), and
 - no host `vmlinux`/`debuginfo_ref` was uploaded for the Run (`run.debuginfo_ref is None`), and
-- an `effective_config` was uploaded and it **provably** lacks the `debuginfo` clauses
-  (DWARF/BTF). Absent/unreadable/degenerate config → no warning (fail-open, matching the crash
-  gate).
+- an `effective_config` was uploaded and it **provably** does not enable `CONFIG_DEBUG_INFO_BTF`.
+  In-guest drgn reads BTF (`/sys/kernel/btf/vmlinux`); DWARF in the kernel `.config` does not help
+  because the DWARF `vmlinux` is not on the guest rootfs, so the check keys on BTF specifically.
+  Absent/unreadable/degenerate config → no warning (fail-open, matching the crash gate).
 
 Surfaced on two seams:
 
@@ -53,24 +54,14 @@ Surfaced on two seams:
 
 ## Implementation
 
-### `kernel_config/requirements.py`
-- Add a `DEBUGINFO = "debuginfo"` module constant (mirrors `CRASH_CAPTURE`/`SYSRQ`) and use it in
-  the existing `debuginfo` `FeatureRequirement`. `gate_required` stays `()` — debuginfo is
-  advertise-and-warn, never a hard gate.
-
-### `kernel_config/support.py`
-- Factor the clause check into a private `_clauses_without_enabled(config, clauses)` and add a
-  public `unmet_advertised_clauses(config, feature)` (checks `feature.advertised`). `unmet_clauses`
-  keeps its `gate_required` semantics. The warn path needs the advertised clauses because
-  debuginfo has no `gate_required`.
-
 ### `kernel_config/gate.py`
 - Add `async def debuginfo_warning(conn, run_id, *, has_uploaded_vmlinux) -> dict | None`. Returns
   `None` when a `vmlinux` was uploaded, when the config is absent/unreadable/degenerate, or when
-  the config carries debuginfo. Otherwise returns
-  `{"reason": "missing_debuginfo", "missing": [...symbols], "remediation": ...}`. Imports
+  the config enables `CONFIG_DEBUG_INFO_BTF`. Otherwise returns
+  `{"reason": "missing_debuginfo", "missing": ["DEBUG_INFO_BTF"], "remediation": ...}`. Imports
   `load_effective_config` into the module namespace so tests patch it at
-  `kdive.kernel_config.gate.load_effective_config` (matching the crash-gate tests).
+  `kdive.kernel_config.gate.load_effective_config` (matching the crash-gate tests). No change to
+  `support.py`/`requirements.py`: the BTF check is a single-symbol lookup, not a clause set.
 
 ### `mcp/tools/debug/sessions_lifecycle.py`
 - Compute the warning in `_prepare_attach_request` (has `conn` + `run`, runs **outside** the
@@ -78,21 +69,23 @@ Surfaced on two seams:
   `_insert_session_locked` spreads it into the success `data` and, when present, prepends
   `artifacts.feature_config_requirements` to `suggested_next_actions`.
 
-### `mcp/tools/debug/introspect.py`
-- Add `run_id` to `LiveDrgnSession` (from the resolved session's `run_id`). Compute the warning in
-  `_with_live_introspection` (has `conn`) and thread it to the two live handlers, which spread it
-  into their response `data`.
+### `mcp/tools/debug/session_context.py` + `mcp/tools/debug/introspect.py`
+- `resolve_debug_session_context(include_system=True)` already fetches the Run for `system_id`;
+  also return its `debuginfo_ref` from the same fetch (new `DebugSessionContext.debuginfo_ref`).
+  Thread `run_id` + `debuginfo_ref` onto `LiveDrgnSession`, compute the warning once in
+  `_with_live_introspection`, and the two live handlers spread it into their `data` — no extra Run
+  read per introspect call.
 
 ### Docs
-- `docs/operating/external-build-upload.md`: reframe the DWARF/BTF note from "only if you also
-  upload `vmlinux`" to "required for `drgn-live` to resolve any symbol," and cross-link
+- `docs/operating/external-build-upload.md`: reframe the DWARF/BTF note to "`CONFIG_DEBUG_INFO_BTF`
+  is what in-guest `drgn-live` reads; DWARF needs an uploaded `vmlinux`," and cross-link
   `artifacts.feature_config_requirements`.
 
 ## Testing
 
-- `tests/kernel_config/test_support.py`: `unmet_advertised_clauses` (met / unmet / partial).
 - `tests/kernel_config/` gate test: `debuginfo_warning` — vmlinux suppresses; absent config →
-  None; degenerate → None; config with BTF → None; config lacking BTF → warning naming symbols.
+  None; config with BTF → None; DWARF-only (no BTF) still warns; config lacking BTF → warning
+  naming `DEBUG_INFO_BTF`.
 - `tests/mcp/debug/test_debug_tools.py`: drgn-live attach surfaces `missing_debuginfo` when config
   lacks it; suppressed when config has BTF; suppressed when `debuginfo_ref` present; session is
   still `live` (non-fatal).
