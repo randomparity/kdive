@@ -27,7 +27,6 @@ from pydantic import Field
 
 import kdive.config as config
 from kdive.config.core_settings import LIVE_SCRIPT_MAX_TIMEOUT_SECONDS
-from kdive.db.repositories import RUNS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.kernel_config.gate import debuginfo_warning
 from kdive.log import bind_context
@@ -160,6 +159,8 @@ class LiveDrgnSession(NamedTuple):
     session_id: UUID
     system_id: UUID
     run_id: UUID
+    # The owning Run's uploaded host vmlinux ref, if any (suppresses the ADR-0322 warning).
+    debuginfo_ref: str | None = None
     # Non-fatal drgn-live debuginfo warning (ADR-0322); spread into the report when set.
     missing_debuginfo: dict[str, JsonValue] | None = None
 
@@ -200,6 +201,7 @@ async def resolve_live_drgn_session(
         resolved.session_id,
         resolved.system_id,
         resolved.session.run_id,
+        resolved.debuginfo_ref,
     )
 
 
@@ -220,29 +222,17 @@ async def _with_live_introspection(
             if denied is not None:
                 return denied
             private_key = await load_system_bootstrap_private_key(conn, resolved.system_id)
-            resolved = await _attach_debuginfo_warning(conn, resolved)
+            # A live introspection over a debuginfo-less kernel resolves no symbols but does not
+            # raise, so the handlers would report `succeeded` with blind output. This fail-open
+            # read lets them warn (never refuse) — the `debuginfo_ref` was resolved with the
+            # session, so no extra Run fetch is needed (ADR-0322).
+            warning = await debuginfo_warning(
+                conn, resolved.run_id, has_uploaded_vmlinux=resolved.debuginfo_ref is not None
+            )
+            resolved = resolved._replace(missing_debuginfo=warning)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(session_id, exc)
     return await action(resolved, runtime, private_key)
-
-
-async def _attach_debuginfo_warning(
-    conn: AsyncConnection, resolved: LiveDrgnSession
-) -> LiveDrgnSession:
-    """Carry the non-fatal ``missing_debuginfo`` warning on the session (ADR-0322).
-
-    A live introspection over a debuginfo-less kernel resolves no symbols but does not raise, so the
-    handlers would report ``succeeded`` with blind output. This fail-open config read lets them warn
-    without refusing; a suppressed warning (uploaded ``vmlinux``, or config that carries debuginfo)
-    leaves the session unchanged.
-    """
-    run = await RUNS.get(conn, resolved.run_id)
-    if run is None:
-        return resolved
-    warning = await debuginfo_warning(
-        conn, resolved.run_id, has_uploaded_vmlinux=run.debuginfo_ref is not None
-    )
-    return resolved._replace(missing_debuginfo=warning)
 
 
 def _session_config_error() -> CategorizedError:

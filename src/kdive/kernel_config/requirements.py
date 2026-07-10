@@ -17,7 +17,6 @@ Clause = frozenset[str]
 
 CRASH_CAPTURE = "crash_capture"
 SYSRQ = "sysrq"
-DEBUGINFO = "debuginfo"
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +82,7 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         _plain("IKCONFIG", "IKCONFIG_PROC"),
     ),
     FeatureRequirement(
-        DEBUGINFO,
+        "debuginfo",
         "Resolve symbols for gdb/drgn debugging (build with DWARF or BTF).",
         (
             frozenset({"DEBUG_INFO"}),

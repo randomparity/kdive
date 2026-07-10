@@ -34,13 +34,14 @@ CONFIG_DEBUG_INFO_BTF=y     # BTF: what in-guest drgn-live reads
 CONFIG_PROVE_LOCKING=y    # lockdep
 ```
 
-**`drgn` needs debuginfo to resolve any symbol.** Build with `CONFIG_DEBUG_INFO_BTF=y` (or DWARF)
-if you plan to use `drgn-live` introspection: `introspect.run` / `introspect.script` read symbols
-from the *in-guest* kernel's BTF, so a defconfig kernel without it resolves nothing. Alternatively
-build with `CONFIG_DEBUG_INFO_DWARF5=y` and also upload `vmlinux` for host-side DWARF introspection
-(offline `introspect.from_vmcore` and gdb). A drgn-live session or introspect over a kernel with
-neither returns a non-fatal `missing_debuginfo` warning naming the symbols to add. See
-`artifacts.feature_config_requirements` for the per-feature `CONFIG_*` manifest.
+**`drgn` needs debuginfo to resolve any symbol.** For `drgn-live` introspection
+(`introspect.run` / `introspect.script`), build with `CONFIG_DEBUG_INFO_BTF=y`: in-guest drgn reads
+BTF from `/sys/kernel/btf`, so a defconfig kernel without it resolves nothing. DWARF in the kernel
+`.config` alone does not help drgn-live — the DWARF `vmlinux` is not on the guest rootfs. For
+host-side DWARF introspection (offline `introspect.from_vmcore` and gdb), build with
+`CONFIG_DEBUG_INFO_DWARF5=y` and also upload `vmlinux`. A drgn-live session or introspect over a
+kernel with neither BTF nor an uploaded `vmlinux` returns a non-fatal `missing_debuginfo` warning.
+See `artifacts.feature_config_requirements` for the per-feature `CONFIG_*` manifest.
 
 ## The `kernel` artifact: one combined gzip tar
 
