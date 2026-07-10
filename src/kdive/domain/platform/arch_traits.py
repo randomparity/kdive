@@ -18,8 +18,10 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 class ArchTraits:
     """The architecture-varying facts of a provisioned System's domain.
 
+    The arch itself is the ``_TRAITS`` dict key (and the renderer emits ``<os type arch=…>`` from
+    ``profile.arch`` directly), so it is not duplicated as a field here.
+
     Attributes:
-        arch: The libvirt ``<os type arch=…>`` value (e.g. ``"x86_64"``, ``"ppc64le"``).
         machine: The libvirt ``<os type machine=…>`` value — ``q35`` on x86, ``pseries`` on
             POWER. An explicit ``domain_xml_params["machine"]`` still overrides this default.
         console_device: The serial console device, used both as the ``console=<x>`` kernel
@@ -32,17 +34,14 @@ class ArchTraits:
             addresses itself, so a pinned slot is left off there.
     """
 
-    arch: str
     machine: str
     console_device: str
     pin_nic_slot: bool
 
 
 _TRAITS: dict[str, ArchTraits] = {
-    "x86_64": ArchTraits(arch="x86_64", machine="q35", console_device="ttyS0", pin_nic_slot=True),
-    "ppc64le": ArchTraits(
-        arch="ppc64le", machine="pseries", console_device="hvc0", pin_nic_slot=False
-    ),
+    "x86_64": ArchTraits(machine="q35", console_device="ttyS0", pin_nic_slot=True),
+    "ppc64le": ArchTraits(machine="pseries", console_device="hvc0", pin_nic_slot=False),
 }
 
 
