@@ -11,7 +11,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.idempotency import delete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
-from kdive.domain.capacity.state import RunState
+from kdive.domain.capacity.state import JobState, RunState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
@@ -183,8 +183,7 @@ async def _restage_and_enqueue_install(
         if progress.install == "succeeded" and variant_changed:
             await delete_run_step(conn, run.id, "install")
             await delete_run_step(conn, run.id, "boot")
-        # The install envelope carries no ``replayed`` marker (boot-only, #1063); discard the
-        # recycle decision.
+        # The install envelope carries no ``replayed`` marker (boot-only, #1063); discard it.
         job, _ = await _locked_enqueue(
             conn,
             ctx,
@@ -274,6 +273,11 @@ async def _has_step_row(conn: AsyncConnection, run_id: UUID, step: str) -> bool:
         return await cur.fetchone() is not None
 
 
+# The job states ``queue.enqueue(recycle_terminal=...)`` resets in place; must match its
+# ``state IN ('failed','succeeded')`` fence so the ``replayed`` marker tracks the actual reset.
+_RECYCLABLE_JOB_STATES = frozenset({JobState.FAILED, JobState.SUCCEEDED})
+
+
 async def _locked_enqueue(
     conn: AsyncConnection,
     ctx: RequestContext,
@@ -291,19 +295,28 @@ async def _locked_enqueue(
     job is returned); a ``failed`` step's row was deleted by ``abandon_run_step`` so a retry
     recycles it; a re-stage (which deletes the row) likewise recycles, carrying the new payload.
 
-    Returns the enqueued/returned :class:`Job` and the ``recycle`` decision — ``True`` when fresh
-    work was enqueued or a terminal job recycled, ``False`` when a pre-existing job was returned
-    unchanged (the boot path surfaces this as ``data.replayed``; #1063).
+    Returns the enqueued/returned :class:`Job` and ``replayed`` — ``True`` when ``queue.enqueue``
+    returned a pre-existing job unchanged (no fresh work enqueued or recycled), ``False`` for a
+    brand-new insert or an in-place terminal recycle. The boot path surfaces this as
+    ``data.replayed`` (#1063). It reads the pre-existing job by dedup key rather than the
+    ``run_steps`` row, because the row is written only when a **worker claims** the job — so a
+    boot that is enqueued but not yet claimed (``queued``, no row) is a replay on a repeat call,
+    which a row-presence proxy would miss.
     """
+    dedup_key = f"{run.id}:{step}"
     recycle = not await _has_step_row(conn, run.id, step)
+    prior = await queue.get_by_dedup_key(conn, dedup_key)
     job = await queue.enqueue(
         conn,
         kind,
         payload,
         job_authorizing(ctx, run.project),
-        f"{run.id}:{step}",
+        dedup_key,
         recycle_terminal=recycle,
     )
+    # A prior job is reset in place only when ``recycle`` fires on a recyclable (terminal) state;
+    # otherwise a prior job is returned unchanged (a replay) and an absent prior is a fresh insert.
+    replayed = prior is not None and not (recycle and prior.state in _RECYCLABLE_JOB_STATES)
     await audit.record(
         conn,
         ctx,
@@ -316,7 +329,7 @@ async def _locked_enqueue(
             project=run.project,
         ),
     )
-    return job, recycle
+    return job, replayed
 
 
 async def _enqueue_step(
@@ -347,7 +360,7 @@ async def _enqueue_step(
                 return _config_error(str(run.id), data={"reason": "step_in_progress"})
             if progress.boot == "succeeded":
                 await delete_run_step(conn, run.id, step)
-        job, recycle = await _locked_enqueue(
+        job, replayed = await _locked_enqueue(
             conn, ctx, run, kind, step, tool, payload, {"run_id": str(run.id)}
         )
-    return run_job_envelope(job, run.id, replayed=not recycle)
+    return run_job_envelope(job, run.id, replayed=replayed)
