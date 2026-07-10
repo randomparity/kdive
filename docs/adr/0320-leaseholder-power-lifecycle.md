@@ -61,12 +61,27 @@ opt-in).**
    and `_power_required_role` are removed. `_authorize_destructive`/`_op_opt_in` and the
    `resolver` dependency remain for `force_crash`.
 
+1a. **Power admits only `READY`.** The power-only admission set narrows from
+   `_STARTED_SYSTEM = {READY, CRASHED}` to `{READY}`. A `CRASHED` System holds preserved
+   crash memory that `capture_vmcore` (contributor-admissible, `CRASHED`-gated) reads;
+   `power_handler` moves no System state and runs the physical power op outside any shared
+   lock (SYSTEM-scoped audit vs. capture's RUN-scoped lock — no mutual exclusion), so a
+   contributor `reset`/`off` on a CRASHED System would destroy or race that evidence and
+   leave the row `CRASHED` so a later capture mislabels a booted kernel as the crash core.
+   Destroying crash evidence is not leaseholder lifecycle. Power on a non-`READY` System
+   returns `configuration_error` directing to the crash workflow (`capture_vmcore` →
+   `teardown`/`reprovision`). `force_crash` (already `READY`-only) and `diagnostic_sysrq`
+   are unaffected — they never used `_STARTED_SYSTEM`.
+
 2. **Taxonomy.** `POWER` leaves `DESTRUCTIVE_JOB_KINDS`
    (`domain/operations/jobs.py`), which becomes `{REPROVISION, TEARDOWN, FORCE_CRASH}`.
-   This set has two consumers: `DestructiveOp.__post_init__` (so power can no longer be
-   routed through the gate even by mistake) and `services/systems/validation.py`'s
-   `_VALID_DESTRUCTIVE_OP_VALUES`, which rejects unknown `destructive_ops` tokens at the
-   write boundary — so `"power"` becomes a rejected token (see point 5).
+   The gate's `DestructiveOp.__post_init__` keeps deriving from that set (so power can no
+   longer be routed through the gate even by mistake). The write-boundary validator's
+   accepted-token set (`services/systems/validation.py`'s `_VALID_DESTRUCTIVE_OP_VALUES`)
+   is **decoupled** from `DESTRUCTIVE_JOB_KINDS` and derives from a new
+   opt-in-consuming-kinds constant `{FORCE_CRASH, REPROVISION}` — so both `"power"`
+   (removed here) and `"teardown"` (gated by role only, its opt-in never consulted —
+   ADR-0129, an accepted-but-inert phantom token) become rejected (see point 5).
 
 3. **`destructive_ops` scope.** The per-provider provisioning-profile `destructive_ops`
    list now governs the opt-in factor for `force_crash` **and** `systems.reprovision`
@@ -79,14 +94,15 @@ opt-in).**
    contributor classification and name `reset`/`cycle` as the leaseholder's recovery path
    for a wedged guest.
 
-5. **No DB migration, but `"power"` becomes a rejected write-boundary token.**
-   `destructive_ops` lives in the `provisioning_profile` JSON as a freeform string list; no
-   column, enum, CHECK, or data change. Because `"power"` leaves the validator's accepted
-   set, `_reject_unknown_destructive_ops` now raises `CONFIGURATION_ERROR` for any profile
-   listing `"power"`, on both provision and reprovision (a deliberate pre-release breaking
-   change, per the ADR-0315/0319 precedent). The unguarded structural read path never
-   raises, so stored rows remain readable; only submitting `"power"` is rejected — the
-   honest signal that power is no longer a destructive op.
+5. **No DB migration, but `"power"` and `"teardown"` become rejected write-boundary
+   tokens.** `destructive_ops` lives in the `provisioning_profile` JSON as a freeform
+   string list; no column, enum, CHECK, or data change. Because the validator's accepted
+   set narrows to `{force_crash, reprovision}`, `_reject_unknown_destructive_ops` now raises
+   `CONFIGURATION_ERROR` (`valid_destructive_ops: [force_crash, reprovision]`) for any
+   profile listing `"power"` or `"teardown"`, on both provision and reprovision (a
+   deliberate pre-release breaking change, per the ADR-0315/0319 precedent). The unguarded
+   structural read path never raises, so stored rows remain readable; only submitting a
+   rejected token fails — the honest signal that neither is an opt-in-gated op.
 
 The `_docmeta.destructive()` MCP annotation on `control.power` is retained: it is an
 agent caution hint (a hard reset interrupts the guest), orthogonal to authorization.
@@ -94,8 +110,9 @@ agent caution hint (a hard reset interrupts the guest), orthogonal to authorizat
 ## Consequences
 
 - The P2 recovery gap closes on the normal MCP path: a `contributor` with no opt-in can
-  `control.power reset` a wedged System — no new tool, no gate bypass, no invariant
-  exception.
+  `control.power reset` a wedged `READY` System — no new tool, no gate bypass, no invariant
+  exception. A `CRASHED` System is not powerable through this path (crash evidence is
+  protected); its recovery is the crash workflow.
 - The two-check destructive gate is **untouched** and still guards `force_crash`
   (admin + `destructive_ops` opt-in), `systems.reprovision` (operator + `destructive_ops`
   opt-in), and `systems.teardown` (admin role only). This ADR narrows *what the gate
@@ -135,3 +152,14 @@ agent caution hint (a hard reset interrupts the guest), orthogonal to authorizat
 - **Also reclassify `force_crash` to `contributor`.** Out of scope and less clearly
   correct: `force_crash` is deliberate fault injection entangled with the `ready →
   crashed` transition and DebugSession detachment. Left as `admin` + gate + opt-in.
+- **Allow contributor power on a `CRASHED` System (uniform READY+CRASHED).** Rejected:
+  a CRASHED System holds irreplaceable crash evidence that contributor-admissible
+  `capture_vmcore` reads, and power races/destroys it with no lock coordination. Two
+  sub-variants were considered and also rejected: (i) keep CRASHED-state power under the
+  existing `admin` + `destructive_ops` opt-in gate — reintroduces a meaningful `"power"`
+  token, contradicting its removal; (ii) uniform contributor power plus a "refuse while a
+  non-terminal `capture_vmcore` exists" interlock — more code, and still allows destroying
+  uncaptured evidence and the post-reset mislabel. Denying power on non-`READY` at
+  admission is the simplest choice that closes the race and the mislabel and keeps power
+  fully out of `destructive_ops`; the crash workflow (`capture_vmcore` →
+  `teardown`/`reprovision`) is the path for a CRASHED System.

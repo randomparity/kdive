@@ -56,6 +56,16 @@ instead of breaking it: no new tool, no bypass, no ADR-0006/0020/0130 exception.
    — the lowest role that runs the full crash-investigation loop and holds the lease —
    and nothing else. No `admin` requirement and no `destructive_ops` opt-in for any power
    action.
+1a. `control.power` is admitted **only on a `READY` System**, not on `CRASHED`. A CRASHED
+   System holds preserved crash memory that `capture_vmcore` (contributor-admissible,
+   `CRASHED`-gated) reads, and `power_handler` moves no System state and runs the physical
+   power op outside any shared lock — so a contributor `reset`/`off` on a CRASHED System
+   would destroy or race that evidence and, because the row stays `CRASHED` after the
+   reboot, let a later capture mislabel a booted kernel as the crash core. Destroying crash
+   evidence is not leaseholder lifecycle. Power on a non-`READY` System returns
+   `configuration_error` (`current_status` in `data`) directing the caller to the crash
+   workflow (`capture_vmcore` → `systems.teardown`/`systems.reprovision`). This narrows the
+   power-only `_STARTED_SYSTEM = {READY, CRASHED}` admission set to `READY`.
 2. `control.force_crash` is **unchanged**: `admin` + the two-check destructive gate +
    `destructive_ops` opt-in. It is the deliberate fault-injection primitive (drives
    `ready → crashed`, detaches DebugSessions, ties to vmcore capture), not a recovery
@@ -73,11 +83,12 @@ instead of breaking it: no new tool, no bypass, no ADR-0006/0020/0130 exception.
    and that power/reboot no longer require it, so an agent learns the knob's scope from
    the MCP surface (issue quick-win 1).
 6. A short wedged-guest recovery note documents `control.power reset` as the first-class
-   recovery **for a System in a started state (`READY`/`CRASHED`)** — `power_system` only
-   admits started Systems — with the `runs.install`(changed cmdline) + `runs.boot`
-   re-stage as the fallback when the guest will not respond to reset **or** wedged before
-   reaching `READY` (e.g. hung during boot), where `control.power` returns a
-   `configuration_error` (issue quick-win 2).
+   recovery **for a `READY` System** — `power_system` admits only `READY` — with the
+   `runs.install`(changed cmdline) + `runs.boot` re-stage as the fallback when the guest
+   will not respond to reset **or** is not `READY` (wedged before boot, or `CRASHED`),
+   where `control.power` returns a `configuration_error`. For a `CRASHED` System the note
+   points to the crash workflow (`capture_vmcore` → `teardown`/`reprovision`), not power
+   (issue quick-win 2).
 7. A new superseding ADR (0320) records the classification change; ADR-0037 §1 and
    ADR-0130 are cited and superseded in the affected part only (not edited in place).
 
@@ -126,14 +137,21 @@ so after this change constructing a `DestructiveOp(kind=POWER)` correctly raises
 can no longer be routed through the gate even by mistake. `JobKind.POWER` itself is
 unchanged (the job still exists and runs).
 
-`DESTRUCTIVE_JOB_KINDS` has **two** in-tree consumers, both of which this change touches:
+`DESTRUCTIVE_JOB_KINDS` has **two** in-tree consumers, handled differently:
 
-1. The gate's `DestructiveOp.__post_init__` validation (above).
-2. `services/systems/validation.py`: `_VALID_DESTRUCTIVE_OP_VALUES = {kind.value for kind
-   in DESTRUCTIVE_JOB_KINDS}`, used by `_reject_unknown_destructive_ops` to reject any
-   `destructive_ops` token outside the closed set at the **write boundary**
-   (`validate_profile_for_provider`, run on both provision and reprovision). Removing
-   POWER therefore makes `"power"` an *unknown* token — see Migration/compatibility.
+1. The gate's `DestructiveOp.__post_init__` validation (above) — keeps deriving from
+   `DESTRUCTIVE_JOB_KINDS` (it still guards `force_crash`/`reprovision`/`teardown`
+   construction). POWER simply leaves the set.
+2. `services/systems/validation.py`: `_VALID_DESTRUCTIVE_OP_VALUES` — the write-boundary
+   set of *accepted* `destructive_ops` tokens. Today it derives from all of
+   `DESTRUCTIVE_JOB_KINDS`, so it accepts `"teardown"` — but `systems.teardown` gates by
+   role only and never reads `destructive_ops` (ADR-0129), making `"teardown"` an
+   accepted-but-inert phantom token. This change **decouples** the accepted set from
+   `DESTRUCTIVE_JOB_KINDS` and derives it from the *opt-in-consuming* kinds
+   `{FORCE_CRASH, REPROVISION}` (introduced as a named constant beside
+   `DESTRUCTIVE_JOB_KINDS`). The accepted set then contains exactly the tokens that gate
+   something; both `"power"` (removed here) and `"teardown"` (long inert) become rejected
+   — see Migration/compatibility.
 
 (`_docmeta.py` only *references* `DESTRUCTIVE_JOB_KINDS` in a comment; no code dependency.)
 
@@ -151,22 +169,22 @@ No code change to the `destructive_ops` field: it stays a freeform
 **No DB migration** — `destructive_ops` lives in the `provisioning_profile` JSON as a
 freeform string list; no column, enum, CHECK, or data change.
 
-But `"power"` becomes a **rejected write-boundary token**, a deliberate pre-release
+But the write-boundary accepted-token set narrows to `{force_crash, reprovision}`, so
+**`"power"` and `"teardown"` both become rejected tokens** — a deliberate pre-release
 breaking change (consistent with the repo's replace-don't-deprecate stance and the
-ADR-0315/0319 pre-release-break precedent). Because `_VALID_DESTRUCTIVE_OP_VALUES` drops
-`"power"`, `_reject_unknown_destructive_ops` now raises `CONFIGURATION_ERROR`
-(`unknown_destructive_ops: ["power"]`, `valid_destructive_ops:
-[force_crash, reprovision, teardown]`) for any profile that lists `"power"` — on both
-`systems.provision` and `systems.reprovision` (including the read-modify-resubmit *echo*
-of a stored profile that carried `"power"`).
+ADR-0315/0319 pre-release-break precedent). `_reject_unknown_destructive_ops` now raises
+`CONFIGURATION_ERROR` (`unknown_destructive_ops`, `valid_destructive_ops:
+[force_crash, reprovision]`) for any profile that lists `"power"` or `"teardown"` — on
+both `systems.provision` and `systems.reprovision` (including the read-modify-resubmit
+*echo* of a stored profile that carried either token).
 
-This is the correct, honest behavior: after this change `"power"` is not a destructive op,
-so listing it is an error the agent should see and remove — silently accepting it as an
-inert token would falsely imply power is still gated (a phantom knob). The unguarded read
-path (`control._op_opt_in` via the structural `ProvisioningProfile.parse`) still never
-raises on a stored token, so a stored System row is readable; only a *write* that submits
-`"power"` is rejected. Recovery for an affected profile is a one-token edit (drop
-`"power"`), which the error names explicitly.
+This is the correct, honest behavior: after this change `"power"` is not a destructive op
+and `"teardown"`'s opt-in was never consulted, so listing either is an error the agent
+should see and remove — silently accepting an inert token falsely implies the op is
+opt-in-gated (a phantom knob). The unguarded read path (`control._op_opt_in` via the
+structural `ProvisioningProfile.parse`) still never raises on a stored token, so a stored
+System row is readable; only a *write* submitting a rejected token fails. Recovery is a
+one-token edit, which the error names explicitly.
 
 ### Docs
 
@@ -200,26 +218,33 @@ drivers — they must flip):
 - `systems.reprovision` unchanged: its opt-in still reads `destructive_ops` — a profile
   without `"reprovision"` is still denied `profile_opt_in` (guards against the regression
   where narrowing `destructive_ops`'s scope accidentally drops reprovision).
-- A power action on a started System with a non-terminal DebugSession succeeds and leaves
+- A power action on a `READY` System with a non-terminal DebugSession succeeds and leaves
   the DebugSession untouched (documents the unchanged no-detach boundary).
-- A pre-`READY` System returns `configuration_error` on `control.power reset` (recovery
-  boundary; re-stage is the fallback).
+- A `CRASHED` System returns `configuration_error` (`current_status: "crashed"`) on
+  `control.power reset`/`off`/`cycle`/`on` — crash evidence is protected; power admits
+  only `READY`. (This is the red-to-green flip for any existing test that admitted power on
+  CRASHED.)
+- A pre-`READY` System (e.g. `provisioning`) returns `configuration_error` on
+  `control.power reset` (recovery boundary; re-stage is the fallback).
 - Idempotency-key replay on a power action is unchanged.
 - `profile_examples` output carries the `destructive_ops` note naming `force_crash` and
   `reprovision`.
 - `DestructiveOp(kind=JobKind.POWER)` raises `ValueError` (POWER left the destructive
   set); `DestructiveOp(kind=JobKind.REPROVISION)` still constructs.
-- Write-boundary validation: a profile with `destructive_ops: ["power"]` is rejected with
-  `CONFIGURATION_ERROR` / `unknown_destructive_ops: ["power"]` on provision **and** on
-  reprovision (echo path); `["force_crash", "reprovision", "teardown"]` still validate.
-  This flips `tests/services/systems/test_system_validation.py` (the `valid_destructive_ops`
-  assertion and the accepts-`"power"` cases) — those are red-to-green drivers to update.
+- Write-boundary validation: a profile with `destructive_ops: ["power"]` **or**
+  `["teardown"]` is rejected with `CONFIGURATION_ERROR` / `unknown_destructive_ops` on
+  provision **and** reprovision (echo path); `["force_crash", "reprovision"]` still
+  validate; `valid_destructive_ops` is `["force_crash", "reprovision"]`. This flips
+  `tests/services/systems/test_system_validation.py` (the `valid_destructive_ops`
+  assertion and the accepts-`"power"`/`"teardown"` cases) — red-to-green drivers to update.
 
 ## Acceptance criteria
 
 - A `contributor` with no `destructive_ops` opt-in can `control.power reset` a wedged
-  started System and get a `power` job — the P2 recovery gap is closed on the normal MCP
+  `READY` System and get a `power` job — the P2 recovery gap is closed on the normal MCP
   path with no new tool.
+- `control.power` on a `CRASHED` System is refused with `configuration_error` — crash
+  evidence is not destroyable through the power path.
 - `control.force_crash` still requires `admin` + `destructive_ops` opt-in.
 - `control.power`'s agent-facing docstring/`Field` state the contributor classification
   and the recovery use.
