@@ -57,21 +57,34 @@ must be a durable marker the power path already respects.
    retry. `_finalize_force_crash` transitions `CRASHING → CRASHED` (was `READY → CRASHED`),
    audits `crashing->crashed`, and detaches every non-terminal DebugSession.
 
-3. **Power path unchanged.** `power_system` admission and `_power_target` execution already
-   refuse any non-`READY` System, so a `CRASHING` System is **automatically** rejected at both
-   points — no new power-path check. The only agent-facing effect is that `current_status` may
-   read `crashing`; the `control.power` wrapper docstring names it alongside `crashed`.
+3. **Power path: guards unchanged, one ordering hardening.** `power_system` admission and
+   `_power_target` execution already refuse any non-`READY` System, so a `CRASHING` System is
+   **automatically** rejected at both points — no new power-path check. The only agent-facing
+   effect is that `current_status` may read `crashing`; the `control.power` wrapper docstring
+   names it alongside `crashed`. `power_handler` is reordered (behaviour-preserving) so
+   `_controller` resolves **before** the final `_power_target` READY re-check, making that
+   re-check the last DB read before the unlocked `control.power` dispatch — symmetric to the
+   `force_crash` ordering, shrinking the power-side race window to microseconds.
+
+   **Bounded residual.** The marker serializes the two state *reads*. It closes the interleaving
+   #1078 names — a power op that re-checks *at or after* the `CRASHING` commit is refused. It
+   does not close the fully-concurrent interleaving where a power op read `READY` *before* the
+   marker and then fires its unlocked physical op after the NMI; no marker checked before the
+   physical op can. The ordering hardening shrinks that residual to microseconds; eliminating it
+   needs per-System single-flight of `power` vs `force_crash` (or a lock held across the blocking
+   op — the ADR-0320 anti-pattern), a larger change left as a possible follow-up. The residual is
+   strictly smaller than the sub-second window ADR-0320 §1a documented.
 
 4. **Leak recovery (reconciler → `crashed`).** A new `repair_stalled_crashing_systems`
    (`reconciler/repairs/systems.py`) runs after `repair_abandoned_jobs` and transitions a
-   `crashing` System whose `force_crash` job is in a **terminal non-success** state — `FAILED`
-   (dead-lettered: lease expired + attempts exhausted) or `CANCELED` (operator `jobs.cancel`;
-   `force_crash` *is* operator-cancelable while `RUNNING`) — to `crashed` under the `SYSTEM`
-   lock, auditing and detaching sessions exactly as finalize would. A System whose `force_crash`
-   job is still `running` (valid lease) or `succeeded` is left alone. `CANCELED` must be
-   recovered, not excluded: a cancel cannot un-fire an already-dispatched NMI, and leaving a
-   `canceled` + `crashing` System unrecovered would strand it forever with power permanently
-   blocked — the permanent limbo R3 forbids.
+   `crashing` System with **no active (`queued`/`running`) `force_crash` job** to `crashed` under
+   the `SYSTEM` lock, auditing and detaching sessions exactly as finalize would. That one
+   predicate covers a `FAILED` (dead-lettered) job, a `CANCELED` job (operator `jobs.cancel`;
+   `force_crash` *is* operator-cancelable while `RUNNING`, so `CANCELED` **must** be recovered or
+   the System strands forever — the R3 limbo), and the invariant-only absent-row case. A
+   `running` job (may finalize) or a `queued` job (mid-retry a worker will run) is left to the
+   normal retry path, not the reconciler — so R3 rests on an explicit worker-liveness assumption.
+   The job row outlives any `crashing` System (verified: no `DELETE FROM jobs` exists).
 
 5. **State-set fan-out.** Every enumerated `SystemState` set is audited (see spec table).
    `CRASHING` is added to the "live/non-terminal" sets — `_NON_TERMINAL_SYSTEM` (quota),
@@ -132,5 +145,10 @@ must be a durable marker the power path already respects.
 - **Exclude `canceled` force_crash jobs from the reconciler recovery.** Considered to honour a
   cancel's abort intent, but `force_crash` is operator-cancelable while `RUNNING`, so excluding
   `canceled` would strand a `canceled` + `crashing` System forever (permanent power block).
-  Rejected: recover `canceled` evidence-first to `crashed` like `failed` — a cancel cannot
+  Rejected: recover on "no active job" (covers `failed`, `canceled`, absent) — a cancel cannot
   un-fire an already-dispatched NMI.
+- **Close the symmetric power-side window now (per-System single-flight).** Making `power` and
+  `force_crash` mutually exclusive per System would eliminate the residual interleaving B, but it
+  is a larger concurrency change (a per-System job-kind mutex or lock-across-op) beyond #1078's
+  scope. Deferred: the ordering hardening reduces the residual to microseconds and it is named as
+  a bounded, accepted remainder / possible follow-up rather than claimed closed.
