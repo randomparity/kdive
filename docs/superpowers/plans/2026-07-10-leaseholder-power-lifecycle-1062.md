@@ -26,7 +26,7 @@
 - `src/kdive/jobs/handlers/control.py` — `power_handler` READY re-check before physical op (Task 2).
 - `src/kdive/domain/operations/jobs.py` — drop `POWER` from `DESTRUCTIVE_JOB_KINDS`; add `OPT_IN_DESTRUCTIVE_JOB_KINDS` (Task 3).
 - `src/kdive/services/systems/validation.py` — accepted-token set from `OPT_IN_DESTRUCTIVE_JOB_KINDS` (Task 3).
-- `src/kdive/profiles/provisioning.py` — 3 `destructive_ops` field docstrings (Task 4).
+- `src/kdive/profiles/provisioning.py` — 2 `destructive_ops` class-docstring updates (local ~115, remote ~164) (Task 4).
 - `src/kdive/mcp/tools/lifecycle/systems/profile_examples.py` — `destructive_ops` scope note (Task 4).
 - Tests: `tests/mcp/lifecycle/test_control_tools.py`, `tests/services/systems/test_system_validation.py`, `tests/mcp/lifecycle/systems/test_profile_examples*.py` (or equivalent).
 - Docs: `src/kdive/security/authz/gate.py` docstring, `docs/design/destructive-gate-per-op-revision.md`, `docs/guide/**` control-power role text (Task 5).
@@ -98,11 +98,10 @@ def test_power_on_crashed_system_is_config_error(migrated_url: str, action: str)
   - Update `test_power_off_with_gate_checks_enqueues_job` → it seeds `destructive_ops=["power"]`; the opt-in is now irrelevant. Rename to `test_power_off_enqueues_job`, drop the `destructive_ops` seed, call with `_ctx(Role.CONTRIBUTOR)`.
   - Keep `test_power_non_started_system_is_config_error` (DEFINED → config error) — still valid.
 
-- [ ] **Step 1b: Update the gate-caller backstop.** `tests/mcp/core/test_tool_docs.py` asserts, by transitive-call introspection, exactly which tools reach `assert_destructive_allowed`. After Task 1, `control.power` no longer does. Two references must drop `control.power`:
-  - The gate-callers registry (a dict near line 66-67 mapping `"control.power"` → its test file) — remove the `control.power` entry.
+- [ ] **Step 1b: Update the gate-caller backstop.** `tests/mcp/core/test_tool_docs.py` computes, by transitive-call introspection (`_gate_reachers()`, dynamic — there is no static registry to edit), which tools reach `assert_destructive_allowed`. After Task 1, `control.power` no longer does. **One** reference needs updating:
   - `test_backstop_actually_detects_the_known_gate_callers` (line ~714) — change the expected set to `{"control.force_crash", "systems.reprovision"}`.
 
-  Leave `test_destructive_hint_matches_reviewed_set` unchanged — `control.power` keeps its `_docmeta.destructive()` annotation (spec-retained), so the destructive-hint set is unaffected. Read the file first and update every `control.power` gate-caller reference it contains.
+  Do **not** touch `_BEHAVIOR_TESTS_BY_TOOL` (the coverage map near line 42/67): `control.power` stays a registered, `implemented` tool covered by `test_control_tools.py`, and `test_active_tools_have_a_covering_test` asserts `active == mapped` — removing its entry would red that test. Leave `test_destructive_hint_matches_reviewed_set` unchanged too — `control.power` keeps its `_docmeta.destructive()` annotation (spec-retained), so the destructive-hint set is unaffected.
 
 - [ ] **Step 2: Run the tests, verify they fail.**
 
@@ -349,7 +348,7 @@ Expected: FAIL — the note does not mention `destructive_ops` yet.
     "power/reboot no longer require it (ADR-0320)."
 ```
 
-  In `provisioning.py`, update the three `destructive_ops` field docstrings (local, remote, fault-inject sections) to: "opts into `force_crash` and `reprovision` (deny-by-default); power is contributor lifecycle and is not gated by it (ADR-0320)."
+  In `provisioning.py`, update the **two** class docstrings that describe `destructive_ops` — the local-libvirt section (~line 115-119) and `RemoteLibvirtProfile` (~line 164-165) — to: "opts into `force_crash` and `reprovision` (deny-by-default); power is contributor lifecycle and is not gated by it (ADR-0320)." The `FaultInjectProfile` class docstring does not mention `destructive_ops` and its field is a bare `Field(default_factory=list)`; leave it unchanged (no third docstring exists).
 
 - [ ] **Step 4: Run it, verify it passes.**
 
