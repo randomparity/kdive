@@ -37,6 +37,7 @@
 
 **Files:**
 - Modify: `src/kdive/mcp/tools/lifecycle/control.py` (`power_system`, module constants, wrapper docstring/Field, module docstring line 1-14)
+- Modify: `tests/mcp/core/test_tool_docs.py` (gate-caller backstop — see Step 1b)
 - Test: `tests/mcp/lifecycle/test_control_tools.py`
 
 **Interfaces:**
@@ -53,7 +54,7 @@ def test_power_destructive_action_allowed_for_contributor_no_optin(
 ) -> None:
     async def scenario() -> None:
         async with _pool(migrated_url) as pool:
-            alloc_id = await _seed_alloc(pool)
+            alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
             resp = await _power(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, action=action)
             assert resp.status == "queued"
@@ -68,7 +69,7 @@ def test_power_destructive_action_allowed_for_contributor_no_optin(
 def test_power_denied_for_viewer(migrated_url: str, action: str) -> None:
     async def scenario() -> None:
         async with _pool(migrated_url) as pool:
-            alloc_id = await _seed_alloc(pool)
+            alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
             with pytest.raises(AuthorizationError):
                 await _power(pool, _ctx(Role.VIEWER), system_id=sys_id, action=action)
@@ -83,7 +84,7 @@ def test_power_denied_for_viewer(migrated_url: str, action: str) -> None:
 def test_power_on_crashed_system_is_config_error(migrated_url: str, action: str) -> None:
     async def scenario() -> None:
         async with _pool(migrated_url) as pool:
-            alloc_id = await _seed_alloc(pool)
+            alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(pool, alloc_id, SystemState.CRASHED)
             resp = await _power(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, action=action)
             assert resp.status == "error" and resp.error_category == "configuration_error"
@@ -97,10 +98,16 @@ def test_power_on_crashed_system_is_config_error(migrated_url: str, action: str)
   - Update `test_power_off_with_gate_checks_enqueues_job` → it seeds `destructive_ops=["power"]`; the opt-in is now irrelevant. Rename to `test_power_off_enqueues_job`, drop the `destructive_ops` seed, call with `_ctx(Role.CONTRIBUTOR)`.
   - Keep `test_power_non_started_system_is_config_error` (DEFINED → config error) — still valid.
 
+- [ ] **Step 1b: Update the gate-caller backstop.** `tests/mcp/core/test_tool_docs.py` asserts, by transitive-call introspection, exactly which tools reach `assert_destructive_allowed`. After Task 1, `control.power` no longer does. Two references must drop `control.power`:
+  - The gate-callers registry (a dict near line 66-67 mapping `"control.power"` → its test file) — remove the `control.power` entry.
+  - `test_backstop_actually_detects_the_known_gate_callers` (line ~714) — change the expected set to `{"control.force_crash", "systems.reprovision"}`.
+
+  Leave `test_destructive_hint_matches_reviewed_set` unchanged — `control.power` keeps its `_docmeta.destructive()` annotation (spec-retained), so the destructive-hint set is unaffected. Read the file first and update every `control.power` gate-caller reference it contains.
+
 - [ ] **Step 2: Run the tests, verify they fail.**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py -q -k "power"`
-Expected: FAIL — the new contributor/CRASHED/viewer tests fail against current admin-gated behavior.
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py -q -k "power" && uv run python -m pytest tests/mcp/core/test_tool_docs.py -q`
+Expected: FAIL — the new contributor/CRASHED/viewer tests fail against current admin-gated behavior; the backstop equality assertion fails until Step 3 removes the gate branch.
 
 - [ ] **Step 3: Implement the authz change in `control.py`.**
   - Delete constants `_POWER_ON_ACTIONS`, `_DESTRUCTIVE_POWER_ACTIONS`, `_STARTED_SYSTEM`, and the `_power_required_role` function.
@@ -143,14 +150,14 @@ Expected: FAIL — the new contributor/CRASHED/viewer tests fail against current
 
 - [ ] **Step 4: Run the tests, verify they pass.**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py -q -k "power"`
-Expected: PASS.
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py -q -k "power" && uv run python -m pytest tests/mcp/core/test_tool_docs.py -q`
+Expected: PASS (both the control tests and the gate-caller backstop).
 
 - [ ] **Step 5: Lint + type, then commit.**
 
 ```bash
 just lint && just type
-git add src/kdive/mcp/tools/lifecycle/control.py tests/mcp/lifecycle/test_control_tools.py
+git add src/kdive/mcp/tools/lifecycle/control.py tests/mcp/lifecycle/test_control_tools.py tests/mcp/core/test_tool_docs.py
 git commit -m "feat(control): power is contributor-level, READY-only (#1062)"
 ```
 
@@ -166,34 +173,35 @@ git commit -m "feat(control): power is contributor-level, READY-only (#1062)"
 - Consumes: `SystemState.READY`, `advisory_xact_lock(LockScope.SYSTEM, …)` (already used).
 - Produces: `power_handler` fails the job terminally (raises `CategorizedError`, `configuration_error`) and does **not** call the provider's `power` when the System is not `READY` at execution.
 
-- [ ] **Step 1: Write the failing test.** In `test_control_tools.py`, model on `test_power_handler_calls_provider_and_audits`:
+- [ ] **Step 1: Write the failing test.** In `test_control_tools.py`, mirror `test_power_handler_calls_provider_and_audits` (lines ~387-418) **verbatim** for the wiring — the job is built via `queue.enqueue`, the controller fake is the local `_FakeControl` (records `.powered`), and the resolver is `provider_resolver(controller=ctrl)` (keyword-only). The only differences: seed `CRASHED`, expect a raise, and assert the provider was never called:
 
 ```python
 def test_power_handler_refuses_non_ready_system(migrated_url: str) -> None:
-    async def scenario() -> None:
+    async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            alloc_id = await _seed_alloc(pool)
-            sys_id = await _seed_system(
-                pool, alloc_id, SystemState.CRASHED, domain_name="kdive-x"
-            )
-            fake = FakeLibvirtConn()
-            job = Job(  # match the shape used by test_power_handler_calls_provider_and_audits
-                kind=JobKind.POWER,
-                payload=PowerPayload(system_id=str(sys_id), action=PowerAction.RESET).model_dump(),
-                state=... , max_attempts=..., authorizing=..., dedup_key=...,
-            )
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.CRASHED, domain_name="kdive-x")
+            async with pool.connection() as conn:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.POWER,
+                    PowerPayload(system_id=sys_id, action=PowerAction.RESET),
+                    {"principal": "user-1", "agent_session": "s", "project": "proj"},
+                    f"{sys_id}:power:reset:{uuid4()}",
+                )
+            ctrl = _FakeControl()
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as exc:
                     await control_plane.power_handler(
-                        conn, job, resolver=provider_resolver(pool, fake)
+                        conn, job, resolver=provider_resolver(controller=ctrl)
                     )
             assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-            assert fake.power_calls == []  # provider physical op never invoked
+            assert ctrl.powered == []  # physical power op never invoked
 
-    asyncio.run(scenario())
+    asyncio.run(_run())
 ```
 
-  Copy the exact `Job(...)` construction and the resolver/fake wiring from the existing `test_power_handler_calls_provider_and_audits` (lines ~387-418) — reuse its helpers so the fake records `power_calls`. If `FakeLibvirtConn` does not already record power calls, assert instead that `sys_row["state"]` is still `crashed` and no audit `power:` row was written.
+  Use `_granted_allocation` (the helper the existing power-handler test uses), not `_seed_alloc`; confirm the helper name against the neighbouring test before writing.
 
 - [ ] **Step 2: Run the test, verify it fails.**
 
