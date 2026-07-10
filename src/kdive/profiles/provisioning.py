@@ -274,12 +274,15 @@ class ProvisioningProfile(_ProfileBase):
         default=None,
         # Provenance: ADR-0078/0080, #472.
         description=(
-            "Label for the baseline kernel this System is provisioned against. Required for "
-            "boot_method 'direct-kernel': the System must reach 'ready' on a baseline kernel "
-            "before its Runs iterate kernels, so the direct-kernel lane needs one named here. A "
-            "bare warm-tree label (e.g. 'linux-6.9'), not a URL — runs.create takes the structured "
-            "git source. Omit it for boot_method 'disk-image': that lane boots the operator-staged "
-            "base image's own kernel and never reads this field."
+            "An arbitrary provenance label the operator/agent chooses for the baseline kernel "
+            "this System is provisioned against (e.g. 'linux-6.9'), for A/B legibility across "
+            "Systems — it is not matched against any warm-tree or inventory list, has no valid-"
+            "value set to discover, and is never read by provisioning or job code: any non-empty "
+            "string is accepted. Required for boot_method 'direct-kernel' (the System must reach "
+            "'ready' on a baseline kernel before its Runs iterate kernels, so the lane needs one "
+            "named here) and not a URL — runs.create takes the structured git source separately. "
+            "Omit it for boot_method 'disk-image': that lane boots the operator-staged base "
+            "image's own kernel and never reads this field."
         ),
     )
     provider: ProviderSection

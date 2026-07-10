@@ -340,19 +340,17 @@ def test_collection_chains_full_discovery_lifecycle(tmp_path: Path) -> None:
         assert tool in actions, tool
 
 
-def test_direct_kernel_placeholder_is_a_non_uri_warm_tree_label() -> None:
-    # D5 (#763): the direct-kernel placeholder kernel_source_ref must be a bare warm-tree label,
-    # not a URI-looking string. A `git:…`/`https://…`-looking bare string is silently routed to
-    # the local warm-tree lane (workspace.real_checkout dispatches on the {"git": {...}} *object*,
-    # never on a string scheme), so advertising one teaches the misleading shape the
-    # build-source-staging doc warns about. Mirror the sibling runs.profile_examples placeholder
-    # (`REPLACE_ME-warm-tree-source`), which is already a non-URI label.
+def test_direct_kernel_placeholder_is_not_uri_looking() -> None:
+    # kernel_source_ref is an inert provenance label (#1061): no provisioning/job code reads it,
+    # so any non-empty string is accepted and there is no valid-value set to discover. The example
+    # value is still kept non-URI-looking, so an agent scanning the example doesn't mistake it for
+    # the unrelated runs.create structured git source ({"git": {"remote": ..., "ref": ...}}),
+    # which is a separate field with real dispatch semantics.
     examples = _examples(None)
     for provider in ("local-libvirt", "fault-inject"):
         ref = _profile_of(examples[provider])["kernel_source_ref"]
         assert isinstance(ref, str)
-        assert "REPLACE_ME" in ref
-        # No URI-looking scheme prefix: a bare `git:`/`https:` etc. is the trap.
+        # No URI-looking scheme prefix, to avoid confusion with the runs.create git source shape.
         assert "://" not in ref
         assert not any(ref.startswith(f"{scheme}:") for scheme in ("git", "https", "http", "ssh"))
 

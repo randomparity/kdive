@@ -59,23 +59,24 @@ _PLACEHOLDER_BASE_IMAGE = "REPLACE_ME-base-image-volume"
 
 # Placeholder kernel source for the direct-kernel (build-iterating) lane only. A disk-image
 # provision boots the base image's own kernel and never reads kernel_source_ref (#472), so the
-# disk-image example omits it entirely. The placeholder is a bare warm-tree *label*, never a
-# URI-looking string (`git:…`/`https://…`): the build checkout dispatches on the structured
-# {"git": {...}} object, so any bare string — including one that looks like a git URI — is
-# silently treated as warm-tree provenance and mirrored from KDIVE_KERNEL_SRC (workspace.py).
-_PLACEHOLDER_KERNEL_SOURCE = "REPLACE_ME-warm-tree-label"
+# disk-image example omits it entirely. kernel_source_ref is an inert provenance annotation with
+# no runtime reader and no valid-value set to discover — any non-empty string is accepted, so the
+# example value below is illustrative, not something the caller must look up or match. It is kept
+# non-URI-looking anyway, only so it isn't mistaken for the unrelated runs.create structured
+# {"git": {...}} build source, which has real dispatch semantics.
+_PLACEHOLDER_KERNEL_SOURCE = "example-baseline-label"
 
 _REPLACE_NOTE = (
     "Example shape only; replace every REPLACE_ME placeholder (any rootfs / base_image_volume "
-    "reference, and kernel_source_ref on the direct-kernel examples) with a real value for your "
-    "host before provisioning. kernel_source_ref is a bare warm-tree label, not a scheme-prefixed "
-    'address: a git build needs the structured {"git": {"remote": ..., "ref": ...}} form at '
-    "runs.create — any bare string (even one that looks scheme-prefixed) is treated as a warm-tree "
-    "label. The disk-image example needs no kernel_source_ref: it boots the operator-staged base "
-    "image's own kernel. The local-libvirt example's provider.local-libvirt.debug block "
-    "(gdbstub/preserve_on_crash) is bound at systems.provision: set it here if you intend to debug "
-    "or triage this System, since it cannot be added to a System that is already provisioned "
-    "without reprovisioning."
+    "reference) with a real value for your host before provisioning. kernel_source_ref is an "
+    "arbitrary provenance label you choose (any non-empty string) for the baseline kernel — there "
+    "is no valid-value set to discover or match against, so the example value can be kept as-is or "
+    'replaced with any label meaningful to you. It is unrelated to the structured {"git": '
+    '{"remote": ..., "ref": ...}} build source at runs.create. The disk-image example needs no '
+    "kernel_source_ref: it boots the operator-staged base image's own kernel. The local-libvirt "
+    "example's provider.local-libvirt.debug block (gdbstub/preserve_on_crash) is bound at "
+    "systems.provision: set it here if you intend to debug or triage this System, since it cannot "
+    "be added to a System that is already provisioned without reprovisioning."
 )
 
 # Sizing guidance (#461): the example carries concrete vcpu/memory_mb/disk_gb so it parses alone
@@ -129,10 +130,12 @@ def build_profile_examples(
 def _example_item(provider: str, doc: InventoryDoc | None) -> ToolResponse:
     """Build one example item for ``provider`` from the inventory (or placeholders).
 
-    Every example carries a ``note``: a direct-kernel example carries a placeholder
-    ``kernel_source_ref`` the caller must replace, while the disk-image (remote-libvirt) example
-    omits it entirely (it boots the base image's own kernel, #472). Even when the rootfs/base-image
-    reference is resolved to a real inventory name, the direct-kernel source stays a placeholder.
+    Every example carries a ``note``: a direct-kernel example carries an illustrative
+    ``kernel_source_ref`` value (an inert provenance label with no valid-value set — the caller may
+    keep it or replace it with any label meaningful to them), while the disk-image (remote-libvirt)
+    example omits it entirely (it boots the base image's own kernel, #472). Even when the
+    rootfs/base-image reference is resolved to a real inventory name, the direct-kernel source
+    stays the illustrative value.
     It also carries a ``sizing_note`` (#461) telling the caller the example's concrete
     ``vcpu``/``memory_mb``/``disk_gb`` must be omitted or matched when provisioning onto a
     shape-sized allocation. ``uses_real_reference`` reports whether the provider rootfs/base-image
