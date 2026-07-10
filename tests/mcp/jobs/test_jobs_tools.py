@@ -330,6 +330,33 @@ def test_cancel_audits_locked_prior_state_not_stale_read(
     asyncio.run(_run())
 
 
+def test_cancel_audit_failure_rolls_back_the_mutation(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ADR-0028 / #1083: the audit row and the ->canceled mutation commit atomically inside one
+    # transaction. If audit.record raises after update_state, the whole transaction rolls back:
+    # the job is NOT left canceled and no audit row survives. Guards the invariant against a
+    # future refactor that pulls audit.record out of the transaction.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue(pool, "audit-rollback")
+            await _mark_running(pool, job_id)
+
+            async def _boom(*_args: Any, **_kwargs: Any) -> Any:
+                raise RuntimeError("audit sink down")
+
+            monkeypatch.setattr(jobs_tools.audit, "record", _boom)
+            with pytest.raises(RuntimeError, match="audit sink down"):
+                await jobs_tools.cancel_job(pool, CONTRIB_CTX, job_id)
+            monkeypatch.undo()
+            resp = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+            rows = await _audit_rows(pool, job_id)
+        assert resp.status == "running"  # rolled back with the audit failure, not canceled
+        assert rows == []
+
+    asyncio.run(_run())
+
+
 def test_cancel_terminal_job_writes_no_audit_row(migrated_url: str) -> None:
     # #1083 / spec D3: an audit event records a transition. A no-op cancel of an already-terminal
     # job performs none, so it writes nothing — only the first, real cancel is attributed.

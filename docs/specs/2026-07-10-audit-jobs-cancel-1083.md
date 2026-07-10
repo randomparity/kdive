@@ -158,12 +158,11 @@ destructive-op gate precedent that puts the op kind in `transition`
 - [ ] A cancel denied by role (`RoleDenied`) writes **zero** rows from
       `cancel_job` itself (the middleware's denial row is unchanged and out of
       scope for this handler's test).
-- [ ] Structural: the `update_state` and `audit.record` calls sit inside one
-      outer `conn.transaction()` on the same connection (code-review check), so
-      the mutation and its audit row commit or roll back together. A
-      fault-injection test (forcing `audit.record` to raise and asserting the
-      job stays non-terminal) is optional given the D1 argument that the guard
-      cannot fire on the success path.
+- [ ] Atomicity: forcing `audit.record` to raise after `update_state` succeeds
+      leaves the job non-terminal (`running`) with **zero** audit rows — the
+      outer `conn.transaction()` rolls both back together (ADR-0028). A
+      fault-injection test pins this so a later refactor that moves
+      `audit.record` out of the transaction fails loudly.
 - [ ] `just ci` is green.
 
 ## Failure modes and edge cases
