@@ -82,6 +82,30 @@ def test_unknown_distro_falls_back_to_generic_hint(tmp_path: Path) -> None:
     assert "libvirt-dev" in result.stderr
 
 
+def _stub(bindir: Path, name: str, body: str) -> None:
+    stub = bindir / name
+    stub.write_text(body)
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def test_ppc64le_future_hint_names_the_power_qemu_package(tmp_path: Path) -> None:
+    """On a ppc64le host the future tier asks for qemu-system-ppc, not the x86 emulator.
+
+    The QEMU binary name is arch-derived (ppc64le -> qemu-system-ppc64), so a stubbed
+    ``uname -m`` reporting ppc64le must route the debian install hint to qemu-system-ppc.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "uv", "#!/bin/sh\nexit 0\n")
+    _stub(bindir, "pkg-config", "#!/bin/sh\nexit 0\n")
+    _stub(bindir, "uname", "#!/bin/sh\necho ppc64le\n")
+
+    result = _run("debian", str(bindir), tmp_path)
+
+    assert "qemu-system-ppc" in result.stderr, result.stderr
+    assert "qemu-system-x86" not in result.stderr
+
+
 def test_required_present_exits_zero(tmp_path: Path) -> None:
     """Stubbing uv + a permissive pkg-config satisfies the required tier."""
     bindir = tmp_path / "bin"

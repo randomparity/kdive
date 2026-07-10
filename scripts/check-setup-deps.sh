@@ -69,6 +69,10 @@ package_for() {
   docker:*) printf "docker" ;;
   qemu-system-x86_64:opensuse) printf "qemu-x86" ;;
   qemu-system-x86_64:*) printf "qemu-system-x86" ;;
+  qemu-system-ppc64:opensuse) printf "qemu-ppc" ;;
+  qemu-system-ppc64:*) printf "qemu-system-ppc" ;;
+  qemu-system-aarch64:opensuse) printf "qemu-arm" ;;
+  qemu-system-aarch64:*) printf "qemu-system-arm" ;;
   qemu-img:debian) printf "qemu-utils" ;;
   qemu-img:opensuse) printf "qemu-tools" ;;
   qemu-img:*) printf "qemu-img" ;;
@@ -158,6 +162,17 @@ report_tier() {
   fi
 }
 
+# The QEMU system-emulator binary is arch-named, and the name is not a plain `uname -m`:
+# ppc64le maps to `qemu-system-ppc64` (not `-ppc64le`). Report the binary for the running host
+# so a POWER/ARM box is not told to install the x86 emulator.
+qemu_system_binary() {
+  case "$(uname -m)" in
+  ppc64le | ppc64) printf "qemu-system-ppc64" ;;
+  aarch64 | arm64) printf "qemu-system-aarch64" ;;
+  *) printf "qemu-system-x86_64" ;;
+  esac
+}
+
 distro="$(load_distro_id)"
 
 # REQUIRED — `uv sync` and the core dev loop fail without these.
@@ -181,7 +196,7 @@ command_exists node || command_exists nodejs ||
 require_command recommended npm "${distro}"
 
 # FUTURE — live_vm and kernel-build milestones; warn only, never block setup.
-for cmd in qemu-system-x86_64 virsh gdb crash virt-builder virt-tar-out \
+for cmd in "$(qemu_system_binary)" virsh gdb crash virt-builder virt-tar-out \
   virt-make-fs guestfish qemu-img bc flex bison; do
   require_command future "${cmd}" "${distro}"
 done
