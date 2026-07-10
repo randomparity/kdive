@@ -23,8 +23,10 @@ import logging
 import math
 from collections.abc import Awaitable, Callable
 from typing import Annotated
+from uuid import UUID
 
 from fastmcp import FastMCP
+from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
@@ -47,6 +49,7 @@ from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_erro
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
+from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, Role, RoleDenied, require_role
 
@@ -202,6 +205,21 @@ async def wait_job(
             await sleep(min(POLL_INTERVAL_S, deadline - now))
 
 
+async def _locked_job_state(conn: AsyncConnection, uid: UUID) -> str | None:
+    """Return the job's current state under ``FOR UPDATE``, or None if the row is gone.
+
+    Read inside the cancel transaction so the audited ``transition`` names the exact state
+    ``update_state`` transitions from. ``queued``<->``running`` are both legal non-terminal
+    edges, so a worker claim/requeue between the pre-authz read and the mutation could leave a
+    cancel legal yet mislabel the prior state; holding the row lock from here through the update
+    closes that window (#1083).
+    """
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT state FROM jobs WHERE id = %s FOR UPDATE", (uid,))
+        row = await cur.fetchone()
+    return row[0] if row else None
+
+
 async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str) -> ToolResponse:
     """Transition the job to ``canceled`` (cooperative); error on a terminal job.
 
@@ -228,8 +246,27 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str
         if denied is not None:
             return denied
         try:
-            async with pool.connection() as conn:
+            async with pool.connection() as conn, conn.transaction():
+                # Lock the row and read the true prior state before mutating, so the audited
+                # transition names the state we actually cancel from (not the stale pre-authz
+                # read — see _locked_job_state).
+                prior_state = await _locked_job_state(conn, uid)
                 job = await JOBS.update_state(conn, uid, JobState.CANCELED)
+                # Audit the transition inside the mutation's transaction (ADR-0028): both commit
+                # or neither does. The job kind rides the readable `transition` column — args is
+                # stored one-way as args_digest, so a kind only there is not recoverable (#1083).
+                await audit.record(
+                    conn,
+                    ctx,
+                    audit.AuditEvent(
+                        tool="jobs.cancel",
+                        object_kind="jobs",
+                        object_id=uid,
+                        transition=f"{job.kind.value}:{prior_state}->canceled",
+                        args={"job_id": job_id, "kind": job.kind.value},
+                        project=_project(job),
+                    ),
+                )
         except ObjectNotFound:
             return _not_found(job_id)
         except IllegalTransition:
