@@ -31,7 +31,7 @@ from pydantic import Field
 from kdive.db.repositories import JOBS, ObjectNotFound
 from kdive.domain.capacity.state import IllegalTransition, JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.operations.jobs import Job, JobKind
+from kdive.domain.operations.jobs import CONTRIBUTOR_CANCELABLE_JOB_KINDS, Job, JobKind
 from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
@@ -116,36 +116,13 @@ def _readable_projects(ctx: RequestContext) -> list[str]:
     return readable
 
 
-#: Job kinds a contributor may cancel: the leaseholder-lifecycle jobs a contributor (or a lower
-#: role) can itself enqueue, so cancelling one is acting on its own transient resource — matching
-#: ``runs.cancel`` over the build/install/boot lane (ADR-0320). Everything else keeps the operator
-#: gate: the destructive kinds (reprovision/teardown/force_crash), the operator-gated provision
-#: lane (whose cancel classification is deferred to the separate provision-lane RBAC review), and
-#: the platform/internal kinds (image_build/diagnostics_worker_check/console_rotate).
-_CONTRIBUTOR_CANCELABLE_KINDS: frozenset[JobKind] = frozenset(
-    {
-        JobKind.BUILD,
-        JobKind.INSTALL,
-        JobKind.BOOT,
-        JobKind.BUILD_INSTALL_BOOT,
-        JobKind.POWER,
-        JobKind.DIAGNOSTIC_SYSRQ,
-        JobKind.CAPTURE_VMCORE,
-        JobKind.AUTHORIZE_SSH_KEY,
-        JobKind.CHECK_SSH_REACHABLE,
-    }
-)
-
-
 def _cancel_role(kind: JobKind) -> Role:
     """The role required to cancel a job of ``kind``, keyed off kind not enqueuing principal.
 
-    A contributor may cancel a leaseholder-lifecycle job it can itself start (see
-    ``_CONTRIBUTOR_CANCELABLE_KINDS``). Every other kind keeps the operator gate. The mapping
-    fails closed — a kind absent from the allowlist requires operator — so a newly added
-    privileged kind is never silently contributor-cancellable.
+    A contributor may cancel a leaseholder-lifecycle job it can itself start
+    (``CONTRIBUTOR_CANCELABLE_JOB_KINDS``); every other kind keeps the fail-closed operator gate.
     """
-    return Role.CONTRIBUTOR if kind in _CONTRIBUTOR_CANCELABLE_KINDS else Role.OPERATOR
+    return Role.CONTRIBUTOR if kind in CONTRIBUTOR_CANCELABLE_JOB_KINDS else Role.OPERATOR
 
 
 def _require_job_role(

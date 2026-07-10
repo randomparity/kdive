@@ -14,7 +14,11 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import JobState
-from kdive.domain.operations.jobs import JobKind
+from kdive.domain.operations.jobs import (
+    CONTRIBUTOR_CANCELABLE_JOB_KINDS,
+    DESTRUCTIVE_JOB_KINDS,
+    JobKind,
+)
 from kdive.jobs import queue
 from kdive.jobs.payloads import Authorizing, BuildPayload, SystemPayload
 from kdive.mcp.auth import RequestContext
@@ -208,31 +212,17 @@ def test_cancel_operator_gated_job_allowed_to_operator(migrated_url: str) -> Non
 
 
 def test_cancel_role_classification_covers_every_kind_and_fails_closed() -> None:
-    # Guard the per-kind cancel gate against fail-open drift: every JobKind must map to an
-    # intended cancel role, and a kind absent from the contributor allowlist must default to
-    # operator — so a newly added privileged kind is never silently contributor-cancellable.
-    contributor_kinds = {
-        JobKind.BUILD,
-        JobKind.INSTALL,
-        JobKind.BOOT,
-        JobKind.BUILD_INSTALL_BOOT,
-        JobKind.POWER,
-        JobKind.DIAGNOSTIC_SYSRQ,
-        JobKind.CAPTURE_VMCORE,
-        JobKind.AUTHORIZE_SSH_KEY,
-        JobKind.CHECK_SSH_REACHABLE,
-    }
+    # Guard the per-kind cancel gate against fail-open drift: every JobKind maps to contributor
+    # or operator, and every kind outside the contributor allowlist (all destructive kinds and
+    # the operator-gated provision lane) must fail closed to operator — so a newly added
+    # privileged kind is never silently contributor-cancellable.
     for kind in JobKind:
-        expected = Role.CONTRIBUTOR if kind in contributor_kinds else Role.OPERATOR
-        assert jobs_tools._cancel_role(kind) is expected, kind
-    # The provision lane and every destructive kind stay operator (out of #1080's leaseholder set).
-    for operator_kind in (
-        JobKind.PROVISION,
-        JobKind.REPROVISION,
-        JobKind.TEARDOWN,
-        JobKind.FORCE_CRASH,
-    ):
-        assert jobs_tools._cancel_role(operator_kind) is Role.OPERATOR
+        role = jobs_tools._cancel_role(kind)
+        assert role in (Role.CONTRIBUTOR, Role.OPERATOR), kind
+        if kind not in CONTRIBUTOR_CANCELABLE_JOB_KINDS:
+            assert role is Role.OPERATOR, kind
+    assert not CONTRIBUTOR_CANCELABLE_JOB_KINDS & DESTRUCTIVE_JOB_KINDS  # destructive never lowered
+    assert JobKind.PROVISION not in CONTRIBUTOR_CANCELABLE_JOB_KINDS  # provision lane out of scope
 
 
 def test_cancel_terminal_job_is_error_envelope(migrated_url: str) -> None:

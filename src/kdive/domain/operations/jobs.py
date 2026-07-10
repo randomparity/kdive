@@ -53,6 +53,28 @@ OPT_IN_DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
 neither is a valid ``destructive_ops`` token.
 """
 
+CONTRIBUTOR_CANCELABLE_JOB_KINDS: frozenset[JobKind] = frozenset(
+    {
+        JobKind.BUILD,
+        JobKind.INSTALL,
+        JobKind.BOOT,
+        JobKind.BUILD_INSTALL_BOOT,
+        JobKind.POWER,
+        JobKind.DIAGNOSTIC_SYSRQ,
+        JobKind.CAPTURE_VMCORE,
+        JobKind.AUTHORIZE_SSH_KEY,
+        JobKind.CHECK_SSH_REACHABLE,
+    }
+)
+"""Job kinds a contributor may cancel: the leaseholder-lifecycle jobs a contributor (or a lower
+role) can itself enqueue, so cancelling one is acting on its own transient resource — matching
+``runs.cancel`` over the build/install/boot lane (ADR-0320). ``jobs.cancel`` requires operator
+for every other kind: the destructive kinds, the operator-gated provision lane, and the
+platform/internal kinds (image_build/diagnostics_worker_check/console_rotate). The gate fails
+closed — a kind absent here requires operator — so a newly added privileged kind is never
+silently contributor-cancellable.
+"""
+
 
 class PowerAction(StrEnum):
     """Power operations accepted by the durable control-plane job contract."""
@@ -88,6 +110,7 @@ class Job(DomainModel):
 
 
 __all__ = [
+    "CONTRIBUTOR_CANCELABLE_JOB_KINDS",
     "DESTRUCTIVE_JOB_KINDS",
     "OPT_IN_DESTRUCTIVE_JOB_KINDS",
     "Job",
