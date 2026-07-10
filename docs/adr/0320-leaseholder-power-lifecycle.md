@@ -63,8 +63,10 @@ opt-in).**
 
 2. **Taxonomy.** `POWER` leaves `DESTRUCTIVE_JOB_KINDS`
    (`domain/operations/jobs.py`), which becomes `{REPROVISION, TEARDOWN, FORCE_CRASH}`.
-   Because `DestructiveOp.__post_init__` validates `kind ∈ DESTRUCTIVE_JOB_KINDS`, power
-   can no longer be routed through the gate even by mistake.
+   This set has two consumers: `DestructiveOp.__post_init__` (so power can no longer be
+   routed through the gate even by mistake) and `services/systems/validation.py`'s
+   `_VALID_DESTRUCTIVE_OP_VALUES`, which rejects unknown `destructive_ops` tokens at the
+   write boundary — so `"power"` becomes a rejected token (see point 5).
 
 3. **`destructive_ops` scope.** The per-provider provisioning-profile `destructive_ops`
    list now governs the opt-in factor for `force_crash` **and** `systems.reprovision`
@@ -77,9 +79,14 @@ opt-in).**
    contributor classification and name `reset`/`cycle` as the leaseholder's recovery path
    for a wedged guest.
 
-5. **No migration.** `destructive_ops` lives in the `provisioning_profile` JSON as a
-   freeform string list; an existing `"power"` entry becomes inert. No column, enum,
-   CHECK, or data change.
+5. **No DB migration, but `"power"` becomes a rejected write-boundary token.**
+   `destructive_ops` lives in the `provisioning_profile` JSON as a freeform string list; no
+   column, enum, CHECK, or data change. Because `"power"` leaves the validator's accepted
+   set, `_reject_unknown_destructive_ops` now raises `CONFIGURATION_ERROR` for any profile
+   listing `"power"`, on both provision and reprovision (a deliberate pre-release breaking
+   change, per the ADR-0315/0319 precedent). The unguarded structural read path never
+   raises, so stored rows remain readable; only submitting `"power"` is rejected — the
+   honest signal that power is no longer a destructive op.
 
 The `_docmeta.destructive()` MCP annotation on `control.power` is retained: it is an
 agent caution hint (a hard reset interrupts the guest), orthogonal to authorization.
@@ -120,6 +127,11 @@ agent caution hint (a hard reset interrupts the guest), orthogonal to authorizat
 - **Default `destructive_ops` to include power.** Weakens deny-by-default globally and
   still leaves power inside the destructive gate — the wrong classification, just
   pre-opted.
+- **Keep `"power"` as an accepted-but-inert legacy token** (e.g.
+  `_VALID_DESTRUCTIVE_OP_VALUES ∪ {"power"}`). Rejected: a backward-compat shim that
+  contradicts replace-don't-deprecate, and it misleads — an accepted `"power"` token reads
+  as "power is still gated" when it no longer is. Hard-rejecting names the change to the
+  agent (`unknown_destructive_ops: ["power"]`).
 - **Also reclassify `force_crash` to `contributor`.** Out of scope and less clearly
   correct: `force_crash` is deliberate fault injection entangled with the `ready →
   crashed` transition and DebugSession detachment. Left as `admin` + gate + opt-in.

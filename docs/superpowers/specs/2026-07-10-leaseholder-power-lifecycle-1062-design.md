@@ -123,9 +123,19 @@ classification. Changing it is out of scope.
 `{REPROVISION, TEARDOWN, FORCE_CRASH}`). This keeps the taxonomy honest: `DestructiveOp`
 (`security/authz/gate.py`) validates `kind ∈ DESTRUCTIVE_JOB_KINDS` in `__post_init__`,
 so after this change constructing a `DestructiveOp(kind=POWER)` correctly raises — power
-can no longer be routed through the gate even by mistake. All consumers of
-`DESTRUCTIVE_JOB_KINDS` must be audited during implementation; the known consumer is the
-gate's validation. `JobKind.POWER` itself is unchanged (the job still exists and runs).
+can no longer be routed through the gate even by mistake. `JobKind.POWER` itself is
+unchanged (the job still exists and runs).
+
+`DESTRUCTIVE_JOB_KINDS` has **two** in-tree consumers, both of which this change touches:
+
+1. The gate's `DestructiveOp.__post_init__` validation (above).
+2. `services/systems/validation.py`: `_VALID_DESTRUCTIVE_OP_VALUES = {kind.value for kind
+   in DESTRUCTIVE_JOB_KINDS}`, used by `_reject_unknown_destructive_ops` to reject any
+   `destructive_ops` token outside the closed set at the **write boundary**
+   (`validate_profile_for_provider`, run on both provision and reprovision). Removing
+   POWER therefore makes `"power"` an *unknown* token — see Migration/compatibility.
+
+(`_docmeta.py` only *references* `DESTRUCTIVE_JOB_KINDS` in a comment; no code dependency.)
 
 ### Provisioning profile (`profiles/`)
 
@@ -138,12 +148,25 @@ No code change to the `destructive_ops` field: it stays a freeform
 
 ### Migration / compatibility
 
-**None.** `destructive_ops` is stored inside the `provisioning_profile` JSON on each
-System row as a freeform string list. An existing System provisioned with
-`destructive_ops: ["power"]` keeps that entry; it simply becomes inert (never consulted
-for a power op). No column, enum, or CHECK changes; no data rewrite. This is the same
-"pre-existing entry becomes inert" pattern the codebase already tolerates for freeform
-profile lists.
+**No DB migration** — `destructive_ops` lives in the `provisioning_profile` JSON as a
+freeform string list; no column, enum, CHECK, or data change.
+
+But `"power"` becomes a **rejected write-boundary token**, a deliberate pre-release
+breaking change (consistent with the repo's replace-don't-deprecate stance and the
+ADR-0315/0319 pre-release-break precedent). Because `_VALID_DESTRUCTIVE_OP_VALUES` drops
+`"power"`, `_reject_unknown_destructive_ops` now raises `CONFIGURATION_ERROR`
+(`unknown_destructive_ops: ["power"]`, `valid_destructive_ops:
+[force_crash, reprovision, teardown]`) for any profile that lists `"power"` — on both
+`systems.provision` and `systems.reprovision` (including the read-modify-resubmit *echo*
+of a stored profile that carried `"power"`).
+
+This is the correct, honest behavior: after this change `"power"` is not a destructive op,
+so listing it is an error the agent should see and remove — silently accepting it as an
+inert token would falsely imply power is still gated (a phantom knob). The unguarded read
+path (`control._op_opt_in` via the structural `ProvisioningProfile.parse`) still never
+raises on a stored token, so a stored System row is readable; only a *write* that submits
+`"power"` is rejected. Recovery for an affected profile is a one-token edit (drop
+`"power"`), which the error names explicitly.
 
 ### Docs
 
@@ -156,6 +179,9 @@ profile lists.
 - A wedged-guest recovery note (tool docstring and/or the relevant runbook) naming
   `control.power reset` as the first-class recovery and re-stage as the fallback.
 - ADR-0320 + `docs/adr/README.md` index row.
+- `docs/design/destructive-gate-per-op-revision.md` — its "affected behavior" table still
+  lists `control.power off/cycle/reset` as `admin` + `power`-in-`destructive_ops`; update
+  that row (and note ADR-0320 supersession) so the living design doc is not stale.
 - Any guide/reference doc that states the power role classification (audit
   `docs/guide/` for `control.power` role text).
 
@@ -183,6 +209,11 @@ drivers — they must flip):
   `reprovision`.
 - `DestructiveOp(kind=JobKind.POWER)` raises `ValueError` (POWER left the destructive
   set); `DestructiveOp(kind=JobKind.REPROVISION)` still constructs.
+- Write-boundary validation: a profile with `destructive_ops: ["power"]` is rejected with
+  `CONFIGURATION_ERROR` / `unknown_destructive_ops: ["power"]` on provision **and** on
+  reprovision (echo path); `["force_crash", "reprovision", "teardown"]` still validate.
+  This flips `tests/services/systems/test_system_validation.py` (the `valid_destructive_ops`
+  assertion and the accepts-`"power"` cases) — those are red-to-green drivers to update.
 
 ## Acceptance criteria
 
