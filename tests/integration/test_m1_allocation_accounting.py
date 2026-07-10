@@ -1012,9 +1012,7 @@ def test_c6_admin_and_operator_succeed_on_their_surfaces(migrated_url: str) -> N
             sys_id = data_str(prov, "system_id")
             async with pool.connection() as conn:
                 await conn.execute("UPDATE systems SET state = 'ready' WHERE id = %s", (sys_id,))
-            power_on = await control_tools.power_system(
-                pool, op, system_id=sys_id, action="on", resolver=_provider_resolver()
-            )
+            power_on = await control_tools.power_system(pool, op, system_id=sys_id, action="on")
             assert power_on.status == "queued"
             reprov = await _SYSTEM_ADMIN_HANDLERS.reprovision_system(
                 pool,

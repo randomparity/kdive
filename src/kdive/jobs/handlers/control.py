@@ -33,22 +33,26 @@ def _resolved_domain_name(system: System) -> str:
     return system.domain_name or domain_name_for(system.id)
 
 
-async def _control_target(conn: AsyncConnection, system_id: UUID, *, op: str) -> _ControlTarget:
+async def _power_target(conn: AsyncConnection, system_id: UUID) -> _ControlTarget:
+    """Resolve a power job's domain/project, re-checking READY under the SYSTEM lock.
+
+    The READY re-check is power-specific policy (ADR-0320): a power job admitted while READY
+    may dequeue after a ready->crashed transition, and a CRASHED System holds crash evidence
+    that must not be destroyed through the power path. ``terminal=True`` because the state
+    will not improve on retry — dead-letter rather than churn. (`force_crash` has its own
+    ``_force_crash_target``; this helper is power-only.)
+    """
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
             raise CategorizedError(
-                f"{op} target system is gone",
+                "power target system is gone",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"system_id": str(system_id)},
             )
-        # Re-check READY under the SYSTEM lock before the physical op: a power job admitted
-        # while READY may dequeue after a ready->crashed transition, and a CRASHED System
-        # holds crash evidence that must not be destroyed through the power path (ADR-0320).
-        # terminal=True: the state will not improve on retry, so dead-letter rather than churn.
         if system.state is not SystemState.READY:
             raise CategorizedError(
-                f"{op} requires a READY system; crash evidence on a non-READY system is "
+                "power requires a READY system; crash evidence on a non-READY system is "
                 "protected from the power path",
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"system_id": str(system_id), "current_status": system.state.value},
@@ -74,7 +78,7 @@ async def power_handler(
     payload = load_payload(job, PowerPayload)
     system_id = UUID(payload.system_id)
     action = payload.action
-    target = await _control_target(conn, system_id, op="power")
+    target = await _power_target(conn, system_id)
     control = await _controller(conn, system_id, resolver)
     await asyncio.to_thread(control.power, target.domain_name, action)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):

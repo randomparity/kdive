@@ -74,7 +74,6 @@ async def power_system(
     *,
     system_id: str,
     action: str,
-    resolver: ProviderResolver,
     idempotency_key: str | None = None,
 ) -> ToolResponse:
     """Admit a power op on a ``READY`` System and enqueue a `power` job.
@@ -313,7 +312,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             current_context(),
             system_id=system_id,
             action=action,
-            resolver=resolver,
             idempotency_key=idempotency_key,
         )
 

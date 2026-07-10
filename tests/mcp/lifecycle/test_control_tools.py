@@ -219,7 +219,6 @@ async def _power(
         ctx,
         system_id=system_id,
         action=action,
-        resolver=provider_resolver(),
         idempotency_key=idempotency_key,
     )
 
