@@ -4,7 +4,8 @@
   "control: no in-band break-glass reboot when `destructive_ops` was not opted in at
   provision (P2)" (BLACK_BOX_REVIEW.md P2)
 - **ADR:** [ADR-0320](../../adr/0320-leaseholder-power-lifecycle.md)
-- **Status:** Draft
+- **Follow-up:** [#1078](https://github.com/randomparity/kdive/issues/1078) (residual force_crash physical-crash-window race)
+- **Status:** Accepted
 - **Date:** 2026-07-10
 
 ## Problem
@@ -89,7 +90,7 @@ instead of breaking it: no new tool, no bypass, no ADR-0006/0020/0130 exception.
      window — a within-project coordination race, not an unprivileged path. Fully closing
      it needs a pre-NMI durable "crashing" marker on `force_crash` that the power re-check
      also rejects; that expands `force_crash`'s state machine (and adds a marker-leak
-     failure mode) and is **out of scope for #1062**, tracked as a follow-up. See
+     failure mode) and is **out of scope for #1062**, tracked as follow-up #1078. See
      Non-goals.
 2. `control.force_crash` is **unchanged**: `admin` + the two-check destructive gate +
    `destructive_ops` opt-in. It is the deliberate fault-injection primitive (drives
@@ -131,7 +132,7 @@ instead of breaking it: no new tool, no bypass, no ADR-0006/0020/0130 exception.
   so a concurrent power op's READY re-check can still pass — is **not** closed here. Closing
   it requires a pre-NMI durable "crashing" marker on `force_crash` (a change to its state
   machine, with a marker-leak failure mode). It is admin-gated and narrow (see Req 1a);
-  tracked as a follow-up, not fixed in #1062.
+  tracked as follow-up #1078, not fixed in #1062.
 - No change to DebugSession handling on power. `control.force_crash` detaches every
   non-terminal DebugSession (the crashed kernel is gone); power off/cycle/reset do **not**
   — this is pre-existing, unchanged behavior. A power reboot can therefore leave a live

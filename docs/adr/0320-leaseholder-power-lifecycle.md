@@ -79,8 +79,8 @@ opt-in).**
    and a concurrent power re-check can still pass. That residual is bounded — `CRASHED`
    (hence capturable evidence) is produced only by the `admin`+opt-in-gated `force_crash`,
    so it is a privileged, sub-second coordination race, not an unprivileged path — and
-   fully closing it requires a pre-NMI `crashing` marker on `force_crash`, deferred as a
-   follow-up. `force_crash` (already `READY`-only) and `diagnostic_sysrq` are unaffected —
+   fully closing it requires a pre-NMI `crashing` marker on `force_crash`, deferred as
+   follow-up #1078. `force_crash` (already `READY`-only) and `diagnostic_sysrq` are unaffected —
    they never used `_STARTED_SYSTEM`.
 
 2. **Taxonomy.** `POWER` leaves `DESTRUCTIVE_JOB_KINDS`
@@ -174,4 +174,4 @@ agent caution hint (a hard reset interrupts the guest), orthogonal to authorizat
   race and the mislabel; the crash workflow (`capture_vmcore` → `teardown`/`reprovision`)
   is the path for a CRASHED System. The remaining sub-second physical-crash-window race
   (`force_crash`'s unlocked NMI before its `CRASHED` write) is a bounded, admin-gated
-  follow-up (a pre-NMI `crashing` marker on `force_crash`), deliberately not taken here.
+  follow-up #1078 (a pre-NMI `crashing` marker on `force_crash`), deliberately not taken here.
