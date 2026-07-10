@@ -152,11 +152,15 @@ Expected: FAIL — the new contributor/CRASHED/viewer tests fail against current
 Run: `uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py -q -k "power" && uv run python -m pytest tests/mcp/core/test_tool_docs.py -q`
 Expected: PASS (both the control tests and the gate-caller backstop).
 
-- [ ] **Step 5: Lint + type, then commit.**
+- [ ] **Step 5: Regenerate the tool reference, lint + type, then commit.**
+
+`docs/guide/reference/control.md` is GENERATED from the wrapper docstring/`Field` by `scripts/gen_tool_reference.py` (header: "do not edit. Regenerate: just docs"). Since Step 3 changed `control.power`'s docstring + `action` Field, regenerate it now or `just docs-check` (in `just ci`) will fail:
 
 ```bash
+just docs
 just lint && just type
-git add src/kdive/mcp/tools/lifecycle/control.py tests/mcp/lifecycle/test_control_tools.py tests/mcp/core/test_tool_docs.py
+git add src/kdive/mcp/tools/lifecycle/control.py tests/mcp/lifecycle/test_control_tools.py \
+  tests/mcp/core/test_tool_docs.py docs/guide/reference/control.md
 git commit -m "feat(control): power is contributor-level, READY-only (#1062)"
 ```
 
@@ -370,26 +374,35 @@ git commit -m "docs(profiles): surface destructive_ops scope in profile_examples
 ### Task 5: Prose docs — gate docstring, design doc, guides, recovery note
 
 **Files:**
-- Modify: `src/kdive/security/authz/gate.py` (module docstring), `docs/design/destructive-gate-per-op-revision.md`, `docs/guide/**` control-power role text, one recovery note (`docs/guide/toolsets/control.md`)
+- Modify: `src/kdive/security/authz/gate.py` (module docstring), `docs/design/destructive-gate-per-op-revision.md`, hand-authored `docs/guide/**` control-power role prose, recovery note in `docs/guide/toolsets/control.md`
+- Regenerate (do NOT hand-edit): `docs/guide/reference/control.md` (done in Task 1 via `just docs`), the `toolsets-control.md` doc-resource snapshot (`just resources-docs`), and the rbac-tool-matrix region of `docs/guide/safety-and-rbac.md` (`just rbac-matrix`)
 
 **Interfaces:** none (docs only).
+
+**Generated-file caution:** several `docs/guide/**` files (or regions) are generator-owned and checked by `just ci` (`docs-check`, `resources-docs-check`, `rbac-matrix-check`). Never hand-edit them; regenerate and commit the output. Specifically: `docs/guide/reference/control.md` (header "do not edit"), the `<!-- BEGIN GENERATED: rbac-tool-matrix --> … <!-- END GENERATED -->` region of `docs/guide/safety-and-rbac.md` (lines ~37-189), and any `docs/guide/toolsets/*.md` that backs a `DOC_RESOURCES` snapshot.
 
 - [ ] **Step 1: Update the gate docstring.** In `gate.py`, the header lists `force_crash/power` as admin destructive ops. Change to name `force_crash` (admin) and `reprovision` (operator) as the gated ops; state power is no longer gated (ADR-0320). Keep it accurate to the two-check mechanism.
 
 - [ ] **Step 2: Update `docs/design/destructive-gate-per-op-revision.md`.** Its "affected behavior" table row for `control.power off/cycle/reset` (admin + power-in-destructive_ops) is now stale. Replace that row with a note that power is reclassified to `contributor` lifecycle (READY-only) by ADR-0320, and remove `power` from the opt-in column; add a one-line "Superseded in part by ADR-0320" pointer near the table.
 
-- [ ] **Step 3: Audit and update the guides.** Run `rg -n "control.power|off/cycle/reset|power.*admin" docs/guide/`. In each hit stating the power role (notably `docs/guide/safety-and-rbac.md`, `docs/guide/reference/control.md`, `docs/guide/toolsets/control.md`), change "admin"/"operator" for power to "contributor" and note READY-only admission. Do not change `force_crash` text.
+- [ ] **Step 3: Audit and update hand-authored guide prose.** Run `rg -n "control.power|off/cycle/reset|power.*admin" docs/guide/`. Update only **hand-authored** prose stating the power role — change "admin"/"operator" for power to "contributor" and note READY-only admission; do not change `force_crash` text. **Skip** `docs/guide/reference/control.md` (regenerated in Task 1) and the `<!-- BEGIN/END GENERATED: rbac-tool-matrix -->` region of `docs/guide/safety-and-rbac.md` (regenerated in Step 5). For `safety-and-rbac.md`, edit only prose OUTSIDE those markers.
 
-- [ ] **Step 4: Add the wedged-guest recovery note.** In `docs/guide/toolsets/control.md`, add a short "Recovering a wedged guest" note: `control.power reset` (contributor) recovers a wedged **READY** guest; if it will not respond, or the System is not READY (wedged before boot, or CRASHED), fall back to `runs.install` (changed cmdline) + `runs.boot`, and for a CRASHED System use `capture_vmcore` → `teardown`/`reprovision`.
+- [ ] **Step 4: Add the wedged-guest recovery note.** In `docs/guide/toolsets/control.md` (the hand-authored source that backs the `toolsets-control.md` doc-resource snapshot), add a short "Recovering a wedged guest" note: `control.power reset` (contributor) recovers a wedged **READY** guest; if it will not respond, or the System is not READY (wedged before boot, or CRASHED), fall back to `runs.install` (changed cmdline) + `runs.boot`, and for a CRASHED System use `capture_vmcore` → `teardown`/`reprovision`. Also apply the Step-3 power-role prose update here.
 
-- [ ] **Step 5: Run doc guardrails, then commit.**
+- [ ] **Step 5: Regenerate the generated docs, run doc guardrails, then commit.** The `toolsets/control.md` edit invalidates its packaged snapshot, and the exposure-derived rbac matrix must be re-run in case anything shifted:
 
 ```bash
+just resources-docs          # regenerate the toolsets-control.md doc-resource snapshot
+just rbac-matrix             # regenerate the safety-and-rbac.md matrix region (no-op if exposure unchanged)
 just check-mermaid
-rg -n "Sprint|critical|robust|comprehensive|elegant" src/kdive/security/authz/gate.py docs/design/destructive-gate-per-op-revision.md docs/guide/toolsets/control.md
+# Verify every generated-doc check is green (these run inside `just ci`):
+just docs-check resources-docs-check rbac-matrix-check
+rg -n "Sprint|critical|robust|comprehensive|elegant" src/kdive/security/authz/gate.py docs/design/destructive-gate-per-op-revision.md docs/guide/toolsets/control.md docs/guide/safety-and-rbac.md
 git add src/kdive/security/authz/gate.py docs/design/destructive-gate-per-op-revision.md docs/guide
 git commit -m "docs(control): power is contributor lifecycle; recovery note (#1062)"
 ```
+
+If `just docs-check`/`resources-docs-check`/`rbac-matrix-check` reports drift, run the matching `just docs`/`just resources-docs`/`just rbac-matrix`, `git add` the regenerated file, and re-check before committing.
 
 ---
 
