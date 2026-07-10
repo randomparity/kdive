@@ -70,7 +70,15 @@ Most real investigation time is spent here, not in the setup stages. After
 3. **Steer the kernel into the failure.** Fault injection (`failslab` / `fail_page_alloc`
    via debugfs, if you built the kernel with `CONFIG_FAULT_INJECTION`), tracing (`ftrace`,
    `bpftrace`), and stress are all in-guest-over-SSH activities using tools you installed
-   (see "The guest is yours" above).
+   (see "The guest is yours" above). **To target one allocation site** instead of whatever
+   fires first: set `ignore-gfp-wait=N` (`Y`, the debugfs default, skips every `GFP_KERNEL`
+   allocation before `cache-filter`/`fail-nth` even run), pin `cache-filter` to the exact
+   slab-cache name from `/proc/slabinfo`, and boot with `slab_nomerge` so SLUB doesn't
+   merge same-size caches out from under your filter. Prefer `probability` over
+   `/proc/self/fail-nth` when more than one site can fire — `fail-nth` is global and trips
+   on the first eligible call in the process (e.g. `fail_usercopy`'s
+   `strncpy_from_user`), not necessarily the one you're after. This is manual guest-side
+   work today; #918 and #919 track a debugfs-driven fault-injection tool surface.
 
 **A panic drops your SSH channel.** When the kernel crashes, the SSH session dies with it, so
 whatever you were watching over SSH is gone. The **serial-console sidecar is the durable
