@@ -23,6 +23,7 @@
 ## File Structure
 
 - `src/kdive/mcp/tools/lifecycle/control.py` — power authz → contributor, READY-only admission, wrapper docstring/Field (Task 1).
+- `src/kdive/mcp/exposure.py` — `control.power` visibility tier `_OPERATOR` → `_CONTRIBUTOR` (Task 1).
 - `src/kdive/jobs/handlers/control.py` — `power_handler` READY re-check before physical op (Task 2).
 - `src/kdive/domain/operations/jobs.py` — drop `POWER` from `DESTRUCTIVE_JOB_KINDS`; add `OPT_IN_DESTRUCTIVE_JOB_KINDS` (Task 3).
 - `src/kdive/services/systems/validation.py` — accepted-token set from `OPT_IN_DESTRUCTIVE_JOB_KINDS` (Task 3).
@@ -33,11 +34,13 @@
 
 ---
 
-### Task 1: Reclassify power authz — contributor role, READY-only admission
+### Task 1: Reclassify power — contributor role + exposure tier, READY-only admission
 
 **Files:**
 - Modify: `src/kdive/mcp/tools/lifecycle/control.py` (`power_system`, module constants, wrapper docstring/Field, module docstring line 1-14)
-- Modify: `tests/mcp/core/test_tool_docs.py` (gate-caller backstop — see Step 1b)
+- Modify: `src/kdive/mcp/exposure.py` (line 119: `control.power` tier — see Step 1c)
+- Modify: `tests/mcp/core/test_tool_docs.py` (gate-caller backstop — see Step 1b), `tests/mcp/core/test_exposure.py` (visibility sets — see Step 1c)
+- Regenerate: `docs/guide/reference/control.md` (`just docs`), `docs/guide/safety-and-rbac.md` rbac-matrix region (`just rbac-matrix`)
 - Test: `tests/mcp/lifecycle/test_control_tools.py`
 
 **Interfaces:**
@@ -103,10 +106,18 @@ def test_power_on_crashed_system_is_config_error(migrated_url: str, action: str)
 
   Do **not** touch `_BEHAVIOR_TESTS_BY_TOOL` (the coverage map near line 42/67): `control.power` stays a registered, `implemented` tool covered by `test_control_tools.py`, and `test_active_tools_have_a_covering_test` asserts `active == mapped` — removing its entry would red that test. Leave `test_destructive_hint_matches_reviewed_set` unchanged too — `control.power` keeps its `_docmeta.destructive()` annotation (spec-retained), so the destructive-hint set is unaffected.
 
+- [ ] **Step 1c: Reclassify the exposure (discoverability) tier.** Tool *visibility* in `list_tools` and the generated RBAC matrix is driven by `src/kdive/mcp/exposure.py` (line 119: `"control.power": _OPERATOR`), separate from the handler's `require_role`. Without this, a contributor could invoke but not *see* `control.power` (contradicting ADR-0320). Change it to `_CONTRIBUTOR` and update the inline comment:
+
+```python
+    "control.power": _CONTRIBUTOR,  # leaseholder lifecycle over a READY transient VM (ADR-0320)
+```
+
+  In `tests/mcp/core/test_exposure.py`, move `"control.power"` out of `_ABOVE_CONTRIBUTOR` (line ~206) and add it to `_CONTRIBUTOR_LOOP` (line ~179). `test_operator_still_sees_the_whole_loop_and_above` recomputes from those frozensets, so it needs no manual edit. Leave `control.force_crash` in `_ABOVE_CONTRIBUTOR` (stays admin). `test_viewer_sees_reads_but_not_mutations` (line ~158, control.power still invisible to viewer) stays green.
+
 - [ ] **Step 2: Run the tests, verify they fail.**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py -q -k "power" && uv run python -m pytest tests/mcp/core/test_tool_docs.py -q`
-Expected: FAIL — the new contributor/CRASHED/viewer tests fail against current admin-gated behavior; the backstop equality assertion fails until Step 3 removes the gate branch.
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py -q -k "power" && uv run python -m pytest tests/mcp/core/test_tool_docs.py tests/mcp/core/test_exposure.py -q`
+Expected: FAIL — the new contributor/CRASHED/viewer tests fail against current admin-gated behavior; the backstop equality assertion fails until Step 3 removes the gate branch; `test_exposure.py` fails until Step 1c's exposure edit lands.
 
 - [ ] **Step 3: Implement the authz change in `control.py`.**
   - Delete constants `_POWER_ON_ACTIONS`, `_DESTRUCTIVE_POWER_ACTIONS`, `_STARTED_SYSTEM`, and the `_power_required_role` function.
@@ -149,20 +160,25 @@ Expected: FAIL — the new contributor/CRASHED/viewer tests fail against current
 
 - [ ] **Step 4: Run the tests, verify they pass.**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py -q -k "power" && uv run python -m pytest tests/mcp/core/test_tool_docs.py -q`
-Expected: PASS (both the control tests and the gate-caller backstop).
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py -q -k "power" && uv run python -m pytest tests/mcp/core/test_tool_docs.py tests/mcp/core/test_exposure.py -q`
+Expected: PASS (control tests, gate-caller backstop, and exposure/visibility sets).
 
-- [ ] **Step 5: Regenerate the tool reference, lint + type, then commit.**
+- [ ] **Step 5: Regenerate the generated docs, lint + type, then commit.**
 
-`docs/guide/reference/control.md` is GENERATED from the wrapper docstring/`Field` by `scripts/gen_tool_reference.py` (header: "do not edit. Regenerate: just docs"). Since Step 3 changed `control.power`'s docstring + `action` Field, regenerate it now or `just docs-check` (in `just ci`) will fail:
+`docs/guide/reference/control.md` is GENERATED from the wrapper docstring/`Field` (`scripts/gen_tool_reference.py`, header "do not edit. Regenerate: just docs"); the `docs/guide/safety-and-rbac.md` rbac-matrix region is generated from `exposure.py` (`just rbac-matrix`). Step 3's docstring change and Step 1c's exposure change make both stale, so regenerate both or `just docs-check`/`rbac-matrix-check` (in `just ci`) fail:
 
 ```bash
 just docs
+just rbac-matrix
 just lint && just type
-git add src/kdive/mcp/tools/lifecycle/control.py tests/mcp/lifecycle/test_control_tools.py \
-  tests/mcp/core/test_tool_docs.py docs/guide/reference/control.md
+just docs-check rbac-matrix-check   # confirm no residual drift
+git add src/kdive/mcp/tools/lifecycle/control.py src/kdive/mcp/exposure.py \
+  tests/mcp/lifecycle/test_control_tools.py tests/mcp/core/test_tool_docs.py \
+  tests/mcp/core/test_exposure.py docs/guide/reference/control.md docs/guide/safety-and-rbac.md
 git commit -m "feat(control): power is contributor-level, READY-only (#1062)"
 ```
+
+If `just rbac-matrix` also touches a snapshot test (`tests/scripts/test_gen_rbac_tool_matrix.py`), run it and update the expected fixture if it asserts the `control.power` row.
 
 ---
 
@@ -375,7 +391,7 @@ git commit -m "docs(profiles): surface destructive_ops scope in profile_examples
 
 **Files:**
 - Modify: `src/kdive/security/authz/gate.py` (module docstring), `docs/design/destructive-gate-per-op-revision.md`, hand-authored `docs/guide/**` control-power role prose, recovery note in `docs/guide/toolsets/control.md`
-- Regenerate (do NOT hand-edit): `docs/guide/reference/control.md` (done in Task 1 via `just docs`), the `toolsets-control.md` doc-resource snapshot (`just resources-docs`), and the rbac-tool-matrix region of `docs/guide/safety-and-rbac.md` (`just rbac-matrix`)
+- Regenerate (do NOT hand-edit): the `toolsets-control.md` doc-resource snapshot (`just resources-docs`). `docs/guide/reference/control.md` and the `docs/guide/safety-and-rbac.md` rbac-matrix region are already regenerated in Task 1 — do not touch them here.
 
 **Interfaces:** none (docs only).
 
@@ -385,7 +401,7 @@ git commit -m "docs(profiles): surface destructive_ops scope in profile_examples
 
 - [ ] **Step 2: Update `docs/design/destructive-gate-per-op-revision.md`.** Its "affected behavior" table row for `control.power off/cycle/reset` (admin + power-in-destructive_ops) is now stale. Replace that row with a note that power is reclassified to `contributor` lifecycle (READY-only) by ADR-0320, and remove `power` from the opt-in column; add a one-line "Superseded in part by ADR-0320" pointer near the table.
 
-- [ ] **Step 3: Audit and update hand-authored guide prose.** Run `rg -n "control.power|off/cycle/reset|power.*admin" docs/guide/`. Update only **hand-authored** prose stating the power role — change "admin"/"operator" for power to "contributor" and note READY-only admission; do not change `force_crash` text. **Skip** `docs/guide/reference/control.md` (regenerated in Task 1) and the `<!-- BEGIN/END GENERATED: rbac-tool-matrix -->` region of `docs/guide/safety-and-rbac.md` (regenerated in Step 5). For `safety-and-rbac.md`, edit only prose OUTSIDE those markers.
+- [ ] **Step 3: Audit and update hand-authored guide prose.** Run `rg -n "control.power|off/cycle/reset|power.*admin" docs/guide/`. Update only **hand-authored** prose stating the power role — change "admin"/"operator" for power to "contributor" and note READY-only admission; do not change `force_crash` text. **Skip** `docs/guide/reference/control.md` and the `<!-- BEGIN/END GENERATED: rbac-tool-matrix -->` region of `docs/guide/safety-and-rbac.md` — both were regenerated in Task 1. For `safety-and-rbac.md`, edit only hand-authored prose OUTSIDE those markers (there may be none — the power role there is matrix-driven).
 
 - [ ] **Step 4: Add the wedged-guest recovery note.** In `docs/guide/toolsets/control.md` (the hand-authored source that backs the `toolsets-control.md` doc-resource snapshot), add a short "Recovering a wedged guest" note: `control.power reset` (contributor) recovers a wedged **READY** guest; if it will not respond, or the System is not READY (wedged before boot, or CRASHED), fall back to `runs.install` (changed cmdline) + `runs.boot`, and for a CRASHED System use `capture_vmcore` → `teardown`/`reprovision`. Also apply the Step-3 power-role prose update here.
 
@@ -393,16 +409,15 @@ git commit -m "docs(profiles): surface destructive_ops scope in profile_examples
 
 ```bash
 just resources-docs          # regenerate the toolsets-control.md doc-resource snapshot
-just rbac-matrix             # regenerate the safety-and-rbac.md matrix region (no-op if exposure unchanged)
 just check-mermaid
-# Verify every generated-doc check is green (these run inside `just ci`):
+# Verify the generated-doc checks are green (these run inside `just ci`):
 just docs-check resources-docs-check rbac-matrix-check
-rg -n "Sprint|critical|robust|comprehensive|elegant" src/kdive/security/authz/gate.py docs/design/destructive-gate-per-op-revision.md docs/guide/toolsets/control.md docs/guide/safety-and-rbac.md
+rg -n "Sprint|critical|robust|comprehensive|elegant" src/kdive/security/authz/gate.py docs/design/destructive-gate-per-op-revision.md docs/guide/toolsets/control.md
 git add src/kdive/security/authz/gate.py docs/design/destructive-gate-per-op-revision.md docs/guide
 git commit -m "docs(control): power is contributor lifecycle; recovery note (#1062)"
 ```
 
-If `just docs-check`/`resources-docs-check`/`rbac-matrix-check` reports drift, run the matching `just docs`/`just resources-docs`/`just rbac-matrix`, `git add` the regenerated file, and re-check before committing.
+If any `*-check` reports drift, run the matching `just docs`/`just resources-docs`/`just rbac-matrix`, `git add` the regenerated file, and re-check before committing.
 
 ---
 
@@ -424,7 +439,7 @@ Expected: only `force_crash`/historical-ADR references remain; no live claim tha
 
 ## Self-Review notes
 
-- **Spec coverage:** Req 1/1a → Tasks 1+2; Req 2 (force_crash unchanged) → untouched, asserted by existing green tests; Req 3 + taxonomy + validator → Task 3; Req 4 (contract) → Task 1 Step 3; Req 5 (profile_examples) → Task 4; Req 6 (recovery note) → Task 5 Step 4; docs list → Task 5.
+- **Spec coverage:** Req 1/1a → Tasks 1+2 (invoke role + exposure tier + READY admission + worker re-check); Req 2 (force_crash unchanged) → untouched, asserted by existing green tests; Req 3 + taxonomy + validator → Task 3; Req 4 (contract) → Task 1 Step 3; Req 5 (profile_examples) → Task 4; Req 6 (recovery note) → Task 5 Step 4; exposure/visibility (spec Authorization §) → Task 1 Step 1c; docs list → Tasks 1+5.
 - **Reprovision opt-in regression** (spec test plan): already covered by the existing green test `tests/mcp/lifecycle/test_systems_tools.py::test_reprovision_without_profile_opt_in_denied` (a profile lacking `"reprovision"` is denied `profile_opt_in`). Since Task 3 keeps `REPROVISION` in `OPT_IN_DESTRUCTIVE_JOB_KINDS` and `_reprovision_opt_in` is unchanged, that test must stay green — no new test needed; run it in Task 3 Step 4 as a guard: `uv run python -m pytest tests/mcp/lifecycle/test_systems_tools.py::test_reprovision_without_profile_opt_in_denied -q`.
 - **Ordering:** Task 1 (removes the power→gate construction) precedes Task 3 (removes `POWER` from `DESTRUCTIVE_JOB_KINDS`) so no code constructs `DestructiveOp(POWER)` against a set that no longer contains it. Task 2 depends on nothing but is grouped with the handler. Tasks 4–5 are docs.
 - **Residual (#1078):** not implemented here; Task 5 keeps the design doc honest about scope.

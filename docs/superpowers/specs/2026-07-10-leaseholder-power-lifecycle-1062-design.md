@@ -159,6 +159,17 @@ the `resolver` dependency **remain** — `force_crash` still uses them.
 `power_system` also narrows its state admission from `_STARTED_SYSTEM` (`{READY, CRASHED}`)
 to `{READY}` — a non-`READY` System returns `configuration_error` (see Req 1a).
 
+**Tool exposure (discoverability) — a second authz source.** Tool *visibility* in
+`list_tools` and the generated RBAC matrix is driven by a separate map,
+`src/kdive/mcp/exposure.py` (`"control.power": _OPERATOR`), independent of the handler's
+`require_role`. Reclassifying only the invoke role would let a contributor *invoke*
+`control.power` but never *see* it — inconsistent with the leaseholder-recovery intent. So
+`exposure.py` must also move `control.power` from `_OPERATOR` to `_CONTRIBUTOR`. This
+shifts the tool in `tests/mcp/core/test_exposure.py` (from `_ABOVE_CONTRIBUTOR` to
+`_CONTRIBUTOR_LOOP`) and regenerates the `docs/guide/safety-and-rbac.md` rbac-tool-matrix
+row (`gen_rbac_tool_matrix.py` renders `required_scopes()` from `exposure.py`).
+`control.force_crash` stays `_ADMIN`.
+
 The `control.power` MCP annotation stays `_docmeta.destructive()`: the annotation is an
 agent *caution hint* (a hard reset still interrupts the guest), orthogonal to the authz
 classification. Changing it is out of scope.

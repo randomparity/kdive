@@ -83,6 +83,12 @@ opt-in).**
    follow-up #1078. `force_crash` (already `READY`-only) and `diagnostic_sysrq` are unaffected —
    they never used `_STARTED_SYSTEM`.
 
+1b. **Exposure.** Tool discoverability (`list_tools`, generated RBAC matrix) is driven by
+   `mcp/exposure.py`, separate from the handler's `require_role`. `control.power` moves from
+   `_OPERATOR` to `_CONTRIBUTOR` there too, so a contributor both sees and invokes it;
+   `control.force_crash` stays `_ADMIN`. The `docs/guide/safety-and-rbac.md` matrix row is
+   regenerated from this map.
+
 2. **Taxonomy.** `POWER` leaves `DESTRUCTIVE_JOB_KINDS`
    (`domain/operations/jobs.py`), which becomes `{REPROVISION, TEARDOWN, FORCE_CRASH}`.
    The gate's `DestructiveOp.__post_init__` keeps deriving from that set (so power can no
