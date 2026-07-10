@@ -21,6 +21,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 import pytest
+from fastmcp import Client, FastMCP
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
@@ -308,6 +309,174 @@ def test_set_breakpoint_returns_set(migrated_url: str) -> None:
         assert resp.status == "set"
         assert resp.data["number"] == "1"
         assert "debug.continue" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+async def _audit_rows(pool: AsyncConnectionPool, object_id: str) -> list[tuple[Any, ...]]:
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT principal, tool, object_kind, object_id::text, project, transition "
+            "FROM audit_log WHERE object_id = %s ORDER BY ts DESC",
+            (object_id,),
+        )
+        return await cur.fetchall()
+
+
+def test_op_audit_descriptor_covers_only_mutating_and_sensitive_ops() -> None:
+    # The audited set is the state-mutating engine ops + the sensitive raw-memory read. Pinning
+    # the exact set catches drift: an added privileged op is unaudited until listed, and a bounded
+    # read wrongly added here would start emitting per-op rows.
+    assert {
+        "debug.read_memory",
+        "debug.set_breakpoint",
+        "debug.clear_breakpoint",
+        "debug.set_watchpoint",
+        "debug.clear_watchpoint",
+        "debug.continue",
+        "debug.interrupt",
+        "debug.load_module_symbols",
+    } == debug_ops._AUDITED_OPS
+    assert debug_ops._op_audit("debug.read_memory", address="0x1", byte_count=4) == (
+        debug_ops._OpAudit(
+            tool="debug.read_memory",
+            transition="read_memory",
+            args={"address": "0x1", "byte_count": 4},
+        )
+    )
+    for bounded in ("debug.backtrace", "debug.read_registers", "debug.resolve_symbol"):
+        assert debug_ops._op_audit(bounded) is None
+
+
+async def _call_registered_debug_tool(
+    pool: AsyncConnectionPool,
+    runtime: DebugEngineRuntime,
+    *,
+    tool: str,
+    arguments: dict[str, object],
+    ctx: RequestContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> ToolResponse:
+    """Register the gdb-MI tools and invoke one through the FastMCP transport (the wrapper path)."""
+    monkeypatch.setattr(debug_ops, "current_context", lambda: ctx)
+    app: FastMCP = FastMCP(name="t")
+    debug_ops._register_debug_ops(app, pool, runtime)
+    async with Client(app) as client:
+        result = await client.call_tool(tool, arguments, raise_on_error=False)
+    assert result.structured_content is not None
+    return ToolResponse.model_validate(result.structured_content)
+
+
+def test_registered_set_breakpoint_handler_writes_audit_row(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Drive a mutating op through the REGISTERED wrapper (not run_engine_op directly) so the
+    # handler's own `audit=_op_audit("debug.set_breakpoint", ...)` wiring is exercised end-to-end.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-break-insert panic": [
+                        {"type": "result", "message": "done", "payload": {"bkpt": {"number": "1"}}}
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await _call_registered_debug_tool(
+                pool,
+                runtime,
+                tool="debug.set_breakpoint",
+                arguments={"session_id": session_id, "location": "panic"},
+                ctx=_ctx(),
+                monkeypatch=monkeypatch,
+            )
+            rows = await _audit_rows(pool, session_id)
+        assert resp.status == "set"
+        assert len(rows) == 1
+        assert rows[0][1] == "debug.set_breakpoint"
+        assert rows[0][5] == "set_breakpoint"
+
+    asyncio.run(_run())
+
+
+def test_read_memory_writes_audit_row(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-data-read-memory-bytes 0x1000 4": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {"memory": [{"contents": "deadbeef"}]},
+                        }
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for("read_memory", runtime, session_id, address=0x1000, byte_count=4),
+                audit=debug_ops._op_audit("debug.read_memory", address="0x1000", byte_count=4),
+            )
+            rows = await _audit_rows(pool, session_id)
+        assert len(rows) == 1
+        principal, tool, object_kind, object_id, project, transition = rows[0]
+        assert (principal, tool, object_kind, object_id, project, transition) == (
+            "user-1",
+            "debug.read_memory",
+            "debug_sessions",
+            session_id,
+            "proj",
+            "read_memory",
+        )
+
+    asyncio.run(_run())
+
+
+def test_non_audited_op_writes_no_audit_row(migrated_url: str) -> None:
+    # A bounded read passes no audit descriptor (its handler calls _op_audit, which returns None).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            runtime = _runtime(_CountingAttach())
+            await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for("read_registers", runtime, session_id, registers=["rip"]),
+                audit=debug_ops._op_audit("debug.read_registers"),
+            )
+            rows = await _audit_rows(pool, session_id)
+        assert rows == []
+
+    asyncio.run(_run())
+
+
+def test_gate_failure_writes_no_audit_row(migrated_url: str) -> None:
+    # A non-live session is rejected by the gate before the op runs, so no audit row is written
+    # even though an audit descriptor was supplied.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.DETACHED)
+            runtime = _runtime(_CountingAttach())
+            resp = await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for("read_memory", runtime, session_id, address=0x1000, byte_count=4),
+                audit=debug_ops._op_audit("debug.read_memory", address="0x1000", byte_count=4),
+            )
+            rows = await _audit_rows(pool, session_id)
+        assert resp.status == "error"
+        assert rows == []
 
     asyncio.run(_run())
 

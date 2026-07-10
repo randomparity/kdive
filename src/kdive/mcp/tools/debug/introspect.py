@@ -53,6 +53,7 @@ from kdive.providers.ports.retrieve import (
     LiveScriptOutput,
     VmcoreIntrospector,
 )
+from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 from kdive.serialization import JsonValue
@@ -357,7 +358,7 @@ async def introspect_script(
         async def _run_live_script_callback(
             resolved: LiveDrgnSession, runtime: ProviderRuntime, private_key: str
         ) -> ToolResponse:
-            return await _run_live_script(
+            resp = await _run_live_script(
                 session_id,
                 resolved=resolved,
                 script=script,
@@ -365,6 +366,9 @@ async def introspect_script(
                 introspector=runtime.live_introspector,
                 private_key=private_key,
             )
+            if resp.error_category is None:
+                await _audit_introspect_script(pool, ctx, resolved, script)
+            return resp
 
         return await _with_live_introspection(
             pool=pool,
@@ -373,6 +377,35 @@ async def introspect_script(
             session_id=session_id,
             mode=_LIVE_SCRIPT,
             action=_run_live_script_callback,
+        )
+
+
+async def _audit_introspect_script(
+    pool: AsyncConnectionPool, ctx: RequestContext, resolved: LiveDrgnSession, script: str
+) -> None:
+    """Attribute a successful introspect.script (arbitrary in-guest drgn exec) to the caller.
+
+    Post-hoc (the script already ran in-guest): one audit_log row against the DebugSession, built
+    from the session ``resolved`` inside the gate (not a second ``require_live`` resolve, which a
+    concurrent ``end_session`` could turn into a silently-dropped row). The script text rides
+    ``args`` for ``args_digest`` correlation only — hashed one-way, never stored plaintext.
+    """
+    async with pool.connection() as conn, conn.transaction():
+        await audit.record(
+            conn,
+            ctx,
+            audit.AuditEvent(
+                tool="introspect.script",
+                object_kind="debug_sessions",
+                object_id=resolved.session_id,
+                transition="script",
+                args={
+                    "session_id": str(resolved.session_id),
+                    "run_id": str(resolved.run_id),
+                    "script": script,
+                },
+                project=resolved.project,
+            ),
         )
 
 

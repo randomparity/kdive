@@ -24,7 +24,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID
@@ -54,10 +55,50 @@ from kdive.providers.ports.debug import (
 )
 from kdive.providers.ports.lifecycle import TransportHandleData
 from kdive.providers.shared.debug_common.gdbmi import MAX_MEMORY_READ_BYTES, MAX_MODULES
+from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.serialization import JsonValue
 
 _EngineOp = Callable[[GdbMiEngine, GdbMiAttachment], ToolResponse]
+
+
+@dataclass(frozen=True)
+class _OpAudit:
+    """The attribution to record for one Debug-plane op (ADR-0006/0028)."""
+
+    tool: str
+    transition: str
+    args: Mapping[str, object]
+
+
+# The Debug-plane ops that write an audit_log row on success: state-mutating engine ops
+# (breakpoints/watchpoints/continue/interrupt/symbol-load) and the sensitive raw-memory read.
+# Bounded pure reads (list_*, read_registers, resolve_symbol, backtrace, read_frame,
+# disassemble) are not audited — the session attach/detach rows plus the per-session transcript
+# already attribute them.
+_AUDITED_OPS: frozenset[str] = frozenset(
+    {
+        "debug.read_memory",
+        "debug.set_breakpoint",
+        "debug.clear_breakpoint",
+        "debug.set_watchpoint",
+        "debug.clear_watchpoint",
+        "debug.continue",
+        "debug.interrupt",
+        "debug.load_module_symbols",
+    }
+)
+
+
+def _op_audit(tool: str, **args: object) -> _OpAudit | None:
+    """Return the audit descriptor for an audited ``tool``, or None to skip auditing.
+
+    ``transition`` is the bare op name (``tool`` sans the ``debug.`` prefix); ``args`` are the
+    op parameters recorded for ``args_digest`` correlation (never raw memory bytes).
+    """
+    if tool not in _AUDITED_OPS:
+        return None
+    return _OpAudit(tool=tool, transition=tool.removeprefix("debug."), args=args)
 
 
 def _gdbmi_maturity() -> dict[str, object]:
@@ -212,12 +253,19 @@ async def run_engine_op(
     session_id: str,
     runtime: DebugEngineRuntime | DebugRuntimeResolver,
     op: _EngineOp,
+    *,
+    audit: _OpAudit | None = None,
 ) -> ToolResponse:
     """Gate the session, take the per-session lock, attach-or-reuse, and run ``op`` off-loop.
 
     The blocking engine work (attach + ``op``) is dispatched via ``asyncio.to_thread`` under the
     per-session ``asyncio.Lock`` so a long `continue` never stalls the event loop and only one
     op ever attaches/drives a given engine (ADR-0034 §4a/§4b).
+
+    When ``audit`` is set and the op succeeds, one ``audit_log`` row attributes the op to the
+    caller against the session (ADR-0006). The op already ran (an external engine call cannot be
+    rolled back), so this is a post-hoc attribution written after the engine lock is released; a
+    gate failure or op error returns before it, writing nothing.
     """
     with bind_context(principal=ctx.principal):
         gated = await _live_session(pool, ctx, session_id)
@@ -229,9 +277,35 @@ async def run_engine_op(
             return resolved_runtime
         async with resolved_runtime.lock_for(session_id):
             try:
-                return await asyncio.to_thread(_attach_and_run, resolved_runtime, session, op)
+                result = await asyncio.to_thread(_attach_and_run, resolved_runtime, session, op)
             except CategorizedError as exc:
                 return _op_failure(session_id, exc)
+        if audit is not None and result.error_category is None:
+            await _record_op_audit(pool, ctx, session, audit)
+        return result
+
+
+async def _record_op_audit(
+    pool: AsyncConnectionPool, ctx: RequestContext, session: DebugSession, op_audit: _OpAudit
+) -> None:
+    """Append one audit_log row attributing ``op_audit`` to the caller against ``session``."""
+    async with pool.connection() as conn, conn.transaction():
+        await audit.record(
+            conn,
+            ctx,
+            audit.AuditEvent(
+                tool=op_audit.tool,
+                object_kind="debug_sessions",
+                object_id=session.id,
+                transition=op_audit.transition,
+                args={
+                    "session_id": str(session.id),
+                    "run_id": str(session.run_id),
+                    **op_audit.args,
+                },
+                project=session.project,
+            ),
+        )
 
 
 async def _runtime_for_op(
@@ -555,6 +629,7 @@ def _register_debug_set_breakpoint(
             session_id,
             runtime,
             _set_breakpoint_op(session_id, location),
+            audit=_op_audit("debug.set_breakpoint", location=location),
         )
 
 
@@ -582,6 +657,7 @@ def _register_debug_clear_breakpoint(
             session_id,
             runtime,
             _clear_breakpoint_op(session_id, number),
+            audit=_op_audit("debug.clear_breakpoint", number=number),
         )
 
 
@@ -626,6 +702,7 @@ def _register_debug_read_memory(
             session_id,
             runtime,
             _read_memory_op(session_id, address, byte_count),
+            audit=_op_audit("debug.read_memory", address=f"0x{address:x}", byte_count=byte_count),
         )
 
 
@@ -715,6 +792,7 @@ def _register_debug_continue(
             session_id,
             runtime,
             _continue_op(session_id, timeout_sec),
+            audit=_op_audit("debug.continue", timeout_sec=timeout_sec),
         )
 
 
@@ -731,7 +809,12 @@ def _register_debug_interrupt(
     ) -> ToolResponse:
         """Send an interrupt to halt a running live DebugSession. Requires contributor."""
         return await run_engine_op(
-            pool, current_context(), session_id, runtime, _interrupt_op(session_id)
+            pool,
+            current_context(),
+            session_id,
+            runtime,
+            _interrupt_op(session_id),
+            audit=_op_audit("debug.interrupt"),
         )
 
 
@@ -865,6 +948,12 @@ def _register_debug_set_watchpoint(
             session_id,
             runtime,
             _set_watchpoint_op(session_id, symbol, address, byte_count),
+            audit=_op_audit(
+                "debug.set_watchpoint",
+                symbol=symbol,
+                address=None if address is None else f"0x{address:x}",
+                byte_count=byte_count,
+            ),
         )
 
 
@@ -910,6 +999,7 @@ def _register_debug_clear_watchpoint(
             session_id,
             runtime,
             _clear_watchpoint_op(session_id, number),
+            audit=_op_audit("debug.clear_watchpoint", number=number),
         )
 
 
@@ -969,4 +1059,9 @@ def _register_debug_load_module_symbols(
             session_id,
             runtime,
             _load_module_symbols_op(session_id, module, expected_base),
+            audit=_op_audit(
+                "debug.load_module_symbols",
+                module=module,
+                expected_base=None if expected_base is None else f"0x{expected_base:x}",
+            ),
         )

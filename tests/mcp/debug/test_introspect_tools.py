@@ -53,6 +53,16 @@ async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
         await pool.close()
 
 
+async def _audit_rows(pool: AsyncConnectionPool, object_id: str) -> list[tuple[Any, ...]]:
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT principal, tool, object_kind, object_id::text, project, transition "
+            "FROM audit_log WHERE object_id = %s ORDER BY ts DESC",
+            (object_id,),
+        )
+        return await cur.fetchall()
+
+
 def _output(*, comm: str = "init", truncated: bool = False) -> IntrospectOutput:
     return IntrospectOutput(
         tasks={"tasks": [{"pid": 1, "comm": comm}], "truncated": False},
@@ -858,6 +868,48 @@ def test_script_clamps_timeout_to_floor(migrated_url: str) -> None:
         assert port.kwargs["timeout_sec"] == 1.0
         assert resp.data["output"] == "ok"
         assert resp.data["truncated"] is False
+
+    asyncio.run(_run())
+
+
+def test_script_writes_audit_row(migrated_url: str) -> None:
+    # introspect.script runs arbitrary caller drgn in-guest; a successful run writes one audit row
+    # attributing the caller against the DebugSession (the script rides args_digest, not plaintext).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_drgn_session(pool)
+            resp = await introspect_tools.introspect_script(
+                pool,
+                _live_ctx(),
+                session_id=session_id,
+                script="print(prog['jiffies'])",
+                timeout_sec=5.0,
+                resolver=_live_resolver(_FakeLiveIntrospector()),
+            )
+            rows = await _audit_rows(pool, session_id)
+        assert resp.status != "error"
+        assert len(rows) == 1
+        assert rows[0] == ("u", "introspect.script", "debug_sessions", session_id, "proj", "script")
+
+    asyncio.run(_run())
+
+
+def test_script_failure_writes_no_audit_row(migrated_url: str) -> None:
+    # A non-drgn-live session is rejected before the script runs; no audit row is written.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_drgn_session(pool, transport="gdbstub")
+            resp = await introspect_tools.introspect_script(
+                pool,
+                _live_ctx(),
+                session_id=session_id,
+                script="print(1)",
+                timeout_sec=5.0,
+                resolver=_live_resolver(_FakeLiveIntrospector()),
+            )
+            rows = await _audit_rows(pool, session_id)
+        assert resp.status == "error"
+        assert rows == []
 
     asyncio.run(_run())
 
