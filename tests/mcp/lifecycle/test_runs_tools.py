@@ -3702,6 +3702,125 @@ def test_boot_after_install_step_enqueues(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_boot_fresh_marks_not_replayed(migrated_url: str) -> None:
+    # A first boot enqueues fresh work, so the envelope marks replayed=false (#1063).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            await _record_install_step(pool, run_id)
+            resp = await _boot(pool, _ctx(), run_id)
+        assert resp.status == "queued"
+        assert resp.data["replayed"] is False
+
+    asyncio.run(_run())
+
+
+def test_boot_repeat_on_succeeded_boot_marks_replayed(migrated_url: str) -> None:
+    # A repeat boot on a Run whose boot already succeeded returns the prior job unchanged and
+    # marks replayed=true, so a wedged-guest no-op is visibly distinct from a fresh boot (#1063).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            await _seed_installed_and_booted(pool, run_id, installed_cmdline=None)
+            resp = await _boot(pool, _ctx(), run_id)
+            njobs = await _count(
+                pool,
+                "SELECT count(*) AS n FROM jobs WHERE kind='boot' AND dedup_key=%s",
+                (f"{run_id}:boot",),
+            )
+        assert resp.status == "succeeded"  # prior terminal job returned unchanged
+        assert resp.data["replayed"] is True
+        assert njobs == 1  # no fresh boot enqueued
+
+    asyncio.run(_run())
+
+
+def test_boot_force_recycles_succeeded_boot(migrated_url: str) -> None:
+    # force=true recycles the settled boot step so a fresh boot runs without a re-stage: the
+    # succeeded boot job resets in place to a fresh queued attempt, marked replayed=false (#1063).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            await _seed_installed_and_booted(pool, run_id, installed_cmdline=None)
+            resp = await boot_run(pool, _ctx(), run_id, force=True)
+            boot_present = await _run_step_row_exists(pool, run_id, "boot")
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT state, attempt, error_category FROM jobs WHERE dedup_key=%s",
+                    (f"{run_id}:boot",),
+                )
+                job_row = await cur.fetchone()
+            njobs = await _count(
+                pool,
+                "SELECT count(*) AS n FROM jobs WHERE kind='boot' AND dedup_key=%s",
+                (f"{run_id}:boot",),
+            )
+        assert resp.status == "queued"
+        assert resp.data["replayed"] is False
+        assert not boot_present  # boot ledger row recycled so the worker re-runs the boot
+        assert job_row is not None
+        assert job_row["state"] == "queued"  # succeeded job reset in place
+        assert job_row["attempt"] == 0
+        assert job_row["error_category"] is None
+        assert njobs == 1  # recycled in place, no duplicate
+
+    asyncio.run(_run())
+
+
+def test_boot_force_rejected_while_boot_running(migrated_url: str) -> None:
+    # force must not recycle an in-flight boot: a running boot step is rejected step_in_progress,
+    # mirroring the runs.install re-stage guard (#1063).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            await _record_install_step(pool, run_id)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO run_steps (run_id, step, state, result) "
+                    "VALUES (%s, 'boot', 'running', NULL)",
+                    (run_id,),
+                )
+            resp = await boot_run(pool, _ctx(), run_id, force=True)
+            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='boot'", ())
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "step_in_progress"
+        assert njobs == 0  # no boot job enqueued or recycled
+
+    asyncio.run(_run())
+
+
+def test_boot_force_on_never_booted_enqueues_fresh(migrated_url: str) -> None:
+    # force on a Run that was installed but never booted is a fresh boot, same as force=false:
+    # nothing to recycle, replayed=false (#1063).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            await _record_install_step(pool, run_id)
+            resp = await boot_run(pool, _ctx(), run_id, force=True)
+            njobs = await _count(
+                pool,
+                "SELECT count(*) AS n FROM jobs WHERE kind='boot' AND dedup_key=%s",
+                (f"{run_id}:boot",),
+            )
+        assert resp.status == "queued"
+        assert resp.data["replayed"] is False
+        assert njobs == 1
+
+    asyncio.run(_run())
+
+
+def test_install_envelope_omits_replayed_marker(migrated_url: str) -> None:
+    # The replayed marker is boot-only: the runs.install envelope carries no replayed key (#1063).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            resp = await _install(pool, _ctx(), run_id)
+        assert resp.error_category is None
+        assert "replayed" not in resp.data
+
+    asyncio.run(_run())
+
+
 @pytest.mark.parametrize("state", [RunState.CREATED, RunState.FAILED])
 def test_boot_on_non_succeeded_run_is_config_error(migrated_url: str, state: RunState) -> None:
     async def _run() -> None:
