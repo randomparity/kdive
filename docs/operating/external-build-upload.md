@@ -29,11 +29,18 @@ CONFIG_KCSAN=y            # data-race detector
 CONFIG_FAULT_INJECTION=y  # failslab / fail_page_alloc via debugfs
 CONFIG_FAILSLAB=y
 CONFIG_FAIL_PAGE_ALLOC=y
-CONFIG_DEBUG_INFO_DWARF5=y  # DWARF for the optional vmlinux upload (see below)
+CONFIG_DEBUG_INFO_DWARF5=y  # DWARF/BTF: required for drgn to resolve any symbol (see below)
+CONFIG_DEBUG_INFO_BTF=y     # BTF: what in-guest drgn-live reads
 CONFIG_PROVE_LOCKING=y    # lockdep
 ```
 
-Enable `CONFIG_DEBUG_INFO_*` if you also plan to upload `vmlinux` for DWARF introspection.
+**`drgn` needs debuginfo to resolve any symbol.** Build with `CONFIG_DEBUG_INFO_BTF=y` (or DWARF)
+if you plan to use `drgn-live` introspection: `introspect.run` / `introspect.script` read symbols
+from the *in-guest* kernel's BTF, so a defconfig kernel without it resolves nothing. Alternatively
+build with `CONFIG_DEBUG_INFO_DWARF5=y` and also upload `vmlinux` for host-side DWARF introspection
+(offline `introspect.from_vmcore` and gdb). A drgn-live session or introspect over a kernel with
+neither returns a non-fatal `missing_debuginfo` warning naming the symbols to add. See
+`artifacts.feature_config_requirements` for the per-feature `CONFIG_*` manifest.
 
 ## The `kernel` artifact: one combined gzip tar
 

@@ -34,6 +34,7 @@ from kdive.db.repositories import DEBUG_SESSIONS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import DebugSessionState, RunState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import DebugSession, Run, System
+from kdive.kernel_config.gate import debuginfo_warning
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import ConfigErrorReason
@@ -63,6 +64,7 @@ from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.serialization import JsonValue
 
 _GDBSTUB = "gdbstub"
 _DRGN_LIVE = "drgn-live"
@@ -100,6 +102,8 @@ class _AttachRequest:
     session_id: UUID
     transport: DebugTransportKind
     connector: Connector
+    # Non-fatal drgn-live debuginfo warning (ADR-0322); spread into the `live` envelope when set.
+    missing_debuginfo: dict[str, JsonValue] | None = None
 
 
 @dataclass(frozen=True)
@@ -339,12 +343,29 @@ class DebugSessionHandlers:
         seeded = await self._seed_bootstrap_key(conn, system, transport, resources.profile_policy)
         if isinstance(seeded, ToolResponse):
             return seeded
+        missing = await self._debuginfo_warning(conn, run, transport)
         return _AttachRequest(
             run=run,
             system=system,
             session_id=session_id,
             transport=transport,
             connector=resources.connector,
+            missing_debuginfo=missing,
+        )
+
+    async def _debuginfo_warning(
+        self, conn: AsyncConnection, run: Run, transport: DebugTransportKind
+    ) -> dict[str, JsonValue] | None:
+        """Compute the non-fatal drgn-live ``missing_debuginfo`` warning (ADR-0322), else ``None``.
+
+        Only drgn-live resolves symbols from the in-guest kernel, so gdbstub (which symbolizes from
+        the host-side uploaded ``vmlinux``) never warns here. Runs outside the per-System lock — its
+        fail-open config read never blocks the attach.
+        """
+        if transport != _DRGN_LIVE:
+            return None
+        return await debuginfo_warning(
+            conn, run.id, has_uploaded_vmlinux=run.debuginfo_ref is not None
         )
 
     async def _seed_bootstrap_key(
@@ -543,11 +564,16 @@ async def _insert_session_locked(
                 project=request.run.project,
             ),
         )
+    data: dict[str, JsonValue] = {"project": request.run.project}
+    actions = ["debug.end_session"]
+    if request.missing_debuginfo is not None:
+        data["missing_debuginfo"] = request.missing_debuginfo
+        actions = ["artifacts.feature_config_requirements", "debug.end_session"]
     return ToolResponse.success(
         str(session.id),
         "live",
-        suggested_next_actions=["debug.end_session"],
-        data={"project": request.run.project},
+        suggested_next_actions=actions,
+        data=data,
     )
 
 

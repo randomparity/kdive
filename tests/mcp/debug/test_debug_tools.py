@@ -904,6 +904,125 @@ def test_start_session_drgn_live_attaches_and_row_records_transport(migrated_url
     asyncio.run(_run())
 
 
+# --- debug.start_session(drgn-live) missing_debuginfo warning (ADR-0322, #1064) ------------------
+
+
+def _patch_effective_config(config: Any) -> Any:
+    from unittest.mock import patch
+
+    async def _fake_load(conn: Any, run_id: Any, *, store_factory: Any = None) -> Any:
+        return config
+
+    return patch("kdive.kernel_config.gate.load_effective_config", _fake_load)
+
+
+def test_start_session_drgn_live_warns_when_config_lacks_debuginfo(migrated_url: str) -> None:
+    # ADR-0322: a drgn-live attach over a kernel whose uploaded config provably lacks DWARF/BTF and
+    # with no uploaded vmlinux stays `live` (non-fatal) but carries a symbol-naming warning.
+    from kdive.kernel_config.parse import KernelConfig
+
+    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_KERNEL"}))  # no DWARF/BTF
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
+            run_id = await _seed_run(pool, sys_id)  # no debuginfo_ref
+            with _patch_effective_config(cfg):
+                resp = await _start_session(
+                    pool,
+                    _ctx(),
+                    run_id=run_id,
+                    transport="drgn-live",
+                    connector=_OrderRecordingConnector([]),
+                )
+        assert resp.status == "live"  # non-fatal
+        warning = cast(dict[str, Any], resp.data["missing_debuginfo"])
+        assert warning["reason"] == "missing_debuginfo"
+        assert "DEBUG_INFO_BTF" in cast(list[str], warning["missing"])
+        assert "artifacts.feature_config_requirements" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+def test_start_session_drgn_live_no_warning_when_config_has_debuginfo(migrated_url: str) -> None:
+    from kdive.kernel_config.parse import KernelConfig
+
+    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"}))
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
+            run_id = await _seed_run(pool, sys_id)
+            with _patch_effective_config(cfg):
+                resp = await _start_session(
+                    pool,
+                    _ctx(),
+                    run_id=run_id,
+                    transport="drgn-live",
+                    connector=_OrderRecordingConnector([]),
+                )
+        assert resp.status == "live"
+        assert "missing_debuginfo" not in resp.data
+        assert resp.suggested_next_actions == ["debug.end_session"]
+
+    asyncio.run(_run())
+
+
+def test_start_session_drgn_live_uploaded_vmlinux_suppresses_warning(migrated_url: str) -> None:
+    # An uploaded host vmlinux (debuginfo_ref set) suppresses the warning even when the config
+    # lacks in-kernel debuginfo — the DWARF-via-vmlinux path must keep working (ADR-0322).
+    from kdive.kernel_config.parse import KernelConfig
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
+            run_id = await _seed_run(pool, sys_id)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE runs SET debuginfo_ref = %s WHERE id = %s",
+                    ("k/runs/r/vmlinux", UUID(run_id)),
+                )
+            with _patch_effective_config(KernelConfig(frozenset())):
+                resp = await _start_session(
+                    pool,
+                    _ctx(),
+                    run_id=run_id,
+                    transport="drgn-live",
+                    connector=_OrderRecordingConnector([]),
+                )
+        assert resp.status == "live"
+        assert "missing_debuginfo" not in resp.data
+
+    asyncio.run(_run())
+
+
+def test_start_session_gdbstub_never_warns_missing_debuginfo(migrated_url: str) -> None:
+    # gdbstub symbolizes from the host-side uploaded vmlinux, not in-guest debuginfo: the drgn-live
+    # warning never fires for it, regardless of the uploaded config (ADR-0322).
+    from kdive.kernel_config.parse import KernelConfig
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_run(pool, sys_id)
+            with _patch_effective_config(KernelConfig(frozenset())):
+                resp = await _start_session(
+                    pool,
+                    _ctx(),
+                    run_id=run_id,
+                    transport="gdbstub",
+                    connector=_OrderRecordingConnector([]),
+                )
+        assert resp.status == "live"
+        assert "missing_debuginfo" not in resp.data
+
+    asyncio.run(_run())
+
+
 def test_start_session_drgn_live_seeds_bootstrap_key_before_opening_transport(
     migrated_url: str,
 ) -> None:

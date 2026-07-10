@@ -27,7 +27,9 @@ from pydantic import Field
 
 import kdive.config as config
 from kdive.config.core_settings import LIVE_SCRIPT_MAX_TIMEOUT_SECONDS
+from kdive.db.repositories import RUNS
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.kernel_config.gate import debuginfo_warning
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ResponseData, ToolResponse
@@ -54,6 +56,7 @@ from kdive.providers.ports.retrieve import (
 )
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
+from kdive.serialization import JsonValue
 
 # The fixed live-helper set (ADR-0033 §2 / ADR-0039 §3): the same three in-tree helpers as the
 # offline path. There is no caller-supplied drgn script — an unknown helper is rejected.
@@ -156,6 +159,9 @@ class LiveDrgnSession(NamedTuple):
     transport_handle: str
     session_id: UUID
     system_id: UUID
+    run_id: UUID
+    # Non-fatal drgn-live debuginfo warning (ADR-0322); spread into the report when set.
+    missing_debuginfo: dict[str, JsonValue] | None = None
 
 
 type _LiveIntrospectionAction = Callable[
@@ -189,7 +195,11 @@ async def resolve_live_drgn_session(
     ):
         raise _session_config_error()
     return LiveDrgnSession(
-        resolved.project, resolved.transport_handle, resolved.session_id, resolved.system_id
+        resolved.project,
+        resolved.transport_handle,
+        resolved.session_id,
+        resolved.system_id,
+        resolved.session.run_id,
     )
 
 
@@ -210,9 +220,29 @@ async def _with_live_introspection(
             if denied is not None:
                 return denied
             private_key = await load_system_bootstrap_private_key(conn, resolved.system_id)
+            resolved = await _attach_debuginfo_warning(conn, resolved)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(session_id, exc)
     return await action(resolved, runtime, private_key)
+
+
+async def _attach_debuginfo_warning(
+    conn: AsyncConnection, resolved: LiveDrgnSession
+) -> LiveDrgnSession:
+    """Carry the non-fatal ``missing_debuginfo`` warning on the session (ADR-0322).
+
+    A live introspection over a debuginfo-less kernel resolves no symbols but does not raise, so the
+    handlers would report ``succeeded`` with blind output. This fail-open config read lets them warn
+    without refusing; a suppressed warning (uploaded ``vmlinux``, or config that carries debuginfo)
+    leaves the session unchanged.
+    """
+    run = await RUNS.get(conn, resolved.run_id)
+    if run is None:
+        return resolved
+    warning = await debuginfo_warning(
+        conn, resolved.run_id, has_uploaded_vmlinux=run.debuginfo_ref is not None
+    )
+    return resolved._replace(missing_debuginfo=warning)
 
 
 def _session_config_error() -> CategorizedError:
@@ -220,6 +250,15 @@ def _session_config_error() -> CategorizedError:
         "debug session does not resolve to a live drgn-live session",
         category=ErrorCategory.CONFIGURATION_ERROR,
     )
+
+
+def _with_debuginfo_warning(
+    data: ResponseData, missing_debuginfo: dict[str, JsonValue] | None
+) -> ResponseData:
+    """Add the non-fatal ``missing_debuginfo`` warning to a live-introspection report (ADR-0322)."""
+    if missing_debuginfo is not None:
+        data["missing_debuginfo"] = missing_debuginfo
+    return data
 
 
 async def introspect_run(
@@ -287,18 +326,19 @@ async def _introspect_live_session(
         return ToolResponse.failure_from_error(response_id, exc)
     sections = {"tasks": output.tasks, "modules": output.modules, "sysinfo": output.sysinfo}
     report = {helper: sections[helper]}
+    data = cast(
+        ResponseData,
+        {
+            "report": report,
+            "truncated": output.truncated,
+            "transcript_sensitivity": "sensitive",
+        },
+    )
     return ToolResponse.success(
         response_id,
         "succeeded",
         suggested_next_actions=["introspect.run", "debug.end_session"],
-        data=cast(
-            ResponseData,
-            {
-                "report": report,
-                "truncated": output.truncated,
-                "transcript_sensitivity": "sensitive",
-            },
-        ),
+        data=_with_debuginfo_warning(data, resolved.missing_debuginfo),
     )
 
 
@@ -378,18 +418,16 @@ async def _run_live_script(
             )
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(response_id, exc)
+    data: ResponseData = {
+        "output": output.output,
+        "truncated": output.truncated,
+        "transcript_sensitivity": "sensitive",
+    }
     return ToolResponse.success(
         response_id,
         "succeeded",
         suggested_next_actions=["introspect.script", "debug.end_session"],
-        data=cast(
-            ResponseData,
-            {
-                "output": output.output,
-                "truncated": output.truncated,
-                "transcript_sensitivity": "sensitive",
-            },
-        ),
+        data=_with_debuginfo_warning(data, resolved.missing_debuginfo),
     )
 
 
