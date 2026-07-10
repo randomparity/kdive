@@ -241,6 +241,20 @@ def test_create_system_upload_stays_operator_but_run_upload_drops() -> None:
     )
 
 
+def test_leaseholder_control_tools_classified_contributor() -> None:
+    # Leaseholder-control sweep (#1080): jobs.cancel and systems.authorize_ssh_key each act only
+    # on the caller's own already-granted transient resource and are weaker than powers a
+    # contributor already holds (runs.cancel is already contributor; authorize_ssh_key adds a key
+    # to a VM the caller already sudos). Both classify at contributor exactly, so a contributor
+    # discovers them and a viewer does not.
+    contributor = _ctx(roles={"a": Role.CONTRIBUTOR})
+    viewer = _ctx(roles={"a": Role.VIEWER})
+    for tool in ("jobs.cancel", "systems.authorize_ssh_key"):
+        assert required_scopes(tool) == frozenset({ExposureScope.PROJECT_CONTRIBUTOR}), tool
+        assert tool_visible(tool, contributor), tool
+        assert not tool_visible(tool, viewer), tool
+
+
 #: Every tool that operates on an *existing* live DebugSession routes through the single
 #: ``resolve_debug_session_context`` runtime gate (contributor, ADR-0234). The exposure scope is
 #: hand-maintained and drifted to VIEWER twice (debug.list_breakpoints, introspect.run), so this

@@ -7,8 +7,11 @@ error :class:`~kdive.mcp.responses.ToolResponse` (with the most specific
 ``ErrorCategory``), never an unhandled 500.
 
 Every read/cancel is **project-scoped**: a job is visible only to a caller with
-``viewer`` on the owning project (``authorizing->>'project'``), while cancellation requires
-``operator``. A by-id read or cancel of a job in an ungranted project returns the same
+``viewer`` on the owning project (``authorizing->>'project'``). Cancellation requires
+``contributor`` for leaseholder-lifecycle kinds (matching ``runs.cancel``) and ``operator`` for
+the provision lane and destructive kinds (provision/reprovision/teardown/force_crash), keyed off
+the job's kind, not its enqueuing principal. A by-id read or cancel of a job in an ungranted
+project returns the same
 not-found-shaped error as a missing job, so existence is not leaked (matching
 ``systems``/``runs``/``allocations`` getters); ``list`` returns only readable jobs.
 """
@@ -28,7 +31,7 @@ from pydantic import Field
 from kdive.db.repositories import JOBS, ObjectNotFound
 from kdive.domain.capacity.state import IllegalTransition, JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.operations.jobs import Job, JobKind
+from kdive.domain.operations.jobs import CONTRIBUTOR_CANCELABLE_JOB_KINDS, Job, JobKind
 from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
@@ -111,6 +114,15 @@ def _readable_projects(ctx: RequestContext) -> list[str]:
             continue
         readable.append(project)
     return readable
+
+
+def _cancel_role(kind: JobKind) -> Role:
+    """The role required to cancel a job of ``kind``, keyed off kind not enqueuing principal.
+
+    A contributor may cancel a leaseholder-lifecycle job it can itself start
+    (``CONTRIBUTOR_CANCELABLE_JOB_KINDS``); every other kind keeps the fail-closed operator gate.
+    """
+    return Role.CONTRIBUTOR if kind in CONTRIBUTOR_CANCELABLE_JOB_KINDS else Role.OPERATOR
 
 
 def _require_job_role(
@@ -212,7 +224,7 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str
             existing = await JOBS.get(conn, uid)
         if existing is None or not _in_scope(existing, ctx):
             return _not_found(job_id)
-        denied = _require_job_role(existing, ctx, Role.OPERATOR, job_id)
+        denied = _require_job_role(existing, ctx, _cancel_role(existing.kind), job_id)
         if denied is not None:
             return denied
         try:
@@ -354,7 +366,12 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def jobs_cancel(
         job_id: Annotated[str, Field(description="The Job to cancel.")],
     ) -> ToolResponse:
-        """Cancel a queued or running job."""
+        """Cancel a queued or running job.
+
+        A contributor may cancel their own lifecycle jobs (build/install/boot/power/
+        authorize_ssh_key/…). Cancelling a provisioning or destructive job
+        (provision/reprovision/teardown/force_crash) requires operator.
+        """
         return await cancel_job(pool, current_context(), job_id)
 
     @app.tool(

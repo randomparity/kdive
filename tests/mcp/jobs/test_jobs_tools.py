@@ -14,7 +14,11 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import JobState
-from kdive.domain.operations.jobs import JobKind
+from kdive.domain.operations.jobs import (
+    CONTRIBUTOR_CANCELABLE_JOB_KINDS,
+    DESTRUCTIVE_JOB_KINDS,
+    JobKind,
+)
 from kdive.jobs import queue
 from kdive.jobs.payloads import Authorizing, BuildPayload, SystemPayload
 from kdive.mcp.auth import RequestContext
@@ -28,6 +32,9 @@ WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.W
 CTX = RequestContext(principal="user-1", agent_session="s", projects=("proj",))
 OP_CTX = RequestContext(
     principal="user-1", agent_session="s", projects=("proj",), roles={"proj": Role.OPERATOR}
+)
+CONTRIB_CTX = RequestContext(
+    principal="user-1", agent_session="s", projects=("proj",), roles={"proj": Role.CONTRIBUTOR}
 )
 VIEWER_CTX = RequestContext(
     principal="user-1", agent_session="s", projects=("proj",), roles={"proj": Role.VIEWER}
@@ -75,6 +82,19 @@ async def _enqueue_in(pool: AsyncConnectionPool, dedup: str, project: str) -> st
 async def _enqueue(pool: AsyncConnectionPool, dedup: str) -> str:
     """Enqueue a job in ``CTX``'s project (the common case for these tests)."""
     return await _enqueue_in(pool, dedup, "proj")
+
+
+async def _enqueue_system_job(pool: AsyncConnectionPool, kind: JobKind, dedup: str) -> str:
+    """Enqueue a SystemPayload job of ``kind`` (provision/force_crash) owned by ``proj``."""
+    async with pool.connection() as conn:
+        job = await queue.enqueue(
+            conn,
+            kind,
+            SystemPayload(system_id=str(uuid4())),
+            Authorizing(principal="p", project="proj"),
+            dedup,
+        )
+    return str(job.id)
 
 
 async def _mark_failed_without_category(pool: AsyncConnectionPool, job_id: str) -> None:
@@ -146,6 +166,63 @@ def test_cancel_queued_job_transitions(migrated_url: str) -> None:
         assert resp.status == "canceled"
 
     asyncio.run(_run())
+
+
+def test_cancel_job_contributor_can_cancel(migrated_url: str) -> None:
+    # Leaseholder-control (#1080, ADR-0320): cancelling your own leaseholder-kind job is
+    # contributor, matching runs.cancel. A contributor cancels a queued build job they own.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue(pool, "d1")
+            resp = await jobs_tools.cancel_job(pool, CONTRIB_CTX, job_id)
+        assert resp.status == "canceled"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("kind", [JobKind.FORCE_CRASH, JobKind.PROVISION])
+def test_cancel_operator_gated_job_denied_to_contributor(migrated_url: str, kind: JobKind) -> None:
+    # Per-kind gate (#1080, ADR-0320): a destructive job (force_crash) and the operator-gated
+    # provision lane both keep the operator gate, so a contributor cannot veto an operator's op.
+    # PROVISION in particular is deliberately out of #1080's scope (the provision-lane RBAC
+    # review). The cancel must not land: the job stays queued.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue_system_job(pool, kind, f"opgate-{kind.value}")
+            with pytest.raises(RoleDenied) as excinfo:
+                await jobs_tools.cancel_job(pool, CONTRIB_CTX, job_id)
+            owned = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+        assert excinfo.value.held is Role.CONTRIBUTOR
+        assert excinfo.value.required is Role.OPERATOR
+        assert owned.status == "queued"
+
+    asyncio.run(_run())
+
+
+def test_cancel_operator_gated_job_allowed_to_operator(migrated_url: str) -> None:
+    # An operator may still cancel an operator-gated job — the pre-#1080 gate is preserved, so
+    # #1080 does not change who may cancel provision/destructive jobs.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue_system_job(pool, JobKind.FORCE_CRASH, "opgate-op")
+            resp = await jobs_tools.cancel_job(pool, OP_CTX, job_id)
+        assert resp.status == "canceled"
+
+    asyncio.run(_run())
+
+
+def test_cancel_role_classification_covers_every_kind_and_fails_closed() -> None:
+    # Guard the per-kind cancel gate against fail-open drift: every JobKind maps to contributor
+    # or operator, and every kind outside the contributor allowlist (all destructive kinds and
+    # the operator-gated provision lane) must fail closed to operator — so a newly added
+    # privileged kind is never silently contributor-cancellable.
+    for kind in JobKind:
+        role = jobs_tools._cancel_role(kind)
+        assert role in (Role.CONTRIBUTOR, Role.OPERATOR), kind
+        if kind not in CONTRIBUTOR_CANCELABLE_JOB_KINDS:
+            assert role is Role.OPERATOR, kind
+    assert not CONTRIBUTOR_CANCELABLE_JOB_KINDS & DESTRUCTIVE_JOB_KINDS  # destructive never lowered
+    assert JobKind.PROVISION not in CONTRIBUTOR_CANCELABLE_JOB_KINDS  # provision lane out of scope
 
 
 def test_cancel_terminal_job_is_error_envelope(migrated_url: str) -> None:
@@ -416,7 +493,8 @@ def test_cancel_job_in_unowned_project_is_denied_and_does_not_mutate(migrated_ur
     asyncio.run(_run())
 
 
-def test_cancel_job_requires_operator_role(migrated_url: str) -> None:
+def test_cancel_job_requires_contributor_role(migrated_url: str) -> None:
+    # Leaseholder-control (#1080, ADR-0320): a viewer cannot cancel — the gate is contributor.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
@@ -426,7 +504,7 @@ def test_cancel_job_requires_operator_role(migrated_url: str) -> None:
         assert excinfo.value.principal == "user-1"
         assert excinfo.value.project == "proj"
         assert excinfo.value.held is Role.VIEWER
-        assert excinfo.value.required is Role.OPERATOR
+        assert excinfo.value.required is Role.CONTRIBUTOR
         assert owned.status == "queued"
 
     asyncio.run(_run())
@@ -470,7 +548,7 @@ def test_cancel_job_requires_a_project_role(migrated_url: str) -> None:
         assert excinfo.value.principal == "user-1"
         assert excinfo.value.project == "proj"
         assert excinfo.value.held is None
-        assert excinfo.value.required is Role.OPERATOR
+        assert excinfo.value.required is Role.CONTRIBUTOR
         assert owned.status == "queued"
 
     asyncio.run(_run())

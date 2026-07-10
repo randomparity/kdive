@@ -170,7 +170,8 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "jobs.get": _VIEWER,
     "jobs.list": _VIEWER,
     "jobs.wait": _VIEWER,
-    "jobs.cancel": _OPERATOR,
+    "jobs.cancel": _CONTRIBUTOR,  # lowest bar: contributor cancels leaseholder-kind jobs; the
+    # handler keeps operator for the provision lane and destructive kinds
     # ops (platform)
     "ops.diagnostics": _PLAT_OP,
     "ops.export_cost_classes": _PLAT_OP,
@@ -222,7 +223,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "systems.teardown": _ADMIN,
     "systems.ssh_info": _VIEWER,
     "systems.check_ssh_reachable": _VIEWER,
-    "systems.authorize_ssh_key": _OPERATOR,
+    "systems.authorize_ssh_key": _CONTRIBUTOR,  # add a key to a VM the caller already sudos
     # vmcore
     "vmcore.list": _VIEWER,
     "vmcore.fetch": _CONTRIBUTOR,
