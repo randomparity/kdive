@@ -925,7 +925,9 @@ def test_c6_operator_refused_admin_ops(migrated_url: str) -> None:
                         max_concurrent_systems=1,
                     ),
                 )
-            # power off / teardown bind their admin check to a real System's project.
+            # teardown binds its admin check to a real System's project; an operator is
+            # refused it. (control.power is no longer admin — it is contributor lifecycle —
+            # so an operator may power a System; that path is covered in test_control_tools.)
             grant = await _request_allocation(
                 pool, op, project="proj", vcpus=2, memory_gb=4, window=3
             )
@@ -936,12 +938,6 @@ def test_c6_operator_refused_admin_ops(migrated_url: str) -> None:
                 profile=provisioning_profile(vcpu=2, memory_mb=4096, disk_gb=10),
             )
             sys_id = data_str(prov, "system_id")
-            async with pool.connection() as conn:
-                await conn.execute("UPDATE systems SET state = 'ready' WHERE id = %s", (sys_id,))
-            power = await control_tools.power_system(
-                pool, op, system_id=sys_id, action="off", resolver=_provider_resolver()
-            )
-            assert power.status == "error" and power.error_category == "authorization_denied"
             teardown = await teardown_system(pool, op, sys_id)
             assert teardown.status == "error"
             assert teardown.error_category == "authorization_denied"
