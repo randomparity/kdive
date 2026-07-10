@@ -139,6 +139,15 @@ the toolchain is present, but four extra requirements apply. Validated on Ubuntu
   export PYTEST_XDIST_AUTO_NUM_WORKERS=6   # tune to taste; 6-8 is comfortable
   ```
 
+- **VM provisioning is arch-aware but unproven on POWER.** A provisioned System's domain is
+  rendered from the profile architecture (`kdive.domain.platform`): ppc64le uses the `pseries`
+  machine type, the `hvc0` serial console (there is no `ttyS0` on pseries, so the readiness
+  marker and boot cmdline target `hvc0`), and lets libvirt assign the SSH NIC's PCI slot. The
+  catalog ships a `fedora-kdive-ready-44-ppc64le` image (Fedora's ppc64le Cloud Base, from the
+  `fedora-secondary` tree). This path is unit-tested but has no live end-to-end proof: the POWER
+  host exposes `/dev/kvm`, but `qemu-system-ppc64`, `libvirt`, and `virt-builder` are not yet set
+  up, so booting a ppc64le guest has not been validated.
+
 Docker Engine's official apt repository publishes `ppc64el` packages for current Ubuntu
 releases, and the `postgres` and `minio/minio` test images are multi-arch (they include
 `ppc64le`), so the standard Docker path and the disposable-container tests work unchanged.
