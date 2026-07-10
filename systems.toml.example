@@ -56,6 +56,14 @@ capabilities = ["ssh", "selinux", "kdump", "drgn"]
 kind = "s3"
 object_key = "rootfs/local/fedora-kdive-ready-44.qcow2"
 # digest = "sha256:…"   # uncomment once published to mark the row `registered`
+# Operator-attested capability operands (ADR-0323): an externally-baked `s3` image records no
+# build provenance, so `images.describe` reads `direct_kernel`/`kdump` `unverified` until you
+# attest what you baked. These make the pre-provision capability check actionable without a KDIVE
+# build; `images.describe` labels a signal computed from them `basis = "operator_attested"` (a
+# claim, not a kdive-verified fact). This image ships one kernel and makedumpfile 1.7.9.
+[image.attested]
+boot_kernel_count = 1
+makedumpfile_version = "1.7.9"
 
 # The kdive-ready local baseline rootfs (the former seed_data baseline), retained as the #817
 # regression reference (ADR-0251): its makedumpfile (1.7.8) cannot filter the newest kernels, so

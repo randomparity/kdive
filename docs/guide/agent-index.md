@@ -93,7 +93,10 @@ means `systems.reprovision`, which rebuilds and reboots the system. Run down thi
 your first provision so every irreversible choice is made up front:
 
 - **Base image** — pick it with `images.describe` and check its `kdump` and `direct_kernel`
-  `capability_signals` first (see the images guide). A wrong image can burn the allocation.
+  `capability_signals` first (see the images guide). A wrong image can burn the allocation. An
+  `unverified` signal is normal for an externally-baked or operator-staged image no one has
+  characterized — not a defect; the check becomes actionable once the image is published or the
+  operator attests it (`basis` then reads `build_verified` or `operator_attested`).
 - **Shape and disk** — size vCPUs, memory, and disk for the work; toolchains, reproducer
   builds, and captures all consume guest disk (see "The guest is yours").
 - **Kernel config** — the config is baked into the kernel you build and upload; enable the

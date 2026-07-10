@@ -12,7 +12,9 @@ from kdive.images.capability_signals import (
 from kdive.images.kdump_support import DEFAULT_KERNEL_BASIS
 
 
-def _entry(caps: list[Capability], provenance: dict[str, object]) -> ImageCatalogEntry:
+def _entry(
+    caps: list[Capability], provenance: dict[str, object], *, attested: bool = False
+) -> ImageCatalogEntry:
     return ImageCatalogEntry.model_validate(
         {
             "id": "00000000-0000-0000-0000-000000000001",
@@ -23,6 +25,7 @@ def _entry(caps: list[Capability], provenance: dict[str, object]) -> ImageCatalo
             "root_device": "/dev/vda",
             "capabilities": caps,
             "provenance": provenance,
+            "provenance_attested": attested,
             "visibility": ImageVisibility.PUBLIC,
             "pending_since": "2026-06-30T00:00:00Z",
             "created_at": "2026-06-30T00:00:00Z",
@@ -80,10 +83,11 @@ def test_direct_kernel_registered_and_off_the_planned_list() -> None:
 
 def test_direct_kernel_provisionable_for_single_kernel() -> None:
     block = render_direct_kernel_signal(_entry([], {"boot_kernel_count": 1}), DEFAULT_KERNEL_BASIS)
-    assert set(block) == {"boot_kernel_count", "status", "note"}
+    assert set(block) == {"boot_kernel_count", "status", "note", "basis"}
     assert block["boot_kernel_count"] == 1
     assert block["status"] == "provisionable"
     assert block["note"] == ""
+    assert block["basis"] == "build_verified"
 
 
 def test_direct_kernel_not_provisionable_for_multiple_kernels() -> None:
@@ -111,3 +115,42 @@ def test_direct_kernel_treats_bool_operand_as_absent() -> None:
     )
     assert block["status"] == "unverified"
     assert block["boot_kernel_count"] is None
+
+
+def test_direct_kernel_operator_attested_basis() -> None:
+    # A present operand from an operator attestation must read as a claim, not a verified fact.
+    block = render_direct_kernel_signal(
+        _entry([], {"boot_kernel_count": 1}, attested=True), DEFAULT_KERNEL_BASIS
+    )
+    assert block["status"] == "provisionable"
+    assert block["basis"] == "operator_attested"
+
+
+def test_direct_kernel_unverified_has_no_basis() -> None:
+    # An absent operand degrades to unverified with no basis — attestation never changes when
+    # unverified is emitted, only how a present operand is labelled (ADR-0323).
+    for attested in (False, True):
+        block = render_direct_kernel_signal(_entry([], {}, attested=attested), DEFAULT_KERNEL_BASIS)
+        assert block["status"] == "unverified"
+        assert "basis" not in block
+
+
+def test_kdump_signal_basis_operator_attested_when_present_and_attested() -> None:
+    block = render_kdump_signal(
+        _entry([Capability.KDUMP], {"makedumpfile_version": "1.7.9"}, attested=True),
+        DEFAULT_KERNEL_BASIS,
+    )
+    assert block["capability"] == "capable"
+    assert block["basis"] == "operator_attested"
+
+
+def test_kdump_signal_basis_build_verified_when_present_and_not_attested() -> None:
+    block = render_kdump_signal(
+        _entry([Capability.KDUMP], {"makedumpfile_version": "1.7.9"}), DEFAULT_KERNEL_BASIS
+    )
+    assert block["basis"] == "build_verified"
+
+
+def test_kdump_signal_absent_operand_has_no_basis() -> None:
+    block = render_kdump_signal(_entry([Capability.KDUMP], {}), DEFAULT_KERNEL_BASIS)
+    assert "basis" not in block

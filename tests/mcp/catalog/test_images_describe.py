@@ -50,6 +50,7 @@ async def _insert(
     state: str = "registered",
     capabilities: list[str] | None = None,
     provenance: str = "{}",
+    provenance_attested: bool = False,
     description: str | None = None,
 ) -> str:
     key = None if state == "defined" else f"images/local-libvirt/{name}/x86_64.qcow2"
@@ -58,9 +59,11 @@ async def _insert(
         cur = await conn.execute(
             "INSERT INTO image_catalog "
             "(provider, name, arch, format, root_device, object_key, digest, capabilities, "
-            " provenance, visibility, owner, expires_at, state, pending_since, description) "
+            " provenance, provenance_attested, visibility, owner, expires_at, state, "
+            " pending_since, description) "
             "VALUES ('local-libvirt', %(name)s, 'x86_64', 'qcow2', '/dev/vda', %(key)s, "
-            " %(digest)s, %(capabilities)s, %(provenance)s::jsonb, %(vis)s, %(owner)s, "
+            " %(digest)s, %(capabilities)s, %(provenance)s::jsonb, %(attested)s, %(vis)s, "
+            " %(owner)s, "
             " CASE WHEN %(vis)s = 'private' THEN now() + interval '1 hour' ELSE NULL END, "
             " %(state)s, now(), %(description)s) RETURNING id",
             {
@@ -69,6 +72,7 @@ async def _insert(
                 "digest": digest,
                 "capabilities": capabilities if capabilities is not None else [],
                 "provenance": provenance,
+                "attested": provenance_attested,
                 "vis": visibility,
                 "owner": owner,
                 "state": state,
@@ -270,7 +274,9 @@ def test_describe_exposes_capability_signals_with_kdump(migrated_url: str) -> No
             "capability",
             "min_makedumpfile_required",
             "note",
+            "basis",
         }
+        assert block["basis"] == "build_verified"
 
     asyncio.run(_run())
 
@@ -368,9 +374,33 @@ def test_describe_direct_kernel_provisionable_for_single_kernel(migrated_url: st
             )
             resp = await catalog_images.describe_image(pool, _ctx(), iid)
         block = _direct_kernel(resp)
-        assert set(block) == {"boot_kernel_count", "status", "note"}
+        assert set(block) == {"boot_kernel_count", "status", "note", "basis"}
         assert block["boot_kernel_count"] == 1
         assert block["status"] == "provisionable"
+        assert block["basis"] == "build_verified"
+
+    asyncio.run(_run())
+
+
+def test_describe_operator_attested_signal_and_flag(migrated_url: str) -> None:
+    """An operator-attested row surfaces data.provenance_attested and basis=operator_attested."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            iid = await _insert(
+                pool,
+                name="attested-s3",
+                visibility="public",
+                owner=None,
+                state="defined",
+                provenance='{"boot_kernel_count": 1}',
+                provenance_attested=True,
+            )
+            resp = await catalog_images.describe_image(pool, _ctx(), iid)
+        assert resp.data["provenance_attested"] is True
+        block = _direct_kernel(resp)
+        assert block["status"] == "provisionable"
+        assert block["basis"] == "operator_attested"
 
     asyncio.run(_run())
 

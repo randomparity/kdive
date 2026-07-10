@@ -222,8 +222,11 @@ def _describe_envelope(entry: ImageCatalogEntry, basis: KernelVersion) -> ToolRe
     Surfaces ``provenance`` verbatim (build metadata, no secret values), the boot layout, digest,
     capabilities, scope, publish state, and the computed ``capability_signals`` block (each signal
     keyed by name, computed for ``basis``; the signals are ``kdump`` and ``direct_kernel``).
-    ``expires_at`` is an ISO-8601 string when set (a ``datetime`` is not a ``JsonValue``), ``""``
-    otherwise.
+    ``provenance_attested`` is true when the provenance is an operator declaration (an ``s3``
+    image's ``[image.attested]`` operands, ADR-0323) rather than a KDIVE-verified fact; the same
+    distinction appears per-signal as ``capability_signals[*].basis`` (``operator_attested`` vs
+    ``build_verified``) on any signal whose operand is present. ``expires_at`` is an ISO-8601 string
+    when set (a ``datetime`` is not a ``JsonValue``), ``""`` otherwise.
     """
     return ToolResponse.success(
         str(entry.id),
@@ -243,6 +246,7 @@ def _describe_envelope(entry: ImageCatalogEntry, basis: KernelVersion) -> ToolRe
             "default_kernel_version": _default_kernel_version(entry.provenance),
             "description": entry.description or "",
             "provenance": entry.provenance,
+            "provenance_attested": entry.provenance_attested,
             "capability_signals": _capability_signals(entry, basis),
             "volume": entry.volume or "",
             "expires_at": entry.expires_at.isoformat() if entry.expires_at else "",
@@ -401,7 +405,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         (the capability for ``target_kernel``, kernel basis disclosed) and ``direct_kernel``
         (``status`` ``provisionable`` when ``/boot`` holds exactly one non-rescue kernel, else
         ``not_provisionable``/``unverified`` — read it before a direct-kernel provision so a
-        multi-kernel image does not burn an allocation on a fail-closed selection).
+        multi-kernel image does not burn an allocation on a fail-closed selection). A signal reads
+        ``unverified`` whenever its operand was never recorded — the normal, honest state for an
+        externally-baked image the operator has not attested and KDIVE has not built. When the
+        operand *is* present, ``basis`` discloses its evidence: ``build_verified`` (recorded by a
+        KDIVE build/publish) or ``operator_attested`` (declared by the operator, also flagged by
+        ``data.provenance_attested``); an ``operator_attested`` signal is a claim kdive did not
+        verify.
         """
         return await describe_image(pool, current_context(), image_id, target_kernel)
 

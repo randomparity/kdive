@@ -188,6 +188,74 @@ def test_s3_source_digest_optional() -> None:
     assert src.digest is None
 
 
+def _s3_image(**over: Any) -> dict[str, Any]:
+    img: dict[str, Any] = {
+        "provider": "local-libvirt",
+        "name": "i",
+        "arch": "x86_64",
+        "format": "qcow2",
+        "root_device": "/dev/vda",
+        "visibility": "public",
+        "source": {"kind": "s3", "object_key": "k"},
+    }
+    img.update(over)
+    return img
+
+
+def test_s3_attested_operands_parse() -> None:
+    d = _doc(
+        image=[_s3_image(attested={"boot_kernel_count": 1, "makedumpfile_version": "1.7.9"})],
+        remote_libvirt=[],
+    )
+    entry = InventoryDoc.parse(d).image[0]
+    assert entry.attested is not None
+    assert entry.attested.as_provenance() == {
+        "boot_kernel_count": 1,
+        "makedumpfile_version": "1.7.9",
+    }
+
+
+def test_s3_attested_single_operand_omits_unset() -> None:
+    d = _doc(image=[_s3_image(attested={"boot_kernel_count": 1})], remote_libvirt=[])
+    entry = InventoryDoc.parse(d).image[0]
+    assert entry.attested is not None
+    assert entry.attested.as_provenance() == {"boot_kernel_count": 1}
+
+
+def test_attested_rejected_on_non_s3_source() -> None:
+    # A build source owns publish-verified provenance and a staged-path source has its sidecar;
+    # attestation would let an operator claim shadow a verified fact (ADR-0323) — reject at load.
+    d = _doc(
+        image=[
+            {
+                "provider": "local-libvirt",
+                "name": "built",
+                "arch": "x86_64",
+                "format": "qcow2",
+                "root_device": "/dev/vda",
+                "visibility": "public",
+                "source": {"kind": "build", "base": "fedora-43"},
+                "attested": {"boot_kernel_count": 1},
+            }
+        ],
+        remote_libvirt=[],
+    )
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(d)
+
+
+def test_empty_attested_table_rejected() -> None:
+    d = _doc(image=[_s3_image(attested={})], remote_libvirt=[])
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(d)
+
+
+def test_attested_negative_boot_kernel_count_rejected() -> None:
+    d = _doc(image=[_s3_image(attested={"boot_kernel_count": -1})], remote_libvirt=[])
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(d)
+
+
 def test_build_source() -> None:
     d = _doc(
         image=[

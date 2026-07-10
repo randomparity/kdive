@@ -86,6 +86,35 @@ ImageSource = Annotated[
 _MAX_IMAGE_DESCRIPTION = 280
 
 
+class AttestedProvenance(BaseModel):
+    """Operator-attested capability operands for an externally-baked ``s3`` image (ADR-0323).
+
+    An operator who bakes an ``s3`` catalog image outside KDIVE can attest the two registered
+    capability-signal operands here; the reconciler synthesizes them into the row's ``provenance``
+    and marks it operator-attested (``image_catalog.provenance_attested``), so the pre-provision
+    ``direct_kernel``/``kdump`` check is actionable without a KDIVE build. These are operator
+    *claims*, not verified facts — ``images.describe`` labels a signal computed from them
+    ``basis = "operator_attested"``. Both fields are optional so an operator can attest just one;
+    :meth:`as_provenance` omits an unset operand entirely.
+    """
+
+    boot_kernel_count: int | None = Field(default=None, ge=0)
+    makedumpfile_version: str | None = None
+
+    def as_provenance(self) -> dict[str, object]:
+        """The declared operands as a provenance dict, omitting any unset operand."""
+        prov: dict[str, object] = {}
+        if self.boot_kernel_count is not None:
+            prov["boot_kernel_count"] = self.boot_kernel_count
+        if self.makedumpfile_version:
+            prov["makedumpfile_version"] = self.makedumpfile_version
+        return prov
+
+    def is_empty(self) -> bool:
+        """True when no operand is attested (an empty ``[image.attested]`` table)."""
+        return not self.as_provenance()
+
+
 class ImageEntry(BaseModel):
     """A single ``[[image]]`` declaration."""
 
@@ -98,11 +127,36 @@ class ImageEntry(BaseModel):
     capabilities: list[Capability] = Field(default_factory=list)
     source: ImageSource
     description: str = ""
+    attested: AttestedProvenance | None = None
 
     @property
     def identity(self) -> tuple[str, str, str]:
         """The stable identity tuple ``(provider, name, arch)``."""
         return (self.provider, self.name, self.arch)
+
+    @model_validator(mode="after")
+    def _attested_only_on_s3(self) -> Self:
+        """Restrict ``[image.attested]`` to ``s3`` sources with at least one operand (ADR-0323).
+
+        Only an externally-baked ``s3`` image lacks build-recorded operands and cannot carry a
+        build-fs sidecar, so attestation is the sole way to characterize it. A ``build`` source owns
+        publish-verified provenance and a ``staged-path`` source has its sidecar; attesting either
+        would let an operator claim shadow a verified fact, so it is rejected at load. An empty
+        table is a config mistake (attests nothing) and is likewise rejected.
+        """
+        if self.attested is None:
+            return self
+        if not isinstance(self.source, S3Source):
+            raise ValueError(
+                f"image {self.name!r} declares [image.attested] on a "
+                f"{self.source.kind!r} source; attestation is only supported for 's3' images"
+            )
+        if self.attested.is_empty():
+            raise ValueError(
+                f"image {self.name!r} declares an empty [image.attested] table; attest at least "
+                "one of boot_kernel_count / makedumpfile_version, or remove the table"
+            )
+        return self
 
     @model_validator(mode="after")
     def _description_within_cap(self) -> Self:

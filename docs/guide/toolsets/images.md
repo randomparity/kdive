@@ -3,7 +3,9 @@
 A system provisions from a base **image** — the guest rootfs (and its baked toolchain). The
 image you pick decides what the guest can do out of the box, so choose it before you
 provision: a multi-kernel or non-kdump image can burn an allocation on a capability the run
-needs. Reach for these to pick an image and read its capabilities first. For exact parameters,
+needs. A capability signal that reads `unverified` is not a failure — it is the honest state for
+an externally-baked image no one has characterized yet (see the `direct_kernel` note below).
+Reach for these to pick an image and read its capabilities first. For exact parameters,
 types, and return schema, read each tool's own description.
 
 ## Picking an image
@@ -28,8 +30,16 @@ types, and return schema, read each tool's own description.
   - `kdump` — whether the image can capture a vmcore for a target kernel (the crash-triage
     path depends on it).
   - `direct_kernel` — `provisionable` only when `/boot` holds exactly one non-rescue kernel;
-    a multi-kernel image reads `not_provisionable`/`unverified`, so a direct-kernel provision
-    would fail closed. Read it first so a multi-kernel image does not waste an allocation.
+    a multi-kernel image reads `not_provisionable`, so a direct-kernel provision would fail
+    closed. Read it first so a multi-kernel image does not waste an allocation.
+
+  A signal reads `unverified` when its operand was never recorded — the **normal, honest state**
+  for an externally-baked (`s3`) or operator-staged image that no one has characterized. It is not
+  a defect and does not block provisioning; it just means the pre-check cannot answer yet. The
+  check becomes actionable once the operand is recorded — either KDIVE built/published the image,
+  or the operator **attested** it in `systems.toml` (`[image.attested]`). When an operand is
+  present, `basis` says how it is known: `build_verified` (a KDIVE build) or `operator_attested`
+  (an operator claim kdive did not verify, also flagged by `provenance_attested`).
 - `images.kernel_config` — a short-lived download URL for the image's own `/boot/config-<ver>`.
   Use it as a **known-good starting `.config`** when you build a kernel locally: it already
   boots this image. kdive never validates the config you build from it. An image with no

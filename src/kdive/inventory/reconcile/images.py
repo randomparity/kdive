@@ -171,7 +171,8 @@ async def _load_config_rows(
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id, provider, name, arch, format, root_device, visibility, capabilities, "
-            "       object_key, digest, volume, path, provenance, state, description "
+            "       object_key, digest, volume, path, provenance, provenance_attested, state, "
+            "       description "
             "FROM image_catalog WHERE managed_by = %s",
             (CONFIG_MANAGED_BY,),
         )
@@ -201,13 +202,14 @@ async def _create_entry(
 ) -> None:
     """Insert a new config row, realizing it per its source kind."""
     head = await _resolve_s3_head(entry, None, store)
-    provenance = await _resolve_staged_provenance(entry, None)
-    realized, warning = _realize(entry, None, head, provenance)
+    provenance, attested = await _resolve_provenance(entry, None)
+    realized, warning = _realize(entry, None, head, provenance, attested)
     await conn.execute(
         "INSERT INTO image_catalog "
         "(provider, name, arch, format, root_device, visibility, capabilities, "
-        " object_key, volume, path, digest, provenance, state, managed_by, description) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        " object_key, volume, path, digest, provenance, provenance_attested, state, "
+        " managed_by, description) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             entry.provider,
             entry.name,
@@ -221,6 +223,7 @@ async def _create_entry(
             realized.path,
             realized.digest,
             Jsonb(realized.provenance),
+            realized.provenance_attested,
             realized.state,
             CONFIG_MANAGED_BY,
             entry.description or None,
@@ -250,14 +253,15 @@ async def _update_entry(
         "description": entry.description or None,
     }
     head = await _resolve_s3_head(entry, row, store)
-    provenance = await _resolve_staged_provenance(entry, row)
-    realized_image, warning = _realize(entry, row, head, provenance)
+    provenance, attested = await _resolve_provenance(entry, row)
+    realized_image, warning = _realize(entry, row, head, provenance, attested)
     realized = {
         "object_key": realized_image.object_key,
         "volume": realized_image.volume,
         "path": realized_image.path,
         "digest": realized_image.digest,
         "provenance": realized_image.provenance,
+        "provenance_attested": realized_image.provenance_attested,
         "state": realized_image.state,
     }
 
@@ -267,7 +271,8 @@ async def _update_entry(
         await conn.execute(
             "UPDATE image_catalog SET format = %s, root_device = %s, visibility = %s, "
             "capabilities = %s, object_key = %s, volume = %s, path = %s, digest = %s, "
-            "provenance = %s, state = %s, description = %s WHERE id = %s",
+            "provenance = %s, provenance_attested = %s, state = %s, description = %s "
+            "WHERE id = %s",
             (
                 desired["format"],
                 desired["root_device"],
@@ -278,6 +283,7 @@ async def _update_entry(
                 realized_image.path,
                 realized_image.digest,
                 Jsonb(realized_image.provenance),
+                realized_image.provenance_attested,
                 realized_image.state,
                 desired["description"],
                 row["id"],
@@ -298,6 +304,7 @@ class _RealizedImage:
     path: str | None
     digest: str | None
     provenance: dict[str, object]
+    provenance_attested: bool
 
 
 def _row_provenance(row: dict[str, object] | None) -> dict[str, object]:
@@ -308,23 +315,41 @@ def _row_provenance(row: dict[str, object] | None) -> dict[str, object]:
     return cast("dict[str, object]", value) if isinstance(value, dict) else {}
 
 
-async def _resolve_staged_provenance(
-    entry: ImageEntry, row: dict[str, object] | None
-) -> dict[str, object]:
-    """The provenance to persist for ``entry``: a staged-path sidecar, else the existing row value.
+def _row_attested(row: dict[str, object] | None) -> bool:
+    """The row's stored ``provenance_attested`` flag (``False`` for a new or missing row)."""
+    return bool(row.get("provenance_attested")) if row is not None else False
 
-    A ``staged-path`` source reads its ``<path>.provenance.json`` sidecar off the event loop (#977,
-    ADR-0296); a valid sidecar's provenance is adopted, and its absence preserves the row's existing
-    provenance (so an absent sidecar never wipes a populated row) and is debug-logged. Every other
-    source kind keeps the row's existing provenance unchanged — ``build``/``s3`` provenance is owned
-    by ``publish_image`` and must never be clobbered; ``staged`` (volume) has no sidecar location.
+
+async def _resolve_provenance(
+    entry: ImageEntry, row: dict[str, object] | None
+) -> tuple[dict[str, object], bool]:
+    """The ``(provenance, provenance_attested)`` to persist for ``entry``.
+
+    Precedence:
+
+    * an ``s3`` source with an ``[image.attested]`` table (ADR-0323) synthesizes the operator's
+      declared operands and marks them attested (``True``), so an externally-baked image gets an
+      actionable capability signal without a KDIVE build. It replaces the row's provenance (editing
+      an operand in the file updates the row) — an s3 image has no build-verified operands to
+      preserve;
+    * a ``staged-path`` source reads its ``<path>.provenance.json`` sidecar off the event loop
+      (#977, ADR-0296), adopted as build-verified (``False``); its absence preserves the row's
+      existing provenance and attested flag (so an absent sidecar never wipes a populated row);
+    * every other case keeps the row's existing provenance and attested flag unchanged. This
+      preserves ``build``/published ``s3`` provenance owned by ``publish_image`` **and** a prior
+      operator attestation whose ``[image.attested]`` table was removed — like an absent sidecar, an
+      absent table never wipes a populated row (and ``ops.export_systems_toml`` does not re-emit the
+      table, so a clear-on-absence would strip an attestation on an export round-trip). To change an
+      attestation, edit its operands; ``staged`` (volume) has no sidecar location.
     """
-    existing = _row_provenance(row)
+    existing = (_row_provenance(row), _row_attested(row))
     source = entry.source
+    if isinstance(source, S3Source) and entry.attested is not None:
+        return entry.attested.as_provenance(), True
     if isinstance(source, StagedPathSource):
         sidecar = await asyncio.to_thread(read_sidecar, Path(source.path))
         if sidecar is not None:
-            return sidecar
+            return sidecar, False
         _log.debug("inventory: staged-path image %s has no provenance sidecar", entry.name)
     return existing
 
@@ -334,6 +359,7 @@ def _realize(
     row: dict[str, object] | None,
     head: _S3Head,
     provenance: dict[str, object],
+    attested: bool,
 ) -> tuple[_RealizedImage, str | None]:
     """Compute the :class:`_RealizedImage` and an optional warning for an entry.
 
@@ -341,20 +367,26 @@ def _realize(
     ``s3`` whose object/digest is not yet confirmed) leaves a realized row exactly as it is,
     so the runtime-owned object_key/digest/state are preserved (invariant 1). A ``staged-path``
     source seeds ``registered`` with ``path`` set and the others NULL (ADR-0228); it is declared,
-    not probed — resolution at provision time is the gate. ``provenance`` is resolved by
-    :func:`_resolve_staged_provenance` and carried onto the row unchanged.
+    not probed — resolution at provision time is the gate. ``provenance``/``attested`` are resolved
+    by :func:`_resolve_provenance` and carried onto the row unchanged.
     """
     source = entry.source
+
+    def _built(
+        state: str, object_key: str | None, volume: str | None, path: str | None, digest: str | None
+    ) -> _RealizedImage:
+        return _RealizedImage(state, object_key, volume, path, digest, provenance, attested)
+
     if isinstance(source, StagedPathSource):
-        return _RealizedImage(_REGISTERED, None, None, source.path, None, provenance), None
+        return _built(_REGISTERED, None, None, source.path, None), None
     if isinstance(source, StagedSource):
-        return _RealizedImage(_REGISTERED, None, source.volume, None, None, provenance), None
+        return _built(_REGISTERED, None, source.volume, None, None), None
     if isinstance(source, BuildSource):
         state, object_key, volume, digest, warning = _realize_build(entry, row)
-        return _RealizedImage(state, object_key, volume, None, digest, provenance), warning
+        return _built(state, object_key, volume, None, digest), warning
     if isinstance(source, S3Source):
         state, object_key, volume, digest, warning = _realize_s3(entry, row, source, head)
-        return _RealizedImage(state, object_key, volume, None, digest, provenance), warning
+        return _built(state, object_key, volume, None, digest), warning
     raise AssertionError(f"unhandled image source kind: {source!r}")  # pragma: no cover
 
 
