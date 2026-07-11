@@ -37,7 +37,10 @@ from kdive.services.allocation.admission.metrics import AdmissionMetrics
 class _AllocationsListPayload(ToolPayload):
     """Public payload for ``allocations.list`` filters and pagination."""
 
-    project: str = Field(description="Project whose allocations to list.")
+    project: str | None = Field(
+        default=None,
+        description="Optional project whose allocations to list; omitted lists readable projects.",
+    )
     state: AllocationState | None = Field(
         default=None, description="Only allocations in this lifecycle state."
     )
@@ -182,15 +185,16 @@ def _register_allocations_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
     )
     async def allocations_list(
         request: Annotated[
-            _AllocationsListPayload,
+            _AllocationsListPayload | None,
             Field(description="Allocations list filters and pagination request."),
-        ],
+        ] = None,
     ) -> ToolResponse:
-        """List allocations visible in a project, newest first, filterable by state.
+        """List allocations visible to the caller, newest first, filterable by project and state.
 
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
         ``cursor`` for the next page. The ``state`` filter composes with the cursor.
         """
+        request = request or _AllocationsListPayload()
         return await _list_allocations(
             pool,
             current_context(),

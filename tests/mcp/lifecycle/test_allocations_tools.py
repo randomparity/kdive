@@ -210,7 +210,13 @@ async def _set_resource_flags(
             )
 
 
-async def _seed_alloc(pool: AsyncConnectionPool, resource_id: str, state: AllocationState) -> str:
+async def _seed_alloc(
+    pool: AsyncConnectionPool,
+    resource_id: str,
+    state: AllocationState,
+    *,
+    project: str = "proj",
+) -> str:
     # A queued `requested` row holds no host: resource_id must be NULL (the 0016 CHECK).
     placed = state is not AllocationState.REQUESTED
     async with pool.connection() as conn:
@@ -221,7 +227,7 @@ async def _seed_alloc(pool: AsyncConnectionPool, resource_id: str, state: Alloca
                 created_at=_DT,
                 updated_at=_DT,
                 principal="user-1",
-                project="proj",
+                project=project,
                 resource_id=UUID(resource_id) if placed else None,
                 state=state,
             ),
@@ -1039,6 +1045,46 @@ def test_list_returns_project_allocations(migrated_url: str) -> None:
         assert responses.data["project"] == "proj"
         assert len(items) == 2
         assert all(r.status == "granted" for r in items)
+
+    asyncio.run(_run())
+
+
+def test_list_allocations_without_project_returns_all_readable_projects(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res = await _register(pool, cap=3)
+            proj_id = await _seed_alloc(pool, res, AllocationState.GRANTED, project="proj")
+            other_id = await _seed_alloc(pool, res, AllocationState.GRANTED, project="other")
+            await _seed_alloc(pool, res, AllocationState.GRANTED, project="hidden")
+            ctx = RequestContext(
+                principal="user-1",
+                agent_session="s",
+                projects=("proj", "other", "hidden"),
+                roles={"proj": Role.VIEWER, "other": Role.CONTRIBUTOR},
+            )
+
+            responses = await list_allocations(pool, ctx, limit=50)
+
+        assert {item.object_id for item in responses.items} == {proj_id, other_id}
+        assert "project" not in responses.data
+        assert responses.suggested_next_actions == ["allocations.get", "allocations.release"]
+
+    asyncio.run(_run())
+
+
+def test_list_allocations_without_project_no_viewer_grants_is_empty(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=1)
+            await _request(pool, _ctx())
+
+            resp = await list_allocations(pool, _ctx(role=None), limit=50)
+
+        assert resp.status == "ok"
+        assert resp.items == []
+        assert resp.data["truncated"] is False
+        assert resp.data["next_cursor"] is None
+        assert resp.data["count"] == 0
 
     asyncio.run(_run())
 
