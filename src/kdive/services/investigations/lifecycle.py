@@ -17,7 +17,6 @@ from kdive.log import bind_context
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext, require_project
 from kdive.security.authz.rbac import Role, require_role
-from kdive.serialization import JsonValue
 from kdive.services.investigations.common import (
     ExternalRefInput,
     InvestigationErrorReason,
@@ -83,21 +82,6 @@ async def open_investigation_record(
         return inv
 
 
-def _state_error(
-    object_id: str,
-    reason: InvestigationErrorReason,
-    detail: str,
-    *,
-    data: dict[str, JsonValue] | None = None,
-) -> InvestigationServiceError:
-    return InvestigationServiceError(
-        object_id=object_id,
-        reason=reason,
-        detail=detail,
-        data=data or {},
-    )
-
-
 async def _close_locked(
     conn: AsyncConnection, ctx: RequestContext, uid: UUID, *, project: str
 ) -> Investigation:
@@ -111,9 +95,9 @@ async def _close_locked(
         if current.state is InvestigationState.CLOSED:
             return current
         if current.state is InvestigationState.ABANDONED:
-            raise _state_error(
-                str(uid),
-                InvestigationErrorReason.ABANDONED,
+            raise InvestigationServiceError(
+                object_id=str(uid),
+                reason=InvestigationErrorReason.ABANDONED,
                 detail="cannot close an abandoned Investigation",
                 data={"current_status": "abandoned"},
             )
@@ -154,9 +138,9 @@ async def close_investigation_record(
                         object_id=raw_id,
                         reason=InvestigationErrorReason.NOT_FOUND,
                     ) from None
-                raise _state_error(
-                    raw_id,
-                    InvestigationErrorReason.ILLEGAL_STATE,
+                raise InvestigationServiceError(
+                    object_id=raw_id,
+                    reason=InvestigationErrorReason.ILLEGAL_STATE,
                     detail=f"Investigation is {latest.state.value}, not closable",
                     data={"current_status": latest.state.value},
                 ) from None
