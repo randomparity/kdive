@@ -7,9 +7,9 @@ from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment, GdbModule, GdbModuleList
-from kdive.providers.shared.debug_common.debuginfo import ModuleDebuginfo
-from kdive.providers.shared.debug_common.gdbmi_host import GdbMiCommandHost
-from kdive.providers.shared.debug_common.mi_protocol import evaluate_value
+from kdive.providers.shared.debug_common.gdbmi.debuginfo import ModuleDebuginfo
+from kdive.providers.shared.debug_common.gdbmi.host import GdbMiCommandHost
+from kdive.providers.shared.debug_common.gdbmi.mi_protocol import evaluate_value
 
 MAX_MODULES = 512
 _MODULE_BASE_FIELDS = ("mem[0].base", "core_layout.base")

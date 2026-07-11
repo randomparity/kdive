@@ -11,8 +11,8 @@ from kdive.providers.ports.debug import (
     GdbInstruction,
     GdbMiAttachment,
 )
-from kdive.providers.shared.debug_common.gdbmi_host import GdbMiCommandHost
-from kdive.providers.shared.debug_common.mi_protocol import (
+from kdive.providers.shared.debug_common.gdbmi.host import GdbMiCommandHost
+from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
     MiRecord,
     disassembly_rows,
     mi_int,

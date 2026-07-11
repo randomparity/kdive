@@ -38,23 +38,20 @@ from kdive.providers.ports.debug import (
     GdbMiAttachment,
     GdbStopRecord,
 )
-from kdive.providers.shared.debug_common import execution as mi_execution
-from kdive.providers.shared.debug_common import mi_controller
-from kdive.providers.shared.debug_common.debuginfo import (
+from kdive.providers.shared.debug_common.gdbmi import execution as mi_execution
+from kdive.providers.shared.debug_common.gdbmi import mi_controller
+from kdive.providers.shared.debug_common.gdbmi.debuginfo import (
     ModuleDebuginfo,
     ModuleDebuginfoResolverSeam,
 )
-from kdive.providers.shared.debug_common.execution import (
+from kdive.providers.shared.debug_common.gdbmi.disassembly import GdbMiDisassemblyCommands
+from kdive.providers.shared.debug_common.gdbmi.execution import (
     MAX_INTERACTIVE_WAIT_SEC,
     ExecutionControl,
 )
-from kdive.providers.shared.debug_common.gdbmi_disassembly import GdbMiDisassemblyCommands
-from kdive.providers.shared.debug_common.gdbmi_modules import GdbMiModuleCommands
-from kdive.providers.shared.debug_common.gdbmi_stack import GdbMiStackCommands
-from kdive.providers.shared.debug_common.gdbmi_watchpoints import GdbMiWatchpointCommands
-from kdive.providers.shared.debug_common.hostpolicy import HostPolicy, require_loopback
-from kdive.providers.shared.debug_common.mi_controller import PygdbmiController
-from kdive.providers.shared.debug_common.mi_protocol import (
+from kdive.providers.shared.debug_common.gdbmi.hostpolicy import HostPolicy, require_loopback
+from kdive.providers.shared.debug_common.gdbmi.mi_controller import PygdbmiController
+from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
     MiRecord,
     breakpoint_rows,
     evaluate_value,
@@ -64,12 +61,15 @@ from kdive.providers.shared.debug_common.mi_protocol import (
     register_values_by_number,
     result_payload_dict,
 )
-from kdive.providers.shared.debug_common.mi_protocol import (
+from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
     register_names as parsed_register_names,
 )
-from kdive.providers.shared.debug_common.transcript import (
+from kdive.providers.shared.debug_common.gdbmi.modules import GdbMiModuleCommands
+from kdive.providers.shared.debug_common.gdbmi.stack import GdbMiStackCommands
+from kdive.providers.shared.debug_common.gdbmi.transcript import (
     append_transcript as write_transcript,
 )
+from kdive.providers.shared.debug_common.gdbmi.watchpoints import GdbMiWatchpointCommands
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 

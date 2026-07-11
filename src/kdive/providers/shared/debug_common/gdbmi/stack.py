@@ -7,8 +7,8 @@ from typing import Any
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbBacktrace, GdbFrame, GdbMiAttachment
-from kdive.providers.shared.debug_common.gdbmi_host import GdbMiCommandHost
-from kdive.providers.shared.debug_common.mi_protocol import MiRecord, mi_int, stack_frames
+from kdive.providers.shared.debug_common.gdbmi.host import GdbMiCommandHost
+from kdive.providers.shared.debug_common.gdbmi.mi_protocol import MiRecord, mi_int, stack_frames
 
 MAX_BACKTRACE_FRAMES = 64
 _RUNNING_RE = re.compile(r"running", re.IGNORECASE)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote, require_loopback
+from kdive.providers.shared.debug_common.gdbmi.hostpolicy import allow_acl_remote, require_loopback
 
 
 def test_require_loopback_accepts_loopback_literal():

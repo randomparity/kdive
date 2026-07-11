@@ -1220,7 +1220,7 @@ class _FakeConnector:
 
 # --- module symbols (#923, ADR-0278) --------------------------------------------------------
 
-from kdive.providers.shared.debug_common.debuginfo import ModuleDebuginfo  # noqa: E402
+from kdive.providers.shared.debug_common.gdbmi.debuginfo import ModuleDebuginfo  # noqa: E402
 
 
 def _module_walk_responses() -> dict[str, list[dict[str, object]]]:

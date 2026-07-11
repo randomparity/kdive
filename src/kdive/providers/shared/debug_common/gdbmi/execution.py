@@ -11,7 +11,7 @@ from kdive.providers.ports.debug import (
     GdbMiAttachment,
     GdbStopRecord,
 )
-from kdive.providers.shared.debug_common.mi_protocol import MiRecord
+from kdive.providers.shared.debug_common.gdbmi.mi_protocol import MiRecord
 
 MAX_INTERACTIVE_WAIT_SEC = 60
 STOP_POLL_SLICE_SEC = 0.5

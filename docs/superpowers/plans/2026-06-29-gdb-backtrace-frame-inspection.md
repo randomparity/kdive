@@ -32,7 +32,7 @@
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `tests/providers/local_libvirt/test_debug_gdbmi.py` (import `stack_frames` from `kdive.providers.shared.debug_common.mi_protocol` alongside the existing `evaluate_value` import):
+Add to `tests/providers/local_libvirt/test_debug_gdbmi.py` (import `stack_frames` from `kdive.providers.shared.debug_common.gdbmi.mi_protocol` alongside the existing `evaluate_value` import):
 
 ```python
 def test_stack_frames_extracts_frame_rows() -> None:
@@ -330,7 +330,7 @@ MAX_BACKTRACE_FRAMES = 64
 _RUNNING_RE = re.compile(r"running", re.IGNORECASE)
 ```
 
-3. Add `stack_frames` to the `from kdive.providers.shared.debug_common.mi_protocol import (...)` block.
+3. Add `stack_frames` to the `from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (...)` block.
 4. Add the methods (place after `resolve_symbol`, before the interactive-execution section):
 
 ```python

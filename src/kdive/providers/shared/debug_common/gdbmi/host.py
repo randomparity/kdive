@@ -13,11 +13,11 @@ from kdive.providers.ports.debug import (
     GdbModule,
     GdbWatchpointRef,
 )
-from kdive.providers.shared.debug_common.debuginfo import (
+from kdive.providers.shared.debug_common.gdbmi.debuginfo import (
     ModuleDebuginfo,
     ModuleDebuginfoResolverSeam,
 )
-from kdive.providers.shared.debug_common.mi_protocol import MiRecord
+from kdive.providers.shared.debug_common.gdbmi.mi_protocol import MiRecord
 from kdive.security.secrets.redaction import Redactor
 
 

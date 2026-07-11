@@ -15,7 +15,7 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment
-from kdive.providers.shared.debug_common import debuginfo
+from kdive.providers.shared.debug_common.gdbmi import debuginfo
 
 
 class _RecordingFetch:

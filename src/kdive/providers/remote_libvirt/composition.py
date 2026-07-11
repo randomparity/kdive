@@ -73,9 +73,9 @@ from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDump
 from kdive.providers.remote_libvirt.resource_details import project_resource_details
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
-from kdive.providers.shared.debug_common.debuginfo import real_module_debuginfo_resolver
 from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
-from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote
+from kdive.providers.shared.debug_common.gdbmi.debuginfo import real_module_debuginfo_resolver
+from kdive.providers.shared.debug_common.gdbmi.hostpolicy import allow_acl_remote
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env

@@ -7,8 +7,8 @@ from typing import Any
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment, GdbWatchpointRef
-from kdive.providers.shared.debug_common.gdbmi_host import GdbMiCommandHost
-from kdive.providers.shared.debug_common.mi_protocol import (
+from kdive.providers.shared.debug_common.gdbmi.host import GdbMiCommandHost
+from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
     MiRecord,
     breakpoint_rows,
     result_payload_dict,
