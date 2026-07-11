@@ -26,12 +26,10 @@ _ACTIVE_BY_SYSTEM_SQL: LiteralString = (
 
 
 async def active_session_ids_for_run(conn: AsyncConnection, run_id: UUID) -> list[str]:
-    """Return the ids of `attach`/`live` debug sessions for one Run (ADR-0176)."""
     return await _active_session_ids(conn, _ACTIVE_BY_RUN_SQL, run_id)
 
 
 async def active_session_ids_for_system(conn: AsyncConnection, system_id: UUID) -> list[str]:
-    """Return the ids of `attach`/`live` debug sessions for any Run on one System."""
     return await _active_session_ids(conn, _ACTIVE_BY_SYSTEM_SQL, system_id)
 
 

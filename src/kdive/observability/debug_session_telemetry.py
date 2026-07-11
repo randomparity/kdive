@@ -31,19 +31,11 @@ class DebugSessionTelemetry:
 
     @classmethod
     def disabled(cls) -> DebugSessionTelemetry:
-        """Return a no-op telemetry for tests or an un-instrumented run."""
         instance = cls.__new__(cls)
         instance._enabled = False
         return instance
 
     def record(self, transport: str, outcome: str, seconds: float) -> None:
-        """Record one session duration.
-
-        Args:
-            transport: The transport kind (``gdbstub`` or ``drgn-live``).
-            outcome: The close reason — ``ok``, ``error``, or ``reaped``.
-            seconds: Session lifetime in seconds.
-        """
         if not self._enabled or seconds < 0.0:
             return
         self._duration.record(seconds, {"transport": transport, "outcome": outcome})
