@@ -71,18 +71,6 @@ async def deregister_resource(
     (cordon if it ever held an allocation, hard-delete a never-allocated row), and writes the
     ledger entry in the same transaction so reconcile stops re-creating the still-declared host. A
     ``discovery``-owned row, or a config row of any other kind, is rejected (``conflict``).
-
-    Args:
-        pool: The shared async connection pool.
-        ctx: The caller's request context (must hold ``platform_admin``).
-        resource_id: The Resource UUID to deregister.
-        force: Typed confirmation required when the resource carries live allocations.
-        reason: Required (non-empty) audit reason for a config-owned removal; ignored for a
-            runtime row.
-
-    Returns:
-        A success envelope, or a typed failure envelope (authorization_denied / not_found /
-        configuration_error / conflict).
     """
     try:
         require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)
