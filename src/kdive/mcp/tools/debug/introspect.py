@@ -56,6 +56,7 @@ from kdive.providers.ports.retrieve import (
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
 
 # The fixed live-helper set (ADR-0033 §2 / ADR-0039 §3): the same three in-tree helpers as the
@@ -213,6 +214,7 @@ async def _with_live_introspection(
     ctx: RequestContext,
     session_id: str,
     mode: IntrospectionMode,
+    secret_registry: SecretRegistry,
     action: _LiveIntrospectionAction,
 ) -> ToolResponse:
     async with pool.connection() as conn:
@@ -222,7 +224,9 @@ async def _with_live_introspection(
             denied = _require_introspection(session_id, runtime, mode)
             if denied is not None:
                 return denied
-            private_key = await load_system_bootstrap_private_key(conn, resolved.system_id)
+            private_key = await load_system_bootstrap_private_key(
+                conn, resolved.system_id, secret_registry=secret_registry
+            )
             # A live introspection over a debuginfo-less kernel resolves no symbols but does not
             # raise, so the handlers would report `succeeded` with blind output. This fail-open
             # read lets them warn (never refuse) — the `debuginfo_ref` was resolved with the
@@ -259,6 +263,7 @@ async def introspect_run(
     session_id: str,
     helper: str,
     resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
 ) -> ToolResponse:
     """Run live drgn introspection over a `live` drgn-live DebugSession; return a redacted report.
 
@@ -291,6 +296,7 @@ async def introspect_run(
             ctx=ctx,
             session_id=session_id,
             mode=_LIVE_INTROSPECTION,
+            secret_registry=secret_registry,
             action=_run_live_helper,
         )
 
@@ -341,6 +347,7 @@ async def introspect_script(
     script: str,
     timeout_sec: float,
     resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
 ) -> ToolResponse:
     """Run a caller drgn script over a `live` drgn-live DebugSession; return capped stdout.
 
@@ -376,6 +383,7 @@ async def introspect_script(
             ctx=ctx,
             session_id=session_id,
             mode=_LIVE_SCRIPT,
+            secret_registry=secret_registry,
             action=_run_live_script_callback,
         )
 
@@ -454,7 +462,13 @@ async def _run_live_script(
     )
 
 
-def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:
+def register(
+    app: FastMCP,
+    pool: AsyncConnectionPool,
+    *,
+    resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
+) -> None:
     """Register the `introspect.from_vmcore`, `introspect.run`, and `introspect.script` tools."""
 
     @app.tool(
@@ -511,6 +525,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             session_id=session_id,
             helper=helper,
             resolver=resolver,
+            secret_registry=secret_registry,
         )
 
     @app.tool(
@@ -549,4 +564,5 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             script=script,
             timeout_sec=timeout_sec,
             resolver=resolver,
+            secret_registry=secret_registry,
         )

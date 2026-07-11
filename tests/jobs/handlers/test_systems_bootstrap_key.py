@@ -35,6 +35,7 @@ from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.payloads import ReprovisionPayload, SystemPayload
 from kdive.prereqs.system_bootstrap_key import ensure_system_bootstrap_key
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.systems_support import PROVISIONING_PROFILE, provider_resolver
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -172,7 +173,9 @@ def test_provision_handler_ensures_key_and_passes_one_customizer(migrated_url: s
                 await systems_handlers.provision_handler(conn, job, resolver=resolver)
             count = await _key_row_count(pool, system_id)
             async with pool.connection() as conn:
-                pubkey = await ensure_system_bootstrap_key(conn, system_id)
+                pubkey = await ensure_system_bootstrap_key(
+                    conn, system_id, secret_registry=SecretRegistry()
+                )
             return (
                 len(prov.recorded["overlay_customizers"]),
                 count,
@@ -254,7 +257,7 @@ def test_teardown_handler_deletes_key_row(migrated_url: str) -> None:
                 pool, SystemState.READY, provisioning_profile=PROVISIONING_PROFILE
             )
             async with pool.connection() as conn:
-                await ensure_system_bootstrap_key(conn, system_id)
+                await ensure_system_bootstrap_key(conn, system_id, secret_registry=SecretRegistry())
             prov = _RecordingProvisioner()
             resolver = provider_resolver(provisioner=prov)
             async with pool.connection() as conn:

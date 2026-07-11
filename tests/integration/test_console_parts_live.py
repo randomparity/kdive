@@ -41,6 +41,7 @@ from kdive.prereqs.system_bootstrap_key import (
 )
 from kdive.providers.shared.libvirt_xml import recorded_ssh_port
 from kdive.providers.shared.runtime_paths import domain_name_for
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.harness import LiveStackClient, OidcIssuer
 from tests.integration.live_stack.spine import (
@@ -383,7 +384,9 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
             # scenario.
             async with phase("emit-proof-lines"):
                 async with await psycopg.AsyncConnection.connect(db_url) as key_conn:
-                    private_key = await load_system_bootstrap_private_key(key_conn, UUID(system_id))
+                    private_key = await load_system_bootstrap_private_key(
+                        key_conn, UUID(system_id), secret_registry=SecretRegistry()
+                    )
                 libvirt_conn = libvirt.open("qemu:///system")
                 try:
                     domain = libvirt_conn.lookupByName(domain_name_for(UUID(system_id)))

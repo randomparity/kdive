@@ -210,7 +210,7 @@ def test_handler_authorizes_via_per_system_key_and_cleans_up_temp_key(
             await pool.open()
             async with pool.connection() as conn:
                 system_id = await _seed_system(conn)
-                await ensure_system_bootstrap_key(conn, system_id)
+                await ensure_system_bootstrap_key(conn, system_id, secret_registry=SecretRegistry())
                 job = _job_for(system_id)
                 resolver = _resolver(("127.0.0.1", 22022))
 
@@ -254,7 +254,7 @@ def test_handler_resolves_endpoint_by_domain_name(migrated_url: str) -> None:
             await pool.open()
             async with pool.connection() as conn:
                 system_id = await _seed_system(conn)
-                await ensure_system_bootstrap_key(conn, system_id)
+                await ensure_system_bootstrap_key(conn, system_id, secret_registry=SecretRegistry())
                 job = _job_for(system_id)
                 resolver = _resolver(("127.0.0.1", 22022))
                 connector = resolver.binding_for_system.return_value.runtime.connector
@@ -283,7 +283,7 @@ def test_handler_ssh_failure_propagates_transport_failure(migrated_url: str) -> 
             await pool.open()
             async with pool.connection() as conn:
                 system_id = await _seed_system(conn)
-                await ensure_system_bootstrap_key(conn, system_id)
+                await ensure_system_bootstrap_key(conn, system_id, secret_registry=SecretRegistry())
                 job = _job_for(system_id)
                 resolver = _resolver(("127.0.0.1", 22022))
                 with pytest.raises(CategorizedError) as excinfo:

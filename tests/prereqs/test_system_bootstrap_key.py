@@ -19,6 +19,7 @@ from kdive.prereqs.system_bootstrap_key import (
     load_system_bootstrap_private_key,
     materialized_private_key,
 )
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 
 def test_generate_keypair_returns_ed25519_pair_and_leaves_no_scratch() -> None:
@@ -83,8 +84,11 @@ def test_ensure_is_idempotent_one_row_one_pubkey(migrated_url: str) -> None:
             await pool.open()
             async with pool.connection() as conn:
                 system_id = await _seed_system(conn)
-                first = await ensure_system_bootstrap_key(conn, system_id)
-                second = await ensure_system_bootstrap_key(conn, system_id)
+                registry = SecretRegistry()
+                first = await ensure_system_bootstrap_key(conn, system_id, secret_registry=registry)
+                second = await ensure_system_bootstrap_key(
+                    conn, system_id, secret_registry=registry
+                )
                 row = await (
                     await conn.execute(
                         "SELECT count(*) FROM system_bootstrap_keys WHERE system_id = %s",
@@ -104,11 +108,16 @@ def test_load_returns_private_key_and_raises_when_absent(migrated_url: str) -> N
             await pool.open()
             async with pool.connection() as conn:
                 system_id = await _seed_system(conn)
+                registry = SecretRegistry()
                 with pytest.raises(CategorizedError) as excinfo:
-                    await load_system_bootstrap_private_key(conn, system_id)
+                    await load_system_bootstrap_private_key(
+                        conn, system_id, secret_registry=registry
+                    )
                 assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
-                await ensure_system_bootstrap_key(conn, system_id)
-                return await load_system_bootstrap_private_key(conn, system_id)
+                await ensure_system_bootstrap_key(conn, system_id, secret_registry=registry)
+                return await load_system_bootstrap_private_key(
+                    conn, system_id, secret_registry=registry
+                )
 
     assert "OPENSSH PRIVATE KEY" in asyncio.run(_run())
 
@@ -119,10 +128,13 @@ def test_delete_is_idempotent(migrated_url: str) -> None:
             await pool.open()
             async with pool.connection() as conn:
                 system_id = await _seed_system(conn)
-                await ensure_system_bootstrap_key(conn, system_id)
+                registry = SecretRegistry()
+                await ensure_system_bootstrap_key(conn, system_id, secret_registry=registry)
                 await delete_system_bootstrap_key(conn, system_id)
                 await delete_system_bootstrap_key(conn, system_id)  # no-op, no raise
                 with pytest.raises(CategorizedError):
-                    await load_system_bootstrap_private_key(conn, system_id)
+                    await load_system_bootstrap_private_key(
+                        conn, system_id, secret_registry=registry
+                    )
 
     asyncio.run(_run())

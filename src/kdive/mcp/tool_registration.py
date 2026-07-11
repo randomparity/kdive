@@ -166,7 +166,9 @@ def _register_debug_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: App
 def _register_introspection_tools(
     app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
 ) -> None:
-    introspect.register(app, pool, resolver=assembly.resolver)
+    introspect.register(
+        app, pool, resolver=assembly.resolver, secret_registry=assembly.secret_registry
+    )
 
 
 def _register_diagnostics_tools(

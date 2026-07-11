@@ -32,6 +32,7 @@ from kdive.providers.ports.retrieve import (
     LiveScriptOutput,
 )
 from kdive.security.authz.rbac import AuthorizationError, Role
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.json_data import data_mapping, json_mapping, json_sequence
 
@@ -304,7 +305,7 @@ async def _call_registered_tool(
     """Register the introspect tools and invoke one through the FastMCP transport (wrapper path)."""
     monkeypatch.setattr(introspect_tools, "current_context", lambda: ctx)
     app: FastMCP = FastMCP(name="t")
-    introspect_tools.register(app, pool, resolver=resolver)
+    introspect_tools.register(app, pool, resolver=resolver, secret_registry=SecretRegistry())
     async with Client(app) as client:
         result = await client.call_tool(tool, arguments, raise_on_error=False)
     assert result.structured_content is not None
@@ -413,7 +414,7 @@ def test_register_adds_the_tool() -> None:
             ),
         )
         resolver = ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
-        introspect_tools.register(app, pool, resolver=resolver)
+        introspect_tools.register(app, pool, resolver=resolver, secret_registry=SecretRegistry())
         tools = await app.list_tools()
         names = {t.name for t in tools}
         assert "introspect.from_vmcore" in names
@@ -522,7 +523,7 @@ async def _seed_live_drgn_session(
     )
     if with_bootstrap_key:
         async with pool.connection() as conn:
-            await ensure_system_bootstrap_key(conn, UUID(sys_id))
+            await ensure_system_bootstrap_key(conn, UUID(sys_id), secret_registry=SecretRegistry())
     handle = transport_handle if transport_handle is not None else f"{transport}://127.0.0.1:22"
     async with pool.connection() as conn:
         session = await DEBUG_SESSIONS.insert(
@@ -554,6 +555,7 @@ def test_run_live_routes_bare_domain_handle_to_introspector(migrated_url: str) -
                 _live_ctx(),
                 session_id=session_id,
                 helper="tasks",
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(port),
             )
         assert resp.status != "error"
@@ -592,6 +594,7 @@ def test_run_live_loads_and_materializes_the_per_system_bootstrap_key(migrated_u
                 _live_ctx(),
                 session_id=session_id,
                 helper="tasks",
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(port),
             )
         return resp, port
@@ -617,6 +620,7 @@ def test_run_live_no_bootstrap_key_is_configuration_error(migrated_url: str) -> 
                 _live_ctx(),
                 session_id=session_id,
                 helper="tasks",
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(port),
             )
 
@@ -635,6 +639,7 @@ def test_run_live_happy_path_returns_redacted_report(migrated_url: str) -> None:
                 _live_ctx(),
                 session_id=session_id,
                 helper="tasks",
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(port),
             )
         assert resp.status != "error"
@@ -676,7 +681,9 @@ def test_run_tool_uses_already_resolved_live_session(
             monkeypatch.setattr(introspect_tools, "current_context", lambda: _live_ctx())
             monkeypatch.setattr(introspect_tools, "resolve_live_drgn_session", counted_resolve)
             app: FastMCP = FastMCP(name="t")
-            introspect_tools.register(app, pool, resolver=resolver)
+            introspect_tools.register(
+                app, pool, resolver=resolver, secret_registry=SecretRegistry()
+            )
             async with Client(app) as client:
                 result = await client.call_tool(
                     "introspect.run",
@@ -706,6 +713,7 @@ def test_run_live_masks_planted_secret_in_response(migrated_url: str) -> None:
                 _live_ctx(),
                 session_id=session_id,
                 helper="tasks",
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(port),
             )
         report = data_mapping(resp, "report")
@@ -725,6 +733,7 @@ def test_run_live_marks_transcript_sensitive(migrated_url: str) -> None:
                 _live_ctx(),
                 session_id=session_id,
                 helper="tasks",
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(_FakeLiveIntrospector()),
             )
         # The raw drgn-over-ssh transcript is sensitive; the response advertises that so a
@@ -743,6 +752,7 @@ def test_run_live_unknown_helper_is_config_error(migrated_url: str) -> None:
                 _live_ctx(),
                 session_id=session_id,
                 helper="exec_arbitrary",
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(_FakeLiveIntrospector()),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
@@ -759,6 +769,7 @@ def test_run_live_non_live_session_is_config_error(migrated_url: str) -> None:
                 _live_ctx(),
                 session_id=session_id,
                 helper="tasks",
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(_FakeLiveIntrospector()),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
@@ -776,6 +787,7 @@ def test_run_live_non_drgn_live_session_is_config_error(migrated_url: str) -> No
                 _live_ctx(),
                 session_id=session_id,
                 helper="tasks",
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(_FakeLiveIntrospector()),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
@@ -792,6 +804,7 @@ def test_run_live_cross_project_is_config_error(migrated_url: str) -> None:
                 _live_ctx(projects=("other",)),
                 session_id=session_id,
                 helper="tasks",
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(_FakeLiveIntrospector()),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
@@ -809,6 +822,7 @@ def test_run_live_without_operator_raises(migrated_url: str) -> None:
                     _live_ctx(Role.VIEWER),
                     session_id=session_id,
                     helper="tasks",
+                    secret_registry=SecretRegistry(),
                     resolver=_live_resolver(_FakeLiveIntrospector()),
                 )
 
@@ -825,6 +839,7 @@ def test_run_live_port_attach_failure_is_typed(migrated_url: str) -> None:
                 _live_ctx(),
                 session_id=session_id,
                 helper="tasks",
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(_FakeLiveIntrospector(raises=err)),
             )
         assert resp.status == "error" and resp.error_category == "transport_failure"
@@ -840,6 +855,7 @@ def test_run_live_malformed_session_id_is_config_error(migrated_url: str) -> Non
                 _live_ctx(),
                 session_id="nope",
                 helper="tasks",
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(_FakeLiveIntrospector()),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
@@ -862,6 +878,7 @@ def test_script_clamps_timeout_to_floor(migrated_url: str) -> None:
                 session_id=session_id,
                 script="print(1)",
                 timeout_sec=0.0,
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(port),
             )
         assert resp.status != "error"
@@ -884,6 +901,7 @@ def test_script_writes_audit_row(migrated_url: str) -> None:
                 session_id=session_id,
                 script="print(prog['jiffies'])",
                 timeout_sec=5.0,
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(_FakeLiveIntrospector()),
             )
             rows = await _audit_rows(pool, session_id)
@@ -905,6 +923,7 @@ def test_script_failure_writes_no_audit_row(migrated_url: str) -> None:
                 session_id=session_id,
                 script="print(1)",
                 timeout_sec=5.0,
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(_FakeLiveIntrospector()),
             )
             rows = await _audit_rows(pool, session_id)
@@ -932,6 +951,7 @@ def test_script_clamps_timeout_to_ceiling(
                 session_id=session_id,
                 script="print(1)",
                 timeout_sec=99999.0,
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(port),
             )
         assert port.kwargs["timeout_sec"] == 600.0
@@ -950,6 +970,7 @@ def test_script_threads_script_into_the_introspector(migrated_url: str) -> None:
                 session_id=session_id,
                 script="print(prog['x'])",
                 timeout_sec=12.0,
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(port),
             )
         assert resp.status != "error"
@@ -972,6 +993,7 @@ def test_script_seam_error_surfaces_typed(migrated_url: str) -> None:
                 session_id=session_id,
                 script="boom",
                 timeout_sec=5.0,
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(port),
             )
         assert resp.status == "error"
@@ -1007,6 +1029,7 @@ def test_script_over_size_cap_is_configuration_error(migrated_url: str) -> None:
                 session_id=session_id,
                 script=huge,
                 timeout_sec=5.0,
+                secret_registry=SecretRegistry(),
                 resolver=_live_resolver(port),
             )
         assert resp.status == "error"
@@ -1048,6 +1071,7 @@ def test_run_live_warns_missing_debuginfo_but_still_succeeds(migrated_url: str) 
                     _live_ctx(),
                     session_id=session_id,
                     helper="tasks",
+                    secret_registry=SecretRegistry(),
                     resolver=_live_resolver(port),
                 )
 
@@ -1074,6 +1098,7 @@ def test_script_live_warns_missing_debuginfo_but_still_succeeds(migrated_url: st
                     session_id=session_id,
                     script="pass",
                     timeout_sec=5.0,
+                    secret_registry=SecretRegistry(),
                     resolver=_live_resolver(port),
                 )
 
@@ -1097,6 +1122,7 @@ def test_run_live_uploaded_vmlinux_suppresses_warning(migrated_url: str) -> None
                     _live_ctx(),
                     session_id=session_id,
                     helper="tasks",
+                    secret_registry=SecretRegistry(),
                     resolver=_live_resolver(port),
                 )
 

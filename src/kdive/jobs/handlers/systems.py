@@ -68,7 +68,10 @@ _SYSRQ_DIAGNOSTIC_LIKE: LiteralString = "%sysrq-diagnostic-%"
 
 
 async def _bootstrap_key_material(
-    conn: AsyncConnection, system_id: UUID, runtime: ProviderRuntime
+    conn: AsyncConnection,
+    system_id: UUID,
+    runtime: ProviderRuntime,
+    secret_registry: SecretRegistry,
 ) -> tuple[tuple[Callable[[str], None], ...], str]:
     """Ensure the System's bootstrap key (committed) and return ``(overlay_customizers, pubkey)``.
 
@@ -80,7 +83,7 @@ async def _bootstrap_key_material(
     ``bootstrap_pubkey`` so remote-libvirt can inject it over the guest agent (ADR-0291, #966).
     """
     async with conn.transaction():
-        pubkey = await ensure_system_bootstrap_key(conn, system_id)
+        pubkey = await ensure_system_bootstrap_key(conn, system_id, secret_registry=secret_registry)
     factory = runtime.bootstrap_key_customizer
     customizers = (factory(pubkey),) if factory is not None else ()
     return customizers, pubkey
@@ -229,6 +232,7 @@ async def provision_handler(
     job: Job,
     *,
     resolver: ProviderResolver,
+    secret_registry: SecretRegistry | None = None,
     artifact_store: ObjectStore | None = None,
 ) -> str | None:
     """Define+start the tagged domain and drive the System ``provisioning -> ready``."""
@@ -251,7 +255,8 @@ async def provision_handler(
             )
         return str(system_id)
     profile = ProvisioningProfile.parse(system.provisioning_profile)
-    customizers, pubkey = await _bootstrap_key_material(conn, system_id, runtime)
+    secret_registry = secret_registry or SecretRegistry()
+    customizers, pubkey = await _bootstrap_key_material(conn, system_id, runtime, secret_registry)
     try:
         domain_name = await asyncio.to_thread(
             functools.partial(
@@ -290,6 +295,7 @@ async def reprovision_handler(
     job: Job,
     *,
     resolver: ProviderResolver,
+    secret_registry: SecretRegistry | None = None,
 ) -> str | None:
     """Apply the new profile in place and drive ``reprovisioning -> ready`` or failed."""
     system_id = UUID(load_payload(job, ReprovisionPayload).system_id)
@@ -306,10 +312,13 @@ async def reprovision_handler(
     if system.state is not SystemState.REPROVISIONING:
         return str(system_id)
     profile = ProvisioningProfile.parse(system.provisioning_profile)
+    secret_registry = secret_registry or SecretRegistry()
     # Same commit-before-overlay ordering as provision_handler (ADR-0289, #963): reprovision wipes
     # and recreates the overlay, so it must re-inject the SAME stored key — ensure_ returns the
     # existing key on reuse, and this commits before the overlay is ever touched.
-    customizers, pubkey = await _bootstrap_key_material(conn, system_id, binding.runtime)
+    customizers, pubkey = await _bootstrap_key_material(
+        conn, system_id, binding.runtime, secret_registry
+    )
     try:
         domain_name = await asyncio.to_thread(
             functools.partial(
@@ -466,7 +475,11 @@ def register_handlers(
     registry.register(
         JobKind.PROVISION,
         lambda conn, job: provision_handler(
-            conn, job, resolver=resolver, artifact_store=artifact_store
+            conn,
+            job,
+            resolver=resolver,
+            secret_registry=secret_registry,
+            artifact_store=artifact_store,
         ),
     )
     registry.register(
@@ -477,7 +490,9 @@ def register_handlers(
     )
     registry.register(
         JobKind.REPROVISION,
-        lambda conn, job: reprovision_handler(conn, job, resolver=resolver),
+        lambda conn, job: reprovision_handler(
+            conn, job, resolver=resolver, secret_registry=secret_registry
+        ),
     )
     registry.register(
         JobKind.AUTHORIZE_SSH_KEY,

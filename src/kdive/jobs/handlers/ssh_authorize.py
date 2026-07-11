@@ -219,7 +219,9 @@ async def authorize_ssh_key_handler(
     host, port = endpoint
     try:
         await _preflight_reachable(probe, host, port)
-        private_key = await load_system_bootstrap_private_key(conn, system_id)
+        private_key = await load_system_bootstrap_private_key(
+            conn, system_id, secret_registry=secret_registry
+        )
         with materialized_private_key(private_key) as key_path:
             ssh_exec(build_authorize_argv(host, port, str(key_path)), payload.public_key)
     except CategorizedError as exc:

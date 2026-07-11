@@ -21,7 +21,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.security.secrets.secret_registry import PROCESS_SECRET_REGISTRY, SecretRegistry
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 _SSH_KEYGEN_TIMEOUT_S = 30
 
@@ -74,7 +74,12 @@ def _run_keygen(args: list[str]) -> None:
         )
 
 
-async def ensure_system_bootstrap_key(conn: AsyncConnection, system_id: UUID) -> str:
+async def ensure_system_bootstrap_key(
+    conn: AsyncConnection,
+    system_id: UUID,
+    *,
+    secret_registry: SecretRegistry,
+) -> str:
     """Return the System's bootstrap **public** key, generating+storing it once (idempotent).
 
     Concurrency-safe: an ``INSERT ... ON CONFLICT DO NOTHING`` with a freshly generated pair, then
@@ -86,7 +91,7 @@ async def ensure_system_bootstrap_key(conn: AsyncConnection, system_id: UUID) ->
     # Register the generated private key for redaction (defense-in-depth, mirrors the load path):
     # it is never logged on the normal path, but a locals-capturing logger firing on an INSERT
     # failure must not surface it.
-    PROCESS_SECRET_REGISTRY.register(private_key, scope=None)
+    secret_registry.register(private_key, scope=None)
     async with conn.cursor() as cur:
         await cur.execute(
             "INSERT INTO system_bootstrap_keys (system_id, private_key, public_key) "
@@ -110,13 +115,13 @@ async def load_system_bootstrap_private_key(
     conn: AsyncConnection,
     system_id: UUID,
     *,
-    secret_registry: SecretRegistry = PROCESS_SECRET_REGISTRY,
+    secret_registry: SecretRegistry,
 ) -> str:
     """Return the System's bootstrap private key (registered for redaction) or raise.
 
-    Registers the key value with ``secret_registry`` so it is scrubbed from logs/errors — callers
-    that hold their own registry (e.g. the drgn tool) pass it; a caller without one uses the
-    process singleton. Raises:
+    Registers the key value with ``secret_registry`` so it is scrubbed from logs/errors.
+
+    Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` when no key row exists (System predates ADR-0289
             or was never provisioned) — fail closed.
     """

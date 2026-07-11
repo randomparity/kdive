@@ -844,7 +844,7 @@ async def _seed_drgn_system(pool: AsyncConnectionPool, alloc_id: str) -> str:
     """Seed a ready local System with a per-System bootstrap key (drgn-live now gates on it)."""
     sys_id = await _seed_profiled_system(pool, alloc_id, copy.deepcopy(_PROFILE))
     async with pool.connection() as conn:
-        await ensure_system_bootstrap_key(conn, UUID(sys_id))
+        await ensure_system_bootstrap_key(conn, UUID(sys_id), secret_registry=SecretRegistry())
     return sys_id
 
 
