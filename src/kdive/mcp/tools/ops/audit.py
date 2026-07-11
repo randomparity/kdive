@@ -353,7 +353,7 @@ def _response(rows: list[dict[str, object]], limit: int) -> ToolResponse:
         _OBJECT_ID,
         "ok",
         items,
-        suggested_next_actions=["inventory.list"],
+        suggested_next_actions=[_TOOL],
         data={"truncated": truncated, "next_cursor": next_cursor},
     )
 

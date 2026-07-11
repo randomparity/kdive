@@ -526,6 +526,9 @@ def test_cross_project_paginates_with_cursor(migrated_url: str) -> None:
                 page = await audit_tools.query_all_projects(
                     pool, ctx, request=_all_projects_query(limit=2, cursor=cursor)
                 )
+                if cursor is None:
+                    assert page.data["truncated"] is True
+                    assert page.suggested_next_actions == ["audit.query"]
                 seen.extend(str(r["object_id"]) for r in _rows(page))
                 if not page.data["truncated"]:
                     break
