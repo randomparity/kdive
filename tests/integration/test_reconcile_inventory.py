@@ -1257,8 +1257,8 @@ def test_remote_libvirt_overlay_lands_vcpus_memory_in_caps(
 
 def test_declared_pool_lands_in_pool_column_else_default(migrated_url: str, tmp_path: Path) -> None:
     # ADR-0186: a declared `pool` is written to the resources.pool column; absent → 'default'.
-    # One doc declares a pooled remote host and a pool-less fault-inject host (single remote
-    # instance keeps the still-present singleton guard happy until #395 relaxes it).
+    # One doc declares a pooled remote host and a pool-less fault-inject host; remote-libvirt
+    # instance names are independent from the shared pool vocabulary.
     combined = (
         _remote_libvirt_toml(name="rl-pool", pool="big-remote") + "[[fault_inject]]\n"
         'name = "fi-default"\n'

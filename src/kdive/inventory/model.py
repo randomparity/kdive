@@ -10,8 +10,9 @@ Parse-time validation enforces three structural invariants:
 2. instance ``name`` is unique within each provider kind;
 3. every instance ``base_image`` cross-reference names a declared ``[[image]]``.
 
-Remote-libvirt is temporarily stricter: only one ``[[remote_libvirt]]`` instance is accepted
-until provider operations carry selected Resource identity into remote config resolution.
+Remote-libvirt accepts multiple named ``[[remote_libvirt]]`` instances. Reconcile creates one
+config-owned resource per instance, and per-op provider resolution selects the instance config by
+the granted resource's ``name`` (ADR-0187).
 
 :meth:`InventoryDoc.parse` is the sanctioned entry point: it wraps
 :meth:`~pydantic.BaseModel.model_validate` and re-raises pydantic's structural
