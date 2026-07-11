@@ -21,6 +21,7 @@ from kdive.mcp.tools.accounting.usage import register as register_accounting_usa
 from kdive.mcp.tools.catalog import (
     availability,
     fixtures,
+    kernel_config,
     resources,
     shapes,
 )
@@ -257,6 +258,7 @@ PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _pool_only_plane_registrar(inventory_tools.register),
     _pool_only_plane_registrar(fixtures.register),
     _pool_only_plane_registrar(catalog_images.register),
+    _pool_only_plane_registrar(kernel_config.register),
     _register_ops_images_tools,
     _register_ops_secrets_tools,
     _register_doc_resources,
