@@ -80,6 +80,13 @@ async def _register(pool: AsyncConnectionPool, *, host_uri: str = "qemu:///syste
     return str(res.id)
 
 
+async def _list_resources(
+    pool: AsyncConnectionPool, ctx: RequestContext, **kw: Any
+) -> ToolResponse:
+    request = catalog_resources_tools.ResourcesListRequest(**kw)
+    return await catalog_resources_tools.list_resources(pool, ctx, request)
+
+
 def _resolver_with_staged_projector(probe: StagedVolumeProbe) -> ProviderResolver:
     unused_port = cast(Any, object())
     runtime = ProviderRuntime(
@@ -114,7 +121,7 @@ def test_list_returns_host_with_flat_capability_projection(migrated_url: str) ->
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool)
-            responses = await catalog_resources_tools.list_resources(pool, CTX, kind=None)
+            responses = await _list_resources(pool, CTX, kind=None)
         assert responses.object_id == "resources"
         assert responses.status == "ok"
         items = responses.items
@@ -138,7 +145,7 @@ def test_list_hides_resources_outside_project_affinity(migrated_url: str) -> Non
             visible = await _register(pool, host_uri="qemu:///visible")
             hidden = await _register(pool, host_uri="qemu:///hidden")
             await _set_affinity(pool, hidden, owner_project="other")
-            responses = await catalog_resources_tools.list_resources(pool, CTX, kind=None)
+            responses = await _list_resources(pool, CTX, kind=None)
         return visible, [item.object_id for item in responses.items]
 
     visible, item_ids = asyncio.run(_run())
@@ -150,8 +157,8 @@ def test_list_hides_scoped_resources_without_viewer_role(migrated_url: str) -> N
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool)
             await _set_affinity(pool, res_id, owner_project="proj")
-            member_resp = await catalog_resources_tools.list_resources(pool, CTX, kind=None)
-            viewer_resp = await catalog_resources_tools.list_resources(pool, VIEWER_CTX, kind=None)
+            member_resp = await _list_resources(pool, CTX, kind=None)
+            viewer_resp = await _list_resources(pool, VIEWER_CTX, kind=None)
         return (
             res_id,
             [item.object_id for item in member_resp.items],
@@ -167,7 +174,7 @@ def test_list_kind_filter_miss_is_configuration_error(migrated_url: str) -> None
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _register(pool)
-            responses = await catalog_resources_tools.list_resources(pool, CTX, kind="nope")
+            responses = await _list_resources(pool, CTX, kind="nope")
         assert responses.status == "error"
         assert responses.error_category == "configuration_error"
 
@@ -184,9 +191,7 @@ def test_list_malformed_resource_row_degrades_to_infrastructure_failure(
             async with pool.connection() as conn:
                 await conn.execute("UPDATE resources SET capabilities = '[]'::jsonb")
             caplog.set_level(logging.WARNING, logger=catalog_resources_tools.__name__)
-            responses = await catalog_resources_tools.list_resources(
-                pool, CTX, kind="local-libvirt"
-            )
+            responses = await _list_resources(pool, CTX, kind="local-libvirt")
         items = responses.items
         assert len(items) == 1
         assert items[0].object_id == res_id
@@ -1269,9 +1274,7 @@ def test_list_paginates_with_cursor(migrated_url: str) -> None:
             seen: list[str] = []
             cursor: str | None = None
             for _ in range(10):
-                page = await catalog_resources_tools.list_resources(
-                    pool, CTX, kind=None, limit=2, cursor=cursor
-                )
+                page = await _list_resources(pool, CTX, kind=None, limit=2, cursor=cursor)
                 seen.extend(item.object_id for item in page.items)
                 if not page.data["truncated"]:
                     break
@@ -1287,7 +1290,7 @@ def test_list_no_truncation_at_exactly_limit(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             for i in range(2):
                 await _register(pool, host_uri=f"qemu:///e{i}")
-            resp = await catalog_resources_tools.list_resources(pool, CTX, kind=None, limit=2)
+            resp = await _list_resources(pool, CTX, kind=None, limit=2)
         assert resp.data["truncated"] is False
         assert resp.data["next_cursor"] is None
 
@@ -1303,7 +1306,7 @@ def test_list_truncated_count_is_over_visible_rows(migrated_url: str) -> None:
                 await _register(pool, host_uri=f"qemu:///v{i}")
             hidden = await _register(pool, host_uri="qemu:///hidden")
             await _set_affinity(pool, hidden, owner_project="other")
-            resp = await catalog_resources_tools.list_resources(pool, CTX, kind=None, limit=3)
+            resp = await _list_resources(pool, CTX, kind=None, limit=3)
         assert len(resp.items) == 3
         assert resp.data["truncated"] is False
 
@@ -1313,7 +1316,7 @@ def test_list_truncated_count_is_over_visible_rows(migrated_url: str) -> None:
 def test_list_malformed_cursor_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await catalog_resources_tools.list_resources(pool, CTX, kind=None, cursor="!!!")
+            resp = await _list_resources(pool, CTX, kind=None, cursor="!!!")
         assert resp.status == "error"
         assert resp.data["reason"] == "invalid_cursor"
 

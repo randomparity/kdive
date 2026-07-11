@@ -12,6 +12,7 @@ to flat scalar fields (``kind``, ``arch``, ``vcpus``, ``memory_mb``,
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -62,6 +63,15 @@ class _ResourcesListPayload(ToolPayload):
     cursor: str | None = Field(
         default=None, description="Opaque continuation cursor from a prior page's next_cursor."
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ResourcesListRequest:
+    """Direct-handler request for ``resources.list`` filters and pagination."""
+
+    kind: str | None = None
+    limit: int = DEFAULT_LIST_LIMIT
+    cursor: str | None = None
 
 
 async def _fetch_resource_rows(
@@ -119,10 +129,7 @@ def _row_visible(row: dict[str, Any], viewer_projects: tuple[str, ...]) -> bool:
 async def list_resources(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    *,
-    kind: str | None,
-    limit: int = DEFAULT_LIST_LIMIT,
-    cursor: str | None = None,
+    request: ResourcesListRequest,
 ) -> ToolResponse:
     """Return a page of visible resources (optionally filtered by ``kind``), ascending.
 
@@ -130,18 +137,18 @@ async def list_resources(
     visibility is applied in Python (ADR-0192). The fleet table is small, so it is read
     whole per call and paged in memory.
     """
-    if kind is None:
+    if request.kind is None:
         resource_kind = None
     else:
         try:
-            resource_kind = ResourceKind(kind)
+            resource_kind = ResourceKind(request.kind)
         except ValueError:
             return resource_config_error("resources.list")
-    capped = _clamp_list_limit(limit)
+    capped = _clamp_list_limit(request.limit)
     after = None
-    if cursor:
+    if request.cursor:
         try:
-            after = _decode_ts_uuid_cursor(_RESOURCES_LIST_TAG, cursor)
+            after = _decode_ts_uuid_cursor(_RESOURCES_LIST_TAG, request.cursor)
         except InvalidCursor:
             return _invalid_cursor_error("resources.list")
     with bind_context(principal=ctx.principal):
@@ -301,7 +308,9 @@ def register(
         payload = request or _ResourcesListPayload()
         kind = payload.kind.value if payload.kind is not None else None
         return await list_resources(
-            pool, current_context(), kind=kind, limit=payload.limit, cursor=payload.cursor
+            pool,
+            current_context(),
+            ResourcesListRequest(kind=kind, limit=payload.limit, cursor=payload.cursor),
         )
 
     @app.tool(

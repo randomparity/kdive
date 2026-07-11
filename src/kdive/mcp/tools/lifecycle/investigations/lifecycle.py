@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.responses import ToolResponse
@@ -21,15 +23,21 @@ from kdive.services.investigations.lifecycle import (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class InvestigationOpenRequest:
+    """Direct-handler request for ``investigations.open``."""
+
+    project: str
+    title: str
+    description: str | None = None
+    external_refs: list[ExternalRefInput] | None = None
+    idempotency_key: str | None = None
+
+
 async def open_investigation(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    *,
-    project: str,
-    title: str,
-    description: str | None = None,
-    external_refs: list[ExternalRefInput] | None = None,
-    idempotency_key: str | None = None,
+    request: InvestigationOpenRequest,
 ) -> ToolResponse:
     """Mint an Investigation (`open`) for the caller's project."""
     async with pool.connection() as conn:
@@ -39,10 +47,10 @@ async def open_investigation(
                 inv = await open_investigation_record(
                     conn,
                     ctx,
-                    project=project,
-                    title=title,
-                    description=description,
-                    external_refs=external_refs,
+                    project=request.project,
+                    title=request.title,
+                    description=request.description,
+                    external_refs=request.external_refs,
                 )
             except InvestigationServiceError as exc:
                 return investigation_error_response(exc)
@@ -50,9 +58,9 @@ async def open_investigation(
 
         return await keyed_mutation(
             conn,
-            idempotency_key=idempotency_key,
+            idempotency_key=request.idempotency_key,
             principal=ctx.principal,
-            project=project,
+            project=request.project,
             kind="investigations.open",
             do_work=_insert,
         )
@@ -73,4 +81,4 @@ async def close_investigation(
         return await envelope_for_investigation(conn, inv)
 
 
-__all__ = ["close_investigation", "open_investigation"]
+__all__ = ["InvestigationOpenRequest", "close_investigation", "open_investigation"]

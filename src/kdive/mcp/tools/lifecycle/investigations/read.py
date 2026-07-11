@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import InvestigationState
@@ -29,6 +31,16 @@ from kdive.services.investigations.read import get_investigation_record, list_in
 from kdive.services.investigations.view import InvestigationRowError
 
 _LIST_TAG = "investigations.list"
+
+
+@dataclass(frozen=True, slots=True)
+class InvestigationsListRequest:
+    """Direct-handler request for ``investigations.list`` filters and pagination."""
+
+    project: str | None = None
+    state: str | None = None
+    limit: int = DEFAULT_LIST_LIMIT
+    cursor: str | None = None
 
 
 async def get_investigation(
@@ -63,27 +75,23 @@ def _state_filter(state: str | None) -> InvestigationState | ToolResponse | None
 async def list_investigations(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    *,
-    project: str | None = None,
-    state: str | None = None,
-    limit: int = DEFAULT_LIST_LIMIT,
-    cursor: str | None = None,
+    request: InvestigationsListRequest,
 ) -> ToolResponse:
     """List the caller's viewer-project Investigations, newest-first."""
-    resolved_state = _state_filter(state)
+    resolved_state = _state_filter(request.state)
     if isinstance(resolved_state, ToolResponse):
         return resolved_state
-    capped = _clamp_list_limit(limit)
+    capped = _clamp_list_limit(request.limit)
     after = None
-    if cursor:
+    if request.cursor:
         try:
-            after = _decode_ts_uuid_cursor(_LIST_TAG, cursor)
+            after = _decode_ts_uuid_cursor(_LIST_TAG, request.cursor)
         except InvalidCursor:
             return _invalid_cursor_error("investigations.list")
     rows = await list_investigation_rows(
         pool,
         ctx,
-        project=project,
+        project=request.project,
         state=resolved_state,
         limit=capped + 1,
         after=after,
@@ -112,4 +120,4 @@ async def list_investigations(
     )
 
 
-__all__ = ["get_investigation", "list_investigations"]
+__all__ = ["InvestigationsListRequest", "get_investigation", "list_investigations"]

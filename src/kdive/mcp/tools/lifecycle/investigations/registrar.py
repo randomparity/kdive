@@ -21,6 +21,7 @@ from kdive.mcp.tools.lifecycle.investigations.common import (
     ExternalRefKey,
 )
 from kdive.mcp.tools.lifecycle.investigations.lifecycle import (
+    InvestigationOpenRequest,
     close_investigation,
     open_investigation,
 )
@@ -30,6 +31,7 @@ from kdive.mcp.tools.lifecycle.investigations.metadata import (
     unlink_external_ref,
 )
 from kdive.mcp.tools.lifecycle.investigations.read import (
+    InvestigationsListRequest,
     get_investigation,
     list_investigations,
 )
@@ -94,11 +96,13 @@ def _register_investigations_open(app: FastMCP, pool: AsyncConnectionPool) -> No
         return await open_investigation(
             pool,
             current_context(),
-            project=project,
-            title=title,
-            description=description,
-            external_refs=external_refs,
-            idempotency_key=idempotency_key,
+            InvestigationOpenRequest(
+                project=project,
+                title=title,
+                description=description,
+                external_refs=external_refs,
+                idempotency_key=idempotency_key,
+            ),
         )
 
 
@@ -214,8 +218,10 @@ def _register_investigations_list(app: FastMCP, pool: AsyncConnectionPool) -> No
         return await list_investigations(
             pool,
             current_context(),
-            project=payload.project,
-            state=payload.state.value if payload.state is not None else None,
-            limit=payload.limit,
-            cursor=payload.cursor,
+            InvestigationsListRequest(
+                project=payload.project,
+                state=payload.state.value if payload.state is not None else None,
+                limit=payload.limit,
+                cursor=payload.cursor,
+            ),
         )

@@ -22,6 +22,7 @@ from kdive.mcp.tools.lifecycle.investigations import registrar as inv_registered
 from kdive.mcp.tools.lifecycle.investigations import view as inv_view
 from kdive.mcp.tools.lifecycle.investigations.common import ExternalRefInput
 from kdive.mcp.tools.lifecycle.investigations.lifecycle import (
+    InvestigationOpenRequest,
     close_investigation,
     open_investigation,
 )
@@ -31,6 +32,7 @@ from kdive.mcp.tools.lifecycle.investigations.metadata import (
     unlink_external_ref,
 )
 from kdive.mcp.tools.lifecycle.investigations.read import (
+    InvestigationsListRequest,
     get_investigation,
     list_investigations,
 )
@@ -56,7 +58,11 @@ async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
 
 
 async def _open(pool: AsyncConnectionPool, ctx: RequestContext, **kw: Any):
-    return await open_investigation(pool, ctx, **kw)
+    return await open_investigation(pool, ctx, InvestigationOpenRequest(**kw))
+
+
+async def _list(pool: AsyncConnectionPool, ctx: RequestContext, **kw: Any):
+    return await list_investigations(pool, ctx, InvestigationsListRequest(**kw))
 
 
 def test_link_unlink_wrapper_docstrings_describe_external_refs() -> None:
@@ -854,7 +860,7 @@ def test_list_item_enumerates_runs(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             inv_id = (await _open(pool, _ctx(), project="proj", title="only")).object_id
             run1, sys1 = await _attach_run(pool, inv_id)
-            resp = await list_investigations(pool, _ctx())
+            resp = await _list(pool, _ctx())
             assert len(resp.items) == 1
             item = resp.items[0]
         assert item.data["runs"] == [run1]
@@ -868,7 +874,7 @@ def test_list_scopes_to_viewer_projects(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             await _open(pool, _ctx(), project="proj", title="a")
             await _open(pool, _ctx(), project="proj", title="b")
-            resp = await list_investigations(pool, _ctx())
+            resp = await _list(pool, _ctx())
             assert resp.data["count"] == 2
             assert {i.data["title"] for i in resp.items} == {"a", "b"}
 
@@ -880,7 +886,7 @@ def test_list_excludes_other_projects(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             await _open(pool, _ctx(), project="proj", title="mine")
             # A viewer of only "other" sees none of proj's investigations.
-            resp = await list_investigations(pool, _ctx(projects=("other",)))
+            resp = await _list(pool, _ctx(projects=("other",)))
             assert resp.data["count"] == 0
 
     asyncio.run(scenario())
@@ -892,7 +898,7 @@ def test_list_state_filter(migrated_url: str) -> None:
             opened = await _open(pool, _ctx(), project="proj", title="a")
             await _open(pool, _ctx(), project="proj", title="b")
             await close_investigation(pool, _ctx(), opened.object_id)
-            resp = await list_investigations(pool, _ctx(), state="open")
+            resp = await _list(pool, _ctx(), state="open")
             assert {i.data["title"] for i in resp.items} == {"b"}
 
     asyncio.run(scenario())
@@ -927,7 +933,7 @@ def test_registered_list_request_filters_by_state(
 def test_list_bad_state_is_config_error(migrated_url: str) -> None:
     async def scenario() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await list_investigations(pool, _ctx(), state="nonsense")
+            resp = await _list(pool, _ctx(), state="nonsense")
             assert resp.error_category == "configuration_error"
             # ADR-0174: an unknown state filter enumerates the accepted Investigation states.
             assert resp.data["reason"] == "invalid_state"
@@ -941,7 +947,7 @@ def test_list_requires_viewer_role(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             await _open(pool, _ctx(), project="proj", title="a")
             # A caller with no viewer role anywhere sees an empty collection.
-            resp = await list_investigations(pool, _ctx(role=None))
+            resp = await _list(pool, _ctx(role=None))
             assert resp.data["count"] == 0
 
     asyncio.run(scenario())
@@ -972,7 +978,7 @@ def test_list_degrades_one_invalid_row(migrated_url: str, monkeypatch: pytest.Mo
                 return real(row)
 
             monkeypatch.setattr(inv_view.Investigation, "model_validate", staticmethod(flaky))
-            resp = await list_investigations(pool, _ctx())
+            resp = await _list(pool, _ctx())
             assert resp.data["count"] == 2
             assert sorted(i.status for i in resp.items) == ["error", "open"]
 
@@ -987,7 +993,7 @@ def test_list_paginates_with_cursor(migrated_url: str) -> None:
             seen: list[str] = []
             cursor: str | None = None
             for _ in range(10):
-                page = await list_investigations(pool, _ctx(), limit=2, cursor=cursor)
+                page = await _list(pool, _ctx(), limit=2, cursor=cursor)
                 seen.extend(item.object_id for item in page.items)
                 if not page.data["truncated"]:
                     break
@@ -1003,7 +1009,7 @@ def test_list_no_truncation_at_exactly_limit(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             await _open(pool, _ctx(), project="proj", title="a")
             await _open(pool, _ctx(), project="proj", title="b")
-            resp = await list_investigations(pool, _ctx(), limit=2)
+            resp = await _list(pool, _ctx(), limit=2)
         assert resp.data["truncated"] is False
         assert resp.data["next_cursor"] is None
 
@@ -1013,7 +1019,7 @@ def test_list_no_truncation_at_exactly_limit(migrated_url: str) -> None:
 def test_list_malformed_cursor_is_config_error(migrated_url: str) -> None:
     async def scenario() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await list_investigations(pool, _ctx(), cursor="!!!")
+            resp = await _list(pool, _ctx(), cursor="!!!")
         assert resp.status == "error"
         assert resp.data["reason"] == "invalid_cursor"
 
