@@ -88,11 +88,11 @@ def test_list_calls_images_list_read_tool(monkeypatch: pytest.MonkeyPatch, capsy
     assert "fedora" in capsys.readouterr().out
 
 
-def test_describe_calls_images_describe_read_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_calls_images_describe_read_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _install(
         monkeypatch, {"object_id": "img-1", "status": "registered", "data": {"name": "fedora"}}
     )
-    code = asyncio.run(reads.images_describe(_args(image_id="img-1")))
+    code = asyncio.run(reads.images_get(_args(image_id="img-1")))
     assert code == 0
     assert client.calls == [("images.describe", {"image_id": "img-1"})]
 
@@ -101,7 +101,7 @@ def test_describe_threads_target_kernel_when_set(monkeypatch: pytest.MonkeyPatch
     client = _install(
         monkeypatch, {"object_id": "img-1", "status": "registered", "data": {"name": "fedora"}}
     )
-    code = asyncio.run(reads.images_describe(_args(image_id="img-1", target_kernel="7.1")))
+    code = asyncio.run(reads.images_get(_args(image_id="img-1", target_kernel="7.1")))
     assert code == 0
     assert client.calls == [("images.describe", {"image_id": "img-1", "target_kernel": "7.1"})]
 
@@ -110,7 +110,7 @@ def test_describe_omits_target_kernel_when_absent(monkeypatch: pytest.MonkeyPatc
     client = _install(
         monkeypatch, {"object_id": "img-1", "status": "registered", "data": {"name": "fedora"}}
     )
-    code = asyncio.run(reads.images_describe(_args(image_id="img-1", target_kernel=None)))
+    code = asyncio.run(reads.images_get(_args(image_id="img-1", target_kernel=None)))
     assert code == 0
     assert client.calls == [("images.describe", {"image_id": "img-1"})]
 

@@ -54,7 +54,7 @@ class Verb:
 
 REGISTRY: tuple[Verb, ...] = (
     Verb("resources", "list", reads.resources_list, "resources.list", options=("kind",)),
-    Verb("resources", "describe", reads.resources_describe, "resources.describe", ("resource_id",)),
+    Verb("resources", "get", reads.resources_get, "resources.describe", ("resource_id",)),
     Verb(
         "allocations",
         "list",
@@ -64,14 +64,14 @@ REGISTRY: tuple[Verb, ...] = (
     ),
     Verb("allocations", "get", reads.allocations_get, "allocations.get", ("allocation_id",)),
     Verb("systems", "list", reads.systems_list, "systems.list", options=("state",)),
-    Verb("systems", "show", reads.systems_show, "systems.get", ("system_id",)),
-    Verb("runs", "show", reads.runs_show, "runs.get", ("run_id",)),
+    Verb("systems", "get", reads.systems_get, "systems.get", ("system_id",)),
+    Verb("runs", "get", reads.runs_get, "runs.get", ("run_id",)),
     Verb("jobs", "list", reads.jobs_list, "jobs.list"),
     Verb("jobs", "get", reads.jobs_get, "jobs.get", ("job_id",)),
     Verb(
         "ledger",
-        "show",
-        reads.ledger_show,
+        "get",
+        reads.ledger_get,
         "accounting.usage_project",
         required_options=("project",),
     ),
@@ -133,8 +133,8 @@ REGISTRY: tuple[Verb, ...] = (
     Verb("images", "list", images.images_list, "images.list"),
     Verb(
         "images",
-        "describe",
-        reads.images_describe,
+        "get",
+        reads.images_get,
         "images.describe",
         ("image_id",),
         options=("target_kernel",),

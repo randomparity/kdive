@@ -36,8 +36,8 @@ def render(rows: Sequence[Mapping[str, object]], *, columns: Sequence[str], as_j
 def render_record(record: Mapping[str, object], *, as_json: bool) -> None:
     """Render a single record as aligned key/value lines, or as stable JSON.
 
-    The single-record verbs (``describe``/``get``/``show``) return one record, not a row
-    list. ``None`` values render as the empty string, matching :func:`render`.
+    The single-record ``get`` verbs return one record, not a row list. ``None`` values
+    render as the empty string, matching :func:`render`.
     """
     if as_json:
         print(json.dumps(dict(record), indent=2, default=str))

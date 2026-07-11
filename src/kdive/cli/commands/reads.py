@@ -90,11 +90,11 @@ async def resources_list(args: argparse.Namespace) -> int:
     return exit_code_for_envelope(envelope)
 
 
-async def resources_describe(args: argparse.Namespace) -> int:
+async def resources_get(args: argparse.Namespace) -> int:
     return await _record("resources.describe", args, {"resource_id": args.resource_id})
 
 
-async def images_describe(args: argparse.Namespace) -> int:
+async def images_get(args: argparse.Namespace) -> int:
     payload = {"image_id": args.image_id, **_payload(args, "target_kernel")}
     return await _record("images.describe", args, payload)
 
@@ -115,11 +115,11 @@ async def systems_list(args: argparse.Namespace) -> int:
     return exit_code_for_envelope(envelope)
 
 
-async def systems_show(args: argparse.Namespace) -> int:
+async def systems_get(args: argparse.Namespace) -> int:
     return await _record("systems.get", args, {"system_id": args.system_id})
 
 
-async def runs_show(args: argparse.Namespace) -> int:
+async def runs_get(args: argparse.Namespace) -> int:
     return await _record("runs.get", args, {"run_id": args.run_id})
 
 
@@ -167,7 +167,7 @@ async def fixtures_list(args: argparse.Namespace) -> int:
     return exit_code_for_envelope(envelope)
 
 
-async def ledger_show(args: argparse.Namespace) -> int:
+async def ledger_get(args: argparse.Namespace) -> int:
     return await _record("accounting.usage_project", args, {"project": args.project})
 
 

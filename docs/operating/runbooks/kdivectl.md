@@ -82,15 +82,15 @@ Curated read verbs call one read-only MCP tool and render a table (or JSON with 
 
 ```bash
 kdivectl resources list [--kind <kind>]
-kdivectl resources describe <resource_id>
+kdivectl resources get <resource_id>
 kdivectl allocations list --project <project>
 kdivectl allocations get <allocation_id>
 kdivectl systems list [--state <state>]
-kdivectl systems show <system_id>
-kdivectl runs show <run_id>
+kdivectl systems get <system_id>
+kdivectl runs get <run_id>
 kdivectl jobs list
 kdivectl jobs get <job_id>
-kdivectl ledger show --project <project>
+kdivectl ledger get --project <project>
 kdivectl ledger report-all [--group-by principal] [--since <ts>] [--until <ts>]
 kdivectl ledger report-granted [--projects a,b] [--group-by principal] [--since <ts>] [--until <ts>]
 kdivectl inventory show [--project <project>]
@@ -99,7 +99,7 @@ kdivectl inventory show [--project <project>]
 `--json` may be given before or after the verb (`kdivectl --json resources list` or
 `kdivectl resources list --json`) for a stable, scriptable contract.
 
-`--project` is **required** for `allocations list` and `ledger show` (no square brackets):
+`--project` is **required** for `allocations list` and `ledger get` (no square brackets):
 each underlying tool (`allocations.list`, `accounting.usage_project`) reads exactly one
 project, so the CLI enforces the flag up front — omitting it is a usage error (exit `2`),
 not a cross-project listing. `inventory show` is the exception: its `--project` is an
@@ -146,10 +146,10 @@ cross-project oversight view, use a `platform_auditor` token.
 
 | read | authorized by | denied to |
 |------|---------------|-----------|
-| `allocations list/get`, `systems list/show`, `runs show`, `jobs list/get`, `ledger show` (`accounting.usage_project`) | per-project `viewer` on the **target project** (`require_role`) | a platform-only token with no membership on that project sees no project tenant data. A by-id `get`/`show` returns a **not-found-shaped** result (exit `4`; tenant existence is not revealed, and **no** distinct authorization-denied code is emitted). A read that **names a project** the caller is not a member of (`allocations list --project …`, `ledger show` / `accounting.usage_project`, `accounting.estimate`) is denied `authorization_denied` (**exit `3`**, ADR-0098) — the named project carries no existence to leak, so the denial surfaces distinctly (ADR-0043 §4a) |
+| `allocations list/get`, `systems list/get`, `runs get`, `jobs list/get`, `ledger get` (`accounting.usage_project`) | per-project `viewer` on the **target project** (`require_role`) | a platform-only token with no membership on that project sees no project tenant data. A by-id `get` returns a **not-found-shaped** result (exit `4`; tenant existence is not revealed, and **no** distinct authorization-denied code is emitted). A read that **names a project** the caller is not a member of (`allocations list --project …`, `ledger get` / `accounting.usage_project`, `accounting.estimate`) is denied `authorization_denied` (**exit `3`**, ADR-0098) — the named project carries no existence to leak, so the denial surfaces distinctly (ADR-0043 §4a) |
 | cross-project `inventory show` (`inventory.list`), `accounting.report` (all-projects), `audit.query` (cross-project) | `platform_auditor` (satisfied by `platform_admin`) | a project-member token holding no platform role |
 | `secrets list`, `doctor` | `platform_operator` | any token lacking `platform_operator` |
-| `resources list/describe`, `fixtures list` | plain authenticated read (no project scope, no role floor) | unauthenticated callers only |
+| `resources list/get`, `fixtures list` | plain authenticated read (no project scope, no role floor) | unauthenticated callers only |
 
 Note `inventory show` is the **cross-project auditor** read (it maps to the `inventory.list`
 tool, gated `platform_auditor`), not a per-project read — it is the one read verb where a
