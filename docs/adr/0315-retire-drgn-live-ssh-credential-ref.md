@@ -14,7 +14,7 @@
 - **Builds on:** [ADR-0289](0289-per-system-ssh-bootstrap-key.md) (the per-System bootstrap key that
   already authenticates `introspect.*`), [ADR-0281](0281-always-render-ssh-forward.md) (the SSH
   forward renders on every local domain).
-- **Spec:** [`docs/superpowers/specs/2026-07-08-retire-ssh-credential-ref-1037-design.md`](../superpowers/specs/2026-07-08-retire-ssh-credential-ref-1037-design.md).
+- **Spec:** [`docs/archive/superpowers/specs/2026-07-08-retire-ssh-credential-ref-1037-design.md`](../archive/superpowers/specs/2026-07-08-retire-ssh-credential-ref-1037-design.md).
 
 ## Context
 

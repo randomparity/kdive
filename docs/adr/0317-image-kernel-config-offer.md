@@ -4,7 +4,7 @@
 - **Date:** 2026-07-08
 - **Deciders:** kdive maintainers
 - **Issue:** #1051 (redesign spec 2 of 3)
-- **Spec:** [image-kernel-config-offer-1051](../superpowers/specs/2026-07-08-image-kernel-config-offer-1051-design.md)
+- **Spec:** [image-kernel-config-offer-1051](../archive/superpowers/specs/2026-07-08-image-kernel-config-offer-1051-design.md)
 - Extends ADR-0092 (image catalog), ADR-0243 (raw-asset presigned egress), ADR-0295
   (`boot_kernel_count` advisory operand), ADR-0311 (`os_release` provenance +
   agent-facing image selection). Follows ADR-0316 (remove server-build lane), which

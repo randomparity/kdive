@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-10
 - **Deciders:** kdive maintainers
-- **Spec:** [`../superpowers/specs/2026-07-10-provision-lane-contributor-1081-design.md`](../superpowers/specs/2026-07-10-provision-lane-contributor-1081-design.md)
+- **Spec:** [`../superpowers/specs/2026-07-10-provision-lane-contributor-1081-design.md`](../archive/superpowers/specs/2026-07-10-provision-lane-contributor-1081-design.md)
 - **Issue:** [#1081](https://github.com/randomparity/kdive/issues/1081)
 - **Supersedes (in part):** [ADR-0234](0234-external-build-default-and-contributor-role.md) §3
   (which classified `systems.define`/`provision`/`provision_defined`/`reprovision` and

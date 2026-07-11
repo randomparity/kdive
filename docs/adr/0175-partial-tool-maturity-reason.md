@@ -3,7 +3,7 @@
 - **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-18
 - **Deciders:** David Christensen
-- **Spec:** [`../superpowers/specs/2026-06-18-partial-tool-maturity-reason.md`](../superpowers/specs/2026-06-18-partial-tool-maturity-reason.md)
+- **Spec:** [`../superpowers/specs/2026-06-18-partial-tool-maturity-reason.md`](../archive/superpowers/specs/2026-06-18-partial-tool-maturity-reason.md)
 - **Builds on:** [ADR-0047](0047-agent-facing-tool-guide-generation.md) (the registry-derived tool
   reference and the `maturity` marker this ADR explains).
 

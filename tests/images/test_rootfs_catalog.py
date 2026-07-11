@@ -17,9 +17,9 @@ from kdive.images.rootfs_catalog import (
 
 _CLOUD_URL = "https://example.test/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
 
-# The curated build-time makedumpfile version per release (verified against distro package indexes
-# 2026-06-26; see docs/superpowers/specs/2026-06-25-local-multidistro-rootfs-catalog-817.md). This
-# is the per-image operand of the computed kdump-capability predicate (ADR-0253): it must match the
+# The curated build-time makedumpfile version per release (verified against distro package
+# indexes 2026-06-26; see the archived local multidistro rootfs catalog spec). This is the
+# per-image operand of the computed kdump-capability predicate (ADR-0253): it must match the
 # structured ``makedumpfile_version`` field in rootfs_catalog.toml. The capability itself is now
 # computed (kdump_support), not stored.
 _EXPECTED_MAKEDUMPFILE: dict[str, str] = {

@@ -10,7 +10,7 @@
   [ADR-0233](0233-live-attach-halted-early-boot-crash.md) (the crash-signature gates this slicing
   scopes).
 - **Issue:** [#773](https://github.com/randomparity/kdive/issues/773) (refinement of #761, epic #764).
-- **Spec:** [`../superpowers/specs/2026-06-24-per-run-console-slicing.md`](../superpowers/specs/2026-06-24-per-run-console-slicing.md).
+- **Spec:** [`../superpowers/specs/2026-06-24-per-run-console-slicing.md`](../archive/superpowers/specs/2026-06-24-per-run-console-slicing.md).
 
 ## Context
 

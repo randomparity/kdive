@@ -27,7 +27,7 @@ So on the exact `fedora-kdive-ready-43` fixture #954 targets, both `boot_kernel_
 `makedumpfile_version` are absent and both signals read `unverified` permanently, regardless of
 rebuilds.
 
-See `docs/superpowers/specs/2026-07-02-local-staged-provenance-977.md`.
+See `docs/archive/superpowers/specs/2026-07-02-local-staged-provenance-977.md`.
 
 ## Decision
 

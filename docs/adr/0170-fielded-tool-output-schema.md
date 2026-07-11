@@ -9,7 +9,7 @@
   retained). Unchanged: [ADR-0019](0019-tool-response-envelope.md) (the `ToolResponse` model)
   and [ADR-0151](0151-mcp-doc-resources.md) (the doc-resource allowlist).
 - **Issue:** [#565](https://github.com/randomparity/kdive/issues/565).
-- **Spec:** [`../specs/2026-06-18-fielded-tool-output-schema.md`](../specs/2026-06-18-fielded-tool-output-schema.md).
+- **Spec:** [`../specs/2026-06-18-fielded-tool-output-schema.md`](../design/2026-06-18-fielded-tool-output-schema.md).
 
 ## Context
 

@@ -4,7 +4,7 @@
 - **Date:** 2026-07-04
 - **Deciders:** kdive maintainers
 - **Issue:** #985 (reframed; `OPUS_REVIEW.md` §5 item I-5, Tier 2)
-- **Spec:** [agent-selectable-disk-985](../superpowers/specs/2026-07-04-agent-selectable-disk-985-design.md)
+- **Spec:** [agent-selectable-disk-985](../archive/superpowers/specs/2026-07-04-agent-selectable-disk-985-design.md)
 - Extends ADR-0067 (system-shape catalog + custom sizing triple), ADR-0007 §2
   (≤ resource-caps admission check), ADR-0030 (whole-disk ext4 rootfs layout),
   ADR-0060 (overlay reuse-on-retry), ADR-0288 (cloud-init first boot). Supersedes

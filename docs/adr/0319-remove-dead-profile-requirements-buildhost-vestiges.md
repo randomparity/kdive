@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-09
 - **Deciders:** kdive maintainers
-- **Spec:** [`../superpowers/specs/2026-07-09-remove-dead-vestiges-1055.md`](../superpowers/specs/2026-07-09-remove-dead-vestiges-1055.md)
+- **Spec:** [`../superpowers/specs/2026-07-09-remove-dead-vestiges-1055.md`](../archive/superpowers/specs/2026-07-09-remove-dead-vestiges-1055.md)
 - **Follows:** [ADR-0316](0316-remove-server-build-lane.md) — the server-build-lane removal that
   killed the readers for both seams below but deferred their clean removal because each crosses a
   behavior/scope boundary (fixture data + an agent-facing tool parameter).

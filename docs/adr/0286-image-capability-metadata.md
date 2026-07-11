@@ -26,7 +26,7 @@ liveness that does not hold (`ssh` live-broken, #956; live-drgn is gated on the 
 `supported_introspection` plus the profile `ssh_credential_ref`, not the image — #762/#697).
 An agent that reads those tags as capability signals is misled.
 
-See `docs/superpowers/specs/2026-06-30-issue-957-image-capability-metadata-design.md`
+See `docs/archive/superpowers/specs/2026-06-30-issue-957-image-capability-metadata-design.md`
 and `../specs/top-level-design.md` "Image catalog".
 
 ## Decision

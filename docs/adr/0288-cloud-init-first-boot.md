@@ -23,7 +23,7 @@ cloud-init either does nothing useful or hangs probing metadata endpoints; and a
 (proven `kexec_crash_loaded=0`). But every base image kdive uses (Fedora Cloud, Rocky/CentOS
 GenericCloud, Debian genericcloud) **ships cloud-init**, and both original problems have targeted
 fixes: a local NoCloud seed removes the datasource hang, and seeding `machine-id` closes the
-`preset-all` landmine. See `docs/superpowers/specs/2026-07-01-cloud-init-first-boot-design.md`.
+`preset-all` landmine. See `docs/archive/superpowers/specs/2026-07-01-cloud-init-first-boot-design.md`.
 
 ## Decision
 

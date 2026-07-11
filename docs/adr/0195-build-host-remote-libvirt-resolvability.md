@@ -9,7 +9,7 @@
   posture), [ADR-0160](0160-buildhost-source-kind-discovery.md) (the `runs.profile_examples` /
   `build_hosts.list` discovery surfaces), [ADR-0103](0103-build-host-reachability-probe.md)
   (the distinct SSH-reachability `state`).
-- **Spec:** [`../superpowers/specs/2026-06-20-build-host-resolvability-surfacing.md`](../superpowers/specs/2026-06-20-build-host-resolvability-surfacing.md)
+- **Spec:** [`../superpowers/specs/2026-06-20-build-host-resolvability-surfacing.md`](../archive/superpowers/specs/2026-06-20-build-host-resolvability-surfacing.md)
 - **Related:** #626 (this), #618 (RUN_REVIEW.md follow-ups).
 
 ## Context

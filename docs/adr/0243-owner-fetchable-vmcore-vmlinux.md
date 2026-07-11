@@ -4,7 +4,7 @@
 - **Date:** 2026-06-25
 - **Deciders:** kdive maintainers
 - **Issue:** [#781](https://github.com/randomparity/kdive/issues/781) (epic [#764](https://github.com/randomparity/kdive/issues/764))
-- **Spec:** [`../superpowers/specs/2026-06-25-fetchable-vmcore-vmlinux-design.md`](../superpowers/specs/2026-06-25-fetchable-vmcore-vmlinux-design.md)
+- **Spec:** [`../superpowers/specs/2026-06-25-fetchable-vmcore-vmlinux-design.md`](../archive/superpowers/specs/2026-06-25-fetchable-vmcore-vmlinux-design.md)
 - **Builds on (does not supersede):** [ADR-0140](0140-artifacts-get-content-retrieval.md)
   (the `REDACTED`-only inline/download gate on `artifacts.get`, **unchanged** — it still
   governs inline content and search), [ADR-0240](0240-live-drgn-script-introspection.md)

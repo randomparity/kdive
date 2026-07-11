@@ -9,7 +9,7 @@
   matrix; the `build_hosts` inventory), [ADR-0124](0124-provisioning-profile-discoverability.md)
   (the `systems.profile_examples` discovery pattern the new tool mirrors),
   [ADR-0117](0117-projects-list-whoami.md) (the auth-only read posture).
-- **Spec:** [`../specs/2026-06-17-buildhost-source-kind-discovery.md`](../specs/2026-06-17-buildhost-source-kind-discovery.md)
+- **Spec:** [`../specs/2026-06-17-buildhost-source-kind-discovery.md`](../design/2026-06-17-buildhost-source-kind-discovery.md)
 - **Issue:** [#536](https://github.com/randomparity/kdive/issues/536)
 
 ## Context

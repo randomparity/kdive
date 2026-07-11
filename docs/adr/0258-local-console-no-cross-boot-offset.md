@@ -7,7 +7,7 @@
   [ADR-0241](0241-per-run-console-slicing.md) — that ADR's remote part-index mechanism is
   unchanged; only its local `<sys>.log` byte-offset mark is superseded.
 - **Issue:** [#836](https://github.com/randomparity/kdive/issues/836).
-- **Spec:** [`../superpowers/specs/2026-06-26-console-head-no-cross-boot-offset-836.md`](../superpowers/specs/2026-06-26-console-head-no-cross-boot-offset-836.md).
+- **Spec:** [`../superpowers/specs/2026-06-26-console-head-no-cross-boot-offset-836.md`](../archive/superpowers/specs/2026-06-26-console-head-no-cross-boot-offset-836.md).
 
 ## Context
 

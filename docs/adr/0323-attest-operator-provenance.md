@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-10
 - **Deciders:** kdive maintainers
-- **Spec:** [`../specs/2026-07-10-attest-s3-provenance-1065.md`](../specs/2026-07-10-attest-s3-provenance-1065.md)
+- **Spec:** [`../specs/2026-07-10-attest-s3-provenance-1065.md`](../design/2026-07-10-attest-s3-provenance-1065.md)
 - **Follows:** [ADR-0286](0286-image-capability-metadata.md) — the computed-capability-signal
   honesty invariant this decision must preserve; [ADR-0296](0296-local-staged-provenance.md) —
   the staged-path sidecar that first fed non-publish provenance into a catalog row.

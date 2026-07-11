@@ -4,7 +4,7 @@
 - Date: 2026-06-30
 - Supersedes the redacted-artifact-search half of [ADR-0064](0064-expected-boot-failures-artifact-search.md) and all of [ADR-0225](0225-search-text-bounded-context-schema.md)
 - Builds on [ADR-0247](0247-artifacts-get-byte-windowing.md) (byte windowing) and [ADR-0257](0257-artifacts-get-token-safe-window-ceiling.md) (24 KiB token-safe ceiling)
-- Spec: [2026-06-30-issue-939-artifact-get-jump-cursor-design.md](../superpowers/specs/2026-06-30-issue-939-artifact-get-jump-cursor-design.md)
+- Spec: [2026-06-30-issue-939-artifact-get-jump-cursor-design.md](../archive/superpowers/specs/2026-06-30-issue-939-artifact-get-jump-cursor-design.md)
 
 ## Context
 

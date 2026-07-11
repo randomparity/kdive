@@ -10,7 +10,7 @@
   plane).
 - **Builds on:** [ADR-0203](0203-local-libvirt-kdump-overlay-harvest.md) (the host-side
   read/write overlay seam and the same-host fact this reuses).
-- **Spec:** [`../superpowers/specs/2026-06-21-local-kdump-stage-kernel-boot-666.md`](../superpowers/specs/2026-06-21-local-kdump-stage-kernel-boot-666.md)
+- **Spec:** [`../superpowers/specs/2026-06-21-local-kdump-stage-kernel-boot-666.md`](../archive/superpowers/specs/2026-06-21-local-kdump-stage-kernel-boot-666.md)
 
 ## Context
 

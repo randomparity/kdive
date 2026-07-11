@@ -9,7 +9,7 @@
   port).
 - **Builds on:** the existing `supported_capture_methods: frozenset[CaptureMethod]` field on
   `ProviderRuntime` — this ADR generalizes that one-off field into a small, uniform descriptor.
-- **Spec:** [`../superpowers/specs/2026-06-22-local-libvirt-service-parity-honesty.md`](../superpowers/specs/2026-06-22-local-libvirt-service-parity-honesty.md)
+- **Spec:** [`../superpowers/specs/2026-06-22-local-libvirt-service-parity-honesty.md`](../archive/superpowers/specs/2026-06-22-local-libvirt-service-parity-honesty.md)
 
 ## Context
 

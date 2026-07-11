@@ -16,7 +16,7 @@
   [ADR-0079](0079-remote-live-debug-transport.md) (`gdb_addr` is the ACL'd security boundary the
   ACL check probes),
   [ADR-0018](0018-job-queue-worker-execution.md) (the durable job queue this dispatches through).
-- **Spec:** [`../superpowers/specs/2026-06-17-diagnostics-worker-vantage-dispatch.md`](../superpowers/specs/2026-06-17-diagnostics-worker-vantage-dispatch.md)
+- **Spec:** [`../superpowers/specs/2026-06-17-diagnostics-worker-vantage-dispatch.md`](../archive/superpowers/specs/2026-06-17-diagnostics-worker-vantage-dispatch.md)
 
 ## Context
 

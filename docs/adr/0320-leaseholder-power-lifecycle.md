@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-10
 - **Deciders:** kdive maintainers
-- **Spec:** [`../superpowers/specs/2026-07-10-leaseholder-power-lifecycle-1062-design.md`](../superpowers/specs/2026-07-10-leaseholder-power-lifecycle-1062-design.md)
+- **Spec:** [`../superpowers/specs/2026-07-10-leaseholder-power-lifecycle-1062-design.md`](../archive/superpowers/specs/2026-07-10-leaseholder-power-lifecycle-1062-design.md)
 - **Issue:** [#1062](https://github.com/randomparity/kdive/issues/1062) (BLACK_BOX_REVIEW.md P2)
 - **Supersedes (in part):** [ADR-0037](0037-rbac-hardening-role-separation.md) §1 (which
   classified `control.power off`/`cycle`/`reset` as `admin` destructive-administration and

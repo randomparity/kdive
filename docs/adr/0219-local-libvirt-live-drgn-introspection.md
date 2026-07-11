@@ -18,7 +18,7 @@
   [ADR-0209](0209-capability-aware-mcp-admission.md) (the descriptor flip + capability-aware
   admission), [ADR-0027](0027-safety-modules-secret-backend-impl.md) (secret-by-reference +
   redaction).
-- **Spec:** [`docs/specs/2026-06-23-local-libvirt-live-drgn-introspection.md`](../specs/2026-06-23-local-libvirt-live-drgn-introspection.md).
+- **Spec:** [`docs/design/2026-06-23-local-libvirt-live-drgn-introspection.md`](../design/2026-06-23-local-libvirt-live-drgn-introspection.md).
 
 ## Context
 

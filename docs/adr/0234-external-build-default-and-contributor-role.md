@@ -11,7 +11,7 @@
   `contributor` into), [ADR-0013](0013-object-store-layout-retention.md) (the retention-class
   labels this ADR backs with an enforced TTL).
 - **Epic:** [#771](https://github.com/randomparity/kdive/issues/771); sub-issues #765–#770.
-- **Spec:** [`../superpowers/specs/2026-06-24-external-build-default-and-contributor-role.md`](../superpowers/specs/2026-06-24-external-build-default-and-contributor-role.md).
+- **Spec:** [`../superpowers/specs/2026-06-24-external-build-default-and-contributor-role.md`](../archive/superpowers/specs/2026-06-24-external-build-default-and-contributor-role.md).
 
 ## Context
 

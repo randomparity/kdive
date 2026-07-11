@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-08
 - **Issue:** #1052
-- **Spec:** [Spec 3 of 3](../superpowers/specs/2026-07-08-debug-feature-config-gate-1052-design.md)
+- **Spec:** [Spec 3 of 3](../archive/superpowers/specs/2026-07-08-debug-feature-config-gate-1052-design.md)
 - **Builds on:** ADR-0316 (remove server-build lane), ADR-0317 (image kernel-config offer)
 
 ## Context

@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-09
 - **Issue:** #1064
-- **Spec:** [drgn-live missing_debuginfo](../superpowers/specs/2026-07-09-introspect-missing-debuginfo-1064-design.md)
+- **Spec:** [drgn-live missing_debuginfo](../archive/superpowers/specs/2026-07-09-introspect-missing-debuginfo-1064-design.md)
 - **Builds on:** ADR-0318 (debug-feature config gate), ADR-0039 (drgn-live introspection)
 
 ## Context

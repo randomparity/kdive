@@ -15,7 +15,7 @@
   (the in-guest sshd + managed authorized key the rootfs build already installs),
   [ADR-0085](0085-drgn-live-transport-generalization.md) (the `drgn-live` agent token whose
   local realization is SSH).
-- **Spec:** [`docs/specs/2026-06-23-local-libvirt-session-ssh-transport.md`](../specs/2026-06-23-local-libvirt-session-ssh-transport.md).
+- **Spec:** [`docs/design/2026-06-23-local-libvirt-session-ssh-transport.md`](../design/2026-06-23-local-libvirt-session-ssh-transport.md).
 
 ## Context
 

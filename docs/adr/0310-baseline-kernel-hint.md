@@ -4,7 +4,7 @@
 - **Date:** 2026-07-03
 - **Deciders:** kdive maintainers
 - **Issue:** #1016 (`BLACK_BOX_REVIEW.md` Finding 2(b), Epic #1018)
-- **Spec:** [baseline-kernel-hint-1016](../superpowers/specs/2026-07-03-baseline-kernel-hint-1016.md)
+- **Spec:** [baseline-kernel-hint-1016](../archive/superpowers/specs/2026-07-03-baseline-kernel-hint-1016.md)
 - Extends ADR-0272 (provision-time baseline-kernel boot) and ADR-0295 (direct-kernel provisionable
   signal); supersedes nothing.
 

@@ -3,9 +3,9 @@
 - **Status:** Accepted
 - **Date:** 2026-06-19
 - **Deciders:** KDIVE maintainers
-- **Refines:** the image decision in `docs/superpowers/specs/2026-06-18-ansible-remote-libvirt-host-setup-design.md` ("Guest image distro: Fedora-pinned"); composes with [ADR-0183](0183-provider-aware-platform-root-cmdline.md) (`root_device`)
+- **Refines:** the image decision in `docs/archive/superpowers/specs/2026-06-18-ansible-remote-libvirt-host-setup-design.md` ("Guest image distro: Fedora-pinned"); composes with [ADR-0183](0183-provider-aware-platform-root-cmdline.md) (`root_device`)
 - **Issue:** #598
-- **Spec:** `docs/superpowers/specs/2026-06-19-ansible-image-catalog-design.md`
+- **Spec:** `docs/archive/superpowers/specs/2026-06-19-ansible-image-catalog-design.md`
 
 ## Context
 

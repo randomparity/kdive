@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Issue: #892
-- Spec: [observe-post-readiness-console-892](../specs/2026-06-29-observe-post-readiness-console-892.md)
+- Spec: [observe-post-readiness-console-892](../design/2026-06-29-observe-post-readiness-console-892.md)
 - Supersedes nothing; extends ADR-0235 (per-Run console evidence), ADR-0095 (remote console
   collector parts), ADR-0226/0247/0257 (`artifacts.get` windowed redacted reads), ADR-0223
   (worker console-file readability), ADR-0258 (local `<log append="off">` per-power-cycle truncation).

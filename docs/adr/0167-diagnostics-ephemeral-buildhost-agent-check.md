@@ -12,7 +12,7 @@
   whose deferred ephemeral-probe and `enabled`-gate this ADR implements),
   [ADR-0164](0164-diagnostics-worker-vantage-dispatch.md) (which already plumbed the async pool
   into `default_service_factory`).
-- **Spec:** [`../specs/2026-06-18-diagnostics-ephemeral-buildhost-agent.md`](../specs/2026-06-18-diagnostics-ephemeral-buildhost-agent.md)
+- **Spec:** [`../specs/2026-06-18-diagnostics-ephemeral-buildhost-agent.md`](../design/2026-06-18-diagnostics-ephemeral-buildhost-agent.md)
 - **Issue:** [#544](https://github.com/randomparity/kdive/issues/544) (split from
   [#533](https://github.com/randomparity/kdive/issues/533); covers
   [#531](https://github.com/randomparity/kdive/issues/531))

@@ -14,7 +14,7 @@
   (self-correcting, value-free errors), [ADR-0214](0214-root-build-privilege-drop.md)
   (`KDIVE_BUILD_USER` demotion).
 - **Issue:** [#778](https://github.com/randomparity/kdive/issues/778) (re-scoped from a doc bug).
-- **Spec:** [`../superpowers/specs/2026-06-25-self-service-build-from-url-778.md`](../superpowers/specs/2026-06-25-self-service-build-from-url-778.md).
+- **Spec:** [`../superpowers/specs/2026-06-25-self-service-build-from-url-778.md`](../archive/superpowers/specs/2026-06-25-self-service-build-from-url-778.md).
 
 ## Context
 

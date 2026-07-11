@@ -9,7 +9,7 @@
   reuses), [ADR-0139](0139-diagnostics-worker-vantage-substitution-honesty.md) (the
   worker-vantage substitution honesty this check is unaffected by, and the backlog the
   worker-vantage refinement defers to).
-- **Spec:** [`../specs/2026-06-17-diagnostics-local-kernel-src.md`](../specs/2026-06-17-diagnostics-local-kernel-src.md)
+- **Spec:** [`../specs/2026-06-17-diagnostics-local-kernel-src.md`](../design/2026-06-17-diagnostics-local-kernel-src.md)
 
 ## Context
 

@@ -12,7 +12,7 @@
   resolution), [ADR-0112](0112-systems-inventory-config.md) (the `systems.toml` inventory descriptor
   and its `[[local_libvirt]]` block), [ADR-0281](0281-always-render-ssh-forward.md) (the SSH forward
   is rendered on every local domain).
-- **Spec:** [`docs/specs/2026-07-05-local-libvirt-egress-optin-1031.md`](../specs/2026-07-05-local-libvirt-egress-optin-1031.md).
+- **Spec:** [`docs/design/2026-07-05-local-libvirt-egress-optin-1031.md`](../design/2026-07-05-local-libvirt-egress-optin-1031.md).
 
 ## Context
 

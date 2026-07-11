@@ -13,7 +13,7 @@
   `check_source_kind_compatibility` helper and the create-time/build-time
   two-checks-one-rule pattern this mirrors), [ADR-0087](0087-config-registry.md)
   (the `KDIVE_*` typed-config registry and its per-process scoping).
-- **Spec:** [`../specs/2026-06-17-local-warm-tree-build-admission.md`](../specs/2026-06-17-local-warm-tree-build-admission.md)
+- **Spec:** [`../specs/2026-06-17-local-warm-tree-build-admission.md`](../design/2026-06-17-local-warm-tree-build-admission.md)
 - **Issue:** [#532](https://github.com/randomparity/kdive/issues/532)
 
 ## Context

@@ -10,7 +10,7 @@
 - **Related:** [ADR-0255](0255-aggregate-funding-gate-denials.md) (#833 — the server-side aggregate
   denial for the same onboarding friction).
 - **Issue:** [#834](https://github.com/randomparity/kdive/issues/834).
-- **Spec:** [`../superpowers/specs/2026-06-26-onboard-target-834.md`](../superpowers/specs/2026-06-26-onboard-target-834.md).
+- **Spec:** [`../superpowers/specs/2026-06-26-onboard-target-834.md`](../archive/superpowers/specs/2026-06-26-onboard-target-834.md).
 
 ## Context
 

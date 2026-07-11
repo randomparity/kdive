@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-10
 - **Deciders:** kdive maintainers
-- **Spec:** [`../superpowers/specs/2026-07-10-force-crash-crashing-marker-1078-design.md`](../superpowers/specs/2026-07-10-force-crash-crashing-marker-1078-design.md)
+- **Spec:** [`../superpowers/specs/2026-07-10-force-crash-crashing-marker-1078-design.md`](../archive/superpowers/specs/2026-07-10-force-crash-crashing-marker-1078-design.md)
 - **Issue:** [#1078](https://github.com/randomparity/kdive/issues/1078)
 - **Depends on:** [ADR-0320](0320-leaseholder-power-lifecycle.md) §1a (which named this
   residual race and deferred it here), [ADR-0021](0021-reconciler-loop-drift-repair.md) (the

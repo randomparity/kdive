@@ -11,7 +11,7 @@
   [ADR-0049](0049-crash-capture-tiers.md) (the capture-method vocabulary + `preserve_on_crash`/
   `gdbstub` flags).
 - **Issue:** [#760](https://github.com/randomparity/kdive/issues/760) (part of #764).
-- **Spec:** [`../superpowers/specs/2026-06-24-expected-crash-capture-disclosure-design.md`](../superpowers/specs/2026-06-24-expected-crash-capture-disclosure-design.md).
+- **Spec:** [`../superpowers/specs/2026-06-24-expected-crash-capture-disclosure-design.md`](../archive/superpowers/specs/2026-06-24-expected-crash-capture-disclosure-design.md).
 
 ## Context
 
