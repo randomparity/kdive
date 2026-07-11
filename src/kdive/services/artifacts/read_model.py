@@ -1,10 +1,10 @@
-"""Artifact read-model helpers shared across MCP, jobs, and providers."""
+"""Application-facing artifact read-model helpers."""
 
 from __future__ import annotations
 
 from uuid import UUID
 
-from psycopg import AsyncConnection, Connection
+from psycopg import AsyncConnection
 
 from kdive.db import artifact_queries
 from kdive.db.artifact_queries import RunFetchContext
@@ -31,13 +31,3 @@ async def raw_vmcore_key(conn: AsyncConnection, run_id: UUID) -> str | None:
 async def effective_config_key(conn: AsyncConnection, run_id: UUID) -> str | None:
     """Return the Run-owned effective config object key, or ``None``."""
     return await artifact_queries.effective_config_key(conn, run_id)
-
-
-def debuginfo_ref_for_run_sync(conn: Connection, run_id: UUID) -> str | None:
-    """Return the Run's published debuginfo object key, or ``None``."""
-    return artifact_queries.debuginfo_ref_for_run_sync(conn, run_id)
-
-
-def kernel_ref_for_run_sync(conn: Connection, run_id: UUID) -> str | None:
-    """Return the Run's published combined kernel/modules object key, or ``None``."""
-    return artifact_queries.kernel_ref_for_run_sync(conn, run_id)
