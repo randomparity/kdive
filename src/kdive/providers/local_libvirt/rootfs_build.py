@@ -201,12 +201,10 @@ class RootfsBuildTools:
 
 
 def _resolve_entry(spec: RootfsBuildSpec) -> RootfsCatalogEntry:
-    """Resolve the catalog row for ``spec.name``; uncataloged builds are rejected."""
     return resolve_rootfs_entry(spec.name)
 
 
 def _source_digest(source: RootfsSource) -> str:
-    """Render the provenance ``source_image_digest`` for a resolved base source."""
     if isinstance(source, CloudImageSource):
         return f"cloud-image:{source.url}@sha256:{source.sha256}"
     return f"virt-builder:{source.template}"

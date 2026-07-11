@@ -33,7 +33,6 @@ _SEARCH_LIMIT_MAX = 50
 
 
 def _score(tool: Tool, tokens: list[str]) -> int:
-    """Lexical score: count of query tokens found as substrings in the tool's haystack."""
     extras = TOOL_KEYWORDS.get(tool.name, frozenset())
     haystack = " ".join([tool.name, tool.description or "", *extras]).lower()
     return sum(1 for tok in tokens if tok in haystack)
