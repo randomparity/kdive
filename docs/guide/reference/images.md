@@ -88,13 +88,14 @@ image, or one whose ``/boot`` lacked a single kernel/config) returns a
 
 `implemented` · `read-only`
 
-List published image catalog entries.
+List visible image catalog entries across publish states.
 
 Each row carries the build-fact ``data.capabilities``, a compact verified ``data.os``
 identity, and ``data.default_kernel_version`` (the kernel the image ships and boots by
 default, ``""`` when unknown) so an agent can compare images on merit — distro, version,
-default kernel — in one call. Keyset-paginated: when ``data.truncated`` is true, pass
-``data.next_cursor`` back as ``cursor`` for the next page.
+default kernel — in one call. The publish state appears as the item envelope ``status`` and
+as ``data.state``. Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor``
+back as ``cursor`` for the next page.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

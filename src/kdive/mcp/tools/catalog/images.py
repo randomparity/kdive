@@ -368,12 +368,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Opaque continuation cursor from a prior page's next_cursor."),
         ] = None,
     ) -> ToolResponse:
-        """List published image catalog entries.
+        """List visible image catalog entries across publish states.
 
         Each row carries the build-fact ``data.capabilities``, a compact verified ``data.os``
         identity, and ``data.default_kernel_version`` (the kernel the image ships and boots by
         default, ``""`` when unknown) so an agent can compare images on merit — distro, version,
-        default kernel — in one call. Keyset-paginated: when ``data.truncated`` is true, pass
+        default kernel — in one call. The publish state appears as the item envelope ``status`` and
+        as ``data.state``. Keyset-paginated: when ``data.truncated`` is true, pass
         ``data.next_cursor`` back as ``cursor`` for the next page.
         """
         return await list_images(pool, current_context(), limit=limit, cursor=cursor)
