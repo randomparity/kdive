@@ -309,11 +309,23 @@ def _object_schema(schema: dict[str, object]) -> dict[str, object]:
     raise AssertionError(f"no object schema in {schema!r}")
 
 
+def _request_properties(params: dict[str, object]) -> dict[str, object]:
+    properties = cast(dict[str, object], params["properties"])
+    request_schema = _object_schema(cast(dict[str, object], properties["request"]))
+    ref = request_schema.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/$defs/"):
+        defs = cast(dict[str, object], params["$defs"])
+        request_schema = cast(dict[str, object], defs[ref.removeprefix("#/$defs/")])
+    return cast(dict[str, object], request_schema["properties"])
+
+
 def test_filtered_list_tools_use_request_payloads() -> None:
     tools = {t.name: t for t in TOOLS}
     expected_fields = {
         "accounting.report_all_projects": {"group_by", "window"},
         "accounting.report_granted_set": {"projects", "group_by", "window"},
+        "artifacts.find": {"artifact_id", "query", "byte_offset", "max_bytes", "direction"},
+        "artifacts.get": {"artifact_id", "byte_offset", "max_bytes", "direction"},
         "debug.list_sessions": {"run_id", "system_id", "project", "state", "limit", "cursor"},
         "investigations.list": {"project", "state", "limit", "cursor"},
         "resources.list": {"kind", "limit", "cursor"},
@@ -322,9 +334,7 @@ def test_filtered_list_tools_use_request_payloads() -> None:
     for tool_name, fields in expected_fields.items():
         params = tools[tool_name].parameters
         assert set(params["properties"]) == {"request"}
-        request_schema = _object_schema(params["properties"]["request"])
-        request_properties = cast(dict[str, object], request_schema["properties"])
-        assert set(request_properties) == fields
+        assert set(_request_properties(params)) == fields
 
 
 def test_platform_auditor_reads_keep_pagination_inside_request_payloads() -> None:

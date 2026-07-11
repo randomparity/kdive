@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import pytest
 from fastmcp.server.auth.providers.jwt import JWTVerifier
@@ -20,6 +21,8 @@ from kdive.mcp.tools.catalog.artifacts.reads import (
     _MAX_WINDOWED_FETCH_BYTES,
     ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
     ARTIFACT_GET_WINDOW_MAX_BYTES,
+    ArtifactsFindRequest,
+    ArtifactsGetRequest,
     artifacts_find,
     artifacts_get,
     artifacts_list,
@@ -32,7 +35,7 @@ from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 from tests.mcp.json_data import data_bool, data_int, data_str
 
 
-def _tool_param_schema(tool_name: str) -> dict[str, dict[str, object]]:
+def _tool_schema(tool_name: str) -> dict[str, Any]:
     """One tool's advertised parameter schema from a DB-free built app."""
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     kp = make_keypair()
@@ -40,7 +43,7 @@ def _tool_param_schema(tool_name: str) -> dict[str, dict[str, object]]:
     app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
     tool = asyncio.run(app.get_tool(tool_name))
     assert tool is not None
-    return tool.parameters["properties"]
+    return tool.parameters
 
 
 def _ctx(
@@ -48,6 +51,22 @@ def _ctx(
 ) -> RequestContext:
     roles = {"proj": role} if role is not None else {}
     return RequestContext(principal="u", agent_session="s", projects=projects, roles=roles)
+
+
+async def _get(pool: AsyncConnectionPool, ctx: RequestContext, **kwargs: Any):
+    store_factory = kwargs.pop("store_factory", None)
+    request = ArtifactsGetRequest.model_validate(kwargs)
+    if store_factory is None:
+        return await artifacts_get(pool, ctx, request=request)
+    return await artifacts_get(pool, ctx, request=request, store_factory=store_factory)
+
+
+async def _find(pool: AsyncConnectionPool, ctx: RequestContext, **kwargs: Any):
+    store_factory = kwargs.pop("store_factory", None)
+    request = ArtifactsFindRequest.model_validate(kwargs)
+    if store_factory is None:
+        return await artifacts_find(pool, ctx, request=request)
+    return await artifacts_find(pool, ctx, request=request, store_factory=store_factory)
 
 
 @asynccontextmanager
@@ -185,7 +204,7 @@ def test_artifacts_get_redacted_returns_ref(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_get(pool, _ctx(), artifact_id=red_id)
+            resp = await _get(pool, _ctx(), artifact_id=red_id)
         assert resp.status != "error" and resp.refs
 
     asyncio.run(_run())
@@ -212,9 +231,7 @@ def test_artifacts_get_serves_run_owned_build_log(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             artifact_id = await _seed_run_build_log(pool)
             store = _SearchStore(b"ld: undefined reference to `foo'\n")
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=artifact_id, store_factory=lambda: store
-            )
+            resp = await _get(pool, _ctx(), artifact_id=artifact_id, store_factory=lambda: store)
         assert resp.status == "available"
         assert data_str(resp, "content") == "ld: undefined reference to `foo'\n"
 
@@ -225,7 +242,7 @@ def test_artifacts_get_run_build_log_cross_project_is_not_found(migrated_url: st
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             artifact_id = await _seed_run_build_log(pool)
-            resp = await artifacts_get(pool, _ctx(projects=("other",)), artifact_id=artifact_id)
+            resp = await _get(pool, _ctx(projects=("other",)), artifact_id=artifact_id)
         assert resp.status == "error"
 
     asyncio.run(_run())
@@ -236,9 +253,7 @@ def test_artifacts_get_inlines_small_redacted_content(migrated_url: str) -> None
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             store = _SearchStore(b"panic: redacted log\n")
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
-            )
+            resp = await _get(pool, _ctx(), artifact_id=red_id, store_factory=lambda: store)
         assert resp.status == "available"
         assert data_str(resp, "content") == "panic: redacted log\n"
         assert data_bool(resp, "content_truncated") is False
@@ -259,9 +274,7 @@ def test_artifacts_get_default_window_caps_large_console(migrated_url: str) -> N
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             store = _SearchStore(body)
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
-            )
+            resp = await _get(pool, _ctx(), artifact_id=red_id, store_factory=lambda: store)
         assert resp.status == "available"
         assert len(data_str(resp, "content")) == ARTIFACT_GET_WINDOW_DEFAULT_BYTES
         assert data_bool(resp, "content_truncated") is True
@@ -285,7 +298,7 @@ def test_artifacts_get_pages_to_completion(migrated_url: str) -> None:
             seen_final = False
             for _ in range(100):  # bound the loop defensively
                 store = _SearchStore(body)
-                resp = await artifacts_get(
+                resp = await _get(
                     pool,
                     _ctx(),
                     artifact_id=red_id,
@@ -314,7 +327,7 @@ def test_artifacts_get_caps_window_at_token_safe_ceiling(migrated_url: str) -> N
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             store = _SearchStore(body)
-            resp = await artifacts_get(
+            resp = await _get(
                 pool,
                 _ctx(),
                 artifact_id=red_id,
@@ -342,7 +355,7 @@ def test_artifacts_get_pages_past_ceiling_to_completion(migrated_url: str) -> No
             seen_final = False
             for _ in range(100):  # bound the loop defensively
                 store = _SearchStore(body)
-                resp = await artifacts_get(
+                resp = await _get(
                     pool,
                     _ctx(),
                     artifact_id=red_id,
@@ -371,7 +384,7 @@ def test_artifacts_get_explicit_max_below_ceiling_is_exact(migrated_url: str) ->
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             store = _SearchStore(body)
-            resp = await artifacts_get(
+            resp = await _get(
                 pool,
                 _ctx(),
                 artifact_id=red_id,
@@ -392,7 +405,7 @@ def test_artifacts_get_offset_past_end_is_empty(migrated_url: str) -> None:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             for offset in (5, 99):  # at end and well past end
                 store = _SearchStore(b"hello")
-                resp = await artifacts_get(
+                resp = await _get(
                     pool,
                     _ctx(),
                     artifact_id=red_id,
@@ -414,7 +427,7 @@ def test_artifacts_get_multibyte_split_decodes_with_replacement(migrated_url: st
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             store = _SearchStore(body)
-            resp = await artifacts_get(
+            resp = await _get(
                 pool,
                 _ctx(),
                 artifact_id=red_id,
@@ -438,11 +451,11 @@ def test_artifacts_get_clamps_out_of_range_window(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             store = _SearchStore(b"abcdef")
-            neg = await artifacts_get(
+            neg = await _get(
                 pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, byte_offset=-3
             )
             store2 = _SearchStore(b"abcdef")
-            zero = await artifacts_get(
+            zero = await _get(
                 pool, _ctx(), artifact_id=red_id, store_factory=lambda: store2, max_bytes=0
             )
         assert data_str(neg, "content") == "abcdef"  # negative offset → from start
@@ -464,7 +477,7 @@ def test_artifacts_get_clamps_window_to_lowered_inline_cap(
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             store = _SearchStore(b"Z" * 32_768)
-            resp = await artifacts_get(
+            resp = await _get(
                 pool,
                 _ctx(),
                 artifact_id=red_id,
@@ -489,9 +502,7 @@ def test_artifacts_get_degenerate_zero_cap_does_not_loop(
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             store = _SearchStore(b"some redacted body")
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
-            )
+            resp = await _get(pool, _ctx(), artifact_id=red_id, store_factory=lambda: store)
         assert resp.status == "available"
         assert data_str(resp, "content") == ""
         assert data_bool(resp, "content_truncated") is False
@@ -507,7 +518,7 @@ def test_artifacts_get_over_ceiling_omits_even_with_window(migrated_url: str) ->
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             store = _SearchStore(b"", size=_MAX_WINDOWED_FETCH_BYTES + 1)
-            resp = await artifacts_get(
+            resp = await _get(
                 pool,
                 _ctx(),
                 artifact_id=red_id,
@@ -530,9 +541,7 @@ def test_artifacts_get_at_ceiling_is_windowed(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             store = _SearchStore(b"X" * 100, size=_MAX_WINDOWED_FETCH_BYTES)
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
-            )
+            resp = await _get(pool, _ctx(), artifact_id=red_id, store_factory=lambda: store)
         assert resp.status == "available"
         assert "content" in resp.data
         assert "content_omitted" not in resp.data
@@ -546,9 +555,7 @@ def test_artifacts_get_omits_oversized_content_keeps_uri(migrated_url: str) -> N
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             store = _SearchStore(b"", size=_MAX_WINDOWED_FETCH_BYTES + 1)
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
-            )
+            resp = await _get(pool, _ctx(), artifact_id=red_id, store_factory=lambda: store)
         assert resp.status == "available"
         assert "content" not in resp.data
         assert data_str(resp, "content_omitted") == "artifact_too_large"
@@ -563,9 +570,7 @@ def test_artifacts_get_rejects_non_redacted_fetch(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             store = _SearchStore(b"panic", sensitivity=Sensitivity.SENSITIVE)
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
-            )
+            resp = await _get(pool, _ctx(), artifact_id=red_id, store_factory=lambda: store)
         # The redaction gate: a sensitive object at a redacted row's key is drift.
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -581,9 +586,7 @@ def test_artifacts_get_rejects_non_redacted_head_before_uri(migrated_url: str) -
             # Object metadata says sensitive though the DB row says redacted (drift):
             # the URI must NOT be minted and the body must NOT be fetched.
             store = _SearchStore(b"panic", head_sensitivity=Sensitivity.SENSITIVE)
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
-            )
+            resp = await _get(pool, _ctx(), artifact_id=red_id, store_factory=lambda: store)
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert store.presigned_key is None  # URI never minted
@@ -600,9 +603,7 @@ def test_artifacts_get_oversized_honors_head_redaction_gate(migrated_url: str) -
             store = _SearchStore(
                 b"", size=_MAX_WINDOWED_FETCH_BYTES + 1, head_sensitivity=Sensitivity.SENSITIVE
             )
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
-            )
+            resp = await _get(pool, _ctx(), artifact_id=red_id, store_factory=lambda: store)
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert store.presigned_key is None
@@ -620,7 +621,7 @@ def test_artifacts_get_degrades_when_store_unconfigured(migrated_url: str) -> No
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_get(pool, _ctx(), artifact_id=red_id, store_factory=_raise_store)
+            resp = await _get(pool, _ctx(), artifact_id=red_id, store_factory=_raise_store)
         # Metadata envelope still returns; only the content/URI enrichment degrades.
         assert resp.status == "available"
         assert resp.refs["object"]
@@ -641,9 +642,7 @@ def test_artifacts_get_degrades_on_store_error(migrated_url: str) -> None:
                     "store down", category=ErrorCategory.INFRASTRUCTURE_FAILURE
                 ),
             )
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
-            )
+            resp = await _get(pool, _ctx(), artifact_id=red_id, store_factory=lambda: store)
         assert resp.status == "available"
         assert resp.refs["object"]
         assert "download_uri" not in resp.refs
@@ -663,9 +662,7 @@ def test_artifacts_get_degrades_on_presign_error(migrated_url: str) -> None:
                     "presign down", category=ErrorCategory.INFRASTRUCTURE_FAILURE
                 ),
             )
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
-            )
+            resp = await _get(pool, _ctx(), artifact_id=red_id, store_factory=lambda: store)
         assert resp.status == "available"
         assert "download_uri" not in resp.refs
         assert "content" not in resp.data
@@ -679,7 +676,7 @@ def test_artifacts_get_requires_viewer_role(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             with pytest.raises(AuthorizationError):
-                await artifacts_get(pool, _ctx(role=None), artifact_id=red_id)
+                await _get(pool, _ctx(role=None), artifact_id=red_id)
 
     asyncio.run(_run())
 
@@ -688,7 +685,7 @@ def test_artifacts_get_sensitive_is_not_found(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, sens_id, _ = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_get(pool, _ctx(), artifact_id=sens_id)
+            resp = await _get(pool, _ctx(), artifact_id=sens_id)
         assert resp.status == "error" and resp.error_category == "not_found"
 
     asyncio.run(_run())
@@ -698,7 +695,7 @@ def test_artifacts_get_cross_project_is_not_found(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_get(pool, _ctx(projects=("other",)), artifact_id=red_id)
+            resp = await _get(pool, _ctx(projects=("other",)), artifact_id=red_id)
         assert resp.status == "error" and resp.error_category == "not_found"
 
     asyncio.run(_run())
@@ -707,7 +704,7 @@ def test_artifacts_get_cross_project_is_not_found(migrated_url: str) -> None:
 def test_artifacts_get_malformed_uuid_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await artifacts_get(pool, _ctx(), artifact_id="nope")
+            resp = await _get(pool, _ctx(), artifact_id="nope")
         assert resp.status == "error" and resp.error_category == "configuration_error"
 
     asyncio.run(_run())
@@ -737,8 +734,8 @@ def test_artifacts_get_excludes_quarantined(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             sys_id, _, red_id = await _seed_system_with_artifacts(pool)
             quar_id = await _seed_quarantined_artifact(pool, sys_id)
-            quar_resp = await artifacts_get(pool, _ctx(), artifact_id=quar_id)
-            red_resp = await artifacts_get(pool, _ctx(), artifact_id=red_id)
+            quar_resp = await _get(pool, _ctx(), artifact_id=quar_id)
+            red_resp = await _get(pool, _ctx(), artifact_id=red_id)
         # Positive control: a redacted artifact in the same DB state IS served, so the
         # quarantined error is specifically the row-sensitivity gate.
         assert red_resp.status == "available"
@@ -761,10 +758,14 @@ def test_artifacts_list_excludes_quarantined(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_artifacts_get_schema_advertises_window_params() -> None:
-    # Criterion 10: byte_offset/max_bytes are discoverable integer params whose
-    # descriptions name the effective bound + the paging field.
-    props = _tool_param_schema("artifacts.get")
+def test_artifacts_get_schema_uses_request_payload_for_window_params() -> None:
+    # Criterion 10: the public tool surface has one structured request object, while
+    # byte_offset/max_bytes remain discoverable inside its payload schema.
+    schema = _tool_schema("artifacts.get")
+    assert set(schema["properties"]) == {"request"}
+    assert schema["required"] == ["request"]
+    request = schema["$defs"]["ArtifactsGetRequest"]
+    props = request["properties"]
     assert props["byte_offset"]["type"] == "integer"
     assert props["byte_offset"]["default"] == 0
     assert "next_offset" in str(props["byte_offset"]["description"])
@@ -783,7 +784,7 @@ def test_artifacts_find_forward_returns_match_window(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_find(
+            resp = await _find(
                 pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, query="BUG: KASAN"
             )
             assert resp.status == "available"
@@ -801,7 +802,7 @@ def test_artifacts_find_no_match(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_find(
+            resp = await _find(
                 pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, query="BUG:"
             )
             assert resp.status == "available"
@@ -818,7 +819,7 @@ def test_artifacts_find_backward_from_end(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_find(
+            resp = await _find(
                 pool,
                 _ctx(),
                 artifact_id=red_id,
@@ -837,7 +838,7 @@ def test_artifacts_find_oversized_rejects(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_find(
+            resp = await _find(
                 pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, query="BUG:"
             )
             assert resp.status == "error"
@@ -852,7 +853,7 @@ def test_artifacts_find_malformed_rejects(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_find(
+            resp = await _find(
                 pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, query="a||b"
             )
             assert resp.status == "error"
@@ -867,7 +868,7 @@ def test_get_backward_no_find_is_tail(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_get(
+            resp = await _get(
                 pool,
                 _ctx(),
                 artifact_id=red_id,
@@ -886,7 +887,7 @@ def test_artifacts_find_quarantined_is_not_found(migrated_url: str) -> None:
             sys_id, _, _ = await _seed_system_with_artifacts(pool)
             quar_id = await _seed_quarantined_artifact(pool, sys_id)
             store = _SearchStore(b"BUG: panic")
-            resp = await artifacts_find(
+            resp = await _find(
                 pool, _ctx(), artifact_id=quar_id, store_factory=lambda: store, query="BUG:"
             )
             assert resp.status == "error"
@@ -897,7 +898,7 @@ def test_artifacts_find_quarantined_is_not_found(migrated_url: str) -> None:
 
 
 def test_get_schema_omits_search_params() -> None:
-    props = _tool_param_schema("artifacts.get")
+    props = _tool_schema("artifacts.get")["$defs"]["ArtifactsGetRequest"]["properties"]
     assert "find" not in props
     assert "query" not in props
     assert "direction" in props
@@ -905,7 +906,10 @@ def test_get_schema_omits_search_params() -> None:
 
 
 def test_find_schema_advertises_query_and_direction() -> None:
-    props = _tool_param_schema("artifacts.find")
+    schema = _tool_schema("artifacts.find")
+    assert set(schema["properties"]) == {"request"}
+    assert schema["required"] == ["request"]
+    props = schema["$defs"]["ArtifactsFindRequest"]["properties"]
     assert "query" in props
     assert props["query"]["type"] == "string"
     assert "no regex" in str(props["query"]["description"]).lower()
@@ -914,7 +918,7 @@ def test_find_schema_advertises_query_and_direction() -> None:
 
 
 def test_search_text_tool_is_removed_and_find_exists() -> None:
-    # build_app + app.get_tool mirrors _tool_param_schema; an absent tool returns None.
+    # build_app + app.get_tool mirrors _tool_schema; an absent tool returns None.
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     kp = make_keypair()
     verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
@@ -933,7 +937,7 @@ def test_artifacts_find_store_outage_omits_match_found(migrated_url: str) -> Non
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_find(
+            resp = await _find(
                 pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, query="BUG:"
             )
             assert resp.status == "available"

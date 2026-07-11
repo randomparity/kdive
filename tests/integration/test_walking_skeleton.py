@@ -31,7 +31,11 @@ from kdive.jobs import queue
 from kdive.jobs.handlers.artifacts import vmcore as vmcore_plane
 from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.catalog.artifacts.reads import artifacts_get, artifacts_list
+from kdive.mcp.tools.catalog.artifacts.reads import (
+    ArtifactsGetRequest,
+    artifacts_get,
+    artifacts_list,
+)
 from kdive.mcp.tools.lifecycle.control import registrar as control_tools
 from kdive.mcp.tools.lifecycle.vmcore import handlers as vmcore_tools
 from kdive.providers.ports.retrieve import (
@@ -242,7 +246,11 @@ def test_raw_vmcore_is_sensitive_and_unreachable(migrated_url: str) -> None:
             listed = await artifacts_list(pool, ctx, system_id=sys_id)
             for r in listed.items:
                 refs.extend(r.refs.values())
-                got = await artifacts_get(pool, ctx, artifact_id=r.object_id)
+                got = await artifacts_get(
+                    pool,
+                    ctx,
+                    request=ArtifactsGetRequest(artifact_id=r.object_id),
+                )
                 refs.extend(got.refs.values())
             # The raw `sensitive` row's id is known only via direct SQL; artifacts.get on it is
             # not-found-shaped (no leak even by id).
@@ -253,7 +261,11 @@ def test_raw_vmcore_is_sensitive_and_unreachable(migrated_url: str) -> None:
                 )
                 raw_row = await cur.fetchone()
             assert raw_row is not None
-            raw_get = await artifacts_get(pool, ctx, artifact_id=str(raw_row["id"]))
+            raw_get = await artifacts_get(
+                pool,
+                ctx,
+                request=ArtifactsGetRequest(artifact_id=str(raw_row["id"])),
+            )
             assert raw_get.status == "error"  # the raw row is unfetchable through the surface
         assert refs  # the redacted artifact was returned
         # A raw core is `.../vmcore-{method}` (no `-redacted`); it must never surface.

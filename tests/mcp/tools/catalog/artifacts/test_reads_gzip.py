@@ -19,7 +19,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.artifacts.storage import FetchedArtifact, HeadResult
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.catalog.artifacts.reads import artifacts_get
+from kdive.mcp.tools.catalog.artifacts.reads import ArtifactsGetRequest, artifacts_get
 from kdive.security.authz.rbac import Role
 from tests.mcp._seed import seed_crashed_system
 from tests.mcp.json_data import data_bool, data_int, data_str
@@ -118,9 +118,11 @@ def test_artifacts_get_inflates_gzip_part(migrated_url: str) -> None:
             resp = await artifacts_get(
                 pool,
                 _ctx(),
-                artifact_id=artifact_id,
-                byte_offset=0,
-                max_bytes=64,
+                request=ArtifactsGetRequest(
+                    artifact_id=artifact_id,
+                    byte_offset=0,
+                    max_bytes=64,
+                ),
                 store_factory=lambda: store,
             )
         assert resp.status == "available"
@@ -143,9 +145,11 @@ def test_artifacts_get_gzip_size_bytes_reflects_inflated_length(migrated_url: st
             resp = await artifacts_get(
                 pool,
                 _ctx(),
-                artifact_id=artifact_id,
-                byte_offset=0,
-                max_bytes=len(plaintext),
+                request=ArtifactsGetRequest(
+                    artifact_id=artifact_id,
+                    byte_offset=0,
+                    max_bytes=len(plaintext),
+                ),
                 store_factory=lambda: store,
             )
         assert resp.status == "available"
@@ -168,9 +172,11 @@ def test_artifacts_get_corrupt_gzip_degrades(migrated_url: str) -> None:
             resp = await artifacts_get(
                 pool,
                 _ctx(),
-                artifact_id=artifact_id,
-                byte_offset=0,
-                max_bytes=64,
+                request=ArtifactsGetRequest(
+                    artifact_id=artifact_id,
+                    byte_offset=0,
+                    max_bytes=64,
+                ),
                 store_factory=lambda: store,
             )
         assert resp.status == "available"
@@ -194,9 +200,11 @@ def test_artifacts_get_non_gzip_reads_byte_identically(migrated_url: str) -> Non
             resp = await artifacts_get(
                 pool,
                 _ctx(),
-                artifact_id=artifact_id,
-                byte_offset=0,
-                max_bytes=len(body),
+                request=ArtifactsGetRequest(
+                    artifact_id=artifact_id,
+                    byte_offset=0,
+                    max_bytes=len(body),
+                ),
                 store_factory=lambda: store,
             )
         assert resp.status == "available"

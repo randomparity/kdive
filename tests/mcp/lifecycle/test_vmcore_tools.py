@@ -990,7 +990,11 @@ def test_no_raw_vmcore_key_in_any_read_response(migrated_url: str) -> None:
                     conn, job, resolver=provider_resolver(retriever=_FakeRetriever(run_id))
                 )
             refs: list[str] = []
-            from kdive.mcp.tools.catalog.artifacts.reads import artifacts_get, artifacts_list
+            from kdive.mcp.tools.catalog.artifacts.reads import (
+                ArtifactsGetRequest,
+                artifacts_get,
+                artifacts_list,
+            )
 
             vmcores = await vmcore_handler_tools.list_vmcores(pool, _ctx(), run_id=run_id)
             for r in vmcores.items:
@@ -1000,7 +1004,11 @@ def test_no_raw_vmcore_key_in_any_read_response(migrated_url: str) -> None:
             for r in artifact_items:
                 refs.extend(r.refs.values())
             for r in artifact_items:
-                got = await artifacts_get(pool, _ctx(), artifact_id=r.object_id)
+                got = await artifacts_get(
+                    pool,
+                    _ctx(),
+                    request=ArtifactsGetRequest(artifact_id=r.object_id),
+                )
                 refs.extend(got.refs.values())
         assert refs  # something was returned
         # A raw core is `.../vmcore-{method}` (no `-redacted`); it must never surface.
