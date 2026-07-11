@@ -337,6 +337,40 @@ def test_filtered_list_tools_use_request_payloads() -> None:
         assert set(_request_properties(params)) == fields
 
 
+def test_composite_mutations_use_request_payloads() -> None:
+    tools = {t.name: t for t in TOOLS}
+    request_only_fields = {
+        "accounting.set_quota": {
+            "project",
+            "max_concurrent_allocations",
+            "max_concurrent_systems",
+            "max_pending_allocations",
+        },
+        "investigations.open": {
+            "project",
+            "title",
+            "description",
+            "external_refs",
+            "idempotency_key",
+        },
+        "shapes.set": {"name", "vcpus", "memory_mb", "disk_gb", "pcie_match"},
+    }
+
+    for tool_name, fields in request_only_fields.items():
+        params = tools[tool_name].parameters
+        assert set(params["properties"]) == {"request"}
+        assert set(_request_properties(params)) == fields
+
+    complete_build_params = tools["runs.complete_build"].parameters
+    assert set(complete_build_params["properties"]) == {"run_id", "request"}
+    assert set(_request_properties(complete_build_params)) == {
+        "cmdline",
+        "build_id",
+        "source_label",
+        "source_ref",
+    }
+
+
 def test_platform_auditor_reads_keep_pagination_inside_request_payloads() -> None:
     tools = {t.name: t for t in TOOLS}
 
@@ -360,8 +394,12 @@ def test_run_cmdline_docs_describe_debug_args_only() -> None:
     """The agent-provided cmdline must not document platform-owned boot args."""
     tools = {t.name: t for t in TOOLS}
     for tool_name in ("runs.complete_build",):
-        schema = tools[tool_name].parameters["properties"]["cmdline"]
+        schema = cast(
+            dict[str, object],
+            _request_properties(tools[tool_name].parameters)["cmdline"],
+        )
         description = schema["description"]
+        assert isinstance(description, str)
         assert "dhash_entries=1" in description
         assert "console=ttyS0" not in description
         assert "root=/dev/vda" not in description

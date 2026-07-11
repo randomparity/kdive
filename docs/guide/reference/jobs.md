@@ -8,9 +8,10 @@
 
 Cancel a queued or running job.
 
-A contributor may cancel their own leaseholder-lifecycle jobs (provision/reprovision/
-install/boot/power/authorize_ssh_key/…). Cancelling a destructive job
-(teardown/force_crash) or retired server-build job requires operator.
+A contributor may cancel leaseholder-lifecycle jobs (provision/reprovision/
+install/boot/power/authorize_ssh_key/…) in projects where they have contributor.
+Cancelling a destructive job (teardown/force_crash) or retired server-build job
+requires operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

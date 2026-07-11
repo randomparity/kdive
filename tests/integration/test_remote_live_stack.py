@@ -314,7 +314,11 @@ def test_remote_spine_over_the_wire() -> None:
                 await await_system_state(op, "provision", system_id, "ready")
             async with phase("open-investigation"):
                 env = ok(
-                    await scalar(op, "investigations.open", project=_PROJECT, title="remote-spine"),
+                    await scalar(
+                        op,
+                        "investigations.open",
+                        request={"project": _PROJECT, "title": "remote-spine"},
+                    ),
                     "open-investigation",
                 )
                 investigation_id = env.object_id
@@ -521,7 +525,9 @@ def test_remote_four_method_capture_over_the_wire() -> None:
             async with phase("open-investigation-B"):
                 env = ok(
                     await scalar(
-                        op, "investigations.open", project=_FOUR_METHOD_PROJECT, title="capstone-B"
+                        op,
+                        "investigations.open",
+                        request={"project": _FOUR_METHOD_PROJECT, "title": "capstone-B"},
                     ),
                     "open-investigation-B",
                 )

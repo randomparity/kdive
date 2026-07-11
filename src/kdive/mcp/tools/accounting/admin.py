@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, DecimalException, InvalidOperation
 from typing import Annotated
@@ -20,6 +19,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext, require_project
@@ -32,14 +32,18 @@ _QUOTA_OBJECT_ID = "quota"
 _ACCOUNTING_AUDIT_ID = UUID(int=0)
 
 
-@dataclass(frozen=True, slots=True)
-class QuotaSetRequest:
+class QuotaSetRequest(ToolPayload):
     """A project quota update after transport-level scalar parsing."""
 
-    project: str
-    max_concurrent_allocations: int
-    max_concurrent_systems: int
-    max_pending_allocations: int = 0
+    project: str = Field(description="Project to set concurrency caps for.")
+    max_concurrent_allocations: int = Field(
+        description="Maximum concurrent allocations allowed (>= 0)."
+    )
+    max_concurrent_systems: int = Field(description="Maximum concurrent Systems allowed (>= 0).")
+    max_pending_allocations: int = Field(
+        default=0,
+        description="Maximum queued (requested) allocations (>= 0); 0 = no queue.",
+    )
 
 
 async def set_budget(
@@ -188,26 +192,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def accounting_set_quota(
-        project: Annotated[str, Field(description="Project to set concurrency caps for.")],
-        max_concurrent_allocations: Annotated[
-            int, Field(description="Maximum concurrent allocations allowed (>= 0).")
+        request: Annotated[
+            QuotaSetRequest,
+            Field(description="Project concurrency quota update request."),
         ],
-        max_concurrent_systems: Annotated[
-            int, Field(description="Maximum concurrent Systems allowed (>= 0).")
-        ],
-        max_pending_allocations: Annotated[
-            int,
-            Field(description="Maximum queued (requested) allocations (>= 0); 0 = no queue."),
-        ] = 0,
     ) -> ToolResponse:
         """Set a project's concurrency caps and pending-queue cap. Requires admin."""
-        return await set_quota(
-            pool,
-            current_context(),
-            request=QuotaSetRequest(
-                project=project,
-                max_concurrent_allocations=max_concurrent_allocations,
-                max_concurrent_systems=max_concurrent_systems,
-                max_pending_allocations=max_pending_allocations,
-            ),
-        )
+        return await set_quota(pool, current_context(), request=request)

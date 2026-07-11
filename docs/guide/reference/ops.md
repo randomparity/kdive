@@ -90,6 +90,9 @@ Resume the worker's claim loop. Requires platform operator.
 
 Run reconciler cleanup once.
 
+Returns `data.repair_counts`, keyed by every cataloged repair kind, plus the
+human-readable scalar summary fields and comma-joined `data.failures`.
+
 ## `ops.reconcile_systems`
 
 `implemented` · `destructive`

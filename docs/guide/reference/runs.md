@@ -60,11 +60,15 @@ Complete an externally built run.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `build_id` | string (nullable) | no | GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff a vmlinux was uploaded. Case-insensitive. |
-| `cmdline` | string (nullable) | no | Kernel debug args appended to the platform-required boot args (e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot via runs.install/runs.boot. |
+| `request` | object (nullable) | no | Optional build finalization fields: cmdline, build_id, and source. |
 | `run_id` | string | yes | The external-build Run to finalize. |
-| `source_label` | string (nullable) | no | Optional unverified provenance: a freeform handle for the local source tree that produced these uploaded artifacts (e.g. 'my-fix worktree'). Recorded as a client claim in runs.get data.build_provenance with client_attested=true; kdive does not clone, resolve, or verify it. 1..256 printable characters; bound on the first completion. Omit if unknown. |
-| `source_ref` | string (nullable) | no | Optional unverified provenance: the ref/commit you claim produced these artifacts (e.g. a git SHA or 'v6.9-rc1+patch'). Recorded as a client claim in runs.get data.build_provenance with client_attested=true; treated as an opaque label, never fetched. 1..256 printable characters; bound on the first completion. Omit if unknown. |
+
+`request` fields:
+
+- `cmdline` (`string (nullable)`, optional) — Kernel debug args appended to the platform-required boot args (e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot via runs.install/runs.boot.
+- `build_id` (`string (nullable)`, optional) — GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff a vmlinux was uploaded. Case-insensitive.
+- `source_label` (`string (nullable)`, optional) — Optional unverified provenance: a freeform handle for the local source tree that produced these uploaded artifacts (e.g. 'my-fix worktree'). Recorded as a client claim in runs.get data.build_provenance with client_attested=true; kdive does not clone, resolve, or verify it. 1..256 printable characters; bound on the first completion. Omit if unknown.
+- `source_ref` (`string (nullable)`, optional) — Optional unverified provenance: the ref/commit you claim produced these artifacts (e.g. a git SHA or 'v6.9-rc1+patch'). Recorded as a client claim in runs.get data.build_provenance with client_attested=true; treated as an opaque label, never fetched. 1..256 printable characters; bound on the first completion. Omit if unknown.
 
 ## `runs.create`
 
@@ -74,12 +78,12 @@ Create a run, bound to a system or unbound against a target_kind.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object | yes | Run creation request. After runs.create, call artifacts.expected_uploads and artifacts.create_run_upload, then runs.complete_build. Extra kernel cmdline args are passed later as `cmdline` on runs.complete_build. |
+| `request` | object | yes | Run creation request. After runs.create, call artifacts.expected_uploads and artifacts.create_run_upload, then runs.complete_build. Extra kernel cmdline args are passed later as `request.cmdline` on runs.complete_build. |
 
 `request` fields:
 
 - `investigation_id` (`string`, required) — Investigation to attach the Run to.
-- `build_profile` (`object(schema_version=1)`, required) — Build profile for the Run's kernel: a thin document, currently just {'schema_version': 1}. The kernel is built locally and uploaded, so no source tree or config is named here. After runs.create, call artifacts.expected_uploads to learn the exact bytes to produce and artifacts.feature_config_requirements to learn which CONFIG_* each debug feature needs, artifacts.create_run_upload to upload, then runs.complete_build (where you may also record the optional source_label/source_ref provenance of the tree you built from - an unverified client claim, surfaced in runs.get data.build_provenance). Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the cmdline parameter to runs.complete_build. See resource://kdive/docs/operating/external-build-upload.md for shaping an upload.
+- `build_profile` (`object(schema_version=1)`, required) — Build profile for the Run's kernel: a thin document, currently just {'schema_version': 1}. The kernel is built locally and uploaded, so no source tree or config is named here. After runs.create, call artifacts.expected_uploads to learn the exact bytes to produce and artifacts.feature_config_requirements to learn which CONFIG_* each debug feature needs, artifacts.create_run_upload to upload, then runs.complete_build (where you may also record the optional source_label/source_ref provenance of the tree you built from - an unverified client claim, surfaced in runs.get data.build_provenance). Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the request.cmdline field to runs.complete_build. See resource://kdive/docs/operating/external-build-upload.md for shaping an upload.
   - `schema_version` (``=1``, required)
 - `system_id` (`string (nullable)`, optional) — Ready System to bind now. Omit to create an unbound Run that targets `target_kind` and is bound later with runs.bind.
 - `target_kind` (`string (nullable)`, optional) — Resource kind the Run builds for. Required when system_id is omitted; derived from the System when system_id is set.
@@ -109,7 +113,8 @@ _external-upload lane (build locally, upload the prebuilt artifact):_
 Return one run; `succeeded` means build done. `data.steps` has install/boot status.
 
 `data.required_cmdline` is the platform-required boot args; append extra kernel debug
-args (e.g. `dhash_entries=1`) with the `cmdline` parameter on `runs.complete_build`.
+args (e.g. `dhash_entries=1`) with the `request.cmdline` field on
+`runs.complete_build`.
 
 Console evidence: `refs.console` is the boot-window console snapshot and
 `data.console_access` names how to read it (`artifacts.get` windowed/paged, or

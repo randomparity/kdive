@@ -28,8 +28,12 @@ Return platform-wide accounting usage for all projects.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `group_by` | string (nullable) | no | Group rows by 'principal', or omit for per-project grouping. |
-| `window` | array<string (nullable)> (nullable) | no | [start, end] ISO-8601 timestamptz pair; omit for all time. |
+| `request` | object (nullable) | no | Report filters: group_by and optional time window. |
+
+`request` fields:
+
+- `group_by` (`string (nullable)`, optional) — Group rows by 'principal', or omit for per-project grouping.
+- `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit for all time.
 
 ## `accounting.report_granted_set`
 
@@ -39,9 +43,13 @@ Return accounting usage for the caller's granted projects.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `group_by` | string (nullable) | no | Group rows by 'principal', or omit for per-project grouping. |
-| `projects` | array<string> (nullable) | no | Named project subset for granted-set scope; omit for all members. |
-| `window` | array<string (nullable)> (nullable) | no | [start, end] ISO-8601 timestamptz pair; omit for all time. |
+| `request` | object (nullable) | no | Report filters: projects, group_by, and optional time window. |
+
+`request` fields:
+
+- `projects` (`array<string> (nullable)`, optional) — Named project subset for granted-set scope; omit for all members.
+- `group_by` (`string (nullable)`, optional) — Group rows by 'principal', or omit for per-project grouping.
+- `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit for all time.
 
 ## `accounting.set_budget`
 
@@ -62,10 +70,14 @@ Set a project's concurrency caps and pending-queue cap. Requires admin.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `max_concurrent_allocations` | integer | yes | Maximum concurrent allocations allowed (>= 0). |
-| `max_concurrent_systems` | integer | yes | Maximum concurrent Systems allowed (>= 0). |
-| `max_pending_allocations` | integer | no | Maximum queued (requested) allocations (>= 0); 0 = no queue. |
-| `project` | string | yes | Project to set concurrency caps for. |
+| `request` | object | yes | Project concurrency quota update request. |
+
+`request` fields:
+
+- `project` (`string`, required) — Project to set concurrency caps for.
+- `max_concurrent_allocations` (`integer`, required) — Maximum concurrent allocations allowed (>= 0).
+- `max_concurrent_systems` (`integer`, required) — Maximum concurrent Systems allowed (>= 0).
+- `max_pending_allocations` (`integer`, optional) — Maximum queued (requested) allocations (>= 0); 0 = no queue.
 
 ## `accounting.usage_investigation`
 
