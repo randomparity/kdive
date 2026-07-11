@@ -11,8 +11,8 @@ import asyncio
 
 from fastmcp import Client, FastMCP
 
+from kdive.mcp.dev_harness import LiveStackClient
 from kdive.mcp.responses import ToolResponse
-from tests.integration.live_stack.harness import LiveStackClient
 
 
 def _probe_app() -> FastMCP:

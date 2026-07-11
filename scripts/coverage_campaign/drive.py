@@ -14,7 +14,7 @@ import asyncio
 import json
 import sys
 
-from tests.integration.live_stack.harness import LiveStackClient, mint_token, oidc_issuer_from_env
+from kdive.mcp.dev_harness import LiveStackClient, mint_token, oidc_issuer_from_env
 
 
 def _parse() -> argparse.Namespace:

@@ -34,6 +34,7 @@ import pytest
 
 import kdive.config as config
 from kdive.domain.errors import CategorizedError
+from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.remote_libvirt.config import (
     is_remote_libvirt_configured,
@@ -41,7 +42,6 @@ from kdive.providers.remote_libvirt.config import (
     remote_instance_names,
 )
 from tests.integration.live_stack.conftest import require_issuer, require_stack
-from tests.integration.live_stack.harness import LiveStackClient, OidcIssuer
 from tests.integration.live_stack.spine import (
     POLL_INTERVAL_S,
     REMOTE_ALLOCATION_DISK_GB,

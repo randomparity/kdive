@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.integration.live_stack.harness import (
+from kdive.mcp.dev_harness import (
     OidcIssuer,
     _build_claims,
     oidc_issuer_from_env,

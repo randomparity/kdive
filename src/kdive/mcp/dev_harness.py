@@ -1,6 +1,6 @@
-"""MCP-over-HTTP wire harness + OIDC token issuance (ADR-0044).
+"""MCP development harness helpers for live-stack and app-introspection tools (ADR-0044).
 
-A test-side seam imported by the live-stack spine driver (issue #100):
+Reusable pieces for run-local scripts and integration tests:
 
 * :func:`mint_token` obtains a bearer token from the mock-oauth2-server by driving its
   interactive-login authorization-code flow and posting a literal ``claims`` JSON object;
@@ -8,11 +8,11 @@ A test-side seam imported by the live-stack spine driver (issue #100):
   ``platform_roles`` array claim (proven to flow into the access token, ADR-0044 Context).
 * :class:`LiveStackClient` wraps :class:`fastmcp.Client`, parsing each tool result's
   structured output back into the project :class:`~kdive.mcp.responses.ToolResponse`.
+* :func:`make_keypair` and :func:`mint` create local JWTs for in-memory app introspection.
 
 The authorization-code flow (:class:`OidcIssuer`, :func:`_build_claims`,
-:func:`_authorization_code`, :func:`_exchange_code`) is the single copy that now lives in
-:mod:`kdive.cli.login`; this harness re-exports those symbols so existing test imports and
-:func:`mint_token` keep working.
+:func:`_authorization_code`, :func:`_exchange_code`) lives in :mod:`kdive.cli.login`; this
+harness re-exports those symbols so script and integration drivers share one flow.
 
 This module imports no pytest symbols so it stays importable as a plain library.
 """
@@ -25,6 +25,7 @@ from typing import Self
 
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
+from fastmcp.server.auth.providers.jwt import RSAKeyPair
 
 from kdive.cli.login import (
     _DEFAULT_AUDIENCE,
@@ -36,13 +37,20 @@ from kdive.cli.login import (
 )
 from kdive.mcp.responses import ToolResponse
 
+ISSUER = "https://idp.test.kdive"
+AUDIENCE = _DEFAULT_AUDIENCE
+
 __all__ = [
+    "AUDIENCE",
+    "ISSUER",
     "LiveStackClient",
     "LiveStackToolError",
     "OidcIssuer",
     "_authorization_code",
     "_build_claims",
     "_exchange_code",
+    "make_keypair",
+    "mint",
     "mint_token",
     "oidc_issuer_from_env",
 ]
@@ -120,6 +128,47 @@ def mint_token(
     )
     code = _authorization_code(issuer, claims)
     return _exchange_code(issuer, code)
+
+
+def make_keypair() -> RSAKeyPair:
+    return RSAKeyPair.generate()
+
+
+def mint(
+    keypair: RSAKeyPair,
+    *,
+    subject: str = "user-1",
+    issuer: str = ISSUER,
+    audience: str = AUDIENCE,
+    agent_session: str | None = "sess-1",
+    projects: list[str] | None = None,
+    roles: dict[str, str] | None = None,
+    client_id: str | None = None,
+    expires_in_seconds: int = 3600,
+) -> str:
+    """Mint a signed JWT carrying the kdive custom claims.
+
+    ``roles`` is the per-project role map (``{"proj-a": "admin"}``) the
+    ``roles_from_claims`` parser reads; omit it for a membership-only token. ``client_id``
+    sets the OIDC ``azp`` claim (the operator-CLI client id) the actor map resolves; omit
+    it for an agent token.
+    """
+    extra: dict[str, object] = {}
+    if agent_session is not None:
+        extra["agent_session"] = agent_session
+    if projects is not None:
+        extra["projects"] = projects
+    if roles is not None:
+        extra["roles"] = roles
+    if client_id is not None:
+        extra["azp"] = client_id
+    return keypair.create_token(
+        subject=subject,
+        issuer=issuer,
+        audience=audience,
+        additional_claims=extra,
+        expires_in_seconds=expires_in_seconds,
+    )
 
 
 class LiveStackClient:

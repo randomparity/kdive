@@ -40,12 +40,12 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from kdive.mcp.responses import ToolResponse
-from tests.integration.live_stack.harness import (
+from kdive.mcp.dev_harness import (
     LiveStackClient,
     mint_token,
     oidc_issuer_from_env,
 )
+from kdive.mcp.responses import ToolResponse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASE_URL = os.environ.get("KDIVE_STACK_BASE_URL", "http://127.0.0.1:8000/mcp")

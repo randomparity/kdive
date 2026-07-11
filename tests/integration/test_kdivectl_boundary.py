@@ -35,9 +35,9 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.mcp.dev_harness import OidcIssuer, mint_token
 from tests.integration._seed import seed_granted_allocation
 from tests.integration.live_stack.conftest import require_issuer, require_stack
-from tests.integration.live_stack.harness import OidcIssuer, mint_token
 
 _DATABASE_URL_ENV = "KDIVE_DATABASE_URL"
 _PROJECT = "kdivectl-boundary"

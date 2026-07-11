@@ -34,13 +34,13 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.sizing import AllocationSizing
-from kdive.profiles.provisioning import reconcile_profile_sizing
-from tests.integration.live_stack.conftest import require_issuer, require_stack
-from tests.integration.live_stack.harness import (
+from kdive.mcp.dev_harness import (
     LiveStackClient,
     LiveStackToolError,
     OidcIssuer,
 )
+from kdive.profiles.provisioning import reconcile_profile_sizing
+from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.spine import (
     LOCAL_ALLOCATION_DISK_GB,
     SpinePhaseError,

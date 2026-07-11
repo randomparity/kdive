@@ -15,7 +15,7 @@ from typing import cast
 import pytest
 from fastmcp import Client
 
-from tests.integration.live_stack.harness import LiveStackClient, LiveStackToolError
+from kdive.mcp.dev_harness import LiveStackClient, LiveStackToolError
 
 
 @dataclass
