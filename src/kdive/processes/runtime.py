@@ -73,7 +73,6 @@ async def tick_heartbeat_loop(heartbeat: Heartbeat) -> None:
 
 
 def install_stop() -> asyncio.Event:
-    """Build a stop event set on SIGINT/SIGTERM."""
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -82,8 +81,6 @@ def install_stop() -> asyncio.Event:
 
 
 def readiness(probe: HealthProbe) -> Callable[[], Awaitable[bool]]:
-    """Adapt a :class:`HealthProbe` into a boolean readiness gate."""
-
     async def ready() -> bool:
         return (await probe.check()).ready
 

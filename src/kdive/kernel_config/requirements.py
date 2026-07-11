@@ -35,12 +35,10 @@ class FeatureRequirement:
 
     @property
     def gated(self) -> bool:
-        """True when this feature has any hard-required symbols (is gate-enforced)."""
         return bool(self.gate_required)
 
 
 def _plain(*symbols: str) -> tuple[Clause, ...]:
-    """Each symbol as its own single-member OR-group clause."""
     return tuple(frozenset({s}) for s in symbols)
 
 
