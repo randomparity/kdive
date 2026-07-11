@@ -25,13 +25,14 @@ from fastmcp import FastMCP
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.platform_auth import ALL_PROJECTS_SCOPE
 from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
@@ -57,10 +58,8 @@ _LIST_TAG = "ops.tool_trail"
 DEFAULT_TRAIL_WINDOW = timedelta(hours=24)
 
 
-class ToolTrailQuery(BaseModel):
+class ToolTrailQuery(ToolPayload):
     """``ops.tool_trail`` row filters."""
-
-    model_config = ConfigDict(extra="forbid")
 
     agent_session: Annotated[
         str | None, Field(description="Filter to one agent session's calls.")
@@ -76,6 +75,13 @@ class ToolTrailQuery(BaseModel):
                 "[start, end] ISO-8601 timestamptz pair; omit start to default to the last 24h."
             )
         ),
+    ] = None
+    limit: Annotated[
+        int, Field(description=f"Maximum rows returned (capped at {MAX_LIST_LIMIT}).")
+    ] = DEFAULT_LIST_LIMIT
+    cursor: Annotated[
+        str | None,
+        Field(description="Opaque continuation cursor from a prior page's next_cursor."),
     ] = None
 
 
@@ -115,8 +121,6 @@ async def tool_trail(
     ctx: RequestContext,
     *,
     request: ToolTrailQuery,
-    limit: int = DEFAULT_LIST_LIMIT,
-    cursor: str | None = None,
     now: datetime | None = None,
 ) -> ToolResponse:
     """Page the ``tool_invocation`` trail; requires platform auditor, read-audited.
@@ -130,7 +134,7 @@ async def tool_trail(
             filters = _parse_filters(request, now=now)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(_OBJECT_ID, exc, suggested_next_actions=[_TOOL])
-        return await _query(pool, ctx, filters, limit, cursor)
+        return await _query(pool, ctx, filters, request.limit, request.cursor)
 
 
 async def _query(
@@ -282,20 +286,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             ToolTrailQuery | None,
             Field(description="Trail filters (agent_session / principal / tool / window)."),
         ] = None,
-        limit: Annotated[
-            int, Field(description=f"Maximum rows returned (capped at {MAX_LIST_LIMIT}).")
-        ] = DEFAULT_LIST_LIMIT,
-        cursor: Annotated[
-            str | None,
-            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
-        ] = None,
     ) -> ToolResponse:
         """Page the per-call tool-invocation trail. Requires platform auditor.
 
         Reconstructs an agent session's ordered tool calls — each row carries ``tool``,
         ``outcome``, ``args_digest``, and ``ts``. Returns the most recent matching rows,
         newest first, keyset-paginated: when ``data.truncated`` is ``true``, pass
-        ``data.next_cursor`` back as ``cursor`` for the next page. Omitting the window
+        ``data.next_cursor`` back as ``request.cursor`` for the next page. Omitting the window
         start bounds the read to the last 24h; that default lower bound is relative to the
         call time, so for an exhaustive read that pages near the 24h edge, pass an explicit
         window to pin both bounds.
@@ -304,6 +301,4 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             pool,
             current_context(),
             request=request or ToolTrailQuery(),
-            limit=limit,
-            cursor=cursor,
         )

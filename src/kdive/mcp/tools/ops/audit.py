@@ -24,13 +24,14 @@ from fastmcp import FastMCP
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.platform_auth import ALL_PROJECTS_SCOPE
 from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
@@ -54,10 +55,8 @@ _OBJECT_ID = "audit.query"
 _LIST_TAG = "audit.query"
 
 
-class _AuditQueryFilters(BaseModel):
+class _AuditQueryFilters(ToolPayload):
     """Common ``audit.query`` filters shared by both read shapes."""
-
-    model_config = ConfigDict(extra="forbid")
 
     principal: Annotated[str | None, Field(description="Filter by acting principal.")] = None
     object_id: Annotated[str | None, Field(description="Filter by audited object UUID.")] = None
@@ -67,6 +66,13 @@ class _AuditQueryFilters(BaseModel):
     window: Annotated[
         list[str | None] | None,
         Field(description="[start, end] ISO-8601 timestamptz pair; omit for all time."),
+    ] = None
+    limit: Annotated[
+        int, Field(description=f"Maximum rows returned (capped at {MAX_LIST_LIMIT}).")
+    ] = DEFAULT_LIST_LIMIT
+    cursor: Annotated[
+        str | None,
+        Field(description="Opaque continuation cursor from a prior page's next_cursor."),
     ] = None
 
 
@@ -91,8 +97,6 @@ async def query_project(
     ctx: RequestContext,
     *,
     request: ProjectAuditQuery,
-    limit: int = DEFAULT_LIST_LIMIT,
-    cursor: str | None = None,
 ) -> ToolResponse:
     """Read one project's audit log; requires project admin."""
     with bind_context(principal=ctx.principal):
@@ -105,7 +109,9 @@ async def query_project(
             )
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(_OBJECT_ID, exc, suggested_next_actions=[_TOOL])
-        return await _query_project(pool, ctx, request.project, filters, limit, cursor)
+        return await _query_project(
+            pool, ctx, request.project, filters, request.limit, request.cursor
+        )
 
 
 async def query_all_projects(
@@ -113,8 +119,6 @@ async def query_all_projects(
     ctx: RequestContext,
     *,
     request: AllProjectsAuditQuery,
-    limit: int = DEFAULT_LIST_LIMIT,
-    cursor: str | None = None,
 ) -> ToolResponse:
     """Read every project's audit log; requires platform auditor."""
     with bind_context(principal=ctx.principal):
@@ -127,7 +131,7 @@ async def query_all_projects(
             )
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(_OBJECT_ID, exc, suggested_next_actions=[_TOOL])
-        return await _query_cross_project(pool, ctx, filters, limit, cursor)
+        return await _query_cross_project(pool, ctx, filters, request.limit, request.cursor)
 
 
 async def query(
@@ -135,13 +139,11 @@ async def query(
     ctx: RequestContext,
     *,
     request: AuditQueryRequest,
-    limit: int = DEFAULT_LIST_LIMIT,
-    cursor: str | None = None,
 ) -> ToolResponse:
     """Dispatch the typed ``audit.query`` request model to its explicit handler."""
     if isinstance(request, ProjectAuditQuery):
-        return await query_project(pool, ctx, request=request, limit=limit, cursor=cursor)
-    return await query_all_projects(pool, ctx, request=request, limit=limit, cursor=cursor)
+        return await query_project(pool, ctx, request=request)
+    return await query_all_projects(pool, ctx, request=request)
 
 
 class _Filters:
@@ -372,18 +374,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
                 description="Project or all-projects audit query request.",
             ),
         ],
-        limit: Annotated[
-            int, Field(description=f"Maximum rows returned (capped at {MAX_LIST_LIMIT}).")
-        ] = DEFAULT_LIST_LIMIT,
-        cursor: Annotated[
-            str | None,
-            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
-        ] = None,
     ) -> ToolResponse:
         """Read audit_log: project form (admin) or cross-project (platform_auditor).
 
         Returns the most recent matching rows, newest first, keyset-paginated:
         ``data.truncated`` is ``true`` when more rows match than were returned — pass
-        ``data.next_cursor`` back as ``cursor`` for the next page, or narrow with filters.
+        ``data.next_cursor`` back as ``request.cursor`` for the next page, or narrow with filters.
         """
-        return await query(pool, current_context(), request=request, limit=limit, cursor=cursor)
+        return await query(pool, current_context(), request=request)

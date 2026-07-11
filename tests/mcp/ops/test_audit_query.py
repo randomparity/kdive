@@ -165,13 +165,17 @@ def _project_object_query(project: str, object_id: str) -> audit_tools.ProjectAu
     )
 
 
-def _all_projects_query() -> audit_tools.AllProjectsAuditQuery:
+def _all_projects_query(
+    *, limit: int = audit_tools.DEFAULT_LIST_LIMIT, cursor: str | None = None
+) -> audit_tools.AllProjectsAuditQuery:
     return audit_tools.AllProjectsAuditQuery(
         scope="all-projects",
         principal=None,
         object_id=None,
         transition=None,
         window=None,
+        limit=limit,
+        cursor=cursor,
     )
 
 
@@ -520,7 +524,7 @@ def test_cross_project_paginates_with_cursor(migrated_url: str) -> None:
             cursor: str | None = None
             for _ in range(10):
                 page = await audit_tools.query_all_projects(
-                    pool, ctx, request=_all_projects_query(), limit=2, cursor=cursor
+                    pool, ctx, request=_all_projects_query(limit=2, cursor=cursor)
                 )
                 seen.extend(str(r["object_id"]) for r in _rows(page))
                 if not page.data["truncated"]:
@@ -538,7 +542,7 @@ def test_cross_project_no_truncation_at_exactly_limit(migrated_url: str) -> None
             await _seed_n_rows(pool, 2)
             ctx = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
             resp = await audit_tools.query_all_projects(
-                pool, ctx, request=_all_projects_query(), limit=2
+                pool, ctx, request=_all_projects_query(limit=2)
             )
         assert resp.data["truncated"] is False
         assert resp.data["next_cursor"] is None
@@ -552,7 +556,7 @@ def test_cross_project_malformed_cursor_is_config_error(migrated_url: str) -> No
             await _seed_n_rows(pool, 1)
             ctx = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
             resp = await audit_tools.query_all_projects(
-                pool, ctx, request=_all_projects_query(), cursor="!!!"
+                pool, ctx, request=_all_projects_query(cursor="!!!")
             )
         assert resp.status == "error"
         assert resp.data["reason"] == "invalid_cursor"

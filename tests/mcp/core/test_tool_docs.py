@@ -324,6 +324,25 @@ def test_filtered_list_tools_use_request_payloads() -> None:
         assert set(request_properties) == fields
 
 
+def test_platform_auditor_reads_keep_pagination_inside_request_payloads() -> None:
+    tools = {t.name: t for t in TOOLS}
+
+    audit_params = tools["audit.query"].parameters
+    assert set(audit_params["properties"]) == {"request"}
+    audit_choices = audit_params["properties"]["request"]["oneOf"]
+    assert isinstance(audit_choices, list)
+    for choice in audit_choices:
+        assert isinstance(choice, dict)
+        properties = cast(dict[str, object], choice["properties"])
+        assert {"limit", "cursor"} <= set(properties)
+
+    trail_params = tools["ops.tool_trail"].parameters
+    assert set(trail_params["properties"]) == {"request"}
+    trail_schema = _object_schema(trail_params["properties"]["request"])
+    trail_properties = cast(dict[str, object], trail_schema["properties"])
+    assert {"limit", "cursor"} <= set(trail_properties)
+
+
 def test_run_cmdline_docs_describe_debug_args_only() -> None:
     """The agent-provided cmdline must not document platform-owned boot args."""
     tools = {t.name: t for t in TOOLS}
