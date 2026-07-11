@@ -228,15 +228,13 @@ class DiagnosticsWorkerCheckPayload(_PayloadBase):
     provider: str
 
 
-_PayloadModel = (
+type _ActivePayloadModel = (
     type[SystemPayload]
     | type[ReprovisionPayload]
     | type[AuthorizeSshKeyPayload]
     | type[CheckSshReachablePayload]
     | type[ConsoleRotatePayload]
     | type[RunPayload]
-    | type[BuildPayload]
-    | type[BuildInstallBootPayload]
     | type[InstallPayload]
     | type[PowerPayload]
     | type[SysRqPayload]
@@ -244,15 +242,13 @@ _PayloadModel = (
     | type[ImageBuildPayload]
     | type[DiagnosticsWorkerCheckPayload]
 )
-PayloadModel = (
+type ActivePayloadModel = (
     SystemPayload
     | ReprovisionPayload
     | AuthorizeSshKeyPayload
     | CheckSshReachablePayload
     | ConsoleRotatePayload
     | RunPayload
-    | BuildPayload
-    | BuildInstallBootPayload
     | InstallPayload
     | PowerPayload
     | SysRqPayload
@@ -260,8 +256,9 @@ PayloadModel = (
     | ImageBuildPayload
     | DiagnosticsWorkerCheckPayload
 )
+type PayloadModel = ActivePayloadModel
 
-_ACTIVE_PAYLOAD_MODELS: dict[JobKind, _PayloadModel] = {
+_ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.PROVISION: SystemPayload,
     JobKind.REPROVISION: ReprovisionPayload,
     JobKind.TEARDOWN: SystemPayload,
@@ -318,7 +315,7 @@ def load_authorizing(job: Job) -> Authorizing:
         raise _validation_error("job authorizing", exc) from exc
 
 
-def dump_payload(kind: JobKind, payload: PayloadModel | dict[str, Any]) -> dict[str, Any]:
+def dump_payload(kind: JobKind, payload: ActivePayloadModel | dict[str, Any]) -> dict[str, Any]:
     """Validate and serialize a payload for ``kind``."""
     if kind in RETIRED_JOB_KINDS:
         raise PayloadValidationError(f"{kind.value} payload contract is retired")
@@ -330,7 +327,7 @@ def dump_payload(kind: JobKind, payload: PayloadModel | dict[str, Any]) -> dict[
     return model.model_dump(mode="json", exclude_none=True)
 
 
-def load_payload[T: PayloadModel](job: Job, model_class: type[T]) -> T:
+def load_payload[T: ActivePayloadModel](job: Job, model_class: type[T]) -> T:
     """Decode ``job.payload`` as ``model_class`` after checking the job kind contract."""
     expected = _ACTIVE_PAYLOAD_MODELS.get(job.kind)
     if expected is None:

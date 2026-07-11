@@ -29,8 +29,8 @@ from kdive.domain.operations.jobs import (
     JobKind,
 )
 from kdive.jobs.payloads import (
+    ActivePayloadModel,
     Authorizing,
-    PayloadModel,
     dump_authorizing,
     dump_payload,
 )
@@ -43,7 +43,7 @@ DEFAULT_DISPATCH_LANES = (DEFAULT_JOB_DISPATCH_LANE,)
 async def enqueue(
     conn: AsyncConnection,
     kind: JobKind,
-    payload: PayloadModel,
+    payload: ActivePayloadModel,
     authorizing: Authorizing | JobAuthorizing,
     dedup_key: str,
     *,
