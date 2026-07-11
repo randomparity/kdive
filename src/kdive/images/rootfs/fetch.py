@@ -74,6 +74,66 @@ def _unlink_tmp_cache(tmp: Path) -> None:
         tmp.unlink()
 
 
+def _required_object_ref(
+    object_key: str | None, digest: str | None, *, provider: str, name: str
+) -> tuple[str, str]:
+    if object_key is None or digest is None:
+        raise CategorizedError(
+            "registered rootfs row is missing its object_key or digest",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"provider": provider, "name": name},
+        )
+    return object_key, digest
+
+
+def _materialize_s3_rootfs(
+    fetch_data: Callable[[], bytes],
+    *,
+    provider: str,
+    name: str,
+    object_key: str,
+    digest: str,
+    cache_dir: Path,
+) -> Path:
+    cached = _cache_path(cache_dir, digest)
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        if cached.is_file():
+            return cached
+    except OSError as err:
+        raise _cache_io_error(
+            provider=provider,
+            name=name,
+            object_key=object_key,
+            cache_path=cached,
+            err=err,
+        ) from err
+
+    data = fetch_data()
+    actual = "sha256:" + hashlib.sha256(data).hexdigest()
+    if actual != digest:
+        raise CategorizedError(
+            "fetched rootfs object digest does not match the catalog row",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"provider": provider, "name": name, "object_key": object_key},
+        )
+
+    tmp = cached.with_suffix(".qcow2.partial")
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(cached)
+    except OSError as err:
+        _unlink_tmp_cache(tmp)
+        raise _cache_io_error(
+            provider=provider,
+            name=name,
+            object_key=object_key,
+            cache_path=cached,
+            err=err,
+        ) from err
+    return cached
+
+
 async def fetch_registered_rootfs(
     conn: AsyncConnection,
     store: RootfsObjectStore,
@@ -102,53 +162,18 @@ async def fetch_registered_rootfs(
         )
     # A registered row always has an object_key and a digest (the DB CHECK and the publish path
     # guarantee it), so both are present here.
-    object_key = row.object_key
-    digest = row.digest
-    if object_key is None or digest is None:  # Defensive: a registered row carries both.
-        raise CategorizedError(
-            "registered rootfs row is missing its object_key or digest",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"provider": provider, "name": name},
-        )
-
-    cached = _cache_path(cache_dir, digest)
-    try:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        if cached.is_file():
-            return cached
-    except OSError as err:
-        raise _cache_io_error(
-            provider=provider,
-            name=name,
-            object_key=object_key,
-            cache_path=cached,
-            err=err,
-        ) from err
-
-    fetched = await asyncio.to_thread(store.get_artifact, object_key, None)
-    actual = "sha256:" + hashlib.sha256(fetched.data).hexdigest()
-    if actual != digest:
-        raise CategorizedError(
-            "fetched rootfs object digest does not match the catalog row",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"provider": provider, "name": name, "object_key": object_key},
-        )
-    # Write through a temp sibling then atomically rename so a partial/corrupt download never
-    # surfaces as a cache hit (and a mismatch above leaves the cache empty).
-    tmp = cached.with_suffix(".qcow2.partial")
-    try:
-        tmp.write_bytes(fetched.data)
-        tmp.replace(cached)
-    except OSError as err:
-        _unlink_tmp_cache(tmp)
-        raise _cache_io_error(
-            provider=provider,
-            name=name,
-            object_key=object_key,
-            cache_path=cached,
-            err=err,
-        ) from err
-    return cached
+    object_key, digest = _required_object_ref(
+        row.object_key, row.digest, provider=provider, name=name
+    )
+    return await asyncio.to_thread(
+        _materialize_s3_rootfs,
+        lambda: store.get_artifact(object_key, None).data,
+        provider=provider,
+        name=name,
+        object_key=object_key,
+        digest=digest,
+        cache_dir=cache_dir,
+    )
 
 
 def fetch_registered_rootfs_sync(
@@ -189,37 +214,14 @@ def fetch_registered_rootfs_sync(
         )
     if row.path is not None:
         return validate_local_component_path(row.path, allowed_roots=allowed_roots)
-    object_key, digest = row.object_key, row.digest
-    if object_key is None or digest is None:  # Defensive: an s3 registered row carries both.
-        raise CategorizedError(
-            "registered rootfs row is missing its object_key or digest",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"provider": provider, "name": name},
-        )
-    cached = _cache_path(cache_dir, digest)
-    try:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        if cached.is_file():
-            return cached
-    except OSError as err:
-        raise _cache_io_error(
-            provider=provider, name=name, object_key=object_key, cache_path=cached, err=err
-        ) from err
-    fetched = store_factory().get_artifact(object_key, None)
-    actual = "sha256:" + hashlib.sha256(fetched.data).hexdigest()
-    if actual != digest:
-        raise CategorizedError(
-            "fetched rootfs object digest does not match the catalog row",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"provider": provider, "name": name, "object_key": object_key},
-        )
-    tmp = cached.with_suffix(".qcow2.partial")
-    try:
-        tmp.write_bytes(fetched.data)
-        tmp.replace(cached)
-    except OSError as err:
-        _unlink_tmp_cache(tmp)
-        raise _cache_io_error(
-            provider=provider, name=name, object_key=object_key, cache_path=cached, err=err
-        ) from err
-    return cached
+    object_key, digest = _required_object_ref(
+        row.object_key, row.digest, provider=provider, name=name
+    )
+    return _materialize_s3_rootfs(
+        lambda: store_factory().get_artifact(object_key, None).data,
+        provider=provider,
+        name=name,
+        object_key=object_key,
+        digest=digest,
+        cache_dir=cache_dir,
+    )
