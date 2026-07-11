@@ -6,6 +6,7 @@ import asyncio
 import logging
 import math
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from psycopg import sql
 from psycopg.rows import dict_row
@@ -19,7 +20,7 @@ from kdive.domain.lifecycle.records import Allocation
 from kdive.log import bind_context
 from kdive.mcp.exposure import tool_visible, visible_next_actions
 from kdive.mcp.responses import JsonValue, ToolResponse
-from kdive.mcp.tools._common import ConfigErrorReason, InvalidCursor
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, ConfigErrorReason, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
@@ -104,6 +105,16 @@ _ALLOCATIONS_LIST_TAG = "allocations.list"
 _ALLOCATIONS_COLLECTION_ACTIONS = ["allocations.get", "allocations.release"]
 
 
+@dataclass(frozen=True, slots=True)
+class AllocationsListRequest:
+    """Filter payload for ``allocations.list``."""
+
+    project: str | None = None
+    state: AllocationState | None = None
+    limit: int = DEFAULT_LIST_LIMIT
+    cursor: str | None = None
+
+
 def _viewer_projects(ctx: RequestContext) -> list[str]:
     """Projects the caller may view: a member project with any granted role."""
     return [p for p in ctx.projects if ctx.roles.get(p) is not None]
@@ -120,11 +131,7 @@ def _project_filter(ctx: RequestContext, project: str | None) -> list[str]:
 async def list_allocations(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    *,
-    project: str | None = None,
-    limit: int,
-    cursor: str | None = None,
-    state: AllocationState | None = None,
+    request: AllocationsListRequest | None = None,
 ) -> ToolResponse:
     """Return a page of the newest visible allocations (keyset-paginated, ADR-0192).
 
@@ -140,19 +147,20 @@ async def list_allocations(
     keyset seek so the cursor stays a pure boundary and following ``next_cursor`` drains
     the full filtered set.
     """
-    projects = _project_filter(ctx, project)
-    capped = _clamp_list_limit(limit)
+    request = request or AllocationsListRequest()
+    projects = _project_filter(ctx, request.project)
+    capped = _clamp_list_limit(request.limit)
     after = None
-    if cursor:
+    if request.cursor:
         try:
-            after = _decode_ts_uuid_cursor(_ALLOCATIONS_LIST_TAG, cursor)
+            after = _decode_ts_uuid_cursor(_ALLOCATIONS_LIST_TAG, request.cursor)
         except InvalidCursor:
             return _invalid_cursor_error("allocations")
     where_parts: list[Composable] = [sql.SQL("project = ANY(%s)")]
     params: list[object] = [projects]
-    if state is not None:
+    if request.state is not None:
         where_parts.append(sql.SQL("state = %s"))
-        params.append(state.value)
+        params.append(request.state.value)
     if after is not None:
         where_parts.append(sql.SQL("(created_at, id) < (%s, %s)"))
         params.extend(after)
@@ -160,7 +168,7 @@ async def list_allocations(
     with bind_context(principal=ctx.principal):
         if not projects:
             return _allocations_collection(
-                ctx, [], project=project, truncated=False, next_cursor=None
+                ctx, [], project=request.project, truncated=False, next_cursor=None
             )
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             query = sql.SQL(
@@ -191,7 +199,7 @@ async def list_allocations(
         return _allocations_collection(
             ctx,
             responses,
-            project=project,
+            project=request.project,
             truncated=truncated,
             next_cursor=next_cursor,
         )

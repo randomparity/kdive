@@ -27,9 +27,18 @@ from kdive.mcp.tools.lifecycle.allocations.request import (
 from kdive.mcp.tools.lifecycle.allocations.request import (
     request_allocation as _request_allocation,
 )
-from kdive.mcp.tools.lifecycle.allocations.view import get_allocation as _get_allocation
-from kdive.mcp.tools.lifecycle.allocations.view import list_allocations as _list_allocations
-from kdive.mcp.tools.lifecycle.allocations.view import wait_allocation as _wait_allocation
+from kdive.mcp.tools.lifecycle.allocations.view import (
+    AllocationsListRequest,
+)
+from kdive.mcp.tools.lifecycle.allocations.view import (
+    get_allocation as _get_allocation,
+)
+from kdive.mcp.tools.lifecycle.allocations.view import (
+    list_allocations as _list_allocations,
+)
+from kdive.mcp.tools.lifecycle.allocations.view import (
+    wait_allocation as _wait_allocation,
+)
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.services.allocation.admission.metrics import AdmissionMetrics
 
@@ -198,10 +207,12 @@ def _register_allocations_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         return await _list_allocations(
             pool,
             current_context(),
-            project=request.project,
-            limit=request.limit,
-            cursor=request.cursor,
-            state=request.state,
+            AllocationsListRequest(
+                project=request.project,
+                limit=request.limit,
+                cursor=request.cursor,
+                state=request.state,
+            ),
         )
 
 

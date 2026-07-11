@@ -37,6 +37,7 @@ from kdive.mcp.tools.lifecycle.allocations.request import (
     request_allocation,
 )
 from kdive.mcp.tools.lifecycle.allocations.view import (
+    AllocationsListRequest,
     get_allocation,
     list_allocations,
     wait_allocation,
@@ -1038,7 +1039,9 @@ def test_list_returns_project_allocations(migrated_url: str) -> None:
             await _register(pool, cap=3)
             await _request(pool, _ctx())
             await _request(pool, _ctx())
-            responses = await list_allocations(pool, _ctx(), project="proj", limit=50)
+            responses = await list_allocations(
+                pool, _ctx(), AllocationsListRequest(project="proj", limit=50)
+            )
         items = responses.items
         assert responses.object_id == "allocations"
         assert responses.status == "ok"
@@ -1063,7 +1066,7 @@ def test_list_allocations_without_project_returns_all_readable_projects(migrated
                 roles={"proj": Role.VIEWER, "other": Role.CONTRIBUTOR},
             )
 
-            responses = await list_allocations(pool, ctx, limit=50)
+            responses = await list_allocations(pool, ctx, AllocationsListRequest(limit=50))
 
         assert {item.object_id for item in responses.items} == {proj_id, other_id}
         assert "project" not in responses.data
@@ -1078,7 +1081,7 @@ def test_list_allocations_without_project_no_viewer_grants_is_empty(migrated_url
             await _register(pool, cap=1)
             await _request(pool, _ctx())
 
-            resp = await list_allocations(pool, _ctx(role=None), limit=50)
+            resp = await list_allocations(pool, _ctx(role=None), AllocationsListRequest(limit=50))
 
         assert resp.status == "ok"
         assert resp.items == []
@@ -1095,7 +1098,11 @@ def test_list_allocations_requires_viewer_role(migrated_url: str) -> None:
             await _register(pool, cap=1)
             await _request(pool, _ctx())
             with pytest.raises(AuthorizationError):
-                await list_allocations(pool, _ctx(role=None), project="proj", limit=50)
+                await list_allocations(
+                    pool,
+                    _ctx(role=None),
+                    AllocationsListRequest(project="proj", limit=50),
+                )
 
     asyncio.run(_run())
 
@@ -1106,14 +1113,20 @@ def test_list_allocations_paginates_with_cursor(migrated_url: str) -> None:
             await _register(pool, cap=5)
             for _ in range(5):
                 await _request(pool, _ctx())
-            first = await list_allocations(pool, _ctx(), project="proj", limit=2)
+            first = await list_allocations(
+                pool, _ctx(), AllocationsListRequest(project="proj", limit=2)
+            )
             assert first.data["truncated"] is True
             cursor = first.data["next_cursor"]
             assert isinstance(cursor, str)
 
             seen = [item.object_id for item in first.items]
             for _ in range(10):
-                page = await list_allocations(pool, _ctx(), project="proj", limit=2, cursor=cursor)
+                page = await list_allocations(
+                    pool,
+                    _ctx(),
+                    AllocationsListRequest(project="proj", limit=2, cursor=cursor),
+                )
                 seen.extend(item.object_id for item in page.items)
                 if not page.data["truncated"]:
                     break
@@ -1132,7 +1145,9 @@ def test_list_allocations_no_truncation_at_exactly_limit(migrated_url: str) -> N
             await _register(pool, cap=2)
             await _request(pool, _ctx())
             await _request(pool, _ctx())
-            resp = await list_allocations(pool, _ctx(), project="proj", limit=2)
+            resp = await list_allocations(
+                pool, _ctx(), AllocationsListRequest(project="proj", limit=2)
+            )
         assert resp.data["truncated"] is False
         assert resp.data["next_cursor"] is None
 
@@ -1144,7 +1159,11 @@ def test_list_allocations_malformed_cursor_is_config_error(migrated_url: str) ->
         async with _pool(migrated_url) as pool:
             await _register(pool, cap=1)
             await _request(pool, _ctx())
-            resp = await list_allocations(pool, _ctx(), project="proj", limit=2, cursor="garbage")
+            resp = await list_allocations(
+                pool,
+                _ctx(),
+                AllocationsListRequest(project="proj", limit=2, cursor="garbage"),
+            )
         assert resp.status == "error"
         assert resp.data["reason"] == "invalid_cursor"
 
@@ -1158,7 +1177,9 @@ def test_list_allocations_filters_by_state(migrated_url: str) -> None:
             granted = await _seed_alloc(pool, res, AllocationState.GRANTED)
             await _seed_alloc(pool, res, AllocationState.RELEASED)
             resp = await list_allocations(
-                pool, _ctx(), project="proj", limit=50, state=AllocationState.GRANTED
+                pool,
+                _ctx(),
+                AllocationsListRequest(project="proj", limit=50, state=AllocationState.GRANTED),
             )
         assert [r.object_id for r in resp.items] == [granted]
 
@@ -1171,7 +1192,9 @@ def test_list_allocations_state_filter_no_match_is_empty(migrated_url: str) -> N
             res = await _register(pool, cap=1)
             await _seed_alloc(pool, res, AllocationState.GRANTED)
             resp = await list_allocations(
-                pool, _ctx(), project="proj", limit=50, state=AllocationState.FAILED
+                pool,
+                _ctx(),
+                AllocationsListRequest(project="proj", limit=50, state=AllocationState.FAILED),
             )
         assert resp.status == "ok"
         assert resp.items == []
@@ -1192,10 +1215,12 @@ def test_list_allocations_state_filter_drains_across_pages(migrated_url: str) ->
                 page = await list_allocations(
                     pool,
                     _ctx(),
-                    project="proj",
-                    limit=2,
-                    cursor=cursor,
-                    state=AllocationState.GRANTED,
+                    AllocationsListRequest(
+                        project="proj",
+                        limit=2,
+                        cursor=cursor,
+                        state=AllocationState.GRANTED,
+                    ),
                 )
                 seen.extend(item.object_id for item in page.items)
                 if not page.data["truncated"]:
@@ -1462,7 +1487,9 @@ def test_queue_position_absent_on_granted_and_in_list(migrated_url: str) -> None
             res = await _register(pool)
             granted = await _seed_alloc(pool, res, AllocationState.GRANTED)
             rg = await get_allocation(pool, _ctx(), granted)
-            rl = await list_allocations(pool, _ctx(), project="proj", limit=50)
+            rl = await list_allocations(
+                pool, _ctx(), AllocationsListRequest(project="proj", limit=50)
+            )
         assert "queue_position" not in rg.data
         assert all("queue_position" not in item.data for item in rl.items)
         # #462: reaching a granted allocation via allocations.get also advertises systems.provision.
