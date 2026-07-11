@@ -43,15 +43,16 @@ _ACTIVE_ALLOCATION_STATE_VALUE = AllocationState.ACTIVE.value
 
 # A System in one of these states is "live" — it keeps its allocation legitimately occupied.
 # This is the complement of admission's `_NON_TERMINAL_SYSTEM` (defined/provisioning/ready/
-# reprovisioning/crashed); a `crashed` System whose allocation backs an in-progress
-# crash investigation is live, NOT orphaned. Derived from the enum, not literal strings, so
-# it cannot drift if SystemState gains a value. Mirrors the sibling
+# reprovisioning/crashing/crashed); a `crashing` (mid-force_crash) or `crashed` System whose
+# allocation backs an in-progress crash investigation is live, NOT orphaned. Keep this in step
+# with `_NON_TERMINAL_SYSTEM` when SystemState gains a value. Mirrors the sibling
 # `reconciler.systems._ORPHANED_SYSTEM_TERMINAL_STATES`.
 _LIVE_SYSTEM_STATES = (
     SystemState.DEFINED,
     SystemState.PROVISIONING,
     SystemState.READY,
     SystemState.REPROVISIONING,
+    SystemState.CRASHING,
     SystemState.CRASHED,
 )
 _LIVE_SYSTEM_STATE_VALUES = tuple(state.value for state in _LIVE_SYSTEM_STATES)

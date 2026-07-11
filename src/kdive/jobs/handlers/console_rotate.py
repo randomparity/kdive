@@ -64,7 +64,9 @@ _RETENTION_CLASS = "console"
 # the still-present console log (absent sidecar -> ZERO state) and orphan them past teardown. The
 # guard and teardown both run under the per-System advisory lock, so the lock serializes the
 # state-set against this state-read: whichever runs second sees the other's committed effect.
-_LIVE_STATES: frozenset[SystemState] = frozenset({SystemState.READY, SystemState.CRASHED})
+_LIVE_STATES: frozenset[SystemState] = frozenset(
+    {SystemState.READY, SystemState.CRASHING, SystemState.CRASHED}
+)
 
 _PART_ROW_SQL: LiteralString = (
     "SELECT id FROM artifacts WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"

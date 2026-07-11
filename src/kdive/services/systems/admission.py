@@ -60,6 +60,7 @@ _NON_TERMINAL_SYSTEM = (
     SystemState.PROVISIONING,
     SystemState.READY,
     SystemState.REPROVISIONING,
+    SystemState.CRASHING,  # mid-force_crash: still holds a quota slot (#1078)
     SystemState.CRASHED,
 )
 type LockedAllocationSystem = tuple[AsyncConnection, Allocation, System | None]
