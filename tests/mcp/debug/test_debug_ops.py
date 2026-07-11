@@ -38,6 +38,14 @@ from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigati
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug import ops as debug_ops
+from kdive.mcp.tools.debug import (
+    ops_breakpoints,
+    ops_execution,
+    ops_memory,
+    ops_modules,
+    ops_stack,
+    ops_watchpoints,
+)
 from kdive.mcp.tools.debug import sessions as debug_tools
 from kdive.mcp.tools.debug.ops import (
     DebugEngineRuntime,
@@ -268,22 +276,22 @@ async def _seed_live_session(pool: AsyncConnectionPool, *, state: DebugSessionSt
 def _op_for(op: str, runtime: DebugEngineRuntime, session_id: str, **kwargs: Any) -> Any:
     del runtime
     factory = {
-        "set_breakpoint": debug_ops._set_breakpoint_op,
-        "clear_breakpoint": debug_ops._clear_breakpoint_op,
-        "list_breakpoints": debug_ops._list_breakpoints_op,
-        "read_memory": debug_ops._read_memory_op,
-        "read_registers": debug_ops._read_registers_op,
-        "resolve_symbol": debug_ops._resolve_symbol_op,
-        "continue": debug_ops._continue_op,
-        "interrupt": debug_ops._interrupt_op,
-        "backtrace": debug_ops._backtrace_op,
-        "read_frame": debug_ops._read_frame_op,
-        "disassemble": debug_ops._disassemble_op,
-        "set_watchpoint": debug_ops._set_watchpoint_op,
-        "list_watchpoints": debug_ops._list_watchpoints_op,
-        "clear_watchpoint": debug_ops._clear_watchpoint_op,
-        "list_modules": debug_ops._list_modules_op,
-        "load_module_symbols": debug_ops._load_module_symbols_op,
+        "set_breakpoint": ops_breakpoints._set_breakpoint_op,
+        "clear_breakpoint": ops_breakpoints._clear_breakpoint_op,
+        "list_breakpoints": ops_breakpoints._list_breakpoints_op,
+        "read_memory": ops_memory._read_memory_op,
+        "read_registers": ops_memory._read_registers_op,
+        "resolve_symbol": ops_memory._resolve_symbol_op,
+        "continue": ops_execution._continue_op,
+        "interrupt": ops_execution._interrupt_op,
+        "backtrace": ops_stack._backtrace_op,
+        "read_frame": ops_stack._read_frame_op,
+        "disassemble": ops_stack._disassemble_op,
+        "set_watchpoint": ops_watchpoints._set_watchpoint_op,
+        "list_watchpoints": ops_watchpoints._list_watchpoints_op,
+        "clear_watchpoint": ops_watchpoints._clear_watchpoint_op,
+        "list_modules": ops_modules._list_modules_op,
+        "load_module_symbols": ops_modules._load_module_symbols_op,
     }[op]
     return factory(session_id, **kwargs)
 
@@ -362,7 +370,15 @@ async def _call_registered_debug_tool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> ToolResponse:
     """Register the gdb-MI tools and invoke one through the FastMCP transport (the wrapper path)."""
-    monkeypatch.setattr(debug_ops, "current_context", lambda: ctx)
+    for module in (
+        ops_breakpoints,
+        ops_memory,
+        ops_execution,
+        ops_stack,
+        ops_watchpoints,
+        ops_modules,
+    ):
+        monkeypatch.setattr(module, "current_context", lambda: ctx)
     app: FastMCP = FastMCP(name="t")
     debug_ops._register_debug_ops(app, pool, cast(Any, _FixedDebugRuntimeResolver(runtime)))
     async with Client(app) as client:
