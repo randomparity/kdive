@@ -24,22 +24,20 @@ attachment and the next op gets ``no_live_session``.
 from __future__ import annotations
 
 import contextlib
-import re
 import shutil
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import (
-    GdbBreakpointRef,
     GdbController,
     GdbMiAttachment,
     GdbStopRecord,
 )
 from kdive.providers.shared.debug_common.gdbmi import execution as mi_execution
 from kdive.providers.shared.debug_common.gdbmi import mi_controller
+from kdive.providers.shared.debug_common.gdbmi.breakpoints import GdbMiBreakpointCommands
 from kdive.providers.shared.debug_common.gdbmi.debuginfo import (
     ModuleDebuginfo,
     ModuleDebuginfoResolverSeam,
@@ -53,19 +51,14 @@ from kdive.providers.shared.debug_common.gdbmi.hostpolicy import HostPolicy, req
 from kdive.providers.shared.debug_common.gdbmi.mi_controller import PygdbmiController
 from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
     MiRecord,
-    breakpoint_rows,
-    evaluate_value,
     memory_segments,
     parse_mi_records,
     payload_dict,
-    register_values_by_number,
-    result_payload_dict,
-)
-from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
-    register_names as parsed_register_names,
 )
 from kdive.providers.shared.debug_common.gdbmi.modules import GdbMiModuleCommands
+from kdive.providers.shared.debug_common.gdbmi.registers import GdbMiRegisterCommands
 from kdive.providers.shared.debug_common.gdbmi.stack import GdbMiStackCommands
+from kdive.providers.shared.debug_common.gdbmi.symbols import GdbMiSymbolCommands
 from kdive.providers.shared.debug_common.gdbmi.transcript import (
     append_transcript as write_transcript,
 )
@@ -83,26 +76,6 @@ __all__ = [
 ]
 
 MAX_MEMORY_READ_BYTES = 4096
-# Caps the backtrace *response* (not the gdb command): a free-running kernel stack is bounded,
-# but the response stays bounded and a deeper stack is flagged via GdbBacktrace.truncated.
-MAX_BACKTRACE_FRAMES = 64
-# Caps the disassembly *response*: bound the window in Python, not the gdb command (ADR-0276).
-MAX_DISASSEMBLE_INSTRUCTIONS = 256
-# x86-64's maximum instruction length is 15 bytes; round up to 16 so an N*16-byte window spans
-# at least N instructions, and reuse it as the shrink-retry floor (one maximal instruction).
-MAX_INSTRUCTION_BYTES = 16
-# x86-64 hardware data-watchpoint widths: one debug register covers one of these. A
-# non-power-of-two or larger region forces gdb to chain registers or fall back to a software
-# watchpoint that single-steps the inferior — unusable over a kernel gdbstub (ADR-0277).
-WATCH_BYTE_SIZES = (1, 2, 4, 8)
-# Default watched width: one 64-bit word (covers a kernel pointer/long/counter).
-DEFAULT_WATCH_BYTES = 8
-# Caps the module-list *walk*: a corrupt list never reaching the head, or an unusually large
-# module count, stays bounded; a longer list is flagged via GdbModuleList.truncated (ADR-0278).
-MAX_MODULES = 512
-# The kernel `struct module` base-address field moved across versions: `mem[MOD_TEXT].base`
-# (>=6.4) and `core_layout.base` (before). Probed once per session, in this order (ADR-0278).
-_MODULE_BASE_FIELDS = ("mem[0].base", "core_layout.base")
 _INTERRUPT_STOP_TIMEOUT_SEC = mi_execution.INTERRUPT_STOP_TIMEOUT_SEC
 _STOP_POLL_SLICE_SEC = mi_execution.STOP_POLL_SLICE_SEC
 _timeout_error = mi_controller.timeout_error
@@ -119,58 +92,8 @@ RSP_REMOTE_TIMEOUT_SEC = 30
 _CONNECT_RETRY_COUNT = 3
 _CONNECT_RETRY_BACKOFF_SEC = 0.5
 
-# A bare C identifier. The name-shape gate keeps a breakpoint location an address-of-a-name,
-# never an arbitrary expression — so `-break-insert` is non-injectable.
-_SYMBOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# The first hex token in a `-data-evaluate-expression &name` value. gdb renders a pointer as
-# `<optional type cast> 0xADDR <optional symbol>`, so a leftmost search yields the address even
-# past a `(int *)` cast; the address always precedes the `<symbol>` annotation.
-_SYMBOL_ADDR_RE = re.compile(r"0x[0-9a-fA-F]+")
-# A register name (passed to -data-list-register-names lookup).
-_REGISTER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
-# A breakpoint location: a bare C identifier (function/symbol).
-_BREAK_LOCATION_RE = _SYMBOL_NAME_RE
-# A gdb breakpoint id is a bare integer.
-_BREAK_ID_RE = re.compile(r"^[0-9]+$")
-# A kernel module name as it appears in `struct module` (sysfs uses `_`); gates
-# `load_module_symbols` so the constructed `((struct module *)0x..)->...` reads stay
-# non-injectable (ADR-0278).
-_MODULE_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
-# In-memory kernel build-id width (BUILD_ID_SIZE_MAX); read as raw bytes for identity comparison.
-_BUILD_ID_BYTES = 20
 # gdb stop reasons meaning the inferior is gone (not a debuggable HALT).
 _TERMINAL_STOP_REASONS = frozenset({"exited", "exited-normally", "exited-signalled"})
-# gdb's ^error message for a stack command issued against a running target carries this token
-# ("...while the target is running.", "Selected thread is running."); used to reclassify the
-# generic command failure to the precise `inferior_running` code.
-_RUNNING_RE = re.compile(r"running", re.IGNORECASE)
-# gdb's ^error message when there is no unwindable stack ("No stack.") or the requested level is
-# beyond stack depth. Live gdbstub proof shows `-stack-list-frames N N` past depth answers
-# `^error,"-stack-list-frames: Not enough frames in stack."` (not an empty `^done,stack=[]` and
-# not the CLI's "No frame at level N."), so the missing-frame codes must catch that phrasing too.
-_NO_STACK_RE = re.compile(r"no (stack|frame)|not enough frames", re.IGNORECASE)
-# gdb's ^error for an unreadable address from the `-data-disassemble` range form. The range form
-# resolves no function, so the only failure phrasing is the memory-access one (never the `-a`
-# form's "No function contains").
-_NO_MEMORY_RE = re.compile(r"cannot access memory", re.IGNORECASE)
-# gdb's ^error when the target/stub refuses a hardware watchpoint at *set* time. Anchored to
-# capability-refusal phrasing so a running-target ("...while the target is running.") or
-# insert-time ("Could not insert hardware watchpoints...") message is classified elsewhere, not
-# swallowed here (ADR-0277).
-_NO_WATCHPOINT_RE = re.compile(
-    r"does not support\b.*watchpoint|cannot set hardware watchpoint", re.IGNORECASE
-)
-# gdb's ^error when `-data-evaluate-expression &<name>` cannot resolve a name to an address: an
-# unknown / inlined / optimized-away symbol answers `No symbol "<name>" in current context.`, and an
-# addressless enum/macro constant answers `Attempt to take address of value not located in memory.`.
-# Anchored to `in current context` (not a bare `No symbol`) so `No symbol table is loaded` —
-# debuginfo never loaded, a genuine attach-level fault — stays `debug_attach_failure`, not a
-# per-symbol miss (ADR-0307).
-_SYMBOL_NOT_FOUND_RE = re.compile(
-    r"No symbol .* in current context|address of value not located in memory", re.IGNORECASE
-)
-# Surfaced on a `symbol_not_found` so an agent pivots instead of retrying the doomed resolution.
-_SYMBOL_INLINE_HINT = "symbol may be inlined or optimized away; try disassembling its caller."
 
 
 def _config_error(
@@ -181,6 +104,9 @@ def _config_error(
 
 
 class GdbMiEngine(
+    GdbMiBreakpointCommands,
+    GdbMiRegisterCommands,
+    GdbMiSymbolCommands,
     GdbMiStackCommands,
     GdbMiDisassemblyCommands,
     GdbMiWatchpointCommands,
@@ -294,96 +220,7 @@ class GdbMiEngine(
             str(exc), category=ErrorCategory.DEBUG_ATTACH_FAILURE, details=details
         )
 
-    # --- breakpoints ----------------------------------------------------------------------
-
-    def set_breakpoint(self, attachment: GdbMiAttachment, location: str) -> GdbBreakpointRef:
-        if not _BREAK_LOCATION_RE.match(location):
-            raise _config_error(
-                f"breakpoint location must be a bare C identifier, got {location!r}",
-                code="bad_location",
-                details={"location": location},
-            )
-        # Software breakpoint (no -h): QEMU's gdbstub honors a software breakpoint's 0xCC write
-        # on a running guest, but does not reliably trap on hardware (debug-register) breakpoints,
-        # so a `-break-insert -h` at a hot symbol could go `^running` and never `*stopped` (#711).
-        return self._breakpoint_ref(
-            self.execute_mi_command(attachment, f"-break-insert {location}"), key="bkpt"
-        )
-
-    def clear_breakpoint(self, attachment: GdbMiAttachment, number: str) -> None:
-        if not _BREAK_ID_RE.match(number):
-            raise _config_error(
-                f"breakpoint id must be numeric, got {number!r}",
-                code="bad_breakpoint_id",
-                details={"number": number},
-            )
-        self.execute_mi_command(attachment, f"-break-delete {number}")
-
-    def list_breakpoints(self, attachment: GdbMiAttachment) -> list[GdbBreakpointRef]:
-        return [
-            self._breakpoint_ref_from(entry)
-            for entry in breakpoint_rows(self.execute_mi_command(attachment, "-break-list"))
-        ]
-
-    def _breakpoint_ref(self, records: list[MiRecord], *, key: str) -> GdbBreakpointRef:
-        payload = result_payload_dict(records)
-        entry = payload.get(key)
-        if not isinstance(entry, dict):
-            raise CategorizedError(
-                f"gdb/MI {key} response had no breakpoint record",
-                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                details={"command_key": key},
-            )
-        return self._breakpoint_ref_from(entry)
-
-    def _breakpoint_ref_from(self, entry: dict[str, Any]) -> GdbBreakpointRef:
-        return GdbBreakpointRef.model_validate(
-            self._redactor().redact_value(
-                {
-                    "number": str(entry.get("number")),
-                    "type": entry.get("type") if isinstance(entry.get("type"), str) else None,
-                    "addr": entry.get("addr") if isinstance(entry.get("addr"), str) else None,
-                    "func": entry.get("func") if isinstance(entry.get("func"), str) else None,
-                    "what": entry.get("what") if isinstance(entry.get("what"), str) else None,
-                }
-            )
-        )
-
-    # --- registers / memory ---------------------------------------------------------------
-
-    def read_registers(
-        self, attachment: GdbMiAttachment, register_names: list[str]
-    ) -> dict[str, object]:
-        if not isinstance(register_names, list) or not register_names:
-            raise _config_error("registers must be a non-empty list", code="bad_register")
-        requested: list[str] = []
-        for name in register_names:
-            if not isinstance(name, str) or not _REGISTER_RE.match(name):
-                raise _config_error(f"invalid register name {name!r}", code="bad_register")
-            requested.append(name)
-        # gdb keys register VALUES by ordinal number; map names->ordinals via
-        # -data-list-register-names, then return only the requested names.
-        ordered_names = parsed_register_names(
-            self.execute_mi_command(attachment, "-data-list-register-names")
-        )
-        by_number = register_values_by_number(
-            self.execute_mi_command(attachment, "-data-list-register-values x")
-        )
-        registers: dict[str, object] = {}
-        for name in requested:
-            if name in ordered_names:
-                ordinal = str(ordered_names.index(name))
-                if ordinal in by_number:
-                    registers[name] = by_number[ordinal]
-        missing = [name for name in requested if name not in registers]
-        if missing:
-            raise CategorizedError(
-                "gdb/MI omitted requested register data",
-                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                details={"code": "missing_registers", "requested": requested, "missing": missing},
-            )
-        redacted = self._redactor().redact_value(registers)
-        return redacted if isinstance(redacted, dict) else {}
+    # --- memory ---------------------------------------------------------------------------
 
     def read_memory(self, attachment: GdbMiAttachment, *, address: int, byte_count: int) -> bytes:
         """Read ``byte_count`` bytes from ``address``, returned **verbatim** (not redacted).
@@ -431,75 +268,6 @@ class GdbMiEngine(
                 },
             )
         return blob
-
-    # --- symbol resolution ----------------------------------------------------------------
-
-    def resolve_symbol(self, attachment: GdbMiAttachment, name: str) -> int:
-        """Resolve a bare C symbol ``name`` to its address via ``-data-evaluate-expression``.
-
-        The Run's DWARF ``vmlinux`` is already loaded at attach, so the symbol table is present.
-        ``name`` is gated to a bare C identifier (``_SYMBOL_NAME_RE``) so the only expression
-        ever evaluated is ``&<identifier>`` — address-of-a-name, never an arbitrary expression
-        (non-injectable, the same property the breakpoint-location gate relies on). ``&name``
-        resolves both data globals (e.g. ``d_hash_shift``) and functions, unlike
-        ``-break-insert`` (a code location only). This is a symtab lookup, so it is valid whether
-        or not the inferior is stopped.
-
-        Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_symbol_name`` for a non-identifier
-                name (raised before any MI command); ``SYMBOL_NOT_FOUND`` (non-retryable, with the
-                inline hint) when gdb cannot resolve the name to an address — an unknown / inlined /
-                optimized-away symbol or an addressless enum/macro constant (ADR-0307);
-                ``DEBUG_ATTACH_FAILURE`` for any other gdb error (e.g. debuginfo never loaded) or a
-                present-but-unparseable address value (``bad_symbol_value``, value redacted).
-        """
-        if not _SYMBOL_NAME_RE.match(name):
-            raise _config_error(
-                f"symbol name must be a bare C identifier, got {name!r}",
-                code="bad_symbol_name",
-                details={"name": name},
-            )
-        value = evaluate_value(self._evaluate_symbol(attachment, name))
-        match = _SYMBOL_ADDR_RE.search(value) if isinstance(value, str) else None
-        if match is None:
-            raise CategorizedError(
-                "gdb/MI returned no parseable symbol address",
-                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                details={
-                    "code": "bad_symbol_value",
-                    "name": name,
-                    "value": self._redactor().redact_value(value),
-                },
-            )
-        return int(match.group(0), 16)
-
-    def _evaluate_symbol(self, attachment: GdbMiAttachment, name: str) -> list[MiRecord]:
-        """Evaluate ``&name``, narrowing a resolution ``^error`` to ``SYMBOL_NOT_FOUND`` (ADR-0307).
-
-        ``execute_mi_command`` maps every gdb ``^error`` generically to ``DEBUG_ATTACH_FAILURE``, so
-        this catches that and — only when the (already-redacted) gdb ``msg`` matches
-        ``_SYMBOL_NOT_FOUND_RE`` (an inlined / optimized-away symbol or an addressless enum/macro
-        constant) — re-raises the precise, non-retryable ``SYMBOL_NOT_FOUND`` with the inline hint.
-        Any other gdb error (e.g. debuginfo never loaded) passes through as an attach failure. This
-        mirrors ``_stack_command``'s per-op reclassification, keeping the shared write path generic.
-        """
-        try:
-            return self.execute_mi_command(attachment, f"-data-evaluate-expression &{name}")
-        except CategorizedError as exc:
-            if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE:
-                payload = exc.details.get("payload")
-                msg = payload.get("msg") if isinstance(payload, dict) else None
-                if isinstance(msg, str) and _SYMBOL_NOT_FOUND_RE.search(msg):
-                    raise CategorizedError(
-                        f"symbol {name!r} not found",
-                        category=ErrorCategory.SYMBOL_NOT_FOUND,
-                        details={
-                            "code": "symbol_not_found",
-                            "name": name,
-                            "hint": _SYMBOL_INLINE_HINT,
-                        },
-                    ) from exc
-            raise
 
     # --- interactive execution ------------------------------------------------------------
 
@@ -591,31 +359,6 @@ def _missing_module_resolver(run_id: str, module: str) -> ModuleDebuginfo:
         category=ErrorCategory.MISSING_DEPENDENCY,
         details={"missing_tools": ["module_debuginfo_resolver"], "module": module},
     )
-
-
-def _eval_command(expr: str) -> str:
-    """The ``-data-evaluate-expression`` MI command for ``expr``, quoted as one MI argument.
-
-    gdb/MI tokenizes the command line on whitespace. Module-walk expressions such as
-    ``(struct module *)0x...`` contain spaces, so the expression must be double-quoted or MI
-    splits it into several arguments and rejects the command with a usage error (ADR-0278).
-    The expressions are engine-constructed from gated identifiers and numeric pointers and never
-    contain a double quote, so no escaping is required.
-    """
-    return f'-data-evaluate-expression "{expr}"'
-
-
-def _hex_from(value: object) -> int | None:
-    """The first ``0x...`` token in a gdb-rendered pointer value, as an int (ADR-0278)."""
-    if not isinstance(value, str):
-        return None
-    match = _SYMBOL_ADDR_RE.search(value)
-    return int(match.group(0), 16) if match is not None else None
-
-
-def _is_watchpoint_row(entry: dict[str, Any]) -> bool:
-    kind = entry.get("type")
-    return isinstance(kind, str) and "watchpoint" in kind.lower()
 
 
 def _redactor_factory(

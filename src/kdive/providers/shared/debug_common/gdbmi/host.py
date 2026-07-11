@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 from kdive.domain.errors import CategorizedError
 from kdive.providers.ports.debug import (
+    GdbBreakpointRef,
     GdbFrame,
     GdbInstruction,
     GdbMiAttachment,
@@ -32,9 +33,15 @@ class GdbMiCommandHost(Protocol):
 
     def resolve_symbol(self, attachment: GdbMiAttachment, name: str) -> int: ...
 
+    def _evaluate_symbol(self, attachment: GdbMiAttachment, name: str) -> list[MiRecord]: ...
+
     def read_memory(
         self, attachment: GdbMiAttachment, *, address: int, byte_count: int
     ) -> bytes: ...
+
+    def _breakpoint_ref(self, records: list[MiRecord], *, key: str) -> GdbBreakpointRef: ...
+
+    def _breakpoint_ref_from(self, entry: dict[str, Any]) -> GdbBreakpointRef: ...
 
     def _mi_path(self, path: Path) -> str: ...
 

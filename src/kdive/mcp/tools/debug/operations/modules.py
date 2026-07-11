@@ -19,7 +19,7 @@ from kdive.mcp.tools.debug.operations.runtime import (
     run_engine_op_with_resolver,
 )
 from kdive.providers.ports.debug import GdbMiAttachment, GdbMiEngine
-from kdive.providers.shared.debug_common.gdbmi.engine import MAX_MODULES
+from kdive.providers.shared.debug_common.gdbmi.modules import MAX_MODULES
 from kdive.serialization import JsonValue
 
 

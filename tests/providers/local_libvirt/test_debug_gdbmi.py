@@ -24,6 +24,7 @@ from kdive.providers.ports.debug import (
 )
 from kdive.providers.shared.debug_common.gdbmi import engine as gdbmi
 from kdive.providers.shared.debug_common.gdbmi.debuginfo import DebuginfoResolver
+from kdive.providers.shared.debug_common.gdbmi.disassembly import MAX_DISASSEMBLE_INSTRUCTIONS
 from kdive.providers.shared.debug_common.gdbmi.engine import (
     MAX_MEMORY_READ_BYTES,
     GdbMiEngine,
@@ -37,6 +38,7 @@ from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
     evaluate_value,
     stack_frames,
 )
+from kdive.providers.shared.debug_common.gdbmi.stack import MAX_BACKTRACE_FRAMES
 from kdive.providers.shared.debug_common.gdbmi.transcript import append_transcript
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -1249,7 +1251,7 @@ def test_backtrace_truncates_to_max_frames(tmp_path: Path) -> None:
     assert [frame.level for frame in bt.frames] == [0, 1, 2]
 
 
-@pytest.mark.parametrize("bad", [0, gdbmi.MAX_BACKTRACE_FRAMES + 1])
+@pytest.mark.parametrize("bad", [0, MAX_BACKTRACE_FRAMES + 1])
 def test_backtrace_rejects_bad_max_frames_before_command(bad: int, tmp_path: Path) -> None:
     controller = _FakeMiController()
     with pytest.raises(CategorizedError) as exc:
@@ -1508,7 +1510,7 @@ def test_disassemble_truncates_to_instruction_count(tmp_path: Path) -> None:
     assert len(result.instructions) == 3
 
 
-@pytest.mark.parametrize("bad", [0, gdbmi.MAX_DISASSEMBLE_INSTRUCTIONS + 1])
+@pytest.mark.parametrize("bad", [0, MAX_DISASSEMBLE_INSTRUCTIONS + 1])
 def test_disassemble_rejects_bad_count_before_command(bad: int, tmp_path: Path) -> None:
     controller = _FakeMiController()
     with pytest.raises(CategorizedError) as exc:
