@@ -248,12 +248,18 @@ class _Pol:
 class _Connector:
     """Fake Connector: open_transport raises when the stub is unreachable."""
 
-    def __init__(self, *, raises: bool) -> None:
+    def __init__(
+        self,
+        *,
+        raises: bool,
+        category: ErrorCategory = ErrorCategory.DEBUG_ATTACH_FAILURE,
+    ) -> None:
         self._raises = raises
+        self._category = category
 
     def open_transport(self, _system: object, _kind: object) -> object:
         if self._raises:
-            raise CategorizedError("no stub", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
+            raise CategorizedError("no stub", category=self._category)
         return object()
 
     def close_transport(self, _handle: object) -> None: ...
@@ -306,6 +312,13 @@ def test_gdbstub_reachable_false_when_open_raises() -> None:
     assert boot_evidence.gdbstub_reachable(conn, uuid4()) is False
 
 
+def test_gdbstub_reachable_preserves_transport_failure_category() -> None:
+    conn = cast(Connector, _Connector(raises=True, category=ErrorCategory.TRANSPORT_FAILURE))
+    with pytest.raises(CategorizedError) as exc:
+        boot_evidence.gdbstub_reachable(conn, uuid4())
+    assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
+
+
 @dataclass
 class _FakeSystem:
     provisioning_profile: dict[str, object]
@@ -318,6 +331,7 @@ def _record(
     host_dump: bool,
     console: bytes | None,
     reachable: bool,
+    failure_category: ErrorCategory = ErrorCategory.DEBUG_ATTACH_FAILURE,
 ) -> tuple[dict[str, object] | None, list[object]]:
     audits: list[object] = []
 
@@ -342,7 +356,7 @@ def _record(
             cast(RequestContext, object()),
             cast(Run, _FakeRun(None)),
             uuid4(),
-            cast(Connector, _Connector(raises=not reachable)),
+            cast(Connector, _Connector(raises=not reachable, category=failure_category)),
             cast(ProfilePolicy, _Pol(gdbstub=gdbstub, host_dump=host_dump)),
             cast(SecretRegistry, object()),
             None,
@@ -380,6 +394,21 @@ def test_no_record_when_stub_unreachable(monkeypatch: pytest.MonkeyPatch) -> Non
         monkeypatch, gdbstub=True, host_dump=False, console=_PANIC_CONSOLE, reachable=False
     )
     assert result is None and audits == []
+
+
+def test_transport_failure_propagates_from_crashed_halted_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(CategorizedError) as exc:
+        _record(
+            monkeypatch,
+            gdbstub=True,
+            host_dump=False,
+            console=_PANIC_CONSOLE,
+            reachable=False,
+            failure_category=ErrorCategory.TRANSPORT_FAILURE,
+        )
+    assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
 
 
 def test_no_record_when_console_has_no_panic(monkeypatch: pytest.MonkeyPatch) -> None:

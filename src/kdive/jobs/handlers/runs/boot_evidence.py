@@ -19,7 +19,7 @@ from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.db.repositories import ARTIFACTS, SYSTEMS
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.crash_signatures import CONSOLE_CRASH_KINDS
 from kdive.domain.lifecycle.records import Run
 from kdive.jobs.handlers.console_evidence import read_redacted_console
@@ -245,7 +245,9 @@ def gdbstub_reachable(connector: Connector, system_id: UUID) -> bool:
     """Probe the gdbstub via the connector's read-only open path."""
     try:
         connector.open_transport(SystemHandle(domain_name_for(system_id)), "gdbstub")
-    except CategorizedError:
+    except CategorizedError as exc:
+        if exc.category is not ErrorCategory.DEBUG_ATTACH_FAILURE:
+            raise
         return False
     return True
 
