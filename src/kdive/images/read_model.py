@@ -1,4 +1,4 @@
-"""Image catalog read queries shared below service and inventory layers."""
+"""Image catalog read-model helpers shared by services, MCP, and inventory."""
 
 from __future__ import annotations
 

@@ -8,9 +8,9 @@ from uuid import UUID
 from psycopg import AsyncConnection, AsyncCursor
 from psycopg.rows import dict_row
 
-from kdive.db.image_queries import image_referenced_by_live_system
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle.rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
+from kdive.images.read_model import image_referenced_by_live_system
 from kdive.inventory.reconcile.locks import resource_identity_lock
 from kdive.inventory.reconcile.records import CONFIG_MANAGED_BY, PruneOutcome
 

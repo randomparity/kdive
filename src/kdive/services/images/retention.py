@@ -11,8 +11,8 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.artifacts.storage import ObjectListing
-from kdive.db.image_queries import image_referenced_by_live_system
 from kdive.domain.catalog.images import ImageVisibility
+from kdive.images.read_model import image_referenced_by_live_system
 
 _log = logging.getLogger(__name__)
 
