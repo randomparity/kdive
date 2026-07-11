@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import tarfile
 from pathlib import Path
 from typing import Protocol, cast
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+
+_log = logging.getLogger(__name__)
 
 _MODULES_ROOT = "/lib/modules"
 _BOOT_ROOT = "/boot"
@@ -107,12 +110,12 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
             guest.launch()
             roots = guest.inspect_os()
         except Exception as exc:
-            guest.close()
+            _close_guestfs_handle(guest, "after failed kernel-staging overlay open")
             raise _RealGuestKernelWriter._io_failure(
                 "opening the System overlay read-write", overlay, exc
             ) from exc
         if not roots:
-            guest.close()
+            _close_guestfs_handle(guest, "after empty kernel-staging inspection")
             raise CategorizedError(
                 "could not inspect the System overlay to stage the built kernel",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -197,3 +200,12 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
 
 def _guest_path_is_file(guest: _GuestFS, path: str) -> bool:
     return bool(guest.is_file(path))
+
+
+def _close_guestfs_handle(guest: _GuestFS, context: str) -> None:
+    try:
+        guest.close()
+    except Exception:
+        _log.warning(
+            "libguestfs close failed %s; preserving original failure", context, exc_info=True
+        )

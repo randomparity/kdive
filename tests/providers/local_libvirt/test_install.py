@@ -5,10 +5,12 @@ from __future__ import annotations
 import io
 import os
 import subprocess
+import sys
 import tarfile
 import xml.etree.ElementTree as ET  # noqa: S405 - parses only self-rendered, trusted test XML
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 from uuid import UUID
 
@@ -609,6 +611,37 @@ def test_install_kdump_no_writer_is_missing_dependency(tmp_path: Path) -> None:
         inst.install(_request(method=CaptureMethod.KDUMP))
     assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
     assert conn.defined_xml == []
+
+
+def test_kernel_writer_mount_close_failure_preserves_open_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Guest:
+        launch_error = RuntimeError("launch failed")
+
+        def add_drive_opts(self, _filename: str, *, format: str, readonly: bool) -> None:
+            assert format == "qcow2"
+            assert readonly is False
+
+        def launch(self) -> None:
+            raise self.launch_error
+
+        def close(self) -> None:
+            raise RuntimeError("close failed")
+
+    guest = _Guest()
+    monkeypatch.setitem(
+        sys.modules,
+        "guestfs",
+        SimpleNamespace(GuestFS=lambda **_kwargs: guest),
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        _RealGuestKernelWriter._mount_rw("overlay.qcow2")
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"overlay": "overlay.qcow2", "error": "RuntimeError"}
+    assert caught.value.__cause__ is guest.launch_error
 
 
 def test_read_release_recovers_version_from_repacked_modules_tar(tmp_path: Path) -> None:
