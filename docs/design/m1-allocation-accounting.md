@@ -234,8 +234,9 @@ Per [0036](../adr/0036-reservation-lease-semantics.md):
 ## Auth, RBAC & attribution (M1)
 
 Per [0037](../adr/0037-rbac-hardening-role-separation.md) — the M0 machinery
-(`Role` rank, `require_role`, the three-check destructive gate) is unchanged; M1
-makes the separation **real and tested**:
+(`Role` rank, `require_role`, and the destructive-op policy later revised by
+[ADR-0130](../adr/0130-destructive-gate-per-op-revision.md)) is unchanged in this
+milestone; M1 makes the separation **real and tested**:
 
 | Role | Surface |
 |------|---------|
