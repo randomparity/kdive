@@ -8,9 +8,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.mcp.tools.debug.operations.runtime import DebugRuntimeResolver
 
 
-def _register_debug_ops(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
-) -> None:
+def register(app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver) -> None:
     """Register the gdb-MI `debug.*` tools on ``app``, sharing ``runtime``."""
     from kdive.mcp.tools.debug.operations.breakpoints import register as register_breakpoints
     from kdive.mcp.tools.debug.operations.execution import register as register_execution

@@ -376,9 +376,7 @@ async def _call_registered_debug_tool(
     ):
         monkeypatch.setattr(module, "current_context", lambda: ctx)
     app: FastMCP = FastMCP(name="t")
-    debug_ops_registrar._register_debug_ops(
-        app, pool, cast(Any, _FixedDebugRuntimeResolver(runtime))
-    )
+    debug_ops_registrar.register(app, pool, cast(Any, _FixedDebugRuntimeResolver(runtime)))
     async with Client(app) as client:
         result = await client.call_tool(tool, arguments, raise_on_error=False)
     assert result.structured_content is not None

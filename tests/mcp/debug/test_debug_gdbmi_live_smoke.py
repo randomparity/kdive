@@ -219,7 +219,7 @@ async def _debug_client(
     ):
         monkeypatch.setattr(module, "current_context", _ctx)
     app: FastMCP = FastMCP(name="live-gdbmi-smoke")
-    debug_ops_registrar._register_debug_ops(app, pool, cast(Any, runtime_resolver))
+    debug_ops_registrar.register(app, pool, cast(Any, runtime_resolver))
     async with Client(app) as client:
         yield client
 

@@ -58,7 +58,7 @@ def register(
     telemetry: DebugSessionTelemetry | None = None,
 ) -> None:
     """Register the ``debug.*`` tools on ``app``, bound to ``pool``."""
-    from kdive.mcp.tools.debug.operations.registrar import _register_debug_ops
+    from kdive.mcp.tools.debug.operations.registrar import register as register_debug_ops
     from kdive.mcp.tools.debug.operations.runtime import DebugRuntimeResolver
 
     runtime = DebugRuntimeResolver(resolver)
@@ -131,4 +131,4 @@ def register(
         )
         return await _list_sessions(pool, current_context(), list_request)
 
-    _register_debug_ops(app, pool, runtime)
+    register_debug_ops(app, pool, runtime)
