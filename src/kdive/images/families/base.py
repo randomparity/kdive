@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Protocol
 
 from kdive.domain.catalog.images import Capability
-from kdive.images.rootfs_kinds import RootfsImageKind
+from kdive.images.rootfs.kinds import RootfsImageKind
 
 
 def _mac_tag(guest_mac: str) -> Capability:

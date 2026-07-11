@@ -26,8 +26,8 @@ from kdive.domain.catalog.images import ImageState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
+from kdive.images.cataloging.validation import GUEST_CONTRACT_PATHS
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
-from kdive.images.validation import GUEST_CONTRACT_PATHS
 from kdive.jobs import queue
 from kdive.jobs.handlers.image_build import image_build_handler, register_handlers
 from kdive.jobs.models import HandlerRegistry

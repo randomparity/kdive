@@ -23,7 +23,7 @@ from kdive.config.core_settings import (
     LOG_LEVEL,
 )
 from kdive.db.pool import create_pool
-from kdive.images.rootfs_command import add_build_fs_parser, run_build_fs
+from kdive.images.rootfs.command import add_build_fs_parser, run_build_fs
 from kdive.processes.reconciler import (
     optional_reconciler_object_store as _optional_reconciler_object_store,
 )

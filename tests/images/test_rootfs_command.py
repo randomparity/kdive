@@ -9,7 +9,7 @@ import pytest
 from kdive.__main__ import build_parser
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
-from kdive.images.rootfs_command import run_build_fs
+from kdive.images.rootfs.command import run_build_fs
 
 
 def _patch_plane(
@@ -23,7 +23,7 @@ def _patch_plane(
             return RootfsBuildOutput(qcow2_path=produced, digest="sha256:abc", provenance={})
 
     monkeypatch.setattr(
-        "kdive.images.rootfs_command._build_local_rootfs_plane",
+        "kdive.images.rootfs.command._build_local_rootfs_plane",
         lambda _workspace: _FakePlane(),
     )
 
@@ -68,7 +68,7 @@ def test_build_fs_image_derives_local_rootfs_dest(
     _patch_plane(monkeypatch, produced, [])
     seen_dest: list[Path] = []
     monkeypatch.setattr(
-        "kdive.images.rootfs_command._publish_rootfs",
+        "kdive.images.rootfs.command._publish_rootfs",
         lambda _output, dest: seen_dest.append(dest),
     )
     args = build_parser().parse_args(
@@ -133,7 +133,7 @@ def _patch_plane_provenance(
             )
 
     monkeypatch.setattr(
-        "kdive.images.rootfs_command._build_local_rootfs_plane",
+        "kdive.images.rootfs.command._build_local_rootfs_plane",
         lambda _workspace: _FakePlane(),
     )
 
@@ -144,7 +144,7 @@ def test_build_fs_writes_provenance_sidecar(
     """`build-fs` records the build's provenance in a sidecar beside the published qcow2 (#977)."""
     import json
 
-    from kdive.images.staged_provenance import SIDECAR_SCHEMA, sidecar_path
+    from kdive.images.rootfs.staged_provenance import SIDECAR_SCHEMA, sidecar_path
 
     produced = tmp_path / "plane" / "img.qcow2"
     produced.parent.mkdir(parents=True)
@@ -186,7 +186,7 @@ def test_build_fs_sidecar_write_failure_is_advisory(
     def _boom(_qcow2: Path, *, provenance: dict[str, object]) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr("kdive.images.rootfs_command.write_sidecar", _boom)
+    monkeypatch.setattr("kdive.images.rootfs.command.write_sidecar", _boom)
     args = build_parser().parse_args(
         [
             "build-fs",

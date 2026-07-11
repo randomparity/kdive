@@ -10,14 +10,14 @@ import pytest
 from kdive.__main__ import build_parser
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildOutput
-from kdive.images.rootfs_command import run_build_fs
+from kdive.images.rootfs.command import run_build_fs
 from kdive.processes.server import HTTP_KEEPALIVE_S, server_uvicorn_config
 
 
 def _patch_plane(monkeypatch: pytest.MonkeyPatch, plane: object) -> None:
     """Replace the local rootfs build-plane factory with one returning ``plane``."""
     monkeypatch.setattr(
-        "kdive.images.rootfs_command._build_local_rootfs_plane",
+        "kdive.images.rootfs.command._build_local_rootfs_plane",
         lambda _workspace: plane,
     )
 
@@ -105,7 +105,7 @@ def test_run_build_fs_moves_plane_output_to_dest(
 
     # Capture the workspace the factory receives so a dropped/None argument is caught.
     monkeypatch.setattr(
-        "kdive.images.rootfs_command._build_local_rootfs_plane",
+        "kdive.images.rootfs.command._build_local_rootfs_plane",
         lambda workspace: seen_workspaces.append(workspace) or _FakePlane(),
     )
 
@@ -428,7 +428,7 @@ def test_run_build_fs_destination_publish_failure_is_actionable(
         raise PermissionError("destination unwritable")
 
     _patch_plane(monkeypatch, _FakePlane())
-    monkeypatch.setattr("kdive.images.rootfs_command.shutil.move", _move)
+    monkeypatch.setattr("kdive.images.rootfs.command.shutil.move", _move)
     dest = tmp_path / "rootfs" / "out.qcow2"
     args = build_parser().parse_args(
         [

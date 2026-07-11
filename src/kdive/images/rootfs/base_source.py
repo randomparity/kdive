@@ -1,6 +1,6 @@
 """Base-image acquirer for the local rootfs catalog (ADR-0251).
 
-A catalog row's :class:`~kdive.images.rootfs_catalog.RootfsSource` is materialized into a
+A catalog row's :class:`~kdive.images.rootfs.catalog.RootfsSource` is materialized into a
 ``scratch`` qcow2 by either invoking ``virt-builder`` against a template or downloading a
 sha256-pinned cloud image and verifying its digest. Both paths fail closed: a digest mismatch or
 an unreachable URL raises a ``CONFIGURATION_ERROR`` rather than handing a corrupt base downstream.
@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import IO
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.rootfs_catalog import CloudImageSource, RootfsSource, VirtBuilderSource
+from kdive.images.rootfs.catalog import CloudImageSource, RootfsSource, VirtBuilderSource
 
 type Downloader = Callable[[str, Path], None]
 

@@ -29,8 +29,8 @@ from kdive.config.core_settings import (
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.images import ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.catalog import resolve_rootfs
-from kdive.images.validation import GUEST_CONTRACT_PATHS, InspectSeam
+from kdive.images.cataloging.catalog import resolve_rootfs
+from kdive.images.cataloging.validation import GUEST_CONTRACT_PATHS, InspectSeam
 from kdive.services.images.upload import PrivateUploadRequest, register_private_upload
 
 _REQUIRED = ("kdump", "drgn")

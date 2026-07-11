@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from kdive.domain.catalog.image_format import ImageFormat
 from kdive.images.families import family_for
 from kdive.images.planes.base import RootfsBuildSpec
-from kdive.images.rootfs_catalog import (
+from kdive.images.rootfs.catalog import (
     CloudImageSource,
     RootfsSource,
     resolve_rootfs_entry,

@@ -13,10 +13,10 @@ from pathlib import Path
 from typing import Any
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.rootfs_kinds import RootfsImageKind, parse_rootfs_image_kind
+from kdive.images.rootfs.kinds import RootfsImageKind, parse_rootfs_image_kind
 
 DEFAULT_CATALOG_PATH = (
-    Path(__file__).parents[3] / "fixtures" / "local-libvirt" / "rootfs_catalog.toml"
+    Path(__file__).parents[4] / "fixtures" / "local-libvirt" / "rootfs_catalog.toml"
 )
 
 _VALID_FAMILIES: frozenset[str] = frozenset({"rhel", "debian", "suse"})

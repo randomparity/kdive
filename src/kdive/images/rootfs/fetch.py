@@ -23,7 +23,7 @@ from psycopg import AsyncConnection
 from kdive.artifacts import storage as artifact_types
 from kdive.components.local_paths import validate_local_component_path
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.catalog import resolve_public_rootfs_sync, resolve_rootfs
+from kdive.images.cataloging.catalog import resolve_public_rootfs_sync, resolve_rootfs
 
 _SHA256_DIGEST = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 

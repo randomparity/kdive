@@ -41,9 +41,9 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.artifacts.storage import ObjectListing
 from kdive.domain.catalog.images import ImageCatalogEntry
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.capability_signals import render_direct_kernel_signal
+from kdive.images.cataloging.capability_signals import render_direct_kernel_signal
 from kdive.images.kdump_support import KernelVersion
-from kdive.images.staged_provenance import sidecar_path, write_sidecar
+from kdive.images.rootfs.staged_provenance import sidecar_path, write_sidecar
 from kdive.inventory.loader import load_inventory
 from kdive.inventory.model import InventoryDoc
 from kdive.inventory.reconcile.coefficients import reconcile_coefficients

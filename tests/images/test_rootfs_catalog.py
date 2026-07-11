@@ -8,13 +8,13 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.kdump_support import DEFAULT_KERNEL_BASIS, kdump_capability
-from kdive.images.rootfs_catalog import (
+from kdive.images.rootfs.catalog import (
     CloudImageSource,
     VirtBuilderSource,
     load_rootfs_catalog,
     resolve_rootfs_entry,
 )
-from kdive.images.rootfs_kinds import RootfsImageKind
+from kdive.images.rootfs.kinds import RootfsImageKind
 
 _CLOUD_URL = "https://example.test/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
 

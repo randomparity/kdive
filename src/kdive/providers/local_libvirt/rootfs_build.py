@@ -1,12 +1,12 @@
 """The in-process local-libvirt rootfs build plane (M2.4/2, ADR-0092, ADR-0251).
 
 `LocalLibvirtRootfsBuildPlane` builds a kdive-ready rootfs from the declarative rootfs catalog
-(`kdive.images.rootfs_catalog`) plus a per-family customizer seam, recording **pinned-input
+(`kdive.images.rootfs.catalog`) plus a per-family customizer seam, recording **pinned-input
 provenance** into the :class:`RootfsBuildOutput`. The pipeline is:
 
 1. resolve the catalog row for ``spec.name`` (its base ``source`` + ``family``);
-2. :func:`kdive.images.base_source.acquire_base` materializes the base into a scratch qcow2 — a
-   ``virt-builder`` template or a sha256-pinned cloud image;
+2. :func:`kdive.images.rootfs.base_source.acquire_base` materializes the base into a scratch
+   qcow2 — a ``virt-builder`` template or a sha256-pinned cloud image;
 3. ``virt-customize`` applies the family's argv (``family.customize_argv``): install the package
    set, enable ``sshd``/``kdump``, stage the kdive-ready unit, etc. — the image bakes no
    authorized key (ADR-0289, #963); the per-System bootstrap key is injected at provision time;
@@ -35,7 +35,6 @@ from pathlib import Path
 
 from kdive.domain.errors import CategorizedError
 from kdive.domain.platform.arch_traits import arch_traits
-from kdive.images.base_source import Downloader, _real_download, acquire_base
 from kdive.images.families import family_for
 from kdive.images.families._fedora_customize import (
     READINESS_MARKER as _READINESS_MARKER,
@@ -65,7 +64,8 @@ from kdive.images.planes.provenance_probes import (
     OsReleaseProbeSeam,
     VersionInspectSeam,
 )
-from kdive.images.rootfs_catalog import (
+from kdive.images.rootfs.base_source import Downloader, _real_download, acquire_base
+from kdive.images.rootfs.catalog import (
     CloudImageSource,
     RootfsCatalogEntry,
     RootfsSource,

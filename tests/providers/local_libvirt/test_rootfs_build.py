@@ -28,7 +28,7 @@ from kdive.images.planes._build_common import (
     VersionInspectSeam,
 )
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
-from kdive.images.rootfs_catalog import (
+from kdive.images.rootfs.catalog import (
     CloudImageSource,
     RootfsSource,
     VirtBuilderSource,

@@ -53,8 +53,8 @@ from kdive.domain.capacity.state import SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.catalog import resolve_rootfs
-from kdive.images.validation import GUEST_CONTRACT_PATHS, InspectSeam
+from kdive.images.cataloging.catalog import resolve_rootfs
+from kdive.images.cataloging.validation import GUEST_CONTRACT_PATHS, InspectSeam
 from kdive.reconciler.cleanup.images import (
     repair_dangling_images,
     repair_leaked_images,

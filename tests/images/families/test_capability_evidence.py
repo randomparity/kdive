@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 
 from kdive.domain.catalog.images import Capability
+from kdive.images.cataloging.validation import GUEST_CONTRACT_PATHS
 from kdive.images.families import _FAMILIES
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer, _mac_tag
-from kdive.images.rootfs_kinds import RootfsImageKind
-from kdive.images.validation import GUEST_CONTRACT_PATHS
+from kdive.images.rootfs.kinds import RootfsImageKind
 
 
 def test_mac_tag_selinux_permissive() -> None:

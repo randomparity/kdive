@@ -18,14 +18,14 @@ from psycopg import AsyncConnection
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.images.planes.base import RootfsBuildPlane
-from kdive.images.rootfs_specs import CatalogRootfsBuild, catalog_rootfs_build
-from kdive.images.validation import (
+from kdive.images.cataloging.validation import (
     DEFAULT_INSPECT,
     GUEST_CONTRACT_PATHS,
     InspectSeam,
     validate_guest_contract,
 )
+from kdive.images.planes.base import RootfsBuildPlane
+from kdive.images.rootfs.specs import CatalogRootfsBuild, catalog_rootfs_build
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ImageBuildPayload, load_payload
 from kdive.providers.core.resolver import ProviderResolver

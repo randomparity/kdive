@@ -6,7 +6,7 @@ import json
 import logging
 from pathlib import Path
 
-from kdive.images.staged_provenance import (
+from kdive.images.rootfs.staged_provenance import (
     SIDECAR_SCHEMA,
     read_sidecar,
     sidecar_path,

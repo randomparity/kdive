@@ -40,7 +40,7 @@ from psycopg.types.json import Jsonb
 
 from kdive.domain.catalog.images import ImageState
 from kdive.domain.errors import CategorizedError
-from kdive.images.staged_provenance import read_sidecar
+from kdive.images.rootfs.staged_provenance import read_sidecar
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import (
     BuildSource,

@@ -13,9 +13,9 @@ from pathlib import Path
 from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildPlane, RootfsBuildSpec
-from kdive.images.rootfs_kinds import RootfsImageKind
-from kdive.images.rootfs_specs import catalog_rootfs_build
-from kdive.images.staged_provenance import write_sidecar
+from kdive.images.rootfs.kinds import RootfsImageKind
+from kdive.images.rootfs.specs import catalog_rootfs_build
+from kdive.images.rootfs.staged_provenance import write_sidecar
 from kdive.providers.assembly.composition import build_local_rootfs_build_plane
 
 _log = logging.getLogger(__name__)

@@ -14,7 +14,7 @@ from pathlib import Path
 from kdive.images.families.base import CustomizeContext
 from kdive.images.families.debian import DebianFamily
 from kdive.images.planes._build_common import MAKEDUMPFILE_MARKER_GUEST_PATH
-from kdive.images.rootfs_kinds import RootfsImageKind
+from kdive.images.rootfs.kinds import RootfsImageKind
 
 
 def _ctx(

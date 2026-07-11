@@ -28,7 +28,7 @@ from kdive.images.families._fedora_customize import (
 )
 from kdive.images.families.base import CustomizeContext, _mac_tag
 from kdive.images.planes._build_common import run_guestfs_tool
-from kdive.images.rootfs_kinds import RootfsImageKind
+from kdive.images.rootfs.kinds import RootfsImageKind
 
 # Cloud-image SELinux ships enforcing; the bare-ext4 repack drops xattrs, so a relabel-on-boot is
 # required. Set permissive so the first boot relabels (``/.autorelabel``) without denying the

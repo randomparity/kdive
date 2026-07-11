@@ -28,7 +28,7 @@ from kdive.images.families._fedora_customize import (
 )
 from kdive.images.families.base import CustomizeContext, _mac_tag
 from kdive.images.planes._build_common import run_guestfs_tool
-from kdive.images.rootfs_kinds import RootfsImageKind
+from kdive.images.rootfs.kinds import RootfsImageKind
 
 # Debian debug/guest rootfs: the in-target crash + introspection toolchain by apt name. ``drgn``
 # ships as ``python3-drgn`` (which provides ``/usr/bin/drgn``, so the ``kdive-drgn`` helper's

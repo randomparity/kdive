@@ -45,7 +45,7 @@ class RootfsBuildSpec:
             build) — a build fact, not a liveness guarantee.
         distro: The base-OS family the image is built from (the extensibility seam; only
             ``"fedora"`` is implemented). The build plane resolves the base source/family from
-            the rootfs catalog (:mod:`kdive.images.rootfs_catalog`).
+            the rootfs catalog (:mod:`kdive.images.rootfs.catalog`).
     """
 
     provider: str

@@ -4,9 +4,9 @@ The ``kdivectl images list`` server seam. A caller sees every ``public`` catalog
 ``private`` rows owned by projects where their token satisfies ``viewer``, and never another
 project's private image. The filter is applied **in SQL** (a parameterized ``owner = ANY`` over
 the viewer-authorized set) so an unauthorized private row never leaves the database. Unlike
-:func:`kdive.images.catalog.resolve_rootfs` (which returns only the one bootable ``registered``
-row), the operator list surfaces every state — a ``defined`` baseline and a ``pending`` publish
-included — so the operator can see in-flight and seeded images.
+:func:`kdive.images.cataloging.catalog.resolve_rootfs` (which returns only the one bootable
+``registered`` row), the operator list surfaces every state — a ``defined`` baseline and a
+``pending`` publish included — so the operator can see in-flight and seeded images.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageVisibility
-from kdive.images.capability_signals import REGISTERED_SIGNALS
+from kdive.images.cataloging.capability_signals import REGISTERED_SIGNALS
 from kdive.images.kdump_support import (
     DEFAULT_KERNEL_BASIS,
     KernelVersion,

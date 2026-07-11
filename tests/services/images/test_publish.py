@@ -28,7 +28,7 @@ from kdive.domain.catalog.images import (
     ImageVisibility,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.catalog import resolve_rootfs
+from kdive.images.cataloging.catalog import resolve_rootfs
 from kdive.services.images.publish import (
     PublishRequest,
     kernel_config_object_key,

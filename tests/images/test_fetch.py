@@ -21,7 +21,7 @@ from kdive.artifacts import storage as artifact_types
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.fetch import fetch_registered_rootfs, fetch_registered_rootfs_sync
+from kdive.images.rootfs.fetch import fetch_registered_rootfs, fetch_registered_rootfs_sync
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _QCOW2 = b"qcow2-bytes-for-test"
