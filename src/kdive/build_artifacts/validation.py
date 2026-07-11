@@ -287,7 +287,6 @@ def extract_build_id_ranged(store: ValidatorStore, key: str, *, max_size: int) -
         e_shoff = struct.unpack_from("<Q", header, 0x28)[0]
         e_shentsize = struct.unpack_from("<H", header, 0x3A)[0]
         e_shnum = struct.unpack_from("<H", header, 0x3C)[0]
-        e_shstrndx = struct.unpack_from("<H", header, 0x3E)[0]
         if e_shoff == 0 or e_shnum == 0 or e_shentsize < 64:
             raise _build_failure("vmlinux has no usable section header table")
         if e_shentsize * e_shnum > _MAX_SECTION_BYTES:
@@ -298,8 +297,7 @@ def extract_build_id_ranged(store: ValidatorStore, key: str, *, max_size: int) -
         if e_shoff + e_shentsize * e_shnum > max_size:
             raise _build_failure("vmlinux section header table extends past the object size")
         sht = store.get_range(key, start=e_shoff, length=e_shentsize * e_shnum)
-        shstr = _read_section(store, key, sht, e_shentsize, e_shstrndx, max_size=max_size)
-        return _find_build_id_note(store, key, sht, shstr, e_shentsize, e_shnum, max_size=max_size)
+        return _find_build_id_note(store, key, sht, e_shentsize, e_shnum, max_size=max_size)
     except (struct.error, ValueError, IndexError) as exc:
         raise _build_failure("vmlinux ELF is structurally malformed") from exc
 
@@ -414,7 +412,6 @@ def _find_build_id_note(
     store: ValidatorStore,
     key: str,
     sht: bytes,
-    shstr: bytes,
     e_shentsize: int,
     e_shnum: int,
     *,
@@ -422,11 +419,9 @@ def _find_build_id_note(
 ) -> str:
     for i in range(e_shnum):
         off = i * e_shentsize
-        sh_name = struct.unpack_from("<I", sht, off)[0]
         sh_type = struct.unpack_from("<I", sht, off + 4)[0]
         if sh_type != _SHT_NOTE:
             continue
-        _section_name_end = shstr.index(b"\x00", sh_name)
         notes = _read_section(store, key, sht, e_shentsize, i, max_size=max_size)
         try:
             return parse_gnu_build_id(notes)
