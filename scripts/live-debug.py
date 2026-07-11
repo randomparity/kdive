@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -50,6 +52,14 @@ BASE_URL = os.environ.get("KDIVE_STACK_BASE_URL", "http://127.0.0.1:8000/mcp")
 DEBUG_DIR = Path(os.environ.get("KDIVE_DEBUG_DIR", "/var/lib/kdive/debug"))
 DEFAULT_BREAK_SYMBOL = "schedule"  # hot enough that a single -exec-continue stops at once
 _POLL_INTERVAL_SEC = 5.0
+
+
+@functools.cache
+def _required_executable(name: str) -> str:
+    path = shutil.which(name)
+    if path is None:
+        raise RuntimeError(f"{name} executable is required on PATH")
+    return path
 
 
 def _token(project: str) -> str:
@@ -365,7 +375,10 @@ def _cmd_transcript(args: argparse.Namespace) -> int:
 def _server_pids() -> list[int]:
     """PIDs of the actual ``kdive server`` daemon (not the bash launcher wrapper)."""
     out = subprocess.run(
-        ["pgrep", "-af", "kdive server"], capture_output=True, text=True, check=False
+        [_required_executable("pgrep"), "-af", "kdive server"],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     pids: list[int] = []
     for line in out.stdout.splitlines():
@@ -382,7 +395,7 @@ def _cmd_reload(args: argparse.Namespace) -> int:
     log_dir = REPO_ROOT / ".live-stack-logs"
     for pid in _server_pids():
         print(f"  stopping server {pid}", file=sys.stderr)
-        subprocess.run(["kill", str(pid)], check=False)
+        subprocess.run([_required_executable("kill"), str(pid)], check=False)
     for _ in range(40):
         if not _server_pids():
             break
@@ -392,7 +405,7 @@ def _cmd_reload(args: argparse.Namespace) -> int:
         f"cd {REPO_ROOT} && source scripts/live-stack/env.sh "
         f"&& setsid nohup {py} -m kdive server >>{log_dir}/server.log 2>&1 </dev/null &"
     )
-    subprocess.run(["bash", "-c", launch], check=True)
+    subprocess.run([_required_executable("bash"), "-c", launch], check=True)
     for _ in range(40):
         time.sleep(0.5)
         try:
