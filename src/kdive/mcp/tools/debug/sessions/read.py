@@ -29,6 +29,7 @@ from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
 from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
 from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
 from kdive.security.authz.context import RequestContext
@@ -78,7 +79,7 @@ async def get_session(
     """Return one debug session the caller's project owns, or a not-found-shaped error."""
     uid = _as_uuid(session_id)
     if uid is None:
-        return _config_error(session_id)
+        return _invalid_uuid_error("session_id", session_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             session = await DEBUG_SESSIONS.get(conn, uid)
@@ -114,13 +115,13 @@ def _build_filters(
     if run_id is not None:
         uid = _as_uuid(run_id)
         if uid is None:
-            return _config_error(run_id)
+            return _invalid_uuid_error("run_id", run_id)
         clauses.append(sql.SQL("s.run_id = %s"))
         params.append(uid)
     if system_id is not None:
         uid = _as_uuid(system_id)
         if uid is None:
-            return _config_error(system_id)
+            return _invalid_uuid_error("system_id", system_id)
         clauses.append(sql.SQL("r.system_id = %s"))
         params.append(uid)
     if project is not None:

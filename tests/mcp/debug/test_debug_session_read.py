@@ -227,11 +227,13 @@ def test_get_session_detached_offers_only_reread(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_get_session_malformed_id_is_config_error(migrated_url: str) -> None:
+def test_get_session_malformed_id_is_invalid_uuid(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await sessions_read.get_session(pool, _ctx(), "not-a-uuid")
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None and "session_id" in resp.detail
 
     asyncio.run(_run())
 
@@ -389,13 +391,22 @@ def test_list_sessions_cross_project_filter_yields_nothing(migrated_url: str) ->
     asyncio.run(_run())
 
 
-def test_list_sessions_bad_filter_uuid_is_config_error(migrated_url: str) -> None:
+def test_list_sessions_bad_filter_uuid_is_invalid_uuid(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await sessions_read.list_sessions(
+            bad_run = await sessions_read.list_sessions(
                 pool, _ctx(), sessions_read.SessionsListRequest(run_id="nope")
             )
-        assert resp.status == "error" and resp.error_category == "configuration_error"
+            bad_system = await sessions_read.list_sessions(
+                pool, _ctx(), sessions_read.SessionsListRequest(system_id="nope")
+            )
+        assert bad_run.status == "error" and bad_run.error_category == "configuration_error"
+        assert bad_run.data["reason"] == "invalid_uuid"
+        assert bad_run.detail is not None and "run_id" in bad_run.detail
+        assert bad_system.status == "error"
+        assert bad_system.error_category == "configuration_error"
+        assert bad_system.data["reason"] == "invalid_uuid"
+        assert bad_system.detail is not None and "system_id" in bad_system.detail
 
     asyncio.run(_run())
 
