@@ -33,9 +33,10 @@ holds the agent's private key.
    the guest with a fixed argv and the managed identity. The authorize job reuses this
    shape (an injected SSH-exec callable) so it is unit-tested with a fake and `live_vm` is
    the only real-SSH gate.
-4. **Tool/job registration + RBAC.** `mcp/assembly/tool_registration.py` (`PLANE_REGISTRARS`) and
-   `mcp/assembly/worker_registration.py` register new tools/job handlers; `mcp/exposure.py`
-   `_TOOL_SCOPES` classifies exposure; `security/authz/rbac.py` `require_role` enforces.
+4. **Tool/job registration + RBAC.** `mcp/assembly/tool_registration.py`
+   (`PLANE_REGISTRARS`) registers tools, and `jobs/assembly.py` (`HANDLER_REGISTRARS`)
+   registers worker job handlers; `mcp/exposure.py` `_TOOL_SCOPES` classifies exposure;
+   `security/authz/rbac.py` `require_role` enforces.
    `mcp/responses.py` `ToolResponse` is the uniform envelope; `ToolResponse.from_job`
    lifts a worker job into one.
 
@@ -116,8 +117,8 @@ XML, and duplicating it would risk drift. `jump_host` is hard `None` for local-l
   fingerprint** so re-authorizing the *same* key is idempotent (the `dedup_key` UNIQUE column
   returns the prior job) while a *distinct* key gets its own job; a System-only dedup_key
   would silently collapse every key after the first into the first job.
-- Worker handler (registered in `worker_registration.py`): resolve the recorded SSH
-  endpoint, open an SSH connection as `root@127.0.0.1:<port>` with
+- Worker handler (registered through `jobs/assembly.py` `HANDLER_REGISTRARS`): resolve the
+  recorded SSH endpoint, open an SSH connection as `root@127.0.0.1:<port>` with
   `managed_private_key_path()`, and run a fixed remote append script. The **key is delivered
   on the SSH session's stdin**, never in the command string: `ssh host CMD` space-joins any
   post-host argv into one string the remote login shell re-parses, so an argv-positioned key
@@ -149,7 +150,7 @@ XML, and duplicating it would risk drift. `jump_host` is hard `None` for local-l
 
 - `tool_registration.py`: append the two systems tools to the systems registrar (they need
   only `pool` + the runtime/connect seam already injected into that plane).
-- `worker_registration.py`: register the `authorize_ssh_key` job handler.
+- `jobs/assembly.py`: register the `authorize_ssh_key` job handler in `HANDLER_REGISTRARS`.
 - `exposure.py` `_TOOL_SCOPES`: `"systems.ssh_info": VIEWER`, `"systems.authorize_ssh_key":
   OPERATOR`. The completeness guard (`CLASSIFIED_TOOLS | PUBLIC_TOOLS` == live registry)
   forces both to be classified.
