@@ -433,8 +433,8 @@ def test_power_handler_calls_provider_and_audits(migrated_url: str) -> None:
 
 
 def test_power_handler_refuses_non_ready_system(migrated_url: str) -> None:
-    # A power job admitted READY but executed after ready->crashed must fail terminally and
-    # never drive the physical domain — protecting crash evidence at execution (ADR-0320).
+    # A power job admitted READY but executed after ready->crashing/crashed must fail terminally
+    # and never drive the physical domain — protecting crash evidence at execution (ADR-0320).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)

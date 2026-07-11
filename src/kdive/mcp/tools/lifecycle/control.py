@@ -12,7 +12,7 @@ non-terminal DebugSession of the System ``-> detached`` (joined through ``runs``
 `power` uses a per-call-unique ``dedup_key`` (``{system_id}:power:{action}:{uuid4}``) so a
 repeated power op is always a fresh job; `force_crash` uses a stable
 ``{system_id}:force_crash`` key (once-per-System: one System per Allocation, no reprovision,
-``ready -> crashed`` is one-way).
+``ready -> crashing -> crashed`` is one-way).
 """
 
 from __future__ import annotations

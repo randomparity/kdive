@@ -275,7 +275,7 @@ def test_concurrent_provision_teardown_never_leaks_a_domain(migrated_url: str) -
 
 
 def test_concurrent_force_crash_and_teardown_end_torn_down_no_stale_nmi(migrated_url: str) -> None:
-    # force_crash (ready->crashed) and teardown (->torn_down) both hold LockScope.SYSTEM for
+    # force_crash (ready->crashing->crashed) and teardown (->torn_down) both hold the SYSTEM lock
     # their whole transition. Whatever the order: the System ends torn_down (teardown is the
     # terminal sink), the domain is reaped, and the NMI fires at most once and never against a
     # System the lock already shows terminal (force_crash's terminal-state early return).
