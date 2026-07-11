@@ -91,14 +91,21 @@ crash-command execution from pure `viewer`s while leaving every contributor and 
 | `allocations.request`/`release`/`renew` | obtain and hold a target |
 | `investigations.open`/`close`/`link`/`unlink`/`set` | organize the work |
 
-What stays **`operator`**: `systems.define`/`provision`/`provision_defined`/`reprovision`,
-`control.power`, `images.upload`/`delete`, and **`artifacts.create_system_upload`**. What stays
+What stays **`operator`**: ~~`systems.define`/`provision`/`provision_defined`/`reprovision`,~~
+~~`control.power`,~~ `images.upload`/`delete`, and ~~**`artifacts.create_system_upload`**~~. What stays
 **`admin`**: `systems.teardown`, `control.force_crash`, `accounting.set_budget`/`set_quota`.
 Platform-role tools are unaffected.
 
-`artifacts.create_run_upload` and `artifacts.create_system_upload` share one enforcement seam
+*Superseded in part: [ADR-0320](0320-leaseholder-power-lifecycle.md) moved `control.power` to
+`contributor`; [ADR-0326](0326-provision-lane-contributor-lifecycle.md) moved the provision lane
+(`systems.define`/`provision`/`provision_defined`, `artifacts.create_system_upload`) and
+`systems.reprovision` to `contributor`. Only `images.upload`/`delete` remain `operator` from this
+list.*
+
+~~`artifacts.create_run_upload` and `artifacts.create_system_upload` share one enforcement seam
 (`_create_upload`); the gate becomes conditional on the owner kind (run → `contributor`,
-system → `operator`) rather than a single role constant.
+system → `operator`) rather than a single role constant.~~ *(Superseded by ADR-0326: both owner
+kinds are now `contributor`.)*
 
 ### 4. Uploaded build artifacts expire and clear on close
 
