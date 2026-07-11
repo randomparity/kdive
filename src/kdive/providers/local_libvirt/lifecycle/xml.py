@@ -7,7 +7,7 @@ from pathlib import Path
 from uuid import UUID
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.platform import arch_traits
+from kdive.domain.platform.arch_traits import arch_traits
 from kdive.profiles.provisioning import ProvisioningProfile, require_concrete_sizing
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.shared.libvirt_xml import (

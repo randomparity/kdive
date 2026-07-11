@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError
-from kdive.domain.platform import arch_traits
+from kdive.domain.platform.arch_traits import arch_traits
 from kdive.images.base_source import Downloader, _real_download, acquire_base
 from kdive.images.families import family_for
 from kdive.images.families._fedora_customize import (

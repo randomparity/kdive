@@ -14,7 +14,7 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Run, System
-from kdive.domain.platform import arch_traits
+from kdive.domain.platform.arch_traits import arch_traits
 from kdive.images.families._fedora_customize import READINESS_MARKER
 from kdive.jobs import queue
 from kdive.profiles.provider_policy import ProfilePolicy, capture_method
