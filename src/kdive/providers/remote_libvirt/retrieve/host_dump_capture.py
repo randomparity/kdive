@@ -9,7 +9,7 @@ import logging
 import os
 import tempfile
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, NamedTuple
@@ -82,7 +82,7 @@ class _SpoolSink:
 
 
 class HostDumpCapturer:
-    """Host-side libvirt core dump, stream download, and object-store upload."""
+    """Public host_dump workflow entrypoint."""
 
     def __init__(
         self,
@@ -102,6 +102,18 @@ class HostDumpCapturer:
         self._secret_backend_factory = secret_backend_factory
         self._pki_base_dir = pki_base_dir
         self._options = options
+        self._spooler = _HostDumpSpooler(
+            config_factory=config_factory,
+            open_connection=open_connection,
+            secret_backend_factory=secret_backend_factory,
+            pki_base_dir=pki_base_dir,
+            options=options,
+        )
+        self._persister = _HostDumpPersister(
+            secret_registry=secret_registry,
+            store_factory=store_factory,
+            options=options,
+        )
 
     def capture(self, system_id: UUID, run_id: UUID) -> CaptureOutput:
         """Host-side core-dump -> storage-pool volume -> stream download -> upload.
@@ -109,6 +121,30 @@ class HostDumpCapturer:
         ``system_id`` locates the live domain/dump volume; ``run_id`` owns the stored core
         (``owner_kind='runs'``, ADR-0244).
         """
+        with self._spooler.capture_to_spool(system_id) as spool:
+            return self._persister.capture_output(system_id, run_id, spool)
+
+
+class _HostDumpSpooler:
+    """Libvirt dump/download stage that yields a bounded private spool file."""
+
+    def __init__(
+        self,
+        *,
+        config_factory: Callable[[], RemoteLibvirtConfig],
+        open_connection: OpenRetrieveConnection,
+        secret_backend_factory: Callable[[], SecretBackend],
+        pki_base_dir: Path | None,
+        options: HostDumpOptions,
+    ) -> None:
+        self._config_factory = config_factory
+        self._open_connection = open_connection
+        self._secret_backend_factory = secret_backend_factory
+        self._pki_base_dir = pki_base_dir
+        self._options = options
+
+    @contextlib.contextmanager
+    def capture_to_spool(self, system_id: UUID) -> Iterator[Path]:
         config = self._config_factory()
         with connection(
             config, self._secret_backend_factory, self._open_connection, self._pki_base_dir
@@ -119,23 +155,25 @@ class HostDumpCapturer:
             vol_name = host_dump_volume_name(system_id)
             self._delete_stale_volume(pool, vol_name)
             self._core_dump(domain, str(pool_dir / vol_name), system_id)
-            return self._stream_and_store(conn, pool, vol_name, system_id, run_id)
+            with self._downloaded_spool(conn, pool, vol_name, system_id) as spool:
+                yield spool
 
-    def _stream_and_store(
-        self, conn: Any, pool: Any, vol_name: str, system_id: UUID, run_id: UUID
-    ) -> CaptureOutput:
+    @contextlib.contextmanager
+    def _downloaded_spool(
+        self, conn: Any, pool: Any, vol_name: str, system_id: UUID
+    ) -> Iterator[Path]:
         pool.refresh(0)
         volume = self._resolve_volume(pool, vol_name, system_id)
         self._enforce_ceiling(volume, vol_name, system_id)
         spool = Path(tempfile.mkdtemp(prefix="kdive-host-dump-")) / vol_name
         try:
             self._download_to_file(conn, volume, spool, system_id)
-            return self._store_core(system_id, run_id, spool)
+            yield spool
         finally:
             spool.unlink(missing_ok=True)
             with contextlib.suppress(Exception):
                 spool.parent.rmdir()
-            self._delete_volume(volume)
+            _delete_volume(volume)
 
     @staticmethod
     def _lookup_pool(conn: Any, pool_name: str) -> Any:
@@ -192,7 +230,7 @@ class HostDumpCapturer:
                     "error": type(exc).__name__,
                 },
             ) from exc
-        self._delete_volume(stale)
+        _delete_volume(stale)
 
     def _core_dump(self, domain: Any, path: str, system_id: UUID) -> None:
         flags = libvirt.VIR_DUMP_MEMORY_ONLY
@@ -260,7 +298,22 @@ class HostDumpCapturer:
                 details={"system_id": str(system_id)},
             ) from exc
 
-    def _store_core(self, system_id: UUID, run_id: UUID, spool: Path) -> CaptureOutput:
+
+class _HostDumpPersister:
+    """Artifact persistence stage that turns a local spool file into ``CaptureOutput``."""
+
+    def __init__(
+        self,
+        *,
+        secret_registry: SecretRegistry,
+        store_factory: Callable[[], StorePort],
+        options: HostDumpOptions,
+    ) -> None:
+        self._secret_registry = secret_registry
+        self._store_factory = store_factory
+        self._options = options
+
+    def capture_output(self, system_id: UUID, run_id: UUID, spool: Path) -> CaptureOutput:
         try:
             build_id = self._options.core_build_id_from_file(spool)
         except CategorizedError:
@@ -352,10 +405,10 @@ class HostDumpCapturer:
                 details={"system_id": str(system_id), "key": raw_key},
             )
 
-    @staticmethod
-    def _delete_volume(volume: Any) -> None:
-        with contextlib.suppress(Exception):
-            volume.delete(0)
+
+def _delete_volume(volume: Any) -> None:
+    with contextlib.suppress(Exception):
+        volume.delete(0)
 
 
 def pool_type_and_target_strict(

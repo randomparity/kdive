@@ -595,7 +595,7 @@ def test_host_dump_over_ceiling_volume_is_configuration_error_before_download(
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert not huge.download_called  # AC4: ceiling enforced before the stream
-    assert huge.delete_calls == 1  # cleanup is owned by _stream_and_store's finally block
+    assert huge.delete_calls == 1  # cleanup is owned by the spooler's finally block
 
 
 def test_host_dump_volume_info_failure_is_infrastructure_failure_before_download(
