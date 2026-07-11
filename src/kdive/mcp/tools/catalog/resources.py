@@ -196,7 +196,10 @@ async def describe_resource(
             resource = await RESOURCES.get(conn, uid)
             if resource is None or not resource_visible_to_projects(resource, viewer_projects):
                 return _not_found(resource_id)
-        runtime = _runtime_for_resource(resolver, resource.kind, resource.name)
+        try:
+            runtime = _runtime_for_resource(resolver, resource.kind, resource.name)
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(resource_id, exc)
         provider_data = await _resource_detail_data(pool, runtime, viewer_projects)
         envelope = resource_envelope(resource, next_actions=["allocations.request"])
         envelope.data["pool"] = resource.pool
@@ -212,13 +215,10 @@ def _runtime_for_resource(
 ) -> ProviderRuntime | None:
     if resolver is None:
         return None
-    try:
-        runtime = resolver.resolve(kind)
-        if name is not None:
-            return runtime.for_resource(name)
-        return runtime
-    except CategorizedError:
-        return None
+    runtime = resolver.resolve(kind)
+    if name is not None:
+        return runtime.for_resource(name)
+    return runtime
 
 
 async def _resource_detail_data(

@@ -317,9 +317,8 @@ def test_describe_omits_capabilities_when_no_resolver(migrated_url: str) -> None
     assert "supported_capture_methods" not in resp.data
 
 
-def test_describe_omits_capabilities_when_kind_unregistered(migrated_url: str) -> None:
-    # The resolver has no runtime for the resource's kind → resolution raises CategorizedError,
-    # the capability block is omitted, and the describe still succeeds.
+def test_describe_fails_when_kind_unregistered(migrated_url: str) -> None:
+    # A present-but-misconfigured resolver should fail closed instead of hiding detail data.
     async def _run() -> ToolResponse:
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool)
@@ -329,8 +328,10 @@ def test_describe_omits_capabilities_when_kind_unregistered(migrated_url: str) -
             )
 
     resp = asyncio.run(_run())
-    assert resp.status == "available"
-    assert "capabilities" not in resp.data
+    assert resp.status == "error"
+    assert resp.error_category == "configuration_error"
+    assert resp.data["kind"] == ResourceKind.LOCAL_LIBVIRT.value
+    assert resp.data["available"] == []
 
 
 def test_describe_hides_resource_outside_project_affinity(migrated_url: str) -> None:
