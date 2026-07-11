@@ -15,6 +15,7 @@ test runs the two handlers as genuinely concurrent tasks on separate pooled conn
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -33,7 +34,7 @@ from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.jobs import queue
 from kdive.jobs.handlers import control as control_plane
 from kdive.jobs.handlers import systems as systems_handlers
-from kdive.jobs.payloads import SystemPayload
+from kdive.jobs.payloads import PowerPayload, SystemPayload
 from tests.adversarial.conftest import seed_allocation, seed_resource
 from tests.mcp.systems_support import provider_resolver
 
@@ -186,6 +187,18 @@ async def _set_state(pool: AsyncConnectionPool, system_id: str, state: str) -> N
     """Direct state UPDATE bypassing can_transition — scaffolds a mid-window state."""
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute("UPDATE systems SET state = %s WHERE id = %s", (state, system_id))
+
+
+async def _enqueue_power(pool: AsyncConnectionPool, system_id: str, dedup: str) -> Job:
+    """Enqueue a POWER job with a valid PowerPayload (power_handler loads PowerPayload)."""
+    async with pool.connection() as conn:
+        return await queue.enqueue(
+            conn,
+            JobKind.POWER,
+            PowerPayload(system_id=system_id, action=PowerAction.RESET),
+            {"principal": "alice", "agent_session": "s", "project": "proj"},
+            dedup,
+        )
 
 
 async def _race_once(pool: AsyncConnectionPool, *, provision_first: bool) -> tuple[str, set[str]]:
@@ -399,5 +412,56 @@ def test_force_crash_nmi_raise_propagates_and_leaves_crashing(migrated_url: str)
             # marker is left set (System stays CRASHING), NOT marked FAILED by the handler.
             assert excinfo.value.terminal is False
             assert await _system_state(pool, system_id) == SystemState.CRASHING.value
+
+    asyncio.run(_run())
+
+
+def test_power_refused_on_crashing_no_physical_reset(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(pool, SystemState.READY, domain_name="kdive-x")
+            await _set_state(pool, system_id, SystemState.CRASHING.value)
+            ctrl = _RecordingController()
+            resolver = provider_resolver(provisioner=_TrackingProvisioner(), controller=ctrl)
+            pjob = await _enqueue_power(pool, system_id, f"{system_id}:power")
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError) as excinfo:
+                    await control_plane.power_handler(conn, pjob, resolver=resolver)
+            assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+            assert excinfo.value.terminal is True
+            assert ctrl.powered == []  # the load-bearing property: no physical reset
+
+    asyncio.run(_run())
+
+
+def test_force_crash_marker_refuses_racing_power(migrated_url: str) -> None:
+    # Interleaving A: force_crash commits CRASHING before the power op's re-check -> power refused.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            for i in range(12):
+                system_id = await _seed_system(pool, SystemState.READY, domain_name=f"kdive-{i}")
+                ctrl = _RecordingController()
+                resolver = provider_resolver(provisioner=_TrackingProvisioner(), controller=ctrl)
+                cjob = await _enqueue(
+                    pool, JobKind.FORCE_CRASH, system_id, f"{system_id}:force_crash"
+                )
+                pjob = await _enqueue_power(pool, system_id, f"{system_id}:power")
+
+                async def run_crash(job: Job = cjob, resolver=resolver) -> None:
+                    async with pool.connection() as conn:
+                        await control_plane.force_crash_handler(conn, job, resolver=resolver)
+
+                async def run_power(job: Job = pjob, resolver=resolver) -> None:
+                    async with pool.connection() as conn:
+                        # refused (CategorizedError) when it saw CRASHING/CRASHED — the safe outcome
+                        with contextlib.suppress(CategorizedError):
+                            await control_plane.power_handler(conn, job, resolver=resolver)
+
+                await asyncio.gather(run_crash(), run_power())
+                assert await _system_state(pool, system_id) in {
+                    SystemState.CRASHED.value,
+                    SystemState.CRASHING.value,
+                }
+                assert len(ctrl.powered) <= 1  # at most the pre-marker READY power op
 
     asyncio.run(_run())

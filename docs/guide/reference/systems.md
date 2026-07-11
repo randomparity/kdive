@@ -120,7 +120,7 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 `request` fields:
 
 - `allocation_id` (`string (nullable)`, optional) — Only Systems under this Allocation id.
-- `state` (``defined`, `provisioning`, `ready`, `reprovisioning`, `crashed`, `torn_down`, `failed` (nullable)`, optional) — Only Systems in this lifecycle state.
+- `state` (``defined`, `provisioning`, `ready`, `reprovisioning`, `crashing`, `crashed`, `torn_down`, `failed` (nullable)`, optional) — Only Systems in this lifecycle state.
 - `shape` (`string (nullable)`, optional) — Only Systems with this named shape, or '__custom__' for full-custom.
 - `pcie` (`string (nullable)`, optional) — Only Systems whose Allocation claims a matching '<vendor>:<device>' spec.
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).

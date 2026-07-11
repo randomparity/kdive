@@ -1,12 +1,13 @@
 """The `control.*` MCP tools (ADR-0028).
 
 `control.power` (all actions ``on``/``off``/``cycle``/``reset`` → ``contributor``,
-ADR-0320) admits only a ``READY`` System — a ``CRASHED`` System holds crash evidence and is
-refused. `control.force_crash` (two-check gated, admin) admits synchronously and enqueues a
-durable job. Worker-owned execution lives in ``kdive.jobs.handlers.control``; `power` moves
-no System state (a domain restart is not a reprovision), while `force_crash` drives System
-``ready -> crashed`` and every non-terminal DebugSession of the System ``-> detached``
-(joined through ``runs``).
+ADR-0320) admits only a ``READY`` System — a ``CRASHING`` (mid-force_crash) or ``CRASHED``
+System holds crash evidence and is refused. `control.force_crash` (two-check gated, admin)
+admits synchronously and enqueues a durable job. Worker-owned execution lives in
+``kdive.jobs.handlers.control``; `power` moves no System state (a domain restart is not a
+reprovision), while `force_crash` drives System ``ready -> crashing -> crashed`` (the
+``crashing`` marker is set before the physical NMI so power cannot race it, ADR-0325) and every
+non-terminal DebugSession of the System ``-> detached`` (joined through ``runs``).
 
 `power` uses a per-call-unique ``dedup_key`` (``{system_id}:power:{action}:{uuid4}``) so a
 repeated power op is always a fresh job; `force_crash` uses a stable
@@ -294,7 +295,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
                 description=(
                     "Power action: `on`/`off`/`cycle`/`reset`. All require `contributor` "
                     "(leaseholder control over your transient VM). Use `reset`/`cycle` to "
-                    "recover a wedged but READY guest. Admitted only on a READY System."
+                    "recover a wedged but READY guest. Admitted only on a READY System; "
+                    "refused on a CRASHED or CRASHING (mid-force_crash) System."
                 )
             ),
         ],
@@ -305,8 +307,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     ) -> ToolResponse:
         """Power action on a READY System: on/off/cycle/reset, all contributor-level
         leaseholder control. reset/cycle recover a wedged READY guest. Refused on a
-        non-READY System (a CRASHED System holds crash evidence — use the crash workflow).
-        Enqueues a power job."""
+        non-READY System (a CRASHED or CRASHING System holds crash evidence — use the crash
+        workflow). Enqueues a power job."""
         return await power_system(
             pool,
             current_context(),
@@ -327,7 +329,9 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             Field(description="Replay-safe key; a repeated key returns the prior envelope."),
         ] = None,
     ) -> ToolResponse:
-        """Inject an NMI to crash a ready System; drives ready->crashed. Requires admin + gate."""
+        """Inject an NMI to crash a ready System; drives ready->crashing->crashed.
+
+        Requires admin + gate."""
         return await force_crash_system(
             pool,
             current_context(),

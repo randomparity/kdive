@@ -351,6 +351,20 @@ def test_power_on_crashed_system_is_config_error(migrated_url: str, action: str)
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("action", ["on", "off", "cycle", "reset"])
+def test_power_on_crashing_system_is_config_error(migrated_url: str, action: str) -> None:
+    # A CRASHING System is mid-force_crash; power is refused, protecting crash evidence (#1078).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.CRASHING)
+            resp = await _power(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, action=action)
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["current_status"] == "crashing"
+
+    asyncio.run(_run())
+
+
 def test_power_cross_project_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
