@@ -18,10 +18,8 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.providers.local_libvirt import composition
 from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
-from kdive.providers.local_libvirt.debug.introspect import (
-    LocalLibvirtLiveIntrospect,
-    LocalLibvirtVmcoreIntrospect,
-)
+from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
+from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.local_libvirt.lifecycle.control import LocalLibvirtControl

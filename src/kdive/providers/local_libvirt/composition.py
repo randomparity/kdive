@@ -26,10 +26,8 @@ from kdive.providers.core.runtime import DebugCapabilities, ProviderRuntime
 from kdive.providers.infra.reaping import InfraReaper
 from kdive.providers.local_libvirt.config import local_guest_egress_for_resource
 from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
-from kdive.providers.local_libvirt.debug.introspect import (
-    LocalLibvirtLiveIntrospect,
-    LocalLibvirtVmcoreIntrospect,
-)
+from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
+from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.local_libvirt.lifecycle.control import LocalLibvirtControl
