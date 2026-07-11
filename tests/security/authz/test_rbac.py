@@ -12,9 +12,11 @@ from kdive.security.authz.rbac import (
     PlatformRole,
     Role,
     RoleDenied,
+    platform_role_satisfies,
     platform_roles_from_claims,
     require_platform_role,
     require_role,
+    role_satisfies,
     roles_from_claims,
 )
 
@@ -65,6 +67,13 @@ def test_roles_from_claims_rejects_non_string_project_key() -> None:
 
 def test_require_role_admin_satisfies_operator() -> None:
     require_role(_ctx(roles={"proj": Role.ADMIN}), "proj", Role.OPERATOR)
+
+
+def test_role_satisfies_uses_project_role_rank() -> None:
+    assert role_satisfies(Role.ADMIN, Role.OPERATOR)
+    assert role_satisfies(Role.CONTRIBUTOR, Role.VIEWER)
+    assert not role_satisfies(Role.VIEWER, Role.CONTRIBUTOR)
+    assert not role_satisfies(None, Role.VIEWER)
 
 
 def test_roles_from_claims_parses_contributor() -> None:
@@ -186,6 +195,19 @@ def test_require_platform_role_denied_message_lists_held_roles() -> None:
     assert str(excinfo.value) == (
         "'alice' needs platform role 'platform_auditor'; holds ['platform_operator']"
     )
+
+
+def test_platform_role_satisfies_uses_platform_partial_order() -> None:
+    assert platform_role_satisfies(
+        frozenset({PlatformRole.PLATFORM_ADMIN}), PlatformRole.PLATFORM_AUDITOR
+    )
+    assert platform_role_satisfies(
+        frozenset({PlatformRole.PLATFORM_OPERATOR}), PlatformRole.PLATFORM_OPERATOR
+    )
+    assert not platform_role_satisfies(
+        frozenset({PlatformRole.PLATFORM_ADMIN}), PlatformRole.PLATFORM_OPERATOR
+    )
+    assert not platform_role_satisfies(frozenset(), PlatformRole.PLATFORM_AUDITOR)
 
 
 def test_request_context_with_roles_is_hashable() -> None:

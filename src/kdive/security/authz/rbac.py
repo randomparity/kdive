@@ -10,7 +10,7 @@ a handler maps "you may not do this" separately from "who are you".
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -145,8 +145,15 @@ def require_role(ctx: RequestContext, project: str, role: Role) -> None:
     if project not in ctx.projects:
         raise AuthorizationError(f"{ctx.principal!r} is not a member of project {project!r}")
     held = ctx.roles.get(project)
-    if held is None or _RANK[held] < _RANK[role]:
+    if not role_satisfies(held, role):
         raise RoleDenied(principal=ctx.principal, project=project, held=held, required=role)
+
+
+def role_satisfies(held: Role | None, required: Role) -> bool:
+    """Return whether a held project role satisfies a required project role."""
+    if held is None:
+        return False
+    return _RANK[held] >= _RANK[required]
 
 
 def projects_with_role(ctx: RequestContext, role: Role) -> list[str]:
@@ -205,10 +212,17 @@ def require_platform_role(ctx: RequestContext, role: PlatformRole) -> None:
         AuthorizationError: The principal holds no platform role satisfying ``role``
             (including the empty-set case — a project-only token).
     """
-    for held in ctx.platform_roles:
-        if held is role or role in _PLATFORM_IMPLIES.get(held, frozenset()):
-            return
+    if platform_role_satisfies(ctx.platform_roles, role):
+        return
     raise AuthorizationError(
         f"{ctx.principal!r} needs platform role {role.value!r}; "
         f"holds {sorted(r.value for r in ctx.platform_roles)!r}"
     )
+
+
+def platform_role_satisfies(held_roles: Iterable[PlatformRole], required: PlatformRole) -> bool:
+    """Return whether any held platform role satisfies a required platform role."""
+    for held in held_roles:
+        if held is required or required in _PLATFORM_IMPLIES.get(held, frozenset()):
+            return True
+    return False
