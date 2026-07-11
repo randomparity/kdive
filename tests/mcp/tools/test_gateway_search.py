@@ -11,6 +11,7 @@ Coverage:
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import pytest
@@ -18,6 +19,7 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.assembly.app import build_app
+from kdive.mcp.schema.schema_advertising import registered_tools
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
@@ -215,3 +217,65 @@ def test_match_includes_full_input_schema(monkeypatch: pytest.MonkeyPatch) -> No
     assert "run_id" in str(runs_get["input_schema"]), (
         f"run_id not in input_schema: {runs_get['input_schema']}"
     )
+
+
+def test_resolver_failure_keeps_search_usable_and_rbac_filtered(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import kdive.mcp.tools.gateway as gateway_module
+    from kdive.providers.core.resolver import ProviderResolver
+
+    monkeypatch.setattr(gateway_module, "current_context", _viewer_ctx)
+
+    def _raise_registered_kinds(self: ProviderResolver) -> frozenset:
+        raise RuntimeError("injected resolver failure")
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    monkeypatch.setattr(ProviderResolver, "registered_kinds", _raise_registered_kinds)
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": "force crash"})
+
+    with caplog.at_level(logging.WARNING, logger="kdive.mcp.tools.gateway"):
+        result = asyncio.run(_run())
+
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    assert "registered_kinds() failed in tools.search" in caplog.text
+    assert "control.force_crash" not in _match_names(content)
+
+
+def test_projection_failure_falls_back_to_original_tool_schema(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _operator_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    original_project = gateway_module.project_listed_tool
+    original_tools = {tool.name: tool for tool in registered_tools(app)}
+    original_alloc_schema = original_tools["allocations.request"].parameters
+
+    def _project_or_raise(tool: Any, kinds: Any) -> Any:
+        if tool.name == "allocations.request":
+            raise RuntimeError("injected projection failure")
+        return original_project(tool, kinds)
+
+    monkeypatch.setattr(gateway_module, "project_listed_tool", _project_or_raise)
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"namespace": "allocations", "limit": 50})
+
+    with caplog.at_level(logging.WARNING, logger="kdive.mcp.tools.gateway"):
+        result = asyncio.run(_run())
+
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    assert "provider-schema projection failed for allocations.request" in caplog.text
+    matches = content["data"]["matches"]
+    assert len(matches) > 1
+    allocations_request = next(m for m in matches if m["name"] == "allocations.request")
+    assert allocations_request["input_schema"] == original_alloc_schema

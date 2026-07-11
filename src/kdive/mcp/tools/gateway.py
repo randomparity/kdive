@@ -64,7 +64,21 @@ def _rank(candidates: list[Tool], *, query: str | None, namespace: str | None) -
     return sorted(candidates, key=lambda t: t.name)
 
 
-def describe_tool(tool: Tool, kinds: frozenset[ResourceKind]) -> dict[str, JsonValue]:
+def _project_or_passthrough(tool: Tool, kinds: frozenset[ResourceKind] | None) -> Tool:
+    if kinds is None:
+        return tool
+    try:
+        return project_listed_tool(tool, kinds)
+    except Exception:
+        _log.warning(
+            "provider-schema projection failed for %s in tools.search; using full schema",
+            tool.name,
+            exc_info=True,
+        )
+        return tool
+
+
+def describe_tool(tool: Tool, kinds: frozenset[ResourceKind] | None) -> dict[str, JsonValue]:
     """Serialise a Tool into the ``{name, description, input_schema}`` match shape,
     narrowing the input schema to the composed ``kinds`` (ADR-0269)."""
     return cast(
@@ -72,7 +86,7 @@ def describe_tool(tool: Tool, kinds: frozenset[ResourceKind]) -> dict[str, JsonV
         {
             "name": tool.name,
             "description": tool.description or "",
-            "input_schema": project_listed_tool(tool, kinds).parameters,
+            "input_schema": _project_or_passthrough(tool, kinds).parameters,
         },
     )
 
@@ -185,7 +199,14 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                 "tool_search_miss",
                 extra={"query": query, "count": 0},
             )
-        kinds = resolver.registered_kinds()
+        kinds: frozenset[ResourceKind] | None = None
+        try:
+            kinds = resolver.registered_kinds()
+        except Exception:
+            _log.warning(
+                "registered_kinds() failed in tools.search; using full schemas",
+                exc_info=True,
+            )
         return ToolResponse.success(
             "tools.search",
             "ok",
