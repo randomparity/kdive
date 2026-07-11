@@ -371,7 +371,7 @@ _RUN_UPLOAD = _UploadOwnerSpec(
 )
 _SYSTEM_UPLOAD = _UploadOwnerSpec(
     owner_kind=upload_manifest.SYSTEM_UPLOAD_OWNER,
-    required_role=Role.OPERATOR,
+    required_role=Role.CONTRIBUTOR,
     lock_scope=LockScope.SYSTEM,
     allowed_names=SYSTEM_ARTIFACT_NAMES,
     next_action="systems.provision_defined",

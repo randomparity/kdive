@@ -753,16 +753,25 @@ def test_create_run_upload_admits_contributor_denies_viewer(migrated_url: str) -
     asyncio.run(_run())
 
 
-def test_create_system_upload_still_requires_operator(migrated_url: str) -> None:
-    # ADR-0234: the system-upload half of the shared seam stays at `operator`; a contributor
-    # (admitted for run uploads) is denied here.
+def test_create_system_upload_is_contributor(migrated_url: str) -> None:
+    # ADR-0326: the system-upload half of the shared seam is contributor leaseholder control (the
+    # define lane feeds provision). A contributor succeeds; a viewer is denied.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id = await _defined_system_via_tool(pool)
+            responses = await create_system_upload(
+                pool,
+                _ctx(role=Role.CONTRIBUTOR),
+                system_id=sys_id,
+                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
+                resolver=provider_resolver(),
+                store=_FakeStore(),
+            )
+            assert [r.object_id for r in responses.items] == [f"local/systems/{sys_id}/rootfs"]
             with pytest.raises(AuthorizationError):
                 await create_system_upload(
                     pool,
-                    _ctx(role=Role.CONTRIBUTOR),
+                    _ctx(role=Role.VIEWER),
                     system_id=sys_id,
                     artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
                     resolver=provider_resolver(),

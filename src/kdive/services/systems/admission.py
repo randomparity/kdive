@@ -416,7 +416,7 @@ async def _locked_allocation_system(
         if alloc is None or alloc.project not in ctx.projects:
             yield MissingAllocation(alloc_id)
             return
-        require_role(ctx, alloc.project, Role.OPERATOR)
+        require_role(ctx, alloc.project, Role.CONTRIBUTOR)
         existing = await _find_system_for_allocation(conn, alloc_id)
         yield conn, alloc, existing
 
@@ -618,7 +618,7 @@ async def _provision_defined_locked(
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 reason=AdmissionFailureReason.SUBJECT_NOT_FOUND,
             )
-        require_role(ctx, system.project, Role.OPERATOR)
+        require_role(ctx, system.project, Role.CONTRIBUTOR)
         alloc = await ALLOCATIONS.get(conn, system.allocation_id)
         if alloc is None or alloc.project != system.project:
             return AdmissionFailure(

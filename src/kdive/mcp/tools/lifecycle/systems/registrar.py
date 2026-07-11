@@ -184,7 +184,7 @@ def _register_systems_define(
                 idempotency_key=idempotency_key,
                 label=label,
             ),
-            required_role=Role.OPERATOR,
+            required_role=Role.CONTRIBUTOR,
         )
 
 
@@ -238,7 +238,7 @@ def _register_systems_provision(
                 idempotency_key=idempotency_key,
                 label=label,
             ),
-            required_role=Role.OPERATOR,
+            required_role=Role.CONTRIBUTOR,
         )
 
 
@@ -276,7 +276,7 @@ def _register_systems_provision_defined(
                 system_id=system_id,
                 idempotency_key=idempotency_key,
             ),
-            required_role=Role.OPERATOR,
+            required_role=Role.CONTRIBUTOR,
         )
 
 
