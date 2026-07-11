@@ -288,7 +288,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
 
     @app.tool(
         name="control.power",
-        annotations=_docmeta.destructive(),
+        annotations=_docmeta.mutating(),
         meta=_docmeta.maturity_meta("implemented"),
     )
     async def control_power(

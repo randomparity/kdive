@@ -649,11 +649,9 @@ def test_backstop_actually_detects_the_known_gate_callers() -> None:
     # that call assert_destructive_allowed today. Equality (not subset) catches both a broken
     # mechanism — the reach analysis stopping at the wrapper body would empty this set — and
     # an unexpected new reacher, which then must be reviewed into DESTRUCTIVE_TOOLS and pinned
-    # here, mirroring test_destructive_tools_set_is_exactly_the_four. systems.teardown and
-    # systems.reprovision are deliberately absent: ADR-0129 dropped teardown to a single
-    # require_role(ADMIN) check and ADR-0326 made reprovision contributor leaseholder control,
-    # so neither reaches the gate (both stay in DESTRUCTIVE_TOOLS via their destructive()
-    # annotation).
+    # here. systems.teardown and systems.reprovision are deliberately absent: ADR-0129 dropped
+    # teardown to a single require_role(ADMIN) check and ADR-0326 made reprovision contributor
+    # leaseholder control, so neither reaches the destructive-op gate.
     assert _gate_reachers() == {"control.force_crash"}
 
 

@@ -433,7 +433,7 @@ def _register_systems_reprovision(
 ) -> None:
     @app.tool(
         name="systems.reprovision",
-        annotations=_docmeta.destructive(),
+        annotations=_docmeta.mutating(),
         meta=_docmeta.maturity_meta("implemented"),
     )
     async def systems_reprovision(

@@ -23,10 +23,8 @@ def maturity_meta(maturity: Maturity) -> dict[str, object]:
 
 DESTRUCTIVE_TOOLS = frozenset(
     {
-        "control.power",
         "control.force_crash",
         "systems.teardown",
-        "systems.reprovision",
         "ops.force_teardown",
         "ops.force_release",
         "ops.reconcile_systems",
