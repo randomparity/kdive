@@ -70,12 +70,15 @@ def test_non_destructive_job_kind_is_rejected() -> None:
         DestructiveOp(kind=JobKind.BUILD, profile_opt_in=True)
 
 
-def test_power_is_no_longer_a_destructive_job_kind() -> None:
-    # Power left DESTRUCTIVE_JOB_KINDS (ADR-0320): it can no longer be routed through the gate,
-    # while reprovision (an opt-in-consuming destructive op) still constructs.
+def test_power_and_reprovision_are_no_longer_destructive_job_kinds() -> None:
+    # Power (ADR-0320) and reprovision (ADR-0326) both left DESTRUCTIVE_JOB_KINDS: neither can be
+    # routed through the gate. force_crash is the sole opt-in-consuming destructive op that still
+    # constructs.
     with pytest.raises(ValueError, match="power is not a destructive job kind"):
         DestructiveOp(kind=JobKind.POWER, profile_opt_in=True)
-    DestructiveOp(kind=JobKind.REPROVISION, profile_opt_in=True)
+    with pytest.raises(ValueError, match="reprovision is not a destructive job kind"):
+        DestructiveOp(kind=JobKind.REPROVISION, profile_opt_in=True)
+    DestructiveOp(kind=JobKind.FORCE_CRASH, profile_opt_in=True)
 
 
 def test_both_absent_lists_role_then_opt_in() -> None:
@@ -95,12 +98,13 @@ def test_denial_message_names_missing_checks_for_audit() -> None:
 
 
 def test_operator_required_role_allows_operator() -> None:
-    # Reprovision's role factor is operator (ADR-0038): an operator with opt-in passes.
+    # The gate takes its role factor as a per-op parameter (ADR-0130): passing operator admits an
+    # operator with opt-in. Exercised via force_crash (the sole gated op) after reprovision left.
     assert (
         assert_destructive_allowed(
             _ctx(Role.OPERATOR),
             _allocation(),
-            DestructiveOp(kind=JobKind.REPROVISION, profile_opt_in=True),
+            DestructiveOp(kind=JobKind.FORCE_CRASH, profile_opt_in=True),
             required_role=Role.OPERATOR,
         )
         is None
@@ -112,7 +116,7 @@ def test_operator_required_role_still_denies_viewer() -> None:
         assert_destructive_allowed(
             _ctx(Role.VIEWER),
             _allocation(),
-            DestructiveOp(kind=JobKind.REPROVISION, profile_opt_in=True),
+            DestructiveOp(kind=JobKind.FORCE_CRASH, profile_opt_in=True),
             required_role=Role.OPERATOR,
         )
     assert exc.value.missing == ["operator_role"]

@@ -466,5 +466,5 @@ def _register_systems_reprovision(
                 profile=dump_profile(profile),
                 idempotency_key=idempotency_key,
             ),
-            required_role=Role.OPERATOR,
+            required_role=Role.CONTRIBUTOR,
         )

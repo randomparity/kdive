@@ -39,7 +39,6 @@ from kdive.profiles.provisioning import ProvisioningProfile, dump_profile, profi
 from kdive.profiles.types import ProvisioningProfileInput
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
-from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
 from kdive.security.authz.rbac import Role, RoleDenied, require_role
 from kdive.services.systems.validation import (
     RootfsValidator,
@@ -48,7 +47,6 @@ from kdive.services.systems.validation import (
 )
 
 _NON_TERMINAL_RUN = frozenset({RunState.CREATED, RunState.RUNNING})
-_REPROVISION = JobKind.REPROVISION
 _TEARDOWN = JobKind.TEARDOWN
 # Idempotency-store kinds (the registered tool names); ADR-0193.
 _REPROVISION_KIND = "systems.reprovision"
@@ -158,14 +156,10 @@ async def _reprovision_in_lock(
     allocation = await ALLOCATIONS.get(conn, system.allocation_id)
     if allocation is None or allocation.project not in ctx.projects:
         return _config_error(str(system_id))
-    op = DestructiveOp(
-        kind=_REPROVISION, profile_opt_in=_reprovision_opt_in(profile_policy, profile)
-    )
-    try:
-        assert_destructive_allowed(ctx, allocation, op, required_role=Role.OPERATOR)
-    except DestructiveOpDenied as denied:
-        await _audit_destructive_denied(conn, ctx, system, _REPROVISION, denied.missing)
-        return _authz_denied(str(system_id), denied.missing)
+    # Reprovision is contributor leaseholder lifecycle (ADR-0326): re-staging your own granted
+    # System is iterating, not administering. Enforced in-handler (the handler-direct path
+    # bypasses the registrar gate), mirroring control.power.
+    require_role(ctx, system.project, Role.CONTRIBUTOR)
     digest = profile_digest(profile)
     dedup_key = f"{system_id}:reprovision:{digest}"
     if system.state is SystemState.REPROVISIONING:
@@ -192,11 +186,6 @@ async def _reprovision_in_lock(
             envelope=envelope,
         )
     return envelope
-
-
-def _reprovision_opt_in(profile_policy: ProfilePolicy, profile: ProvisioningProfile) -> bool:
-    """Resolve the gate's profile opt-in factor from the target profile."""
-    return profile_policy.destructive_opt_in(profile, _REPROVISION)
 
 
 async def _audit_destructive_denied(
