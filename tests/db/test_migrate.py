@@ -11,11 +11,12 @@ from typing import LiteralString
 import psycopg
 import pytest
 
-from kdive.db import idempotency, migrate
+from kdive.db import migrate
 from kdive.db.provider_component_records import ComponentUploadState
 from kdive.domain import errors
 from kdive.domain.capacity import state
 from kdive.domain.catalog import images, resources
+from kdive.domain.lifecycle.run_steps import PERSISTED_RUN_STEP_STATES
 from kdive.domain.operations import jobs
 from kdive.inventory.overrides import InventoryOverrideDisposition
 
@@ -36,7 +37,6 @@ CHECK_ENUMS = [
     ("image_state_check", images.ImageState),
     ("image_catalog_managed_by_check", resources.ManagedBy),
     ("resources_managed_by_check", resources.ManagedBy),
-    ("run_steps_state_check", idempotency._RunStepState),
     ("component_uploads_state_check", ComponentUploadState),
     ("inventory_overrides_disposition_check", InventoryOverrideDisposition),
 ]
@@ -215,12 +215,12 @@ def _seed_run_for_steps(conn: psycopg.Connection) -> str:
     return str(run[0])
 
 
-def test_run_steps_state_check_admits_enum_values_and_rejects_others(
+def test_run_steps_state_check_admits_persisted_values_and_rejects_others(
     pg_conn: psycopg.Connection,
 ) -> None:
     migrate.apply_migrations(pg_conn)
     run_id = _seed_run_for_steps(pg_conn)
-    for step_state in ("running", "succeeded"):
+    for step_state in PERSISTED_RUN_STEP_STATES:
         pg_conn.execute(
             "INSERT INTO run_steps (run_id, step, state) VALUES (%s, %s, %s)",
             (run_id, f"step-{step_state}", step_state),
@@ -232,8 +232,10 @@ def test_run_steps_state_check_admits_enum_values_and_rejects_others(
         )
 
 
-def test_run_steps_state_check_admits_exactly_the_enum(pg_conn: psycopg.Connection) -> None:
-    """The CHECK's admitted set equals _RunStepState exactly — no SQL-only extras."""
+def test_run_steps_state_check_admits_exactly_persisted_values(
+    pg_conn: psycopg.Connection,
+) -> None:
+    """The CHECK's admitted set equals the persisted run-step states; no SQL-only extras."""
     migrate.apply_migrations(pg_conn)
     row = pg_conn.execute(
         "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
@@ -244,7 +246,7 @@ def test_run_steps_state_check_admits_exactly_the_enum(pg_conn: psycopg.Connecti
     # (state = ANY (ARRAY['running'::text, ...]) or state IN ('running', ...)); the
     # ::text casts sit outside the quotes, so the quoted tokens are exactly the values.
     admitted = set(re.findall(r"'([^']+)'", row[0]))
-    assert admitted == {s.value for s in idempotency._RunStepState}
+    assert admitted == set(PERSISTED_RUN_STEP_STATES)
 
 
 def test_component_uploads_state_check_admits_exactly_the_enum(pg_conn: psycopg.Connection) -> None:

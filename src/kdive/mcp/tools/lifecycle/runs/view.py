@@ -6,6 +6,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import JOBS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import RunState
+from kdive.domain.lifecycle.run_steps import RUN_STEP_SUCCEEDED
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -66,7 +67,7 @@ async def get_run(
             )
             boot_attempt = (
                 await _failed_boot_attempt(conn, run.id)
-                if progress is not None and progress.boot != "succeeded"
+                if progress is not None and progress.boot != RUN_STEP_SUCCEEDED
                 else None
             )
             # The Run-scoped console manifest (ADR-0279), opt-in per #1067/ADR-0324. Queried inside

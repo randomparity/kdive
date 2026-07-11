@@ -34,6 +34,7 @@ from kdive.db.repositories import DEBUG_SESSIONS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import DebugSessionState, RunState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import DebugSession, Run, System
+from kdive.domain.lifecycle.run_steps import RUN_STEP_SUCCEEDED
 from kdive.kernel_config.gate import debuginfo_warning
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
@@ -177,10 +178,10 @@ async def _system_for_run(conn: AsyncConnection, run: Run) -> System | None:
 async def _succeeded_boot_result(conn: AsyncConnection, run_id: UUID) -> dict[str, Any] | None:
     """Return the succeeded ``boot`` step result for ``run_id`` when one exists."""
     query: LiteralString = (
-        "SELECT result FROM run_steps WHERE run_id = %s AND step = 'boot' AND state = 'succeeded'"
+        "SELECT result FROM run_steps WHERE run_id = %s AND step = 'boot' AND state = %s"
     )
     async with conn.cursor() as cur:
-        await cur.execute(query, (run_id,))
+        await cur.execute(query, (run_id, RUN_STEP_SUCCEEDED))
         row = await cur.fetchone()
     if row is None:
         return None

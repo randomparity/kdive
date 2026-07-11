@@ -9,6 +9,7 @@ from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory, suppressed_detail
 from kdive.domain.lifecycle.records import Run
+from kdive.domain.lifecycle.run_steps import RUN_STEP_SUCCEEDED
 from kdive.domain.operations.jobs import Job
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import job_envelope
@@ -138,9 +139,9 @@ def _succeeded_next_step(run: Run, progress: StepProgress | None) -> list[str]:
     """
     if run.system_id is None:
         return ["runs.bind"]
-    if progress is None or progress.install != "succeeded":
+    if progress is None or progress.install != RUN_STEP_SUCCEEDED:
         return ["runs.install"]
-    if progress.boot != "succeeded":
+    if progress.boot != RUN_STEP_SUCCEEDED:
         return ["runs.boot"]
     if progress.boot_outcome == "expected_crash_observed":
         return ["postmortem.triage", "vmcore.fetch"]
