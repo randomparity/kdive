@@ -169,6 +169,14 @@ anyway, the fifth is in a separate artifacts file:
 - `catalog/artifacts/registrar.py:252` (`create_system_upload`, "Requires
   operator")
 
+One `Field` description is worse than a stale label — it actively instructs the
+now-rejected input: `registrar.py:442`, the `reprovision` `profile` param, reads
+`"New provisioning profile; must opt in to reprovision."` Section 5 makes
+`destructive_ops: ["reprovision"]` a hard `CONFIGURATION_ERROR`, so this Field must
+be reworded to state the profile no longer needs a `destructive_ops` opt-in for
+reprovision. (The `_docmeta.destructive()` annotations at `registrar.py:414/435`
+are the retained agent caution hints, not authz text — leave them.)
+
 Two more agent-facing surfaces name the old classification and must be corrected —
 both serialize into a tool schema, the drift class this project guards against:
 
