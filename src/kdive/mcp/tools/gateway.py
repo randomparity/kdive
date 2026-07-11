@@ -10,12 +10,12 @@ import logging
 from typing import Annotated, Any, cast
 
 from fastmcp import FastMCP
-from fastmcp.exceptions import NotFoundError
+from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.tools.base import Tool, ToolResult
 from pydantic import Field, ValidationError
 
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import current_context
 from kdive.mcp.exposure import tool_visible
 from kdive.mcp.responses import ToolResponse
@@ -108,11 +108,21 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
 
         ``AuthorizationError`` from the inner call is NOT caught here; the denial-audit
         middleware handles it and converts it to an ``authorization_denied`` envelope.
-        Only ``NotFoundError`` (unknown/disabled tool) and pydantic ``ValidationError``
-        (invalid arguments) are caught and converted to ``configuration_error`` envelopes.
+        ``CategorizedError`` uses the same typed error-to-envelope conversion as direct
+        tool handlers, including when FastMCP wraps it in ``ToolError``. ``NotFoundError``
+        (unknown/disabled tool) and pydantic ``ValidationError`` (invalid arguments) are
+        caught and converted to ``configuration_error`` envelopes.
         """
         try:
             return await app.call_tool(name, arguments or {}, run_middleware=True)
+        except CategorizedError as exc:
+            envelope = ToolResponse.failure_from_error("tools.invoke", exc)
+            return ToolResult(structured_content=envelope.model_dump(mode="json"))
+        except ToolError as exc:
+            if not isinstance(exc.__cause__, CategorizedError):
+                raise
+            envelope = ToolResponse.failure_from_error("tools.invoke", exc.__cause__)
+            return ToolResult(structured_content=envelope.model_dump(mode="json"))
         except NotFoundError:
             envelope = ToolResponse.failure(
                 "tools.invoke",
