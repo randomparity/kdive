@@ -212,7 +212,6 @@ class ProviderSection(_ProfileBase):
 
     @property
     def kind(self) -> ResourceKind:
-        """Return the resource kind for the profile's concrete provider section."""
         if self.local_libvirt_section is not None:
             return ResourceKind.LOCAL_LIBVIRT
         if self.remote_libvirt_section is not None:
@@ -223,7 +222,6 @@ class ProviderSection(_ProfileBase):
 
     @property
     def destructive_ops(self) -> list[str]:
-        """Return the active provider section's declared destructive-op opt-in tokens."""
         if self.local_libvirt_section is not None:
             return list(self.local_libvirt_section.destructive_ops)
         if self.remote_libvirt_section is not None:
@@ -234,21 +232,18 @@ class ProviderSection(_ProfileBase):
 
     @property
     def local_libvirt(self) -> LibvirtProfile:
-        """Return the local-libvirt section for local-libvirt-specific callers."""
         if self.local_libvirt_section is None:
             raise AttributeError("profile has no local-libvirt provider section")
         return self.local_libvirt_section
 
     @property
     def fault_inject(self) -> FaultInjectProfile:
-        """Return the fault-inject section for fault-inject-specific callers."""
         if self.fault_inject_section is None:
             raise AttributeError("profile has no fault-inject provider section")
         return self.fault_inject_section
 
     @property
     def remote_libvirt(self) -> RemoteLibvirtProfile:
-        """Return the remote-libvirt section for remote-libvirt-specific callers."""
         if self.remote_libvirt_section is None:
             raise AttributeError("profile has no remote-libvirt provider section")
         return self.remote_libvirt_section

@@ -14,8 +14,7 @@ from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
 class ProfilePolicy(Protocol):
     """Provider-owned behavior derived from a parsed provisioning profile."""
 
-    def rootfs_source(self, profile: ProvisioningProfile) -> RootfsSource | None:
-        """Return the rootfs source used by this provider, if any."""
+    def rootfs_source(self, profile: ProvisioningProfile) -> RootfsSource | None: ...
 
     def drgn_live_seeds_bootstrap_key(self, profile: ProvisioningProfile) -> bool:
         """Return whether a drgn-live ``start_session`` gates+seeds on the per-System bootstrap key.
@@ -27,20 +26,15 @@ class ProfilePolicy(Protocol):
         it still uses the bootstrap key at ``introspect.run``.
         """
 
-    def validate_profile(self, profile: ProvisioningProfile) -> None:
-        """Run provider-specific static profile validation."""
+    def validate_profile(self, profile: ProvisioningProfile) -> None: ...
 
-    def destructive_opt_in(self, profile: ProvisioningProfile, op: JobKind) -> bool:
-        """Return whether the profile opts into a destructive operation."""
+    def destructive_opt_in(self, profile: ProvisioningProfile, op: JobKind) -> bool: ...
 
-    def capture_method(self, profile: ProvisioningProfile) -> CaptureMethod:
-        """Resolve the crash-capture method enabled by the profile."""
+    def capture_method(self, profile: ProvisioningProfile) -> CaptureMethod: ...
 
-    def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
-        """Return whether the System has a gdbstub endpoint independent of capture method."""
+    def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool: ...
 
-    def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
-        """Return whether a host-side memory dump is available on a preserved crash."""
+    def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool: ...
 
 
 def _parsed_profile(profile: ProvisioningProfile | Mapping[str, object]) -> ProvisioningProfile:
@@ -50,7 +44,6 @@ def _parsed_profile(profile: ProvisioningProfile | Mapping[str, object]) -> Prov
 
 
 def rootfs_upload_window_allowed(policy: ProfilePolicy, profile: ProvisioningProfile) -> bool:
-    """Return whether the profile's rootfs expects a System upload window."""
     rootfs = policy.rootfs_source(profile)
     return rootfs is not None and rootfs.kind == "upload"
 
@@ -58,7 +51,6 @@ def rootfs_upload_window_allowed(policy: ProfilePolicy, profile: ProvisioningPro
 def reject_rootfs_upload_without_window(
     policy: ProfilePolicy, profile: ProvisioningProfile
 ) -> None:
-    """Reject a profile whose rootfs needs a System upload window in a no-window lane."""
     if rootfs_upload_window_allowed(policy, profile):
         raise CategorizedError(
             "upload-kind rootfs requires systems.define upload window",
@@ -69,6 +61,5 @@ def reject_rootfs_upload_without_window(
 def capture_method(
     policy: ProfilePolicy, profile: ProvisioningProfile | Mapping[str, object]
 ) -> CaptureMethod:
-    """Resolve the crash-capture method a provisioning profile enables."""
     parsed = _parsed_profile(profile)
     return policy.capture_method(parsed)

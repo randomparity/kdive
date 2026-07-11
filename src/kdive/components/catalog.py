@@ -66,7 +66,6 @@ class FixtureCatalog(BaseModel):
     profiles: list[ProfileCatalogEntry]
 
     def rootfs_for_provider(self, provider: str) -> list[RootfsCatalogEntry]:
-        """Return rootfs entries scoped to ``provider``."""
         return [
             entry
             for entry in self.rootfs
@@ -74,7 +73,6 @@ class FixtureCatalog(BaseModel):
         ]
 
     def rootfs_entry(self, provider: str, name: str) -> RootfsCatalogEntry | None:
-        """Return one visible rootfs catalog entry for ``provider`` and ``name``."""
         for entry in self.rootfs:
             if (
                 entry.provider == provider
@@ -85,7 +83,6 @@ class FixtureCatalog(BaseModel):
         return None
 
     def profile(self, provider: str, name: str) -> ProfileCatalogEntry | None:
-        """Return one profile entry for ``provider`` and ``name``."""
         for entry in self.profiles:
             if entry.provider == provider and entry.name == name:
                 return entry
@@ -93,7 +90,6 @@ class FixtureCatalog(BaseModel):
 
 
 def fixture_catalog_path_from_env() -> Path:
-    """Return the operator-provided fixture catalog path, or the source-tree default."""
     raw = config.get(FIXTURE_CATALOG_PATH)
     if raw is None or raw == "":
         return DEFAULT_FIXTURE_CATALOG_PATH
