@@ -121,6 +121,14 @@ class _RecordingController:
         self.crashed.append(domain_name)
 
 
+class _RaisingCrashController(_RecordingController):
+    """force_crash records the attempt then raises like a degraded provider (transport error)."""
+
+    def force_crash(self, domain_name: str) -> None:
+        self.crashed.append(domain_name)
+        raise CategorizedError("inject-nmi failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+
 @asynccontextmanager
 async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
     pool = AsyncConnectionPool(url, min_size=2, max_size=4, open=False)
@@ -172,6 +180,12 @@ async def _system_state(pool: AsyncConnectionPool, system_id: str) -> str:
         row = await cur.fetchone()
     assert row is not None
     return row["state"]
+
+
+async def _set_state(pool: AsyncConnectionPool, system_id: str, state: str) -> None:
+    """Direct state UPDATE bypassing can_transition — scaffolds a mid-window state."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("UPDATE systems SET state = %s WHERE id = %s", (state, system_id))
 
 
 async def _race_once(pool: AsyncConnectionPool, *, provision_first: bool) -> tuple[str, set[str]]:
@@ -325,5 +339,65 @@ def test_concurrent_double_teardown_is_idempotent(migrated_url: str) -> None:
                     )
                     row = await cur.fetchone()
                 assert row is not None and row["n"] == 1
+
+    asyncio.run(_run())
+
+
+def test_force_crash_drives_ready_crashing_crashed(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(pool, SystemState.READY, domain_name="kdive-x")
+            ctrl = _RecordingController()
+            resolver = provider_resolver(provisioner=_TrackingProvisioner(), controller=ctrl)
+            job = await _enqueue(pool, JobKind.FORCE_CRASH, system_id, f"{system_id}:force_crash")
+            async with pool.connection() as conn:
+                await control_plane.force_crash_handler(conn, job, resolver=resolver)
+            assert await _system_state(pool, system_id) == SystemState.CRASHED.value
+            assert ctrl.crashed == ["kdive-x"]  # NMI fired exactly once
+            # Non-skippable CI guard on the system-transition audit literal (also used by the
+            # gated live_stack proof and the reconciler recovery):
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM audit_log "
+                    "WHERE object_kind = 'systems' AND transition = 'crashing->crashed'"
+                )
+                row = await cur.fetchone()
+            assert row is not None and row["n"] == 1
+
+    asyncio.run(_run())
+
+
+def test_force_crash_retry_after_crashing_finalizes_without_second_nmi(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(pool, SystemState.READY, domain_name="kdive-x")
+            ctrl = _RecordingController()
+            resolver = provider_resolver(provisioner=_TrackingProvisioner(), controller=ctrl)
+            job = await _enqueue(pool, JobKind.FORCE_CRASH, system_id, f"{system_id}:force_crash")
+            # Model a handler that marked CRASHING and fired the NMI but died before finalize:
+            # set CRASHING directly (bypassing can_transition), then run the handler as a retry.
+            await _set_state(pool, system_id, SystemState.CRASHING.value)
+            async with pool.connection() as conn:
+                await control_plane.force_crash_handler(conn, job, resolver=resolver)
+            assert await _system_state(pool, system_id) == SystemState.CRASHED.value
+            assert ctrl.crashed == []  # finalize-only retry: NMI NOT re-fired
+
+    asyncio.run(_run())
+
+
+def test_force_crash_nmi_raise_propagates_and_leaves_crashing(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(pool, SystemState.READY, domain_name="kdive-x")
+            ctrl = _RaisingCrashController()
+            resolver = provider_resolver(provisioner=_TrackingProvisioner(), controller=ctrl)
+            job = await _enqueue(pool, JobKind.FORCE_CRASH, system_id, f"{system_id}:force_crash")
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError) as excinfo:
+                    await control_plane.force_crash_handler(conn, job, resolver=resolver)
+            # AC4b: the raise is NON-terminal, so the worker requeues (not dead-letters) — and the
+            # marker is left set (System stays CRASHING), NOT marked FAILED by the handler.
+            assert excinfo.value.terminal is False
+            assert await _system_state(pool, system_id) == SystemState.CRASHING.value
 
     asyncio.run(_run())

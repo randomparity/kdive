@@ -634,10 +634,10 @@ def test_force_crash_handler_already_crashed_is_idempotent(migrated_url: str) ->
                 await control_plane.force_crash_handler(
                     conn, job, resolver=provider_resolver(controller=ctrl)
                 )  # no raise
-            assert ctrl.crashed == ["kdive-x"]  # NMI re-attempted
+            assert ctrl.crashed == []  # already CRASHED: force_crash is a no-op, NMI not re-fired
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
-                    "SELECT count(*) AS n FROM audit_log WHERE transition = 'ready->crashed'"
+                    "SELECT count(*) AS n FROM audit_log WHERE transition = 'crashing->crashed'"
                 )
                 row = await cur.fetchone()
         assert row is not None and row["n"] == 0  # no transition audited on idempotent re-run
