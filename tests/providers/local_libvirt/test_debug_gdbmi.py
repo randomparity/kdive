@@ -2280,6 +2280,38 @@ def test_list_modules_core_layout_fallback(tmp_path: Path) -> None:
     assert [m.base_address for m in result.modules] == ["0x2000", "0x3000"]
 
 
+def test_module_optional_eval_preserves_infrastructure_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _engine()
+    attachment = _attachment(_FakeMiController(), tmp_path)
+
+    def fail(_attachment: GdbMiAttachment, _command: str) -> list[MiRecord]:
+        raise CategorizedError("transport stalled", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    monkeypatch.setattr(engine, "execute_mi_command", fail)
+    with pytest.raises(CategorizedError) as excinfo:
+        engine._module_eval_optional(attachment, "modules.next")
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_module_build_id_preserves_memory_transport_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _engine()
+    attachment = _attachment(_FakeMiController(), tmp_path)
+    monkeypatch.setattr(engine, "_module_eval_optional", lambda _attachment, _expr: 0x2010)
+
+    def fail_memory(_attachment: GdbMiAttachment, *, address: int, byte_count: int) -> bytes:
+        del address, byte_count
+        raise CategorizedError("rsp dropped", category=ErrorCategory.TRANSPORT_FAILURE)
+
+    monkeypatch.setattr(engine, "read_memory", fail_memory)
+    with pytest.raises(CategorizedError) as excinfo:
+        engine._module_build_id(attachment, 0x2000)
+    assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+
+
 # --- load_module_symbols (#923, ADR-0278) ---------------------------------------------------
 
 from kdive.providers.shared.debug_common.debuginfo import ModuleDebuginfo  # noqa: E402
