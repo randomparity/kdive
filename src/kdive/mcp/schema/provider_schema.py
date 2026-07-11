@@ -10,6 +10,7 @@ members.
 from __future__ import annotations
 
 import copy
+from typing import cast
 
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -18,8 +19,10 @@ from kdive.profiles.provider_sections import aliases_for
 _RESOURCE_KIND_DEF = "ResourceKind"
 _PROVIDER_SECTION_DEF = "ProviderSection"
 
+type JsonSchema = dict[str, object]
 
-def project_tool_schema(parameters: dict, kinds: frozenset[ResourceKind]) -> dict:
+
+def project_tool_schema(parameters: JsonSchema, kinds: frozenset[ResourceKind]) -> JsonSchema:
     """Return a deep-copy of ``parameters`` narrowed to the composed ``kinds``.
 
     Filters the ``ResourceKind`` enum to the live kind values and the ``ProviderSection``
@@ -37,15 +40,25 @@ def project_tool_schema(parameters: dict, kinds: frozenset[ResourceKind]) -> dic
     defs = projected.get("$defs")
     if not isinstance(defs, dict):
         return projected
+    defs = cast(dict[str, object], defs)
     live_values = [k.value for k in ResourceKind if k in kinds]
     kind_def = defs.get(_RESOURCE_KIND_DEF)
-    if isinstance(kind_def, dict) and isinstance(kind_def.get("enum"), list):
-        kind_def["enum"] = [v for v in kind_def["enum"] if v in live_values]
+    if isinstance(kind_def, dict):
+        kind_def = cast(dict[str, object], kind_def)
+        enum = kind_def.get("enum")
+        if isinstance(enum, list):
+            kind_def["enum"] = [value for value in enum if value in live_values]
     section_def = defs.get(_PROVIDER_SECTION_DEF)
-    if isinstance(section_def, dict) and isinstance(section_def.get("properties"), dict):
+    if isinstance(section_def, dict):
+        section_def = cast(dict[str, object], section_def)
+        properties = section_def.get("properties")
+    else:
+        properties = None
+    if isinstance(properties, dict):
+        properties = cast(dict[str, object], properties)
         live = aliases_for(kinds)
         section_def["properties"] = {
-            alias: schema for alias, schema in section_def["properties"].items() if alias in live
+            alias: schema for alias, schema in properties.items() if alias in live
         }
     return projected
 
