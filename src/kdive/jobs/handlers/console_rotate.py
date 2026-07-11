@@ -34,6 +34,7 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.models import HandlerRegistry
+from kdive.jobs.payloads import ConsoleRotatePayload, load_payload
 from kdive.providers.console_parts.rotation import (
     RotationResult,
     SealedPart,
@@ -218,8 +219,9 @@ async def console_rotate_handler(
     if artifact_store is None:
         _log.warning("object storage is not configured; skipping console rotation")
         return None
-    system_id = UUID(job.payload["system_id"])
-    boot_id = job.payload.get("boot_id", "")
+    payload = load_payload(job, ConsoleRotatePayload)
+    system_id = UUID(payload.system_id)
+    boot_id = payload.boot_id
     result = await _rotate_under_lock(
         conn, artifact_store, system_id, boot_id, _make_redactor(secret_registry)
     )
