@@ -10,6 +10,7 @@ import pytest
 
 from kdive.artifacts.storage import HeadResult
 from kdive.artifacts.uploads import ManifestEntry
+from kdive.build_artifacts import validation
 from kdive.build_artifacts.validation import (
     extract_build_id_ranged,
     validate_external_artifacts,
@@ -381,6 +382,37 @@ def test_extract_build_id_accepts_nonstandard_note_section_name() -> None:
     store = _FakeStore({"v": blob}, {})
 
     assert extract_build_id_ranged(store, "v", max_size=len(blob)) == build_id.hex()
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        CategorizedError(
+            "note parser dependency failed",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        ),
+        CategorizedError(
+            "unexpected note parser build failure",
+            category=ErrorCategory.BUILD_FAILURE,
+        ),
+    ],
+)
+def test_extract_build_id_reraises_unexpected_categorized_note_errors(
+    exc: CategorizedError, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blob = _elf_with_build_id(bytes.fromhex("deadbeef"))
+    store = _FakeStore({"v": blob}, {})
+
+    def fail_parse(notes: bytes) -> str:
+        del notes
+        raise exc
+
+    monkeypatch.setattr(validation, "parse_gnu_build_id", fail_parse)
+
+    with pytest.raises(CategorizedError) as caught:
+        extract_build_id_ranged(store, "v", max_size=len(blob))
+
+    assert caught.value is exc
 
 
 def test_extract_build_id_ranged_truncated_header_is_build_failure() -> None:

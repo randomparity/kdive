@@ -23,6 +23,7 @@ _GZIP_MAGIC = b"\x1f\x8b"
 _BZIMAGE_MAGIC = b"HdrS"
 _BZIMAGE_MAGIC_OFFSET = 0x202
 _SHT_NOTE = 7
+_NO_GNU_BUILD_ID_NOTE = "vmlinux carries no GNU build-id note"
 _MAX_SECTION_BYTES = 16 * 1024 * 1024
 # The effective_config readable/upload cap (1 MiB). This module owns the single canonical value;
 # the upload-admission path (mcp uploads tool) imports it so the advertised cap, the admission gate,
@@ -221,10 +222,7 @@ def parse_gnu_build_id(notes: bytes) -> str:
         if next_offset <= offset:
             break
         offset = next_offset
-    raise CategorizedError(
-        "vmlinux carries no GNU build-id note",
-        category=ErrorCategory.BUILD_FAILURE,
-    )
+    raise _build_failure(_NO_GNU_BUILD_ID_NOTE)
 
 
 def validate_external_artifacts(
@@ -432,9 +430,11 @@ def _find_build_id_note(
         notes = _read_section(store, key, sht, e_shentsize, i, max_size=max_size)
         try:
             return parse_gnu_build_id(notes)
-        except CategorizedError:
-            continue
-    raise _build_failure("vmlinux carries no GNU build-id note")
+        except CategorizedError as exc:
+            if _is_missing_build_id_note(exc):
+                continue
+            raise
+    raise _build_failure(_NO_GNU_BUILD_ID_NOTE)
 
 
 def _read_section(
@@ -454,3 +454,7 @@ def _read_section(
 
 def _build_failure(message: str, **details: object) -> CategorizedError:
     return CategorizedError(message, category=ErrorCategory.BUILD_FAILURE, details=details)
+
+
+def _is_missing_build_id_note(exc: CategorizedError) -> bool:
+    return exc.category is ErrorCategory.BUILD_FAILURE and str(exc) == _NO_GNU_BUILD_ID_NOTE
