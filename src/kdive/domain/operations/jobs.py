@@ -39,6 +39,9 @@ class JobKind(StrEnum):
 RETIRED_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT})
 """Persisted historical job kinds that are no longer valid active enqueue/filter choices."""
 
+DEFAULT_JOB_DISPATCH_LANE = "default"
+"""Dispatch lane used by the generic worker pool and all historical jobs."""
+
 ACTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
     kind for kind in JobKind if kind not in RETIRED_JOB_KINDS
 )
@@ -97,6 +100,7 @@ class Job(DomainModel):
     """A durable unit of async work; the ``jobs`` table is the queue."""
 
     kind: JobKind
+    dispatch_lane: str = DEFAULT_JOB_DISPATCH_LANE
     payload: dict[str, Any] = Field(default_factory=dict)
     state: JobState
     attempt: int = 0
@@ -114,6 +118,7 @@ class Job(DomainModel):
 __all__ = [
     "ACTIVE_JOB_KINDS",
     "CONTRIBUTOR_CANCELABLE_JOB_KINDS",
+    "DEFAULT_JOB_DISPATCH_LANE",
     "OPT_IN_DESTRUCTIVE_JOB_KINDS",
     "RETIRED_JOB_KINDS",
     "Job",

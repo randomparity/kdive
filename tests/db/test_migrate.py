@@ -1386,6 +1386,28 @@ def test_migration_0030_backfills_pre_existing_rows(pg_conn: psycopg.Connection)
     assert priv is not None and priv[0] == "runtime"
 
 
+def test_migration_0066_adds_job_dispatch_lane(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    cols = _columns(pg_conn, "jobs")
+    assert cols.get("dispatch_lane") == "text"
+    nullable = _nullable(pg_conn, "jobs")
+    assert nullable.get("dispatch_lane") == "NO"
+    row = pg_conn.execute(
+        "INSERT INTO jobs (kind, payload, state, max_attempts, authorizing, dedup_key) "
+        "VALUES ('install', '{\"run_id\":\"00000000-0000-0000-0000-000000000001\"}', "
+        '\'queued\', 3, \'{"principal":"p","project":"proj"}\', \'dk-lane\') '
+        "RETURNING dispatch_lane"
+    ).fetchone()
+    assert row is not None and row[0] == "default"
+    with pytest.raises(psycopg.errors.CheckViolation):
+        pg_conn.execute(
+            "INSERT INTO jobs "
+            "(kind, dispatch_lane, payload, state, max_attempts, authorizing, dedup_key) "
+            "VALUES ('install', '', '{}', 'queued', 3, "
+            '\'{"principal":"p","project":"proj"}\', \'dk-blank-lane\')'
+        )
+
+
 def _apply_through(conn: psycopg.Connection, last_version: str) -> None:
     """Apply migrations up to and including last_version, recording each as the runner would.
 

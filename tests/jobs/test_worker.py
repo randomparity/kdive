@@ -772,6 +772,50 @@ def test_run_once_dequeues_when_ready_again(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_run_once_claims_only_configured_dispatch_lane(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
+            calls: list[str] = []
+
+            async def handler(conn: psycopg.AsyncConnection, job: Job) -> str:
+                calls.append(job.dedup_key)
+                return "s3://out"
+
+            reg = HandlerRegistry()
+            reg.register(JobKind.INSTALL, handler)
+            worker = _worker(
+                pool,
+                reg,
+                worker_id="w1",
+                config=WorkerConfig(accepted_lanes=("provider-b",)),
+            )
+            async with pool.connection() as conn:
+                first = await queue.enqueue(
+                    conn,
+                    JobKind.INSTALL,
+                    _build_payload(),
+                    _AUTHORIZING,
+                    "dk-provider-a",
+                    dispatch_lane="provider-a",
+                )
+                second = await queue.enqueue(
+                    conn,
+                    JobKind.INSTALL,
+                    _build_payload(),
+                    _AUTHORIZING,
+                    "dk-provider-b",
+                    dispatch_lane="provider-b",
+                )
+
+            processed = await worker.run_once()
+            assert processed is not None and processed.id == second.id
+            assert calls == ["dk-provider-b"]
+            assert (await _final_state(migrated_url, first.id)).state is JobState.QUEUED
+            assert (await _final_state(migrated_url, second.id)).state is JobState.SUCCEEDED
+
+    asyncio.run(_run())
+
+
 def test_background_ticker_keeps_livez_live_across_a_long_blocking_job() -> None:
     """A ticker that advances fake time past stale_after keeps /livez fresh (ADR-0090 §5).
 

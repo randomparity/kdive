@@ -125,12 +125,60 @@ def test_enqueue_rejects_max_attempts_below_one(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_enqueue_rejects_blank_dispatch_lane(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            with pytest.raises(ValueError, match="dispatch_lane"):
+                await queue.enqueue(
+                    conn,
+                    JobKind.INSTALL,
+                    _build_payload(),
+                    _AUTHORIZING,
+                    "dk-blank-lane",
+                    dispatch_lane="",
+                )
+
+    asyncio.run(_run())
+
+
 @pytest.mark.parametrize("kind", sorted(RETIRED_JOB_KINDS, key=lambda item: item.value))
 def test_enqueue_rejects_retired_job_kinds(migrated_url: str, kind: JobKind) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             with pytest.raises(ValueError, match="retired"):
                 await queue.enqueue(conn, kind, _build_payload(), _AUTHORIZING, f"dk-{kind.value}")
+
+    asyncio.run(_run())
+
+
+def test_dequeue_claims_only_accepted_dispatch_lanes(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            await queue.enqueue(
+                conn,
+                JobKind.INSTALL,
+                _build_payload(),
+                _AUTHORIZING,
+                "dk-provider-a",
+                dispatch_lane="provider-a",
+            )
+            second = await queue.enqueue(
+                conn,
+                JobKind.INSTALL,
+                _build_payload(),
+                _AUTHORIZING,
+                "dk-provider-b",
+                dispatch_lane="provider-b",
+            )
+            skipped = await queue.dequeue(conn, "w-a", accepted_lanes=("provider-c",))
+            assert skipped is None
+            assert await queue.count_claimable(conn, accepted_lanes=("provider-c",)) == 0
+            assert await queue.count_claimable(conn, accepted_lanes=("provider-b",)) == 1
+
+            claimed = await queue.dequeue(conn, "w-b", accepted_lanes=("provider-b",))
+            assert claimed is not None
+            assert claimed.id == second.id
+            assert claimed.dispatch_lane == "provider-b"
 
     asyncio.run(_run())
 
