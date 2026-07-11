@@ -1,30 +1,33 @@
-"""Investigation envelope rendering helpers."""
+"""Investigation read-model helpers."""
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TypedDict
 from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.domain.capacity.state import InvestigationState
-from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Investigation
-from kdive.mcp.responses import ToolResponse
 from kdive.serialization import JsonValue
 
 _log = logging.getLogger(__name__)
-type InvestigationListItem = Investigation | ToolResponse
-
-_TERMINAL_INVESTIGATION = frozenset({InvestigationState.CLOSED, InvestigationState.ABANDONED})
+type InvestigationListItem = Investigation | InvestigationRowError
 
 
 class InvestigationAttachments(TypedDict):
-    """Run and System ids attached to an Investigation envelope."""
+    """Run and System ids attached to an Investigation."""
 
     runs: list[JsonValue]
     systems: list[JsonValue]
+
+
+@dataclass(frozen=True, slots=True)
+class InvestigationRowError:
+    """A row that failed Investigation validation during list rendering."""
+
+    object_id: object | None
 
 
 async def attached_runs_and_systems(
@@ -76,37 +79,8 @@ async def attachments_for_investigations(
     return attachments
 
 
-def investigation_envelope(
-    inv: Investigation, attachments: InvestigationAttachments
-) -> ToolResponse:
-    """Render an Investigation; every state is a non-failure status."""
-    if inv.state in _TERMINAL_INVESTIGATION:
-        actions = ["investigations.get"]
-    else:
-        actions = ["investigations.get", "investigations.close", "runs.create"]
-    data: dict[str, JsonValue] = {
-        "project": inv.project,
-        "title": inv.title,
-        "description": inv.description,
-        "external_refs": [r.model_dump() for r in inv.external_refs],
-        "state": inv.state.value,
-        "last_run_at": inv.last_run_at.isoformat() if inv.last_run_at else None,
-        "runs": attachments["runs"],
-        "systems": attachments["systems"],
-    }
-    return ToolResponse.success(
-        str(inv.id), inv.state.value, suggested_next_actions=actions, data=data
-    )
-
-
-async def envelope_for_investigation(conn: AsyncConnection, inv: Investigation) -> ToolResponse:
-    """Load attachments and render a single Investigation envelope."""
-    run_ids, system_ids = await attached_runs_and_systems(conn, inv.id)
-    return investigation_envelope(inv, {"runs": run_ids, "systems": system_ids})
-
-
 def investigation_list_item(row: dict[str, object]) -> InvestigationListItem:
-    """Validate a row for collection rendering, degrading invalid rows to error envelopes."""
+    """Validate a row for collection rendering, degrading invalid rows to a row error."""
     try:
         return Investigation.model_validate(row)
     except ValueError:
@@ -116,12 +90,4 @@ def investigation_list_item(row: dict[str, object]) -> InvestigationListItem:
             object_id if object_id is not None else "<missing>",
             exc_info=True,
         )
-        return investigation_row_error(object_id)
-
-
-def investigation_row_error(object_id: object | None) -> ToolResponse:
-    """Return a degraded row envelope for an invalid Investigation row."""
-    return ToolResponse.failure(
-        str(object_id) if object_id is not None else "investigations.list",
-        ErrorCategory.CONFIGURATION_ERROR,
-    )
+        return InvestigationRowError(object_id)

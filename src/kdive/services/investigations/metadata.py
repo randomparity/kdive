@@ -8,19 +8,16 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.domain.lifecycle.records import ExternalRef
+from kdive.domain.lifecycle.records import ExternalRef, Investigation
 from kdive.log import bind_context
-from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools._common import ConfigErrorReason
-from kdive.mcp.tools._common import as_uuid as _as_uuid
-from kdive.mcp.tools._common import config_error_reason as _config_error_reason
-from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.serialization import JsonValue
 from kdive.services.investigations.common import (
     ExternalRefInput,
     ExternalRefKey,
+    InvestigationErrorReason,
+    InvestigationServiceError,
     get_mutable_investigation_locked,
     invalid_external_refs_error,
     invalid_text_error,
@@ -30,16 +27,13 @@ from kdive.services.investigations.common import (
     resolve_contributor_investigation,
     validate_text,
 )
-from kdive.services.investigations.view import envelope_for_investigation
 
 
 async def _link_locked(
     conn: AsyncConnection, ctx: RequestContext, uid: UUID, ref: ExternalRef, *, project: str
-) -> ToolResponse:
+) -> Investigation:
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.INVESTIGATION, uid):
         current = await get_mutable_investigation_locked(conn, uid)
-        if isinstance(current, ToolResponse):
-            return current
         kept = [r for r in current.external_refs if (r.tracker, r.id) != (ref.tracker, ref.id)]
         kept.append(ref)
         await conn.execute(
@@ -57,8 +51,7 @@ async def _link_locked(
                 project=project,
             ),
         )
-        updated = current.model_copy(update={"external_refs": kept})
-    return await envelope_for_investigation(conn, updated)
+        return current.model_copy(update={"external_refs": kept})
 
 
 async def _unlink_locked(
@@ -68,11 +61,9 @@ async def _unlink_locked(
     key: tuple[str, str],
     *,
     project: str,
-) -> ToolResponse:
+) -> Investigation:
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.INVESTIGATION, uid):
         current = await get_mutable_investigation_locked(conn, uid)
-        if isinstance(current, ToolResponse):
-            return current
         kept = [r for r in current.external_refs if (r.tracker, r.id) != key]
         if len(kept) != len(current.external_refs):
             await conn.execute(
@@ -91,43 +82,40 @@ async def _unlink_locked(
                     project=project,
                 ),
             )
-        updated = current.model_copy(update={"external_refs": kept})
-    return await envelope_for_investigation(conn, updated)
+        return current.model_copy(update={"external_refs": kept})
 
 
-async def link_external_ref(
-    pool: AsyncConnectionPool, ctx: RequestContext, investigation_id: str, ref: ExternalRefInput
-) -> ToolResponse:
-    """Upsert an external ref onto an Investigation (keyed on `(tracker, id)`)."""
-    uid = _as_uuid(investigation_id)
-    if uid is None:
-        return _invalid_uuid_error("investigation_id", investigation_id)
-    parsed = parse_external_ref_input(ref, investigation_id)
-    if isinstance(parsed, ToolResponse):
-        return parsed
+async def link_external_ref_record(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    uid: UUID,
+    ref: ExternalRefInput,
+    *,
+    raw_id: str,
+) -> Investigation:
+    """Upsert an external ref onto an Investigation."""
+    parsed = parse_external_ref_input(ref, raw_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
-            inv = await resolve_contributor_investigation(conn, ctx, uid, investigation_id)
-            if isinstance(inv, ToolResponse):
-                return inv
+            inv = await resolve_contributor_investigation(conn, ctx, uid, raw_id)
             return await _link_locked(conn, ctx, uid, parsed, project=inv.project)
 
 
-async def unlink_external_ref(
-    pool: AsyncConnectionPool, ctx: RequestContext, investigation_id: str, ref: ExternalRefKey
-) -> ToolResponse:
-    """Remove an external ref by its `(tracker, id)` key (idempotent; `url` ignored)."""
-    uid = _as_uuid(investigation_id)
-    if uid is None:
-        return _invalid_uuid_error("investigation_id", investigation_id)
+async def unlink_external_ref_record(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    uid: UUID,
+    ref: ExternalRefKey,
+    *,
+    raw_id: str,
+) -> Investigation:
+    """Remove an external ref by its `(tracker, id)` key."""
     key = natural_key(ref)
     if key is None:
-        return invalid_external_refs_error(investigation_id, key_only=True)
+        raise invalid_external_refs_error(raw_id, key_only=True)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
-            inv = await resolve_contributor_investigation(conn, ctx, uid, investigation_id)
-            if isinstance(inv, ToolResponse):
-                return inv
+            inv = await resolve_contributor_investigation(conn, ctx, uid, raw_id)
             return await _unlink_locked(conn, ctx, uid, key, project=inv.project)
 
 
@@ -139,12 +127,10 @@ async def _set_locked(
     title: str | None,
     description: str | None,
     project: str,
-) -> ToolResponse:
+) -> Investigation:
     """Apply a title/description edit under the per-Investigation lock."""
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.INVESTIGATION, uid):
         current = await get_mutable_investigation_locked(conn, uid)
-        if isinstance(current, ToolResponse):
-            return current
         new_title = title if title is not None else current.title
         new_description = current.description if description is None else (description or None)
         audit_args: dict[str, JsonValue] = {}
@@ -168,35 +154,30 @@ async def _set_locked(
                 project=project,
             ),
         )
-        updated = current.model_copy(update={"title": new_title, "description": new_description})
-    return await envelope_for_investigation(conn, updated)
+        return current.model_copy(update={"title": new_title, "description": new_description})
 
 
-async def set_investigation(
+async def set_investigation_record(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    investigation_id: str,
+    uid: UUID,
     *,
+    raw_id: str,
     title: str | None = None,
     description: str | None = None,
-) -> ToolResponse:
+) -> Investigation:
     """Edit an Investigation's title and/or description."""
-    uid = _as_uuid(investigation_id)
-    if uid is None:
-        return _invalid_uuid_error("investigation_id", investigation_id)
     if title is None and description is None:
-        return _config_error_reason(
-            investigation_id,
-            ConfigErrorReason.MISSING_REQUIRED_FIELD,
+        raise InvestigationServiceError(
+            object_id=raw_id,
+            reason=InvestigationErrorReason.MISSING_REQUIRED_FIELD,
             detail="set requires at least one of title or description",
         )
     if not validate_text(title, description):
-        return invalid_text_error(investigation_id)
+        raise invalid_text_error(raw_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
-            inv = await resolve_contributor_investigation(conn, ctx, uid, investigation_id)
-            if isinstance(inv, ToolResponse):
-                return inv
+            inv = await resolve_contributor_investigation(conn, ctx, uid, raw_id)
             return await _set_locked(
                 conn, ctx, uid, title=title, description=description, project=inv.project
             )
