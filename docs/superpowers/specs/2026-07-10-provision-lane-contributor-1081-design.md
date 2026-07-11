@@ -156,7 +156,18 @@ validates); only submitting the retired token fails.
 Update the wrapper docstrings + `Field` descriptions for the five tools to state
 the `contributor` classification and, for `reprovision`, that it no longer
 consumes a `destructive_ops` opt-in. No ADR references in any text that
-serializes into the tool schema (`test_no_adr_leak`).
+serializes into the tool schema (`test_no_adr_leak`). No guardrail catches this
+drift (`gen_rbac_tool_matrix.py` reads `exposure.py`, not docstrings), so the five
+sites are named to prevent a miss — four are in the systems registrar being edited
+anyway, the fifth is in a separate artifacts file:
+
+- `registrar.py:167` (`define`, "Operator only")
+- `registrar.py:221` (`provision`, "Operator only")
+- `registrar.py:265` (`provision_defined`, "Requires operator")
+- `registrar.py:450` (`reprovision`, "Requires operator **and opt-in**" → drop
+  both — contributor, no opt-in)
+- `catalog/artifacts/registrar.py:252` (`create_system_upload`, "Requires
+  operator")
 
 Two more agent-facing surfaces name the old classification and must be corrected —
 both serialize into a tool schema, the drift class this project guards against:
