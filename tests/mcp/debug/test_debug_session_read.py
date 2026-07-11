@@ -19,7 +19,6 @@ from uuid import UUID, uuid4
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, DEBUG_SESSIONS, INVESTIGATIONS, RUNS, SYSTEMS
-from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
@@ -33,6 +32,7 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.debug.sessions import read as sessions_read
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.mcp.tools.lifecycle.systems.view import get_system as _get_system
+from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.ports.lifecycle import (
     TransportHandleData,
     TransportHandleKind,

@@ -12,10 +12,10 @@ import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import HeadResult
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 from kdive.build_artifacts.results import BuildOutput
-from kdive.db import upload_manifest
 from kdive.db.repositories import RUNS
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory

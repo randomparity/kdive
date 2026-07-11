@@ -11,8 +11,8 @@ from typing import LiteralString
 import psycopg
 import pytest
 
+from kdive.components.records import ComponentUploadState
 from kdive.db import migrate
-from kdive.db.provider_component_records import ComponentUploadState
 from kdive.domain import errors
 from kdive.domain.capacity import state
 from kdive.domain.catalog import images, resources

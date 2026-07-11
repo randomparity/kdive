@@ -27,8 +27,8 @@ from uuid import UUID
 import psycopg
 
 import kdive.config as config
+from kdive.artifacts.read_model import debuginfo_ref_for_run_sync, kernel_ref_for_run_sync
 from kdive.config.core_settings import DATABASE_URL
-from kdive.db.artifact_queries import debuginfo_ref_for_run_sync, kernel_ref_for_run_sync
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import AttachSeam, GdbMiAttachment
 from kdive.providers.shared.debug_common.crash_postmortem import default_fetch_object

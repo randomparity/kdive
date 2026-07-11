@@ -15,7 +15,6 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
-from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
@@ -26,6 +25,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as catalog_resources_tools
 from kdive.mcp.tools.ops.resources import host_ops as resources_tools
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.core.runtime import (
     ProviderRuntime,
     ProviderSupport,

@@ -20,13 +20,13 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import ArtifactWriteRequest, FetchedArtifact, StoredArtifact
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
-from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import AllocationState, JobState, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers.control import diagnostic_sysrq
+from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore

@@ -13,9 +13,7 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import HeadResult
-from kdive.components.references import ComponentKind
-from kdive.components.visibility import Visibility
-from kdive.db.provider_component_records import (
+from kdive.components.records import (
     ArtifactComponentRequest,
     ComponentRegistration,
     ComponentUploadIntentRequest,
@@ -31,6 +29,8 @@ from kdive.db.provider_component_records import (
     link_local_component,
     list_visible_components,
 )
+from kdive.components.references import ComponentKind
+from kdive.components.visibility import Visibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 

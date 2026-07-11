@@ -10,10 +10,10 @@ from uuid import UUID, uuid4
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import HeadResult
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
-from kdive.db import upload_manifest
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, RUNS, SYSTEMS
 from kdive.domain.capacity.state import (
     AllocationState,

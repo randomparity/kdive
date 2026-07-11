@@ -9,14 +9,14 @@ from contextlib import asynccontextmanager
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.resource_discovery import (
-    ensure_discovered_resource_registered,
-    register_discovered_resource,
-)
 from kdive.domain.capacity.state import ResourceStatus
 from kdive.domain.catalog.discovery import ResourceRecord
 from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.catalog.resources import ResourceKind
+from kdive.providers.core.resource_registration import (
+    ensure_discovered_resource_registered,
+    register_discovered_resource,
+)
 
 
 class _Discovery:

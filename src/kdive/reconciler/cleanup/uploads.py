@@ -10,7 +10,7 @@ from uuid import UUID
 from psycopg import AsyncConnection, sql
 from psycopg.rows import dict_row
 
-from kdive.db import upload_manifest
+from kdive.artifacts import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import RunState, SystemState
 

@@ -15,7 +15,6 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.components.references import ComponentKind
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS
-from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.accounting.records import Budget, Quota
 from kdive.domain.capacity.state import AllocationState
 from kdive.domain.capture import CaptureMethod
@@ -29,6 +28,7 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.core.runtime import (
     BootstrapKeyCapabilities,
     ProviderRuntime,

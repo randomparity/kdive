@@ -23,7 +23,6 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, DEBUG_SESSIONS, INVESTIGATIONS, RUNS, SYSTEMS
-from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
@@ -45,6 +44,7 @@ from kdive.prereqs.system_bootstrap_key import (
 )
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy

@@ -21,7 +21,6 @@ import kdive.config as config
 import kdive.mcp.tools.debug.operations.breakpoints as debug_breakpoint_tools
 from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, INVESTIGATIONS, QUOTAS, RUNS, SYSTEMS
-from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.accounting.records import Budget, Quota
 from kdive.domain.capacity.state import AllocationState, InvestigationState, RunState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
@@ -37,6 +36,7 @@ from kdive.mcp.tools.lifecycle.runs import registrar as runs_tools
 from kdive.mcp.tools.lifecycle.systems import registrar as systems_tools
 from kdive.mcp.tools.ops.resources import host_ops as ops_resources_tools
 from kdive.providers.assembly import composition
+from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.fault_inject.discovery import FaultInjectDiscovery
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.context import RequestContext

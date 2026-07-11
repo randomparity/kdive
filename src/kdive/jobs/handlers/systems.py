@@ -12,9 +12,9 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.artifacts import upload_manifest
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import StoredArtifact
-from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, SYSTEMS
 from kdive.domain.capacity.state import IllegalTransition, SystemState

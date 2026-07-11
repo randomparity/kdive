@@ -15,6 +15,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import ArtifactWriteRequest
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.components.references import (
@@ -23,7 +24,6 @@ from kdive.components.references import (
     ComponentRef,
     LocalComponentRef,
 )
-from kdive.db import upload_manifest
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, InvestigationState, RunState, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
