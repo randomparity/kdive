@@ -33,6 +33,7 @@ from kdive.mcp.platform_auth import (
     held_platform_roles,
 )
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._time_window import parse_timestamptz_window
 from kdive.security import audit
@@ -59,6 +60,36 @@ _GRANTED_SCOPE = "granted-set"
 _VALID_FORMATS = ("csv", "xlsx")
 
 StoreFactory = Callable[[], ReportArtifactStore]
+
+
+class _GrantedReportPayload(ToolPayload):
+    """Public payload for ``reports.generate_granted_set`` filters."""
+
+    projects: list[str] | None = Field(
+        default=None,
+        description="Named project subset; omit for all member projects with a role.",
+    )
+    window: list[str | None] | None = Field(
+        default=None,
+        description="[start, end] ISO-8601 timestamptz pair; omit for all time.",
+    )
+    formats: list[str] | None = Field(
+        default=None,
+        description="Spreadsheet formats: subset of ['csv','xlsx']; omit for both.",
+    )
+
+
+class _AllProjectsReportPayload(ToolPayload):
+    """Public payload for ``reports.generate_all_projects`` filters."""
+
+    window: list[str | None] | None = Field(
+        default=None,
+        description="[start, end] ISO-8601 timestamptz pair; omit for all time.",
+    )
+    formats: list[str] | None = Field(
+        default=None,
+        description="Spreadsheet formats: subset of ['csv','xlsx']; omit for both.",
+    )
 
 
 def _parse_window(window: object) -> tuple[datetime | None, datetime | None] | None:
@@ -399,27 +430,20 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, secret_registry: Secret
         meta={"maturity": "implemented"},
     )
     async def reports_generate_granted_set(
-        projects: Annotated[
-            list[str] | None,
-            Field(description="Named project subset; omit for all member projects with a role."),
-        ] = None,
-        window: Annotated[
-            list[str | None] | None,
-            Field(description="[start, end] ISO-8601 timestamptz pair; omit for all time."),
-        ] = None,
-        formats: Annotated[
-            list[str] | None,
-            Field(description="Spreadsheet formats: subset of ['csv','xlsx']; omit for both."),
+        request: Annotated[
+            _GrantedReportPayload | None,
+            Field(description="Granted-project report filters request; omit for defaults."),
         ] = None,
     ) -> ToolResponse:
         """Generate a consolidated report over the caller's granted projects."""
+        payload = request or _GrantedReportPayload()
         return await generate_granted_set(
             pool,
             current_context(),
             secret_registry=secret_registry,
-            projects=projects,
-            window=window,
-            formats=formats,
+            projects=payload.projects,
+            window=payload.window,
+            formats=payload.formats,
         )
 
     @app.tool(
@@ -428,20 +452,17 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, secret_registry: Secret
         meta={"maturity": "implemented"},
     )
     async def reports_generate_all_projects(
-        window: Annotated[
-            list[str | None] | None,
-            Field(description="[start, end] ISO-8601 timestamptz pair; omit for all time."),
-        ] = None,
-        formats: Annotated[
-            list[str] | None,
-            Field(description="Spreadsheet formats: subset of ['csv','xlsx']; omit for both."),
+        request: Annotated[
+            _AllProjectsReportPayload | None,
+            Field(description="All-project report filters request; omit for defaults."),
         ] = None,
     ) -> ToolResponse:
         """Generate a platform-wide consolidated report over every project."""
+        payload = request or _AllProjectsReportPayload()
         return await generate_all_projects(
             pool,
             current_context(),
             secret_registry=secret_registry,
-            window=window,
-            formats=formats,
+            window=payload.window,
+            formats=payload.formats,
         )

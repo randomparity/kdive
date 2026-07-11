@@ -43,6 +43,7 @@ from kdive.mcp.platform_auth import (
     held_platform_roles,
 )
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
@@ -60,6 +61,23 @@ _TOOL = "inventory.list"
 _OBJECT_ID = "inventory.list"
 _CLEAR_TOOL = "inventory.clear_override"
 _CLEAR_OBJECT_ID = "inventory_override"
+
+
+class _InventoryListPayload(ToolPayload):
+    """Public payload for ``inventory.list`` filters."""
+
+    project: str | None = Field(
+        default=None,
+        description="Filter the summary to one project; omit for all.",
+    )
+    resource_id: str | None = Field(
+        default=None,
+        description="Filter to allocations/systems on one host UUID.",
+    )
+    limit: int = Field(
+        default=DEFAULT_LIST_LIMIT,
+        description=f"Maximum rows per stream returned (capped at {MAX_LIST_LIMIT}).",
+    )
 
 
 async def list_inventory(
@@ -334,16 +352,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def inventory_list(
-        project: Annotated[
-            str | None, Field(description="Filter the summary to one project; omit for all.")
+        request: Annotated[
+            _InventoryListPayload | None,
+            Field(description="Inventory summary filters request; omit for the full summary."),
         ] = None,
-        resource_id: Annotated[
-            str | None, Field(description="Filter to allocations/systems on one host UUID.")
-        ] = None,
-        limit: Annotated[
-            int,
-            Field(description=f"Maximum rows per stream returned (capped at {MAX_LIST_LIMIT})."),
-        ] = DEFAULT_LIST_LIMIT,
     ) -> ToolResponse:
         """Cross-project systems/allocations summary. Requires platform auditor.
 
@@ -351,8 +363,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         ``data.truncated`` is ``true`` when either cap is hit. This dual-stream summary is
         not cursor-continuable — narrow with the project/resource filters instead.
         """
+        payload = request or _InventoryListPayload()
         return await list_inventory(
-            pool, current_context(), project=project, resource_id=resource_id, limit=limit
+            pool,
+            current_context(),
+            project=payload.project,
+            resource_id=payload.resource_id,
+            limit=payload.limit,
         )
 
     @app.tool(
