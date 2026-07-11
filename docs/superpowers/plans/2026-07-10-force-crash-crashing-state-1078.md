@@ -322,9 +322,11 @@ def test_force_crash_nmi_raise_propagates_and_leaves_crashing(migrated_url: str)
             resolver = provider_resolver(provisioner=_TrackingProvisioner(), controller=ctrl)
             job = await _enqueue(pool, JobKind.FORCE_CRASH, system_id, f"{system_id}:force_crash")
             async with pool.connection() as conn:
-                with pytest.raises(CategorizedError):
+                with pytest.raises(CategorizedError) as excinfo:
                     await control_plane.force_crash_handler(conn, job, resolver=resolver)
-            # Marker set before the NMI; the raise propagates (worker will requeue) — NOT failed.
+            # AC4b: the raise is NON-terminal, so the worker requeues (not dead-letters) — and the
+            # marker is left set (System stays CRASHING), NOT marked FAILED by the handler.
+            assert excinfo.value.terminal is False
             assert await _system_state(pool, system_id) == SystemState.CRASHING.value
 
     asyncio.run(_run())
@@ -580,7 +582,22 @@ def test_force_crash_marker_refuses_racing_power(migrated_url: str) -> None:
     asyncio.run(_run())
 ```
 
-Admission in `tests/mcp/lifecycle/test_control_tools.py` — mirror the existing `power` admission tests; seed a System, set its state to `crashing`, assert `control.power` returns `configuration_error` with `data.current_status == "crashing"` and no job is enqueued. (Follow the existing power-admission test's fixture/seed pattern in that file.)
+Admission in `tests/mcp/lifecycle/test_control_tools.py` — copy the exact shape of the existing `test_power_on_crashed_system_is_config_error` (~line 340) but for a `crashing` System. Add:
+
+```python
+@pytest.mark.parametrize("action", ["on", "off", "cycle", "reset"])
+def test_power_on_crashing_system_is_config_error(migrated_url: str, action: str) -> None:
+    # A CRASHING System is mid-force_crash; power is refused, protecting crash evidence (#1078).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.CRASHING)
+            resp = await _power(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, action=action)
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["current_status"] == "crashing"
+
+    asyncio.run(_run())
+```
 
 - [ ] **Step 2: Run to verify they fail / establish baseline**
 
@@ -729,7 +746,46 @@ async def repair_stalled_crashing_systems(conn: AsyncConnection) -> int:
     return recovered
 ```
 
-`detach_sessions` in `control.py` takes a `Job` and audits each detach via `audit.record` (needs a `RequestContext`); the reconciler has neither. Add `_detach_sessions_reconciler(conn, system)` in `systems.py` that mirrors `detach_sessions`' SQL (the `WITH targets ... UPDATE debug_sessions ... RETURNING` statement) but audits each detached session with `audit.record_system(conn, principal=SYSTEM_RECONCILER_PRINCIPAL, event=AuditEvent(tool="control.force_crash", object_kind="debug_sessions", object_id=session_id, transition=f"{old_state}->detached", args={"system_id": str(system.id)}, project=system.project))`. Keep it small and local to the repair; do not refactor `detach_sessions`' `Job`-based signature (the force_crash call site still uses it as-is).
+`detach_sessions` in `control.py` takes a `Job` and audits each detach via `audit.record` (needs a `RequestContext`); the reconciler has neither. Add `_detach_sessions_reconciler(conn, system)` in `systems.py` — it mirrors `detach_sessions`' SQL (`control.py:170-201`) exactly but audits with `record_system`. Do **not** refactor `detach_sessions`' `Job`-based signature (the force_crash call site keeps using it):
+
+```python
+async def _detach_sessions_reconciler(conn: AsyncConnection, system) -> None:
+    """Drive every non-terminal DebugSession of ``system`` to detached (reconciler principal)."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "WITH targets AS ("
+            "    SELECT id, state FROM debug_sessions "
+            "    WHERE state IN (%s, %s) "
+            "      AND run_id IN (SELECT id FROM runs WHERE system_id = %s) "
+            "    FOR UPDATE"
+            ") "
+            "UPDATE debug_sessions s SET state = %s "
+            "FROM targets t WHERE s.id = t.id "
+            "RETURNING s.id, t.state",
+            (
+                DebugSessionState.ATTACH.value,
+                DebugSessionState.LIVE.value,
+                system.id,
+                DebugSessionState.DETACHED.value,
+            ),
+        )
+        rows = await cur.fetchall()
+    for session_id, old_state in rows:
+        await audit.record_system(
+            conn,
+            principal=SYSTEM_RECONCILER_PRINCIPAL,
+            event=audit.AuditEvent(
+                tool="control.force_crash",
+                object_kind="debug_sessions",
+                object_id=session_id,
+                transition=f"{old_state}->detached",
+                args={"system_id": str(system.id)},
+                project=system.project,
+            ),
+        )
+```
+
+(The `System` param is typed loosely here for brevity; annotate it `System` and import `from kdive.domain.lifecycle.records import System` if it is not already imported in `systems.py`.)
 
 The Step 3 predicate `j.dedup_key = s.id::text || ':force_crash'` matches the enqueue key
 `f"{system_id}:force_crash"` (`mcp/tools/lifecycle/control.py:207`); `jobs.dedup_key` is `text`
