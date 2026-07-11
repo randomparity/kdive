@@ -14,12 +14,14 @@ from kdive.providers.shared.debug_common.gdbmi.commands.breakpoints import (
     GdbMiBreakpointCommands,
 )
 from kdive.providers.shared.debug_common.gdbmi.commands.modules import GdbMiModuleCommands
+from kdive.providers.shared.debug_common.gdbmi.commands.registers import GdbMiRegisterCommands
+from kdive.providers.shared.debug_common.gdbmi.commands.symbols import GdbMiSymbolCommands
 from kdive.providers.shared.debug_common.gdbmi.commands.watchpoints import (
     GdbMiWatchpointCommands,
 )
 from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import MiRecord
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import ModuleDebuginfo
-from kdive.security.secrets.redaction import Redactor
+from kdive.security.secrets.redaction import REDACTION, Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 
@@ -68,6 +70,8 @@ class _CommandHost(
     GdbMiBreakpointCommands,
     GdbMiWatchpointCommands,
     GdbMiModuleCommands,
+    GdbMiSymbolCommands,
+    GdbMiRegisterCommands,
 ):
     def __init__(self) -> None:
         self.commands: list[str] = []
@@ -303,3 +307,109 @@ def test_load_module_symbols_adds_symbol_file_and_marks_loaded() -> None:
         '-data-evaluate-expression "((struct module *)0x3000)->srcversion"',
         '-interpreter-exec console "add-symbol-file /symbols/nf_conntrack.ko 0x2000"',
     ]
+
+
+def test_resolve_symbol_evaluates_address_of_identifier() -> None:
+    host = _CommandHost()
+    host.responses["-data-evaluate-expression &panic"] = _done(
+        {"value": "0xffffffff81000000 <panic>"}
+    )
+
+    address = host.resolve_symbol(_attachment(), "panic")
+
+    assert address == 0xFFFFFFFF81000000
+    assert host.commands == ["-data-evaluate-expression &panic"]
+
+
+@pytest.mark.parametrize("name", ["panic()", "module.name", ""])
+def test_resolve_symbol_rejects_non_identifier_names(name: str) -> None:
+    host = _CommandHost()
+
+    with pytest.raises(CategorizedError) as exc:
+        host.resolve_symbol(_attachment(), name)
+
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"code": "bad_symbol_name", "name": name}
+    assert host.commands == []
+
+
+def test_resolve_symbol_maps_gdb_not_found_error() -> None:
+    host = _CommandHost()
+    host.errors["-data-evaluate-expression &missing_symbol"] = _gdb_error(
+        "No symbol missing_symbol in current context."
+    )
+
+    with pytest.raises(CategorizedError) as exc:
+        host.resolve_symbol(_attachment(), "missing_symbol")
+
+    assert exc.value.category is ErrorCategory.SYMBOL_NOT_FOUND
+    assert exc.value.details == {
+        "code": "symbol_not_found",
+        "name": "missing_symbol",
+        "hint": "symbol may be inlined or optimized away; try disassembling its caller.",
+    }
+
+
+def test_resolve_symbol_redacts_unparseable_value() -> None:
+    host = _CommandHost()
+    host._redactor_value = Redactor(secret_values=["secret-address"], registry=SecretRegistry())
+    host.responses["-data-evaluate-expression &panic"] = _done({"value": "secret-address"})
+
+    with pytest.raises(CategorizedError) as exc:
+        host.resolve_symbol(_attachment(), "panic")
+
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details == {
+        "code": "bad_symbol_value",
+        "name": "panic",
+        "value": REDACTION,
+    }
+
+
+def test_read_registers_maps_requested_names_to_values() -> None:
+    host = _CommandHost()
+    host._redactor_value = Redactor(secret_values=["secret-register"], registry=SecretRegistry())
+    host.responses["-data-list-register-names"] = _done({"register-names": ["rax", "rbx", "rip"]})
+    host.responses["-data-list-register-values x"] = _done(
+        {
+            "register-values": [
+                {"number": "0", "value": "0x1"},
+                {"number": "2", "value": "secret-register"},
+            ]
+        }
+    )
+
+    registers = host.read_registers(_attachment(), ["rip", "rax"])
+
+    assert registers == {"rip": REDACTION, "rax": "0x1"}
+    assert host.commands == ["-data-list-register-names", "-data-list-register-values x"]
+
+
+@pytest.mark.parametrize("names", [[], ["rax", "rip=0x1"]])
+def test_read_registers_rejects_invalid_requests(names: list[str]) -> None:
+    host = _CommandHost()
+
+    with pytest.raises(CategorizedError) as exc:
+        host.read_registers(_attachment(), names)
+
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["code"] == "bad_register"
+    assert host.commands == []
+
+
+def test_read_registers_reports_missing_requested_values() -> None:
+    host = _CommandHost()
+    host.responses["-data-list-register-names"] = _done({"register-names": ["rax", "rip"]})
+    host.responses["-data-list-register-values x"] = _done(
+        {"register-values": [{"number": "0", "value": "0x1"}]}
+    )
+
+    with pytest.raises(CategorizedError) as exc:
+        host.read_registers(_attachment(), ["rip", "rax"])
+
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details == {
+        "code": "missing_registers",
+        "requested": ["rip", "rax"],
+        "missing": ["rip"],
+    }
