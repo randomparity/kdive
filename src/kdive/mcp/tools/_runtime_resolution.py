@@ -27,35 +27,32 @@ type RuntimeResolver = Callable[
 
 
 @dataclass(frozen=True, slots=True)
-class _RuntimeLookup:
+class _AuthorizationLookup:
     object_kind: str
     sql: LiteralString
     required_role: Role
-    runtime_resolver: RuntimeResolver | None = None
     requires_bound_run: bool = False
 
 
-_AUTHORIZED_ALLOCATION_KIND: LiteralString = (
-    "SELECT a.project, r.kind AS kind FROM allocations a "
-    "LEFT JOIN resources r ON r.id = a.resource_id "
-    "WHERE a.id = %s"
-)
-_AUTHORIZED_SYSTEM_KIND: LiteralString = (
-    "SELECT s.project, r.kind AS kind FROM systems s "
-    "JOIN allocations a ON a.id = s.allocation_id "
-    "JOIN resources r ON r.id = a.resource_id "
-    "WHERE s.id = %s"
-)
+@dataclass(frozen=True, slots=True)
+class _TargetKindLookup:
+    object_kind: str
+    sql: LiteralString
+    required_role: Role
+
+
+_AUTHORIZED_ALLOCATION: LiteralString = "SELECT a.project FROM allocations a WHERE a.id = %s"
+_AUTHORIZED_SYSTEM: LiteralString = "SELECT s.project FROM systems s WHERE s.id = %s"
 # A target-kind-only Run lookup is authorized by the Run row and selected by its committed
 # ``target_kind``. It deliberately does not join System/Allocation/Resource, so unbound Runs
 # (ADR-0169, ``system_id IS NULL``) resolve for ``runs.complete_build`` before
 # any System exists. Bound-run operations use ``ProviderResolver.runtime_for_run`` instead, which
 # applies ``ProviderRuntime.for_resource(name)`` before capability or port handoff.
-_AUTHORIZED_RUN_KIND: LiteralString = (
+_AUTHORIZED_RUN_TARGET_KIND: LiteralString = (
     "SELECT rn.project, rn.target_kind AS kind FROM runs rn WHERE rn.id = %s"
 )
-_AUTHORIZED_BOUND_RUN_KIND: LiteralString = (
-    "SELECT rn.project, rn.target_kind AS kind, rn.system_id FROM runs rn WHERE rn.id = %s"
+_AUTHORIZED_BOUND_RUN: LiteralString = (
+    "SELECT rn.project, rn.system_id FROM runs rn WHERE rn.id = %s"
 )
 
 
@@ -65,45 +62,65 @@ class _InvalidRuntimeObjectId(ValueError):
         self.object_id = object_id
 
 
-async def _runtime_for_object(
+async def _bound_runtime_for_object(
     pool: AsyncConnectionPool,
     resolver: ProviderResolver,
     ctx: RequestContext,
     object_id: str,
-    lookup: _RuntimeLookup,
+    lookup: _AuthorizationLookup,
+    runtime_resolver: RuntimeResolver,
 ) -> ProviderRuntime:
     uid = as_uuid(object_id)
     if uid is None:
         raise _InvalidRuntimeObjectId(object_id)
     async with pool.connection() as conn:
-        kind = await _authorized_kind(conn, ctx, uid, lookup)
-        if lookup.runtime_resolver is not None:
-            return await lookup.runtime_resolver(resolver, conn, uid)
+        await _authorize_object(conn, ctx, uid, lookup)
+        return await runtime_resolver(resolver, conn, uid)
+
+
+async def _runtime_for_target_kind(
+    pool: AsyncConnectionPool,
+    resolver: ProviderResolver,
+    ctx: RequestContext,
+    object_id: str,
+    lookup: _TargetKindLookup,
+) -> ProviderRuntime:
+    uid = as_uuid(object_id)
+    if uid is None:
+        raise _InvalidRuntimeObjectId(object_id)
+    async with pool.connection() as conn:
+        kind = await _authorized_target_kind(conn, ctx, uid, lookup)
     return resolver.resolve(kind)
 
 
-async def _authorized_kind(
+async def _authorize_object(
     conn: AsyncConnection,
     ctx: RequestContext,
     uid: UUID,
-    lookup: _RuntimeLookup,
-) -> ResourceKind:
+    lookup: _AuthorizationLookup,
+) -> None:
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(lookup.sql, (uid,))
         row = await cur.fetchone()
-    if row is None or row["project"] not in ctx.projects:
-        raise CategorizedError(
-            f"{lookup.object_kind} {uid} was not found",
-            category=ErrorCategory.NOT_FOUND,
-            details={"object_kind": lookup.object_kind, "object_id": str(uid)},
-        )
-    require_role(ctx, row["project"], lookup.required_role)
+    row = _authorize_row(row, ctx, uid, lookup.object_kind, lookup.required_role)
     if lookup.requires_bound_run and row["system_id"] is None:
         raise CategorizedError(
             f"{lookup.object_kind} {uid} is not bound to a system",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "run_unbound"},
         )
+
+
+async def _authorized_target_kind(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    uid: UUID,
+    lookup: _TargetKindLookup,
+) -> ResourceKind:
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(lookup.sql, (uid,))
+        row = await cur.fetchone()
+    row = _authorize_row(row, ctx, uid, lookup.object_kind, lookup.required_role)
     if row["kind"] is None:
         raise CategorizedError(
             f"{lookup.object_kind} {uid} has no resolved provider resource",
@@ -113,16 +130,60 @@ async def _authorized_kind(
     return ResourceKind(row["kind"])
 
 
-async def _with_runtime_for_object(
+def _authorize_row(
+    row: dict[str, object] | None,
+    ctx: RequestContext,
+    uid: UUID,
+    object_kind: str,
+    required_role: Role,
+) -> dict[str, object]:
+    if row is None:
+        raise CategorizedError(
+            f"{object_kind} {uid} was not found",
+            category=ErrorCategory.NOT_FOUND,
+            details={"object_kind": object_kind, "object_id": str(uid)},
+        )
+    project = row["project"]
+    if not isinstance(project, str) or project not in ctx.projects:
+        raise CategorizedError(
+            f"{object_kind} {uid} was not found",
+            category=ErrorCategory.NOT_FOUND,
+            details={"object_kind": object_kind, "object_id": str(uid)},
+        )
+    require_role(ctx, project, required_role)
+    return row
+
+
+async def _with_bound_runtime_for_object(
     pool: AsyncConnectionPool,
     resolver: ProviderResolver,
     ctx: RequestContext,
     object_id: str,
-    lookup: _RuntimeLookup,
+    lookup: _AuthorizationLookup,
+    runtime_resolver: RuntimeResolver,
     runtime_callback: RuntimeCallback,
 ) -> ToolResponse:
     try:
-        runtime = await _runtime_for_object(pool, resolver, ctx, object_id, lookup)
+        runtime = await _bound_runtime_for_object(
+            pool, resolver, ctx, object_id, lookup, runtime_resolver
+        )
+    except _InvalidRuntimeObjectId:
+        return invalid_uuid_error(f"{lookup.object_kind}_id", object_id)
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(object_id, exc)
+    return await runtime_callback(runtime)
+
+
+async def _with_target_kind_runtime_for_object(
+    pool: AsyncConnectionPool,
+    resolver: ProviderResolver,
+    ctx: RequestContext,
+    object_id: str,
+    lookup: _TargetKindLookup,
+    runtime_callback: RuntimeCallback,
+) -> ToolResponse:
+    try:
+        runtime = await _runtime_for_target_kind(pool, resolver, ctx, object_id, lookup)
     except _InvalidRuntimeObjectId:
         return invalid_uuid_error(f"{lookup.object_kind}_id", object_id)
     except CategorizedError as exc:
@@ -157,17 +218,17 @@ async def with_runtime_for_allocation(
     *,
     required_role: Role,
 ) -> ToolResponse:
-    return await _with_runtime_for_object(
+    return await _with_bound_runtime_for_object(
         pool,
         resolver,
         ctx,
         allocation_id,
-        _RuntimeLookup(
+        _AuthorizationLookup(
             "allocation",
-            _AUTHORIZED_ALLOCATION_KIND,
+            _AUTHORIZED_ALLOCATION,
             required_role,
-            runtime_resolver=_runtime_for_allocation,
         ),
+        _runtime_for_allocation,
         runtime_callback,
     )
 
@@ -181,17 +242,17 @@ async def with_runtime_for_system(
     *,
     required_role: Role,
 ) -> ToolResponse:
-    return await _with_runtime_for_object(
+    return await _with_bound_runtime_for_object(
         pool,
         resolver,
         ctx,
         system_id,
-        _RuntimeLookup(
+        _AuthorizationLookup(
             "system",
-            _AUTHORIZED_SYSTEM_KIND,
+            _AUTHORIZED_SYSTEM,
             required_role,
-            runtime_resolver=_runtime_for_system,
         ),
+        _runtime_for_system,
         runtime_callback,
     )
 
@@ -205,18 +266,18 @@ async def with_runtime_for_run(
     *,
     required_role: Role,
 ) -> ToolResponse:
-    return await _with_runtime_for_object(
+    return await _with_bound_runtime_for_object(
         pool,
         resolver,
         ctx,
         run_id,
-        _RuntimeLookup(
+        _AuthorizationLookup(
             "run",
-            _AUTHORIZED_BOUND_RUN_KIND,
+            _AUTHORIZED_BOUND_RUN,
             required_role,
-            runtime_resolver=_runtime_for_run,
             requires_bound_run=True,
         ),
+        _runtime_for_run,
         runtime_callback,
     )
 
@@ -230,11 +291,11 @@ async def with_runtime_for_run_target_kind(
     *,
     required_role: Role,
 ) -> ToolResponse:
-    return await _with_runtime_for_object(
+    return await _with_target_kind_runtime_for_object(
         pool,
         resolver,
         ctx,
         run_id,
-        _RuntimeLookup("run", _AUTHORIZED_RUN_KIND, required_role),
+        _TargetKindLookup("run", _AUTHORIZED_RUN_TARGET_KIND, required_role),
         runtime_callback,
     )
