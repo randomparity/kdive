@@ -24,6 +24,7 @@ from kdive.images.kdump_support import (
     DEFAULT_KERNEL_BASIS,
     KernelVersion,
 )
+from kdive.images.planes.base import PROVENANCE_OS_RELEASE
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
@@ -67,7 +68,7 @@ def _compact_os(provenance: dict[str, Any]) -> dict[str, JsonValue]:
     ``id`` — a record without a distro id is not a usable identity, so a bare version is never
     surfaced. ``version_id`` is included only when present (a rolling distro may omit it).
     """
-    record = provenance.get("os_release")
+    record = provenance.get(PROVENANCE_OS_RELEASE)
     if not isinstance(record, dict) or not record.get("id"):
         return {}
     compact: dict[str, JsonValue] = {"id": str(record["id"])}

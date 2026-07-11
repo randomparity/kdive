@@ -14,6 +14,10 @@ from dataclasses import dataclass
 
 from kdive.domain.catalog.images import Capability, ImageCatalogEntry
 from kdive.images.kdump_support import KernelVersion, kdump_capability
+from kdive.images.planes.base import (
+    PROVENANCE_BOOT_KERNEL_COUNT,
+    PROVENANCE_MAKEDUMPFILE_VERSION,
+)
 from kdive.serialization import JsonValue
 
 type SignalRender = Callable[[ImageCatalogEntry, KernelVersion], dict[str, JsonValue]]
@@ -64,7 +68,7 @@ def render_kdump_signal(
     capability, echoing the kernel basis it was computed against. A reader never raises on image
     data — an unparseable stored version degrades to ``unverified``.
     """
-    raw = entry.provenance.get("makedumpfile_version")
+    raw = entry.provenance.get(PROVENANCE_MAKEDUMPFILE_VERSION)
     has_operand = isinstance(raw, str) and bool(raw)
     cap = kdump_capability(
         makedumpfile_version=raw if has_operand else None,
@@ -101,7 +105,7 @@ def render_direct_kernel_signal(
     ignored. A missing or non-``int`` operand (``bool`` excluded — it is an ``int`` subclass)
     degrades to ``unverified`` with a ``None`` count, so un-refreshed metadata never lies.
     """
-    raw = entry.provenance.get("boot_kernel_count")
+    raw = entry.provenance.get(PROVENANCE_BOOT_KERNEL_COUNT)
     count = raw if isinstance(raw, int) and not isinstance(raw, bool) else None
     if count is None:
         return {

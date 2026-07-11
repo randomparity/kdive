@@ -9,6 +9,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageVisibility
+from kdive.images.planes.base import PROVENANCE_DEFAULT_KERNEL_VERSION
 from kdive.log import bind_context
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, projects_with_role
@@ -41,5 +42,5 @@ async def fetch_visible_image(
 
 def default_kernel_version(provenance: dict[str, Any]) -> str:
     """Return the build-recorded default kernel version, or ``""`` when absent."""
-    value = provenance.get("default_kernel_version")
+    value = provenance.get(PROVENANCE_DEFAULT_KERNEL_VERSION)
     return str(value) if value else ""

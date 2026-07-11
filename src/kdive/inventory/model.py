@@ -30,6 +30,10 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 from kdive.domain.accounting.cost_class_rules import parse_positive_coeff, validate_cost_class_name
 from kdive.domain.catalog.image_format import ImageFormat
 from kdive.domain.catalog.images import Capability, ImageVisibility
+from kdive.images.planes.base import (
+    PROVENANCE_BOOT_KERNEL_COUNT,
+    PROVENANCE_MAKEDUMPFILE_VERSION,
+)
 from kdive.inventory.errors import InventoryError
 
 
@@ -106,9 +110,9 @@ class AttestedProvenance(BaseModel):
         """The declared operands as a provenance dict, omitting any unset operand."""
         prov: dict[str, object] = {}
         if self.boot_kernel_count is not None:
-            prov["boot_kernel_count"] = self.boot_kernel_count
+            prov[PROVENANCE_BOOT_KERNEL_COUNT] = self.boot_kernel_count
         if self.makedumpfile_version:
-            prov["makedumpfile_version"] = self.makedumpfile_version
+            prov[PROVENANCE_MAKEDUMPFILE_VERSION] = self.makedumpfile_version
         return prov
 
     def is_empty(self) -> bool:

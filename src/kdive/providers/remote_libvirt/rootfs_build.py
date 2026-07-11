@@ -41,7 +41,7 @@ from kdive.images.planes._build_common import (
     run_guestfs_tool,
     validate_image_name,
 )
-from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
+from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildProvenance, RootfsBuildSpec
 from kdive.images.planes.provenance_probes import DEFAULT_VERSION_INSPECT, VersionInspectSeam
 from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
 
@@ -160,7 +160,14 @@ class RemoteLibvirtRootfsBuildPlane:
         return RootfsBuildOutput(
             qcow2_path=qcow2,
             digest=digest,
-            provenance=_provenance(spec, size=self._size, package_versions=package_versions),
+            provenance=RootfsBuildProvenance.remote_libvirt(
+                spec,
+                packages=_guest_agent_packages(spec.packages),
+                image_size=self._size,
+                boot_method="disk-image",
+                guest_access_seam="qemu-guest-agent",
+                package_versions=package_versions,
+            ).to_dict(),
         )
 
     def _capture_versions(self, qcow2: Path, requested: tuple[str, ...]) -> dict[str, str]:
@@ -180,35 +187,6 @@ class RemoteLibvirtRootfsBuildPlane:
             return {}
         wanted = _guest_agent_packages(requested)
         return {name: installed[name] for name in wanted if name in installed}
-
-
-def _provenance(
-    spec: RootfsBuildSpec, *, size: str, package_versions: dict[str, str]
-) -> dict[str, object]:
-    """Record the pinned inputs and build args that produced the image (falsifiable contract).
-
-    ``source_image_digest`` is the caller-declared base/template pin recorded as requested — the
-    plane does not re-fetch and checksum the virt-builder template, so it names what was *asked
-    for*, not a plane-verified hash. The image's verifiable identity is the output qcow2 content
-    digest (:func:`kdive.images.planes._build_common.digest_file`), per ADR-0092.
-    ``package_versions`` (the installed version of each installed package, guest agent included) is
-    added only when capture succeeded — an empty map is omitted so a degraded build's row is
-    byte-identical to a pre-feature one (ADR-0252).
-    """
-    record: dict[str, object] = {
-        "plane": "remote-libvirt",
-        "boot_method": "disk-image",
-        "releasever": spec.releasever,
-        "packages": list(_guest_agent_packages(spec.packages)),
-        "source_image_digest": spec.source_image_digest,
-        "capabilities": list(spec.capabilities),
-        "arch": spec.arch,
-        "image_size": size,
-        "guest_access_seam": "qemu-guest-agent",
-    }
-    if package_versions:
-        record["package_versions"] = package_versions
-    return record
 
 
 __all__ = [
