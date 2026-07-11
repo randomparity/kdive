@@ -17,7 +17,7 @@ from psycopg import AsyncConnection
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
-from kdive.jobs.handlers.connectivity.ssh_reachable import ProbeFn, _real_probe
+from kdive.jobs.handlers.connectivity.ssh_reachable import ProbeFn, ReachResult, _real_probe
 from kdive.jobs.handlers.console.console_evidence import redacted_console_tail
 from kdive.jobs.payloads import AuthorizeSshKeyPayload, load_payload
 from kdive.prereqs.system_bootstrap_key import (
@@ -48,11 +48,6 @@ _AUTHORIZE_SSH_RETRY = SshRetryPolicy()
 
 # The reachability pre-flight (ADR-0305, #1012) maps the probe's fixed unreachable verdicts onto the
 # shared #1008 reason vocabulary so a fast-fail names *why* in the same terms as the append path.
-_PREFLIGHT_REASON: dict[str, SshFailureReason] = {
-    "unreachable": "unreachable",
-    "no SSH banner": "banner_timeout",
-}
-
 # The remote append script (ADR-0271). The key is **never** in this string: `ssh host CMD` joins
 # any post-host argv into one string the remote login shell re-parses, so an argv-positioned key
 # would not be isolated. Instead the worker pipes the validated key on the SSH session's stdin and
@@ -154,7 +149,21 @@ async def _preflight_reachable(probe: ProbeFn, host: str, port: int) -> None:
     raise CategorizedError(
         "guest SSH endpoint is unreachable; not attempting the authorized-keys append",
         category=ErrorCategory.TRANSPORT_FAILURE,
-        details={"reason": _PREFLIGHT_REASON[result.detail], "detail": result.detail},
+        details={"reason": _preflight_reason(result), "detail": result.detail},
+        terminal=True,
+    )
+
+
+def _preflight_reason(result: ReachResult) -> SshFailureReason:
+    failed_layer = result.failed_layer
+    if failed_layer == "tcp_connect":
+        return "unreachable"
+    if failed_layer == "ssh_banner":
+        return "banner_timeout"
+    raise CategorizedError(
+        "reachability pre-flight reported unreachable without a failed layer",
+        category=ErrorCategory.TRANSPORT_FAILURE,
+        details={"reason": "unreachable"},
         terminal=True,
     )
 

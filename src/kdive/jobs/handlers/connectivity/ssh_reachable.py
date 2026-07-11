@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -41,25 +42,66 @@ _BACKOFF_S = 0.5
 # "tcp_connect" = a connection to the recorded loopback SSH forward was accepted; "ssh_banner"
 # = the server sent an ``SSH-`` identification string. "forward bound" is not a separate layer
 # because a pure TCP connect cannot distinguish it from "connected but guest refused".
-_LAYER_TCP_CONNECT = "tcp_connect"
-_LAYER_SSH_BANNER = "ssh_banner"
+type ProbeLayer = Literal["tcp_connect", "ssh_banner"]
+
+_LAYER_TCP_CONNECT: ProbeLayer = "tcp_connect"
+_LAYER_SSH_BANNER: ProbeLayer = "ssh_banner"
 _PROBE_LAYERS = (_LAYER_TCP_CONNECT, _LAYER_SSH_BANNER)
 
-# The fixed ``detail`` vocabulary maps one-to-one onto the lowest failing layer (``None`` ⇒ every
-# layer passed). ``detail`` stays the single source of truth; ``layer``/``checks`` project it.
-_DETAIL_FAILED_LAYER: dict[str, str | None] = {
-    "reachable": None,
-    "unreachable": _LAYER_TCP_CONNECT,
-    "no SSH banner": _LAYER_SSH_BANNER,
+_DETAIL_BY_FAILED_LAYER: Mapping[ProbeLayer | None, str] = {
+    None: "reachable",
+    _LAYER_TCP_CONNECT: "unreachable",
+    _LAYER_SSH_BANNER: "no SSH banner",
 }
 
 
 @dataclass(frozen=True, slots=True)
+class ReachCheck:
+    """One structured layer result from the SSH reachability probe."""
+
+    layer: ProbeLayer
+    ok: bool
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {"layer": self.layer, "ok": self.ok}
+
+
+@dataclass(frozen=True, slots=True)
 class ReachResult:
-    """The classified outcome of one probe: reachable, plus a fixed-vocabulary detail."""
+    """The classified outcome of one probe, backed by ordered layer checks."""
 
     reachable: bool
-    detail: str  # "reachable" | "unreachable" | "no SSH banner"
+    checks: tuple[ReachCheck, ...]
+
+    @classmethod
+    def ok(cls) -> ReachResult:
+        return cls(
+            True,
+            (ReachCheck(_LAYER_TCP_CONNECT, True), ReachCheck(_LAYER_SSH_BANNER, True)),
+        )
+
+    @classmethod
+    def tcp_unreachable(cls) -> ReachResult:
+        return cls(False, (ReachCheck(_LAYER_TCP_CONNECT, False),))
+
+    @classmethod
+    def missing_banner(cls) -> ReachResult:
+        return cls(
+            False,
+            (ReachCheck(_LAYER_TCP_CONNECT, True), ReachCheck(_LAYER_SSH_BANNER, False)),
+        )
+
+    @property
+    def failed_layer(self) -> ProbeLayer | None:
+        for check in self.checks:
+            if not check.ok:
+                return check.layer
+        return None
+
+    @property
+    def detail(self) -> str:
+        """Compatibility detail vocabulary projected from the structured failed layer."""
+        return _DETAIL_BY_FAILED_LAYER[self.failed_layer]
 
 
 type ProbeFn = Callable[[str, int], Awaitable[ReachResult]]
@@ -81,7 +123,7 @@ async def _real_probe(
     while True:
         remaining = end - loop.time()
         if remaining <= 0:
-            return ReachResult(False, "unreachable")
+            return ReachResult.tcp_unreachable()
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port),
@@ -101,24 +143,17 @@ async def _real_probe(
             with suppress(OSError):
                 await writer.wait_closed()
         if banner.startswith(b"SSH-"):
-            return ReachResult(True, "reachable")
-        return ReachResult(False, "no SSH banner")
+            return ReachResult.ok()
+        return ReachResult.missing_banner()
 
 
-def _layer_breakdown(detail: str) -> tuple[str | None, list[JsonValue]]:
-    """Project ``detail`` onto its lowest failing layer and the ordered pass/fail breakdown.
+def _layer_breakdown(result: ReachResult) -> tuple[ProbeLayer | None, list[JsonValue]]:
+    """Project ``result`` onto its lowest failing layer and ordered pass/fail breakdown.
 
     ``checks`` lists layers in order up to and including the first failure; a higher layer the
     probe never reached (because a lower one failed) is omitted rather than reported as tested.
     """
-    failed = _DETAIL_FAILED_LAYER[detail]
-    checks: list[JsonValue] = []
-    for name in _PROBE_LAYERS:
-        if name == failed:
-            checks.append({"layer": name, "ok": False})
-            break
-        checks.append({"layer": name, "ok": True})
-    return failed, checks
+    return result.failed_layer, [check.to_json() for check in result.checks]
 
 
 def serialize_reach_verdict(
@@ -130,12 +165,12 @@ def serialize_reach_verdict(
 ) -> str:
     """Compact-JSON reachability verdict carried inline in ``result_ref`` (the ADR-0164 pattern).
 
-    ``layer``/``checks`` name the lowest failing probe layer (ADR-0303); they are additive and
-    derived from ``detail``, which remains the top-level back-compat field. ``console_tail`` — a
-    bounded, redacted guest console tail — is added only when the guest is unreachable (ADR-0306),
-    so a reachable verdict stays byte-for-byte back-compatible.
+    ``layer``/``checks`` name the lowest failing probe layer (ADR-0303); ``detail`` is projected
+    from that structured outcome as the top-level back-compat field. ``console_tail`` — a bounded,
+    redacted guest console tail — is added only when the guest is unreachable (ADR-0306), so a
+    reachable verdict stays byte-for-byte back-compatible.
     """
-    layer, checks = _layer_breakdown(result.detail)
+    layer, checks = _layer_breakdown(result)
     verdict: dict[str, JsonValue] = {
         "reachable": result.reachable,
         "checked_at": checked_at,

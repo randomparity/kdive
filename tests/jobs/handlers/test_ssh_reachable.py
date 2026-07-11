@@ -17,7 +17,6 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind, JobState
 from kdive.jobs.handlers.connectivity import ssh_reachable
 from kdive.jobs.handlers.connectivity.ssh_reachable import (
-    _DETAIL_FAILED_LAYER,
     ReachResult,
     _real_probe,
     check_ssh_reachable_handler,
@@ -58,7 +57,7 @@ def test_probe_reachable_on_ssh_banner() -> None:
         async with server:
             return await _real_probe(host, port, deadline_s=3.0)
 
-    assert asyncio.run(_run()) == ReachResult(True, "reachable")
+    assert asyncio.run(_run()) == ReachResult.ok()
 
 
 def test_probe_no_ssh_banner_when_wrong_prefix() -> None:
@@ -67,7 +66,7 @@ def test_probe_no_ssh_banner_when_wrong_prefix() -> None:
         async with server:
             return await _real_probe(host, port, deadline_s=3.0)
 
-    assert asyncio.run(_run()) == ReachResult(False, "no SSH banner")
+    assert asyncio.run(_run()) == ReachResult.missing_banner()
 
 
 def test_probe_no_ssh_banner_when_server_sends_nothing() -> None:
@@ -76,14 +75,14 @@ def test_probe_no_ssh_banner_when_server_sends_nothing() -> None:
         async with server:
             return await _real_probe(host, port, deadline_s=1.0)
 
-    assert asyncio.run(_run()) == ReachResult(False, "no SSH banner")
+    assert asyncio.run(_run()) == ReachResult.missing_banner()
 
 
 def test_probe_unreachable_on_closed_port() -> None:
     async def _run() -> ReachResult:
         return await _real_probe("127.0.0.1", _free_port(), deadline_s=1.0)
 
-    assert asyncio.run(_run()) == ReachResult(False, "unreachable")
+    assert asyncio.run(_run()) == ReachResult.tcp_unreachable()
 
 
 def test_probe_retries_until_sshd_binds() -> None:
@@ -109,12 +108,12 @@ def test_probe_retries_until_sshd_binds() -> None:
         await server.wait_closed()
         return result
 
-    assert asyncio.run(_run()) == ReachResult(True, "reachable")
+    assert asyncio.run(_run()) == ReachResult.ok()
 
 
 def test_serialize_verdict_is_compact_and_redacted() -> None:
     raw = serialize_reach_verdict(
-        ReachResult(False, "no SSH banner"), "127.0.0.1", 22001, "2026-07-02T00:00:00+00:00"
+        ReachResult.missing_banner(), "127.0.0.1", 22001, "2026-07-02T00:00:00+00:00"
     )
     assert raw == (
         '{"reachable":false,"checked_at":"2026-07-02T00:00:00+00:00",'
@@ -125,9 +124,7 @@ def test_serialize_verdict_is_compact_and_redacted() -> None:
 
 
 def test_serialize_verdict_reachable_names_no_failing_layer() -> None:
-    raw = serialize_reach_verdict(
-        ReachResult(True, "reachable"), "127.0.0.1", 22001, "2026-07-02T00:00:00+00:00"
-    )
+    raw = serialize_reach_verdict(ReachResult.ok(), "127.0.0.1", 22001, "2026-07-02T00:00:00+00:00")
     assert '"layer":null' in raw
     assert '"checks":[{"layer":"tcp_connect","ok":true},{"layer":"ssh_banner","ok":true}]' in raw
 
@@ -136,7 +133,7 @@ def test_serialize_verdict_unreachable_names_tcp_connect_layer() -> None:
     # No connection was ever accepted, so the lowest failing layer is tcp_connect and the
     # higher, un-evaluated ssh_banner layer is not claimed as tested.
     raw = serialize_reach_verdict(
-        ReachResult(False, "unreachable"), "127.0.0.1", 22001, "2026-07-02T00:00:00+00:00"
+        ReachResult.tcp_unreachable(), "127.0.0.1", 22001, "2026-07-02T00:00:00+00:00"
     )
     assert '"layer":"tcp_connect"' in raw
     assert '"checks":[{"layer":"tcp_connect","ok":false}]' in raw
@@ -145,7 +142,7 @@ def test_serialize_verdict_unreachable_names_tcp_connect_layer() -> None:
 def test_serialize_verdict_embeds_console_tail_when_given() -> None:
     # ADR-0306: an unreachable verdict carries a bounded, redacted guest console tail.
     raw = serialize_reach_verdict(
-        ReachResult(False, "no SSH banner"),
+        ReachResult.missing_banner(),
         "127.0.0.1",
         22001,
         "2026-07-02T00:00:00+00:00",
@@ -156,17 +153,19 @@ def test_serialize_verdict_embeds_console_tail_when_given() -> None:
 
 def test_serialize_verdict_omits_console_tail_when_none() -> None:
     # A reachable verdict needs no guest diagnostics, so the field stays absent (back-compatible).
-    raw = serialize_reach_verdict(
-        ReachResult(True, "reachable"), "127.0.0.1", 22001, "2026-07-02T00:00:00+00:00"
-    )
+    raw = serialize_reach_verdict(ReachResult.ok(), "127.0.0.1", 22001, "2026-07-02T00:00:00+00:00")
     assert "console_tail" not in raw
 
 
-def test_every_probe_detail_maps_to_a_layer() -> None:
-    # Drift guard: any detail value the probe can emit must name its failing layer, or the
-    # verdict would raise at serialization time.
-    for detail in ("reachable", "unreachable", "no SSH banner"):
-        assert detail in _DETAIL_FAILED_LAYER
+def test_reach_result_detail_is_projected_from_layer_checks() -> None:
+    cases = [
+        (ReachResult.ok(), "reachable", None),
+        (ReachResult.tcp_unreachable(), "unreachable", "tcp_connect"),
+        (ReachResult.missing_banner(), "no SSH banner", "ssh_banner"),
+    ]
+    for result, detail, layer in cases:
+        assert result.detail == detail
+        assert result.failed_layer == layer
 
 
 # --- worker handler ---------------------------------------------------------------------------
@@ -225,7 +224,7 @@ def test_handler_serializes_reachable_verdict(
     monkeypatch.setattr(ssh_reachable, "datetime", FrozenClock(_FROZEN))
 
     async def probe(_host: str, _port: int) -> ReachResult:
-        return ReachResult(True, "reachable")
+        return ReachResult.ok()
 
     async def _run() -> str | None:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
@@ -255,7 +254,7 @@ def test_handler_serializes_unreachable_verdict_as_success(
     monkeypatch.setattr(ssh_reachable, "datetime", FrozenClock(_FROZEN))
 
     async def probe(_host: str, _port: int) -> ReachResult:
-        return ReachResult(False, "unreachable")
+        return ReachResult.tcp_unreachable()
 
     async def _run() -> str | None:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
@@ -288,7 +287,7 @@ def test_unreachable_verdict_carries_console_tail(
     monkeypatch.setattr(ssh_reachable, "redacted_console_tail", _tail)
 
     async def probe(_host: str, _port: int) -> ReachResult:
-        return ReachResult(False, "no SSH banner")
+        return ReachResult.missing_banner()
 
     async def _run() -> str | None:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
@@ -321,7 +320,7 @@ def test_reachable_verdict_omits_console_tail(
     monkeypatch.setattr(ssh_reachable, "redacted_console_tail", _must_not_run)
 
     async def probe(_host: str, _port: int) -> ReachResult:
-        return ReachResult(True, "reachable")
+        return ReachResult.ok()
 
     async def _run() -> str | None:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
