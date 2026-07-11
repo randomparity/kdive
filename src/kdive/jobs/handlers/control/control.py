@@ -10,7 +10,7 @@ from psycopg import AsyncConnection
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import SYSTEMS
-from kdive.domain.capacity.state import DebugSessionState, SystemState
+from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.lifecycle.rules import TERMINAL_SYSTEM_STATES
@@ -22,6 +22,7 @@ from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
+from kdive.services.debug.detach import detach_audit_event, detach_system_debug_sessions
 
 
 class _ControlTarget(NamedTuple):
@@ -208,47 +209,6 @@ async def _finalize_force_crash(conn: AsyncConnection, job: Job, system_id: UUID
                 ),
             )
         await detach_sessions(conn, job, system)
-
-
-async def detach_system_debug_sessions(
-    conn: AsyncConnection, system: System
-) -> list[tuple[UUID, str]]:
-    """Drive every non-terminal DebugSession of ``system`` to detached; return ``(id, old_state)``.
-
-    The transition SQL only — the caller audits the returned rows under its own principal
-    (`detach_sessions` for a job, the reconciler under the system principal).
-    """
-    async with conn.cursor() as cur:
-        await cur.execute(
-            "WITH targets AS ("
-            "    SELECT id, state FROM debug_sessions "
-            "    WHERE state IN (%s, %s) "
-            "      AND run_id IN (SELECT id FROM runs WHERE system_id = %s) "
-            "    FOR UPDATE"
-            ") "
-            "UPDATE debug_sessions s SET state = %s "
-            "FROM targets t WHERE s.id = t.id "
-            "RETURNING s.id, t.state",
-            (
-                DebugSessionState.ATTACH.value,
-                DebugSessionState.LIVE.value,
-                system.id,
-                DebugSessionState.DETACHED.value,
-            ),
-        )
-        return await cur.fetchall()
-
-
-def detach_audit_event(system: System, session_id: UUID, old_state: str) -> audit.AuditEvent:
-    """The `<old_state>->detached` audit event for a force_crash session detach."""
-    return audit.AuditEvent(
-        tool="control.force_crash",
-        object_kind="debug_sessions",
-        object_id=session_id,
-        transition=f"{old_state}->detached",
-        args={"system_id": str(system.id)},
-        project=system.project,
-    )
 
 
 async def detach_sessions(conn: AsyncConnection, job: Job, system: System) -> None:

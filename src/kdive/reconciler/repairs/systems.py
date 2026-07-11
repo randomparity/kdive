@@ -14,10 +14,10 @@ from kdive.domain.capacity.state import AllocationState, JobState, SystemState
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers.control.control import detach_audit_event, detach_system_debug_sessions
 from kdive.jobs.payloads import SystemPayload
 from kdive.reconciler.repairs.allocations import SYSTEM_RECONCILER_PRINCIPAL
 from kdive.security import audit
+from kdive.services.debug.detach import detach_audit_event, detach_system_debug_sessions
 
 _log = logging.getLogger(__name__)
 
@@ -136,8 +136,8 @@ async def repair_stalled_crashing_systems(conn: AsyncConnection) -> int:
 async def _detach_sessions_reconciler(conn: AsyncConnection, system: System) -> None:
     """Drive every non-terminal DebugSession of ``system`` to detached (reconciler principal).
 
-    Reuses ``detach_system_debug_sessions``'s transition SQL; audits under the system principal
-    (the reconciler has no request context) rather than under a job.
+    Reuses the shared DebugSession detach transition SQL; audits under the system principal
+    because the reconciler has no request context.
     """
     for session_id, old_state in await detach_system_debug_sessions(conn, system):
         await audit.record_system(
