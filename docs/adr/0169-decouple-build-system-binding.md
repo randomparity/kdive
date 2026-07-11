@@ -16,7 +16,7 @@
   System-independent; the build's last System tie is removed here),
   [ADR-0019](0019-tool-response-envelope.md) (the response envelope / error taxonomy / the
   self-correcting-error idiom).
-- **Spec:** [`../superpowers/specs/2026-06-18-decouple-build-system-binding.md`](../superpowers/specs/2026-06-18-decouple-build-system-binding.md)
+- **Spec:** [`../superpowers/specs/2026-06-18-decouple-build-system-binding.md`](../archive/superpowers/specs/2026-06-18-decouple-build-system-binding.md)
 - **Issue:** [#554](https://github.com/randomparity/kdive/issues/554)
 
 ## Context

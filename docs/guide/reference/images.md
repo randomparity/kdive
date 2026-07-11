@@ -88,18 +88,23 @@ image, or one whose ``/boot`` lacked a single kernel/config) returns a
 
 `implemented` · `read-only`
 
-List published image catalog entries.
+List visible image catalog entries across publish states.
 
 Each row carries the build-fact ``data.capabilities``, a compact verified ``data.os``
 identity, and ``data.default_kernel_version`` (the kernel the image ships and boots by
 default, ``""`` when unknown) so an agent can compare images on merit — distro, version,
-default kernel — in one call. Keyset-paginated: when ``data.truncated`` is true, pass
-``data.next_cursor`` back as ``cursor`` for the next page.
+default kernel — in one call. The publish state appears as the item envelope ``status`` and
+as ``data.state``. Keyset-paginated: when ``data.truncated`` is true, pass
+``data.next_cursor`` back as ``request.cursor`` for the next page.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
-| `limit` | integer | no | Maximum rows returned (capped at 200). |
+| `request` | object (nullable) | no | Image list pagination request; omit for the first page. |
+
+`request` fields:
+
+- `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
+- `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
 
 ## `images.prune_expired`
 

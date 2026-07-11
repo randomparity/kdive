@@ -109,17 +109,14 @@ class OidcIssuer:
 
     @property
     def authorize_endpoint(self) -> str:
-        """The OAuth authorization endpoint (drives the login form)."""
         return f"{self.base_url}/authorize"
 
     @property
     def token_endpoint(self) -> str:
-        """The OAuth token endpoint (exchanges the code for an access token)."""
         return f"{self.base_url}/token"
 
     @property
     def jwks_uri(self) -> str:
-        """The JWKS endpoint the verifier reads to validate signatures."""
         return f"{self.base_url}/jwks"
 
 

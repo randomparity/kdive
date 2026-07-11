@@ -10,7 +10,7 @@
   precedent this generalizes), [ADR-0006](0006-oidc-rbac-attribution.md) /
   [ADR-0020](0020-rbac-audit-gate-implementation.md) (project-scoped RBAC and `require_role`).
 - **Issue:** [#862](https://github.com/randomparity/kdive/issues/862).
-- **Spec:** [`../superpowers/specs/2026-06-26-role-filter-success-next-actions-862.md`](../superpowers/specs/2026-06-26-role-filter-success-next-actions-862.md).
+- **Spec:** [`../superpowers/specs/2026-06-26-role-filter-success-next-actions-862.md`](../archive/superpowers/specs/2026-06-26-role-filter-success-next-actions-862.md).
 
 ## Context
 

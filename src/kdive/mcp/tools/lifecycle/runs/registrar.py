@@ -13,7 +13,7 @@ from kdive.domain.external_provenance import PROVENANCE_FIELD_MAX_LEN
 from kdive.domain.labels import LABEL_MAX_LEN
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import ToolPayload
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT
@@ -58,7 +58,7 @@ class _RunsCreatePayload(ToolPayload):
             "runs.complete_build (where you may also record the optional source_label/source_ref "
             "provenance of the tree you built from - an unverified client claim, surfaced in "
             "runs.get data.build_provenance). Extra kernel cmdline args (e.g. 'dhash_entries=1') "
-            "are not set here: pass the cmdline parameter to runs.complete_build. See "
+            "are not set here: pass the request.cmdline field to runs.complete_build. See "
             "resource://kdive/docs/operating/external-build-upload.md for shaping an upload."
         )
     )
@@ -150,6 +150,47 @@ class _RunsListPayload(ToolPayload):
         )
 
 
+class _RunsCompleteBuildPayload(ToolPayload):
+    """Public payload for ``runs.complete_build`` operation fields."""
+
+    cmdline: str | None = Field(
+        default=None,
+        description=(
+            "Kernel debug args appended to the platform-required boot args "
+            "(e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot "
+            "via runs.install/runs.boot."
+        ),
+    )
+    build_id: str | None = Field(
+        default=None,
+        description=(
+            "GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff a vmlinux was "
+            "uploaded. Case-insensitive."
+        ),
+    )
+    source_label: str | None = Field(
+        default=None,
+        description=(
+            "Optional unverified provenance: a freeform handle for the local source tree that "
+            "produced these uploaded artifacts (e.g. 'my-fix worktree'). Recorded as a client "
+            "claim in runs.get data.build_provenance with client_attested=true; kdive does not "
+            "clone, resolve, or verify it. "
+            f"1..{PROVENANCE_FIELD_MAX_LEN} printable characters; bound on the first completion. "
+            "Omit if unknown."
+        ),
+    )
+    source_ref: str | None = Field(
+        default=None,
+        description=(
+            "Optional unverified provenance: the ref/commit you claim produced these artifacts "
+            "(e.g. a git SHA or 'v6.9-rc1+patch'). Recorded as a client claim in runs.get "
+            "data.build_provenance with client_attested=true; treated as an opaque label, never "
+            f"fetched. 1..{PROVENANCE_FIELD_MAX_LEN} printable characters; bound on the first "
+            "completion. Omit if unknown."
+        ),
+    )
+
+
 def register(
     app: FastMCP,
     pool: AsyncConnectionPool,
@@ -194,11 +235,12 @@ def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: Provid
         """Return one run; `succeeded` means build done. `data.steps` has install/boot status.
 
         `data.required_cmdline` is the platform-required boot args; append extra kernel debug
-        args (e.g. `dhash_entries=1`) with the `cmdline` parameter on `runs.complete_build`.
+        args (e.g. `dhash_entries=1`) with the `request.cmdline` field on
+        `runs.complete_build`.
 
         Console evidence: `refs.console` is the boot-window console snapshot and
-        `data.console_access` names how to read it (`artifacts.get` windowed/paged, or jumped to
-        a literal match with its `find` parameter) — both always present on a booted Run.
+        `data.console_access` names how to read it (`artifacts.get` windowed/paged, or
+        `artifacts.find` for literal search) — both always present on a booted Run.
         `data.console_artifacts` is the Run-scoped console manifest and is **opt-in**: it appears
         only when you pass `include_console_artifacts=true`. When requested it is an ordered,
         newest-first list of `{artifact_id, object_key, created_at}` for every console artifact
@@ -263,7 +305,7 @@ def _register_runs_create(
                 description=(
                     "Run creation request. After runs.create, call artifacts.expected_uploads and "
                     "artifacts.create_run_upload, then runs.complete_build. Extra kernel cmdline "
-                    "args are passed later as `cmdline` on runs.complete_build."
+                    "args are passed later as `request.cmdline` on runs.complete_build."
                 )
             ),
         ],
@@ -334,44 +376,13 @@ def _register_runs_complete_build(
     )
     async def runs_complete_build(
         run_id: Annotated[str, Field(description="The external-build Run to finalize.")],
-        cmdline: Annotated[
-            str | None,
-            Field(
-                description="Kernel debug args appended to the platform-required boot args "
-                "(e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot "
-                "via runs.install/runs.boot."
-            ),
-        ] = None,
-        build_id: Annotated[
-            str | None,
-            Field(
-                description="GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff "
-                "a vmlinux was uploaded. Case-insensitive."
-            ),
-        ] = None,
-        source_label: Annotated[
-            str | None,
-            Field(
-                description="Optional unverified provenance: a freeform handle for the local "
-                "source tree that produced these uploaded artifacts (e.g. 'my-fix worktree'). "
-                "Recorded as a client claim in runs.get data.build_provenance with "
-                f"client_attested=true; kdive does not clone, resolve, or verify it. "
-                f"1..{PROVENANCE_FIELD_MAX_LEN} printable characters; bound on the first "
-                "completion. Omit if unknown."
-            ),
-        ] = None,
-        source_ref: Annotated[
-            str | None,
-            Field(
-                description="Optional unverified provenance: the ref/commit you claim produced "
-                "these artifacts (e.g. a git SHA or 'v6.9-rc1+patch'). Recorded as a client claim "
-                "in runs.get data.build_provenance with client_attested=true; treated as an opaque "
-                f"label, never fetched. 1..{PROVENANCE_FIELD_MAX_LEN} printable characters; bound "
-                "on the first completion. Omit if unknown."
-            ),
+        request: Annotated[
+            _RunsCompleteBuildPayload | None,
+            Field(description="Optional build finalization fields: cmdline, build_id, and source."),
         ] = None,
     ) -> ToolResponse:
         """Complete an externally built run."""
+        payload = request or _RunsCompleteBuildPayload()
         ctx = current_context()
         return await with_runtime_for_run_target_kind(
             pool,
@@ -382,10 +393,10 @@ def _register_runs_complete_build(
                 pool,
                 ctx,
                 run_id,
-                build_id=build_id,
-                cmdline=cmdline,
-                source_label=source_label,
-                source_ref=source_ref,
+                build_id=payload.build_id,
+                cmdline=payload.cmdline,
+                source_label=payload.source_label,
+                source_ref=payload.source_ref,
             ),
             required_role=Role.CONTRIBUTOR,
         )

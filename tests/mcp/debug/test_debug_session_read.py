@@ -19,7 +19,6 @@ from uuid import UUID, uuid4
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, DEBUG_SESSIONS, INVESTIGATIONS, RUNS, SYSTEMS
-from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
@@ -30,14 +29,16 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.debug import sessions_read
+from kdive.mcp.tools.debug.sessions import read as sessions_read
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.mcp.tools.lifecycle.systems.view import get_system as _get_system
+from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.ports.lifecycle import (
     TransportHandleData,
     TransportHandleKind,
 )
 from kdive.security.authz.rbac import Role
+from kdive.services.debug.sessions import active_session_ids_for_run, active_session_ids_for_system
 from tests.mcp.systems_support import provider_resolver
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
@@ -226,11 +227,13 @@ def test_get_session_detached_offers_only_reread(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_get_session_malformed_id_is_config_error(migrated_url: str) -> None:
+def test_get_session_malformed_id_is_invalid_uuid(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await sessions_read.get_session(pool, _ctx(), "not-a-uuid")
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None and "session_id" in resp.detail
 
     asyncio.run(_run())
 
@@ -388,13 +391,22 @@ def test_list_sessions_cross_project_filter_yields_nothing(migrated_url: str) ->
     asyncio.run(_run())
 
 
-def test_list_sessions_bad_filter_uuid_is_config_error(migrated_url: str) -> None:
+def test_list_sessions_bad_filter_uuid_is_invalid_uuid(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await sessions_read.list_sessions(
+            bad_run = await sessions_read.list_sessions(
                 pool, _ctx(), sessions_read.SessionsListRequest(run_id="nope")
             )
-        assert resp.status == "error" and resp.error_category == "configuration_error"
+            bad_system = await sessions_read.list_sessions(
+                pool, _ctx(), sessions_read.SessionsListRequest(system_id="nope")
+            )
+        assert bad_run.status == "error" and bad_run.error_category == "configuration_error"
+        assert bad_run.data["reason"] == "invalid_uuid"
+        assert bad_run.detail is not None and "run_id" in bad_run.detail
+        assert bad_system.status == "error"
+        assert bad_system.error_category == "configuration_error"
+        assert bad_system.data["reason"] == "invalid_uuid"
+        assert bad_system.detail is not None and "system_id" in bad_system.detail
 
     asyncio.run(_run())
 
@@ -438,8 +450,8 @@ def test_recovery_flow_list_get_then_active_ids(migrated_url: str) -> None:
             got = await sessions_read.get_session(pool, _ctx(), recovered)
             assert got.status == "live"
             async with pool.connection() as conn:
-                by_run = await sessions_read.active_session_ids_for_run(conn, UUID(run_id))
-                by_system = await sessions_read.active_session_ids_for_system(conn, UUID(sys_id))
+                by_run = await active_session_ids_for_run(conn, UUID(run_id))
+                by_system = await active_session_ids_for_system(conn, UUID(sys_id))
         assert by_run == [session_id]
         assert by_system == [session_id]
 
@@ -451,8 +463,8 @@ def test_active_session_ids_exclude_detached(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             _, run_id, sys_id = await _seeded_session(pool, DebugSessionState.DETACHED)
             async with pool.connection() as conn:
-                by_run = await sessions_read.active_session_ids_for_run(conn, UUID(run_id))
-                by_system = await sessions_read.active_session_ids_for_system(conn, UUID(sys_id))
+                by_run = await active_session_ids_for_run(conn, UUID(run_id))
+                by_system = await active_session_ids_for_system(conn, UUID(sys_id))
         assert by_run == []
         assert by_system == []
 

@@ -13,8 +13,8 @@ from uuid import UUID, uuid4
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
-from kdive.db import upload_manifest
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, RUNS, SYSTEMS
 from kdive.domain.capacity.state import (
     AllocationState,

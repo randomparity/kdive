@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-09
 - **Deciders:** kdive maintainers
-- **Spec:** [`../specs/2026-07-09-runs-boot-force-reboot-1063.md`](../specs/2026-07-09-runs-boot-force-reboot-1063.md)
+- **Spec:** [`../specs/2026-07-09-runs-boot-force-reboot-1063.md`](../design/2026-07-09-runs-boot-force-reboot-1063.md)
 - **Follows:** [ADR-0299](0299-install-cmdline-iteration.md) — the ledger-driven recycle
   (`_locked_enqueue`, `delete_run_step`) this change reuses for the boot step.
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from kdive.artifacts.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
 from kdive.build_artifacts.validation import (
     EXTERNAL_BUILD_CONTRACTS,
     ArtifactContract,
@@ -28,8 +29,6 @@ from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     CREATE_RUN_UPLOAD_TOOL,
     CREATE_SYSTEM_UPLOAD_TOOL,
-    RUN_ARTIFACT_NAMES,
-    SYSTEM_ARTIFACT_NAMES,
 )
 from kdive.serialization import JsonValue
 

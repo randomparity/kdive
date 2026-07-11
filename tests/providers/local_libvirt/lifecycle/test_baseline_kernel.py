@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle.baseline_kernel import (
+from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import (
     baseline_kernel_names,
     select_kernel_and_initrd,
 )

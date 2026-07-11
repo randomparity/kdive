@@ -11,7 +11,10 @@ from __future__ import annotations
 import pytest
 
 from kdive.domain.errors import CategorizedError
-from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote, require_loopback
+from kdive.providers.shared.debug_common.gdbmi.policy.hostpolicy import (
+    allow_acl_remote,
+    require_loopback,
+)
 
 
 def test_remote_policy_accepts_non_loopback_but_loopback_policy_would_reject():

@@ -33,7 +33,7 @@ Validating the live VM lifecycle on `sha-6898353` found two onboarding defects i
 - All eight chain identifiers are registered tools (`systems.provision`, `systems.get`,
   `systems.teardown` via `mcp/tools/lifecycle/systems/registrar.py`; `resources.list`,
   `shapes.list`, `accounting.estimate`, `allocations.request`, `allocations.release` via their
-  registrars / the `mcp/app.py` description map).
+  registrars / the `mcp/assembly/app.py` description map).
 - The pairing rule `_pair_boot_method_with_provider` already ties `disk-image` ⇔ remote-libvirt
   and `direct-kernel` ⇔ local/fault, so `boot_method` is a reliable discriminator for "is this the
   build-iterating lane."

@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-25
 - **Issue:** [#817](https://github.com/randomparity/kdive/issues/817)
-- **Spec:** [`../superpowers/specs/2026-06-25-local-multidistro-rootfs-catalog-817.md`](../superpowers/specs/2026-06-25-local-multidistro-rootfs-catalog-817.md)
+- **Spec:** [`../superpowers/specs/2026-06-25-local-multidistro-rootfs-catalog-817.md`](../archive/superpowers/specs/2026-06-25-local-multidistro-rootfs-catalog-817.md)
 - **Depends on:** [ADR-0092](0092-image-rootfs-lifecycle.md) (the `RootfsBuildPlane`/`RootfsBuildSpec`
   contract this extends), [ADR-0188](0188-ansible-image-catalog.md) (the remote image catalog whose
   per-distro shape this mirrors for the local rootfs), [ADR-0244](0244-per-run-vmcore-capture.md)

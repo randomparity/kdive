@@ -92,8 +92,10 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
         async def close(self) -> None:
             events.append("close")
 
-    monkeypatch.setattr(__main__, "create_pool", lambda **kw: _FakePool())
-    monkeypatch.setattr(__main__, "_install_stop", lambda: __import__("asyncio").Event())
+    monkeypatch.setattr("kdive.processes.reconciler.create_pool", lambda **kw: _FakePool())
+    monkeypatch.setattr(
+        "kdive.processes.reconciler.install_stop", lambda: __import__("asyncio").Event()
+    )
     monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: object())
 
     async def _no_serve(*a: object, **k: object) -> None:

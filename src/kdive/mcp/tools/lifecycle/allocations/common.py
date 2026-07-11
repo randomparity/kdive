@@ -25,31 +25,36 @@ def allocation_next_actions(state: AllocationState) -> list[str]:
 
 async def queue_position(conn: AsyncConnection, alloc: Allocation) -> int:
     """Return the 1-based FIFO rank of a requested allocation for its target."""
+    params: dict[str, object] = {
+        "state": AllocationState.REQUESTED.value,
+        "created_at": alloc.created_at,
+        "id": alloc.id,
+    }
     if alloc.requested_resource_id is not None:
         query = (
-            "SELECT count(*) FROM allocations WHERE state = 'requested' "
+            "SELECT count(*) FROM allocations WHERE state = %(state)s "
             "AND requested_resource_id = %(target)s "
             "AND (created_at, id) < (%(created_at)s, %(id)s)"
         )
-        target: object = alloc.requested_resource_id
+        params["target"] = alloc.requested_resource_id
     elif alloc.requested_kind is not None:
         query = (
-            "SELECT count(*) FROM allocations WHERE state = 'requested' "
+            "SELECT count(*) FROM allocations WHERE state = %(state)s "
             "AND requested_kind = %(target)s "
             "AND (created_at, id) < (%(created_at)s, %(id)s)"
         )
-        target = alloc.requested_kind.value
+        params["target"] = alloc.requested_kind.value
     elif alloc.requested_pool is not None:
         query = (
-            "SELECT count(*) FROM allocations WHERE state = 'requested' "
+            "SELECT count(*) FROM allocations WHERE state = %(state)s "
             "AND requested_pool = %(target)s "
             "AND (created_at, id) < (%(created_at)s, %(id)s)"
         )
-        target = alloc.requested_pool
+        params["target"] = alloc.requested_pool
     else:
         return 1
     async with conn.cursor() as cur:
-        await cur.execute(query, {"target": target, "created_at": alloc.created_at, "id": alloc.id})
+        await cur.execute(query, params)
         row = await cur.fetchone()
     ahead = int(row[0]) if row is not None else 0
     return ahead + 1

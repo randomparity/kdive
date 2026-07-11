@@ -1,4 +1,4 @@
-"""Completeness guard for ``TOOL_KEYWORDS`` in ``kdive.mcp.tool_index``.
+"""Completeness guard for ``TOOL_KEYWORDS`` in ``kdive.mcp.schema.tool_index``.
 
 Every key in ``TOOL_KEYWORDS`` must be a live registered tool name so the index
 never silently accumulates stale entries (mirror of the ``CLASSIFIED_TOOLS`` guard
@@ -13,8 +13,8 @@ from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier, RSAKeyPair
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.mcp.app import build_app
-from kdive.mcp.tool_index import TOOL_KEYWORDS
+from kdive.mcp.assembly.app import build_app
+from kdive.mcp.schema.tool_index import TOOL_KEYWORDS
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.conftest import AUDIENCE, ISSUER
 
@@ -63,7 +63,7 @@ def test_instructions_cover_every_live_namespace() -> None:
     for ns in live_ns:
         assert ns in text, (
             f"Namespace {ns!r} is missing from server instructions.\n"
-            "Add it to NAMESPACE_TOC in src/kdive/mcp/tool_index.py."
+            "Add it to NAMESPACE_TOC in src/kdive/mcp/schema/tool_index.py."
         )
     assert "tools.search" in text, "instructions must mention tools.search"
     assert "tools.invoke" in text, "instructions must mention tools.invoke"
@@ -76,7 +76,7 @@ _GATEWAY_PRIMARY_CLAIM = "Only a small set of core tools are listed directly"
 
 def test_instructions_point_at_the_agent_index() -> None:
     """Both instruction variants name the agent-index doc resource as the entry point."""
-    from kdive.mcp.tool_index import build_instructions
+    from kdive.mcp.schema.tool_index import build_instructions
 
     for enabled in (False, True):
         assert "resource://kdive/docs/guide/agent-index.md" in build_instructions(enabled)
@@ -84,7 +84,7 @@ def test_instructions_point_at_the_agent_index() -> None:
 
 def test_instructions_both_modes_cover_namespaces_and_gateway_tools() -> None:
     """Every namespace and both gateway tools appear whether the gateway is on or off."""
-    from kdive.mcp.tool_index import NAMESPACE_TOC, build_instructions
+    from kdive.mcp.schema.tool_index import NAMESPACE_TOC, build_instructions
 
     for enabled in (False, True):
         text = build_instructions(enabled)
@@ -100,7 +100,7 @@ def test_instructions_gateway_off_do_not_claim_gateway_primary() -> None:
     Regression for #1034: the gateway is off by default, so every tool is listed
     directly; the old text falsely asserted the opposite.
     """
-    from kdive.mcp.tool_index import build_instructions
+    from kdive.mcp.schema.tool_index import build_instructions
 
     text = build_instructions(gateway_enabled=False)
     assert _GATEWAY_PRIMARY_CLAIM not in text, (
@@ -111,7 +111,7 @@ def test_instructions_gateway_off_do_not_claim_gateway_primary() -> None:
 
 def test_instructions_gateway_on_describe_gateway_first() -> None:
     """With the gateway on, instructions describe the gateway-first discovery pattern."""
-    from kdive.mcp.tool_index import build_instructions
+    from kdive.mcp.schema.tool_index import build_instructions
 
     assert _GATEWAY_PRIMARY_CLAIM in build_instructions(gateway_enabled=True)
 

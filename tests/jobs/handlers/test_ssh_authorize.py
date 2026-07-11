@@ -18,14 +18,14 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind, JobState
 from kdive.jobs import worker
-from kdive.jobs.handlers import ssh_authorize
-from kdive.jobs.handlers.ssh_authorize import (
+from kdive.jobs.handlers.connectivity import ssh_authorize
+from kdive.jobs.handlers.connectivity.ssh_authorize import (
     _attach_console_tail,
     _raise_on_authorize_failure,
     authorize_ssh_key_handler,
     build_authorize_argv,
 )
-from kdive.jobs.handlers.ssh_reachable import ReachResult
+from kdive.jobs.handlers.connectivity.ssh_reachable import ReachResult
 from kdive.prereqs.system_bootstrap_key import ensure_system_bootstrap_key
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -35,7 +35,7 @@ _KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 agent@host"
 
 async def _reachable(_host: str, _port: int) -> ReachResult:
     """A pre-flight probe that reports the guest sshd is reachable (the healthy path)."""
-    return ReachResult(True, "reachable")
+    return ReachResult.ok()
 
 
 def _probe_returning(result: ReachResult) -> Callable[[str, int], Awaitable[ReachResult]]:
@@ -121,10 +121,15 @@ def test_handler_unprovisioned_is_configuration_error() -> None:
 
 
 @pytest.mark.parametrize(
-    ("detail", "reason"),
-    [("unreachable", "unreachable"), ("no SSH banner", "banner_timeout")],
+    ("result", "reason", "detail"),
+    [
+        (ReachResult.tcp_unreachable(), "unreachable", "unreachable"),
+        (ReachResult.missing_banner(), "banner_timeout", "no SSH banner"),
+    ],
 )
-def test_handler_unreachable_preflight_fails_fast_terminal(detail: str, reason: str) -> None:
+def test_handler_unreachable_preflight_fails_fast_terminal(
+    result: ReachResult, reason: str, detail: str
+) -> None:
     resolver = _resolver(("127.0.0.1", 22022))
     ssh_calls: list[int] = []
 
@@ -139,7 +144,7 @@ def test_handler_unreachable_preflight_fails_fast_terminal(detail: str, reason: 
                 resolver=resolver,
                 secret_registry=SecretRegistry(),
                 ssh_exec=_ssh,
-                probe=_probe_returning(ReachResult(False, detail)),
+                probe=_probe_returning(result),
             )
         )
     exc = excinfo.value
@@ -166,7 +171,7 @@ def test_handler_preflight_reason_survives_failure_context() -> None:
                 resolver=resolver,
                 secret_registry=SecretRegistry(),
                 ssh_exec=lambda _argv, _key: None,
-                probe=_probe_returning(ReachResult(False, "no SSH banner")),
+                probe=_probe_returning(ReachResult.missing_banner()),
             )
         )
     context = worker._failure_context(excinfo.value, SecretRegistry())
@@ -210,7 +215,7 @@ def test_handler_authorizes_via_per_system_key_and_cleans_up_temp_key(
             await pool.open()
             async with pool.connection() as conn:
                 system_id = await _seed_system(conn)
-                await ensure_system_bootstrap_key(conn, system_id)
+                await ensure_system_bootstrap_key(conn, system_id, secret_registry=SecretRegistry())
                 job = _job_for(system_id)
                 resolver = _resolver(("127.0.0.1", 22022))
 
@@ -254,7 +259,7 @@ def test_handler_resolves_endpoint_by_domain_name(migrated_url: str) -> None:
             await pool.open()
             async with pool.connection() as conn:
                 system_id = await _seed_system(conn)
-                await ensure_system_bootstrap_key(conn, system_id)
+                await ensure_system_bootstrap_key(conn, system_id, secret_registry=SecretRegistry())
                 job = _job_for(system_id)
                 resolver = _resolver(("127.0.0.1", 22022))
                 connector = resolver.binding_for_system.return_value.runtime.connector
@@ -283,7 +288,7 @@ def test_handler_ssh_failure_propagates_transport_failure(migrated_url: str) -> 
             await pool.open()
             async with pool.connection() as conn:
                 system_id = await _seed_system(conn)
-                await ensure_system_bootstrap_key(conn, system_id)
+                await ensure_system_bootstrap_key(conn, system_id, secret_registry=SecretRegistry())
                 job = _job_for(system_id)
                 resolver = _resolver(("127.0.0.1", 22022))
                 with pytest.raises(CategorizedError) as excinfo:
@@ -408,7 +413,7 @@ def test_unreachable_preflight_failure_context_carries_console_tail(
                 resolver=resolver,
                 secret_registry=SecretRegistry(),
                 ssh_exec=lambda _argv, _key: None,
-                probe=_probe_returning(ReachResult(False, "no SSH banner")),
+                probe=_probe_returning(ReachResult.missing_banner()),
             )
         )
     context = worker._failure_context(excinfo.value, SecretRegistry())

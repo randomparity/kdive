@@ -30,7 +30,7 @@ second install:
 
 Iterating within one Run thus requires recycling both layers for `install` and `boot`.
 
-See `docs/superpowers/specs/2026-07-02-install-cmdline-iteration-988.md`.
+See `docs/archive/superpowers/specs/2026-07-02-install-cmdline-iteration-988.md`.
 
 ## Decision
 

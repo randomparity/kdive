@@ -24,7 +24,7 @@ Two capabilities are missing and separable: (1) placing the key **into** the rem
 guest, and (2) a **reachable SSH endpoint** so the worker (for `authorize_ssh_key`) and
 the agent can SSH in. The only pre-SSH channel to a remote guest is the qemu-guest-agent,
 which remote already speaks (drgn-live, build, kdump). This ADR delivers full SSH parity.
-See `docs/superpowers/specs/2026-07-01-remote-ssh-key-injection-design.md`.
+See `docs/archive/superpowers/specs/2026-07-01-remote-ssh-key-injection-design.md`.
 
 ## Decision
 

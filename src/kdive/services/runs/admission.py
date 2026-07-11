@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import NoReturn, cast
+from typing import cast
 from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection
@@ -20,17 +20,11 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.labels import validate_label
 from kdive.domain.lifecycle.records import (
-    Allocation,
     ExpectedBootFailure,
     Investigation,
     Run,
-    System,
 )
-from kdive.domain.lifecycle.system_reuse import (
-    ReuseRequirement,
-    read_system_sizing,
-    snapshot_satisfies,
-)
+from kdive.domain.lifecycle.system_reuse import ReuseRequirement
 from kdive.domain.profile_documents import SerializedExpectedBootFailure
 from kdive.log import bind_context
 from kdive.profiles.build import BuildProfile, dump_build_profile
@@ -39,12 +33,22 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.serialization import JsonValue
+from kdive.services.idempotency.envelope import StoredResult
+from kdive.services.runs.host_admission import (
+    RunHostTargets,
+    check_host_preconditions,
+    check_reuse_assertion,
+    config_failure,
+    parse_uuid,
+    raise_config_error,
+    raise_from_categorized_error,
+    raise_stale_target,
+    resource_kind_for_system,
+)
 from kdive.services.runs.states import (
     ALLOC_HOSTABLE,
     INVESTIGATION_OPEN_FOR_RUN,
-    RUN_HOSTABLE,
-    RUN_NON_TERMINAL,
-    SYSTEM_GONE,
 )
 
 
@@ -110,21 +114,6 @@ class RunCreateRequest:
 TARGET_KIND_VOCAB_REASONS = frozenset({"target_kind_required", "unknown_target_kind"})
 
 
-class RunCreateError(CategorizedError):
-    """Transport-neutral runs.create failure with the response object id preserved."""
-
-    def __init__(
-        self,
-        object_id: str,
-        message: str,
-        *,
-        category: ErrorCategory,
-        details: dict[str, object] | None = None,
-    ) -> None:
-        super().__init__(message, category=category, details=details)
-        self.object_id = object_id
-
-
 @dataclass(frozen=True, slots=True)
 class RunCreateResult:
     """Transport-neutral successful runs.create result."""
@@ -139,6 +128,45 @@ class RunCreateResult:
 
 
 type RunCreateRecorder = Callable[[AsyncConnection, RunCreateResult], Awaitable[None]]
+
+
+def stored_run_create_result(result: RunCreateResult) -> StoredResult:
+    """Serialize a successful Run creation result for idempotent replay."""
+    document: dict[str, JsonValue] = {
+        "type": "run_create",
+        "run_id": str(result.run_id),
+        "project": result.project,
+        "investigation_id": str(result.investigation_id),
+        "target_kind": result.target_kind.value,
+        "system_id": str(result.system_id) if result.system_id is not None else None,
+        "expected_boot_failure_kind": result.expected_boot_failure_kind,
+        "label": result.label,
+    }
+    return StoredResult(document=document)
+
+
+def run_create_result_from_stored(stored: StoredResult) -> RunCreateResult:
+    """Deserialize a stored successful Run creation result."""
+    if stored.document.get("type") != "run_create":
+        raise CategorizedError(
+            "stored run creation result is invalid",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"reason": "invalid_idempotency_result"},
+        )
+    system_id = stored.document["system_id"]
+    return RunCreateResult(
+        run_id=UUID(str(stored.document["run_id"])),
+        project=str(stored.document["project"]),
+        investigation_id=UUID(str(stored.document["investigation_id"])),
+        target_kind=ResourceKind(str(stored.document["target_kind"])),
+        system_id=UUID(str(system_id)) if isinstance(system_id, str) else None,
+        expected_boot_failure_kind=_optional_str(stored.document["expected_boot_failure_kind"]),
+        label=_optional_str(stored.document["label"]),
+    )
+
+
+def _optional_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 async def create_run(
@@ -166,17 +194,17 @@ async def create_run(
     try:
         label = validate_label(request.label)
     except CategorizedError as exc:
-        _raise_from_error(object_id, exc)
-    investigation_id = _parse_uuid(request.investigation_id)
+        raise_from_categorized_error(object_id, exc)
+    investigation_id = parse_uuid(request.investigation_id)
     try:
         parsed_build_profile = BuildProfile.parse(request.build_profile)
     except CategorizedError as exc:
-        _raise_from_error(object_id, exc)
+        raise_from_categorized_error(object_id, exc)
     parsed_expected = _parse_expected_boot_failure(object_id, request.expected_boot_failure)
     try:
         requirement = request.domain_reuse_requirement()
     except CategorizedError as exc:
-        _raise_from_error(object_id, exc)
+        raise_from_categorized_error(object_id, exc)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             if request.system_id is None:
@@ -192,7 +220,7 @@ async def create_run(
                     recorder=recorder,
                     label=label,
                 )
-            system_id = _parse_uuid(request.system_id)
+            system_id = parse_uuid(request.system_id)
             targets, project = await _resolve_targets(conn, ctx, investigation_id, system_id)
             return await _create_locked(
                 conn,
@@ -208,65 +236,9 @@ async def create_run(
             )
 
 
-def _parse_uuid(value: str) -> UUID:
-    try:
-        return UUID(value)
-    except ValueError:
-        _raise_config(value)
-
-
-def _raise_from_error(object_id: str, exc: CategorizedError) -> NoReturn:
-    raise _run_create_failure(object_id, exc) from exc
-
-
-def _raise_config(
-    object_id: str,
-    *,
-    detail: str = "invalid run creation request",
-    data: dict[str, object] | None = None,
-) -> NoReturn:
-    raise _config_failure(object_id, detail=detail, data=data)
-
-
-def _raise_stale(object_id: str, *, current_status: str) -> NoReturn:
-    raise _stale_failure(object_id, current_status=current_status)
-
-
-def _config_failure(
-    object_id: str,
-    *,
-    detail: str = "invalid run creation request",
-    data: dict[str, object] | None = None,
-) -> RunCreateError:
-    return RunCreateError(
-        object_id,
-        detail,
-        category=ErrorCategory.CONFIGURATION_ERROR,
-        details=data,
-    )
-
-
-def _stale_failure(object_id: str, *, current_status: str) -> RunCreateError:
-    return RunCreateError(
-        object_id,
-        "stale run creation target",
-        category=ErrorCategory.STALE_HANDLE,
-        details={"current_status": current_status},
-    )
-
-
-def _run_create_failure(object_id: str, exc: CategorizedError) -> RunCreateError:
-    return RunCreateError(
-        object_id,
-        str(exc),
-        category=exc.category,
-        details=dict(exc.details),
-    )
-
-
 async def _resolve_targets(
     conn: AsyncConnection, ctx: RequestContext, investigation_id: UUID, system_id: UUID
-) -> tuple[_CreateTargets, str]:
+) -> tuple[RunHostTargets, str]:
     """Pre-lock fetch + fast-fail checks; resolves the ALLOCATION lock key before locking.
 
     The allocation id must be known before the first lock (the global order acquires
@@ -275,18 +247,18 @@ async def _resolve_targets(
     """
     inv = await INVESTIGATIONS.get(conn, investigation_id)
     if inv is None or inv.project not in ctx.projects:
-        _raise_config(str(investigation_id))
+        raise_config_error(str(investigation_id))
     require_role(ctx, inv.project, Role.CONTRIBUTOR)
     system = await SYSTEMS.get(conn, system_id)
     if system is None or system.project not in ctx.projects:
-        _raise_config(str(system_id))
+        raise_config_error(str(system_id))
     if system.project != inv.project:
-        _raise_config(str(system_id))
+        raise_config_error(str(system_id))
     alloc = await ALLOCATIONS.get(conn, system.allocation_id)
     if alloc is None or alloc.state not in ALLOC_HOSTABLE:
         current = alloc.state.value if alloc is not None else "missing"
-        _raise_stale(str(system_id), current_status=current)
-    return _CreateTargets(
+        raise_stale_target(str(system_id), current_status=current)
+    return RunHostTargets(
         investigation_id=investigation_id, system_id=system_id, allocation_id=alloc.id
     ), inv.project
 
@@ -297,26 +269,15 @@ def _parse_expected_boot_failure(
     if value is None:
         return None
     if not isinstance(value, dict):
-        _raise_config(object_id, data={"reason": "bad_expected_boot_failure"})
+        raise_config_error(object_id, data={"reason": "bad_expected_boot_failure"})
     try:
         parsed = ExpectedBootFailure.model_validate(value)
     except ValidationError:
-        _raise_config(object_id, data={"reason": "bad_expected_boot_failure"})
+        raise_config_error(object_id, data={"reason": "bad_expected_boot_failure"})
     return cast(
         SerializedExpectedBootFailure,
         parsed.model_dump(mode="json", exclude_none=True),
     )
-
-
-class _CreateTargets:
-    """The three locked object ids for a ``runs.create``, carried into the locked section."""
-
-    __slots__ = ("allocation_id", "investigation_id", "system_id")
-
-    def __init__(self, *, investigation_id: UUID, system_id: UUID, allocation_id: UUID) -> None:
-        self.investigation_id = investigation_id
-        self.system_id = system_id
-        self.allocation_id = allocation_id
 
 
 async def _investigation_for_update(conn: AsyncConnection, uid: UUID) -> Investigation | None:
@@ -326,120 +287,10 @@ async def _investigation_for_update(conn: AsyncConnection, uid: UUID) -> Investi
     return Investigation.model_validate(row) if row else None
 
 
-async def _resource_kind_for_system(conn: AsyncConnection, system_id: UUID) -> ResourceKind:
-    """Return the resource kind backing a System (ADR-0169 bound-path target_kind derivation)."""
-    async with conn.cursor() as cur:
-        await cur.execute(
-            "SELECT r.kind FROM systems s "
-            "JOIN allocations a ON a.id = s.allocation_id "
-            "JOIN resources r ON r.id = a.resource_id "
-            "WHERE s.id = %s",
-            (system_id,),
-        )
-        row = await cur.fetchone()
-    if row is None:  # Invariant: the System was validated live under its lock before this call.
-        raise RuntimeError(f"resource kind lookup found no row for system {system_id}")
-    return ResourceKind(row[0])
-
-
-async def _count_non_terminal_runs(conn: AsyncConnection, system_id: UUID) -> int:
-    async with conn.cursor() as cur:
-        await cur.execute(
-            "SELECT count(*) FROM runs WHERE system_id = %s AND state = ANY(%s)",
-            (system_id, [s.value for s in RUN_NON_TERMINAL]),
-        )
-        row = await cur.fetchone()
-    if row is None:  # Invariant: count(*) always yields a row.
-        raise RuntimeError("count(*) returned no row")
-    return int(row[0])
-
-
-def _system_block_error(system: System | None, system_id: UUID) -> RunCreateError | None:
-    """Re-validate the System under the lock; return an error or ``None`` if ok."""
-    if system is None:
-        return _config_failure(str(system_id))
-    if system.state in SYSTEM_GONE:
-        return _stale_failure(str(system_id), current_status=system.state.value)
-    if system.state not in RUN_HOSTABLE:
-        return _config_failure(str(system_id), data={"current_status": system.state.value})
-    return None
-
-
-def _allocation_block_error(alloc: Allocation | None, system_id: UUID) -> RunCreateError | None:
-    """Re-validate the Allocation under its lock (live + lease not lapsed), or ``None``.
-
-    A terminal/expiring Allocation (non-``ACTIVE``, or ``ACTIVE`` whose ``lease_expiry`` has
-    already elapsed — the ADR-0021 orphan-reaping window) is ``stale_handle`` (ADR-0070).
-    """
-    if alloc is None:
-        return _stale_failure(str(system_id), current_status="missing")
-    if alloc.state not in ALLOC_HOSTABLE:
-        return _stale_failure(str(system_id), current_status=alloc.state.value)
-    if alloc.lease_expiry is not None and alloc.lease_expiry < datetime.now(UTC):
-        return _stale_failure(str(system_id), current_status="lease_expired")
-    return None
-
-
-async def _preconditions_block_response(
-    conn: AsyncConnection,
-    targets: _CreateTargets,
-    *,
-    project: str,
-) -> tuple[RunCreateError, None] | tuple[None, tuple[System, Allocation]]:
-    """Run the three unconditional preconditions under the held locks.
-
-    Returns ``(failure, None)`` on a violation, else ``(None, (system, alloc))`` for the
-    snapshot assertion and the insert to reuse. Order is fixed — System reachability, live
-    allocation, single project, one-Run-per-System — so a stale/conflicting System returns
-    its precondition error, never a sizing error.
-    """
-    system = await SYSTEMS.get(conn, targets.system_id)
-    blocked = _system_block_error(system, targets.system_id)
-    if blocked is not None or system is None:
-        return blocked or _config_failure(str(targets.system_id)), None
-    alloc = await ALLOCATIONS.get(conn, targets.allocation_id)
-    blocked = _allocation_block_error(alloc, targets.system_id)
-    if blocked is not None or alloc is None:
-        return blocked or _stale_failure(str(targets.system_id), current_status="missing"), None
-    if system.project != project:
-        return _config_failure(str(targets.system_id)), None
-    if await _count_non_terminal_runs(conn, targets.system_id) > 0:
-        return (
-            RunCreateError(
-                str(targets.system_id),
-                "system already has a live run",
-                category=ErrorCategory.TRANSPORT_CONFLICT,
-                details={"reason": "system_has_live_run"},
-            ),
-            None,
-        )
-    return None, (system, alloc)
-
-
-def _assertion_block_response(
-    system: System, alloc: Allocation, requirement: ReuseRequirement
-) -> RunCreateError | None:
-    """Apply the optional snapshot-≥ / pcie-contains assertion, or ``None`` if satisfied.
-
-    Checked only after the three preconditions pass (so a stale/conflicting System never
-    leaks sizing). A miss — or a malformed / ``class=`` pcie spec — is ``configuration_error``.
-    """
-    if requirement.is_empty():
-        return None
-    sizing = read_system_sizing(alloc, system)
-    try:
-        satisfied = snapshot_satisfies(sizing, alloc.pcie_claim, requirement)
-    except CategorizedError as exc:
-        return _run_create_failure(str(system.id), exc)
-    if not satisfied:
-        return _config_failure(str(system.id), data={"reason": "reuse_requirement_unmet"})
-    return None
-
-
 async def _create_locked(
     conn: AsyncConnection,
     ctx: RequestContext,
-    targets: _CreateTargets,
+    targets: RunHostTargets,
     build_profile: BuildProfile,
     expected_boot_failure: SerializedExpectedBootFailure | None,
     *,
@@ -460,21 +311,24 @@ async def _create_locked(
         advisory_xact_lock(conn, LockScope.SYSTEM, targets.system_id),
         advisory_xact_lock(conn, LockScope.INVESTIGATION, targets.investigation_id),
     ):
-        blocked, ok = await _preconditions_block_response(conn, targets, project=project)
+        blocked, ok = await check_host_preconditions(conn, targets, project=project)
         if blocked is not None or ok is None:
-            raise blocked or _config_failure(str(targets.system_id))
+            raise blocked or config_failure(str(targets.system_id))
         system, alloc = ok
-        assertion_block = _assertion_block_response(system, alloc, requirement)
+        assertion_block = check_reuse_assertion(system, alloc, requirement)
         if assertion_block is not None:
             raise assertion_block
         inv = await _investigation_for_update(conn, targets.investigation_id)
         if inv is None:
-            _raise_config(str(targets.investigation_id))
+            raise_config_error(str(targets.investigation_id))
         if inv.state not in INVESTIGATION_OPEN_FOR_RUN:
-            _raise_config(str(targets.investigation_id), data={"current_status": inv.state.value})
-        target_kind = await _resource_kind_for_system(conn, targets.system_id)
+            raise_config_error(
+                str(targets.investigation_id),
+                data={"current_status": inv.state.value},
+            )
+        target_kind = await resource_kind_for_system(conn, targets.system_id)
         if explicit_target_kind is not None and explicit_target_kind != target_kind.value:
-            raise _config_failure(
+            raise config_failure(
                 str(targets.system_id),
                 data={
                     "reason": "target_kind_mismatch",
@@ -482,14 +336,19 @@ async def _create_locked(
                     "target_kind": explicit_target_kind,
                 },
             )
-        run = await _insert_run(
+        run = await _insert_created_run(
             conn,
             ctx,
-            targets,
-            build_profile,
-            expected_boot_failure,
-            project,
+            investigation_id=targets.investigation_id,
+            system_id=targets.system_id,
+            build_profile=build_profile,
+            expected_boot_failure=expected_boot_failure,
+            project=project,
             target_kind=target_kind,
+            audit_args={
+                "investigation_id": str(targets.investigation_id),
+                "system_id": str(targets.system_id),
+            },
             label=label,
         )
         await _flip_investigation_if_open(conn, ctx, inv, targets.investigation_id, project)
@@ -499,15 +358,17 @@ async def _create_locked(
     return result
 
 
-async def _insert_run(
+async def _insert_created_run(
     conn: AsyncConnection,
     ctx: RequestContext,
-    targets: _CreateTargets,
+    *,
+    investigation_id: UUID,
+    system_id: UUID | None,
     build_profile: BuildProfile,
     expected_boot_failure: SerializedExpectedBootFailure | None,
     project: str,
-    *,
     target_kind: ResourceKind,
+    audit_args: dict[str, str],
     label: str | None = None,
 ) -> Run:
     now = datetime.now(UTC)
@@ -520,8 +381,8 @@ async def _insert_run(
             principal=ctx.principal,
             agent_session=ctx.agent_session,
             project=project,
-            investigation_id=targets.investigation_id,
-            system_id=targets.system_id,
+            investigation_id=investigation_id,
+            system_id=system_id,
             target_kind=target_kind,
             state=RunState.CREATED,
             build_profile=dump_build_profile(build_profile),
@@ -537,10 +398,7 @@ async def _insert_run(
             object_kind="runs",
             object_id=run.id,
             transition="->created",
-            args={
-                "investigation_id": str(targets.investigation_id),
-                "system_id": str(targets.system_id),
-            },
+            args=audit_args,
             project=project,
         ),
     )
@@ -601,13 +459,13 @@ def _validate_unbound_target_kind(
     would drop the list anyway (ADR-0169).
     """
     if value is None:
-        raise _config_failure(object_id, data={"reason": "target_kind_required"})
+        raise config_failure(object_id, data={"reason": "target_kind_required"})
     try:
         kind = ResourceKind(value)
     except ValueError:
         kind = None
     if kind is None or kind not in resolver.registered_kinds():
-        raise _config_failure(object_id, data={"reason": "unknown_target_kind"})
+        raise config_failure(object_id, data={"reason": "unknown_target_kind"})
     return kind
 
 
@@ -633,10 +491,10 @@ async def _create_unbound(
     object_id = request.investigation_id
     target_kind = _validate_unbound_target_kind(object_id, request.target_kind, resolver)
     if not requirement.is_empty():
-        raise _config_failure(object_id, data={"reason": "reuse_requires_system"})
+        raise config_failure(object_id, data={"reason": "reuse_requires_system"})
     inv = await INVESTIGATIONS.get(conn, investigation_id)
     if inv is None or inv.project not in ctx.projects:
-        _raise_config(object_id)
+        raise_config_error(object_id)
     require_role(ctx, inv.project, Role.CONTRIBUTOR)
     project = inv.project
     async with (
@@ -645,17 +503,22 @@ async def _create_unbound(
     ):
         locked_inv = await _investigation_for_update(conn, investigation_id)
         if locked_inv is None:
-            _raise_config(object_id)
+            raise_config_error(object_id)
         if locked_inv.state not in INVESTIGATION_OPEN_FOR_RUN:
-            _raise_config(object_id, data={"current_status": locked_inv.state.value})
-        run = await _insert_unbound_run(
+            raise_config_error(object_id, data={"current_status": locked_inv.state.value})
+        run = await _insert_created_run(
             conn,
             ctx,
-            investigation_id,
-            build_profile,
-            expected_boot_failure,
-            project,
-            target_kind,
+            investigation_id=investigation_id,
+            system_id=None,
+            build_profile=build_profile,
+            expected_boot_failure=expected_boot_failure,
+            project=project,
+            target_kind=target_kind,
+            audit_args={
+                "investigation_id": str(investigation_id),
+                "target_kind": target_kind.value,
+            },
             label=label,
         )
         await _flip_investigation_if_open(conn, ctx, locked_inv, investigation_id, project)
@@ -663,51 +526,3 @@ async def _create_unbound(
         if recorder is not None:
             await recorder(conn, result)
     return result
-
-
-async def _insert_unbound_run(
-    conn: AsyncConnection,
-    ctx: RequestContext,
-    investigation_id: UUID,
-    build_profile: BuildProfile,
-    expected_boot_failure: SerializedExpectedBootFailure | None,
-    project: str,
-    target_kind: ResourceKind,
-    *,
-    label: str | None = None,
-) -> Run:
-    now = datetime.now(UTC)
-    run = await RUNS.insert(
-        conn,
-        Run(
-            id=uuid4(),
-            created_at=now,
-            updated_at=now,
-            principal=ctx.principal,
-            agent_session=ctx.agent_session,
-            project=project,
-            investigation_id=investigation_id,
-            system_id=None,
-            target_kind=target_kind,
-            state=RunState.CREATED,
-            build_profile=dump_build_profile(build_profile),
-            expected_boot_failure=expected_boot_failure,
-            label=label,
-        ),
-    )
-    await audit.record(
-        conn,
-        ctx,
-        audit.AuditEvent(
-            tool="runs.create",
-            object_kind="runs",
-            object_id=run.id,
-            transition="->created",
-            args={
-                "investigation_id": str(investigation_id),
-                "target_kind": target_kind.value,
-            },
-            project=project,
-        ),
-    )
-    return run

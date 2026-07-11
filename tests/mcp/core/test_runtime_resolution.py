@@ -16,10 +16,10 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._runtime_resolution import (
-    _AUTHORIZED_ALLOCATION_KIND,
-    _AUTHORIZED_BOUND_RUN_KIND,
-    _AUTHORIZED_RUN_KIND,
-    _AUTHORIZED_SYSTEM_KIND,
+    _AUTHORIZED_ALLOCATION,
+    _AUTHORIZED_BOUND_RUN,
+    _AUTHORIZED_RUN_TARGET_KIND,
+    _AUTHORIZED_SYSTEM,
     RuntimeCallback,
     with_runtime_for_allocation,
     with_runtime_for_run,
@@ -51,10 +51,10 @@ _BOUND_WRAPPERS: tuple[tuple[str, Callable[..., Coroutine[Any, Any, ToolResponse
     ("run", with_runtime_for_run),
 )
 _WRAPPER_SQL: tuple[tuple[str, Callable[..., Coroutine[Any, Any, ToolResponse]], str], ...] = (
-    ("allocation", with_runtime_for_allocation, _AUTHORIZED_ALLOCATION_KIND),
-    ("system", with_runtime_for_system, _AUTHORIZED_SYSTEM_KIND),
-    ("run", with_runtime_for_run, _AUTHORIZED_BOUND_RUN_KIND),
-    ("run", with_runtime_for_run_target_kind, _AUTHORIZED_RUN_KIND),
+    ("allocation", with_runtime_for_allocation, _AUTHORIZED_ALLOCATION),
+    ("system", with_runtime_for_system, _AUTHORIZED_SYSTEM),
+    ("run", with_runtime_for_run, _AUTHORIZED_BOUND_RUN),
+    ("run", with_runtime_for_run_target_kind, _AUTHORIZED_RUN_TARGET_KIND),
 )
 
 

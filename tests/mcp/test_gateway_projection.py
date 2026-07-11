@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.mcp.tool_payloads import AllocationRequestPayload
+from kdive.mcp.schema.tool_payloads import AllocationRequestPayload
 from kdive.mcp.tools.gateway import describe_tool
 from kdive.profiles.provisioning import ProvisioningProfile
 

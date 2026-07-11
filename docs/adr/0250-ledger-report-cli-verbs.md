@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-25
 - **Issue:** [#818](https://github.com/randomparity/kdive/issues/818)
-- **Spec:** [`../superpowers/specs/2026-06-25-ledger-report-cli-verbs-818.md`](../superpowers/specs/2026-06-25-ledger-report-cli-verbs-818.md)
+- **Spec:** [`../superpowers/specs/2026-06-25-ledger-report-cli-verbs-818.md`](../archive/superpowers/specs/2026-06-25-ledger-report-cli-verbs-818.md)
 - **Extends:** [ADR-0089](0089-operator-cli-mcp-client.md) (the curated-read-verb CLI this
   adds to), [ADR-0043](0043-platform-scoped-rbac-tier.md) (the platform RBAC tier that gates
   the report tools and splits their authorization axes).

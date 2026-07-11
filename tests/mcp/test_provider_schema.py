@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.mcp.provider_schema import assert_kind_composed, project_tool_schema
-from kdive.mcp.tool_payloads import AllocationRequestPayload
+from kdive.mcp.schema.provider_schema import JsonSchema, assert_kind_composed, project_tool_schema
+from kdive.mcp.schema.tool_payloads import AllocationRequestPayload
 from kdive.profiles.provisioning import ProvisioningProfile
 
 LOCAL = ResourceKind.LOCAL_LIBVIRT
@@ -18,52 +20,56 @@ FAULT = ResourceKind.FAULT_INJECT
 #   - systems.define/provision: `$defs.ProviderSection.properties` keyed by alias; the profile
 #     schema has NO `ResourceKind` $def. So enum tests source from the allocation payload and
 #     section tests source from the profile.
-def _allocation_schema() -> dict:
-    return AllocationRequestPayload.model_json_schema()
+def _allocation_schema() -> JsonSchema:
+    return cast(JsonSchema, AllocationRequestPayload.model_json_schema())
 
 
-def _profile_schema() -> dict:
-    return ProvisioningProfile.model_json_schema()
+def _profile_schema() -> JsonSchema:
+    return cast(JsonSchema, ProvisioningProfile.model_json_schema())
+
+
+def _defs(schema: JsonSchema) -> dict[str, Any]:
+    return cast("dict[str, Any]", schema["$defs"])
 
 
 def test_resource_kind_enum_narrows_to_live_set() -> None:
     schema = _allocation_schema()
-    assert set(schema["$defs"]["ResourceKind"]["enum"]) == {
+    assert set(_defs(schema)["ResourceKind"]["enum"]) == {
         "local-libvirt",
         "fault-inject",
         "remote-libvirt",
     }
     projected = project_tool_schema(schema, frozenset({LOCAL}))
-    assert projected["$defs"]["ResourceKind"]["enum"] == ["local-libvirt"]
+    assert _defs(projected)["ResourceKind"]["enum"] == ["local-libvirt"]
 
 
 def test_profile_schema_has_no_resource_kind_def() -> None:
     # Pins the asymmetry: the section union is alias-keyed, not a ResourceKind enum.
-    assert "ResourceKind" not in _profile_schema()["$defs"]
+    assert "ResourceKind" not in _defs(_profile_schema())
 
 
 def test_provider_section_properties_narrow_to_live_aliases() -> None:
     schema = _profile_schema()
-    props = schema["$defs"]["ProviderSection"]["properties"]
+    props = _defs(schema)["ProviderSection"]["properties"]
     assert {"local-libvirt", "remote-libvirt", "fault-inject"} <= set(props)
     projected = project_tool_schema(schema, frozenset({LOCAL, REMOTE}))
-    kept = set(projected["$defs"]["ProviderSection"]["properties"])
+    kept = set(_defs(projected)["ProviderSection"]["properties"])
     assert "fault-inject" not in kept
     assert {"local-libvirt", "remote-libvirt"} <= kept
 
 
 def test_projection_does_not_mutate_the_input() -> None:
     schema = _allocation_schema()
-    before = schema["$defs"]["ResourceKind"]["enum"][:]
+    before = _defs(schema)["ResourceKind"]["enum"][:]
     project_tool_schema(schema, frozenset({LOCAL}))
-    assert schema["$defs"]["ResourceKind"]["enum"] == before
+    assert _defs(schema)["ResourceKind"]["enum"] == before
 
 
 def test_empty_set_narrows_each_surface() -> None:
     alloc = project_tool_schema(_allocation_schema(), frozenset())
-    assert alloc["$defs"]["ResourceKind"]["enum"] == []
+    assert _defs(alloc)["ResourceKind"]["enum"] == []
     profile = project_tool_schema(_profile_schema(), frozenset())
-    assert profile["$defs"]["ProviderSection"]["properties"] == {}
+    assert _defs(profile)["ProviderSection"]["properties"] == {}
 
 
 def test_schema_without_defs_is_returned_unchanged() -> None:

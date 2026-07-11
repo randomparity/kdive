@@ -11,6 +11,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.repositories import IMAGE_CATALOG
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.errors import ErrorCategory
+from kdive.images.cataloging.read_model import image_referenced_by_live_system
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -24,7 +25,6 @@ from kdive.mcp.tools.ops.images._common import (
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, Role, RoleDenied, require_role
-from kdive.services.images.retention import image_referenced_by_live_system
 
 _log = logging.getLogger(__name__)
 

@@ -36,17 +36,19 @@ class _FakeClient:
         )
 
 
-def test_build_calls_uses_flat_quota_params_and_defaults() -> None:
+def test_build_calls_uses_quota_request_payload_and_defaults() -> None:
     ns = acct.parse(["--base", "http://h/mcp"])
     calls = acct.build_calls(ns)
     names = [n for n, _ in calls]
     assert names == ["accounting.set_quota", "accounting.set_budget", "accounting.usage_project"]
     quota = dict(calls)["accounting.set_quota"]
     assert quota == {
-        "project": "demo",
-        "max_concurrent_allocations": 4,
-        "max_concurrent_systems": 4,
-        "max_pending_allocations": 0,
+        "request": {
+            "project": "demo",
+            "max_concurrent_allocations": 4,
+            "max_concurrent_systems": 4,
+            "max_pending_allocations": 0,
+        },
     }
     assert dict(calls)["accounting.set_budget"] == {"project": "demo", "limit_kcu": "1000000"}
 

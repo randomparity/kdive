@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-24
 - **Issue:** [#762](https://github.com/randomparity/kdive/issues/762) (D4, epic #764)
-- **Spec:** [`../superpowers/specs/2026-06-24-live-drgn-script-introspection-design.md`](../superpowers/specs/2026-06-24-live-drgn-script-introspection-design.md)
+- **Spec:** [`../superpowers/specs/2026-06-24-live-drgn-script-introspection-design.md`](../archive/superpowers/specs/2026-06-24-live-drgn-script-introspection-design.md)
 - **Depends on:** [ADR-0033](0033-drgn-introspection-from-vmcore.md) (the fixed-helper
   introspect surface this extends, and the deferral it discharges),
   [ADR-0218](0218-local-libvirt-session-ssh-transport.md) / [ADR-0219](0219-local-libvirt-live-drgn-introspection.md)

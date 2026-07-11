@@ -20,7 +20,7 @@ import argparse
 import os
 import re
 import shutil
-import subprocess
+import subprocess  # noqa: S404 - fixed pytest/mutmut argv, no shell  # nosec B404
 import sys
 import tempfile
 from pathlib import Path
@@ -233,7 +233,9 @@ def subprocess_env(base: dict[str, str], shim_dir: str) -> dict[str, str]:
 def _run_subprocess(
     cmd: list[str], env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=_ROOT, text=True, capture_output=True, check=False, env=env)
+    return subprocess.run(  # noqa: S603 - caller builds fixed pytest/mutmut argv  # nosec B603
+        cmd, cwd=_ROOT, text=True, capture_output=True, check=False, env=env
+    )
 
 
 def preflight_collect(test_paths: list[str], runner=_run_subprocess) -> None:

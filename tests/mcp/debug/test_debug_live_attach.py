@@ -26,7 +26,7 @@ from uuid import uuid4
 import pytest
 
 from kdive.domain.capacity.state import SystemState
-from kdive.mcp.tools.debug import sessions as debug_tools
+from kdive.mcp.tools.debug.sessions import lifecycle as debug_tools
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from kdive.domain.catalog.images import Capability, ImageCatalogEntry, ImageVisibility
-from kdive.images.capability_signals import (
+from kdive.images.cataloging.capability_signals import (
     PLANNED_SIGNALS,
     REGISTERED_SIGNALS,
     render_direct_kernel_signal,

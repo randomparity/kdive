@@ -12,6 +12,6 @@ def test_local_libvirt_supports_kdump_and_host_dump_capture() -> None:
     # for — KDUMP (overlay harvest) and HOST_DUMP (libvirt domain core dump, B4). The non-core
     # CONSOLE/GDBSTUB members are dropped.
     runtime = build_local_runtime(secret_registry=SecretRegistry())
-    assert runtime.supported_capture_methods == frozenset(
+    assert runtime.support.capture_methods == frozenset(
         {CaptureMethod.KDUMP, CaptureMethod.HOST_DUMP}
     )

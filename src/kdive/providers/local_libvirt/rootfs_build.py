@@ -1,12 +1,12 @@
 """The in-process local-libvirt rootfs build plane (M2.4/2, ADR-0092, ADR-0251).
 
 `LocalLibvirtRootfsBuildPlane` builds a kdive-ready rootfs from the declarative rootfs catalog
-(`kdive.images.rootfs_catalog`) plus a per-family customizer seam, recording **pinned-input
+(`kdive.images.rootfs.catalog`) plus a per-family customizer seam, recording **pinned-input
 provenance** into the :class:`RootfsBuildOutput`. The pipeline is:
 
 1. resolve the catalog row for ``spec.name`` (its base ``source`` + ``family``);
-2. :func:`kdive.images.base_source.acquire_base` materializes the base into a scratch qcow2 — a
-   ``virt-builder`` template or a sha256-pinned cloud image;
+2. :func:`kdive.images.rootfs.base_source.acquire_base` materializes the base into a scratch
+   qcow2 — a ``virt-builder`` template or a sha256-pinned cloud image;
 3. ``virt-customize`` applies the family's argv (``family.customize_argv``): install the package
    set, enable ``sshd``/``kdump``, stage the kdive-ready unit, etc. — the image bakes no
    authorized key (ADR-0289, #963); the per-System bootstrap key is injected at provision time;
@@ -34,8 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError
-from kdive.domain.platform import arch_traits
-from kdive.images.base_source import Downloader, _real_download, acquire_base
+from kdive.domain.platform.arch_traits import arch_traits
 from kdive.images.families import family_for
 from kdive.images.families._fedora_customize import (
     READINESS_MARKER as _READINESS_MARKER,
@@ -46,6 +45,14 @@ from kdive.images.families._fedora_customize import (
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.kdump_support import MakedumpfileVersion
 from kdive.images.planes._build_common import (
+    build_workspace,
+    digest_file,
+    publish_qcow2,
+    run_guestfs_tool,
+    validate_image_name,
+)
+from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildProvenance, RootfsBuildSpec
+from kdive.images.planes.provenance_probes import (
     DEFAULT_BOOT_ENTRIES_PROBE,
     DEFAULT_KERNEL_CONFIG_PROBE,
     DEFAULT_MAKEDUMPFILE_PROBE,
@@ -56,20 +63,15 @@ from kdive.images.planes._build_common import (
     MakedumpfileProbeSeam,
     OsReleaseProbeSeam,
     VersionInspectSeam,
-    build_workspace,
-    digest_file,
-    publish_qcow2,
-    run_guestfs_tool,
-    validate_image_name,
 )
-from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
-from kdive.images.rootfs_catalog import (
+from kdive.images.rootfs.base_source import Downloader, _real_download, acquire_base
+from kdive.images.rootfs.catalog import (
     CloudImageSource,
     RootfsCatalogEntry,
     RootfsSource,
     resolve_rootfs_entry,
 )
-from kdive.providers.local_libvirt.lifecycle.baseline_kernel import baseline_kernel_names
+from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import baseline_kernel_names
 from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
 
 _log = logging.getLogger(__name__)
@@ -199,12 +201,10 @@ class RootfsBuildTools:
 
 
 def _resolve_entry(spec: RootfsBuildSpec) -> RootfsCatalogEntry:
-    """Resolve the catalog row for ``spec.name``; uncataloged builds are rejected."""
     return resolve_rootfs_entry(spec.name)
 
 
 def _source_digest(source: RootfsSource) -> str:
-    """Render the provenance ``source_image_digest`` for a resolved base source."""
     if isinstance(source, CloudImageSource):
         return f"cloud-image:{source.url}@sha256:{source.sha256}"
     return f"virt-builder:{source.template}"
@@ -271,17 +271,19 @@ class LocalLibvirtRootfsBuildPlane:
             qcow2_path=qcow2,
             digest=digest,
             kernel_config=boot_facts.kernel_config,
-            provenance=_provenance(
+            provenance=RootfsBuildProvenance.local_libvirt(
                 spec,
-                entry,
-                family,
-                size=self._size,
+                source_image_digest=_source_digest(entry.source),
+                image_size=self._size,
+                readiness_marker=_READINESS_MARKER,
+                layout="whole-disk-ext4-qcow2",
+                guest_mac=family.guest_mac,
                 package_versions=package_versions,
                 makedumpfile_version=makedumpfile_version,
                 boot_kernel_count=boot_facts.boot_kernel_count,
                 default_kernel_version=boot_facts.default_kernel_version,
                 os_release=self._capture_os_release(scratch),
-            ),
+            ).to_dict(),
         )
 
     def _inspect_installed(self, scratch: Path) -> dict[str, str]:
@@ -447,67 +449,3 @@ class _BootFacts:
     boot_kernel_count: int | None
     default_kernel_version: str | None
     kernel_config: bytes | None
-
-
-def _provenance(
-    spec: RootfsBuildSpec,
-    entry: RootfsCatalogEntry,
-    family: FamilyCustomizer,
-    *,
-    size: str,
-    package_versions: dict[str, str],
-    makedumpfile_version: str | None,
-    boot_kernel_count: int | None,
-    default_kernel_version: str | None,
-    os_release: dict[str, str] | None,
-) -> dict[str, object]:
-    """Record the pinned inputs and build args that produced the image (falsifiable contract).
-
-    ``source_image_digest`` names the resolved catalog base source: ``virt-builder:<template>`` or
-    ``cloud-image:<url>@sha256:<digest>`` (the latter a verified pin). The image's verifiable
-    identity is the output qcow2 content digest
-    (:func:`kdive.images.planes._build_common.digest_file`), per ADR-0092. ``guest_mac`` is the
-    family's mandatory-access-control posture (``selinux-permissive`` for rhel, ``apparmor`` for
-    debian), so the record stays falsifiable across families (#824). ``package_versions`` (the
-    installed version of each requested package) is added only when capture succeeded — an empty
-    map is omitted so a degraded build's row is byte-identical to a pre-feature one (ADR-0252).
-    ``makedumpfile_version`` (the installed makedumpfile binary's version) is the per-image operand
-    of the computed kdump-capability predicate; added only when captured, omitted otherwise so a
-    degraded build's row stays byte-identical to a pre-feature one (ADR-0253).
-    ``boot_kernel_count`` (the non-rescue ``vmlinuz-*`` count in ``/boot``) is the operand of the
-    computed ``direct_kernel`` provisionability signal; added when the count is known — including
-    ``0`` — and omitted only when the probe could not produce a listing (``None``), so a degraded
-    build's row stays byte-identical to a pre-feature one (ADR-0295).
-    ``os_release`` (the built image's ``ID``/``VERSION_ID``/``PRETTY_NAME`` from
-    ``/etc/os-release``) is the verified OS identity surfaced by ``images.list``/``describe``; added
-    only when captured, omitted otherwise so a degraded build's row stays byte-identical to a
-    pre-feature one (ADR-0311).
-    ``default_kernel_version`` (the lone non-rescue ``vmlinuz-<ver>`` version in ``/boot``) is the
-    image's default kernel surfaced by ``images.list``/``describe`` for informed agent selection;
-    added only when a single baseline kernel is present, omitted when zero/many (ambiguous) so a
-    degraded build's row stays byte-identical to a pre-feature one (ADR-0317).
-    """
-    record: dict[str, object] = {
-        "plane": "local-libvirt",
-        "distro": spec.distro,
-        "releasever": spec.releasever,
-        "packages": list(spec.packages),
-        "source_image_digest": _source_digest(entry.source),
-        "capabilities": list(spec.capabilities),
-        "arch": spec.arch,
-        "image_size": size,
-        "readiness_marker": _READINESS_MARKER,
-        "layout": "whole-disk-ext4-qcow2",
-        "guest_mac": family.guest_mac,
-    }
-    if package_versions:
-        record["package_versions"] = package_versions
-    if makedumpfile_version:
-        record["makedumpfile_version"] = makedumpfile_version
-    if boot_kernel_count is not None:
-        record["boot_kernel_count"] = boot_kernel_count
-    if default_kernel_version:
-        record["default_kernel_version"] = default_kernel_version
-    if os_release:
-        record["os_release"] = os_release
-    return record

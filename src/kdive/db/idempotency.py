@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from enum import StrEnum
 from typing import NamedTuple
 from uuid import UUID
 
@@ -30,15 +29,15 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from kdive.domain.lifecycle.run_steps import (
+    RUN_STEP_RUNNING,
+    RUN_STEP_SUCCEEDED,
+    parse_persisted_run_step_state,
+)
 from kdive.serialization import JsonValue, ensure_json_value
 
 _STEP_WAIT_POLL_SEC = 0.05
 _STALE_RUNNING_INTERVAL = "30 minutes"
-
-
-class _RunStepState(StrEnum):
-    RUNNING = "running"
-    SUCCEEDED = "succeeded"
 
 
 class StepClaim(NamedTuple):
@@ -88,7 +87,7 @@ async def run_step(
             "INSERT INTO run_steps (run_id, step, state, result) "
             "VALUES (%s, %s, %s, %s) "
             "ON CONFLICT (run_id, step) DO NOTHING RETURNING result",
-            (run_id, step, _RunStepState.SUCCEEDED.value, Jsonb(result)),
+            (run_id, step, RUN_STEP_SUCCEEDED, Jsonb(result)),
         )
         inserted = await cur.fetchone()
         if inserted is not None:
@@ -115,7 +114,7 @@ async def claim_run_step(conn: AsyncConnection, run_id: UUID, step: str) -> Step
                 "DELETE FROM run_steps "
                 "WHERE run_id = %s AND step = %s AND state = %s "
                 "AND updated_at < now() - %s::interval",
-                (run_id, step, _RunStepState.RUNNING.value, _STALE_RUNNING_INTERVAL),
+                (run_id, step, RUN_STEP_RUNNING, _STALE_RUNNING_INTERVAL),
             )
             await cur.execute(
                 "SELECT state, result FROM run_steps WHERE run_id = %s AND step = %s",
@@ -127,21 +126,14 @@ async def claim_run_step(conn: AsyncConnection, run_id: UUID, step: str) -> Step
                     "INSERT INTO run_steps (run_id, step, state, result) "
                     "VALUES (%s, %s, %s, NULL) "
                     "ON CONFLICT (run_id, step) DO NOTHING RETURNING result",
-                    (run_id, step, _RunStepState.RUNNING.value),
+                    (run_id, step, RUN_STEP_RUNNING),
                 )
                 inserted = await cur.fetchone()
                 if inserted is not None:
                     return StepClaim(True, None)
                 continue
-            raw_state = existing["state"]
-            try:
-                state = _RunStepState(raw_state)
-            except ValueError:
-                raise RuntimeError(
-                    f"run_step ({run_id}, {step}) has unknown state {raw_state!r}; "
-                    f"expected one of {[s.value for s in _RunStepState]}"
-                ) from None
-            if state is _RunStepState.SUCCEEDED:
+            state = parse_persisted_run_step_state(existing["state"], run_id=run_id, step=step)
+            if state == RUN_STEP_SUCCEEDED:
                 return StepClaim(False, _step_result(existing["result"], run_id=run_id, step=step))
         await asyncio.sleep(_STEP_WAIT_POLL_SEC)
 
@@ -156,11 +148,11 @@ async def complete_run_step(
             "UPDATE run_steps SET state = %s, result = %s "
             "WHERE run_id = %s AND step = %s AND state = %s RETURNING result",
             (
-                _RunStepState.SUCCEEDED.value,
+                RUN_STEP_SUCCEEDED,
                 Jsonb(result),
                 run_id,
                 step,
-                _RunStepState.RUNNING.value,
+                RUN_STEP_RUNNING,
             ),
         )
         row = await cur.fetchone()
@@ -174,7 +166,7 @@ async def abandon_run_step(conn: AsyncConnection, run_id: UUID, step: str) -> No
     async with conn.transaction():
         await conn.execute(
             "DELETE FROM run_steps WHERE run_id = %s AND step = %s AND state = %s",
-            (run_id, step, _RunStepState.RUNNING.value),
+            (run_id, step, RUN_STEP_RUNNING),
         )
 
 

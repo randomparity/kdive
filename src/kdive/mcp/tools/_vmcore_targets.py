@@ -7,7 +7,7 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.db.artifact_queries import raw_vmcore_key
+from kdive.artifacts.read_model import raw_vmcore_key
 from kdive.db.repositories import RUNS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run

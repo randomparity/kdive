@@ -65,8 +65,12 @@ Cross-project queue depth and per-job state. Requires platform operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `limit` | integer | no | Maximum per-job rows returned (capped at 200). |
-| `states` | array<string> (nullable) | no | Filter per-job rows to these job states; omit for all. |
+| `request` | object (nullable) | no | Operator job-list filters request; omit for all jobs. |
+
+`request` fields:
+
+- `states` (`array<string> (nullable)`, optional) — Filter per-job rows to these job states; omit for all.
+- `limit` (`integer`, optional) — Maximum per-job rows returned (capped at 200).
 
 ## `ops.queue_pause`
 
@@ -85,6 +89,9 @@ Resume the worker's claim loop. Requires platform operator.
 `implemented`
 
 Run reconciler cleanup once.
+
+Returns `data.repair_counts`, keyed by every cataloged repair kind, plus the
+human-readable scalar summary fields and comma-joined `data.failures`.
 
 ## `ops.reconcile_systems`
 
@@ -123,15 +130,13 @@ Page the per-call tool-invocation trail. Requires platform auditor.
 Reconstructs an agent session's ordered tool calls — each row carries ``tool``,
 ``outcome``, ``args_digest``, and ``ts``. Returns the most recent matching rows,
 newest first, keyset-paginated: when ``data.truncated`` is ``true``, pass
-``data.next_cursor`` back as ``cursor`` for the next page. Omitting the window
+``data.next_cursor`` back as ``request.cursor`` for the next page. Omitting the window
 start bounds the read to the last 24h; that default lower bound is relative to the
 call time, so for an exhaustive read that pages near the 24h edge, pass an explicit
 window to pin both bounds.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
-| `limit` | integer | no | Maximum rows returned (capped at 200). |
 | `request` | object (nullable) | no | Trail filters (agent_session / principal / tool / window). |
 
 `request` fields:
@@ -140,3 +145,5 @@ window to pin both bounds.
 - `principal` (`string (nullable)`, optional) — Filter by acting principal.
 - `tool` (`string (nullable)`, optional) — Filter by tool name (e.g. 'runs.create').
 - `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit start to default to the last 24h.
+- `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
+- `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.

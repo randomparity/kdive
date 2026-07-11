@@ -28,6 +28,7 @@ from kdive.images.families._fedora_customize import (
 )
 from kdive.images.families.base import CustomizeContext, _mac_tag
 from kdive.images.planes._build_common import run_guestfs_tool
+from kdive.images.rootfs.kinds import RootfsImageKind
 
 # Cloud-image SELinux ships enforcing; the bare-ext4 repack drops xattrs, so a relabel-on-boot is
 # required. Set permissive so the first boot relabels (``/.autorelabel``) without denying the
@@ -65,7 +66,7 @@ class RhelFamily:
     kdump_unit = "kdump.service"
     guest_mac = "selinux-permissive"
 
-    def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
+    def packages(self, kind: RootfsImageKind, distro: str, version: str) -> tuple[str, ...]:
         """Return the dnf package set for ``kind`` on ``distro``/``version``.
 
         ``build`` returns the kernel-build toolchain (release-independent). A debug image returns
@@ -80,7 +81,9 @@ class RhelFamily:
             return _EL8_EL9_DEBUG_PACKAGES
         return (*DEFAULT_DEBUG_FS_PACKAGES, "openssh-server")
 
-    def capabilities(self, kind: str, distro: str, version: str) -> tuple[Capability, ...]:
+    def capabilities(
+        self, kind: RootfsImageKind, distro: str, version: str
+    ) -> tuple[Capability, ...]:
         """Return the tags this family bakes. EL-major-invariant, so distro/version unused."""
         del distro, version
         mac = _mac_tag(self.guest_mac)

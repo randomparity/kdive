@@ -26,9 +26,14 @@ from kdive.providers.core.discovery_registration import (
     ProviderDiscoveryRegistration,
 )
 from kdive.providers.core.runtime import (
+    ConsoleCapabilities,
     DebugCapabilities,
     ProviderRuntime,
+    ProviderSupport,
+    ResourceBindingCapabilities,
+    ResourceDetailCapabilities,
     ResourceDetailProjector,
+    RootfsCapabilities,
     StagedVolumeProbe,
 )
 from kdive.providers.core.transport_reset import TransportResetter
@@ -66,11 +71,14 @@ from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtP
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
 from kdive.providers.remote_libvirt.resource_details import project_resource_details
-from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
+from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
+from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
-from kdive.providers.shared.debug_common.debuginfo import real_module_debuginfo_resolver
-from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
-from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote
+from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
+from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
+    real_module_debuginfo_resolver,
+)
+from kdive.providers.shared.debug_common.gdbmi.policy.hostpolicy import allow_acl_remote
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
@@ -83,9 +91,9 @@ RunningSystemsFactory = Callable[[AsyncConnectionPool], RunningSystems]
 
 
 def _component_sources() -> ComponentSourceCapabilities:
-    # Remote server build merges a kdump config fragment onto the tree's defconfig and applies
-    # an optional local patch on the worker (ADR-0081/0096). No rootfs/kernel/initrd: the remote
-    # target is a disk-image base OS, not a component-provisioned guest.
+    # Remote-libvirt accepts catalog/local kernel config inputs and local patch artifacts for
+    # uploaded-artifact workflows. No rootfs/kernel/initrd component source is accepted: the
+    # target boots from an operator-staged disk-image base OS.
     accepted: dict[ComponentKind, frozenset[ComponentSourceKind]] = {
         CONFIG_COMPONENT: frozenset({"catalog", "local"}),
         PATCH_COMPONENT: frozenset({"local"}),
@@ -268,9 +276,10 @@ def build_runtime(
     installer = RemoteLibvirtInstall.from_env(
         secret_registry=secret_registry, config_factory=config_factory
     )
-    retriever = RemoteLibvirtRetrieve.from_env(
+    retriever = RemoteLibvirtRetriever.from_env(
         secret_registry=secret_registry, config_factory=config_factory
     )
+    crash_postmortem = CrashPostmortemAdapter(secret_registry=secret_registry)
     vmcore_introspector = RemoteLibvirtVmcoreIntrospect.from_env(secret_registry=secret_registry)
     live_introspector = RemoteLibvirtLiveIntrospect.from_env(
         secret_registry=secret_registry, config_factory=config_factory
@@ -290,36 +299,41 @@ def build_runtime(
             secret_registry=secret_registry, config_factory=config_factory
         ),
         retriever=retriever,
-        crash_postmortem=retriever,
+        crash_postmortem=crash_postmortem,
         vmcore_introspector=vmcore_introspector,
         live_introspector=live_introspector,
-        supported_capture_methods=frozenset(
-            {
-                CaptureMethod.KDUMP,
-                CaptureMethod.HOST_DUMP,
-                CaptureMethod.GDBSTUB,
-                CaptureMethod.CONSOLE,
-            }
+        support=ProviderSupport(
+            component_sources=_component_sources(),
+            capture_methods=frozenset(
+                {
+                    CaptureMethod.KDUMP,
+                    CaptureMethod.HOST_DUMP,
+                    CaptureMethod.GDBSTUB,
+                    CaptureMethod.CONSOLE,
+                }
+            ),
+            # ADR-0208: remote reports what it already implements — both live-debug transports
+            # (gdbstub + drgn-live, ADR-0083/0085) and both introspection modes (the wired
+            # RemoteLibvirtVmcoreIntrospect / RemoteLibvirtLiveIntrospect ports).
+            debug_transports=frozenset({"gdbstub", "drgn-live"}),
+            introspection=frozenset({"offline-vmcore", "live", "live-script"}),
         ),
-        # ADR-0208: remote reports what it already implements — both live-debug transports
-        # (gdbstub + drgn-live, ADR-0083/0085) and both introspection modes (the wired
-        # RemoteLibvirtVmcoreIntrospect / RemoteLibvirtLiveIntrospect ports).
-        supported_debug_transports=frozenset({"gdbstub", "drgn-live"}),
-        supported_introspection=frozenset({"offline-vmcore", "live", "live-script"}),
         debug=_debug_capabilities(secret_registry),
-        component_sources=_component_sources(),
-        rootfs_validator=lambda _rootfs: None,
-        rootfs_build_plane=RemoteLibvirtRootfsBuildPlane.from_env(),
-        staged_volume_probe=_staged_volume_probe(config_factory),
-        resource_detail_projector=_resource_detail_projector(config_factory),
+        rootfs=RootfsCapabilities(build_plane=RemoteLibvirtRootfsBuildPlane.from_env()),
+        resource_details=ResourceDetailCapabilities(
+            staged_volume_probe=_staged_volume_probe(config_factory),
+            projector=_resource_detail_projector(config_factory),
+        ),
         # ADR-0235: the reconciler-resident collector streams the console to S3 parts; the boot
         # worker assembles them into an immutable per-Run `console-<run>` artifact so a later boot
         # of the same System never overwrites earlier crash→fix evidence. Builds its store lazily
         # (this composition stays buildable without S3 config, ADR-0076).
-        console_snapshotter=RemoteLibvirtConsoleSnapshotter(),
+        console=ConsoleCapabilities(snapshotter=RemoteLibvirtConsoleSnapshotter()),
         # The remote base image is partitioned and boots via in-guest GRUB, which already carries
         # the correct root=UUID=… (inherited by the install helper's grubby --copy-default). The
         # platform must not inject a root device or it overrides that (ADR-0183, #587).
         platform_root_cmdline=None,
-        rebind_for_resource=_rebind_for_resource(secret_registry),
+        binding=ResourceBindingCapabilities(
+            rebind_for_resource=_rebind_for_resource(secret_registry)
+        ),
     )

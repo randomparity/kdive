@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, cast
 from uuid import uuid4
 
 from psycopg import AsyncConnection
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import FetchedArtifact
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -42,8 +45,10 @@ class _FakeConn:
 class _Store:
     def __init__(self, data: bytes = b"", exc: Exception | None = None) -> None:
         self._data, self._exc = data, exc
+        self.keys: list[str] = []
 
     def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:
+        self.keys.append(key)
         if self._exc is not None:
             raise self._exc
         return FetchedArtifact(self._data, Sensitivity.SENSITIVE, "build")
@@ -51,6 +56,16 @@ class _Store:
 
 def _conn(row: dict[str, Any] | None) -> AsyncConnection[Any]:
     return cast(AsyncConnection[Any], _FakeConn(row))
+
+
+@asynccontextmanager
+async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+    pool = AsyncConnectionPool(url, min_size=1, max_size=2, open=False)
+    await pool.open()
+    try:
+        yield pool
+    finally:
+        await pool.close()
 
 
 def test_no_row_returns_none():
@@ -62,6 +77,58 @@ def test_present_config_parses():
     conn = _conn({"object_key": "local/runs/x/effective_config"})
     got = asyncio.run(load_effective_config(conn, uuid4(), store_factory=lambda: _Store(_GOOD)))
     assert got is not None and got.is_enabled("KEXEC")
+
+
+def test_present_config_selects_run_owned_effective_config_from_schema(migrated_url: str):
+    async def _run() -> None:
+        run_id = uuid4()
+        other_run_id = uuid4()
+        expected_key = f"local/runs/{run_id}/effective_config"
+        store = _Store(_GOOD)
+        async with (
+            _pool(migrated_url) as pool,
+            pool.connection() as conn,
+            conn.cursor() as cur,
+        ):
+            await cur.execute(
+                "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+                "retention_class) VALUES "
+                "(%s, %s, %s, %s, %s, %s), "
+                "(%s, %s, %s, %s, %s, %s), "
+                "(%s, %s, %s, %s, %s, %s), "
+                "(%s, %s, %s, %s, %s, %s)",
+                (
+                    "runs",
+                    run_id,
+                    f"local/runs/{run_id}/kernel",
+                    "etag",
+                    "sensitive",
+                    "build",
+                    "runs",
+                    run_id,
+                    expected_key,
+                    "etag",
+                    "sensitive",
+                    "build",
+                    "runs",
+                    other_run_id,
+                    f"local/runs/{other_run_id}/effective_config",
+                    "etag",
+                    "sensitive",
+                    "build",
+                    "systems",
+                    run_id,
+                    f"local/systems/{run_id}/effective_config",
+                    "etag",
+                    "sensitive",
+                    "build",
+                ),
+            )
+            got = await load_effective_config(conn, run_id, store_factory=lambda: store)
+        assert got is not None and got.is_enabled("PROC_VMCORE")
+        assert store.keys == [expected_key]
+
+    asyncio.run(_run())
 
 
 def test_store_error_fails_open_to_none():

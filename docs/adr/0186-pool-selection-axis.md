@@ -11,7 +11,7 @@
   set), [ADR-0112](0112-systems-inventory-config.md) (the `systems.toml` → `resources` reconcile
   that writes `resource.pool`), [ADR-0180](0180-lifecycle-recovery-context.md) (the recovery
   context that echoes the requested selector).
-- **Spec:** [`../superpowers/specs/2026-06-19-system-pools-design.md`](../superpowers/specs/2026-06-19-system-pools-design.md)
+- **Spec:** [`../superpowers/specs/2026-06-19-system-pools-design.md`](../archive/superpowers/specs/2026-06-19-system-pools-design.md)
 
 ## Context
 

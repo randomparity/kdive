@@ -34,13 +34,13 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.sizing import AllocationSizing
-from kdive.profiles.provisioning import reconcile_profile_sizing
-from tests.integration.live_stack.conftest import require_issuer, require_stack
-from tests.integration.live_stack.harness import (
+from kdive.mcp.dev_harness import (
     LiveStackClient,
     LiveStackToolError,
     OidcIssuer,
 )
+from kdive.profiles.provisioning import reconcile_profile_sizing
+from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.spine import (
     LOCAL_ALLOCATION_DISK_GB,
     SpinePhaseError,
@@ -327,7 +327,11 @@ def test_spine_over_the_wire() -> None:
                 await await_system_state(op, "provision", system_id, "ready")
             async with phase("open-investigation"):
                 env = ok(
-                    await scalar(op, "investigations.open", project=_PROJECT, title="spine"),
+                    await scalar(
+                        op,
+                        "investigations.open",
+                        request={"project": _PROJECT, "title": "spine"},
+                    ),
                     "open-investigation",
                 )
                 investigation_id = env.object_id
@@ -451,7 +455,11 @@ def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
                 await await_system_state(op, "provision", system_id, "ready")
             async with phase("create-run"):
                 env = ok(
-                    await scalar(op, "investigations.open", project=_PROJECT, title="sweep"),
+                    await scalar(
+                        op,
+                        "investigations.open",
+                        request={"project": _PROJECT, "title": "sweep"},
+                    ),
                     "create-run",
                 )
                 investigation_id = env.object_id
@@ -540,7 +548,11 @@ def test_spine_live_script_over_the_wire() -> None:
                 await await_system_state(op, "provision", system_id, "ready")
             async with phase("open-investigation"):
                 env = ok(
-                    await scalar(op, "investigations.open", project=_PROJECT, title="live-script"),
+                    await scalar(
+                        op,
+                        "investigations.open",
+                        request={"project": _PROJECT, "title": "live-script"},
+                    ),
                     "open-investigation",
                 )
                 investigation_id = env.object_id

@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import HeadResult
-from kdive.mcp.tools.catalog import images as catalog_images
+from kdive.mcp.tools.catalog import kernel_config as kernel_config_tools
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 
@@ -103,7 +103,7 @@ def test_present_config_returns_download_uri(migrated_url: str) -> None:
                 provenance='{"default_kernel_version": "6.19.10-300.fc44.x86_64"}',
             )
             store = _FakeStore(present={config_key}, size=1234)
-            resp = await catalog_images.kernel_config(
+            resp = await kernel_config_tools.kernel_config(
                 pool, _ctx(), image_id, store_factory=lambda: store
             )
         assert resp.refs is not None
@@ -120,7 +120,7 @@ def test_no_config_key_is_unavailable(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             image_id = await _insert(pool, name="no-config", kernel_config_key=None)
             store = _FakeStore()
-            resp = await catalog_images.kernel_config(
+            resp = await kernel_config_tools.kernel_config(
                 pool, _ctx(), image_id, store_factory=lambda: store
             )
         assert resp.error_category is not None
@@ -137,7 +137,7 @@ def test_object_absent_is_unavailable(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             image_id = await _insert(pool, name="gone", kernel_config_key=config_key)
             store = _FakeStore(present=set())  # key set but object missing
-            resp = await catalog_images.kernel_config(
+            resp = await kernel_config_tools.kernel_config(
                 pool, _ctx(), image_id, store_factory=lambda: store
             )
         assert resp.error_category is not None
@@ -160,7 +160,7 @@ def test_invisible_private_is_not_found(migrated_url: str) -> None:
             )
             store = _FakeStore(present={config_key})
             # Caller has no grant on other-proj: byte-identical not_found, no config leak.
-            resp = await catalog_images.kernel_config(
+            resp = await kernel_config_tools.kernel_config(
                 pool, _ctx(), image_id, store_factory=lambda: store
             )
         assert resp.status == "error" and resp.error_category == "not_found"
@@ -172,7 +172,7 @@ def test_invisible_private_is_not_found(migrated_url: str) -> None:
 def test_malformed_id_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await catalog_images.kernel_config(
+            resp = await kernel_config_tools.kernel_config(
                 pool, _ctx(), "not-a-uuid", store_factory=lambda: _FakeStore()
             )
         assert resp.error_category is not None

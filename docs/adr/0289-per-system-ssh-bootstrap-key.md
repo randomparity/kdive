@@ -24,7 +24,7 @@ introspection (#762/#697). The #962 live proof exposed two defects:
 
 The root cause is a category error: the keypair is host-local ambient state when it is per-System
 infrastructure state. See
-`docs/superpowers/specs/2026-07-01-per-system-ssh-bootstrap-key-design.md`.
+`docs/archive/superpowers/specs/2026-07-01-per-system-ssh-bootstrap-key-design.md`.
 
 ## Decision
 

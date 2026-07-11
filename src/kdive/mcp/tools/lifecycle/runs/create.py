@@ -11,12 +11,6 @@ from pydantic import JsonValue
 
 from kdive.domain.errors import CategorizedError
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools._idempotency import (
-    record_envelope,
-    resolve_conflict,
-    resolve_envelope_replay,
-    validate_idempotency_key,
-)
 from kdive.mcp.tools.catalog.artifacts.expected_uploads import EXPECTED_UPLOADS_TOOL
 from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
     FEATURE_CONFIG_REQUIREMENTS_TOOL,
@@ -24,14 +18,22 @@ from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
 from kdive.mcp.tools.catalog.artifacts.uploads import CREATE_RUN_UPLOAD_TOOL
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
+from kdive.services.idempotency.envelope import (
+    record_result,
+    resolve_conflict,
+    resolve_replay,
+    validate_idempotency_key,
+)
 from kdive.services.runs.admission import (
     TARGET_KIND_VOCAB_REASONS,
-    RunCreateError,
     RunCreateResult,
+    run_create_result_from_stored,
+    stored_run_create_result,
 )
 from kdive.services.runs.admission import RunCreateRequest as RunCreateRequest
 from kdive.services.runs.admission import RunReuseRequirementInput as RunReuseRequirementInput
 from kdive.services.runs.admission import create_run as _create_run
+from kdive.services.runs.host_admission import RunCreateError
 
 _RUNS_CREATE_KIND = "runs.create"
 
@@ -66,7 +68,7 @@ async def _create_run_keyed(
     """Run runs.create under replay-idempotency (ADR-0193).
 
     Validates the key, resolves a replay up-front, else creates the Run while recording the
-    success envelope inside the Run-insert transaction (atomic). A key collision is resolved
+    success result inside the Run-insert transaction (atomic). A key collision is resolved
     read-after-conflict to the winner's envelope (or ``CONFLICT`` for cross-tool reuse).
     """
     try:
@@ -74,20 +76,20 @@ async def _create_run_keyed(
     except CategorizedError as exc:
         return ToolResponse.failure_from_error("idempotency_key", exc)
     async with pool.connection() as conn:
-        replay = await resolve_envelope_replay(
+        replay = await resolve_replay(
             conn, principal=ctx.principal, key=key, kind=_RUNS_CREATE_KIND
         )
     if replay is not None:
-        return replay
+        return _created_response(run_create_result_from_stored(replay))
 
     async def _record(record_conn: AsyncConnection, result: RunCreateResult) -> None:
-        await record_envelope(
+        await record_result(
             record_conn,
             principal=ctx.principal,
             key=key,
             project=result.project,
             kind=_RUNS_CREATE_KIND,
-            envelope=_created_response(result),
+            result=stored_run_create_result(result),
         )
 
     try:
@@ -97,11 +99,12 @@ async def _create_run_keyed(
     except UniqueViolation:
         async with pool.connection() as conn:
             try:
-                return await resolve_conflict(
+                winner = await resolve_conflict(
                     conn, principal=ctx.principal, key=key, kind=_RUNS_CREATE_KIND
                 )
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error("idempotency_key", exc)
+        return _created_response(run_create_result_from_stored(winner))
     return _created_response(result)
 
 

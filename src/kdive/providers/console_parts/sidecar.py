@@ -19,7 +19,9 @@ pass).
 from __future__ import annotations
 
 import base64
+import binascii
 import json
+import logging
 from typing import Protocol
 from uuid import UUID
 
@@ -30,8 +32,10 @@ from kdive.artifacts.storage import (
     artifact_key,
 )
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.console_parts.rotation import RotationState
+
+_log = logging.getLogger(__name__)
 
 _OWNER_KIND = "systems"
 _RETENTION_CLASS = "console"
@@ -77,7 +81,7 @@ def _serialize(state: RotationState) -> bytes:
 
 def _deserialize(data: bytes) -> RotationState:
     doc = json.loads(data)
-    carry = base64.b64decode(doc["carry"])
+    carry = base64.b64decode(doc["carry"], validate=True)
     return RotationState(
         plaintext_offset=int(doc["plaintext_offset"]),
         carry=carry,
@@ -88,10 +92,12 @@ def _deserialize(data: bytes) -> RotationState:
 
 
 def read_sidecar(store: _StorePort, tenant: str, system_id: UUID) -> RotationState:
-    """Read the System's rotation-state sidecar, returning ZERO on absent or corrupt state.
+    """Read the System's rotation-state sidecar.
 
-    Never raises: any missing, unreadable, or unparseable sidecar silently returns
-    :data:`ZERO` so a new rotation job starts fresh rather than crashing.
+    A missing/stale sidecar returns :data:`ZERO` so the first rotation job starts fresh.
+    A corrupt sidecar logs system/key context and also returns :data:`ZERO`; object-store
+    infrastructure failures propagate as typed :class:`CategorizedError` so the worker records
+    the store failure instead of silently rewinding rotation state.
 
     Args:
         store: Object store port exposing ``put_artifact`` and ``get_artifact``.
@@ -100,15 +106,29 @@ def read_sidecar(store: _StorePort, tenant: str, system_id: UUID) -> RotationSta
 
     Returns:
         The persisted :class:`~kdive.providers.console_parts.rotation.RotationState`,
-        or :data:`ZERO` if the sidecar is absent or unreadable.
+        or :data:`ZERO` if the sidecar is absent or corrupt.
+
+    Raises:
+        CategorizedError: The object-store read fails for any reason other than an absent
+            or stale sidecar handle.
     """
     key = _sidecar_key(tenant, system_id)
     try:
         fetched = store.get_artifact(key, None)
         return _deserialize(fetched.data)
-    except CategorizedError, KeyError, ValueError, TypeError:
-        # ValueError covers json.JSONDecodeError and binascii.Error; TypeError covers a
-        # wrong-typed field (e.g. a null where an int is expected) from a truncated write.
+    except CategorizedError as exc:
+        if exc.category is ErrorCategory.STALE_HANDLE:
+            return ZERO
+        raise
+    except binascii.Error, KeyError, ValueError, TypeError:
+        # ValueError covers json.JSONDecodeError; TypeError covers a wrong-typed field
+        # (e.g. a null where an int is expected) from a truncated write.
+        _log.warning(
+            "console rotation sidecar %s for system %s is corrupt; starting from zero",
+            key,
+            system_id,
+            exc_info=True,
+        )
         return ZERO
 
 

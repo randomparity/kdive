@@ -14,7 +14,7 @@
   [ADR-0082](0082-remote-install-in-guest-kernel.md) (remote's modules-in-guest delivery this
   converges with), [ADR-0169](0169-decouple-build-system-binding.md) (the build is decoupled
   from the System, so the trigger cannot be the System's capture method).
-- **Spec:** [`../superpowers/specs/2026-06-21-local-kdump-modules-in-guest-654.md`](../superpowers/specs/2026-06-21-local-kdump-modules-in-guest-654.md)
+- **Spec:** [`../superpowers/specs/2026-06-21-local-kdump-modules-in-guest-654.md`](../archive/superpowers/specs/2026-06-21-local-kdump-modules-in-guest-654.md)
 
 ## Context
 

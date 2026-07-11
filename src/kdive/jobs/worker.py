@@ -56,6 +56,7 @@ class WorkerConfig:
     """Timing, health, and telemetry collaborators for :class:`Worker`."""
 
     lease: timedelta = queue.DEFAULT_LEASE
+    accepted_lanes: tuple[str, ...] = queue.DEFAULT_DISPATCH_LANES
     heartbeat_interval: timedelta = timedelta(seconds=30)
     poll_interval: timedelta = timedelta(seconds=1)
     heartbeat: Heartbeat | None = None
@@ -111,6 +112,7 @@ class Worker:
         self._registry = registry
         self._worker_id = worker_id
         self._lease = config.lease
+        self._accepted_lanes = config.accepted_lanes
         self._heartbeat_interval = config.heartbeat_interval
         self._poll_interval = config.poll_interval
         self._secret_registry = secret_registry
@@ -136,9 +138,13 @@ class Worker:
         async with self._pool.connection() as conn:
             if await queue.is_queue_paused(conn):
                 return None
-            job = await queue.dequeue(conn, self._worker_id, lease=self._lease)
+            job = await queue.dequeue(
+                conn, self._worker_id, lease=self._lease, accepted_lanes=self._accepted_lanes
+            )
             if self._telemetry.enabled:
-                self._telemetry.observe_queue_depth(await queue.count_claimable(conn))
+                self._telemetry.observe_queue_depth(
+                    await queue.count_claimable(conn, accepted_lanes=self._accepted_lanes)
+                )
         if job is None:
             return None
         if self._telemetry.enabled and job.heartbeat_at is not None and job.created_at is not None:

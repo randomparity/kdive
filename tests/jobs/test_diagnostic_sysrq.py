@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 
-from kdive.jobs.handlers.diagnostic_sysrq import CaptureResult, capture_console_delta
+from kdive.jobs.handlers.control.diagnostic_sysrq import CaptureResult, capture_console_delta
 
 
 def _scripted_reader(frames: list[bytes]) -> Callable[[], Awaitable[bytes]]:

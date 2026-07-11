@@ -249,13 +249,17 @@ These packages are related but not interchangeable:
 | `kdive.artifacts` | Artifact DTOs, keys, sensitivity, and upload metadata. |
 | `kdive.store` | Object-store clients and environment-backed store assembly. |
 | `kdive.build_artifacts` | Build-output result shapes and build-id validation. |
-| `kdive.build_configs` | Catalog-backed kernel config lookup and fetch ports. |
+| `kdive.kernel_config` | Uploaded kernel-config parsing, effective-config fetch, and feature requirement gates. |
 | `kdive.components` | Typed component refs and config-requirement validation. |
 | `kdive.images` / `kdive.inventory` | Image inventory, catalog reconcile, and TOML shape. |
 | `kdive.mcp.tools.catalog.artifacts` | Agent artifact tools and upload/download authz. |
 
 Provider build semantics, provider filenames, S3 upload mechanics, and MCP response shaping stay
 outside these data-owner packages unless the package above names that responsibility.
+
+Historical build-config catalog designs live under `docs/archive/design/`. They were superseded
+by [ADR-0316](../adr/0316-remove-server-build-lane.md); `kdive.build_configs`, `buildconfig.*`,
+and the build-config catalog are not part of the live architecture.
 
 ## MCP tool surface
 
@@ -322,8 +326,8 @@ Applied across every plane.
   HMC tokens never appear in requests, state rows, or responses. The service
   resolves references from a pluggable secret backend at the worker boundary;
   only `(present, source-ref)` is persisted. When a worker resolves a reference,
-  it **registers the resolved value into the redaction registry** (the ported
-  `PROCESS_SECRET_REGISTRY.register`) for the op's lifetime, so any transcript or
+  it **registers the resolved value into the process-owned redaction registry**
+  passed through runtime composition (ADR-0327) for the op's lifetime, so any transcript or
   console output capturing the value is masked by **exact-value replacement**, not
   merely by the redactor's secret-name patterns. Output captured before
   registration completes is quarantined (object-store, sensitive) until redacted.
@@ -494,7 +498,7 @@ Milestone-based. ("Sprint" is avoided per the project doc-style guard.)
   the highest-payoff piece and depends only on the CLI. M2.2–M2.4 act on the
   service, so M2.1 may be developed in parallel (its image is still a prerequisite
   of the band gate). See
-  [the design](../superpowers/specs/2026-06-10-m2x-productionization-band-design.md).*
+  [the design](../archive/superpowers/specs/2026-06-10-m2x-productionization-band-design.md).*
 
 - **M2.1 — Deployment & packaging.** Official container image(s) for the three
   processes (one image, entrypoints matching `python -m kdive

@@ -12,12 +12,12 @@ from kdive.components.references import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import _UploadRootfs
-from kdive.providers.local_libvirt.lifecycle.materialize import (
+from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
+from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     RootfsMaterializationContext,
     RootfsUploadContext,
     materialize_rootfs_base,
 )
-from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 

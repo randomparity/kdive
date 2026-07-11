@@ -13,14 +13,15 @@ from pydantic import Field
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
-from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._platform_auth import (
+from kdive.mcp.platform_auth import (
     ALL_PROJECTS_SCOPE,
     actor_for,
     audit_platform_denial,
     held_platform_roles,
 )
+from kdive.mcp.responses import ToolResponse
+from kdive.mcp.schema.tool_payloads import ToolPayload
+from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._time_window import parse_timestamptz_window
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
@@ -40,40 +41,71 @@ _SCOPE_GRANTED_SET = "granted-set"
 _GROUP_BY_PRINCIPAL = "principal"
 
 
+class AccountingGrantedSetReportRequest(ToolPayload):
+    """Request payload for ``accounting.report_granted_set``."""
+
+    projects: Annotated[
+        list[str] | None,
+        Field(description="Named project subset for granted-set scope; omit for all members."),
+    ] = None
+    group_by: Annotated[
+        str | None,
+        Field(description="Group rows by 'principal', or omit for per-project grouping."),
+    ] = None
+    window: Annotated[
+        list[str | None] | None,
+        Field(description="[start, end] ISO-8601 timestamptz pair; omit for all time."),
+    ] = None
+
+
+class AccountingAllProjectsReportRequest(ToolPayload):
+    """Request payload for ``accounting.report_all_projects``."""
+
+    group_by: Annotated[
+        str | None,
+        Field(description="Group rows by 'principal', or omit for per-project grouping."),
+    ] = None
+    window: Annotated[
+        list[str | None] | None,
+        Field(description="[start, end] ISO-8601 timestamptz pair; omit for all time."),
+    ] = None
+
+
 async def report_granted_set(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
-    projects: list[str] | None = None,
-    group_by: str | None = None,
-    window: object = None,
+    request: AccountingGrantedSetReportRequest | None = None,
 ) -> ToolResponse:
     """Roll up caller-authorized member projects (ADR-0043 §3)."""
+    request = request or AccountingGrantedSetReportRequest()
     with bind_context(principal=ctx.principal):
         try:
-            parsed_group_by = _parse_group_by(group_by)
-            parsed_window = _parse_window(window)
+            parsed_group_by = _parse_group_by(request.group_by)
+            parsed_window = _parse_window(request.window)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(
                 _REPORT_OBJECT_ID,
                 exc,
                 suggested_next_actions=[_REPORT_GRANTED_SET_TOOL],
             )
-        return await _report_granted_set(pool, ctx, projects, parsed_group_by, parsed_window)
+        return await _report_granted_set(
+            pool, ctx, request.projects, parsed_group_by, parsed_window
+        )
 
 
 async def report_all_projects(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
-    group_by: str | None = None,
-    window: object = None,
+    request: AccountingAllProjectsReportRequest | None = None,
 ) -> ToolResponse:
     """Roll up all projects under the platform-auditor role (ADR-0043 §3)."""
+    request = request or AccountingAllProjectsReportRequest()
     with bind_context(principal=ctx.principal):
         try:
-            parsed_group_by = _parse_group_by(group_by)
-            parsed_window = _parse_window(window)
+            parsed_group_by = _parse_group_by(request.group_by)
+            parsed_window = _parse_window(request.window)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(
                 _REPORT_OBJECT_ID,
@@ -320,22 +352,16 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def accounting_report_granted_set(
-        projects: Annotated[
-            list[str] | None,
-            Field(description="Named project subset for granted-set scope; omit for all members."),
-        ] = None,
-        group_by: Annotated[
-            str | None,
-            Field(description="Group rows by 'principal', or omit for per-project grouping."),
-        ] = None,
-        window: Annotated[
-            list[str | None] | None,
-            Field(description="[start, end] ISO-8601 timestamptz pair; omit for all time."),
+        request: Annotated[
+            AccountingGrantedSetReportRequest | None,
+            Field(description="Report filters: projects, group_by, and optional time window."),
         ] = None,
     ) -> ToolResponse:
         """Return accounting usage for the caller's granted projects."""
         return await report_granted_set(
-            pool, current_context(), projects=projects, group_by=group_by, window=window
+            pool,
+            current_context(),
+            request=request or AccountingGrantedSetReportRequest(),
         )
 
     @app.tool(
@@ -344,14 +370,14 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def accounting_report_all_projects(
-        group_by: Annotated[
-            str | None,
-            Field(description="Group rows by 'principal', or omit for per-project grouping."),
-        ] = None,
-        window: Annotated[
-            list[str | None] | None,
-            Field(description="[start, end] ISO-8601 timestamptz pair; omit for all time."),
+        request: Annotated[
+            AccountingAllProjectsReportRequest | None,
+            Field(description="Report filters: group_by and optional time window."),
         ] = None,
     ) -> ToolResponse:
         """Return platform-wide accounting usage for all projects."""
-        return await report_all_projects(pool, current_context(), group_by=group_by, window=window)
+        return await report_all_projects(
+            pool,
+            current_context(),
+            request=request or AccountingAllProjectsReportRequest(),
+        )

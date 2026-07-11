@@ -103,7 +103,7 @@ def test_allocations_list_requires_project_in_payload(
     assert client.calls == [("allocations.list", {"request": {"project": "proj-a"}})]
 
 
-def test_resources_describe_renders_single_record(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+def test_resources_get_renders_single_record(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     record = {
         "object_id": "r1",
         "status": "ok",
@@ -111,7 +111,7 @@ def test_resources_describe_renders_single_record(monkeypatch: pytest.MonkeyPatc
         "items": [],
     }
     client = _install_session(monkeypatch, record)
-    code = asyncio.run(reads.resources_describe(_args(resource_id="r1")))
+    code = asyncio.run(reads.resources_get(_args(resource_id="r1")))
     assert code == 0
     assert client.calls == [("resources.describe", {"resource_id": "r1"})]
     out = capsys.readouterr().out
@@ -121,15 +121,15 @@ def test_resources_describe_renders_single_record(monkeypatch: pytest.MonkeyPatc
 def test_record_verb_json_mode_emits_flat_record(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     record = {"object_id": "s1", "status": "running", "data": {"project": "p"}, "items": []}
     _install_session(monkeypatch, record)
-    asyncio.run(reads.systems_show(argparse.Namespace(json=True, system_id="s1")))
+    asyncio.run(reads.systems_get(argparse.Namespace(json=True, system_id="s1")))
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["id"] == "s1" and parsed["state"] == "running" and parsed["project"] == "p"
 
 
-def test_ledger_show_is_a_single_record(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+def test_ledger_get_is_a_single_record(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     record = {"object_id": "p", "status": "ok", "data": {"kcu": "12", "window": "30d"}, "items": []}
     client = _install_session(monkeypatch, record)
-    asyncio.run(reads.ledger_show(_args(project="proj-a")))
+    asyncio.run(reads.ledger_get(_args(project="proj-a")))
     assert client.calls == [("accounting.usage_project", {"project": "proj-a"})]
     out = capsys.readouterr().out
     assert "kcu" in out and "12" in out
@@ -285,7 +285,7 @@ def test_record_verb_denial_exits_authorization_denied(
     # A single-record verb must surface the same nonzero exit a denial returns, not the
     # success exit 0 that ignoring the envelope would leave.
     _install_session(monkeypatch, _denied("s1"))
-    code = asyncio.run(reads.systems_show(_args(system_id="s1")))
+    code = asyncio.run(reads.systems_get(_args(system_id="s1")))
     assert code == 3
 
 
@@ -368,8 +368,8 @@ def test_record_verbs_send_the_declared_id_payload_key(
 ) -> None:
     cases = [
         (reads.allocations_get, "allocation_id", "allocations.get"),
-        (reads.systems_show, "system_id", "systems.get"),
-        (reads.runs_show, "run_id", "runs.get"),
+        (reads.systems_get, "system_id", "systems.get"),
+        (reads.runs_get, "run_id", "runs.get"),
         (reads.jobs_get, "job_id", "jobs.get"),
     ]
     for handler, key, tool in cases:

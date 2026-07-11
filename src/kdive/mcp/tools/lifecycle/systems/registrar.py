@@ -12,9 +12,9 @@ from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError
 from kdive.domain.labels import LABEL_MAX_LEN
 from kdive.mcp.auth import current_context
-from kdive.mcp.provider_schema import assert_kind_composed
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import ToolPayload
+from kdive.mcp.schema.provider_schema import assert_kind_composed
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT
@@ -117,20 +117,20 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
 
 
 def _rootfs_validator(runtime: ProviderRuntime):
-    if runtime.rootfs_validator is None:
-        raise RuntimeError("systems registrar requires an injected rootfs validator")
-    return runtime.rootfs_validator
+    if runtime.rootfs is None or runtime.rootfs.validator is None:
+        return lambda _rootfs: None
+    return runtime.rootfs.validator
 
 
 def _provision_handlers(runtime: ProviderRuntime) -> _SystemProvisionHandlers:
     return _SystemProvisionHandlers(
-        runtime.profile_policy, runtime.component_sources, _rootfs_validator(runtime)
+        runtime.profile_policy, runtime.support.component_sources, _rootfs_validator(runtime)
     )
 
 
 def _admin_handlers(runtime: ProviderRuntime) -> _SystemAdminHandlers:
     return _SystemAdminHandlers(
-        runtime.profile_policy, runtime.component_sources, _rootfs_validator(runtime)
+        runtime.profile_policy, runtime.support.component_sources, _rootfs_validator(runtime)
     )
 
 
@@ -433,7 +433,7 @@ def _register_systems_reprovision(
 ) -> None:
     @app.tool(
         name="systems.reprovision",
-        annotations=_docmeta.destructive(),
+        annotations=_docmeta.mutating(),
         meta=_docmeta.maturity_meta("implemented"),
     )
     async def systems_reprovision(

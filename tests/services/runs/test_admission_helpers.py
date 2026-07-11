@@ -20,15 +20,17 @@ from kdive.domain.lifecycle.records import Allocation, System
 from kdive.profiles.types import ExpectedBootFailureInput
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.services.runs.admission import (
+    _parse_expected_boot_failure,
+    _validate_unbound_target_kind,
+)
+from kdive.services.runs.host_admission import (
     RunCreateError,
     _allocation_block_error,
-    _config_failure,
-    _parse_expected_boot_failure,
-    _parse_uuid,
-    _run_create_failure,
-    _stale_failure,
     _system_block_error,
-    _validate_unbound_target_kind,
+    categorized_failure,
+    config_failure,
+    parse_uuid,
+    stale_failure,
 )
 
 _A_KIND = next(iter(ResourceKind))
@@ -36,19 +38,19 @@ _A_KIND = next(iter(ResourceKind))
 
 def test_parse_uuid_accepts_valid() -> None:
     value = uuid4()
-    assert _parse_uuid(str(value)) == value
+    assert parse_uuid(str(value)) == value
 
 
 def test_parse_uuid_rejects_invalid_as_config_error() -> None:
     with pytest.raises(RunCreateError) as exc:
-        _parse_uuid("not-a-uuid")
+        parse_uuid("not-a-uuid")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.object_id == "not-a-uuid"
     assert str(exc.value) == "invalid run creation request"  # the default config detail
 
 
 def test_config_failure_fields() -> None:
-    err = _config_failure("obj-1", detail="bad thing", data={"reason": "x"})
+    err = config_failure("obj-1", detail="bad thing", data={"reason": "x"})
     assert err.object_id == "obj-1"
     assert err.category is ErrorCategory.CONFIGURATION_ERROR
     assert str(err) == "bad thing"
@@ -56,7 +58,7 @@ def test_config_failure_fields() -> None:
 
 
 def test_stale_failure_carries_current_status() -> None:
-    err = _stale_failure("sys-1", current_status="failed")
+    err = stale_failure("sys-1", current_status="failed")
     assert err.category is ErrorCategory.STALE_HANDLE
     assert str(err) == "stale run creation target"
     assert err.details == {"current_status": "failed"}
@@ -64,7 +66,7 @@ def test_stale_failure_carries_current_status() -> None:
 
 def test_run_create_failure_preserves_message_category_and_details() -> None:
     src = CategorizedError("boom", category=ErrorCategory.BUILD_FAILURE, details={"k": "v"})
-    err = _run_create_failure("obj-2", src)
+    err = categorized_failure("obj-2", src)
     assert err.object_id == "obj-2"
     assert str(err) == "boom"
     assert err.category is ErrorCategory.BUILD_FAILURE

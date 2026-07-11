@@ -14,6 +14,8 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
+from kdive.artifacts import upload_manifest
+from kdive.artifacts.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
 from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
 from kdive.artifacts.uploads import (
     MAX_PART_BYTES,
@@ -25,7 +27,6 @@ from kdive.artifacts.uploads import (
 )
 from kdive.build_artifacts.validation import EFFECTIVE_CONFIG_MAX_BYTES
 from kdive.config.core_settings import MAX_UPLOAD_BYTES, UPLOAD_TTL_SECONDS
-from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import RunState, SystemState
@@ -57,9 +58,6 @@ _TENANT = "local"
 # validator below enforces — the advertisement can never drift from the accepted names.
 CREATE_RUN_UPLOAD_TOOL = "artifacts.create_run_upload"
 CREATE_SYSTEM_UPLOAD_TOOL = "artifacts.create_system_upload"
-RUN_ARTIFACT_NAMES = frozenset({"effective_config", "kernel", "initrd", "vmlinux"})
-_ROOTFS_NAME = "rootfs"
-SYSTEM_ARTIFACT_NAMES = frozenset({_ROOTFS_NAME})
 _RETENTION_CLASS = "build"
 
 # Upper bound on an offending artifact-name string echoed back in an error's ``data.value``

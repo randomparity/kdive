@@ -48,6 +48,7 @@ from kdive.domain.pcie import (
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.security.authz.rbac import Role, projects_with_role
 from kdive.services.allocation.admission.affinity import resource_visible_to_projects
@@ -61,6 +62,22 @@ _log = logging.getLogger(__name__)
 _TOOL = "resources.availability"
 _REQUESTED = AllocationState.REQUESTED.value
 _NEXT_ACTIONS = ["resources.describe", "allocations.request"]
+
+
+class _ResourcesAvailabilityPayload(ToolPayload):
+    """Public payload for ``resources.availability`` filters."""
+
+    pcie: str | None = Field(
+        default=None,
+        description=(
+            "Optional PCIe match spec ('<4hex>:<4hex>' or 'class=' plus 2 or 4 hex); "
+            "narrows to hosts with a free matching device."
+        ),
+    )
+    shape: str | None = Field(
+        default=None,
+        description="Optional shape name; restricts the fitting computation to it.",
+    )
 
 
 class _HostAvailability(NamedTuple):
@@ -363,22 +380,18 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def resources_availability(
-        pcie: Annotated[
-            str | None,
+        request: Annotated[
+            _ResourcesAvailabilityPayload | None,
             Field(
-                description=(
-                    "Optional PCIe match spec ('<4hex>:<4hex>' or 'class=' plus 2 or 4 hex); "
-                    "narrows to hosts with a free matching device."
-                )
+                description="Resource availability filters request; omit for an unfiltered view."
             ),
-        ] = None,
-        shape: Annotated[
-            str | None,
-            Field(description="Optional shape name; restricts the fitting computation to it."),
         ] = None,
     ) -> ToolResponse:
         """Report fleet availability (headroom, free PCIe, fitting shapes, queue depth). Viewer.
 
         A point-in-time hint, not a reservation; the admission path stays the authority.
         """
-        return await availability_tool(pool, current_context(), pcie=pcie, shape=shape)
+        payload = request or _ResourcesAvailabilityPayload()
+        return await availability_tool(
+            pool, current_context(), pcie=payload.pcie, shape=payload.shape
+        )

@@ -5,16 +5,16 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-from collections.abc import Callable
-from typing import LiteralString
+from collections.abc import Awaitable, Callable
+from typing import LiteralString, Protocol
 from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.artifacts import upload_manifest
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import StoredArtifact
-from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, SYSTEMS
 from kdive.domain.capacity.state import IllegalTransition, SystemState
@@ -24,8 +24,8 @@ from kdive.domain.lifecycle.records import System
 from kdive.domain.lifecycle.rules import TERMINAL_SYSTEM_STATES
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
-from kdive.jobs.handlers.ssh_authorize import authorize_ssh_key_handler
-from kdive.jobs.handlers.ssh_reachable import check_ssh_reachable_handler
+from kdive.jobs.handlers.connectivity.ssh_authorize import authorize_ssh_key_handler
+from kdive.jobs.handlers.connectivity.ssh_reachable import check_ssh_reachable_handler
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReprovisionPayload, SystemPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
@@ -67,22 +67,37 @@ _SELECT_PART_KEYS_SQL: LiteralString = (
 _SYSRQ_DIAGNOSTIC_LIKE: LiteralString = "%sysrq-diagnostic-%"
 
 
+class _ProviderLifecycleCall(Protocol):
+    def __call__(
+        self,
+        system_id: UUID,
+        profile: ProvisioningProfile,
+        *,
+        overlay_customizers: tuple[Callable[[str], None], ...],
+        bootstrap_pubkey: str,
+    ) -> str: ...
+
+
 async def _bootstrap_key_material(
-    conn: AsyncConnection, system_id: UUID, runtime: ProviderRuntime
+    conn: AsyncConnection,
+    system_id: UUID,
+    runtime: ProviderRuntime,
+    secret_registry: SecretRegistry,
 ) -> tuple[tuple[Callable[[str], None], ...], str]:
     """Ensure the System's bootstrap key (committed) and return ``(overlay_customizers, pubkey)``.
 
     The ``ensure`` commits in its own transaction BEFORE this returns (ADR-0289, #963): the
     overlay is created and the key injected into it strictly after this call, so a later
     rollback in the caller's transaction never un-records a key the overlay may already trust.
-    A provider runtime with no ``bootstrap_key_customizer`` factory (no local overlay to
+    A provider runtime with no ``bootstrap_key`` capability (no local overlay to
     customize) yields no customizers; the returned ``pubkey`` is still passed to the provider as
     ``bootstrap_pubkey`` so remote-libvirt can inject it over the guest agent (ADR-0291, #966).
     """
     async with conn.transaction():
-        pubkey = await ensure_system_bootstrap_key(conn, system_id)
-    factory = runtime.bootstrap_key_customizer
-    customizers = (factory(pubkey),) if factory is not None else ()
+        pubkey = await ensure_system_bootstrap_key(conn, system_id, secret_registry=secret_registry)
+    customizers = (
+        () if runtime.bootstrap_key is None else (runtime.bootstrap_key.customizer(pubkey),)
+    )
     return customizers, pubkey
 
 
@@ -224,11 +239,104 @@ async def _commit_provision_result(
         return current
 
 
+async def _commit_reprovision_result(
+    conn: AsyncConnection,
+    job: Job,
+    system: System,
+    profile: ProvisioningProfile,
+    domain_name: str,
+) -> SystemState | None:
+    fingerprint = profile_digest(profile)
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
+        current = await _locked_system_state(conn, system.id)
+        if current is SystemState.REPROVISIONING:
+            await conn.execute(
+                "UPDATE systems SET state = %s, domain_name = %s, "
+                "target_fingerprint = %s WHERE id = %s",
+                (SystemState.READY.value, domain_name, fingerprint, system.id),
+            )
+            await audit_transition(
+                conn,
+                job,
+                project=system.project,
+                object_id=system.id,
+                transition="reprovisioning->ready",
+                tool="systems.reprovision",
+            )
+        return current
+
+
+async def _provider_lifecycle_call(
+    provider_call: _ProviderLifecycleCall,
+    system_id: UUID,
+    profile: ProvisioningProfile,
+    *,
+    customizers: tuple[Callable[[str], None], ...],
+    pubkey: str,
+) -> str:
+    return await asyncio.to_thread(
+        functools.partial(
+            provider_call,
+            system_id,
+            profile,
+            overlay_customizers=customizers,
+            bootstrap_pubkey=pubkey,
+        )
+    )
+
+
+async def _execute_system_lifecycle_call(
+    conn: AsyncConnection,
+    job: Job,
+    system: System,
+    runtime: ProviderRuntime,
+    *,
+    secret_registry: SecretRegistry,
+    provider_call: _ProviderLifecycleCall,
+    commit_result: Callable[
+        [AsyncConnection, Job, System, ProvisioningProfile, str],
+        Awaitable[SystemState | None],
+    ],
+    failure_transition: str,
+    tool: str,
+    operation: str,
+) -> str:
+    profile = ProvisioningProfile.parse(system.provisioning_profile)
+    customizers, pubkey = await _bootstrap_key_material(conn, system.id, runtime, secret_registry)
+    try:
+        domain_name = await _provider_lifecycle_call(
+            provider_call,
+            system.id,
+            profile,
+            customizers=customizers,
+            pubkey=pubkey,
+        )
+    except CategorizedError as exc:
+        await _record_system_failure(
+            conn,
+            job,
+            system_id=system.id,
+            project=system.project,
+            transition=failure_transition,
+            tool=tool,
+            operation=operation,
+        )
+        # The System is now terminally `failed`; dead-letter at once so a retry cannot mask it.
+        exc.terminal = True
+        raise
+    current = await commit_result(conn, job, system, profile, domain_name)
+    if current in TERMINAL_SYSTEM_STATES:
+        await asyncio.to_thread(runtime.provisioner.teardown, domain_name)
+        _log.info("%s of system %s superseded by teardown; domain reaped", operation, system.id)
+    return str(system.id)
+
+
 async def provision_handler(
     conn: AsyncConnection,
     job: Job,
     *,
     resolver: ProviderResolver,
+    secret_registry: SecretRegistry | None = None,
     artifact_store: ObjectStore | None = None,
 ) -> str | None:
     """Define+start the tagged domain and drive the System ``provisioning -> ready``."""
@@ -250,39 +358,31 @@ async def provision_handler(
                 provisioner.teardown, system.domain_name or domain_name_for(system_id)
             )
         return str(system_id)
-    profile = ProvisioningProfile.parse(system.provisioning_profile)
-    customizers, pubkey = await _bootstrap_key_material(conn, system_id, runtime)
-    try:
-        domain_name = await asyncio.to_thread(
-            functools.partial(
-                provisioner.provision,
-                system_id,
-                profile,
-                overlay_customizers=customizers,
-                bootstrap_pubkey=pubkey,
-            )
+    secret_registry = secret_registry or SecretRegistry()
+
+    async def _commit(
+        conn: AsyncConnection,
+        job: Job,
+        system: System,
+        profile: ProvisioningProfile,
+        domain_name: str,
+    ) -> SystemState | None:
+        return await _commit_provision_result(
+            conn, job, system, profile, runtime.profile_policy, domain_name, artifact_store
         )
-    except CategorizedError as exc:
-        await _record_system_failure(
-            conn,
-            job,
-            system_id=system_id,
-            project=system.project,
-            transition="provisioning->failed",
-            tool="systems.provision",
-            operation="provision",
-        )
-        # The System is now terminally `failed`; a job retry would re-enter the terminal-state
-        # branch above and return success, masking this failure. Dead-letter at once instead.
-        exc.terminal = True
-        raise
-    current = await _commit_provision_result(
-        conn, job, system, profile, runtime.profile_policy, domain_name, artifact_store
+
+    return await _execute_system_lifecycle_call(
+        conn,
+        job,
+        system,
+        runtime,
+        secret_registry=secret_registry,
+        provider_call=provisioner.provision,
+        commit_result=_commit,
+        failure_transition="provisioning->failed",
+        tool="systems.provision",
+        operation="provision",
     )
-    if current in TERMINAL_SYSTEM_STATES:
-        await asyncio.to_thread(provisioner.teardown, domain_name)
-        _log.info("provision of system %s superseded by teardown; domain reaped", system_id)
-    return str(system_id)
 
 
 async def reprovision_handler(
@@ -290,6 +390,7 @@ async def reprovision_handler(
     job: Job,
     *,
     resolver: ProviderResolver,
+    secret_registry: SecretRegistry | None = None,
 ) -> str | None:
     """Apply the new profile in place and drive ``reprovisioning -> ready`` or failed."""
     system_id = UUID(load_payload(job, ReprovisionPayload).system_id)
@@ -302,63 +403,23 @@ async def reprovision_handler(
         )
     binding = await resolver.binding_for_system(conn, system_id)
     set_provider_kind(binding.kind.value)
-    provisioner = binding.runtime.provisioner
+    runtime = binding.runtime
+    provisioner = runtime.provisioner
     if system.state is not SystemState.REPROVISIONING:
         return str(system_id)
-    profile = ProvisioningProfile.parse(system.provisioning_profile)
-    # Same commit-before-overlay ordering as provision_handler (ADR-0289, #963): reprovision wipes
-    # and recreates the overlay, so it must re-inject the SAME stored key — ensure_ returns the
-    # existing key on reuse, and this commits before the overlay is ever touched.
-    customizers, pubkey = await _bootstrap_key_material(conn, system_id, binding.runtime)
-    try:
-        domain_name = await asyncio.to_thread(
-            functools.partial(
-                provisioner.reprovision,
-                system_id,
-                profile,
-                overlay_customizers=customizers,
-                bootstrap_pubkey=pubkey,
-            )
-        )
-    except CategorizedError as exc:
-        await _record_system_failure(
-            conn,
-            job,
-            system_id=system_id,
-            project=system.project,
-            transition="reprovisioning->failed",
-            tool="systems.reprovision",
-            operation="reprovision",
-        )
-        # The System is now terminally `failed`; dead-letter at once so a retry cannot mask it.
-        exc.terminal = True
-        raise
-    fingerprint = profile_digest(profile)
-    current: SystemState | None = None
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        async with conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("SELECT state FROM systems WHERE id = %s FOR UPDATE", (system_id,))
-            row = await cur.fetchone()
-            current = SystemState(row["state"]) if row is not None else None
-            if current is SystemState.REPROVISIONING:
-                await cur.execute(
-                    "UPDATE systems SET state = %s, domain_name = %s, "
-                    "target_fingerprint = %s WHERE id = %s",
-                    (SystemState.READY.value, domain_name, fingerprint, system_id),
-                )
-        if current is SystemState.REPROVISIONING:
-            await audit_transition(
-                conn,
-                job,
-                project=system.project,
-                object_id=system_id,
-                transition="reprovisioning->ready",
-                tool="systems.reprovision",
-            )
-    if current in TERMINAL_SYSTEM_STATES:
-        await asyncio.to_thread(provisioner.teardown, domain_name)
-        _log.info("reprovision of system %s superseded by teardown; domain reaped", system_id)
-    return str(system_id)
+    secret_registry = secret_registry or SecretRegistry()
+    return await _execute_system_lifecycle_call(
+        conn,
+        job,
+        system,
+        runtime,
+        secret_registry=secret_registry,
+        provider_call=provisioner.reprovision,
+        commit_result=_commit_reprovision_result,
+        failure_transition="reprovisioning->failed",
+        tool="systems.reprovision",
+        operation="reprovision",
+    )
 
 
 async def _console_part_keys(conn: AsyncConnection, system_id: UUID) -> list[str]:
@@ -466,7 +527,11 @@ def register_handlers(
     registry.register(
         JobKind.PROVISION,
         lambda conn, job: provision_handler(
-            conn, job, resolver=resolver, artifact_store=artifact_store
+            conn,
+            job,
+            resolver=resolver,
+            secret_registry=secret_registry,
+            artifact_store=artifact_store,
         ),
     )
     registry.register(
@@ -477,7 +542,9 @@ def register_handlers(
     )
     registry.register(
         JobKind.REPROVISION,
-        lambda conn, job: reprovision_handler(conn, job, resolver=resolver),
+        lambda conn, job: reprovision_handler(
+            conn, job, resolver=resolver, secret_registry=secret_registry
+        ),
     )
     registry.register(
         JobKind.AUTHORIZE_SSH_KEY,

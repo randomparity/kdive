@@ -10,7 +10,7 @@
   `base_image_volume` prerequisite and its `CONFIGURATION_ERROR`-if-absent contract),
   [ADR-0139](0139-diagnostics-worker-vantage-substitution-honesty.md) (the
   feature-not-enabled substitution honesty this check is unaffected by).
-- **Spec:** [`../specs/2026-06-17-diagnostics-base-image-staging.md`](../specs/2026-06-17-diagnostics-base-image-staging.md)
+- **Spec:** [`../specs/2026-06-17-diagnostics-base-image-staging.md`](../design/2026-06-17-diagnostics-base-image-staging.md)
 
 ## Context
 

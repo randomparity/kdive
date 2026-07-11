@@ -413,14 +413,14 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
             guest.launch()
             roots = guest.inspect_os()
         except Exception as exc:
-            guest.close()
+            _close_guestfs_handle(guest, "after failed read-only overlay open")
             raise CategorizedError(
                 "libguestfs failed to open the System overlay",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"overlay": overlay, "error": type(exc).__name__},
             ) from exc
         if not roots:
-            guest.close()
+            _close_guestfs_handle(guest, "after empty read-only overlay inspection")
             raise CategorizedError(
                 "could not inspect the System overlay to find /var/crash",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -428,6 +428,15 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
             )
         guest.mount_ro(roots[0], "/")
         return guest
+
+
+def _close_guestfs_handle(guest: _GuestfsHandle, context: str) -> None:
+    try:
+        guest.close()
+    except Exception:
+        _log.warning(
+            "libguestfs close failed %s; preserving original failure", context, exc_info=True
+        )
 
 
 def _poll_until_settled(

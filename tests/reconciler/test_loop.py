@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import fields
 from datetime import timedelta
 from typing import cast
 from uuid import UUID, uuid4
@@ -41,8 +42,6 @@ from tests.reconciler.conftest import (
     seed_system,
 )
 
-WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
-
 
 def test_null_reaper_is_an_infra_reaper() -> None:
     assert isinstance(NullReaper(), InfraReaper)
@@ -77,6 +76,16 @@ def test_reconcile_report_holds_counts_and_failures() -> None:
     assert report.failures == ("abandoned_jobs",)
     assert tuple(report.repair_counts) == loop.ALL_REPAIR_KINDS
     assert report.repair_counts["abandoned_uploads"] == 0
+
+
+def test_reconcile_report_fields_are_catalog_backed() -> None:
+    scalar_fields = {
+        field.name
+        for field in fields(ReconcileReport)
+        if field.name not in {"failures", "repair_counts"}
+    }
+    assert set(loop._REPORT_FIELDS) == scalar_fields
+    assert set(loop._REPORT_FIELDS) <= set(loop._REPORT_FIELD_TO_REPAIR_KIND)
 
 
 def test_orphaned_system_enqueues_gc_teardown(migrated_url: str) -> None:
@@ -182,7 +191,8 @@ def test_zombie_job_compensates_owning_run(migrated_url: str) -> None:
             await seed_running_job(
                 seed,
                 "dk-run-zombie",
-                payload={"run_id": str(run_id), "build_host_id": str(WORKER_LOCAL_ID)},
+                kind="install",
+                payload={"run_id": str(run_id)},
                 lease_seconds=-60,
                 attempt=3,
                 max_attempts=3,
@@ -232,6 +242,7 @@ def test_zombie_with_malformed_run_payload_still_dead_letters_job(migrated_url: 
             job_id = await seed_running_job(
                 seed,
                 "dk-bad-run-zombie",
+                kind="install",
                 payload={"run_id": "not-a-uuid"},
                 lease_seconds=-60,
                 attempt=3,

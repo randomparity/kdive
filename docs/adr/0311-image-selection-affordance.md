@@ -4,7 +4,7 @@
 - **Date:** 2026-07-04
 - **Deciders:** kdive maintainers
 - **Issue:** #1017 (reframed; `BLACK_BOX_REVIEW.md` Finding 2(a), Epic #1018)
-- **Spec:** [image-selection-affordance-1017](../superpowers/specs/2026-07-04-image-selection-affordance-1017.md)
+- **Spec:** [image-selection-affordance-1017](../archive/superpowers/specs/2026-07-04-image-selection-affordance-1017.md)
 - Extends ADR-0092 (image catalog), ADR-0124 (`profile_examples`), ADR-0286/0295
   (capability honesty invariant), ADR-0296 (staged-path provenance). Supersedes
   nothing; closes the original #1017 curated-`boot_kernel_count` ask as

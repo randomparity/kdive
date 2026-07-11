@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastmcp.server.auth.providers.jwt import RSAKeyPair
+from kdive.mcp.dev_harness import AUDIENCE, ISSUER, make_keypair, mint  # noqa: F401
 
 # Re-export the disposable-Postgres fixtures so DB-backed MCP tests can use them.
 from tests.db.conftest import migrated_url, pg_conn, postgres_url  # noqa: F401
@@ -10,47 +10,3 @@ from tests.db.conftest import migrated_url, pg_conn, postgres_url  # noqa: F401
 # Re-export the disposable-MinIO fixture so the upload-rootfs commit test can reach a
 # real object store (the rootfs artifacts row is committed against it at provisioning).
 from tests.store.conftest import minio_store  # noqa: F401
-
-ISSUER = "https://idp.test.kdive"
-AUDIENCE = "kdive"
-
-
-def make_keypair() -> RSAKeyPair:
-    return RSAKeyPair.generate()
-
-
-def mint(
-    keypair: RSAKeyPair,
-    *,
-    subject: str = "user-1",
-    issuer: str = ISSUER,
-    audience: str = AUDIENCE,
-    agent_session: str | None = "sess-1",
-    projects: list[str] | None = None,
-    roles: dict[str, str] | None = None,
-    client_id: str | None = None,
-    expires_in_seconds: int = 3600,
-) -> str:
-    """Mint a signed JWT carrying the kdive custom claims.
-
-    ``roles`` is the per-project role map (``{"proj-a": "admin"}``) the
-    ``roles_from_claims`` parser reads; omit it for a membership-only token. ``client_id``
-    sets the OIDC ``azp`` claim (the operator-CLI client id) the actor map resolves; omit
-    it for an agent token.
-    """
-    extra: dict[str, object] = {}
-    if agent_session is not None:
-        extra["agent_session"] = agent_session
-    if projects is not None:
-        extra["projects"] = projects
-    if roles is not None:
-        extra["roles"] = roles
-    if client_id is not None:
-        extra["azp"] = client_id
-    return keypair.create_token(
-        subject=subject,
-        issuer=issuer,
-        audience=audience,
-        additional_claims=extra,
-        expires_in_seconds=expires_in_seconds,
-    )

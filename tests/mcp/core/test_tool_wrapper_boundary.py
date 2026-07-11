@@ -18,25 +18,25 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
+import kdive.mcp.tools.debug.operations.breakpoints as debug_breakpoint_tools
 from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, INVESTIGATIONS, QUOTAS, RUNS, SYSTEMS
-from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.accounting.records import Budget, Quota
 from kdive.domain.capacity.state import AllocationState, InvestigationState, RunState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
-from kdive.mcp.app import build_app
+from kdive.mcp.assembly.app import build_app
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as resources_tools
 from kdive.mcp.tools.catalog.artifacts import registrar as artifacts_tools
 from kdive.mcp.tools.catalog.artifacts import uploads as artifact_upload_tools
-from kdive.mcp.tools.debug import ops as debug_ops_tools
-from kdive.mcp.tools.debug import sessions as debug_sessions_tools
+from kdive.mcp.tools.debug.sessions import registrar as debug_sessions_registrar
 from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_tools
 from kdive.mcp.tools.lifecycle.runs import registrar as runs_tools
 from kdive.mcp.tools.lifecycle.systems import registrar as systems_tools
 from kdive.mcp.tools.ops.resources import host_ops as ops_resources_tools
 from kdive.providers.assembly import composition
+from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.fault_inject.discovery import FaultInjectDiscovery
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.context import RequestContext
@@ -405,8 +405,8 @@ def test_debug_ops_resolve_fault_inject_runtime_through_fastmcp(
     async def _run() -> tuple[ToolResponse, ToolResponse]:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_fault_inject_run(pool)
-            monkeypatch.setattr(debug_sessions_tools, "current_context", _ctx)
-            monkeypatch.setattr(debug_ops_tools, "current_context", _ctx)
+            monkeypatch.setattr(debug_sessions_registrar, "current_context", _ctx)
+            monkeypatch.setattr(debug_breakpoint_tools, "current_context", _ctx)
             monkeypatch.setenv("KDIVE_FAULT_INJECT", "1")
             config.load()  # re-snapshot: the pool setup above already primed the snapshot
             secret_registry = SecretRegistry()

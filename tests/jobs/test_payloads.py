@@ -23,6 +23,7 @@ from kdive.jobs.payloads import (
     PowerPayload,
     ReprovisionPayload,
     SysRqPayload,
+    SystemPayload,
     dump_authorizing,
     dump_payload,
     load_payload,
@@ -32,43 +33,24 @@ from kdive.jobs.payloads import (
 WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
 
 
-def test_build_payload_round_trips_with_optional_cmdline() -> None:
+def test_retired_build_payload_decodes_historical_model() -> None:
     run_id = uuid4()
-    now = datetime.now(UTC)
 
-    payload = dump_payload(
-        JobKind.BUILD,
+    decoded = BuildPayload.model_validate(
         {
             "run_id": str(run_id),
             "build_host_id": str(WORKER_LOCAL_ID),
             "cmdline": "panic=1",
-        },
+        }
     )
-    job = Job(
-        id=uuid4(),
-        created_at=now,
-        updated_at=now,
-        kind=JobKind.BUILD,
-        payload=payload,
-        state=JobState.QUEUED,
-        max_attempts=3,
-        authorizing={"principal": "alice", "agent_session": None, "project": "kernel-team"},
-        dedup_key="build",
-    )
-    decoded = load_payload(job, BuildPayload)
 
-    assert payload == {
-        "run_id": str(run_id),
-        "build_host_id": str(WORKER_LOCAL_ID),
-        "cmdline": "panic=1",
-    }
     assert decoded.run_id == str(run_id)
     assert decoded.cmdline == "panic=1"
 
 
 def test_build_payload_requires_build_host_id() -> None:
-    with pytest.raises(PayloadValidationError, match="build_host_id"):
-        dump_payload(JobKind.BUILD, {"run_id": str(uuid4())})
+    with pytest.raises(ValueError, match="build_host_id"):
+        BuildPayload.model_validate({"run_id": str(uuid4())})
 
 
 def test_install_payload_round_trips_and_strips_cmdline() -> None:
@@ -143,14 +125,13 @@ def test_install_payload_decodes_legacy_run_only_payload() -> None:
     assert decoded.cmdline is None
 
 
-def test_dump_payload_omits_unset_optional_fields() -> None:
-    run_id = uuid4()
-    payload = dump_payload(
-        JobKind.BUILD,
-        {"run_id": str(run_id), "build_host_id": str(WORKER_LOCAL_ID), "cmdline": None},
-    )
-    assert "cmdline" not in payload
-    assert payload == {"run_id": str(run_id), "build_host_id": str(WORKER_LOCAL_ID)}
+@pytest.mark.parametrize("kind", [JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT])
+def test_dump_payload_rejects_retired_job_kinds(kind: JobKind) -> None:
+    with pytest.raises(PayloadValidationError, match=f"{kind.value} payload contract is retired"):
+        dump_payload(
+            kind,
+            {"run_id": str(uuid4()), "build_host_id": str(WORKER_LOCAL_ID)},
+        )
 
 
 def test_load_payload_rejects_unrelated_model_class_for_kind() -> None:
@@ -160,17 +141,37 @@ def test_load_payload_rejects_unrelated_model_class_for_kind() -> None:
         id=uuid4(),
         created_at=now,
         updated_at=now,
-        kind=JobKind.BUILD,
-        payload={"run_id": str(run_id), "build_host_id": str(WORKER_LOCAL_ID)},
+        kind=JobKind.INSTALL,
+        payload={"run_id": str(run_id)},
         state=JobState.QUEUED,
         max_attempts=3,
         authorizing={"principal": "alice", "agent_session": None, "project": "kernel-team"},
-        dedup_key="build",
+        dedup_key="install",
     )
     with pytest.raises(
-        PayloadValidationError, match="PowerPayload does not match build payload contract"
+        PayloadValidationError, match="PowerPayload does not match install payload contract"
     ):
         load_payload(job, PowerPayload)
+
+
+def test_load_payload_rejects_superclass_model_for_kind() -> None:
+    now = datetime.now(UTC)
+    system_id = uuid4()
+    job = Job(
+        id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        kind=JobKind.REPROVISION,
+        payload={"system_id": str(system_id), "profile_digest": "abc123"},
+        state=JobState.QUEUED,
+        max_attempts=3,
+        authorizing={"principal": "alice", "agent_session": None, "project": "kernel-team"},
+        dedup_key="reprovision",
+    )
+    with pytest.raises(
+        PayloadValidationError, match="SystemPayload does not match reprovision payload contract"
+    ):
+        load_payload(job, SystemPayload)
 
 
 def test_validation_error_joins_nested_loc_with_dots() -> None:
@@ -199,20 +200,13 @@ def test_dump_authorizing_accepts_plain_mapping() -> None:
 
 
 def test_payload_validation_rejects_wrong_shape_for_kind() -> None:
-    with pytest.raises(PayloadValidationError, match="invalid build payload"):
-        dump_payload(JobKind.BUILD, {"system_id": str(uuid4())})
+    with pytest.raises(PayloadValidationError, match="invalid install payload"):
+        dump_payload(JobKind.INSTALL, {"system_id": str(uuid4())})
 
 
 def test_run_id_from_payload_returns_uuid_for_run_jobs() -> None:
     run_id = uuid4()
 
-    assert (
-        run_id_from_payload(
-            JobKind.BUILD,
-            {"run_id": str(run_id), "build_host_id": str(WORKER_LOCAL_ID)},
-        )
-        == run_id
-    )
     assert run_id_from_payload(JobKind.INSTALL, {"run_id": str(run_id)}) == run_id
     assert run_id_from_payload(JobKind.BOOT, {"run_id": str(run_id)}) == run_id
     assert (
@@ -228,9 +222,16 @@ def test_run_id_from_payload_returns_none_for_system_jobs() -> None:
     assert run_id_from_payload(JobKind.PROVISION, {"system_id": str(uuid4())}) is None
 
 
+def test_run_id_from_payload_reads_retired_build_jobs() -> None:
+    run_id = uuid4()
+    payload = {"run_id": str(run_id), "build_host_id": str(WORKER_LOCAL_ID)}
+    assert run_id_from_payload(JobKind.BUILD, payload) == run_id
+    assert run_id_from_payload(JobKind.BUILD_INSTALL_BOOT, payload) == run_id
+
+
 def test_run_id_from_payload_rejects_malformed_run_jobs() -> None:
-    with pytest.raises(PayloadValidationError, match="invalid build payload"):
-        run_id_from_payload(JobKind.BUILD, {"run_id": "not-a-uuid"})
+    with pytest.raises(PayloadValidationError, match="invalid install payload"):
+        run_id_from_payload(JobKind.INSTALL, {"run_id": "not-a-uuid"})
 
 
 def test_reprovision_payload_includes_profile_digest() -> None:

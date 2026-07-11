@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
+
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware import denial_audit as da
@@ -100,8 +102,12 @@ def _context(name: str = "admin.teardown", arguments: Any = None) -> Any:
     return SimpleNamespace(message=SimpleNamespace(name=name, arguments=arguments))
 
 
+def _pool(value: object) -> AsyncConnectionPool:
+    return cast("AsyncConnectionPool", value)
+
+
 def _spy_middleware() -> tuple[DenialAuditMiddleware, list[Any]]:
-    mw = DenialAuditMiddleware(pool=object())
+    mw = DenialAuditMiddleware(pool=_pool(object()))
     recorded: list[Any] = []
 
     async def _record(tool: str, denial: RoleDenied, *, args: Any = None) -> None:
@@ -143,7 +149,7 @@ def test_on_call_tool_audits_role_denied_and_envelopes() -> None:
 
 
 def test_on_call_tool_envelopes_even_when_audit_record_fails(monkeypatch) -> None:
-    mw = DenialAuditMiddleware(pool=object())
+    mw = DenialAuditMiddleware(pool=_pool(object()))
 
     async def _failing_record(*_a: Any, **_k: Any) -> None:
         raise RuntimeError("db down")
@@ -204,7 +210,7 @@ def test_record_builds_denial_event(monkeypatch) -> None:
         events.append((conn, event))
 
     monkeypatch.setattr(da.audit, "record_denial", _record_denial)
-    mw = DenialAuditMiddleware(pool=_FakePool(), agent_session=lambda: "sess-2")
+    mw = DenialAuditMiddleware(pool=_pool(_FakePool()), agent_session=lambda: "sess-2")
     denial = _denial()
 
     asyncio.run(mw._record("admin.teardown", denial, args={"force": True}))
@@ -226,7 +232,7 @@ def test_record_defaults_args_to_empty_dict(monkeypatch) -> None:
         events.append(event)
 
     monkeypatch.setattr(da.audit, "record_denial", _record_denial)
-    mw = DenialAuditMiddleware(pool=_FakePool(), agent_session=lambda: None)
+    mw = DenialAuditMiddleware(pool=_pool(_FakePool()), agent_session=lambda: None)
 
     asyncio.run(mw._record("admin.teardown", _denial()))
 
@@ -242,7 +248,7 @@ def test_default_agent_session_reads_request_context(monkeypatch) -> None:
         events.append(event)
 
     monkeypatch.setattr(da.audit, "record_denial", _record_denial)
-    mw = DenialAuditMiddleware(pool=_FakePool())  # no agent_session override
+    mw = DenialAuditMiddleware(pool=_pool(_FakePool()))  # no agent_session override
 
     asyncio.run(mw._record("admin.teardown", _denial()))
 

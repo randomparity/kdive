@@ -41,9 +41,9 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.artifacts.storage import ObjectListing
 from kdive.domain.catalog.images import ImageCatalogEntry
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.capability_signals import render_direct_kernel_signal
+from kdive.images.cataloging.capability_signals import render_direct_kernel_signal
 from kdive.images.kdump_support import KernelVersion
-from kdive.images.staged_provenance import sidecar_path, write_sidecar
+from kdive.images.rootfs.staged_provenance import sidecar_path, write_sidecar
 from kdive.inventory.loader import load_inventory
 from kdive.inventory.model import InventoryDoc
 from kdive.inventory.reconcile.coefficients import reconcile_coefficients
@@ -1257,8 +1257,8 @@ def test_remote_libvirt_overlay_lands_vcpus_memory_in_caps(
 
 def test_declared_pool_lands_in_pool_column_else_default(migrated_url: str, tmp_path: Path) -> None:
     # ADR-0186: a declared `pool` is written to the resources.pool column; absent → 'default'.
-    # One doc declares a pooled remote host and a pool-less fault-inject host (single remote
-    # instance keeps the still-present singleton guard happy until #395 relaxes it).
+    # One doc declares a pooled remote host and a pool-less fault-inject host; remote-libvirt
+    # instance names are independent from the shared pool vocabulary.
     combined = (
         _remote_libvirt_toml(name="rl-pool", pool="big-remote") + "[[fault_inject]]\n"
         'name = "fi-default"\n'
@@ -1548,10 +1548,10 @@ def test_reconcile_resources_is_idempotent(migrated_url: str, tmp_path: Path) ->
 def test_discovery_insert_path_writes_managed_by_discovery(migrated_url: str) -> None:
     # Invariant 5 (load-bearing): a host discovered AFTER the migration must insert at
     # 'discovery', not the column default 'runtime'. Exercises the real registrar insert path.
-    from kdive.db.resource_discovery import register_discovered_resource
     from kdive.domain.capacity.state import ResourceStatus
     from kdive.domain.catalog.discovery import ResourceRecord
     from kdive.domain.catalog.resources import ResourceKind
+    from kdive.providers.core.resource_registration import register_discovered_resource
 
     async def _run() -> None:
         record = ResourceRecord(
@@ -1890,7 +1890,7 @@ def test_on_demand_reconcile_systems_also_prices(
 ) -> None:
     # The path that silently skipped pricing before Task 4 — pin it explicitly.
     import kdive.config as config
-    from kdive.mcp.tools.ops import reconcile_systems as rs
+    from kdive.mcp.tools.ops.reconcile import reconcile_systems as rs
 
     async def _run() -> None:
         path = _write_toml(tmp_path, _priced_remote_toml("4.0"))

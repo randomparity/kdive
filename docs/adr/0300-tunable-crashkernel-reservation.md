@@ -27,7 +27,7 @@ the reservation through that override either — by deliberate design, the platf
 The one sanctioned lever for the reservation size therefore has to be a **structured field**, not
 free-form cmdline text.
 
-See `docs/superpowers/specs/2026-07-02-tunable-crashkernel-989.md`.
+See `docs/archive/superpowers/specs/2026-07-02-tunable-crashkernel-989.md`.
 
 ## Decision
 

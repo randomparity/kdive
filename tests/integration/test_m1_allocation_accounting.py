@@ -52,13 +52,13 @@ from kdive.domain.lifecycle.records import Allocation, Investigation, Run, Syste
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.mcp.auth import AuthError
-from kdive.mcp.tool_payloads import AllocationRequestPayload, EstimateRequestPayload
+from kdive.mcp.schema.tool_payloads import AllocationRequestPayload, EstimateRequestPayload
 from kdive.mcp.tools.accounting.admin import QuotaSetRequest, set_budget, set_quota
 from kdive.mcp.tools.accounting.estimate import estimate
 from kdive.mcp.tools.accounting.usage import usage_investigation, usage_project
-from kdive.mcp.tools.lifecycle import control as control_tools
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import release_allocation, renew_allocation
 from kdive.mcp.tools.lifecycle.allocations.request import request_allocation
+from kdive.mcp.tools.lifecycle.control import registrar as control_tools
 from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardown_system
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.providers.infra.reaping import NullReaper

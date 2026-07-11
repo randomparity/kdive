@@ -18,7 +18,7 @@ class Capability(StrEnum):
 
     A tag is a build fact — the tooling is present — not a liveness guarantee. Whether a
     feature works end to end is answered by the computed signals in
-    :mod:`kdive.images.capability_signals`.
+    :mod:`kdive.images.cataloging.capability_signals`.
     """
 
     AGENT = "agent"

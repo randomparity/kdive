@@ -14,7 +14,7 @@
   this ADR applies the same fielded principle to the upload-declaration *input* item),
   [ADR-0047](0047-agent-facing-tool-guide-generation.md) (the generated tool reference the
   new examples render into).
-- **Spec:** [`../specs/2026-06-18-upload-declaration-input-schema.md`](../specs/2026-06-18-upload-declaration-input-schema.md)
+- **Spec:** [`../specs/2026-06-18-upload-declaration-input-schema.md`](../design/2026-06-18-upload-declaration-input-schema.md)
 - **Issue:** [#567](https://github.com/randomparity/kdive/issues/567)
 
 ## Context

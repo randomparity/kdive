@@ -7,7 +7,7 @@
   (the `build_hosts` inventory + the §5 fail-closed `kernel_source_ref` cross-checks
   this relocates to create time), [ADR-0070](0070-fleet-availability-system-reuse.md)
   (the `runs.create` precondition/lock structure this hooks into).
-- **Spec:** [`../specs/2026-06-17-create-time-build-host-source-check.md`](../specs/2026-06-17-create-time-build-host-source-check.md)
+- **Spec:** [`../specs/2026-06-17-create-time-build-host-source-check.md`](../design/2026-06-17-create-time-build-host-source-check.md)
 - **Issue:** [#534](https://github.com/randomparity/kdive/issues/534)
 
 ## Context

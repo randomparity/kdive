@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-25
 - **Issue:** [#816](https://github.com/randomparity/kdive/issues/816)
-- **Spec:** [`../superpowers/specs/2026-06-25-real-crash-runner-816.md`](../superpowers/specs/2026-06-25-real-crash-runner-816.md)
+- **Spec:** [`../superpowers/specs/2026-06-25-real-crash-runner-816.md`](../archive/superpowers/specs/2026-06-25-real-crash-runner-816.md)
 - **Depends on:** [ADR-0084](0084-remote-control-two-phase-vmcore-retrieve.md) (the provider-neutral
   worker-side crash postmortem this completes), [ADR-0175](0175-partial-tool-maturity-reason.md)
   (the maturity/promotion contract the two tools carry).

@@ -25,11 +25,12 @@ from kdive.domain.operations.jobs import Job
 from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
+from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
-from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
@@ -41,6 +42,19 @@ _JOBS_OBJECT_ID = "jobs"
 _PAUSE_TOOL = "ops.queue_pause"
 _RESUME_TOOL = "ops.queue_resume"
 _JOBS_LIST_TOOL = "ops.jobs_list"
+
+
+class _OpsJobsListPayload(ToolPayload):
+    """Public payload for ``ops.jobs_list`` filters."""
+
+    states: list[str] | None = Field(
+        default=None,
+        description="Filter per-job rows to these job states; omit for all.",
+    )
+    limit: int = Field(
+        default=DEFAULT_LIST_LIMIT,
+        description=f"Maximum per-job rows returned (capped at {MAX_LIST_LIMIT}).",
+    )
 
 
 async def queue_pause(pool: AsyncConnectionPool, ctx: RequestContext) -> ToolResponse:
@@ -250,13 +264,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def ops_jobs_list(
-        states: Annotated[
-            list[str] | None,
-            Field(description="Filter per-job rows to these job states; omit for all."),
+        request: Annotated[
+            _OpsJobsListPayload | None,
+            Field(description="Operator job-list filters request; omit for all jobs."),
         ] = None,
-        limit: Annotated[
-            int, Field(description=f"Maximum per-job rows returned (capped at {MAX_LIST_LIMIT}).")
-        ] = DEFAULT_LIST_LIMIT,
     ) -> ToolResponse:
         """Cross-project queue depth and per-job state. Requires platform operator."""
-        return await jobs_list(pool, current_context(), states=states, limit=limit)
+        payload = request or _OpsJobsListPayload()
+        return await jobs_list(pool, current_context(), states=payload.states, limit=payload.limit)

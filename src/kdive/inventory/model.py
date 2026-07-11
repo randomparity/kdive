@@ -10,8 +10,9 @@ Parse-time validation enforces three structural invariants:
 2. instance ``name`` is unique within each provider kind;
 3. every instance ``base_image`` cross-reference names a declared ``[[image]]``.
 
-Remote-libvirt is temporarily stricter: only one ``[[remote_libvirt]]`` instance is accepted
-until provider operations carry selected Resource identity into remote config resolution.
+Remote-libvirt accepts multiple named ``[[remote_libvirt]]`` instances. Reconcile creates one
+config-owned resource per instance, and per-op provider resolution selects the instance config by
+the granted resource's ``name`` (ADR-0187).
 
 :meth:`InventoryDoc.parse` is the sanctioned entry point: it wraps
 :meth:`~pydantic.BaseModel.model_validate` and re-raises pydantic's structural
@@ -29,6 +30,10 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 from kdive.domain.accounting.cost_class_rules import parse_positive_coeff, validate_cost_class_name
 from kdive.domain.catalog.image_format import ImageFormat
 from kdive.domain.catalog.images import Capability, ImageVisibility
+from kdive.images.planes.base import (
+    PROVENANCE_BOOT_KERNEL_COUNT,
+    PROVENANCE_MAKEDUMPFILE_VERSION,
+)
 from kdive.inventory.errors import InventoryError
 
 
@@ -105,9 +110,9 @@ class AttestedProvenance(BaseModel):
         """The declared operands as a provenance dict, omitting any unset operand."""
         prov: dict[str, object] = {}
         if self.boot_kernel_count is not None:
-            prov["boot_kernel_count"] = self.boot_kernel_count
+            prov[PROVENANCE_BOOT_KERNEL_COUNT] = self.boot_kernel_count
         if self.makedumpfile_version:
-            prov["makedumpfile_version"] = self.makedumpfile_version
+            prov[PROVENANCE_MAKEDUMPFILE_VERSION] = self.makedumpfile_version
         return prov
 
     def is_empty(self) -> bool:

@@ -23,7 +23,6 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, DEBUG_SESSIONS, INVESTIGATIONS, RUNS, SYSTEMS
-from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
@@ -35,14 +34,17 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.debug import sessions as debug_tools
-from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
+from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.debug.sessions import lifecycle as debug_lifecycle
+from kdive.mcp.tools.debug.sessions import lifecycle as debug_tools
+from kdive.mcp.tools.lifecycle.vmcore.view import CONSOLE_CRASH_GUIDANCE
 from kdive.prereqs.system_bootstrap_key import (
     ensure_system_bootstrap_key,
     load_system_bootstrap_private_key,
 )
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
@@ -57,6 +59,7 @@ from kdive.providers.ports.lifecycle import (
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.debug import lifecycle as debug_service_lifecycle
 from tests.mcp.systems_support import provider_resolver
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
@@ -477,14 +480,14 @@ def test_locked_recheck_closes_transport_when_system_crashed(migrated_url: str) 
                 )
                 conn_fake = _RaisingCloseConnector()
                 handle = conn_fake.open_transport(SystemHandle("kdive-x"), "gdbstub")
-                request = debug_tools._AttachRequest(
+                request = debug_service_lifecycle.AttachRequest(
                     run=run,
                     system=system,
                     session_id=uuid4(),
                     transport="gdbstub",
                     connector=conn_fake,
                 )
-                resp = await debug_tools._insert_session_locked(conn, _ctx(), request, handle)
+                resp = await debug_lifecycle._insert_session_locked(conn, _ctx(), request, handle)
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert resp.data["current_status"] == "crashed"
@@ -510,14 +513,14 @@ def test_locked_recheck_closes_transport_when_conflict_appears(migrated_url: str
                 assert run is not None and system is not None
                 conn_fake = _RaisingCloseConnector()
                 handle = conn_fake.open_transport(SystemHandle("kdive-x"), "gdbstub")
-                request = debug_tools._AttachRequest(
+                request = debug_service_lifecycle.AttachRequest(
                     run=run,
                     system=system,
                     session_id=uuid4(),
                     transport="gdbstub",
                     connector=conn_fake,
                 )
-                resp = await debug_tools._insert_session_locked(conn, _ctx(), request, handle)
+                resp = await debug_lifecycle._insert_session_locked(conn, _ctx(), request, handle)
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "transport_conflict"
         assert count == 1  # only the race winner's row
@@ -844,7 +847,7 @@ async def _seed_drgn_system(pool: AsyncConnectionPool, alloc_id: str) -> str:
     """Seed a ready local System with a per-System bootstrap key (drgn-live now gates on it)."""
     sys_id = await _seed_profiled_system(pool, alloc_id, copy.deepcopy(_PROFILE))
     async with pool.connection() as conn:
-        await ensure_system_bootstrap_key(conn, UUID(sys_id))
+        await ensure_system_bootstrap_key(conn, UUID(sys_id), secret_registry=SecretRegistry())
     return sys_id
 
 
@@ -1088,9 +1091,7 @@ def test_start_session_resolves_connector_before_seeding_bootstrap_key(migrated_
     asyncio.run(_run())
 
 
-def test_start_session_cleans_up_open_transport_on_insert_failure(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_start_session_cleans_up_open_transport_on_insert_failure(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
@@ -1099,13 +1100,18 @@ def test_start_session_cleans_up_open_transport_on_insert_failure(
             log: list[str] = []
             connector = _OrderRecordingConnector(log)
 
-            async def _raise_after_open(*_args: object, **_kwargs: object) -> None:
+            async def _raise_after_open(
+                _conn: Any,
+                _ctx: RequestContext,
+                _request: debug_service_lifecycle.AttachRequest,
+                _handle: TransportHandle,
+            ) -> ToolResponse:
                 raise RuntimeError("insert failed")
 
-            monkeypatch.setattr(debug_tools, "_insert_session_locked", _raise_after_open)
             handlers = debug_tools.DebugSessionHandlers.from_resolver(
                 provider_resolver(connector=connector, profile_policy=_PROFILE_POLICY),
                 runtime_resolver=None,
+                insert_session_locked=_raise_after_open,
                 secret_registry=SecretRegistry(),
             )
 

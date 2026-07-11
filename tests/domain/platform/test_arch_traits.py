@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.platform import arch_traits
+from kdive.domain.platform.arch_traits import arch_traits
 
 
 def test_x86_64_traits_are_q35_ttys0_pinned() -> None:

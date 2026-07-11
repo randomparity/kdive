@@ -11,7 +11,8 @@
   [ADR-0019](0019-tool-response-envelope.md) (the `ToolResponse` envelope),
   [ADR-0113](0113-flat-tool-output-schema.md) (the flat advertised schema, unaffected).
 - **Issue:** [#438](https://github.com/randomparity/kdive/issues/438).
-- **Spec:** [`../design/operator-build-config-write-path.md`](../design/operator-build-config-write-path.md).
+- **Spec:** archived at
+  [`../archive/design/operator-build-config-write-path.md`](../archive/design/operator-build-config-write-path.md).
 
 ## Context
 

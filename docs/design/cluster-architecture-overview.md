@@ -21,7 +21,7 @@ flowchart LR
         server["server Deployment<br/>FastMCP HTTP API<br/>authz · admission · state machines"]
         worker["worker Deployment<br/>runs provider ops<br/>build / install / debug / capture"]
         recon["reconciler Deployment<br/>drift repair · lease reclaim<br/>dead-session cleanup"]
-        jobs["one-shot Jobs<br/>migrate · seed-build-configs<br/>validate-systems"]
+        jobs["one-shot Jobs<br/>migrate · validate-systems"]
 
         subgraph Backends["State + artifacts"]
             pg[("Postgres<br/>system-of-record")]
@@ -43,7 +43,7 @@ flowchart LR
     server -- "enqueue jobs" --> pg
     worker -- "pull jobs" --> pg
     recon -- "read / write state" --> pg
-    jobs -- "schema + seed" --> pg
+    jobs -- "schema + validation" --> pg
     worker -- "artifact refs" --> s3
     server -- "artifact refs" --> s3
 
@@ -61,7 +61,7 @@ flowchart LR
 | **server** | `deployment-server` + `service` (`:8000`) | The MCP HTTP API. Thin and fast: owns authz (OIDC/RBAC, on-behalf-of tokens), admission control (quota/budget/capacity), lifecycle state machines, and response shaping. Never blocks on a long operation — it enqueues a job and returns `{job_id, running}`. |
 | **worker** | `deployment-worker` + `pvc-worker` (build 10Gi / install 5Gi) | Pulls durable jobs from the Postgres-backed queue and runs the actual provider operations (provision, build, install, debug-op, capture-vmcore). This is the only tier that opens long-lived connections to a remote host. |
 | **reconciler** | `deployment-reconciler` | Periodic drift-repair loop: tears down orphaned Systems, reclaims expired leases, detaches dead debug sessions, and resets a dead worker's stale gdbstub. |
-| **migrate / seed / validate** | `job-migrate`, `job-seed-build-configs`, `job-validate-systems` | One-shot Jobs run at install/upgrade. `migrate` applies the DB schema; `seed-build-configs` loads the build-config catalog; `validate-systems` fails the deploy fast if `systems.toml` is malformed. |
+| **migrate / validate** | `job-migrate`, `job-validate-systems` | One-shot Jobs run at install/upgrade. `migrate` applies the DB schema; `validate-systems` fails the deploy fast if `systems.toml` is malformed. |
 | **Postgres** | external, or bundled `demo/postgres` | System-of-record for all structured state: resources, allocations, systems, runs, the durable job queue, and the accounting/audit ledger. |
 | **Object store (S3 / MinIO)** | external, or bundled `demo/minio` | Bulk artifacts — vmcores, build outputs, console/gdb transcripts. Postgres rows reference objects by key; output is never dumped through the API. |
 | **OIDC issuer** | external, or bundled `demo/oidc` | Validates the agent's bearer token and supplies the RBAC claims the server enforces. |

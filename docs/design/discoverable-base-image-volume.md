@@ -177,8 +177,9 @@ The existing `pool` / `cost_class` / `host_uri` keys on `describe_resource` are 
 - Probing every resource inside `resources_list` (see ADR considered-and-rejected: it would couple
   a hot list read to the liveness of every configured host and fan out N TLS handshakes per call).
 - The `image_catalog` schema (the `volume` column already exists).
-- The remote-libvirt singleton constraint (one `[[remote_libvirt]]` instance) is unchanged; the
-  per-resource framing is forward-compatible with multiple hosts when that constraint lifts.
+- Remote-libvirt now accepts multiple named `[[remote_libvirt]]` instances (ADR-0187). The probe
+  resolves config through the resource name selected for the operation, so per-resource framing is
+  the current multi-host contract rather than a future placeholder.
 
 ## Test plan (behavior, not implementation)
 

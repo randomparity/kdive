@@ -19,13 +19,13 @@ from uuid import UUID
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS
-from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.accounting.records import Budget, Quota
 from kdive.domain.pcie import PCIeClaim
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import AllocationRequestPayload
+from kdive.mcp.schema.tool_payloads import AllocationRequestPayload
 from kdive.mcp.tools.lifecycle.allocations.request import request_allocation
+from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.rbac import Role
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn, FakeNodeDevice, pci_nodedev_xml

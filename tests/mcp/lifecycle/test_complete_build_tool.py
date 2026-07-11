@@ -10,10 +10,10 @@ from typing import Any
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import HeadResult, PresignedUpload, PresignPutRequest
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput
-from kdive.db import upload_manifest
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory

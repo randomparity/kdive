@@ -15,6 +15,7 @@ from kdive.domain.capacity.state import JobState, RunState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
+from kdive.domain.lifecycle.run_steps import RUN_STEP_RUNNING, RUN_STEP_SUCCEEDED
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import InstallPayload, RunPayload
@@ -23,6 +24,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._idempotency import keyed_mutation
 from kdive.mcp.tools.lifecycle.runs.common import run_job_envelope
 from kdive.providers.core.resolver import ProviderResolver
@@ -81,7 +83,7 @@ async def install_run(
     """
     uid = _as_uuid(run_id)
     if uid is None:
-        return _config_error(run_id)
+        return _invalid_uuid_error("run_id", run_id)
     owned = platform_owned_cmdline_token(cmdline)
     if owned is not None:
         return _config_error(
@@ -174,13 +176,13 @@ async def _restage_and_enqueue_install(
         audit_args["crashkernel"] = crashkernel.strip()
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
         progress = await step_progress(conn, run.id)
-        if progress.install == "running" or progress.boot == "running":
+        if progress.install == RUN_STEP_RUNNING or progress.boot == RUN_STEP_RUNNING:
             return _config_error(str(run.id), data={"reason": "step_in_progress"})
         variant_changed = (
             progress.installed_cmdline != requested_cmdline
             or progress.installed_crashkernel != requested_crashkernel
         )
-        if progress.install == "succeeded" and variant_changed:
+        if progress.install == RUN_STEP_SUCCEEDED and variant_changed:
             await delete_run_step(conn, run.id, "install")
             await delete_run_step(conn, run.id, "boot")
         # The install envelope carries no ``replayed`` marker (boot-only, #1063); discard it.
@@ -215,7 +217,7 @@ async def boot_run(
     """
     uid = _as_uuid(run_id)
     if uid is None:
-        return _config_error(run_id)
+        return _invalid_uuid_error("run_id", run_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             run = await RUNS.get(conn, uid)
@@ -261,8 +263,8 @@ def _not_bound(run_id: str) -> ToolResponse:
 async def _has_succeeded_step(conn: AsyncConnection, run_id: UUID, step: str) -> bool:
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT 1 FROM run_steps WHERE run_id = %s AND step = %s AND state = 'succeeded'",
-            (run_id, step),
+            "SELECT 1 FROM run_steps WHERE run_id = %s AND step = %s AND state = %s",
+            (run_id, step, RUN_STEP_SUCCEEDED),
         )
         return await cur.fetchone() is not None
 
@@ -356,9 +358,9 @@ async def _enqueue_step(
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
         if force:
             progress = await step_progress(conn, run.id)
-            if progress.boot == "running":
+            if progress.boot == RUN_STEP_RUNNING:
                 return _config_error(str(run.id), data={"reason": "step_in_progress"})
-            if progress.boot == "succeeded":
+            if progress.boot == RUN_STEP_SUCCEEDED:
                 await delete_run_step(conn, run.id, step)
         job, replayed = await _locked_enqueue(
             conn, ctx, run, kind, step, tool, payload, {"run_id": str(run.id)}

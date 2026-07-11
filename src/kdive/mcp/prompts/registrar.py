@@ -15,7 +15,7 @@ step. A referenced tool that is unknown to
 the live registry or marked `planned` (advertised but unavailable) raises at registration
 — a fail-fast that also catches an accidental registrar reordering. `register` takes the
 maturity map explicitly, so it is pure with respect to FastMCP internals and unit-testable
-with a fabricated map; the live map is assembled in `mcp/app.py` from the registered tool
+with a fabricated map; the live map is assembled in `mcp/assembly/app.py` from the registered tool
 metas.
 """
 
@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from fastmcp import FastMCP
 from fastmcp.prompts import Prompt
 
+from kdive.mcp.tools._docmeta import ToolMaturityValue
+
 
 @dataclass(frozen=True, slots=True)
 class ToolMaturity:
@@ -37,7 +39,7 @@ class ToolMaturity:
         reason: The ``maturity_detail.reason`` for a ``partial`` tool, else ``None``.
     """
 
-    maturity: str
+    maturity: ToolMaturityValue
     reason: str | None
 
 

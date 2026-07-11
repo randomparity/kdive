@@ -44,7 +44,7 @@ that verifies runtime truths and records operands; S3 (`sysrq`) and S4
 descriptive: it makes the *tags* tell the per-distro truth of what today's build already
 bakes. It adds no new build behavior.
 
-See `docs/superpowers/specs/2026-07-01-rootfs-capability-tags-s1-design.md`.
+See `docs/archive/superpowers/specs/2026-07-01-rootfs-capability-tags-s1-design.md`.
 
 ## Decision
 

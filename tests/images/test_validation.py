@@ -14,7 +14,11 @@ import pytest
 
 from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.validation import GUEST_CONTRACT_PATHS, InspectSeam, validate_guest_contract
+from kdive.images.cataloging.validation import (
+    GUEST_CONTRACT_PATHS,
+    InspectSeam,
+    validate_guest_contract,
+)
 
 
 def test_guest_contract_elements_are_a_subset_of_the_capability_vocabulary() -> None:

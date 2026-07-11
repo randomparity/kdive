@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import subprocess  # noqa: S404 - fixed argv, no shell, best-effort provenance read
+import subprocess  # noqa: S404 - fixed argv, no shell provenance reads  # nosec B404
 
 DEFAULT_GIT_READ_TIMEOUT = 30.0
 
@@ -19,7 +19,7 @@ def _git_run(tree: str, *args: str, timeout: float) -> str | None:
     if not tree:
         return None
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(  # noqa: S603 - fixed git argv, no shell  # nosec
             ["git", "-C", tree, *args],
             capture_output=True,
             text=True,
@@ -66,7 +66,7 @@ def working_tree_dirty(tree: str, *, timeout: float = DEFAULT_GIT_READ_TIMEOUT) 
     if not tree:
         return None
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(  # noqa: S603 - fixed git argv, no shell  # nosec
             ["git", "-C", tree, "status", "--porcelain"],
             capture_output=True,
             text=True,

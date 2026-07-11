@@ -10,12 +10,10 @@ Read audit_log: project form (admin) or cross-project (platform_auditor).
 
 Returns the most recent matching rows, newest first, keyset-paginated:
 ``data.truncated`` is ``true`` when more rows match than were returned — pass
-``data.next_cursor`` back as ``cursor`` for the next page, or narrow with filters.
+``data.next_cursor`` back as ``request.cursor`` for the next page, or narrow with filters.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
-| `limit` | integer | no | Maximum rows returned (capped at 200). |
 | `request` | object(scope=project) \| object(scope=all-projects) | yes | Project or all-projects audit query request. |
 
 `request` fields:
@@ -25,6 +23,8 @@ Returns the most recent matching rows, newest first, keyset-paginated:
   - `object_id` (`string (nullable)`, optional) — Filter by audited object UUID.
   - `transition` (`string (nullable)`, optional) — Filter by transition literal (e.g. 'requested').
   - `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit for all time.
+  - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
+  - `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
   - `scope` (``=project``, required)
   - `project` (`string`, required) — Project to read; requires project admin.
 - _variant object(scope=all-projects):_
@@ -32,4 +32,6 @@ Returns the most recent matching rows, newest first, keyset-paginated:
   - `object_id` (`string (nullable)`, optional) — Filter by audited object UUID.
   - `transition` (`string (nullable)`, optional) — Filter by transition literal (e.g. 'requested').
   - `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit for all time.
+  - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
+  - `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
   - `scope` (``=all-projects``, required)

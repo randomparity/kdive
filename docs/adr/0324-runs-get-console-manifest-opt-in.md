@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-09
 - **Deciders:** kdive maintainers
-- **Spec:** [`../specs/2026-07-09-runs-get-console-manifest-opt-in-1067.md`](../specs/2026-07-09-runs-get-console-manifest-opt-in-1067.md)
+- **Spec:** [`../specs/2026-07-09-runs-get-console-manifest-opt-in-1067.md`](../design/2026-07-09-runs-get-console-manifest-opt-in-1067.md)
 - **Follows:** [ADR-0279](0279-console-run-correlation.md) — the Run-scoped
   console manifest (`list_run_console_artifacts`, `data.console_artifacts`) this
   change makes opt-in.

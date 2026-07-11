@@ -10,7 +10,7 @@
   hosting loop that must now resolve config per system), [ADR-0186](0186-pool-selection-axis.md)
   (the pool selection axis that makes multiple interchangeable remote hosts useful — the consumer
   of this primitive).
-- **Spec:** [`../superpowers/specs/2026-06-19-system-pools-design.md`](../superpowers/specs/2026-06-19-system-pools-design.md)
+- **Spec:** [`../superpowers/specs/2026-06-19-system-pools-design.md`](../archive/superpowers/specs/2026-06-19-system-pools-design.md)
 
 ## Context
 

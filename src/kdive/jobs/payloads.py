@@ -15,7 +15,13 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, mo
 
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.images import ImageVisibility
-from kdive.domain.operations.jobs import Job, JobAuthorizing, JobKind, PowerAction
+from kdive.domain.operations.jobs import (
+    RETIRED_JOB_KINDS,
+    Job,
+    JobAuthorizing,
+    JobKind,
+    PowerAction,
+)
 from kdive.domain.operations.sysrq import SysRqCommand
 
 
@@ -222,36 +228,40 @@ class DiagnosticsWorkerCheckPayload(_PayloadBase):
     provider: str
 
 
-_PayloadModel = (
+type _ActivePayloadModel = (
     type[SystemPayload]
     | type[ReprovisionPayload]
+    | type[AuthorizeSshKeyPayload]
+    | type[CheckSshReachablePayload]
+    | type[ConsoleRotatePayload]
     | type[RunPayload]
+    | type[InstallPayload]
     | type[PowerPayload]
     | type[SysRqPayload]
     | type[CaptureVmcorePayload]
     | type[ImageBuildPayload]
     | type[DiagnosticsWorkerCheckPayload]
-    | type[BuildInstallBootPayload]
-    | type[ConsoleRotatePayload]
 )
-PayloadModel = (
+type ActivePayloadModel = (
     SystemPayload
     | ReprovisionPayload
+    | AuthorizeSshKeyPayload
+    | CheckSshReachablePayload
+    | ConsoleRotatePayload
     | RunPayload
+    | InstallPayload
     | PowerPayload
     | SysRqPayload
     | CaptureVmcorePayload
     | ImageBuildPayload
     | DiagnosticsWorkerCheckPayload
-    | BuildInstallBootPayload
-    | ConsoleRotatePayload
 )
+type PayloadModel = ActivePayloadModel
 
-_PAYLOAD_MODELS: dict[JobKind, _PayloadModel] = {
+_ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.PROVISION: SystemPayload,
     JobKind.REPROVISION: ReprovisionPayload,
     JobKind.TEARDOWN: SystemPayload,
-    JobKind.BUILD: BuildPayload,
     JobKind.INSTALL: InstallPayload,
     JobKind.BOOT: RunPayload,
     JobKind.FORCE_CRASH: SystemPayload,
@@ -260,17 +270,20 @@ _PAYLOAD_MODELS: dict[JobKind, _PayloadModel] = {
     JobKind.CAPTURE_VMCORE: CaptureVmcorePayload,
     JobKind.IMAGE_BUILD: ImageBuildPayload,
     JobKind.DIAGNOSTICS_WORKER_CHECK: DiagnosticsWorkerCheckPayload,
-    JobKind.BUILD_INSTALL_BOOT: BuildInstallBootPayload,
     JobKind.AUTHORIZE_SSH_KEY: AuthorizeSshKeyPayload,
     JobKind.CHECK_SSH_REACHABLE: CheckSshReachablePayload,
     JobKind.CONSOLE_ROTATE: ConsoleRotatePayload,
 }
-_RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
+_HISTORICAL_RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.BUILD: BuildPayload,
+    JobKind.BUILD_INSTALL_BOOT: BuildInstallBootPayload,
+}
+_PAYLOAD_MODELS = _ACTIVE_PAYLOAD_MODELS
+_RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.INSTALL: InstallPayload,
     JobKind.BOOT: RunPayload,
     JobKind.CAPTURE_VMCORE: CaptureVmcorePayload,
-    JobKind.BUILD_INSTALL_BOOT: BuildInstallBootPayload,
+    **_HISTORICAL_RUN_PAYLOAD_MODELS,
 }
 
 
@@ -302,9 +315,11 @@ def load_authorizing(job: Job) -> Authorizing:
         raise _validation_error("job authorizing", exc) from exc
 
 
-def dump_payload(kind: JobKind, payload: PayloadModel | dict[str, Any]) -> dict[str, Any]:
+def dump_payload(kind: JobKind, payload: ActivePayloadModel | dict[str, Any]) -> dict[str, Any]:
     """Validate and serialize a payload for ``kind``."""
-    model_class = _PAYLOAD_MODELS[kind]
+    if kind in RETIRED_JOB_KINDS:
+        raise PayloadValidationError(f"{kind.value} payload contract is retired")
+    model_class = _ACTIVE_PAYLOAD_MODELS[kind]
     try:
         model = payload if isinstance(payload, model_class) else model_class.model_validate(payload)
     except ValidationError as exc:
@@ -312,10 +327,12 @@ def dump_payload(kind: JobKind, payload: PayloadModel | dict[str, Any]) -> dict[
     return model.model_dump(mode="json", exclude_none=True)
 
 
-def load_payload[T: PayloadModel](job: Job, model_class: type[T]) -> T:
+def load_payload[T: ActivePayloadModel](job: Job, model_class: type[T]) -> T:
     """Decode ``job.payload`` as ``model_class`` after checking the job kind contract."""
-    expected = _PAYLOAD_MODELS[job.kind]
-    if not issubclass(model_class, expected) and not issubclass(expected, model_class):
+    expected = _ACTIVE_PAYLOAD_MODELS.get(job.kind)
+    if expected is None:
+        raise PayloadValidationError(f"{job.kind.value} payload contract is retired")
+    if model_class is not expected:
         raise PayloadValidationError(
             f"{model_class.__name__} does not match {job.kind.value} payload contract"
         )

@@ -15,29 +15,33 @@ from pathlib import Path
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.mcp.tools.debug.session_registry import GdbMiSessionRegistry
+from kdive.mcp.tools.debug.sessions.registry import GdbMiSessionRegistry
 from kdive.providers.ports.debug import (
     GdbFrame,
     GdbMiAttachment,
     GdbModule,
     GdbStopRecord,
 )
-from kdive.providers.shared.debug_common import gdbmi
-from kdive.providers.shared.debug_common.debuginfo import DebuginfoResolver
-from kdive.providers.shared.debug_common.execution import ExecutionControl
-from kdive.providers.shared.debug_common.gdbmi import (
+from kdive.providers.shared.debug_common.gdbmi.commands.disassembly import (
+    MAX_DISASSEMBLE_INSTRUCTIONS,
+)
+from kdive.providers.shared.debug_common.gdbmi.commands.stack import MAX_BACKTRACE_FRAMES
+from kdive.providers.shared.debug_common.gdbmi.core import engine as gdbmi
+from kdive.providers.shared.debug_common.gdbmi.core.engine import (
     MAX_MEMORY_READ_BYTES,
     GdbMiEngine,
     MiRecord,
     PygdbmiController,
     parse_mi_records,
 )
-from kdive.providers.shared.debug_common.mi_protocol import (
+from kdive.providers.shared.debug_common.gdbmi.core.execution import ExecutionControl
+from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
     disassembly_rows,
     evaluate_value,
     stack_frames,
 )
-from kdive.providers.shared.debug_common.transcript import append_transcript
+from kdive.providers.shared.debug_common.gdbmi.core.transcript import append_transcript
+from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import DebuginfoResolver
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -1249,7 +1253,7 @@ def test_backtrace_truncates_to_max_frames(tmp_path: Path) -> None:
     assert [frame.level for frame in bt.frames] == [0, 1, 2]
 
 
-@pytest.mark.parametrize("bad", [0, gdbmi.MAX_BACKTRACE_FRAMES + 1])
+@pytest.mark.parametrize("bad", [0, MAX_BACKTRACE_FRAMES + 1])
 def test_backtrace_rejects_bad_max_frames_before_command(bad: int, tmp_path: Path) -> None:
     controller = _FakeMiController()
     with pytest.raises(CategorizedError) as exc:
@@ -1508,7 +1512,7 @@ def test_disassemble_truncates_to_instruction_count(tmp_path: Path) -> None:
     assert len(result.instructions) == 3
 
 
-@pytest.mark.parametrize("bad", [0, gdbmi.MAX_DISASSEMBLE_INSTRUCTIONS + 1])
+@pytest.mark.parametrize("bad", [0, MAX_DISASSEMBLE_INSTRUCTIONS + 1])
 def test_disassemble_rejects_bad_count_before_command(bad: int, tmp_path: Path) -> None:
     controller = _FakeMiController()
     with pytest.raises(CategorizedError) as exc:
@@ -2280,9 +2284,41 @@ def test_list_modules_core_layout_fallback(tmp_path: Path) -> None:
     assert [m.base_address for m in result.modules] == ["0x2000", "0x3000"]
 
 
+def test_module_optional_eval_preserves_infrastructure_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _engine()
+    attachment = _attachment(_FakeMiController(), tmp_path)
+
+    def fail(_attachment: GdbMiAttachment, _command: str) -> list[MiRecord]:
+        raise CategorizedError("transport stalled", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    monkeypatch.setattr(engine, "execute_mi_command", fail)
+    with pytest.raises(CategorizedError) as excinfo:
+        engine._module_eval_optional(attachment, "modules.next")
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_module_build_id_preserves_memory_transport_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _engine()
+    attachment = _attachment(_FakeMiController(), tmp_path)
+    monkeypatch.setattr(engine, "_module_eval_optional", lambda _attachment, _expr: 0x2010)
+
+    def fail_memory(_attachment: GdbMiAttachment, *, address: int, byte_count: int) -> bytes:
+        del address, byte_count
+        raise CategorizedError("rsp dropped", category=ErrorCategory.TRANSPORT_FAILURE)
+
+    monkeypatch.setattr(engine, "read_memory", fail_memory)
+    with pytest.raises(CategorizedError) as excinfo:
+        engine._module_build_id(attachment, 0x2000)
+    assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+
+
 # --- load_module_symbols (#923, ADR-0278) ---------------------------------------------------
 
-from kdive.providers.shared.debug_common.debuginfo import ModuleDebuginfo  # noqa: E402
+from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import ModuleDebuginfo  # noqa: E402
 
 
 def _srcversion_cmd(ptr: str) -> str:

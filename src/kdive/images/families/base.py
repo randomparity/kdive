@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Protocol
 
 from kdive.domain.catalog.images import Capability
+from kdive.images.rootfs.kinds import RootfsImageKind
 
 
 def _mac_tag(guest_mac: str) -> Capability:
@@ -38,7 +39,7 @@ class CustomizeContext:
         version: The base-OS release (e.g. ``44`` / ``8`` / ``10``).
     """
 
-    kind: str
+    kind: RootfsImageKind
     packages: tuple[str, ...]
     readiness_unit_path: Path
     is_cloud_image: bool
@@ -60,11 +61,13 @@ class FamilyCustomizer(Protocol):
     #: ``apparmor`` (debian — profile-based, needs no relabel).
     guest_mac: str
 
-    def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
+    def packages(self, kind: RootfsImageKind, distro: str, version: str) -> tuple[str, ...]:
         """Return the package set this family installs for ``kind`` on ``distro``/``version``."""
         ...
 
-    def capabilities(self, kind: str, distro: str, version: str) -> tuple[Capability, ...]:
+    def capabilities(
+        self, kind: RootfsImageKind, distro: str, version: str
+    ) -> tuple[Capability, ...]:
         """Return the capability tags this family bakes for ``kind`` on ``distro``/``version``."""
         ...
 

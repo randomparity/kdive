@@ -26,7 +26,7 @@ TELEMETRY_MODULES: tuple[str, ...] = (
     "src/kdive/reconciler/fleet.py",
     "src/kdive/reconciler/loop_telemetry.py",
     "src/kdive/jobs/worker_telemetry.py",
-    "src/kdive/jobs/handlers/capture_telemetry.py",
+    "src/kdive/jobs/handlers/console/capture_telemetry.py",
 )
 
 _CREATE_ATTRS = frozenset(

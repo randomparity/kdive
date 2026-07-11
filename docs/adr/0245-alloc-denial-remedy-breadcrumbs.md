@@ -7,7 +7,7 @@
   denial `detail`/`reason`), the #471 discovery-action denial breadcrumbs
   (`mcp/tools/lifecycle/allocations/request.py`).
 - **Issue:** [#801](https://github.com/randomparity/kdive/issues/801) (part of epic #800).
-- **Spec:** [`../superpowers/specs/2026-06-25-alloc-denial-remedy-801.md`](../superpowers/specs/2026-06-25-alloc-denial-remedy-801.md).
+- **Spec:** [`../superpowers/specs/2026-06-25-alloc-denial-remedy-801.md`](../archive/superpowers/specs/2026-06-25-alloc-denial-remedy-801.md).
 
 ## Context
 

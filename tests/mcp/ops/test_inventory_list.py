@@ -29,7 +29,7 @@ from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.ops import inventory as inventory_tools
+from kdive.mcp.tools.ops.inventory import inventory as inventory_tools
 from kdive.security.authz.rbac import PlatformRole, Role
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -200,6 +200,7 @@ def test_auditor_lists_all_projects_and_audits(migrated_url: str) -> None:
         assert resp.data["truncated"] is False
         assert resp.data["allocation_count"] == 2
         assert resp.data["system_count"] == 2
+        assert resp.suggested_next_actions == ["inventory.list"]
         # Exactly one platform_audit_log row, zero audit_log writes.
         rows = await _platform_audit_rows(migrated_url)
         assert rows == [("user-1", "platform_auditor", "inventory.list", "all-projects")]
@@ -350,6 +351,7 @@ def test_either_stream_at_cap_sets_truncated(migrated_url: str) -> None:
         assert resp.data["truncated"] is True
         assert resp.data["allocation_count"] == 2  # capped to the limit
         assert resp.data["system_count"] == 0
+        assert resp.suggested_next_actions == ["inventory.list"]
         assert "next_cursor" not in resp.data  # dual-stream summary is not continuable
 
     asyncio.run(_run())

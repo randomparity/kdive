@@ -144,33 +144,56 @@ project membership + contributor on the asset's owning project, not by redaction
 | `asset` | `vmcore`, `vmlinux` | yes | Which raw asset to fetch: vmcore or vmlinux. |
 | `run_id` | string | yes | The Run whose raw asset to fetch. |
 
+## `artifacts.find`
+
+`implemented` · `read-only`
+
+Jump to the nearest literal match in one redacted artifact.
+
+Returns `data.match_found` plus, on a hit, `data.match_offset`/`data.match_line`, the
+surrounding `data.content`, and `data.next_offset` to continue in `direction`. An
+artifact above the fetch ceiling cannot be searched and returns configuration_error
+with `data.reason=artifact_too_large`, not an empty match. Requires viewer; sensitive
+ids are not-found.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `request` | object | yes | Artifact id plus literal search and result-window options. |
+
+`request` fields:
+
+- `artifact_id` (`string`, required) — The redacted artifact to search (sensitive ids are not-found).
+- `query` (`string`, required) — Literal search terms. '|' separates alternatives (e.g. 'BUG: KASAN|Call Trace'); the nearest term in direction is returned with data.match_offset, data.match_line, the surrounding data.content, and data.next_offset to continue (data.match_found is false when none remain). Per-line literal substring, case-sensitive, no regex and no Unicode normalization — match the artifact's exact bytes (kernel signatures are ASCII).
+- `byte_offset` (`integer`, optional) — Start byte for the search cursor. With direction=forward (default), search starts at this byte and a negative value starts from the beginning. With direction=backward, search runs up from this byte and an omitted (0) or negative value means end-of-artifact.
+- `max_bytes` (`integer`, optional) — Maximum surrounding content bytes on a match; default 16384. The server caps this at the smaller of a hard 24576-byte token-safe ceiling and KDIVE_ARTIFACT_INLINE_MAX_BYTES.
+- `direction` (``forward`, `backward``, optional) — Search direction. forward starts at byte_offset (the artifact start when omitted). backward starts at end-of-artifact when byte_offset is omitted; a positive byte_offset bounds it.
+
 ## `artifacts.get`
 
 `implemented` · `read-only`
 
-Fetch a byte window of one redacted artifact, or jump to a literal match.
+Fetch a byte window of one redacted artifact.
 
-Without `find`, returns the object ref plus a byte window of the redacted bytes inline
-in `data.content` (`[byte_offset, byte_offset + max_bytes)`, capped at a hard token-safe
+Returns the object ref plus a byte window of the redacted bytes inline in
+`data.content` (`[byte_offset, byte_offset + max_bytes)`, capped at a hard token-safe
 ceiling and KDIVE_ARTIFACT_INLINE_MAX_BYTES); `data.content_truncated` and
 `data.next_offset` page the rest, in `direction` (forward from the start, or backward
 from the tail). An artifact above the fetch ceiling sets `content_omitted` and is
-retrieved via the always-present presigned `refs.download_uri`.
-
-With `find`, jumps to the nearest literal match in `direction` over the whole artifact
-and returns `data.match_found` plus, on a hit, `data.match_offset`/`data.match_line`,
-the surrounding `data.content`, and `data.next_offset` to continue. An artifact above
-the fetch ceiling cannot be searched and returns a configuration error
-(reason=artifact_too_large), not an empty match. Requires viewer; sensitive ids are
-not-found.
+retrieved via presigned `refs.download_uri` when the store is reachable and redaction
+checks pass. When the response sets `data.content_unavailable`, callers must handle the
+degraded result without a `download_uri`. Use `artifacts.find` for literal search.
+Requires viewer; sensitive ids are not-found.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `artifact_id` | string | yes | The redacted artifact to fetch (sensitive ids are not-found). |
-| `byte_offset` | integer | no | Start byte of the window (0-based). With direction=forward (default) a negative value reads from the start; with direction=backward the window or find runs up from this byte and an omitted (0) or negative value means end-of-artifact. Page with the returned data.next_offset until data.content_truncated is false. |
-| `direction` | `forward`, `backward` | no | Cursor direction for paging and for find. forward starts at byte_offset (the artifact start when omitted). backward starts at end-of-artifact when byte_offset is omitted (read the tail and page up); a positive byte_offset bounds it. |
-| `find` | string (nullable) | no | Jump to the nearest literal match instead of returning a plain window. '\|' separates terms (e.g. 'BUG: KASAN\|Call Trace'); the nearest term in direction is returned with data.match_offset, data.match_line, the surrounding data.content, and data.next_offset to continue (data.match_found is false when none remain). Per-line literal substring, case-sensitive, no regex and no Unicode normalization — match the artifact's exact bytes (kernel signatures are ASCII). Omit for a plain window. |
-| `max_bytes` | integer | no | Maximum inline window bytes; default 16384, sized to the tool-result token budget. The server caps the window at the smaller of a hard 24576-byte token-safe ceiling and KDIVE_ARTIFACT_INLINE_MAX_BYTES, so a larger value still returns at most 24576 bytes with data.next_offset to page the rest; an artifact above the fetch ceiling omits inline content — use refs.download_uri for the whole object. |
+| `request` | object | yes | Artifact id plus byte-window paging options. |
+
+`request` fields:
+
+- `artifact_id` (`string`, required) — The redacted artifact to fetch (sensitive ids are not-found).
+- `byte_offset` (`integer`, optional) — Start byte of the window (0-based). With direction=forward (default) a negative value reads from the start; with direction=backward the window runs up from this byte and an omitted (0) or negative value means end-of-artifact. Page with the returned data.next_offset until data.content_truncated is false.
+- `max_bytes` (`integer`, optional) — Maximum inline window bytes; default 16384, sized to the tool-result token budget. The server caps the window at the smaller of a hard 24576-byte token-safe ceiling and KDIVE_ARTIFACT_INLINE_MAX_BYTES, so a larger value still returns at most 24576 bytes with data.next_offset to page the rest; an artifact above the fetch ceiling omits inline content — use refs.download_uri for the whole object when present. Store or redaction failures set data.content_unavailable and omit download_uri.
+- `direction` (``forward`, `backward``, optional) — Cursor direction for paging. forward starts at byte_offset (the artifact start when omitted). backward starts at end-of-artifact when byte_offset is omitted (read the tail and page up); a positive byte_offset bounds it.
 
 ## `artifacts.list`
 

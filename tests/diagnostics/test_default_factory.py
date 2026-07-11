@@ -24,6 +24,7 @@ from kdive.diagnostics.checks import (
     Check,
     CheckResult,
     CheckStatus,
+    Vantage,
 )
 from kdive.diagnostics.provider_checks import (
     BASE_VOLUME_NOT_STAGED_FIX,
@@ -49,6 +50,19 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.diagnostics import base_image_staging, reachability
 from kdive.providers.remote_libvirt.diagnostics import contribution as remote_contribution
+
+
+class _FakeEgressCheck(Check):
+    @property
+    def id(self) -> str:
+        return "guest_egress"
+
+    @property
+    def vantage(self) -> Vantage:
+        return Vantage.WORKER
+
+    async def run(self) -> CheckResult:
+        return CheckResult("guest_egress", CheckStatus.PASS, "egress ok", provider="provider-a")
 
 
 def _factory(
@@ -319,12 +333,37 @@ def test_secret_ref_passes_when_no_ref_is_required(monkeypatch, tmp_path: Path) 
 
 
 def test_with_egress_fails_fast_when_no_probe_image_is_wired(monkeypatch, tmp_path: Path) -> None:
-    # The default factory has no probe-guest seam (remote needs an operator-staged image until
-    # M2.4, ADR-0091), so opting into egress fails fast rather than silently dropping the check.
+    # The default provider contributions have no probe-guest seam, so opting into egress fails fast
+    # rather than silently dropping the check.
     _set_env(monkeypatch, tmp_path)
     with pytest.raises(CategorizedError) as exc:
         _factory(None, with_egress=True)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_with_egress_assembles_provider_supplied_egress_check(monkeypatch, tmp_path: Path) -> None:
+    _set_env(monkeypatch, tmp_path)
+    egress = _FakeEgressCheck()
+
+    def _enabled() -> bool:
+        return True
+
+    def _no_checks() -> tuple[Check, ...]:
+        return ()
+
+    contribution = DiagnosticProviderContribution(
+        provider="provider-a",
+        enabled=_enabled,
+        checks=_no_checks,
+        unavailable_worker_checks=tuple,
+        worker_checks=_no_checks,
+        egress_checks=lambda: (egress,),
+    )
+    service = default_service_factory(
+        None, with_egress=True, provider_contributions=(contribution,)
+    )
+
+    assert egress in service._checks  # noqa: SLF001
 
 
 # ---- remote-libvirt reachability + TLS/ACL wiring (ADR-0125, #453) -------------------

@@ -20,12 +20,10 @@ class KernelConfig:
     enabled: frozenset[str]
 
     def is_enabled(self, symbol: str) -> bool:
-        """True when ``symbol`` (bare name) is built in (``=y``) or a module (``=m``)."""
         return symbol in self.enabled
 
     @property
     def is_degenerate(self) -> bool:
-        """True when no symbols are enabled — signals a non-authoritative/empty upload."""
         return not self.enabled
 
 

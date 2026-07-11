@@ -14,7 +14,7 @@
   /[ADR-0085](0085-drgn-live-transport-generalization.md) (the `kdive-drgn` in-guest helper
   contract the live path SSH-execs), [ADR-0213](0213-local-kdump-in-guest-prerequisites.md) (the
   same package-membership gate this reuses to stage debug-image-only assets).
-- **Spec:** [`docs/specs/2026-06-23-local-rootfs-drgn-helper-and-networking.md`](../specs/2026-06-23-local-rootfs-drgn-helper-and-networking.md).
+- **Spec:** [`docs/design/2026-06-23-local-rootfs-drgn-helper-and-networking.md`](../design/2026-06-23-local-rootfs-drgn-helper-and-networking.md).
 
 ## Context
 

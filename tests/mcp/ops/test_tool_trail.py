@@ -26,7 +26,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.ops import tool_trail as trail_tools
+from kdive.mcp.tools.ops.audit import tool_trail as trail_tools
 from kdive.security.authz.rbac import PlatformRole, Role
 
 _NOW = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
@@ -129,9 +129,16 @@ def _query(
     principal: str | None = None,
     tool: str | None = None,
     window: list[str | None] | None = None,
+    limit: int = trail_tools.DEFAULT_LIST_LIMIT,
+    cursor: str | None = None,
 ) -> trail_tools.ToolTrailQuery:
     return trail_tools.ToolTrailQuery(
-        agent_session=agent_session, principal=principal, tool=tool, window=window
+        agent_session=agent_session,
+        principal=principal,
+        tool=tool,
+        window=window,
+        limit=limit,
+        cursor=cursor,
     )
 
 
@@ -257,12 +264,15 @@ def test_keyset_pagination_drains_the_set(migrated_url: str) -> None:
             await _seed_session(pool)
             ctx = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
             first = await trail_tools.tool_trail(
-                pool, ctx, request=_query(agent_session="sess-1"), limit=2, now=_NOW
+                pool, ctx, request=_query(agent_session="sess-1", limit=2), now=_NOW
             )
             assert first.data["truncated"] is True
             cursor = cast(str, first.data["next_cursor"])
             second = await trail_tools.tool_trail(
-                pool, ctx, request=_query(agent_session="sess-1"), limit=2, cursor=cursor, now=_NOW
+                pool,
+                ctx,
+                request=_query(agent_session="sess-1", limit=2, cursor=cursor),
+                now=_NOW,
             )
         assert [r["args_digest"] for r in _rows(first)] == ["d3", "d2"]
         assert [r["args_digest"] for r in _rows(second)] == ["d1"]
@@ -291,7 +301,10 @@ def test_invalid_cursor_fails_closed_but_audits(migrated_url: str) -> None:
             await _seed_session(pool)
             ctx = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
             resp = await trail_tools.tool_trail(
-                pool, ctx, request=_query(agent_session="sess-1"), cursor="not-a-cursor", now=_NOW
+                pool,
+                ctx,
+                request=_query(agent_session="sess-1", cursor="not-a-cursor"),
+                now=_NOW,
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"

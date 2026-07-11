@@ -22,8 +22,8 @@ from uuid import UUID
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts import upload_manifest
 from kdive.artifacts.uploads import ManifestEntry
-from kdive.db import upload_manifest
 from kdive.db.locks import LockScope
 from kdive.domain.capacity.state import RunState
 from kdive.reconciler.cleanup.uploads import (

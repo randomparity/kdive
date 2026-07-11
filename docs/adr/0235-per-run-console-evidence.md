@@ -10,7 +10,7 @@
   [ADR-0233](0233-live-attach-halted-early-boot-crash.md) (the boot-outcome results this console
   evidence rides on).
 - **Issue:** [#761](https://github.com/randomparity/kdive/issues/761) (part of epic #764).
-- **Spec:** [`../superpowers/specs/2026-06-24-per-run-console-evidence.md`](../superpowers/specs/2026-06-24-per-run-console-evidence.md).
+- **Spec:** [`../superpowers/specs/2026-06-24-per-run-console-evidence.md`](../archive/superpowers/specs/2026-06-24-per-run-console-evidence.md).
 
 ## Context
 

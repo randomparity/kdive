@@ -46,11 +46,11 @@ are guarded anyway, so a future edit cannot silently reintroduce a ref.
 
 Driven by the guard (write it first; it lists every offending path). Sources:
 
-- `src/kdive/mcp/schema_advertising.py` — `ENVELOPE_OUTPUT_SCHEMA["description"]` (kills the
+- `src/kdive/mcp/schema/schema_advertising.py` — `ENVELOPE_OUTPUT_SCHEMA["description"]` (kills the
   bulk).
 - Tool docstrings: `mcp/tools/gateway.py` (`tools.invoke`), `mcp/tools/lifecycle/runs/composite.py`
   (`runs.build_install_boot`), `mcp/tools/ops/build_hosts/build_envs.py` (`build_envs.list`).
-- Field/schema descriptions: `mcp/provider_schema.py`, `mcp/tool_payloads.py`,
+- Field/schema descriptions: `mcp/schema/provider_schema.py`, `mcp/schema/tool_payloads.py`,
   `profiles/provider_sections.py`, `profiles/provisioning.py`, `profiles/build.py`,
   `domain/capacity/state.py` (state-enum class docstrings), the `resources.register_*` and
   `runs.complete_build` payloads.

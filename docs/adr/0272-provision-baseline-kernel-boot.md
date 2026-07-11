@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Issue: #905
-- Spec: [provision-baseline-kernel-boot-905](../specs/2026-06-29-provision-baseline-kernel-boot-905.md)
+- Spec: [provision-baseline-kernel-boot-905](../design/2026-06-29-provision-baseline-kernel-boot-905.md)
 - Supersedes nothing; extends ADR-0025 (provision XML), ADR-0030 (install direct-kernel `<os>`),
   ADR-0060 (idempotent provision/overlay), ADR-0218 (loopback SSH forward).
 

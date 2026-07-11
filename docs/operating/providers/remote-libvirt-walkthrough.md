@@ -32,10 +32,9 @@ helm install kdive deploy/helm/kdive -n kdive-demo -f deploy/helm/kdive/values-d
 
 ## 3. Onboard the project
 
-The chart seeds build-configs but **not** quota or budget, so the first `allocations.request`
-dead-ends on `quota_exceeded` (this is issue #497). Onboard the demo project through the
-audited admin tools. The in-cluster server is ClusterIP-only, so port-forward its MCP
-endpoint first:
+The chart does **not** seed quota or budget, so the first `allocations.request` dead-ends on
+`quota_exceeded` (this is issue #497). Onboard the demo project through the audited admin tools.
+The in-cluster server is ClusterIP-only, so port-forward its MCP endpoint first:
 
 Run this from the repo checkout with the project venv active (or set
 `KDIVE_PYTHON=/opt/kdive/.venv/bin/python`), so `fastmcp` resolves:

@@ -27,10 +27,10 @@ from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_erro
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
-from kdive.mcp.tools.debug.sessions_read import active_session_ids_for_system
 from kdive.mcp.tools.lifecycle._recovery import iso, provisioning_profile_summary
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.debug.sessions import active_session_ids_for_system
 
 CUSTOM_SHAPE_SENTINEL = "__custom__"
 """The ``shape`` filter value selecting full-custom Systems (``shape IS NULL``)."""

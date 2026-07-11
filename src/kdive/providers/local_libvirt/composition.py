@@ -22,26 +22,35 @@ from kdive.providers.core.discovery_registration import (
     DiscoveryRegistrationTarget,
     ProviderDiscoveryRegistration,
 )
-from kdive.providers.core.runtime import DebugCapabilities, ProviderRuntime
+from kdive.providers.core.runtime import (
+    BootstrapKeyCapabilities,
+    DebugCapabilities,
+    ProviderRuntime,
+    ProviderSupport,
+    ResourceBindingCapabilities,
+    RootfsCapabilities,
+)
 from kdive.providers.infra.reaping import InfraReaper
 from kdive.providers.local_libvirt.config import local_guest_egress_for_resource
 from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
-from kdive.providers.local_libvirt.debug.introspect import (
-    LocalLibvirtLiveIntrospect,
-    LocalLibvirtVmcoreIntrospect,
-)
+from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
+from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.local_libvirt.lifecycle.control import LocalLibvirtControl
 from kdive.providers.local_libvirt.lifecycle.install import LocalLibvirtInstall
-from kdive.providers.local_libvirt.lifecycle.overlay_customize import authorized_key_customizer
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
+from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import (
+    authorized_key_customizer,
+)
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.local_libvirt.reaping import LibvirtInfraReaper
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
-from kdive.providers.shared.debug_common.debuginfo import real_module_debuginfo_resolver
-from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
+from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
+from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
+    real_module_debuginfo_resolver,
+)
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -144,9 +153,12 @@ def build_runtime(
         # live (B3 #677/ADR-0219, drgn-live SSH-exec of the in-guest kdive-drgn helper). All these
         # planes were proven live end-to-end on real KVM by the B6 (#680) milestone verifier, so
         # `debug.*` and `introspect.run` tool maturity is `implemented` (ADR-0218 §6 / ADR-0219).
-        supported_capture_methods=frozenset({CaptureMethod.KDUMP, CaptureMethod.HOST_DUMP}),
-        supported_debug_transports=frozenset({"gdbstub", "drgn-live"}),
-        supported_introspection=frozenset({"offline-vmcore", "live", "live-script"}),
+        support=ProviderSupport(
+            component_sources=_component_sources(),
+            capture_methods=frozenset({CaptureMethod.KDUMP, CaptureMethod.HOST_DUMP}),
+            debug_transports=frozenset({"gdbstub", "drgn-live"}),
+            introspection=frozenset({"offline-vmcore", "live", "live-script"}),
+        ),
         debug=DebugCapabilities(
             attach_seam=default_attach_seam,
             engine=GdbMiEngine(
@@ -154,13 +166,16 @@ def build_runtime(
                 module_debuginfo_resolver=real_module_debuginfo_resolver(),
             ),
         ),
-        component_sources=_component_sources(),
-        rootfs_validator=provisioner.validate_rootfs_ref,
-        rootfs_build_plane=LocalLibvirtRootfsBuildPlane.from_env(),
+        rootfs=RootfsCapabilities(
+            validator=provisioner.validate_rootfs_ref,
+            build_plane=LocalLibvirtRootfsBuildPlane.from_env(),
+        ),
         # The per-System bootstrap key (ADR-0289, #963) is injected via virt-customize into the
         # local overlay only local-libvirt owns; other providers leave this unset.
-        bootstrap_key_customizer=authorized_key_customizer,
+        bootstrap_key=BootstrapKeyCapabilities(customizer=authorized_key_customizer),
         # Per-Resource rebind (ADR-0187/0313, #1031): bind the operator guest_egress opt-in for the
         # allocated Resource by name. Previously unset (identity) — local now resolves per op.
-        rebind_for_resource=_rebind_for_resource(secret_registry),
+        binding=ResourceBindingCapabilities(
+            rebind_for_resource=_rebind_for_resource(secret_registry)
+        ),
     )

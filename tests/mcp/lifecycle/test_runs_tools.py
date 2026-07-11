@@ -30,15 +30,15 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
+from kdive.domain.lifecycle.run_steps import BootOutcome
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.domain.pcie import PCIeClaim
-from kdive.jobs.handlers import console_evidence
+from kdive.jobs.handlers.console import console_evidence
 from kdive.jobs.handlers.runs import common as run_handler_common
 from kdive.jobs.handlers.runs import registrar as runs_handlers
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run_target_kind
-from kdive.mcp.tools.lifecycle import vmcore
 from kdive.mcp.tools.lifecycle.runs import common as runs_common
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest, bind_run
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
@@ -50,6 +50,7 @@ from kdive.mcp.tools.lifecycle.runs.create import (
 from kdive.mcp.tools.lifecycle.runs.create import _created_response as _created_response
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
+from kdive.mcp.tools.lifecycle.vmcore import view as vmcore_view
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.artifacts.listing import CONSOLE_MANIFEST_MAX, ConsoleManifest
@@ -722,7 +723,7 @@ def test_envelope_for_run_omits_installed_crashkernel_without_progress() -> None
 
 _CONSOLE_ACCESS_EXPECTED = {
     "ref": "console",
-    "search": "artifacts.get",
+    "search": "artifacts.find",
     "full_text": "artifacts.get",
 }
 
@@ -874,7 +875,7 @@ def test_envelope_for_run_console_access_hint_absent_without_step_progress() -> 
     assert "console_access" not in resp.data
 
 
-def _ready_progress(boot_outcome: str | None) -> StepProgress:
+def _ready_progress(boot_outcome: BootOutcome | None) -> StepProgress:
     return StepProgress(install="succeeded", boot="succeeded", boot_outcome=boot_outcome)
 
 
@@ -1252,7 +1253,7 @@ def test_get_expected_crash_surfaces_capture_disclosure(migrated_url: str) -> No
             resp = await get_run(pool, _ctx(), run_id)
         assert resp.data["available_capture"] == ["console"]
         assert resp.data["inert_capture"] == ["gdbstub", "host_dump"]
-        assert resp.data["inert_capture_reason"] == vmcore.CONSOLE_CRASH_GUIDANCE
+        assert resp.data["inert_capture_reason"] == vmcore_view.CONSOLE_CRASH_GUIDANCE
 
     asyncio.run(_run())
 
@@ -2850,18 +2851,33 @@ def test_create_second_run_on_live_system_conflicts(migrated_url: str) -> None:
 
 from kdive.jobs import queue  # noqa: E402
 from kdive.jobs.models import HandlerRegistry  # noqa: E402
-from kdive.jobs.payloads import BuildPayload, InstallPayload, RunPayload  # noqa: E402
+from kdive.jobs.payloads import (  # noqa: E402
+    BuildPayload,
+    InstallPayload,
+    PayloadValidationError,
+    RunPayload,
+)
 
 
 async def _enqueue_build_job(pool: AsyncConnectionPool, run_id: str) -> Job:
-    async with pool.connection() as conn:
-        return await queue.enqueue(
-            conn,
-            JobKind.BUILD,
-            BuildPayload(run_id=run_id, build_host_id=str(WORKER_LOCAL_ID)),
-            {"principal": "user-1", "agent_session": "s", "project": "proj"},
-            f"{run_id}:build",
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "INSERT INTO jobs (kind, payload, state, max_attempts, authorizing, dedup_key) "
+            "VALUES (%s, %s, 'queued', 3, %s, %s) RETURNING *",
+            (
+                JobKind.BUILD.value,
+                Jsonb(
+                    BuildPayload(run_id=run_id, build_host_id=str(WORKER_LOCAL_ID)).model_dump(
+                        mode="json", exclude_none=True
+                    )
+                ),
+                Jsonb({"principal": "user-1", "agent_session": "s", "project": "proj"}),
+                f"{run_id}:build",
+            ),
         )
+        row = await cur.fetchone()
+    assert row is not None
+    return Job.model_validate(row)
 
 
 async def _seed_running_run(pool: AsyncConnectionPool) -> str:
@@ -3709,11 +3725,28 @@ def test_install_cross_project_is_config_error(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_install_malformed_uuid_is_config_error(migrated_url: str) -> None:
+def test_install_malformed_uuid_is_invalid_uuid(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await _install(pool, _ctx(), "not-a-uuid")
-        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None
+        assert "run_id" in resp.detail and "not-a-uuid" in resp.detail
+
+    asyncio.run(_run())
+
+
+def test_boot_malformed_uuid_is_invalid_uuid(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _boot(pool, _ctx(), "not-a-uuid")
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None
+        assert "run_id" in resp.detail and "not-a-uuid" in resp.detail
 
     asyncio.run(_run())
 
@@ -5157,21 +5190,15 @@ def test_step_progress_reads_installed_cmdline(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_install_handler_accepts_composite_phase_job(migrated_url: str) -> None:
-    """The composite build_install_boot install phase passes a BUILD_INSTALL_BOOT-kind job.
-
-    Its run_only payload bakes cmdline at build (no install-time override), so the handler must
-    decode it and apply the build-ledger cmdline — regression for the InstallPayload dispatch that
-    load_payload(InstallPayload) would otherwise reject on the composite's differently-kinded job.
-    """
+def test_install_handler_rejects_retired_composite_phase_job(migrated_url: str) -> None:
+    """The retired build_install_boot kind no longer bypasses exact install payload decoding."""
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_succeeded_run(
                 pool, build_profile={**_VALID_BUILD, "cmdline": "dhash_entries=9"}
             )
-            # Exactly what composite._phase_job(job, RunPayload(run_id)) produces: kind carried
-            # from the composite job, payload a bare {run_id}.
+            # Historical composite rows carried the composite kind with a bare {run_id} payload.
             phase_job = Job(
                 id=uuid4(),
                 created_at=_DT,
@@ -5183,16 +5210,18 @@ def test_install_handler_accepts_composite_phase_job(migrated_url: str) -> None:
                 authorizing={"principal": "user-1", "agent_session": "s", "project": "proj"},
                 dedup_key=f"{run_id}:composite",
             )
-            installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(
-                    conn,
-                    phase_job,
-                    resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
-                )
-            # No override on the composite path: the build-ledger cmdline is applied and recorded.
-            assert installer.calls[0].cmdline == "console=ttyS0 root=/dev/vda dhash_entries=9"
-            assert await _install_step_cmdline(pool, run_id) == "dhash_entries=9"
+                with pytest.raises(
+                    PayloadValidationError,
+                    match="build_install_boot payload contract is retired",
+                ):
+                    await runs_handlers.install_handler(
+                        conn,
+                        phase_job,
+                        resolver=provider_resolver(
+                            installer=_FakeInstaller(), profile_policy=_LOCAL_POLICY
+                        ),
+                    )
 
     asyncio.run(_run())
 
@@ -5371,12 +5400,15 @@ def test_cancel_unknown_run_id_is_not_found(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_cancel_malformed_run_id_is_configuration_error(migrated_url: str) -> None:
+def test_cancel_malformed_run_id_is_invalid_uuid(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await cancel_run(pool, _ctx(Role.OPERATOR), "not-a-uuid")
             assert resp.status == "error"
             assert resp.error_category == "configuration_error"
+            assert resp.data["reason"] == "invalid_uuid"
+            assert resp.detail is not None
+            assert "run_id" in resp.detail and "not-a-uuid" in resp.detail
 
     asyncio.run(_run())
 

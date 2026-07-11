@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field
 import kdive.config as config
 from kdive.config.core_settings import RESOURCE_LEASE_TTL_SECONDS
 from kdive.domain.capacity.state import ResourceStatus
+from kdive.domain.catalog.images import ImageState
 from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     MEMORY_MB_KEY,
@@ -36,8 +37,8 @@ from kdive.domain.catalog.resource_capabilities import (
 from kdive.domain.catalog.resources import ManagedBy, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.reconcile.locks import resource_identity_lock
+from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.tools.ops.resources._common import (
     REGISTER_FAULT_INJECT_TOOL,
     REGISTER_LOCAL_LIBVIRT_TOOL,
@@ -188,9 +189,8 @@ async def _base_image_registered(
     """Whether ``base_image`` names a ``registered`` image_catalog row for ``kind``'s provider."""
     async with conn.cursor() as cur:
         await cur.execute(
-            "SELECT 1 FROM image_catalog "
-            "WHERE provider = %s AND name = %s AND state = 'registered' LIMIT 1",
-            (kind.value, base_image),
+            "SELECT 1 FROM image_catalog WHERE provider = %s AND name = %s AND state = %s LIMIT 1",
+            (kind.value, base_image, ImageState.REGISTERED.value),
         )
         return (await cur.fetchone()) is not None
 

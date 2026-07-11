@@ -3,7 +3,7 @@
 Builds the app with a null pool + a local-keypair verifier (the service-test
 path; needs no DB and no OIDC env), then asserts every tool is fully
 documented, the destructive hint matches the reviewed set, and every
-`implemented` or `partial` tool is assigned to a non-live behavior test module.
+`implemented` tool is assigned to a non-live behavior test module.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from fastmcp.tools.function_tool import FunctionTool
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import SystemState
-from kdive.mcp.app import build_app
+from kdive.mcp.assembly.app import build_app
 from kdive.mcp.tools import _docmeta
 from kdive.profiles.build import BuildProfile
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -60,6 +60,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
         "tests/mcp/catalog/test_feature_config_requirements_tool.py",
     ),
     "artifacts.fetch_raw": ("tests/mcp/catalog/test_raw_fetch_tool.py",),
+    "artifacts.find": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "artifacts.get": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "artifacts.list": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "audit.query": ("tests/mcp/ops/test_audit_query.py",),
@@ -308,9 +309,23 @@ def _object_schema(schema: dict[str, object]) -> dict[str, object]:
     raise AssertionError(f"no object schema in {schema!r}")
 
 
+def _request_properties(params: dict[str, object]) -> dict[str, object]:
+    properties = cast(dict[str, object], params["properties"])
+    request_schema = _object_schema(cast(dict[str, object], properties["request"]))
+    ref = request_schema.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/$defs/"):
+        defs = cast(dict[str, object], params["$defs"])
+        request_schema = cast(dict[str, object], defs[ref.removeprefix("#/$defs/")])
+    return cast(dict[str, object], request_schema["properties"])
+
+
 def test_filtered_list_tools_use_request_payloads() -> None:
     tools = {t.name: t for t in TOOLS}
     expected_fields = {
+        "accounting.report_all_projects": {"group_by", "window"},
+        "accounting.report_granted_set": {"projects", "group_by", "window"},
+        "artifacts.find": {"artifact_id", "query", "byte_offset", "max_bytes", "direction"},
+        "artifacts.get": {"artifact_id", "byte_offset", "max_bytes", "direction"},
         "debug.list_sessions": {"run_id", "system_id", "project", "state", "limit", "cursor"},
         "investigations.list": {"project", "state", "limit", "cursor"},
         "resources.list": {"kind", "limit", "cursor"},
@@ -319,17 +334,72 @@ def test_filtered_list_tools_use_request_payloads() -> None:
     for tool_name, fields in expected_fields.items():
         params = tools[tool_name].parameters
         assert set(params["properties"]) == {"request"}
-        request_schema = _object_schema(params["properties"]["request"])
-        request_properties = cast(dict[str, object], request_schema["properties"])
-        assert set(request_properties) == fields
+        assert set(_request_properties(params)) == fields
+
+
+def test_composite_mutations_use_request_payloads() -> None:
+    tools = {t.name: t for t in TOOLS}
+    request_only_fields = {
+        "accounting.set_quota": {
+            "project",
+            "max_concurrent_allocations",
+            "max_concurrent_systems",
+            "max_pending_allocations",
+        },
+        "investigations.open": {
+            "project",
+            "title",
+            "description",
+            "external_refs",
+            "idempotency_key",
+        },
+        "shapes.set": {"name", "vcpus", "memory_mb", "disk_gb", "pcie_match"},
+    }
+
+    for tool_name, fields in request_only_fields.items():
+        params = tools[tool_name].parameters
+        assert set(params["properties"]) == {"request"}
+        assert set(_request_properties(params)) == fields
+
+    complete_build_params = tools["runs.complete_build"].parameters
+    assert set(complete_build_params["properties"]) == {"run_id", "request"}
+    assert set(_request_properties(complete_build_params)) == {
+        "cmdline",
+        "build_id",
+        "source_label",
+        "source_ref",
+    }
+
+
+def test_platform_auditor_reads_keep_pagination_inside_request_payloads() -> None:
+    tools = {t.name: t for t in TOOLS}
+
+    audit_params = tools["audit.query"].parameters
+    assert set(audit_params["properties"]) == {"request"}
+    audit_choices = audit_params["properties"]["request"]["oneOf"]
+    assert isinstance(audit_choices, list)
+    for choice in audit_choices:
+        assert isinstance(choice, dict)
+        properties = cast(dict[str, object], choice["properties"])
+        assert {"limit", "cursor"} <= set(properties)
+
+    trail_params = tools["ops.tool_trail"].parameters
+    assert set(trail_params["properties"]) == {"request"}
+    trail_schema = _object_schema(trail_params["properties"]["request"])
+    trail_properties = cast(dict[str, object], trail_schema["properties"])
+    assert {"limit", "cursor"} <= set(trail_properties)
 
 
 def test_run_cmdline_docs_describe_debug_args_only() -> None:
     """The agent-provided cmdline must not document platform-owned boot args."""
     tools = {t.name: t for t in TOOLS}
     for tool_name in ("runs.complete_build",):
-        schema = tools[tool_name].parameters["properties"]["cmdline"]
+        schema = cast(
+            dict[str, object],
+            _request_properties(tools[tool_name].parameters)["cmdline"],
+        )
         description = schema["description"]
+        assert isinstance(description, str)
         assert "dhash_entries=1" in description
         assert "console=ttyS0" not in description
         assert "root=/dev/vda" not in description
@@ -480,52 +550,11 @@ def test_every_tool_has_a_valid_maturity() -> None:
     assert not offenders, f"tools with missing/invalid maturity: {offenders}"
 
 
-_VALID_MATURITY_REASONS = {r.value for r in _docmeta.MaturityReason}
+def test_tools_have_no_maturity_detail() -> None:
+    # A maturity_detail left behind after a tool is promoted would mislead.
+    offenders = [t.name for t in TOOLS if "maturity_detail" in (t.meta or {})]
+    assert not offenders, f"tools carrying a stale maturity_detail: {offenders}"
 
-
-def test_partial_tools_carry_a_maturity_reason() -> None:
-    # ADR-0175: every `partial` tool must explain itself with a structured
-    # maturity_detail (a closed reason + a one-line detail + a one-line promotion
-    # bar) so a black-box agent reads WHY, not just `partial`.
-    offenders: list[str] = []
-    for t in TOOLS:
-        meta = t.meta or {}
-        if meta.get("maturity") != "partial":
-            continue
-        detail = meta.get("maturity_detail")
-        if not isinstance(detail, dict):
-            offenders.append(f"{t.name}: missing maturity_detail")
-            continue
-        if detail.get("reason") not in _VALID_MATURITY_REASONS:
-            offenders.append(f"{t.name}: invalid reason {detail.get('reason')!r}")
-        if not (detail.get("detail") or "").strip():
-            offenders.append(f"{t.name}: empty detail")
-        if not (detail.get("promotion") or "").strip():
-            offenders.append(f"{t.name}: empty promotion")
-    assert not offenders, f"partial tools missing maturity explanation: {offenders}"
-
-
-def test_non_partial_tools_have_no_maturity_detail() -> None:
-    # A maturity_detail left behind after a tool is promoted to `implemented`
-    # would mislead; only `partial` tools carry one.
-    offenders = [
-        t.name
-        for t in TOOLS
-        if (t.meta or {}).get("maturity") != "partial" and "maturity_detail" in (t.meta or {})
-    ]
-    assert not offenders, f"non-partial tools carrying a stale maturity_detail: {offenders}"
-
-
-# The introspect planes whose local-libvirt seam is still an Epic-B stub (M2.8 honesty,
-# #673). Their `providers` pointer must say the local-libvirt path is *planned* and the
-# remote-libvirt path *implemented* — not the pre-honesty "wired" half-truth. A promotion to
-# `implemented` for a plane is the diff that flips its pointer here. The `debug.*` planes moved
-# to their own implemented-guard once B1 (#675) wired the gdbstub transport they run over;
-# `introspect.from_vmcore` got its own implemented-guard once B2 (#676) wired it and B6 (#680)
-# proved it live; and `introspect.run` got its own implemented-guard once B3 (#677/ADR-0219)
-# wired the live drgn-over-SSH seam and B6 proved it live (#682/ADR-0221) — so no local plane is
-# a MISSING_DEPENDENCY stub any more.
-_LOCAL_PLANNED_PROVIDER_TOOLS: frozenset[str] = frozenset()
 
 # The `debug.*` planes were proven live end-to-end on real KVM (M2.8 B6 #680, ADR-0208
 # invariant 5): start_session opened a live gdbstub session, set_breakpoint("schedule") →
@@ -576,34 +605,11 @@ _LOCAL_PROVEN_DEBUG_TOOLS = frozenset(
 def test_introspect_from_vmcore_promoted_to_implemented() -> None:
     # M2.8 B6 (#680): local offline drgn introspection was proven live on a real host_dump core
     # (sysinfo release 7.0.0, cpus_online=1, modules.decode_errors=0, all_failed=false), so the
-    # tool is now `implemented` (ADR-0175: a non-partial tool carries no maturity_detail).
+    # tool is now `implemented` and carries no maturity_detail.
     by_name = {t.name: t for t in TOOLS}
     tool = by_name["introspect.from_vmcore"]
     assert (tool.meta or {}).get("maturity") == "implemented"
     assert (tool.meta or {}).get("maturity_detail") is None
-
-
-def test_local_stubbed_planes_advertise_planned_provider_pointer() -> None:
-    # #673 / M2.8 honesty: a local-libvirt System cannot run these planes today
-    # (the seam raises MISSING_DEPENDENCY); the catalog must say so. Each in-scope
-    # tool carries a `providers` pointer marking local-libvirt `planned` and
-    # remote-libvirt `implemented`.
-    by_name = {t.name: t for t in TOOLS}
-    offenders: list[str] = []
-    for name in sorted(_LOCAL_PLANNED_PROVIDER_TOOLS):
-        tool = by_name.get(name)
-        if tool is None:
-            offenders.append(f"{name}: tool not registered")
-            continue
-        providers = ((tool.meta or {}).get("maturity_detail") or {}).get("providers")
-        if not isinstance(providers, str):
-            offenders.append(f"{name}: missing providers pointer")
-            continue
-        if "local-libvirt: planned" not in providers:
-            offenders.append(f"{name}: local-libvirt not marked planned ({providers!r})")
-        if "remote-libvirt: implemented" not in providers:
-            offenders.append(f"{name}: remote-libvirt not marked implemented ({providers!r})")
-    assert not offenders, f"stubbed local planes with a dishonest provider pointer: {offenders}"
 
 
 def test_introspect_run_promoted_to_implemented() -> None:
@@ -622,7 +628,7 @@ def test_introspect_run_promoted_to_implemented() -> None:
 def test_local_proven_debug_planes_are_implemented() -> None:
     # B6 (#680): the gdb-MI debug surface was proven live on real KVM (ADR-0208 invariant 5
     # satisfied), so every debug.* op is now `implemented` and — per ADR-0175 — carries no
-    # maturity_detail. Guards against a leftover `partial`/maturity_detail after promotion.
+    # maturity_detail. Guards against a leftover maturity_detail after promotion.
     by_name = {t.name: t for t in TOOLS}
     offenders: list[str] = []
     for name in sorted(_LOCAL_PROVEN_DEBUG_TOOLS):
@@ -665,21 +671,6 @@ def test_postmortem_crash_triage_promoted_to_implemented() -> None:
     assert not offenders, f"postmortem tools not promoted to implemented: {offenders}"
 
 
-def test_maturity_meta_rejects_partial_without_reason() -> None:
-    with pytest.raises(ValueError, match="requires reason"):
-        _docmeta.maturity_meta("partial")
-
-
-def test_maturity_meta_rejects_reason_on_non_partial() -> None:
-    with pytest.raises(ValueError, match="must not carry"):
-        _docmeta.maturity_meta(
-            "implemented",
-            reason=_docmeta.MaturityReason.OPERATOR_GATE,
-            detail="x",
-            promotion="y",
-        )
-
-
 def test_destructive_hint_matches_reviewed_set() -> None:
     hinted = {t.name for t in TOOLS if (t.annotations and t.annotations.destructiveHint)}
     assert hinted == _docmeta.DESTRUCTIVE_TOOLS, (
@@ -708,11 +699,9 @@ def test_backstop_actually_detects_the_known_gate_callers() -> None:
     # that call assert_destructive_allowed today. Equality (not subset) catches both a broken
     # mechanism — the reach analysis stopping at the wrapper body would empty this set — and
     # an unexpected new reacher, which then must be reviewed into DESTRUCTIVE_TOOLS and pinned
-    # here, mirroring test_destructive_tools_set_is_exactly_the_four. systems.teardown and
-    # systems.reprovision are deliberately absent: ADR-0129 dropped teardown to a single
-    # require_role(ADMIN) check and ADR-0326 made reprovision contributor leaseholder control,
-    # so neither reaches the gate (both stay in DESTRUCTIVE_TOOLS via their destructive()
-    # annotation).
+    # here. systems.teardown and systems.reprovision are deliberately absent: ADR-0129 dropped
+    # teardown to a single require_role(ADMIN) check and ADR-0326 made reprovision contributor
+    # leaseholder control, so neither reaches the destructive-op gate.
     assert _gate_reachers() == {"control.force_crash"}
 
 
@@ -943,7 +932,7 @@ def test_bound_literal_guard_detects_and_ignores() -> None:
 
 
 def test_active_tools_have_a_covering_test() -> None:
-    covered_maturities = {"implemented", "partial"}
+    covered_maturities = {"implemented"}
     active = {t.name for t in TOOLS if (t.meta or {}).get("maturity") in covered_maturities}
     mapped = set(_BEHAVIOR_TESTS_BY_TOOL)
     assert active == mapped, (

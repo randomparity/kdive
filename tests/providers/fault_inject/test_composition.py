@@ -21,7 +21,7 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
+from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.fault_inject import composition
 from kdive.providers.fault_inject._common import SYNTHETIC_BUILD_ID, TENANT
 from kdive.providers.fault_inject.debug.gdb import (
@@ -86,20 +86,19 @@ def test_build_runtime_wires_fault_inject_ports_and_capabilities() -> None:
     assert isinstance(runtime.crash_postmortem, FaultInjectRetrieve)
     assert isinstance(runtime.vmcore_introspector, FaultInjectIntrospect)
     assert isinstance(runtime.live_introspector, FaultInjectIntrospect)
-    assert runtime.supported_capture_methods == frozenset(
+    assert runtime.support.capture_methods == frozenset(
         {CaptureMethod.CONSOLE, CaptureMethod.HOST_DUMP, CaptureMethod.GDBSTUB}
     )
     # ADR-0208: fault-inject reports its synthetic capability — both transports its connector
     # accepts (gdbstub + drgn-live) and both introspection modes FaultInjectIntrospect realizes.
-    assert runtime.supported_debug_transports == frozenset({"gdbstub", "drgn-live"})
-    assert runtime.supported_introspection == frozenset({"offline-vmcore", "live"})
+    assert runtime.support.debug_transports == frozenset({"gdbstub", "drgn-live"})
+    assert runtime.support.introspection == frozenset({"offline-vmcore", "live"})
     assert runtime.debug is not None
     assert isinstance(runtime.debug.engine, FaultInjectDebugEngine)
     assert runtime.debug.attach_seam is fault_inject_attach_seam
-    assert runtime.rootfs_validator is not None
-    assert runtime.rootfs_validator(cast(RootfsSource, object())) is None
-    assert runtime.component_sources.provider == ResourceKind.FAULT_INJECT.value
-    assert runtime.component_sources.accepted_component_sources == {
+    assert runtime.rootfs is None
+    assert runtime.support.component_sources.provider == ResourceKind.FAULT_INJECT.value
+    assert runtime.support.component_sources.accepted_component_sources == {
         ROOTFS_COMPONENT: frozenset({"catalog", "local"}),
         KERNEL_COMPONENT: frozenset({"local"}),
         INITRD_COMPONENT: frozenset({"local"}),

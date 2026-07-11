@@ -80,8 +80,8 @@ A new tool that loads the catalog at the resolved path and reports its profiles 
 categorized error. Contract:
 
 - **Name / annotations:** `fixtures.validate`, `read_only()`, `meta={"maturity": "implemented"}`.
-- **Auth:** `current_context()` only (valid token), no project RBAC, no platform gate —
-  matches `fixtures.list`/`buildconfig.get`. The response echoes the resolved catalog `path`,
+- **Auth:** `current_context()` only (valid token), no project RBAC, no platform gate,
+  matching `fixtures.list`. The response echoes the resolved catalog `path`,
   which is non-secret deployment info already public in the chart's `values.yaml`
   (`fixtures.mountPath` defaults to `/etc/kdive/fixtures`) — not host topology a tenant could
   not already read from the chart — and it is the diagnostic signal the tool exists to provide

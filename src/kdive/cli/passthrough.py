@@ -50,12 +50,6 @@ def classify_tool(tool: object) -> ToolTier:
     ``destructiveHint`` (literal ``True`` → ``DESTRUCTIVE``, else ``MUTATING``). Anything else — a
     missing/``None`` hint, a truthy-but-not-``True`` value, missing annotations, or a ``None``
     tool — is ``UNKNOWN`` (fail-closed).
-
-    Args:
-        tool: The resolved tool object (or any object whose ``annotations`` are inspected).
-
-    Returns:
-        The tool's :class:`ToolTier`.
     """
     annotations = getattr(tool, "annotations", None)
     read_only = getattr(annotations, "readOnlyHint", None)
@@ -70,19 +64,9 @@ def classify_tool(tool: object) -> ToolTier:
 def assert_tool_allowed(name: str, tool: object, *, max_tier: ToolTier) -> ToolTier:
     """Admit ``tool`` iff its tier is at or below ``max_tier``; raise otherwise.
 
-    Args:
-        name: The tool name, used in the refusal message.
-        tool: The resolved tool object (or any object whose annotations are inspected).
-        max_tier: The highest tier the caller authorized for this invocation.
-
-    Returns:
-        The tool's resolved :class:`ToolTier` (so the caller knows whether to confirm a destructive
-        call).
-
-    Raises:
-        ToolNotAllowedError: When the tool is ``UNKNOWN`` (refused at every tier), or its tier
-            exceeds ``max_tier``. The message names the tool and the flag that would admit it
-            (``UNKNOWN`` names no flag — it is unreachable).
+    ``UNKNOWN`` is refused at every tier. Other refusals name the flag that would admit the
+    tool, while successful calls return the resolved tier so destructive calls can be
+    confirmed by the caller.
     """
     tier = classify_tool(tool)
     if tier is ToolTier.UNKNOWN:

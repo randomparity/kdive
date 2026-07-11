@@ -4,7 +4,8 @@ Mints a presigned download URL for a Run's raw debug asset — its ``vmlinux`` d
 raw ``vmcore`` of the System it booted — gated by project membership plus the ``contributor``
 role on the **asset's own** owning project, not by sensitivity. The raw objects stay
 ``SENSITIVE``; the closed ``RawAsset`` enum is the egress allow-list. URL-only (these are
-multi-GB binaries); the ``REDACTED``-only inline/search gate on ``artifacts.get`` is unchanged.
+multi-GB binaries); the ``REDACTED``-only inline/search gate on ``artifacts.get`` /
+``artifacts.find`` is unchanged.
 """
 
 from __future__ import annotations
@@ -19,13 +20,13 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
-from kdive.artifacts.storage import HeadResult
-from kdive.config.core_settings import ARTIFACT_DOWNLOAD_TTL_SECONDS
-from kdive.db.artifact_queries import (
+from kdive.artifacts.read_model import (
     RunFetchContext,
     raw_vmcore_key,
     run_fetch_context,
 )
+from kdive.artifacts.storage import HeadResult
+from kdive.config.core_settings import ARTIFACT_DOWNLOAD_TTL_SECONDS
 from kdive.domain.errors import CategorizedError
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse

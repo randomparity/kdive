@@ -16,7 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 
 from kdive.mcp.auth import AuthError, RequestContext
-from kdive.mcp.tool_payloads import EstimateRequestPayload
+from kdive.mcp.schema.tool_payloads import EstimateRequestPayload
 from kdive.mcp.tools.accounting.estimate import estimate
 from kdive.security.authz.rbac import AuthorizationError, Role
 

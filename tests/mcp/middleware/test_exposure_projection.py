@@ -10,14 +10,11 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.mcp.middleware.exposure as exposure_mod
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.mcp.app import build_app
-from kdive.mcp.middleware.exposure import (
-    NARROWED_TOOLS,
-    ToolExposureMiddleware,
-    project_listed_tool,
-)
-from kdive.mcp.schema_advertising import registered_tools
-from kdive.mcp.tool_payloads import AllocationRequestPayload
+from kdive.mcp.assembly.app import build_app
+from kdive.mcp.middleware.exposure import ToolExposureMiddleware
+from kdive.mcp.schema.schema_advertising import registered_tools
+from kdive.mcp.schema.tool_payloads import AllocationRequestPayload
+from kdive.mcp.schema.tool_projection import NARROWED_TOOLS, project_listed_tool
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry

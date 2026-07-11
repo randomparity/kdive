@@ -4,9 +4,7 @@ Ported from the PoC ``kdive.safety.secret_registry``. Both the logging
 ``SecretRedactionFilter`` and app-owned ``Redactor`` instances seed from the same
 ``SecretRegistry``, so a value resolved through a ``SecretBackend`` is masked on
 the logging path and the return/persistence path without each call site
-re-supplying it. Production composition passes an app-owned registry explicitly;
-``PROCESS_SECRET_REGISTRY`` remains only for tests and small CLI helpers that do
-not have an app composition owner.
+re-supplying it. Production composition passes an app-owned registry explicitly.
 """
 
 from __future__ import annotations
@@ -95,7 +93,3 @@ class SecretRegistry:
             self._refcount.clear()
             self._by_scope.clear()
             self._version += 1
-
-
-PROCESS_SECRET_REGISTRY = SecretRegistry()
-"""Process registry for tests and CLI helpers without an app-owned registry."""

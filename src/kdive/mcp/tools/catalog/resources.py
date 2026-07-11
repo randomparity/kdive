@@ -12,6 +12,7 @@ to flat scalar fields (``kind``, ``arch``, ``vcpus``, ``memory_mb``,
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -28,13 +29,14 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
-from kdive.mcp.tool_payloads import ToolPayload
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
 from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
 from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
 from kdive.mcp.tools._resource_envelopes import resource_config_error, resource_envelope
@@ -62,6 +64,15 @@ class _ResourcesListPayload(ToolPayload):
     cursor: str | None = Field(
         default=None, description="Opaque continuation cursor from a prior page's next_cursor."
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ResourcesListRequest:
+    """Direct-handler request for ``resources.list`` filters and pagination."""
+
+    kind: str | None = None
+    limit: int = DEFAULT_LIST_LIMIT
+    cursor: str | None = None
 
 
 async def _fetch_resource_rows(
@@ -119,10 +130,7 @@ def _row_visible(row: dict[str, Any], viewer_projects: tuple[str, ...]) -> bool:
 async def list_resources(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    *,
-    kind: str | None,
-    limit: int = DEFAULT_LIST_LIMIT,
-    cursor: str | None = None,
+    request: ResourcesListRequest,
 ) -> ToolResponse:
     """Return a page of visible resources (optionally filtered by ``kind``), ascending.
 
@@ -130,18 +138,18 @@ async def list_resources(
     visibility is applied in Python (ADR-0192). The fleet table is small, so it is read
     whole per call and paged in memory.
     """
-    if kind is None:
+    if request.kind is None:
         resource_kind = None
     else:
         try:
-            resource_kind = ResourceKind(kind)
+            resource_kind = ResourceKind(request.kind)
         except ValueError:
             return resource_config_error("resources.list")
-    capped = _clamp_list_limit(limit)
+    capped = _clamp_list_limit(request.limit)
     after = None
-    if cursor:
+    if request.cursor:
         try:
-            after = _decode_ts_uuid_cursor(_RESOURCES_LIST_TAG, cursor)
+            after = _decode_ts_uuid_cursor(_RESOURCES_LIST_TAG, request.cursor)
         except InvalidCursor:
             return _invalid_cursor_error("resources.list")
     with bind_context(principal=ctx.principal):
@@ -189,14 +197,17 @@ async def describe_resource(
     try:
         uid = UUID(resource_id)
     except ValueError:
-        return resource_config_error(resource_id)
+        return _invalid_uuid_error("resource_id", resource_id)
     with bind_context(principal=ctx.principal):
         viewer_projects = tuple(projects_with_role(ctx, Role.VIEWER))
         async with pool.connection() as conn:
             resource = await RESOURCES.get(conn, uid)
             if resource is None or not resource_visible_to_projects(resource, viewer_projects):
                 return _not_found(resource_id)
-        runtime = _runtime_for_resource(resolver, resource.kind, resource.name)
+        try:
+            runtime = _runtime_for_resource(resolver, resource.kind, resource.name)
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(resource_id, exc)
         provider_data = await _resource_detail_data(pool, runtime, viewer_projects)
         envelope = resource_envelope(resource, next_actions=["allocations.request"])
         envelope.data["pool"] = resource.pool
@@ -212,13 +223,10 @@ def _runtime_for_resource(
 ) -> ProviderRuntime | None:
     if resolver is None:
         return None
-    try:
-        runtime = resolver.resolve(kind)
-        if name is not None:
-            return runtime.for_resource(name)
-        return runtime
-    except CategorizedError:
-        return None
+    runtime = resolver.resolve(kind)
+    if name is not None:
+        return runtime.for_resource(name)
+    return runtime
 
 
 async def _resource_detail_data(
@@ -226,9 +234,13 @@ async def _resource_detail_data(
     runtime: ProviderRuntime | None,
     viewer_projects: tuple[str, ...],
 ) -> dict[str, JsonValue]:
-    if runtime is None or runtime.resource_detail_projector is None:
+    if (
+        runtime is None
+        or runtime.resource_details is None
+        or runtime.resource_details.projector is None
+    ):
         return {}
-    return await runtime.resource_detail_projector(pool, viewer_projects)
+    return await runtime.resource_details.projector(pool, viewer_projects)
 
 
 def _project_capabilities(envelope: ToolResponse, runtime: ProviderRuntime | None) -> None:
@@ -244,10 +256,10 @@ def _project_capabilities(envelope: ToolResponse, runtime: ProviderRuntime | Non
         return
     capabilities: list[JsonValue] = [plane for plane in _capability_planes(runtime)]
     capture: list[JsonValue] = [
-        method.value for method in sorted(runtime.supported_capture_methods, key=lambda m: m.value)
+        method.value for method in sorted(runtime.support.capture_methods, key=lambda m: m.value)
     ]
-    transports: list[JsonValue] = [t for t in sorted(runtime.supported_debug_transports)]
-    introspection: list[JsonValue] = [m for m in sorted(runtime.supported_introspection)]
+    transports: list[JsonValue] = [t for t in sorted(runtime.support.debug_transports)]
+    introspection: list[JsonValue] = [m for m in sorted(runtime.support.introspection)]
     envelope.data["capabilities"] = capabilities
     envelope.data["supported_capture_methods"] = capture
     envelope.data["supported_debug_transports"] = transports
@@ -262,13 +274,13 @@ def _capability_planes(runtime: ProviderRuntime) -> list[str]:
     non-empty transport/introspection sets.
     """
     planes = {"build", "boot"}
-    if CaptureMethod.KDUMP in runtime.supported_capture_methods:
+    if CaptureMethod.KDUMP in runtime.support.capture_methods:
         planes.add("kdump")
-    if CaptureMethod.HOST_DUMP in runtime.supported_capture_methods:
+    if CaptureMethod.HOST_DUMP in runtime.support.capture_methods:
         planes.add("host-dump")
-    if runtime.supported_debug_transports:
+    if runtime.support.debug_transports:
         planes.add("debug")
-    if runtime.supported_introspection:
+    if runtime.support.introspection:
         planes.add("introspect")
     return sorted(planes)
 
@@ -297,7 +309,9 @@ def register(
         payload = request or _ResourcesListPayload()
         kind = payload.kind.value if payload.kind is not None else None
         return await list_resources(
-            pool, current_context(), kind=kind, limit=payload.limit, cursor=payload.cursor
+            pool,
+            current_context(),
+            ResourcesListRequest(kind=kind, limit=payload.limit, cursor=payload.cursor),
         )
 
     @app.tool(

@@ -23,6 +23,7 @@ _GZIP_MAGIC = b"\x1f\x8b"
 _BZIMAGE_MAGIC = b"HdrS"
 _BZIMAGE_MAGIC_OFFSET = 0x202
 _SHT_NOTE = 7
+_NO_GNU_BUILD_ID_NOTE = "vmlinux carries no GNU build-id note"
 _MAX_SECTION_BYTES = 16 * 1024 * 1024
 # The effective_config readable/upload cap (1 MiB). This module owns the single canonical value;
 # the upload-admission path (mcp uploads tool) imports it so the advertised cap, the admission gate,
@@ -221,10 +222,7 @@ def parse_gnu_build_id(notes: bytes) -> str:
         if next_offset <= offset:
             break
         offset = next_offset
-    raise CategorizedError(
-        "vmlinux carries no GNU build-id note",
-        category=ErrorCategory.BUILD_FAILURE,
-    )
+    raise _build_failure(_NO_GNU_BUILD_ID_NOTE)
 
 
 def validate_external_artifacts(
@@ -289,7 +287,6 @@ def extract_build_id_ranged(store: ValidatorStore, key: str, *, max_size: int) -
         e_shoff = struct.unpack_from("<Q", header, 0x28)[0]
         e_shentsize = struct.unpack_from("<H", header, 0x3A)[0]
         e_shnum = struct.unpack_from("<H", header, 0x3C)[0]
-        e_shstrndx = struct.unpack_from("<H", header, 0x3E)[0]
         if e_shoff == 0 or e_shnum == 0 or e_shentsize < 64:
             raise _build_failure("vmlinux has no usable section header table")
         if e_shentsize * e_shnum > _MAX_SECTION_BYTES:
@@ -300,8 +297,7 @@ def extract_build_id_ranged(store: ValidatorStore, key: str, *, max_size: int) -
         if e_shoff + e_shentsize * e_shnum > max_size:
             raise _build_failure("vmlinux section header table extends past the object size")
         sht = store.get_range(key, start=e_shoff, length=e_shentsize * e_shnum)
-        shstr = _read_section(store, key, sht, e_shentsize, e_shstrndx, max_size=max_size)
-        return _find_build_id_note(store, key, sht, shstr, e_shentsize, e_shnum, max_size=max_size)
+        return _find_build_id_note(store, key, sht, e_shentsize, e_shnum, max_size=max_size)
     except (struct.error, ValueError, IndexError) as exc:
         raise _build_failure("vmlinux ELF is structurally malformed") from exc
 
@@ -416,7 +412,6 @@ def _find_build_id_note(
     store: ValidatorStore,
     key: str,
     sht: bytes,
-    shstr: bytes,
     e_shentsize: int,
     e_shnum: int,
     *,
@@ -424,17 +419,17 @@ def _find_build_id_note(
 ) -> str:
     for i in range(e_shnum):
         off = i * e_shentsize
-        sh_name = struct.unpack_from("<I", sht, off)[0]
         sh_type = struct.unpack_from("<I", sht, off + 4)[0]
         if sh_type != _SHT_NOTE:
             continue
-        _section_name_end = shstr.index(b"\x00", sh_name)
         notes = _read_section(store, key, sht, e_shentsize, i, max_size=max_size)
         try:
             return parse_gnu_build_id(notes)
-        except CategorizedError:
-            continue
-    raise _build_failure("vmlinux carries no GNU build-id note")
+        except CategorizedError as exc:
+            if _is_missing_build_id_note(exc):
+                continue
+            raise
+    raise _build_failure(_NO_GNU_BUILD_ID_NOTE)
 
 
 def _read_section(
@@ -454,3 +449,7 @@ def _read_section(
 
 def _build_failure(message: str, **details: object) -> CategorizedError:
     return CategorizedError(message, category=ErrorCategory.BUILD_FAILURE, details=details)
+
+
+def _is_missing_build_id_note(exc: CategorizedError) -> bool:
+    return exc.category is ErrorCategory.BUILD_FAILURE and str(exc) == _NO_GNU_BUILD_ID_NOTE

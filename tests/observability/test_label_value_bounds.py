@@ -17,7 +17,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import ErrorCategory
 from kdive.health.metrics_text import render_prometheus
-from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
+from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.jobs.worker_telemetry import WorkerTelemetry
 from kdive.observability.console_telemetry import ConsoleTelemetry

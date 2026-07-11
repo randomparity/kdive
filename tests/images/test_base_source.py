@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.base_source import _CloudImageRedirect, acquire_base
-from kdive.images.rootfs_catalog import CloudImageSource, VirtBuilderSource
+from kdive.images.rootfs.base_source import _CloudImageRedirect, acquire_base
+from kdive.images.rootfs.catalog import CloudImageSource, VirtBuilderSource
 
 
 def _follow_redirect(newurl: str) -> urllib.request.Request | None:

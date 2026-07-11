@@ -10,18 +10,18 @@ import logging
 from typing import Annotated, Any, cast
 
 from fastmcp import FastMCP
-from fastmcp.exceptions import NotFoundError
+from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.tools.base import Tool, ToolResult
 from pydantic import Field, ValidationError
 
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import current_context
 from kdive.mcp.exposure import tool_visible
-from kdive.mcp.middleware.exposure import project_listed_tool
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.schema_advertising import registered_tools
-from kdive.mcp.tool_index import TOOL_KEYWORDS
+from kdive.mcp.schema.schema_advertising import registered_tools
+from kdive.mcp.schema.tool_index import TOOL_KEYWORDS
+from kdive.mcp.schema.tool_projection import project_listed_tool
 from kdive.mcp.tools import _docmeta
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.serialization import JsonValue
@@ -33,7 +33,6 @@ _SEARCH_LIMIT_MAX = 50
 
 
 def _score(tool: Tool, tokens: list[str]) -> int:
-    """Lexical score: count of query tokens found as substrings in the tool's haystack."""
     extras = TOOL_KEYWORDS.get(tool.name, frozenset())
     haystack = " ".join([tool.name, tool.description or "", *extras]).lower()
     return sum(1 for tok in tokens if tok in haystack)
@@ -64,7 +63,21 @@ def _rank(candidates: list[Tool], *, query: str | None, namespace: str | None) -
     return sorted(candidates, key=lambda t: t.name)
 
 
-def describe_tool(tool: Tool, kinds: frozenset[ResourceKind]) -> dict[str, JsonValue]:
+def _project_or_passthrough(tool: Tool, kinds: frozenset[ResourceKind] | None) -> Tool:
+    if kinds is None:
+        return tool
+    try:
+        return project_listed_tool(tool, kinds)
+    except Exception:
+        _log.warning(
+            "provider-schema projection failed for %s in tools.search; using full schema",
+            tool.name,
+            exc_info=True,
+        )
+        return tool
+
+
+def describe_tool(tool: Tool, kinds: frozenset[ResourceKind] | None) -> dict[str, JsonValue]:
     """Serialise a Tool into the ``{name, description, input_schema}`` match shape,
     narrowing the input schema to the composed ``kinds`` (ADR-0269)."""
     return cast(
@@ -72,7 +85,7 @@ def describe_tool(tool: Tool, kinds: frozenset[ResourceKind]) -> dict[str, JsonV
         {
             "name": tool.name,
             "description": tool.description or "",
-            "input_schema": project_listed_tool(tool, kinds).parameters,
+            "input_schema": _project_or_passthrough(tool, kinds).parameters,
         },
     )
 
@@ -108,11 +121,21 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
 
         ``AuthorizationError`` from the inner call is NOT caught here; the denial-audit
         middleware handles it and converts it to an ``authorization_denied`` envelope.
-        Only ``NotFoundError`` (unknown/disabled tool) and pydantic ``ValidationError``
-        (invalid arguments) are caught and converted to ``configuration_error`` envelopes.
+        ``CategorizedError`` uses the same typed error-to-envelope conversion as direct
+        tool handlers, including when FastMCP wraps it in ``ToolError``. ``NotFoundError``
+        (unknown/disabled tool) and pydantic ``ValidationError`` (invalid arguments) are
+        caught and converted to ``configuration_error`` envelopes.
         """
         try:
             return await app.call_tool(name, arguments or {}, run_middleware=True)
+        except CategorizedError as exc:
+            envelope = ToolResponse.failure_from_error("tools.invoke", exc)
+            return ToolResult(structured_content=envelope.model_dump(mode="json"))
+        except ToolError as exc:
+            if not isinstance(exc.__cause__, CategorizedError):
+                raise
+            envelope = ToolResponse.failure_from_error("tools.invoke", exc.__cause__)
+            return ToolResult(structured_content=envelope.model_dump(mode="json"))
         except NotFoundError:
             envelope = ToolResponse.failure(
                 "tools.invoke",
@@ -175,7 +198,14 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                 "tool_search_miss",
                 extra={"query": query, "count": 0},
             )
-        kinds = resolver.registered_kinds()
+        kinds: frozenset[ResourceKind] | None = None
+        try:
+            kinds = resolver.registered_kinds()
+        except Exception:
+            _log.warning(
+                "registered_kinds() failed in tools.search; using full schemas",
+                exc_info=True,
+            )
         return ToolResponse.success(
             "tools.search",
             "ok",

@@ -102,12 +102,12 @@ registry-based dispatch.
 
 ### Two registrar seams keep the entrypoint stable
 
-`mcp/app.py` is the assembly facade. Tool/resource/prompt registrars live in
-`mcp/tool_registration.py`; worker job-handler registrars live in `mcp/worker_registration.py`.
-A new plane appends to the appropriate registrar tuple, so `build_app` and
-`build_handler_registry` stay stable. MCP tools (`mcp/tools/*.py`) are thin FastMCP
-wrappers over plain async handlers that take an injected pool + `RequestContext`, so they
-are tested directly without a transport.
+`mcp/assembly/app.py` is the assembly facade. Tool/resource/prompt registrars live in
+`mcp/assembly/tool_registration.py`; worker job-handler registrars live in
+`jobs/assembly.py` as `HANDLER_REGISTRARS`. A new plane appends to the appropriate
+registrar tuple, so `build_app` and `build_handler_registry` stay stable. MCP tools
+(`mcp/tools/*.py`) are thin FastMCP wrappers over plain async handlers that take an injected
+pool + `RequestContext`, so they are tested directly without a transport.
 
 **The wrapper docstring is the agent-facing contract.** FastMCP serializes only the
 `@app.tool`-decorated wrapper's docstring and its `Field(description=...)` text into the
@@ -136,9 +136,10 @@ and constraint an agent must know, and does not invite a pattern the behavior di
   and register into the redaction registry for the op's lifetime; only `(present,
   source-ref)` persists. All guest/console/gdb output passes the redactor before
   persistence or any response snippet (`security/`).
-- **Destructive-op gate** — `security/authz/gate.py`: power/force_crash/teardown/reprovision
-  require all three of capability scope + RBAC role + explicit profile opt-in (deny by
-  default).
+- **Destructive-op gate** — `security/authz/gate.py`: `force_crash` requires both the
+  allocation project's required RBAC role and an explicit profile opt-in. The former
+  `capability_scope` factor was removed by ADR-0130; power, teardown, and reprovision now
+  use their own lifecycle/RBAC paths.
 - **Concurrency** — serialize per-Allocation and per-System via advisory locks; admission
   control's check-then-debit is atomic under a per-project lock. Idempotent steps keyed by
   `run_id` + step. The `tests/adversarial/` suite stress-tests these races.

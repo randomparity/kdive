@@ -25,7 +25,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import EstimateRequestPayload
+from kdive.mcp.schema.tool_payloads import EstimateRequestPayload
 from kdive.mcp.tools import _docmeta
 from kdive.security.authz.context import RequestContext, require_project
 from kdive.security.authz.rbac import Role, require_role

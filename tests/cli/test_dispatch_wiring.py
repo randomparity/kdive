@@ -60,7 +60,7 @@ def test_every_registry_verb_parses_through_the_built_parser() -> None:
         assert args.command == verb.group and args.subcommand == verb.sub
 
 
-@pytest.mark.parametrize(("group", "sub"), [("allocations", "list"), ("ledger", "show")])
+@pytest.mark.parametrize(("group", "sub"), [("allocations", "list"), ("ledger", "get")])
 def test_project_required_verb_rejects_a_missing_project(group: str, sub: str) -> None:
     # The underlying tool's ``project`` is a required argument, so the CLI enforces it up
     # front (clean argparse usage error / exit 2) instead of a server-side missing-arg error.
@@ -69,7 +69,7 @@ def test_project_required_verb_rejects_a_missing_project(group: str, sub: str) -
     assert excinfo.value.code == 2
 
 
-@pytest.mark.parametrize(("group", "sub"), [("allocations", "list"), ("ledger", "show")])
+@pytest.mark.parametrize(("group", "sub"), [("allocations", "list"), ("ledger", "get")])
 def test_project_required_verb_accepts_an_explicit_project(group: str, sub: str) -> None:
     args = build_parser().parse_args([group, sub, "--project", "proj-a"])
     assert args.project == "proj-a"

@@ -16,7 +16,7 @@ from __future__ import annotations
 import contextlib
 import time
 from collections.abc import Iterable, Iterator, Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
 #: Histogram bucket bounds (seconds) for one reconcile pass (DB sweeps, usually fast).
 _DURATION_BUCKETS = (0.05, 0.25, 1.0, 5.0, 15.0, 30.0, 60.0)
+type TelemetryOutcome = Literal["ok", "error"]
 
 
 class ReconcilerTelemetry:
@@ -123,8 +124,8 @@ class _PassSpan:
 
     def __init__(self, span: Span | None) -> None:
         self.span = span
-        self.outcome = "ok"
+        self.outcome: TelemetryOutcome = "ok"
 
-    def set_outcome(self, outcome: str) -> None:
+    def set_outcome(self, outcome: TelemetryOutcome) -> None:
         """Stamp the pass's terminal outcome (``ok``/``error``)."""
         self.outcome = outcome

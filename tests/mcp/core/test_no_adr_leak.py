@@ -28,7 +28,7 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.tools.base import Tool
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.mcp.app import build_app
+from kdive.mcp.assembly.app import build_app
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 

@@ -28,8 +28,8 @@ from pathlib import Path
 import psycopg
 
 from kdive.domain.accounting.cost import quantize_kcu
+from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer, mint_token
 from kdive.mcp.responses import JsonValue, ToolResponse
-from tests.integration.live_stack.harness import LiveStackClient, OidcIssuer, mint_token
 from tests.mcp.json_data import data_str
 
 # Above the 300s jobs.wait cap and the 30s reconciler interval; teardown is the slowest phase.

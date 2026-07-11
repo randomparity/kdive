@@ -24,14 +24,12 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.payloads import Authorizing, BuildPayload
+from kdive.jobs.payloads import Authorizing, InstallPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.ops import queue as ops_queue
 from kdive.security.authz.rbac import PlatformRole
 from tests.mcp.json_data import data_int
-
-WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
 
 
 def _ctx(
@@ -66,8 +64,8 @@ def _authorizing(project: str) -> Authorizing:
     return Authorizing(principal="p", agent_session=None, project=project)
 
 
-def _build_payload() -> BuildPayload:
-    return BuildPayload(run_id=str(uuid4()), build_host_id=str(WORKER_LOCAL_ID))
+def _build_payload() -> InstallPayload:
+    return InstallPayload(run_id=str(uuid4()))
 
 
 async def _paused(url: str) -> bool:
@@ -167,10 +165,10 @@ def test_jobs_list_returns_cross_project_state(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
                 await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _authorizing("proj-a"), "dk-a"
+                    conn, JobKind.INSTALL, _build_payload(), _authorizing("proj-a"), "dk-a"
                 )
                 await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _authorizing("proj-b"), "dk-b"
+                    conn, JobKind.INSTALL, _build_payload(), _authorizing("proj-b"), "dk-b"
                 )
             resp = await ops_queue.jobs_list(pool, _ctx(platform_roles=_OPERATOR))
         assert resp.status == "ok"
@@ -194,10 +192,10 @@ def test_jobs_list_filters_by_state(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
                 await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _authorizing("proj-a"), "dk-q"
+                    conn, JobKind.INSTALL, _build_payload(), _authorizing("proj-a"), "dk-q"
                 )
                 running = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _authorizing("proj-a"), "dk-r"
+                    conn, JobKind.INSTALL, _build_payload(), _authorizing("proj-a"), "dk-r"
                 )
                 await conn.execute(
                     "UPDATE jobs SET state = 'running', worker_id = 'w1' WHERE id = %s",
@@ -225,7 +223,7 @@ def test_jobs_list_renders_failed_job_with_category(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
                 failed = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _authorizing("proj-a"), "dk-f"
+                    conn, JobKind.INSTALL, _build_payload(), _authorizing("proj-a"), "dk-f"
                 )
                 await conn.execute(
                     "UPDATE jobs SET state = 'failed', error_category = 'build_failure' "
@@ -254,7 +252,7 @@ def test_jobs_list_degrades_failed_job_missing_category(
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
                 failed = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _authorizing("proj-a"), "dk-n"
+                    conn, JobKind.INSTALL, _build_payload(), _authorizing("proj-a"), "dk-n"
                 )
                 await conn.execute(
                     "UPDATE jobs SET state = 'failed', error_category = NULL WHERE id = %s",

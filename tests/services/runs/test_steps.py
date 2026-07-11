@@ -1,3 +1,4 @@
+from kdive.domain.lifecycle.run_steps import parse_boot_outcome
 from kdive.images.families._fedora_customize import READINESS_MARKER
 from kdive.services.runs.steps import BuildStepResult, _optional_str_list, ready_boot_outcome
 
@@ -25,6 +26,13 @@ def test_ready_boot_outcome_returns_a_fresh_mapping() -> None:
     first = ready_boot_outcome()
     first["outcome"] = "tampered"
     assert ready_boot_outcome()["outcome"] == "ready"
+
+
+def test_parse_boot_outcome_rejects_unknown_values() -> None:
+    assert parse_boot_outcome("ready") == "ready"
+    assert parse_boot_outcome("expected_crash_observed") == "expected_crash_observed"
+    assert parse_boot_outcome("bogus") is None
+    assert parse_boot_outcome(None) is None
 
 
 def test_optional_str_list_passes_through_string_list() -> None:

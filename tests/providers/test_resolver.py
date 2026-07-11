@@ -225,6 +225,8 @@ def test_binding_for_system_returns_binding_with_kind_and_bound_runtime() -> Non
     conn = cast(AsyncConnection, _Conn({"kind": "remote-libvirt", "name": "host-c"}))
     binding = asyncio.run(resolver.binding_for_system(conn, _ABSENT_OBJECT_ID))
     assert binding.kind is ResourceKind.REMOTE_LIBVIRT
+    assert binding.resource_name == "host-c"
+    assert binding.cache_key == (ResourceKind.REMOTE_LIBVIRT, "host-c")
     assert binding.runtime is runtimes[ResourceKind.REMOTE_LIBVIRT]
     assert runtimes[ResourceKind.REMOTE_LIBVIRT].bound_to == "host-c"
 
@@ -234,6 +236,8 @@ def test_binding_for_run_returns_binding_with_kind_and_bound_runtime() -> None:
     conn = cast(AsyncConnection, _Conn({"kind": "local-libvirt", "name": "host-d"}))
     binding = asyncio.run(resolver.binding_for_run(conn, _ABSENT_OBJECT_ID))
     assert binding.kind is ResourceKind.LOCAL_LIBVIRT
+    assert binding.resource_name == "host-d"
+    assert binding.cache_key == (ResourceKind.LOCAL_LIBVIRT, "host-d")
     assert binding.runtime is runtimes[ResourceKind.LOCAL_LIBVIRT]
     assert runtimes[ResourceKind.LOCAL_LIBVIRT].bound_to == "host-d"
 

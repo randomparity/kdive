@@ -15,6 +15,7 @@ from typing import LiteralString
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.domain.capacity.state import AllocationState
 from kdive.services.accounting import ledger as accounting_ledger
 from kdive.services.reports.core import (
     ReportScope,
@@ -24,7 +25,8 @@ from kdive.services.reports.core import (
     Window,
 )
 
-_ACTIVE_LEASE_STATES = ("granted", "active")
+_ACTIVE_LEASE_STATES = (AllocationState.GRANTED.value, AllocationState.ACTIVE.value)
+_EXPIRED_LEASE_STATE = AllocationState.EXPIRED.value
 
 
 def _capped(rows: list[Row], cap: int) -> SectionRows:
@@ -129,7 +131,12 @@ class LeasesSection:
         *,
         cap: int,
     ) -> SectionRows:
-        params: list[object] = [list(_ACTIVE_LEASE_STATES), as_of, list(_ACTIVE_LEASE_STATES)]
+        params: list[object] = [
+            list(_ACTIVE_LEASE_STATES),
+            as_of,
+            list(_ACTIVE_LEASE_STATES),
+            _EXPIRED_LEASE_STATE,
+        ]
         scope_clause: LiteralString = ""
         if not scope.all_projects:
             scope_clause = " AND project = ANY(%s)"
@@ -140,7 +147,7 @@ class LeasesSection:
             "CASE WHEN state = ANY(%s) AND lease_expiry IS NOT NULL AND lease_expiry > %s "
             "THEN 'active' ELSE 'stale' END AS status "
             "FROM allocations "
-            "WHERE (state = ANY(%s) OR state = 'expired')"
+            "WHERE (state = ANY(%s) OR state = %s)"
             + scope_clause
             + " ORDER BY lease_expiry DESC NULLS LAST, id DESC LIMIT %s"
         )

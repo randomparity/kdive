@@ -21,27 +21,35 @@ from psycopg.types.json import Jsonb
 
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.operations.jobs import Job, JobAuthorizing, JobKind
+from kdive.domain.operations.jobs import (
+    DEFAULT_JOB_DISPATCH_LANE,
+    RETIRED_JOB_KINDS,
+    Job,
+    JobAuthorizing,
+    JobKind,
+)
 from kdive.jobs.payloads import (
+    ActivePayloadModel,
     Authorizing,
-    PayloadModel,
     dump_authorizing,
     dump_payload,
 )
 
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_LEASE = timedelta(minutes=5)
+DEFAULT_DISPATCH_LANES = (DEFAULT_JOB_DISPATCH_LANE,)
 
 
 async def enqueue(
     conn: AsyncConnection,
     kind: JobKind,
-    payload: PayloadModel,
+    payload: ActivePayloadModel,
     authorizing: Authorizing | JobAuthorizing,
     dedup_key: str,
     *,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     recycle_terminal: bool = False,
+    dispatch_lane: str = DEFAULT_JOB_DISPATCH_LANE,
 ) -> Job:
     """Admit a job, returning the existing one on a ``dedup_key`` conflict.
 
@@ -65,18 +73,26 @@ async def enqueue(
 
     Raises:
         ValueError: ``max_attempts < 1`` (a job that ``dequeue`` could never claim).
+        ValueError: ``kind`` is a retired historical kind without an active handler.
+        ValueError: ``dispatch_lane`` is blank.
     """
     if max_attempts < 1:
         raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
+    if kind in RETIRED_JOB_KINDS:
+        raise ValueError(f"job kind {kind.value!r} is retired and cannot be enqueued")
+    if not dispatch_lane:
+        raise ValueError("dispatch_lane must not be blank")
     payload_json = dump_payload(kind, payload)
     authorizing = dump_authorizing(authorizing)
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "INSERT INTO jobs (kind, payload, state, max_attempts, authorizing, dedup_key) "
-            "VALUES (%s, %s, %s, %s, %s, %s) "
+            "INSERT INTO jobs "
+            "(kind, dispatch_lane, payload, state, max_attempts, authorizing, dedup_key) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (dedup_key) DO NOTHING",
             (
                 kind,
+                dispatch_lane,
                 Jsonb(payload_json),
                 JobState.QUEUED.value,
                 max_attempts,
@@ -118,7 +134,11 @@ async def get_by_dedup_key(conn: AsyncConnection, dedup_key: str) -> Job | None:
 
 
 async def dequeue(
-    conn: AsyncConnection, worker_id: str, *, lease: timedelta = DEFAULT_LEASE
+    conn: AsyncConnection,
+    worker_id: str,
+    *,
+    lease: timedelta = DEFAULT_LEASE,
+    accepted_lanes: Sequence[str] = DEFAULT_DISPATCH_LANES,
 ) -> Job | None:
     """Claim the oldest eligible job for ``worker_id``, charging an attempt.
 
@@ -129,9 +149,15 @@ async def dequeue(
     claim disjoint rows without blocking. ``now()`` is the database clock, so no
     worker clocks need to agree.
 
+    ``accepted_lanes`` is the worker's explicit dispatch boundary. A worker claims only
+    queued/lapsed jobs whose persisted lane is in this set, so provider- or pool-specific
+    workers do not acquire work they cannot execute.
+
     Returns:
-        The claimed :class:`Job`, or ``None`` when nothing is eligible.
+        The claimed :class:`Job`, or ``None`` when nothing is eligible for the accepted lanes.
     """
+    if not accepted_lanes:
+        return None
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "UPDATE jobs SET "
@@ -142,6 +168,7 @@ async def dequeue(
             "    WHERE (state = %s "
             "           OR (state = %s AND lease_expires_at < now())) "
             "      AND attempt < max_attempts "
+            "      AND dispatch_lane = ANY(%s::text[]) "
             "    ORDER BY created_at "
             "    FOR UPDATE SKIP LOCKED "
             "    LIMIT 1 "
@@ -153,26 +180,32 @@ async def dequeue(
                 lease,
                 JobState.QUEUED.value,
                 JobState.RUNNING.value,
+                list(accepted_lanes),
             ),
         )
         row = await cur.fetchone()
     return None if row is None else Job.model_validate(row)
 
 
-async def count_claimable(conn: AsyncConnection) -> int:
+async def count_claimable(
+    conn: AsyncConnection, *, accepted_lanes: Sequence[str] = DEFAULT_DISPATCH_LANES
+) -> int:
     """Return the number of jobs a ``dequeue`` could currently claim (the queue depth).
 
-    Mirrors :func:`dequeue`'s eligibility predicate (``queued`` or lease-lapsed
-    ``running``, attempts remaining) without locking or claiming — a read-only depth
-    sample for the ``kdive.job.queue.depth`` gauge (ADR-0090 §5). It does not include
-    jobs paused by ``queue_paused`` state because pausing is a separate operator gate.
+    Mirrors :func:`dequeue`'s eligibility predicate for ``accepted_lanes`` without locking or
+    claiming — a read-only depth sample for the ``kdive.job.queue.depth`` gauge (ADR-0090 §5).
+    It does not include jobs paused by ``queue_paused`` state because pausing is a separate
+    operator gate.
     """
+    if not accepted_lanes:
+        return 0
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT count(*) FROM jobs "
             "WHERE (state = %s OR (state = %s AND lease_expires_at < now())) "
-            "  AND attempt < max_attempts",
-            (JobState.QUEUED.value, JobState.RUNNING.value),
+            "  AND attempt < max_attempts "
+            "  AND dispatch_lane = ANY(%s::text[])",
+            (JobState.QUEUED.value, JobState.RUNNING.value, list(accepted_lanes)),
         )
         row = await cur.fetchone()
     return int(row[0]) if row is not None else 0

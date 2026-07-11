@@ -15,12 +15,14 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import JobState
 from kdive.domain.operations.jobs import (
+    ACTIVE_JOB_KINDS,
     CONTRIBUTOR_CANCELABLE_JOB_KINDS,
-    DESTRUCTIVE_JOB_KINDS,
+    OPT_IN_DESTRUCTIVE_JOB_KINDS,
+    RETIRED_JOB_KINDS,
     JobKind,
 )
 from kdive.jobs import queue
-from kdive.jobs.payloads import Authorizing, BuildPayload, SystemPayload
+from kdive.jobs.payloads import Authorizing, BuildPayload, InstallPayload, SystemPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
 from kdive.mcp.tools import jobs as jobs_tools
@@ -57,6 +59,10 @@ def _build_payload() -> BuildPayload:
     return BuildPayload(run_id=str(uuid4()), build_host_id=str(WORKER_LOCAL_ID))
 
 
+def _install_payload() -> InstallPayload:
+    return InstallPayload(run_id=str(uuid4()))
+
+
 @asynccontextmanager
 async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
     pool = AsyncConnectionPool(url, min_size=1, max_size=2, open=False)
@@ -72,8 +78,8 @@ async def _enqueue_in(pool: AsyncConnectionPool, dedup: str, project: str) -> st
     async with pool.connection() as conn:
         job = await queue.enqueue(
             conn,
-            JobKind.BUILD,
-            _build_payload(),
+            JobKind.INSTALL,
+            _install_payload(),
             Authorizing(principal="p", project=project),
             dedup,
         )
@@ -83,6 +89,29 @@ async def _enqueue_in(pool: AsyncConnectionPool, dedup: str, project: str) -> st
 async def _enqueue(pool: AsyncConnectionPool, dedup: str) -> str:
     """Enqueue a job in ``CTX``'s project (the common case for these tests)."""
     return await _enqueue_in(pool, dedup, "proj")
+
+
+async def _list_jobs(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    limit: int,
+    cursor: str | None = None,
+    status: JobState | None = None,
+    kind: JobKind | None = None,
+    investigation_id: str | None = None,
+) -> Any:
+    return await jobs_tools.list_jobs(
+        pool,
+        ctx,
+        jobs_tools.JobsListRequest(
+            limit=limit,
+            cursor=cursor,
+            status=status,
+            kind=kind,
+            investigation_id=investigation_id,
+        ),
+    )
 
 
 async def _enqueue_system_job(pool: AsyncConnectionPool, kind: JobKind, dedup: str) -> str:
@@ -130,7 +159,7 @@ def test_get_known_job_returns_status(migrated_url: str) -> None:
             resp = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
         assert resp.object_id == job_id
         assert resp.status == "queued"
-        assert resp.data == {"kind": "build"}
+        assert resp.data == {"kind": "install"}
 
     asyncio.run(_run())
 
@@ -172,6 +201,37 @@ def test_get_malformed_id_is_error_envelope(migrated_url: str) -> None:
         assert resp.object_id == "not-a-uuid"
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None
+        assert "job_id" in resp.detail
+
+    asyncio.run(_run())
+
+
+def test_wait_malformed_id_is_invalid_uuid_envelope(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await jobs_tools.wait_job(pool, CTX, "not-a-uuid", timeout_s=0.0)
+        assert resp.object_id == "not-a-uuid"
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None
+        assert "job_id" in resp.detail
+
+    asyncio.run(_run())
+
+
+def test_cancel_malformed_id_is_invalid_uuid_envelope(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await jobs_tools.cancel_job(pool, CTX, "not-a-uuid")
+        assert resp.object_id == "not-a-uuid"
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None
+        assert "job_id" in resp.detail
 
     asyncio.run(_run())
 
@@ -187,8 +247,8 @@ def test_cancel_queued_job_transitions(migrated_url: str) -> None:
 
 
 def test_cancel_job_contributor_can_cancel(migrated_url: str) -> None:
-    # Leaseholder-control (#1080, ADR-0320): cancelling your own leaseholder-kind job is
-    # contributor, matching runs.cancel. A contributor cancels a queued build job they own.
+    # Leaseholder-control (#1080, ADR-0320): leaseholder-kind jobs are contributor-cancelable
+    # within the project, matching runs.cancel.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
@@ -252,11 +312,15 @@ def test_cancel_role_classification_covers_every_kind_and_fails_closed() -> None
         assert role in (Role.CONTRIBUTOR, Role.OPERATOR), kind
         if kind not in CONTRIBUTOR_CANCELABLE_JOB_KINDS:
             assert role is Role.OPERATOR, kind
-    assert not CONTRIBUTOR_CANCELABLE_JOB_KINDS & DESTRUCTIVE_JOB_KINDS  # destructive never lowered
+    assert not CONTRIBUTOR_CANCELABLE_JOB_KINDS & OPT_IN_DESTRUCTIVE_JOB_KINDS
+    assert not CONTRIBUTOR_CANCELABLE_JOB_KINDS & RETIRED_JOB_KINDS
+    assert RETIRED_JOB_KINDS.isdisjoint(ACTIVE_JOB_KINDS)
     # The provision lane is contributor leaseholder control (ADR-0326): a contributor that can
     # enqueue provision/reprovision can cancel the job it enqueued.
     assert JobKind.PROVISION in CONTRIBUTOR_CANCELABLE_JOB_KINDS
     assert JobKind.REPROVISION in CONTRIBUTOR_CANCELABLE_JOB_KINDS
+    assert JobKind.INSTALL in CONTRIBUTOR_CANCELABLE_JOB_KINDS
+    assert JobKind.BOOT in CONTRIBUTOR_CANCELABLE_JOB_KINDS
 
 
 def test_cancel_terminal_job_is_error_envelope(migrated_url: str) -> None:
@@ -276,7 +340,7 @@ def test_cancel_terminal_job_is_error_envelope(migrated_url: str) -> None:
 def test_cancel_running_leaseholder_job_writes_audit_row(migrated_url: str) -> None:
     # #1083: a successful cancel writes one readable audit row attributing the actor, tool,
     # object, project, and a transition that names the job kind in plaintext (not only in the
-    # one-way args_digest). BUILD is a contributor-cancelable leaseholder kind.
+    # one-way args_digest). INSTALL is a contributor-cancelable leaseholder kind.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "audit-run")
@@ -291,8 +355,8 @@ def test_cancel_running_leaseholder_job_writes_audit_row(migrated_url: str) -> N
         assert object_kind == "jobs"
         assert object_id == job_id
         assert project == "proj"
-        assert transition == "build:running->canceled"
-        assert digest == args_digest({"job_id": job_id, "kind": "build"})
+        assert transition == "install:running->canceled"
+        assert digest == args_digest({"job_id": job_id, "kind": "install"})
 
     asyncio.run(_run())
 
@@ -341,7 +405,7 @@ def test_cancel_audits_locked_prior_state_not_stale_read(
         assert resp.status == "canceled"
         assert len(rows) == 1
         # Labeled from the locked real state (running), not the stale pre-read (queued).
-        assert rows[0][5] == "build:running->canceled"
+        assert rows[0][5] == "install:running->canceled"
 
     asyncio.run(_run())
 
@@ -539,7 +603,7 @@ def test_list_jobs_newest_first_and_capped(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             for i in range(3):
                 await _enqueue(pool, f"d{i}")
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=2)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=2)
         items = resp.items
         assert resp.object_id == "jobs"
         assert resp.status == "ok"
@@ -553,7 +617,7 @@ def test_list_jobs_newest_first_and_capped(migrated_url: str) -> None:
 def test_list_jobs_empty(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50)
         assert resp.status == "ok"
         assert resp.items == []
 
@@ -573,7 +637,7 @@ def test_list_jobs_isolates_invariant_violating_row(
             # Force the bad row into a state that violates "category iff failed".
             await _mark_failed_without_category(pool, bad_id)
             caplog.set_level(logging.WARNING, logger=jobs_tools.__name__)
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50)
         items = resp.items
         by_id = {r.object_id: r for r in items}
         assert len(items) == 2  # the bad row did not blank the list
@@ -723,7 +787,7 @@ def test_list_jobs_only_returns_callers_project(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             mine = await _enqueue_in(pool, "mine", "proj")
             await _enqueue_in(pool, "theirs", "other")
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50)
         ids = {r.object_id for r in resp.items}
         assert ids == {mine}  # the "other"-project job is not listed
 
@@ -734,7 +798,7 @@ def test_list_jobs_excludes_roleless_projects(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _enqueue(pool, "d1")
-            resp = await jobs_tools.list_jobs(pool, CTX, limit=50)
+            resp = await _list_jobs(pool, CTX, limit=50)
         assert resp.items == []
 
     asyncio.run(_run())
@@ -753,7 +817,7 @@ def test_list_jobs_excludes_jobs_with_no_project(migrated_url: str) -> None:
                         Jsonb({"principal": "p"}),
                     ),
                 )
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50)
         assert resp.items == []
 
     asyncio.run(_run())
@@ -764,7 +828,7 @@ def test_list_jobs_first_page_sets_truncated_and_cursor(migrated_url: str) -> No
         async with _pool(migrated_url) as pool:
             for i in range(3):
                 await _enqueue(pool, f"p{i}")
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=2)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=2)
         assert resp.data["truncated"] is True
         assert isinstance(resp.data["next_cursor"], str)
         assert len(resp.items) == 2
@@ -777,7 +841,7 @@ def test_list_jobs_no_truncation_at_exactly_limit(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             for i in range(2):
                 await _enqueue(pool, f"e{i}")
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=2)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=2)
         assert resp.data["truncated"] is False
         assert resp.data["next_cursor"] is None
 
@@ -787,7 +851,7 @@ def test_list_jobs_no_truncation_at_exactly_limit(migrated_url: str) -> None:
 def test_list_jobs_empty_pagination_fields(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50)
         assert resp.data["truncated"] is False
         assert resp.data["next_cursor"] is None
         assert resp.data["count"] == 0
@@ -803,7 +867,7 @@ def test_list_jobs_drains_every_row_following_cursor(migrated_url: str) -> None:
             seen: list[str] = []
             cursor: str | None = None
             for _ in range(10):  # bound the loop defensively
-                resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=2, cursor=cursor)
+                resp = await _list_jobs(pool, VIEWER_CTX, limit=2, cursor=cursor)
                 seen.extend(item.object_id for item in resp.items)
                 if not resp.data["truncated"]:
                     break
@@ -819,7 +883,7 @@ def test_list_jobs_drains_every_row_following_cursor(migrated_url: str) -> None:
 def test_list_jobs_malformed_cursor_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=2, cursor="!!!")
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=2, cursor="!!!")
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data["reason"] == "invalid_cursor"
@@ -844,8 +908,8 @@ async def _enqueue_provision(pool: AsyncConnectionPool, dedup: str) -> str:
     return str(job.id)
 
 
-async def _enqueue_build_for_investigation(pool: AsyncConnectionPool, dedup: str) -> str:
-    """Seed an Investigation + Run and a build job whose payload run_id points at it.
+async def _enqueue_install_for_investigation(pool: AsyncConnectionPool, dedup: str) -> str:
+    """Seed an Investigation + Run and an install job whose payload run_id points at it.
 
     Returns the Investigation id (the filter key). ``runs.system_id`` is nullable since
     ADR-0169, so the Run needs only its Investigation FK + a committed ``target_kind``.
@@ -867,8 +931,8 @@ async def _enqueue_build_for_investigation(pool: AsyncConnectionPool, dedup: str
         assert run_row is not None
         await queue.enqueue(
             conn,
-            JobKind.BUILD,
-            BuildPayload(run_id=str(run_row[0]), build_host_id=str(WORKER_LOCAL_ID)),
+            JobKind.INSTALL,
+            InstallPayload(run_id=str(run_row[0])),
             Authorizing(principal="p", project="proj"),
             dedup,
         )
@@ -881,7 +945,7 @@ def test_list_jobs_filters_by_status(migrated_url: str) -> None:
             failed = await _enqueue(pool, "f")
             await _set_state(pool, failed, JobState.FAILED)
             await _enqueue(pool, "q")  # stays queued
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50, status=JobState.FAILED)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, status=JobState.FAILED)
         assert [r.object_id for r in resp.items] == [failed]
 
     asyncio.run(_run())
@@ -890,10 +954,28 @@ def test_list_jobs_filters_by_status(migrated_url: str) -> None:
 def test_list_jobs_filters_by_kind(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            build_id = await _enqueue(pool, "b")
+            install_id = await _enqueue(pool, "i")
             await _enqueue_provision(pool, "p")
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50, kind=JobKind.BUILD)
-        assert [r.object_id for r in resp.items] == [build_id]
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, kind=JobKind.INSTALL)
+        assert [r.object_id for r in resp.items] == [install_id]
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("kind", sorted(RETIRED_JOB_KINDS, key=lambda item: item.value))
+def test_jobs_list_payload_rejects_retired_kind_filters(kind: JobKind) -> None:
+    with pytest.raises(ValueError, match="retired job kind"):
+        jobs_tools._JobsListPayload(kind=kind)
+
+
+@pytest.mark.parametrize("kind", [JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT])
+def test_list_jobs_rejects_retired_kind_filters(migrated_url: str, kind: JobKind) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, kind=kind)
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data == {"reason": "retired_job_kind", "kind": kind.value}
 
     asyncio.run(_run())
 
@@ -901,13 +983,11 @@ def test_list_jobs_filters_by_kind(migrated_url: str) -> None:
 def test_list_jobs_filters_by_investigation_id(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            investigation_id = await _enqueue_build_for_investigation(pool, "in-inv")
-            await _enqueue(pool, "other")  # build for an unrelated run
+            investigation_id = await _enqueue_install_for_investigation(pool, "in-inv")
+            await _enqueue(pool, "other")  # install for an unrelated run
             await _enqueue_provision(pool, "no-run")  # run-less, never matches
-            resp = await jobs_tools.list_jobs(
-                pool, VIEWER_CTX, limit=50, investigation_id=investigation_id
-            )
-        assert [r.data["kind"] for r in resp.items] == ["build"]
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, investigation_id=investigation_id)
+        assert [r.data["kind"] for r in resp.items] == ["install"]
         assert len(resp.items) == 1
 
     asyncio.run(_run())
@@ -916,9 +996,7 @@ def test_list_jobs_filters_by_investigation_id(migrated_url: str) -> None:
 def test_list_jobs_malformed_investigation_id_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await jobs_tools.list_jobs(
-                pool, VIEWER_CTX, limit=50, investigation_id="not-a-uuid"
-            )
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, investigation_id="not-a-uuid")
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data["reason"] == "invalid_uuid"
@@ -930,9 +1008,7 @@ def test_list_jobs_investigation_filter_no_match_is_empty(migrated_url: str) -> 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _enqueue(pool, "b")
-            resp = await jobs_tools.list_jobs(
-                pool, VIEWER_CTX, limit=50, investigation_id=str(uuid4())
-            )
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, investigation_id=str(uuid4()))
         assert resp.status == "ok"
         assert resp.items == []
 

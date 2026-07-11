@@ -43,7 +43,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.catalog.image_format import ImageFormat
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.validation import DEFAULT_INSPECT, InspectSeam, validate_guest_contract
+from kdive.images.cataloging.validation import DEFAULT_INSPECT, InspectSeam, validate_guest_contract
 from kdive.security import audit
 from kdive.services.images.publish import (
     ImageObjectStore,

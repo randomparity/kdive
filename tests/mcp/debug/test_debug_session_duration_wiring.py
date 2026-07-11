@@ -20,7 +20,6 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, DEBUG_SESSIONS, INVESTIGATIONS, RUNS, SYSTEMS
-from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
@@ -31,9 +30,10 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.debug import sessions as debug_tools
-from kdive.mcp.tools.debug import sessions_lifecycle as _sessions_lifecycle_mod
+from kdive.mcp.tools.debug.sessions import lifecycle as _sessions_lifecycle_mod
+from kdive.mcp.tools.debug.sessions import lifecycle as debug_tools
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
+from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.ports.handles import (

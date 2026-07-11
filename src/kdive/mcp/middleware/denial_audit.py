@@ -8,6 +8,7 @@ from math import isfinite
 from typing import Any
 
 from fastmcp.server.middleware import Middleware
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware.shared import META_TOOLS, request_context
@@ -72,7 +73,7 @@ class DenialAuditMiddleware(Middleware):
 
     def __init__(
         self,
-        pool: Any,
+        pool: AsyncConnectionPool,
         *,
         agent_session: Callable[[], str | None] = _current_agent_session,
     ) -> None:

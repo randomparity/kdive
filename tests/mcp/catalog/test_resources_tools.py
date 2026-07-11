@@ -15,7 +15,6 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
-from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
@@ -26,7 +25,13 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as catalog_resources_tools
 from kdive.mcp.tools.ops.resources import host_ops as resources_tools
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.core.resource_registration import register_discovered_resource
+from kdive.providers.core.runtime import (
+    ProviderRuntime,
+    ProviderSupport,
+    ResourceBindingCapabilities,
+    ResourceDetailCapabilities,
+)
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.remote_libvirt.resource_details import (
     StagedVolumeProbe,
@@ -75,6 +80,13 @@ async def _register(pool: AsyncConnectionPool, *, host_uri: str = "qemu:///syste
     return str(res.id)
 
 
+async def _list_resources(
+    pool: AsyncConnectionPool, ctx: RequestContext, **kw: Any
+) -> ToolResponse:
+    request = catalog_resources_tools.ResourcesListRequest(**kw)
+    return await catalog_resources_tools.list_resources(pool, ctx, request)
+
+
 def _resolver_with_staged_projector(probe: StagedVolumeProbe) -> ProviderResolver:
     unused_port = cast(Any, object())
     runtime = ProviderRuntime(
@@ -88,8 +100,10 @@ def _resolver_with_staged_projector(probe: StagedVolumeProbe) -> ProviderResolve
         crash_postmortem=unused_port,
         vmcore_introspector=unused_port,
         live_introspector=unused_port,
-        resource_detail_projector=lambda pool, viewer_projects: project_resource_details(
-            pool, viewer_projects, staged_probe=probe
+        resource_details=ResourceDetailCapabilities(
+            projector=lambda pool, viewer_projects: project_resource_details(
+                pool, viewer_projects, staged_probe=probe
+            )
         ),
     )
     return ProviderResolver({ResourceKind.REMOTE_LIBVIRT: runtime})
@@ -107,7 +121,7 @@ def test_list_returns_host_with_flat_capability_projection(migrated_url: str) ->
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool)
-            responses = await catalog_resources_tools.list_resources(pool, CTX, kind=None)
+            responses = await _list_resources(pool, CTX, kind=None)
         assert responses.object_id == "resources"
         assert responses.status == "ok"
         items = responses.items
@@ -131,7 +145,7 @@ def test_list_hides_resources_outside_project_affinity(migrated_url: str) -> Non
             visible = await _register(pool, host_uri="qemu:///visible")
             hidden = await _register(pool, host_uri="qemu:///hidden")
             await _set_affinity(pool, hidden, owner_project="other")
-            responses = await catalog_resources_tools.list_resources(pool, CTX, kind=None)
+            responses = await _list_resources(pool, CTX, kind=None)
         return visible, [item.object_id for item in responses.items]
 
     visible, item_ids = asyncio.run(_run())
@@ -143,8 +157,8 @@ def test_list_hides_scoped_resources_without_viewer_role(migrated_url: str) -> N
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool)
             await _set_affinity(pool, res_id, owner_project="proj")
-            member_resp = await catalog_resources_tools.list_resources(pool, CTX, kind=None)
-            viewer_resp = await catalog_resources_tools.list_resources(pool, VIEWER_CTX, kind=None)
+            member_resp = await _list_resources(pool, CTX, kind=None)
+            viewer_resp = await _list_resources(pool, VIEWER_CTX, kind=None)
         return (
             res_id,
             [item.object_id for item in member_resp.items],
@@ -160,7 +174,7 @@ def test_list_kind_filter_miss_is_configuration_error(migrated_url: str) -> None
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _register(pool)
-            responses = await catalog_resources_tools.list_resources(pool, CTX, kind="nope")
+            responses = await _list_resources(pool, CTX, kind="nope")
         assert responses.status == "error"
         assert responses.error_category == "configuration_error"
 
@@ -177,9 +191,7 @@ def test_list_malformed_resource_row_degrades_to_infrastructure_failure(
             async with pool.connection() as conn:
                 await conn.execute("UPDATE resources SET capabilities = '[]'::jsonb")
             caplog.set_level(logging.WARNING, logger=catalog_resources_tools.__name__)
-            responses = await catalog_resources_tools.list_resources(
-                pool, CTX, kind="local-libvirt"
-            )
+            responses = await _list_resources(pool, CTX, kind="local-libvirt")
         items = responses.items
         assert len(items) == 1
         assert items[0].object_id == res_id
@@ -224,9 +236,11 @@ def _descriptor_runtime(
         crash_postmortem=unused_port,
         vmcore_introspector=unused_port,
         live_introspector=unused_port,
-        supported_capture_methods=capture,
-        supported_debug_transports=cast(Any, transports),
-        supported_introspection=cast(Any, introspection),
+        support=ProviderSupport(
+            capture_methods=capture,
+            debug_transports=cast(Any, transports),
+            introspection=cast(Any, introspection),
+        ),
     )
 
 
@@ -308,9 +322,8 @@ def test_describe_omits_capabilities_when_no_resolver(migrated_url: str) -> None
     assert "supported_capture_methods" not in resp.data
 
 
-def test_describe_omits_capabilities_when_kind_unregistered(migrated_url: str) -> None:
-    # The resolver has no runtime for the resource's kind → resolution raises CategorizedError,
-    # the capability block is omitted, and the describe still succeeds.
+def test_describe_fails_when_kind_unregistered(migrated_url: str) -> None:
+    # A present-but-misconfigured resolver should fail closed instead of hiding detail data.
     async def _run() -> ToolResponse:
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool)
@@ -320,8 +333,10 @@ def test_describe_omits_capabilities_when_kind_unregistered(migrated_url: str) -
             )
 
     resp = asyncio.run(_run())
-    assert resp.status == "available"
-    assert "capabilities" not in resp.data
+    assert resp.status == "error"
+    assert resp.error_category == "configuration_error"
+    assert resp.data["kind"] == ResourceKind.LOCAL_LIBVIRT.value
+    assert resp.data["available"] == []
 
 
 def test_describe_hides_resource_outside_project_affinity(migrated_url: str) -> None:
@@ -352,6 +367,7 @@ def test_describe_malformed_id_is_error(migrated_url: str) -> None:
             resp = await catalog_resources_tools.describe_resource(pool, CTX, "not-a-uuid")
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
 
     asyncio.run(_run())
 
@@ -460,13 +476,19 @@ def _resolver_with_rebound_staged_probe(
             crash_postmortem=unused_port,
             vmcore_introspector=unused_port,
             live_introspector=unused_port,
-            resource_detail_projector=lambda pool, viewer_projects: project_resource_details(
-                pool, viewer_projects, staged_probe=probe
+            resource_details=ResourceDetailCapabilities(
+                projector=lambda pool, viewer_projects: project_resource_details(
+                    pool, viewer_projects, staged_probe=probe
+                )
             ),
         )
 
     base = _runtime(unbound)
-    object.__setattr__(base, "rebind_for_resource", lambda name: _runtime(bound_by_name[name]))
+    object.__setattr__(
+        base,
+        "binding",
+        ResourceBindingCapabilities(rebind_for_resource=lambda name: _runtime(bound_by_name[name])),
+    )
     return ProviderResolver({ResourceKind.REMOTE_LIBVIRT: base})
 
 
@@ -669,6 +691,19 @@ def test_set_status_unknown_host_is_error(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_set_status_malformed_resource_id_is_invalid_uuid(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await resources_tools.set_resource_status(
+                pool, _OPERATOR, resource_id="not-a-uuid", status="offline"
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+
+    asyncio.run(_run())
+
+
 def test_set_status_does_not_clear_cordoned(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -714,6 +749,17 @@ def test_cordon_unknown_host_is_error(migrated_url: str) -> None:
             resp = await resources_tools.cordon_resource(pool, _OPERATOR, resource_id=str(uuid4()))
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
+def test_cordon_malformed_resource_id_is_invalid_uuid(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await resources_tools.cordon_resource(pool, _OPERATOR, resource_id="not-a-uuid")
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
 
     asyncio.run(_run())
 
@@ -1209,6 +1255,7 @@ def test_drain_bad_uuid_is_error_unaudited(migrated_url: str) -> None:
             audited = await _platform_audit_rows(pool)
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
         assert audited == []
 
     asyncio.run(_run())
@@ -1253,9 +1300,7 @@ def test_list_paginates_with_cursor(migrated_url: str) -> None:
             seen: list[str] = []
             cursor: str | None = None
             for _ in range(10):
-                page = await catalog_resources_tools.list_resources(
-                    pool, CTX, kind=None, limit=2, cursor=cursor
-                )
+                page = await _list_resources(pool, CTX, kind=None, limit=2, cursor=cursor)
                 seen.extend(item.object_id for item in page.items)
                 if not page.data["truncated"]:
                     break
@@ -1271,7 +1316,7 @@ def test_list_no_truncation_at_exactly_limit(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             for i in range(2):
                 await _register(pool, host_uri=f"qemu:///e{i}")
-            resp = await catalog_resources_tools.list_resources(pool, CTX, kind=None, limit=2)
+            resp = await _list_resources(pool, CTX, kind=None, limit=2)
         assert resp.data["truncated"] is False
         assert resp.data["next_cursor"] is None
 
@@ -1287,7 +1332,7 @@ def test_list_truncated_count_is_over_visible_rows(migrated_url: str) -> None:
                 await _register(pool, host_uri=f"qemu:///v{i}")
             hidden = await _register(pool, host_uri="qemu:///hidden")
             await _set_affinity(pool, hidden, owner_project="other")
-            resp = await catalog_resources_tools.list_resources(pool, CTX, kind=None, limit=3)
+            resp = await _list_resources(pool, CTX, kind=None, limit=3)
         assert len(resp.items) == 3
         assert resp.data["truncated"] is False
 
@@ -1297,7 +1342,7 @@ def test_list_truncated_count_is_over_visible_rows(migrated_url: str) -> None:
 def test_list_malformed_cursor_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await catalog_resources_tools.list_resources(pool, CTX, kind=None, cursor="!!!")
+            resp = await _list_resources(pool, CTX, kind=None, cursor="!!!")
         assert resp.status == "error"
         assert resp.data["reason"] == "invalid_cursor"
 

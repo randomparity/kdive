@@ -87,10 +87,11 @@ rejected. To exercise an authenticated call against the compose server, mint the
 *inside* the network (a one-off container joined to the compose network, hitting
 `http://oidc:8080`), so its `iss` matches what the server expects.
 
-The token flow itself (authorize → code → exchange) is the same one the live-stack harness
-uses — see [`tests/integration/live_stack/harness.py`](../../tests/integration/live_stack/harness.py)
-and the [live-stack runbook](../../docs/operating/runbooks/live-stack.md), which runs the server *on
-the host* (where `iss=http://localhost:8090/default` matches host-minted tokens).
+The token flow itself (authorize → code → exchange) is the same one the live-stack drivers
+use — see [`src/kdive/mcp/dev_harness.py`](../../src/kdive/mcp/dev_harness.py),
+[`tests/integration/live_stack/spine.py`](../../tests/integration/live_stack/spine.py), and the
+[live-stack runbook](../../docs/operating/runbooks/live-stack.md), which runs the server *on the
+host* (where `iss=http://localhost:8090/default` matches host-minted tokens).
 
 ## Teardown
 

@@ -1,8 +1,8 @@
-"""Tests for the process-scoped secret registry (ADR-0027, refines ADR-0012)."""
+"""Tests for explicit secret registries (ADR-0027, refines ADR-0012)."""
 
 from __future__ import annotations
 
-from kdive.security.secrets.secret_registry import PROCESS_SECRET_REGISTRY, SecretRegistry
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 
 def test_register_then_snapshot_contains_value() -> None:
@@ -77,10 +77,6 @@ def test_release_of_unknown_scope_does_not_bump_version() -> None:
     before = registry.version()
     registry.release(object())
     assert registry.version() == before
-
-
-def test_process_registry_is_a_secret_registry() -> None:
-    assert isinstance(PROCESS_SECRET_REGISTRY, SecretRegistry)
 
 
 def test_scope_refs_returns_scope_keys_never_values() -> None:

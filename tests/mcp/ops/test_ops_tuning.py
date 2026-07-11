@@ -36,7 +36,8 @@ from kdive.domain.lifecycle.records import Allocation
 from kdive.inventory import writeback
 from kdive.inventory.model import InventoryDoc
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.ops import inventory_export, tuning
+from kdive.mcp.tools.ops import tuning
+from kdive.mcp.tools.ops.inventory import inventory_export
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.allocation.admission.core import AllocationRequest, admit
 

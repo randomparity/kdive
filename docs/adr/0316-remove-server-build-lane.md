@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-08
 - **Deciders:** kdive maintainers
-- **Spec:** [`../superpowers/specs/2026-07-08-remove-server-build-lane-design.md`](../superpowers/specs/2026-07-08-remove-server-build-lane-design.md)
+- **Spec:** [`../superpowers/specs/2026-07-08-remove-server-build-lane-design.md`](../archive/superpowers/specs/2026-07-08-remove-server-build-lane-design.md)
   (spec 1 of a three-spec redesign; specs 2 and 3 are [#1051](https://github.com/randomparity/kdive/issues/1051)
   and [#1052](https://github.com/randomparity/kdive/issues/1052)).
 - **Supersedes:** [ADR-0137](0137-build-profile-schema-discoverability.md) (server-build profile

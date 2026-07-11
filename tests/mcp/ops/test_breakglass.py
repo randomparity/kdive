@@ -31,7 +31,7 @@ from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.ops import breakglass
+from kdive.mcp.tools.ops.security import breakglass
 from kdive.security.authz.rbac import PlatformRole
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

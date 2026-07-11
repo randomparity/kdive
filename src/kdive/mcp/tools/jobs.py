@@ -23,23 +23,29 @@ import asyncio
 import logging
 import math
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Annotated
 from uuid import UUID
 
 from fastmcp import FastMCP
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from kdive.db.repositories import JOBS, ObjectNotFound
 from kdive.domain.capacity.state import IllegalTransition, JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.operations.jobs import CONTRIBUTOR_CANCELABLE_JOB_KINDS, Job, JobKind
+from kdive.domain.operations.jobs import (
+    CONTRIBUTOR_CANCELABLE_JOB_KINDS,
+    RETIRED_JOB_KINDS,
+    Job,
+    JobKind,
+)
 from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
-from kdive.mcp.tool_payloads import ToolPayload
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -67,12 +73,10 @@ class _JobsListPayload(ToolPayload):
     """Public payload for ``jobs.list`` filters and pagination."""
 
     status: JobState | None = Field(default=None, description="Only jobs in this lifecycle state.")
-    kind: JobKind | None = Field(default=None, description="Only jobs of this kind.")
+    kind: JobKind | None = Field(default=None, description="Only active jobs of this kind.")
     investigation_id: str | None = Field(
         default=None,
-        description=(
-            "Only run-bearing jobs (build/install/boot) whose Run belongs to this Investigation."
-        ),
+        description=("Only active run-bearing jobs whose Run belongs to this Investigation."),
     )
     limit: int = Field(
         default=DEFAULT_LIST_LIMIT,
@@ -81,6 +85,24 @@ class _JobsListPayload(ToolPayload):
     cursor: str | None = Field(
         default=None, description="Opaque continuation cursor from a prior page's next_cursor."
     )
+
+    @field_validator("kind")
+    @classmethod
+    def _reject_retired_kind(cls, value: JobKind | None) -> JobKind | None:
+        if value in RETIRED_JOB_KINDS:
+            raise ValueError(f"{value.value} is a retired job kind")
+        return value
+
+
+@dataclass(frozen=True, slots=True)
+class JobsListRequest:
+    """Filter payload for ``jobs.list``."""
+
+    status: JobState | None = None
+    kind: JobKind | None = None
+    investigation_id: str | None = None
+    limit: int = DEFAULT_LIST_LIMIT
+    cursor: str | None = None
 
 
 def _error(object_id: str, category: ErrorCategory) -> ToolResponse:
@@ -153,7 +175,7 @@ async def get_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str) -
     """
     uid = _as_uuid(job_id)
     if uid is None:
-        return _error(job_id, ErrorCategory.CONFIGURATION_ERROR)
+        return _invalid_uuid_error("job_id", job_id)
     with bind_context(principal=ctx.principal, job_id=job_id):
         async with pool.connection() as conn:
             job = await JOBS.get(conn, uid)
@@ -186,7 +208,7 @@ async def wait_job(
     """
     uid = _as_uuid(job_id)
     if uid is None:
-        return _error(job_id, ErrorCategory.CONFIGURATION_ERROR)
+        return _invalid_uuid_error("job_id", job_id)
     if not math.isfinite(timeout_s):
         return _error(job_id, ErrorCategory.CONFIGURATION_ERROR)
     loop = asyncio.get_running_loop()
@@ -233,7 +255,7 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str
     """
     uid = _as_uuid(job_id)
     if uid is None:
-        return _error(job_id, ErrorCategory.CONFIGURATION_ERROR)
+        return _invalid_uuid_error("job_id", job_id)
     with bind_context(principal=ctx.principal, job_id=job_id):
         # Authorize before mutating: a job in an ungranted project must look absent and
         # never be canceled. The owning project never changes, so the read→update gap is
@@ -284,12 +306,7 @@ _JOBS_LIST_TAG = "jobs.list"
 async def list_jobs(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    *,
-    limit: int,
-    cursor: str | None = None,
-    status: JobState | None = None,
-    kind: JobKind | None = None,
-    investigation_id: str | None = None,
+    request: JobsListRequest | None = None,
 ) -> ToolResponse:
     """Return a page of the newest jobs (keyset-paginated) in one collection envelope.
 
@@ -304,16 +321,23 @@ async def list_jobs(
     error). Filters compose with the cursor — following ``next_cursor`` drains the full
     filtered set.
     """
-    capped = _clamp_list_limit(limit)
+    request = request or JobsListRequest()
+    capped = _clamp_list_limit(request.limit)
+    if request.kind in RETIRED_JOB_KINDS:
+        return ToolResponse.failure(
+            "jobs",
+            ErrorCategory.CONFIGURATION_ERROR,
+            data={"reason": "retired_job_kind", "kind": request.kind.value},
+        )
     investigation_uid = None
-    if investigation_id is not None:
-        investigation_uid = _as_uuid(investigation_id)
+    if request.investigation_id is not None:
+        investigation_uid = _as_uuid(request.investigation_id)
         if investigation_uid is None:
-            return _invalid_uuid_error("investigation_id", investigation_id)
+            return _invalid_uuid_error("investigation_id", request.investigation_id)
     after = None
-    if cursor:
+    if request.cursor:
         try:
-            after = _decode_ts_uuid_cursor(_JOBS_LIST_TAG, cursor)
+            after = _decode_ts_uuid_cursor(_JOBS_LIST_TAG, request.cursor)
         except InvalidCursor:
             return _invalid_cursor_error("jobs")
     with bind_context(principal=ctx.principal):
@@ -323,8 +347,8 @@ async def list_jobs(
                 capped + 1,
                 _readable_projects(ctx),
                 after=after,
-                status=status,
-                kind=kind,
+                status=request.status,
+                kind=request.kind,
                 investigation_id=investigation_uid,
             )
         kept, truncated = _paginate(jobs, capped)
@@ -406,9 +430,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         """Cancel a queued or running job.
 
-        A contributor may cancel their own leaseholder-lifecycle jobs (provision/reprovision/
-        build/install/boot/power/authorize_ssh_key/…). Cancelling a destructive job
-        (teardown/force_crash) requires operator.
+        A contributor may cancel leaseholder-lifecycle jobs (provision/reprovision/
+        install/boot/power/authorize_ssh_key/…) in projects where they have contributor.
+        Cancelling a destructive job (teardown/force_crash) or retired server-build job
+        requires operator.
         """
         return await cancel_job(pool, current_context(), job_id)
 
@@ -426,15 +451,18 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """List jobs visible to the caller, newest first, filterable by status/kind/investigation.
 
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-        ``cursor`` to read the next page. Filters compose with the cursor.
+        ``cursor`` to read the next page. Filters compose with the cursor. The ``kind`` filter
+        accepts active job kinds only; historical retired build jobs remain readable by id.
         """
         request = request or _JobsListPayload()
         return await list_jobs(
             pool,
             current_context(),
-            limit=request.limit,
-            cursor=request.cursor,
-            status=request.status,
-            kind=request.kind,
-            investigation_id=request.investigation_id,
+            JobsListRequest(
+                limit=request.limit,
+                cursor=request.cursor,
+                status=request.status,
+                kind=request.kind,
+                investigation_id=request.investigation_id,
+            ),
         )

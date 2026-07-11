@@ -8,13 +8,13 @@ from uuid import UUID, uuid4
 
 import psycopg
 
-from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
-from kdive.db.upload_manifest import (
+from kdive.artifacts.upload_manifest import (
     UploadManifestReplaceRequest,
     delete_manifest,
     get_manifest,
     replace_manifest,
 )
+from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 
 
 async def _connect(url: str) -> psycopg.AsyncConnection:

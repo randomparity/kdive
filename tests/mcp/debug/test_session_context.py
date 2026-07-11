@@ -6,7 +6,7 @@ import asyncio
 
 from kdive.domain.capacity.state import DebugSessionState
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.debug.session_context import (
+from kdive.mcp.tools.debug.sessions.context import (
     debug_session_error,
     resolve_debug_session_context,
 )

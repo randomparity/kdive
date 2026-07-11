@@ -5,10 +5,12 @@ from __future__ import annotations
 import io
 import os
 import subprocess
+import sys
 import tarfile
 import xml.etree.ElementTree as ET  # noqa: S405 - parses only self-rendered, trusted test XML
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 from uuid import UUID
 
@@ -19,8 +21,8 @@ from kdive.artifacts.storage import FetchedArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle import readiness as readiness_mod
-from kdive.providers.local_libvirt.lifecycle.guest_kernel_writer import (
+from kdive.providers.local_libvirt.lifecycle.boot import readiness as readiness_mod
+from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
     GuestKernelWriter,
     _kernel_dest,
     _RealGuestKernelWriter,
@@ -28,17 +30,17 @@ from kdive.providers.local_libvirt.lifecycle.guest_kernel_writer import (
     _verify_vmlinux_size,
     _vmlinux_dest,
 )
-from kdive.providers.local_libvirt.lifecycle.install import (
-    Fetch,
-    LocalLibvirtInstall,
-    _stage_object,
-)
-from kdive.providers.local_libvirt.lifecycle.kernel_bundle import repack_modules_subtree
-from kdive.providers.local_libvirt.lifecycle.readiness import (
+from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import repack_modules_subtree
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleVerdict,
     ReadinessResult,
     _verdict_to_result,
     classify_console,
+)
+from kdive.providers.local_libvirt.lifecycle.install import (
+    Fetch,
+    LocalLibvirtInstall,
+    _stage_object,
 )
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.runtime_paths import read_console_log
@@ -609,6 +611,37 @@ def test_install_kdump_no_writer_is_missing_dependency(tmp_path: Path) -> None:
         inst.install(_request(method=CaptureMethod.KDUMP))
     assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
     assert conn.defined_xml == []
+
+
+def test_kernel_writer_mount_close_failure_preserves_open_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Guest:
+        launch_error = RuntimeError("launch failed")
+
+        def add_drive_opts(self, _filename: str, *, format: str, readonly: bool) -> None:
+            assert format == "qcow2"
+            assert readonly is False
+
+        def launch(self) -> None:
+            raise self.launch_error
+
+        def close(self) -> None:
+            raise RuntimeError("close failed")
+
+    guest = _Guest()
+    monkeypatch.setitem(
+        sys.modules,
+        "guestfs",
+        SimpleNamespace(GuestFS=lambda **_kwargs: guest),
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        _RealGuestKernelWriter._mount_rw("overlay.qcow2")
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"overlay": "overlay.qcow2", "error": "RuntimeError"}
+    assert caught.value.__cause__ is guest.launch_error
 
 
 def test_read_release_recovers_version_from_repacked_modules_tar(tmp_path: Path) -> None:

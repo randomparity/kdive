@@ -16,12 +16,12 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.config.core_settings import FAULT_INJECT, LOCAL_LIBVIRT_ENABLED
-from kdive.db.resource_discovery import ensure_discovered_resource_registered
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.observability.console_telemetry import ConsoleTelemetry
 from kdive.providers.core.discovery_registration import ProviderDiscoveryRegistration
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.resource_registration import ensure_discovered_resource_registered
 from kdive.providers.core.runtime import DiscoveryRegistrar, ProviderRuntime
 from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.fault_inject import composition as fault_inject_composition

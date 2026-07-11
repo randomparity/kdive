@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Issue: #935
-- Spec: [console-run-correlation-935](../specs/2026-06-30-console-run-correlation-935.md)
+- Spec: [console-run-correlation-935](../design/2026-06-30-console-run-correlation-935.md)
 - Supersedes nothing; extends ADR-0235 (per-Run console evidence snapshot), ADR-0273 (rotating
   System-owned console parts), ADR-0262 (`runs.get` `data.console_access` read-path hint), ADR-0244
   (Run-owned vmcore — the contrast this decision deliberately does *not* follow for console). Builds

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.lifecycle.rules import TERMINAL_SYSTEM_STATES
-from kdive.jobs.handlers.console_rotate import _LIVE_STATES
+from kdive.jobs.handlers.console.console_rotate import _LIVE_STATES
 from kdive.providers.infra.console_hosting import _RUNNING_SYSTEM_STATE_VALUES
 from kdive.reconciler.repairs.allocations import _LIVE_SYSTEM_STATES as _ALLOC_LIVE
 from kdive.reconciler.repairs.console_rotation import _LIVE_SYSTEM_STATES as _ROT_LIVE

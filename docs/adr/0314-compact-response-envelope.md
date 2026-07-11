@@ -4,7 +4,7 @@
 - **Date:** 2026-07-08
 - **Deciders:** kdive maintainers
 - **Issue:** #1035 (`BLACK_BOX_REVIEW.md` pain point P4, Epic #998)
-- **Spec:** [compact-response-envelope-1035](../specs/2026-07-08-compact-response-envelope-1035.md)
+- **Spec:** [compact-response-envelope-1035](../design/2026-07-08-compact-response-envelope-1035.md)
 - Extends ADR-0019 (uniform response envelope), ADR-0087 (config registry),
   ADR-0170 (advertised envelope output schema). Supersedes nothing.
 

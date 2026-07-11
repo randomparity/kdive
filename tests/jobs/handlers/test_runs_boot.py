@@ -16,8 +16,9 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
+from kdive.domain.lifecycle.run_steps import BootStepResult
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.handlers import console_evidence
+from kdive.jobs.handlers.console import console_evidence
 from kdive.jobs.handlers.runs import boot as runs_boot
 from kdive.jobs.handlers.runs import boot_evidence
 from kdive.jobs.handlers.runs import registrar as runs
@@ -248,12 +249,18 @@ class _Pol:
 class _Connector:
     """Fake Connector: open_transport raises when the stub is unreachable."""
 
-    def __init__(self, *, raises: bool) -> None:
+    def __init__(
+        self,
+        *,
+        raises: bool,
+        category: ErrorCategory = ErrorCategory.DEBUG_ATTACH_FAILURE,
+    ) -> None:
         self._raises = raises
+        self._category = category
 
     def open_transport(self, _system: object, _kind: object) -> object:
         if self._raises:
-            raise CategorizedError("no stub", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
+            raise CategorizedError("no stub", category=self._category)
         return object()
 
     def close_transport(self, _handle: object) -> None: ...
@@ -306,6 +313,13 @@ def test_gdbstub_reachable_false_when_open_raises() -> None:
     assert boot_evidence.gdbstub_reachable(conn, uuid4()) is False
 
 
+def test_gdbstub_reachable_preserves_transport_failure_category() -> None:
+    conn = cast(Connector, _Connector(raises=True, category=ErrorCategory.TRANSPORT_FAILURE))
+    with pytest.raises(CategorizedError) as exc:
+        boot_evidence.gdbstub_reachable(conn, uuid4())
+    assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
+
+
 @dataclass
 class _FakeSystem:
     provisioning_profile: dict[str, object]
@@ -318,7 +332,8 @@ def _record(
     host_dump: bool,
     console: bytes | None,
     reachable: bool,
-) -> tuple[dict[str, object] | None, list[object]]:
+    failure_category: ErrorCategory = ErrorCategory.DEBUG_ATTACH_FAILURE,
+) -> tuple[BootStepResult | None, list[object]]:
     audits: list[object] = []
 
     async def _fake_get(_conn: object, _system_id: object) -> _FakeSystem:
@@ -336,18 +351,18 @@ def _record(
     monkeypatch.setattr(boot_evidence, "_capture_console_artifact", _fake_capture)
     monkeypatch.setattr(boot_evidence, "record_boot_audit", _fake_audit)
 
-    async def _run() -> dict[str, object] | None:
+    async def _run() -> BootStepResult | None:
         return await boot_evidence.record_crash_halted_live(
             cast(AsyncConnection, object()),
             cast(RequestContext, object()),
             cast(Run, _FakeRun(None)),
-            uuid4(),
-            cast(Connector, _Connector(raises=not reachable)),
-            cast(ProfilePolicy, _Pol(gdbstub=gdbstub, host_dump=host_dump)),
-            cast(SecretRegistry, object()),
-            None,
-            None,  # console_snapshotter — local dispatch falls through to _capture_console_artifact
-            0,  # boot-window mark (ADR-0241); unused here since _capture_console_artifact is faked
+            system_id=uuid4(),
+            connector=cast(Connector, _Connector(raises=not reachable, category=failure_category)),
+            profile_policy=cast(ProfilePolicy, _Pol(gdbstub=gdbstub, host_dump=host_dump)),
+            secret_registry=cast(SecretRegistry, object()),
+            artifact_store=None,
+            snapshotter=None,
+            mark=0,
         )
 
     return asyncio.run(_run()), audits
@@ -382,6 +397,21 @@ def test_no_record_when_stub_unreachable(monkeypatch: pytest.MonkeyPatch) -> Non
     assert result is None and audits == []
 
 
+def test_transport_failure_propagates_from_crashed_halted_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(CategorizedError) as exc:
+        _record(
+            monkeypatch,
+            gdbstub=True,
+            host_dump=False,
+            console=_PANIC_CONSOLE,
+            reachable=False,
+            failure_category=ErrorCategory.TRANSPORT_FAILURE,
+        )
+    assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
+
+
 def test_no_record_when_console_has_no_panic(monkeypatch: pytest.MonkeyPatch) -> None:
     # Panic signature, not the probe, is the crash signal: a reachable stub is not enough.
     result, audits = _record(
@@ -404,7 +434,7 @@ def _record_expected(
     host_dump: bool,
     kdump: bool,
     system_present: bool,
-) -> tuple[dict[str, object] | None, list[object]]:
+) -> tuple[BootStepResult | None, list[object]]:
     audits: list[object] = []
 
     async def _fake_get(_conn: object, _system_id: object) -> _FakeSystem | None:
@@ -418,15 +448,17 @@ def _record_expected(
 
     artifact = boot_evidence.ConsoleArtifact(uuid4(), "tenant/console", _PANIC_CONSOLE)
 
-    async def _run() -> dict[str, object] | None:
+    async def _run() -> BootStepResult | None:
         return await boot_evidence.record_expected_crash(
             cast(AsyncConnection, object()),
             cast(RequestContext, object()),
             cast(Run, _FakeRun({"kind": "console_crash", "pattern": "panic"})),
-            uuid4(),
-            cast(ProfilePolicy, _Pol(gdbstub=gdbstub, host_dump=host_dump, kdump=kdump)),
-            artifact,
-            "Kernel panic - not syncing: matched line",
+            system_id=uuid4(),
+            profile_policy=cast(
+                ProfilePolicy, _Pol(gdbstub=gdbstub, host_dump=host_dump, kdump=kdump)
+            ),
+            artifact=artifact,
+            matched_line="Kernel panic - not syncing: matched line",
         )
 
     return asyncio.run(_run()), audits

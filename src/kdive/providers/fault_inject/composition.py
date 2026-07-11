@@ -19,7 +19,11 @@ from kdive.providers.core.discovery_registration import (
     DiscoveryRegistrationTarget,
     ProviderDiscoveryRegistration,
 )
-from kdive.providers.core.runtime import DebugCapabilities, ProviderRuntime
+from kdive.providers.core.runtime import (
+    DebugCapabilities,
+    ProviderRuntime,
+    ProviderSupport,
+)
 from kdive.providers.fault_inject.debug.gdb import (
     FaultInjectDebugEngine,
     fault_inject_attach_seam,
@@ -102,18 +106,18 @@ def build_runtime(
         crash_postmortem=retrieve,
         vmcore_introspector=introspect,
         live_introspector=introspect,
-        supported_capture_methods=frozenset(
-            {CaptureMethod.CONSOLE, CaptureMethod.HOST_DUMP, CaptureMethod.GDBSTUB}
+        support=ProviderSupport(
+            component_sources=_component_sources(),
+            capture_methods=frozenset(
+                {CaptureMethod.CONSOLE, CaptureMethod.HOST_DUMP, CaptureMethod.GDBSTUB}
+            ),
+            # ADR-0208: fault-inject reports its synthetic capability: both connector transports
+            # and both introspection modes FaultInjectIntrospect realizes.
+            debug_transports=frozenset({"gdbstub", "drgn-live"}),
+            introspection=frozenset({"offline-vmcore", "live"}),
         ),
-        # ADR-0208: fault-inject reports its synthetic capability — both transports its connector
-        # accepts (FaultInjectConnect admits the full DEBUG_TRANSPORT_KINDS) and both introspection
-        # modes FaultInjectIntrospect realizes (from_vmcore + introspect_live).
-        supported_debug_transports=frozenset({"gdbstub", "drgn-live"}),
-        supported_introspection=frozenset({"offline-vmcore", "live"}),
         debug=DebugCapabilities(
             attach_seam=fault_inject_attach_seam,
             engine=FaultInjectDebugEngine(),
         ),
-        component_sources=_component_sources(),
-        rootfs_validator=lambda _rootfs: None,
     )

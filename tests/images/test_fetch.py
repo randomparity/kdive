@@ -21,7 +21,7 @@ from kdive.artifacts import storage as artifact_types
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.fetch import fetch_registered_rootfs, fetch_registered_rootfs_sync
+from kdive.images.rootfs.fetch import fetch_registered_rootfs, fetch_registered_rootfs_sync
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _QCOW2 = b"qcow2-bytes-for-test"
@@ -363,3 +363,23 @@ def test_sync_fetch_s3_downloads_and_caches(migrated_url: str, tmp_path: Path) -
         assert out.read_bytes() == _QCOW2
         assert out.parent == cache
         assert store.gets == [key]
+
+
+def test_sync_fetch_s3_cache_hit_skips_store_factory(migrated_url: str, tmp_path: Path) -> None:
+    key = "images/local-libvirt/fed/x86_64.qcow2"
+    cache = tmp_path / ".cache"
+    cache.mkdir()
+    cached = cache / f"{_DIGEST.removeprefix('sha256:')}.qcow2"
+    cached.write_bytes(_QCOW2)
+    with psycopg.connect(migrated_url, autocommit=True) as conn:
+        _insert_registered_sync(conn, object_key=key, digest=_DIGEST)
+        out = fetch_registered_rootfs_sync(
+            conn,
+            _exploding_factory(),
+            allowed_roots=[tmp_path],
+            provider="local-libvirt",
+            name="fed",
+            arch="x86_64",
+            cache_dir=cache,
+        )
+        assert out == cached

@@ -12,7 +12,10 @@ from fastmcp import Client, FastMCP
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.schema_advertising import ENVELOPE_OUTPUT_SCHEMA, advertise_envelope_output_schema
+from kdive.mcp.schema.schema_advertising import (
+    ENVELOPE_OUTPUT_SCHEMA,
+    advertise_envelope_output_schema,
+)
 
 
 def _probe_app() -> FastMCP:

@@ -5,6 +5,8 @@ Coverage:
 * An unknown tool name yields a ``configuration_error`` envelope with a pointer
   to ``tools.search`` in the detail.
 * Missing required arguments for an inner tool yield ``configuration_error``.
+* An inner tool's ``CategorizedError`` yields the same typed failure envelope as
+  direct tool handlers.
 * An inner tool that raises ``fastmcp.exceptions.AuthorizationError`` propagates
   unchanged — tools.invoke does not catch authorization errors (ADR-0148).
 """
@@ -19,9 +21,10 @@ from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.mcp.app import build_app
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.mcp.assembly.app import build_app
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.schema_advertising import advertise_envelope_output_schema
+from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.tools import gateway
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
@@ -114,7 +117,39 @@ def test_bad_arguments_is_configuration_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 4: inner authorization error is not caught by tools.invoke
+# Test 4: inner CategorizedError is converted to an envelope
+# ---------------------------------------------------------------------------
+
+
+def test_inner_categorized_error_becomes_failure_envelope() -> None:
+    """tools.invoke converts domain errors to the uniform failure envelope."""
+    app = FastMCP("test-gateway-categorized-error")
+
+    @app.tool(name="domain.fail")  # type: ignore[misc]
+    async def _domain_fail() -> ToolResponse:
+        raise CategorizedError(
+            "store unavailable",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"operation": "capture"},
+        )
+
+    gateway.register(app, resolver=ProviderResolver({}))
+    advertise_envelope_output_schema(app)
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.invoke", {"name": "domain.fail", "arguments": {}})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["object_id"] == "tools.invoke"
+    assert content["status"] == "error"
+    assert content["error_category"] == "infrastructure_failure"
+    assert content["detail"] == "store unavailable"
+    assert content["data"] == {"operation": "capture"}
+
+
+# ---------------------------------------------------------------------------
+# Test 5: inner authorization error is not caught by tools.invoke
 # ---------------------------------------------------------------------------
 
 

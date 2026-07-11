@@ -20,12 +20,13 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers import vmcore as vmcore_plane
-from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
+from kdive.jobs.handlers.artifacts import vmcore as vmcore_plane
+from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
+from kdive.mcp.tools.lifecycle.vmcore import handlers as vmcore_handler_tools
+from kdive.mcp.tools.lifecycle.vmcore import view as vmcore_view
 from kdive.providers.ports.retrieve import (
     CaptureOutput,
     CrashOutput,
@@ -143,8 +144,8 @@ class _FakeCrash:
         )
 
 
-def _vmcore_handlers(crash: CrashPostmortem | None = None) -> vmcore_tools.VmcoreHandlers:
-    return vmcore_tools.VmcoreHandlers(
+def _vmcore_handlers(crash: CrashPostmortem | None = None) -> vmcore_handler_tools.VmcoreHandlers:
+    return vmcore_handler_tools.VmcoreHandlers(
         resolver=provider_resolver(
             crash_postmortem=crash or _FakeCrash(),
             supported_capture_methods=_TEST_CAPTURE_METHODS,
@@ -181,7 +182,7 @@ class _RaisingCrash:
 # --- vmcore.fetch tool ---------------------------------------------------------------------
 
 
-def _real_local_handlers() -> vmcore_tools.VmcoreHandlers:
+def _real_local_handlers() -> vmcore_handler_tools.VmcoreHandlers:
     """A VmcoreHandlers bound to the REAL local-libvirt runtime (descriptor narrowing applies).
 
     Unlike ``_vmcore_handlers``, this does not override ``supported_capture_methods`` — it uses
@@ -195,7 +196,7 @@ def _real_local_handlers() -> vmcore_tools.VmcoreHandlers:
     registry = SecretRegistry()
     runtime = build_local_runtime(secret_registry=registry)
     resolver = ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
-    return vmcore_tools.VmcoreHandlers(resolver=resolver, secret_registry=registry)
+    return vmcore_handler_tools.VmcoreHandlers(resolver=resolver, secret_registry=registry)
 
 
 async def _job_count(pool: AsyncConnectionPool) -> int:
@@ -469,6 +470,8 @@ def test_fetch_vmcore_malformed_uuid_is_config_error(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             resp = await _fetch_vmcore(pool, _ctx(), run_id="nope")
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None and "nope" in resp.detail
 
     asyncio.run(_run())
 
@@ -702,7 +705,7 @@ def test_list_vmcores_redacted_only(migrated_url: str) -> None:
                 await vmcore_plane.capture_handler(
                     conn, job, resolver=provider_resolver(retriever=_FakeRetriever(run_id))
                 )
-            resp = await vmcore_tools.list_vmcores(pool, _ctx(), run_id=run_id)
+            resp = await vmcore_handler_tools.list_vmcores(pool, _ctx(), run_id=run_id)
         keys = {r.refs["object"] for r in resp.items}
         assert keys == {f"local/runs/{run_id}/vmcore-host_dump-redacted"}
 
@@ -719,7 +722,7 @@ def test_list_vmcores_requires_viewer_role(migrated_url: str) -> None:
                     conn, job, resolver=provider_resolver(retriever=_FakeRetriever(run_id))
                 )
             with pytest.raises(AuthorizationError):
-                await vmcore_tools.list_vmcores(pool, _ctx(role=None), run_id=run_id)
+                await vmcore_handler_tools.list_vmcores(pool, _ctx(role=None), run_id=run_id)
 
     asyncio.run(_run())
 
@@ -736,7 +739,7 @@ def test_list_vmcores_surfaces_run_owned_redacted_core(migrated_url: str) -> Non
                 await vmcore_plane.capture_handler(
                     conn, job, resolver=provider_resolver(retriever=_FakeRetriever(run_id))
                 )
-            resp = await vmcore_tools.list_vmcores(pool, _ctx(), run_id=run_id)
+            resp = await vmcore_handler_tools.list_vmcores(pool, _ctx(), run_id=run_id)
         assert len(resp.items) == 1
         assert resp.items[0].refs["object"] == f"local/runs/{run_id}/vmcore-host_dump-redacted"
 
@@ -908,8 +911,8 @@ async def _console_crash_run_no_core(pool: AsyncConnectionPool) -> str:
 def test_console_crash_guidance_constant_pins_meaning() -> None:
     # The narrative is one shared constant; assert its stable substrings so a reworded constant
     # that drops the early-boot/console framing fails (#734, ADR-0227).
-    assert "kexec" in vmcore_tools.CONSOLE_CRASH_GUIDANCE
-    assert "console" in vmcore_tools.CONSOLE_CRASH_GUIDANCE
+    assert "kexec" in vmcore_view.CONSOLE_CRASH_GUIDANCE
+    assert "console" in vmcore_view.CONSOLE_CRASH_GUIDANCE
 
 
 def test_postmortem_triage_console_crash_redirects_to_console(migrated_url: str) -> None:
@@ -923,7 +926,7 @@ def test_postmortem_triage_console_crash_redirects_to_console(migrated_url: str)
         assert resp.data["reason"] == "expected_console_crash"
         assert resp.data["expected_boot_failure"] == "console_crash"
         assert resp.suggested_next_actions == ["runs.get", "artifacts.list"]
-        assert resp.detail == vmcore_tools.CONSOLE_CRASH_GUIDANCE
+        assert resp.detail == vmcore_view.CONSOLE_CRASH_GUIDANCE
 
     asyncio.run(_run())
 
@@ -939,7 +942,7 @@ def test_postmortem_crash_console_crash_redirects_to_console(migrated_url: str) 
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert resp.data["reason"] == "expected_console_crash"
         assert resp.suggested_next_actions == ["runs.get", "artifacts.list"]
-        assert resp.detail == vmcore_tools.CONSOLE_CRASH_GUIDANCE
+        assert resp.detail == vmcore_view.CONSOLE_CRASH_GUIDANCE
 
     asyncio.run(_run())
 
@@ -987,9 +990,13 @@ def test_no_raw_vmcore_key_in_any_read_response(migrated_url: str) -> None:
                     conn, job, resolver=provider_resolver(retriever=_FakeRetriever(run_id))
                 )
             refs: list[str] = []
-            from kdive.mcp.tools.catalog.artifacts.reads import artifacts_get, artifacts_list
+            from kdive.mcp.tools.catalog.artifacts.reads import (
+                ArtifactsGetRequest,
+                artifacts_get,
+                artifacts_list,
+            )
 
-            vmcores = await vmcore_tools.list_vmcores(pool, _ctx(), run_id=run_id)
+            vmcores = await vmcore_handler_tools.list_vmcores(pool, _ctx(), run_id=run_id)
             for r in vmcores.items:
                 refs.extend(r.refs.values())
             listed = await artifacts_list(pool, _ctx(), system_id=sys_id)
@@ -997,7 +1004,11 @@ def test_no_raw_vmcore_key_in_any_read_response(migrated_url: str) -> None:
             for r in artifact_items:
                 refs.extend(r.refs.values())
             for r in artifact_items:
-                got = await artifacts_get(pool, _ctx(), artifact_id=r.object_id)
+                got = await artifacts_get(
+                    pool,
+                    _ctx(),
+                    request=ArtifactsGetRequest(artifact_id=r.object_id),
+                )
                 refs.extend(got.refs.values())
         assert refs  # something was returned
         # A raw core is `.../vmcore-{method}` (no `-redacted`); it must never surface.

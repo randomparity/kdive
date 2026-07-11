@@ -28,9 +28,9 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.domain.errors import CategorizedError
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.ops import reconcile as ops_reconcile
+from kdive.mcp.tools.ops.reconcile import reconcile as ops_reconcile
 from kdive.providers.infra.reaping import NullReaper
-from kdive.reconciler.loop import ReconcileConfig, reconcile_once
+from kdive.reconciler.loop import ALL_REPAIR_KINDS, ReconcileConfig, reconcile_once
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 from kdive.store.assembly import optional_object_store
@@ -104,6 +104,9 @@ def test_reconcile_now_resolves_orphaned_system_and_returns_summary(migrated_url
             )
         assert resp.status == "ok"
         assert resp.data["orphaned_systems"] == 1
+        repair_counts = resp.data["repair_counts"]
+        assert isinstance(repair_counts, dict)
+        assert repair_counts["orphaned_systems"] == 1
         assert resp.data["failures"] == ""
         # The pending repair was actually performed, not just counted.
         assert await _teardown_job_count(migrated_url) == 1
@@ -148,6 +151,10 @@ def test_reconcile_now_clean_state_returns_zero_summary(migrated_url: str) -> No
         assert resp.data["promoted_allocations"] == 0
         assert resp.data["queue_timeouts"] == 0
         assert resp.data["reconciled_inventory"] == 0
+        repair_counts = resp.data["repair_counts"]
+        assert isinstance(repair_counts, dict)
+        assert tuple(repair_counts) == ALL_REPAIR_KINDS
+        assert all(repair_counts[repair_kind] == 0 for repair_kind in ALL_REPAIR_KINDS)
         assert resp.data["failures"] == ""
         # A pass with nothing to repair is still audited (it ran a control action).
         assert await _platform_audit_count(migrated_url) == 1

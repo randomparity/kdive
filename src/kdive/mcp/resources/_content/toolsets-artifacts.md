@@ -8,9 +8,9 @@ read each tool's own description.
 ## Reading evidence
 
 - `artifacts.list` — list the artifacts available for a run or system, by name.
-- `artifacts.get` — fetch an artifact's bytes in a token-safe window. Use its optional
-  `find` / `direction` jump-cursor to locate a crash signature in a large console log
-  without pulling the whole file.
+- `artifacts.get` — fetch an artifact's bytes in a token-safe window.
+- `artifacts.find` — locate a crash signature in a large console log without pulling the
+  whole file.
 - `artifacts.fetch_raw` — get a download URL for a large or binary artifact (such as a
   vmcore or vmlinux) instead of inlining its bytes.
 

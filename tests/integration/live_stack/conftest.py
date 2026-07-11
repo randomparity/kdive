@@ -8,7 +8,7 @@ import urllib.request
 
 import pytest
 
-from tests.integration.live_stack.harness import OidcIssuer, oidc_issuer_from_env
+from kdive.mcp.dev_harness import OidcIssuer, oidc_issuer_from_env
 
 
 def _issuer_reachable(issuer: OidcIssuer) -> bool:

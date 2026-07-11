@@ -35,7 +35,6 @@ def validate_key_component(label: str, value: str) -> str:
 
 
 def artifact_key(tenant: str, kind: str, object_id: str, name: str) -> str:
-    """Public, validated ``{tenant}/{kind}/{object_id}/{name}`` key."""
     parts = [
         validate_key_component("tenant", tenant),
         validate_key_component("kind", kind),
@@ -46,7 +45,6 @@ def artifact_key(tenant: str, kind: str, object_id: str, name: str) -> str:
 
 
 def owner_prefix(tenant: str, kind: str, object_id: str) -> str:
-    """The validated ``{tenant}/{kind}/{object_id}/`` key prefix for an owner's objects."""
     parts = [
         validate_key_component("tenant", tenant),
         validate_key_component("kind", kind),

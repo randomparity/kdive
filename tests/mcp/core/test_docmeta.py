@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kdive.mcp.tools import _docmeta
 
 
@@ -31,10 +33,8 @@ def test_destructive_tools_set_is_the_reviewed_set() -> None:
     assert (
         frozenset(
             {
-                "control.power",
                 "control.force_crash",
                 "systems.teardown",
-                "systems.reprovision",
                 "ops.force_teardown",
                 "ops.force_release",
                 "ops.reconcile_systems",
@@ -48,3 +48,18 @@ def test_destructive_tools_set_is_the_reviewed_set() -> None:
         )
         == _docmeta.DESTRUCTIVE_TOOLS
     )
+
+
+def test_contributor_lifecycle_tools_are_mutating_not_destructive() -> None:
+    assert "control.power" not in _docmeta.DESTRUCTIVE_TOOLS
+    assert "systems.reprovision" not in _docmeta.DESTRUCTIVE_TOOLS
+
+
+def test_maturity_values_include_partial_disclosure_state() -> None:
+    assert {"implemented", "partial", "planned"} == _docmeta.TOOL_MATURITY_VALUES
+    assert _docmeta.maturity_meta("partial") == {"maturity": "partial"}
+
+
+def test_normalize_maturity_rejects_typos() -> None:
+    with pytest.raises(ValueError, match="invalid tool maturity"):
+        _docmeta.normalize_maturity("implemeted")

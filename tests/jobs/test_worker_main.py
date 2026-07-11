@@ -42,9 +42,9 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
         async def close(self) -> None:
             events.append("close")
 
-    monkeypatch.setattr(__main__, "create_pool", lambda **kw: _FakePool())
-    monkeypatch.setattr(__main__, "_install_stop", lambda: asyncio.Event())
-    monkeypatch.setattr("kdive.mcp.app.build_handler_registry", lambda **kw: object())
+    monkeypatch.setattr("kdive.processes.worker.create_pool", lambda **kw: _FakePool())
+    monkeypatch.setattr("kdive.processes.worker.install_stop", lambda: asyncio.Event())
+    monkeypatch.setattr("kdive.jobs.assembly.build_handler_registry", lambda **kw: object())
     monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: object())
     monkeypatch.setattr(
         "kdive.health.processes.server.build_postgres_ping", lambda pool: lambda: None

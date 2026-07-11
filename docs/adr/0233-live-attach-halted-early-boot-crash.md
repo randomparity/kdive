@@ -14,7 +14,7 @@
   passthrough + bind-probe), [ADR-0185](0185-retry-terminal-failed-step.md) (the `run_steps`
   running/succeeded ledger that deletes a failed step row).
 - **Issue:** [#747](https://github.com/randomparity/kdive/issues/747) (part of #746).
-- **Spec:** [`../superpowers/specs/2026-06-23-live-attach-halted-early-boot-crash-design.md`](../superpowers/specs/2026-06-23-live-attach-halted-early-boot-crash-design.md).
+- **Spec:** [`../superpowers/specs/2026-06-23-live-attach-halted-early-boot-crash-design.md`](../archive/superpowers/specs/2026-06-23-live-attach-halted-early-boot-crash-design.md).
 
 ## Context
 

@@ -18,7 +18,7 @@ Stdlib-only: CI runs it without a synced environment (``just m2-gate``).
 from __future__ import annotations
 
 import shutil
-import subprocess
+import subprocess  # noqa: S404 - git commands use fixed argv, no shell  # nosec B404
 import sys
 
 BASELINE_TAG = "pre-M2"
@@ -108,7 +108,7 @@ ALLOWED_FILES = frozenset(
         # CORE_PREFIXES) and reach the tool only through the injected service factory; this module
         # is the same authz-gated/audited ops surface as its siblings above.
         "src/kdive/mcp/tools/ops/diagnostics.py",
-        "src/kdive/mcp/app.py",
+        "src/kdive/mcp/assembly/app.py",
         # Server telemetry middleware (#266, ADR-0090 §5): a provider-agnostic platform
         # change adding TelemetryMiddleware (a span per MCP tool call + per-tool RED
         # metrics) at the dispatch boundary and registering it in build_app. The labels
@@ -320,7 +320,7 @@ def _measure() -> dict[str, int] | None:
         capture_output=True,
         text=True,
         timeout=GIT_COMMAND_TIMEOUT_S,
-    )  # nosec B603 - git is resolved once via shutil.which; arguments are fixed by this script.
+    )  # git is resolved via shutil.which; args are fixed.  # nosec B603
     if tag_check.returncode != 0:
         print(
             f"error: baseline tag {BASELINE_TAG!r} is unavailable; fetch tags/history "
@@ -344,7 +344,7 @@ def _measure() -> dict[str, int] | None:
         text=True,
         check=True,
         timeout=GIT_COMMAND_TIMEOUT_S,
-    )  # nosec B603 - git is resolved once via shutil.which; arguments are fixed by this script.
+    )  # git is resolved via shutil.which; args are fixed.  # nosec B603
     touched = parse_numstat(log.stdout)
     # Union in the net diff: it sees merge-commit-only changes the per-commit walk
     # misses, while the per-commit sum keeps reverted changes counted.
@@ -362,7 +362,7 @@ def _measure() -> dict[str, int] | None:
         text=True,
         check=True,
         timeout=GIT_COMMAND_TIMEOUT_S,
-    )  # nosec B603 - git is resolved once via shutil.which; arguments are fixed by this script.
+    )  # git is resolved via shutil.which; args are fixed.  # nosec B603
     for path, count in parse_numstat(net.stdout).items():
         touched[path] = max(touched.get(path, 0), count)
     return touched

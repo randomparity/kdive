@@ -7,7 +7,7 @@
 ## Problem
 
 There is no MCP tool that tells a caller which projects its token grants. Confirmed:
-no `projects` registrar in `_PLANE_REGISTRARS` (`src/kdive/mcp/app.py`). An agent
+no `projects` registrar in `_PLANE_REGISTRARS` (`src/kdive/mcp/assembly/app.py`). An agent
 driving the tools must guess project names by trial. The sibling fix (#426) makes
 `accounting.report_granted_set` name the caller's *role-bearing* granted set, but a
 token whose only membership is role-less still has no discovery surface, and a

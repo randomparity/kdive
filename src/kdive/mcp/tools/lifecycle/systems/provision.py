@@ -29,17 +29,20 @@ from kdive.mcp.tools._common import (
 from kdive.mcp.tools._common import (
     config_error as _config_error,
 )
-from kdive.mcp.tools._common import job_envelope
-from kdive.mcp.tools._idempotency import (
-    record_envelope,
-    resolve_conflict,
-    resolve_envelope_replay,
-    validate_idempotency_key,
+from kdive.mcp.tools._common import (
+    invalid_uuid_error as _invalid_uuid_error,
 )
+from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools.lifecycle.systems.view import defined_system_envelope
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.types import ProvisioningProfileInput
 from kdive.security.authz.context import RequestContext
+from kdive.services.idempotency.envelope import (
+    record_result,
+    resolve_conflict,
+    resolve_replay,
+    validate_idempotency_key,
+)
 from kdive.services.systems.admission import (
     AdmissionFailure,
     AdmissionFailureReason,
@@ -52,6 +55,8 @@ from kdive.services.systems.admission import (
     ProvisionJobAdmitted,
     SystemAdmission,
     SystemRecorder,
+    admission_result_from_stored,
+    stored_admission_result,
 )
 from kdive.services.systems.validation import RootfsValidator
 
@@ -97,8 +102,8 @@ async def _with_idempotency(
     """Wrap a systems admission call under replay-idempotency (ADR-0193).
 
     ``run`` invokes the admission with the recorder it is handed (or ``None`` when unkeyed);
-    the recorder persists the success envelope inside the admission transaction. A replay is
-    resolved up-front; a key collision is resolved read-after-conflict.
+    the recorder persists the successful service result inside the admission transaction. A replay
+    is resolved up-front; a key collision is resolved read-after-conflict.
     """
     if idempotency_key is None:
         return _admission_response(await run(None))
@@ -107,20 +112,18 @@ async def _with_idempotency(
     except CategorizedError as exc:
         return ToolResponse.failure_from_error("idempotency_key", exc)
     async with pool.connection() as conn:
-        replay = await resolve_envelope_replay(
-            conn, principal=ctx.principal, key=idempotency_key, kind=kind
-        )
+        replay = await resolve_replay(conn, principal=ctx.principal, key=idempotency_key, kind=kind)
     if replay is not None:
-        return replay
+        return _admission_response(admission_result_from_stored(replay))
 
     async def _record(conn: AsyncConnection, result: AdmissionResult) -> None:
-        await record_envelope(
+        await record_result(
             conn,
             principal=ctx.principal,
             key=idempotency_key,
             project=_result_project(result),
             kind=kind,
-            envelope=_admission_response(result),
+            result=stored_admission_result(result),
         )
 
     try:
@@ -128,11 +131,12 @@ async def _with_idempotency(
     except UniqueViolation:
         async with pool.connection() as conn:
             try:
-                return await resolve_conflict(
+                winner = await resolve_conflict(
                     conn, principal=ctx.principal, key=idempotency_key, kind=kind
                 )
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error("idempotency_key", exc)
+        return _admission_response(admission_result_from_stored(winner))
 
 
 def _result_project(result: AdmissionResult) -> str:
@@ -185,7 +189,7 @@ class SystemProvisionHandlers:
         """Mint a System for a ``granted`` Allocation and enqueue its provision job."""
         uid = _as_uuid(allocation_id)
         if uid is None:
-            return _config_error(allocation_id)
+            return _invalid_uuid_error("allocation_id", allocation_id)
         cleaned = _validated_label(allocation_id, label)
         if isinstance(cleaned, ToolResponse):
             return cleaned
@@ -212,7 +216,7 @@ class SystemProvisionHandlers:
         """Admit a ``defined`` System after its upload window is complete."""
         uid = _as_uuid(system_id)
         if uid is None:
-            return _config_error(system_id)
+            return _invalid_uuid_error("system_id", system_id)
 
         async def _provision_defined(recorder: SystemRecorder | None) -> AdmissionResult:
             with bind_context(principal=ctx.principal):

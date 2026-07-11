@@ -21,7 +21,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
@@ -106,25 +106,10 @@ _sweep_expired_allocations = allocation_repairs.sweep_expired_allocations
 _sweep_console_rotation = console_rotation_repairs.sweep_console_rotation
 
 __all__ = [
+    "ALL_REPAIR_KINDS",
     "ReconcileConfig",
     "ReconcileReport",
     "Reconciler",
-    "_expire_one",
-    "_gc_expired_build_artifacts",
-    "_gc_idempotency_keys",
-    "_gc_investigation_artifacts",
-    "_gc_report_artifacts",
-    "_promote_pending",
-    "_reap_expired_runtime_resources",
-    "_reap_orphaned_active_allocations",
-    "_reap_console_collectors",
-    "_reap_orphaned_dump_volumes",
-    "_repair_abandoned_jobs",
-    "_repair_dead_sessions",
-    "_repair_orphaned_systems",
-    "_repair_stalled_crashing_systems",
-    "_sweep_console_rotation",
-    "_sweep_expired_allocations",
     "reconcile_once",
 ]
 
@@ -213,33 +198,11 @@ class ReconcileReport:
     @classmethod
     def from_counts(cls, counts: Mapping[str, int], failures: Sequence[str]) -> ReconcileReport:
         full_counts = _repair_count_defaults(counts)
+        report_counts = cast("dict[str, Any]", _report_field_counts(full_counts))
         return cls(
-            expired_allocations=_report_count(full_counts, "expired_allocations"),
-            orphaned_systems=_report_count(full_counts, "orphaned_systems"),
-            abandoned_jobs=_report_count(full_counts, "abandoned_jobs"),
-            dead_sessions=_report_count(full_counts, "dead_sessions"),
-            leaked_domains=_report_count(full_counts, "leaked_domains"),
-            idempotency_keys_gc_count=_report_count(full_counts, "idempotency_keys_gc_count"),
             failures=tuple(failures),
-            abandoned_uploads=_report_count(full_counts, "abandoned_uploads"),
-            reconciled_inventory=_report_count(full_counts, "reconciled_inventory"),
-            reaped_active_allocations=_report_count(full_counts, "reaped_active_allocations"),
-            promoted_allocations=_report_count(full_counts, "promoted_allocations"),
-            queue_timeouts=_report_count(full_counts, "queue_timeouts"),
-            leaked_probe_guests=_report_count(full_counts, "leaked_probe_guests"),
-            leaked_images=_report_count(full_counts, "leaked_images"),
-            dangling_images=_report_count(full_counts, "dangling_images"),
-            expired_private_images=_report_count(full_counts, "expired_private_images"),
-            console_collectors_reaped=_report_count(full_counts, "console_collectors_reaped"),
-            reaped_dump_volumes=_report_count(full_counts, "reaped_dump_volumes"),
-            reaped_runtime_resources=_report_count(full_counts, "reaped_runtime_resources"),
-            investigation_artifacts_gc_count=_report_count(
-                full_counts, "investigation_artifacts_gc_count"
-            ),
-            expired_build_artifacts_gc_count=_report_count(
-                full_counts, "expired_build_artifacts_gc_count"
-            ),
             repair_counts=full_counts,
+            **report_counts,
         )
 
 
@@ -448,6 +411,28 @@ ALL_REPAIR_KINDS: tuple[str, ...] = tuple(entry.name for entry in _REPAIR_CATALO
 _REPORT_FIELD_TO_REPAIR_KIND = {
     entry.report_field or entry.name: entry.name for entry in _REPAIR_CATALOG
 }
+_REPORT_FIELDS: tuple[str, ...] = (
+    "expired_allocations",
+    "orphaned_systems",
+    "abandoned_jobs",
+    "dead_sessions",
+    "leaked_domains",
+    "idempotency_keys_gc_count",
+    "abandoned_uploads",
+    "reconciled_inventory",
+    "reaped_active_allocations",
+    "promoted_allocations",
+    "queue_timeouts",
+    "leaked_probe_guests",
+    "leaked_images",
+    "dangling_images",
+    "expired_private_images",
+    "console_collectors_reaped",
+    "reaped_dump_volumes",
+    "reaped_runtime_resources",
+    "investigation_artifacts_gc_count",
+    "expired_build_artifacts_gc_count",
+)
 
 
 def _repair_count_defaults(counts: Mapping[str, int]) -> dict[str, int]:
@@ -456,6 +441,10 @@ def _repair_count_defaults(counts: Mapping[str, int]) -> dict[str, int]:
 
 def _report_count(counts: Mapping[str, int], report_field: str) -> int:
     return counts[_REPORT_FIELD_TO_REPAIR_KIND[report_field]]
+
+
+def _report_field_counts(counts: Mapping[str, int]) -> dict[str, int]:
+    return {field_name: _report_count(counts, field_name) for field_name in _REPORT_FIELDS}
 
 
 async def reconcile_once(

@@ -9,10 +9,14 @@ from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory, suppressed_detail
 from kdive.domain.lifecycle.records import Run
+from kdive.domain.lifecycle.run_steps import (
+    BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED,
+    RUN_STEP_SUCCEEDED,
+)
 from kdive.domain.operations.jobs import Job
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import job_envelope
-from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
+from kdive.mcp.tools.lifecycle.vmcore.view import CONSOLE_CRASH_GUIDANCE
 from kdive.services.artifacts.listing import ConsoleManifest
 from kdive.services.runs import states as run_states
 from kdive.services.runs.steps import (
@@ -87,16 +91,15 @@ _BUILD_LOG_FAILURE_DETAIL = "failure_detail_build_log_artifact"
 
 # The VIEWER-accessible read path for the REDACTED ``refs["console"]`` artifact (ADR-0226),
 # surfaced as ``data["console_access"]`` so an agent learns it from the envelope, not out of
-# band (#864, ADR-0262, ADR-0283): ``artifacts.get`` both jumps to a targeted match (``find``)
-# and pages the full log (``next_offset`` until ``content_truncated`` is ``false``; ADR-0247's
-# per-window cap means whole-log = paging). ``search`` and ``full_text`` name the same tool —
-# ``find`` distinguishes them. ``artifacts.fetch_raw`` is deliberately absent: it egresses only
-# the ``vmcore``/``vmlinux`` ``RawAsset`` allow-list keyed by ``run_id``+``asset`` and is
-# ``contributor``-gated, so it neither serves the console artifact nor is callable by a
-# console-ref viewer. Copied per envelope so the shared constant stays immutable.
+# band (#864, ADR-0262, ADR-0283): ``artifacts.find`` jumps to a targeted match and
+# ``artifacts.get`` pages the full log (``next_offset`` until ``content_truncated`` is ``false``;
+# ADR-0247's per-window cap means whole-log = paging). ``artifacts.fetch_raw`` is deliberately
+# absent: it egresses only the ``vmcore``/``vmlinux`` ``RawAsset`` allow-list keyed by
+# ``run_id``+``asset`` and is ``contributor``-gated, so it neither serves the console artifact nor
+# is callable by a console-ref viewer. Copied per envelope so the shared constant stays immutable.
 _CONSOLE_ACCESS_HINT: dict[str, str] = {
     "ref": "console",
-    "search": "artifacts.get",
+    "search": "artifacts.find",
     "full_text": "artifacts.get",
 }
 
@@ -107,8 +110,8 @@ def _run_artifact_refs(
     """The Run's object-store artifact keys, for the envelope ``refs`` slot.
 
     ``console_ref`` is the boot step's console evidence artifact id (ADR-0226), surfaced as
-    ``console``; the REDACTED console artifact is read via ``artifacts.get`` (windowed and paged,
-    or jumped to a match with ``find``), and ``data["console_access"]`` names it
+    ``console``; the REDACTED console artifact is read via ``artifacts.get`` (windowed and paged)
+    or searched via ``artifacts.find``, and ``data["console_access"]`` names those paths
     (``_CONSOLE_ACCESS_HINT``, ADR-0262/0283) so the agent need not know it out of band. It is
     supplied only on the ``runs.get`` success path (which loads the boot step), and omitted when no
     boot step recorded evidence. ``build_log_ref`` is the failed build's build-log artifact id
@@ -138,11 +141,11 @@ def _succeeded_next_step(run: Run, progress: StepProgress | None) -> list[str]:
     """
     if run.system_id is None:
         return ["runs.bind"]
-    if progress is None or progress.install != "succeeded":
+    if progress is None or progress.install != RUN_STEP_SUCCEEDED:
         return ["runs.install"]
-    if progress.boot != "succeeded":
+    if progress.boot != RUN_STEP_SUCCEEDED:
         return ["runs.boot"]
-    if progress.boot_outcome == "expected_crash_observed":
+    if progress.boot_outcome == BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED:
         return ["postmortem.triage", "vmcore.fetch"]
     return ["debug.start_session"]
 
@@ -175,7 +178,7 @@ def _required_cmdline_data(required_cmdline: str | None) -> dict[str, JsonValue]
     if required_cmdline is None:
         return {}
     # The platform-owned boot args (#748). Extra kernel debug args are set via runs.install.cmdline
-    # (per-boot, no rebuild) or runs.complete_build.cmdline (at build finalization).
+    # (per-boot, no rebuild) or runs.complete_build.request.cmdline (at build finalization).
     return {"required_cmdline": required_cmdline}
 
 
@@ -226,7 +229,7 @@ def _capture_data(step_progress: StepProgress | None) -> dict[str, JsonValue]:
         data["available_capture"] = cast(JsonValue, step_progress.available_capture)
     if step_progress.inert_capture is not None:
         data["inert_capture"] = cast(JsonValue, step_progress.inert_capture)
-        if step_progress.boot_outcome == "expected_crash_observed":
+        if step_progress.boot_outcome == BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED:
             # Console-crash panic precedes kexec, so live attach/vmcore are impossible by design
             # (#802). Reuse the same wording as debug.start_session/vmcore.fetch.
             data["inert_capture_reason"] = CONSOLE_CRASH_GUIDANCE

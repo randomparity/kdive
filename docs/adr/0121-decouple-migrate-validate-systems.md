@@ -14,7 +14,8 @@
   layer), after [ADR-0119](0119-operator-build-config-write-path.md) (#438) and
   [ADR-0120](0120-operator-fixture-profile-write-path.md) (#439).
 - **Issue:** [#440](https://github.com/randomparity/kdive/issues/440).
-- **Spec:** [`../design/decouple-migrate-validate-systems.md`](../design/decouple-migrate-validate-systems.md).
+- **Spec:** archived at
+  [`../archive/design/decouple-migrate-validate-systems.md`](../archive/design/decouple-migrate-validate-systems.md).
 
 ## Context
 

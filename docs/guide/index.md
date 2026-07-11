@@ -22,11 +22,12 @@ DebugSession) have independent lifecycles but a fixed nesting order. Understandi
 that nesting — and knowing that a lower layer outlives its dependents — is the
 foundation for driving the tools correctly. See [concepts](concepts.md).
 
-Destructive operations are protected at two tiers: `control.force_crash` and
-`systems.reprovision` pass a two-check gate (RBAC role + provisioning-profile
-opt-in), while `systems.teardown` requires the `admin` role directly.
-`control.power` is contributor leaseholder lifecycle (not gated). See
-[safety and RBAC](safety-and-rbac.md).
+Destructive operations are protected by explicit policy: `control.force_crash`
+uses the destructive-op gate (`admin` role plus provisioning-profile opt-in),
+while `systems.teardown` requires the `admin` role directly. `control.power`
+and `systems.reprovision` are contributor leaseholder lifecycle over the
+caller's own allocation, not destructive-gate operations. See [safety and
+RBAC](safety-and-rbac.md).
 
 When a tool reports a failure, the `error_category` field carries a stable string
 from a closed taxonomy. See [errors](errors.md).

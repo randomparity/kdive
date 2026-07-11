@@ -42,7 +42,7 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle.records import DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.debug import sessions as debug_tools
+from kdive.mcp.tools.debug.sessions import lifecycle as debug_tools
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.ports.handles import (
     SystemHandle,
@@ -212,8 +212,11 @@ async def _live_session_count(pool: AsyncConnectionPool, system_id: str) -> int:
     async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT count(*) AS n FROM debug_sessions s JOIN runs r ON r.id = s.run_id "
-            "WHERE r.system_id = %s AND s.state IN ('attach', 'live')",
-            (UUID(system_id),),
+            "WHERE r.system_id = %s AND s.state = ANY(%s)",
+            (
+                UUID(system_id),
+                [DebugSessionState.ATTACH.value, DebugSessionState.LIVE.value],
+            ),
         )
         row = await cur.fetchone()
     return 0 if row is None else int(row["n"])

@@ -13,7 +13,7 @@ from kdive.domain.capacity.state import AllocationState
 from kdive.domain.errors import CategorizedError
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import AllocationRequestPayload, ToolPayload
+from kdive.mcp.schema.tool_payloads import AllocationRequestPayload, ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
 from kdive.mcp.tools.lifecycle.allocations.common import MAX_WAIT_S
@@ -27,9 +27,18 @@ from kdive.mcp.tools.lifecycle.allocations.request import (
 from kdive.mcp.tools.lifecycle.allocations.request import (
     request_allocation as _request_allocation,
 )
-from kdive.mcp.tools.lifecycle.allocations.view import get_allocation as _get_allocation
-from kdive.mcp.tools.lifecycle.allocations.view import list_allocations as _list_allocations
-from kdive.mcp.tools.lifecycle.allocations.view import wait_allocation as _wait_allocation
+from kdive.mcp.tools.lifecycle.allocations.view import (
+    AllocationsListRequest,
+)
+from kdive.mcp.tools.lifecycle.allocations.view import (
+    get_allocation as _get_allocation,
+)
+from kdive.mcp.tools.lifecycle.allocations.view import (
+    list_allocations as _list_allocations,
+)
+from kdive.mcp.tools.lifecycle.allocations.view import (
+    wait_allocation as _wait_allocation,
+)
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.services.allocation.admission.metrics import AdmissionMetrics
 
@@ -37,7 +46,10 @@ from kdive.services.allocation.admission.metrics import AdmissionMetrics
 class _AllocationsListPayload(ToolPayload):
     """Public payload for ``allocations.list`` filters and pagination."""
 
-    project: str = Field(description="Project whose allocations to list.")
+    project: str | None = Field(
+        default=None,
+        description="Optional project whose allocations to list; omitted lists readable projects.",
+    )
     state: AllocationState | None = Field(
         default=None, description="Only allocations in this lifecycle state."
     )
@@ -182,22 +194,25 @@ def _register_allocations_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
     )
     async def allocations_list(
         request: Annotated[
-            _AllocationsListPayload,
+            _AllocationsListPayload | None,
             Field(description="Allocations list filters and pagination request."),
-        ],
+        ] = None,
     ) -> ToolResponse:
-        """List allocations visible in a project, newest first, filterable by state.
+        """List allocations visible to the caller, newest first, filterable by project and state.
 
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
         ``cursor`` for the next page. The ``state`` filter composes with the cursor.
         """
+        request = request or _AllocationsListPayload()
         return await _list_allocations(
             pool,
             current_context(),
-            project=request.project,
-            limit=request.limit,
-            cursor=request.cursor,
-            state=request.state,
+            AllocationsListRequest(
+                project=request.project,
+                limit=request.limit,
+                cursor=request.cursor,
+                state=request.state,
+            ),
         )
 
 

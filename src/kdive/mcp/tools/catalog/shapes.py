@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Annotated
 from fastmcp import FastMCP
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import Field, ValidationError
 
 from kdive.db.repositories import SYSTEM_SHAPES
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -41,9 +41,10 @@ from kdive.domain.lifecycle.records import SystemShape
 from kdive.domain.pcie import parse_match_spec
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
+from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.security import audit
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
 from kdive.serialization import JsonValue
@@ -64,16 +65,17 @@ _MAX_NAME_LEN = 64
 _PLACEHOLDER_TS = datetime(1970, 1, 1, tzinfo=UTC)
 
 
-class ShapeSetRequest(BaseModel):
+class ShapeSetRequest(ToolPayload):
     """A complete shape definition for the handler boundary."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    name: str
-    vcpus: int
-    memory_mb: int
-    disk_gb: int
-    pcie_match: str | None = None
+    name: str = Field(description="Shape name to upsert (e.g. 'medium').")
+    vcpus: int = Field(description="Virtual CPU count (> 0).")
+    memory_mb: int = Field(description="Memory in MiB, a whole-GB multiple (> 0).")
+    disk_gb: int = Field(description="Disk size in GiB (> 0).")
+    pcie_match: str | None = Field(
+        default=None,
+        description="Optional PCIe match spec ('<4hex>:<4hex>' or 'class=' plus 2 or 4 hex).",
+    )
 
 
 async def list_shapes(pool: AsyncConnectionPool, ctx: RequestContext) -> ToolResponse:
@@ -254,31 +256,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def shapes_set(
-        name: Annotated[str, Field(description="Shape name to upsert (e.g. 'medium').")],
-        vcpus: Annotated[int, Field(description="Virtual CPU count (> 0).")],
-        memory_mb: Annotated[int, Field(description="Memory in MiB, a whole-GB multiple (> 0).")],
-        disk_gb: Annotated[int, Field(description="Disk size in GiB (> 0).")],
-        pcie_match: Annotated[
-            str | None,
-            Field(
-                description=(
-                    "Optional PCIe match spec ('<4hex>:<4hex>' or 'class=' plus 2 or 4 hex)."
-                )
-            ),
-        ] = None,
+        request: Annotated[
+            ShapeSetRequest,
+            Field(description="Complete shape definition to upsert."),
+        ],
     ) -> ToolResponse:
         """Create or update a system shape."""
-        return await set_shape(
-            pool,
-            current_context(),
-            ShapeSetRequest(
-                name=name,
-                vcpus=vcpus,
-                memory_mb=memory_mb,
-                disk_gb=disk_gb,
-                pcie_match=pcie_match,
-            ),
-        )
+        return await set_shape(pool, current_context(), request)
 
     @app.tool(
         name=_DELETE_TOOL,

@@ -15,6 +15,7 @@ import pytest
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
 from kdive.build_artifacts.validation import EFFECTIVE_CONFIG_MAX_BYTES
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog.artifacts import registrar as artifacts_registrar
@@ -28,8 +29,6 @@ from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     CREATE_RUN_UPLOAD_TOOL,
     CREATE_SYSTEM_UPLOAD_TOOL,
-    RUN_ARTIFACT_NAMES,
-    SYSTEM_ARTIFACT_NAMES,
 )
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext

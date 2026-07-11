@@ -17,9 +17,9 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.read_model import run_fetch_context, system_project
 from kdive.artifacts.storage import HeadResult
-from kdive.db.artifact_queries import run_fetch_context, system_project
-from kdive.mcp.app import build_app
+from kdive.mcp.assembly.app import build_app
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.catalog.artifacts.raw_fetch import RawAsset, fetch_raw
 from kdive.security.authz.rbac import Role, RoleDenied

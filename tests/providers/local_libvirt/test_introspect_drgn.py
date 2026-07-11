@@ -16,10 +16,12 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.debug.introspect import (
     IntrospectOutput,
-    LiveIntrospector,
-    LocalLibvirtLiveIntrospect,
     LocalLibvirtVmcoreIntrospect,
     VmcoreIntrospector,
+)
+from kdive.providers.local_libvirt.debug.live_introspect import (
+    LiveIntrospector,
+    LocalLibvirtLiveIntrospect,
     _raise_on_live_ssh_failure,
 )
 from kdive.providers.ports.retrieve import LiveScriptOutput
@@ -660,7 +662,7 @@ def test_real_run_live_helper_threads_key_path_into_argv(
     caller-supplied path — even one that doesn't exist — reaches the argv unchanged, so this
     drives the real seam up to (but never actually spawning) ssh via the exec seam.
     """
-    from kdive.providers.local_libvirt.debug import introspect as introspect_mod
+    from kdive.providers.local_libvirt.debug import live_introspect as introspect_mod
 
     key = tmp_path / "absent_id_ed25519"
     seen_argv: list[str] = []
@@ -674,7 +676,7 @@ def test_real_run_live_helper_threads_key_path_into_argv(
 
 
 def test_live_ssh_argv_uses_the_passed_key_path_and_appends_command() -> None:
-    from kdive.providers.local_libvirt.debug import introspect as introspect_mod
+    from kdive.providers.local_libvirt.debug import live_introspect as introspect_mod
 
     registry = SecretRegistry()
 

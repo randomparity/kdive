@@ -27,16 +27,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from kdive.providers.remote_libvirt.console.collector import (
-    DEFAULT_ROTATION_THRESHOLD,
-    DEFAULT_SEAM_OVERLAP,
-)
-
-# The steady-state rotation size and the trailing overlap re-scanned across each seam, reused
-# from the collector so the two implementations share one geometry (Task 8 dedupes the collector
-# onto this module).
-ROTATION_THRESHOLD = DEFAULT_ROTATION_THRESHOLD
-SEAM_OVERLAP = DEFAULT_SEAM_OVERLAP
+# The steady-state rotation size and the trailing overlap re-scanned across each seam.
+ROTATION_THRESHOLD = 64 * 1024
+SEAM_OVERLAP = 4 * 1024
 
 Redact = Callable[[bytes], bytes]
 

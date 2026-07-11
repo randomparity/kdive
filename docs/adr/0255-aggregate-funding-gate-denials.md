@@ -9,7 +9,7 @@
   queueable-vs-terminate routing the promotion sweep shares),
   [ADR-0007](0007-metering-budgets-admission.md) (fail-closed funding invariants).
 - **Issue:** [#833](https://github.com/randomparity/kdive/issues/833).
-- **Spec:** [`../superpowers/specs/2026-06-26-aggregate-funding-gates-833.md`](../superpowers/specs/2026-06-26-aggregate-funding-gates-833.md).
+- **Spec:** [`../superpowers/specs/2026-06-26-aggregate-funding-gates-833.md`](../archive/superpowers/specs/2026-06-26-aggregate-funding-gates-833.md).
 
 ## Context
 

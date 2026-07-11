@@ -5,7 +5,7 @@
 - **Deciders:** kdive maintainers
 - **Issue:** [#796](https://github.com/randomparity/kdive/issues/796) (split from the #781 design
   discussion; epic [#764](https://github.com/randomparity/kdive/issues/764))
-- **Spec:** [`../superpowers/specs/2026-06-25-per-run-vmcore-capture-796.md`](../superpowers/specs/2026-06-25-per-run-vmcore-capture-796.md)
+- **Spec:** [`../superpowers/specs/2026-06-25-per-run-vmcore-capture-796.md`](../archive/superpowers/specs/2026-06-25-per-run-vmcore-capture-796.md)
 - **Supersedes:** [ADR-0050](0050-vmcore-method-aware-storage.md) — refines its multiplicity scope
   from **per System** to **per Run**; keeps the method-aware storage and the
   first-method-wins-then-reject contract intact, now Run-scoped.

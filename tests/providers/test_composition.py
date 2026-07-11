@@ -44,7 +44,8 @@ from kdive.providers.remote_libvirt.lifecycle.control import RemoteLibvirtContro
 from kdive.providers.remote_libvirt.lifecycle.install import RemoteLibvirtInstall
 from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtProvisioning
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
-from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
+from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
+from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -222,8 +223,8 @@ def test_default_runtime_advertises_implemented_component_sources_only() -> None
     runtime = composition.build_local_runtime(secret_registry=SecretRegistry())
 
     assert isinstance(runtime.profile_policy, LocalLibvirtProfilePolicy)
-    assert runtime.component_sources.provider == "local-libvirt"
-    assert runtime.component_sources.accepted_component_sources == {
+    assert runtime.support.component_sources.provider == "local-libvirt"
+    assert runtime.support.component_sources.accepted_component_sources == {
         "rootfs": frozenset({"catalog", "local"}),
         "kernel": frozenset({"local"}),
         "initrd": frozenset({"local"}),
@@ -236,7 +237,8 @@ def test_default_runtime_advertises_implemented_component_sources_only() -> None
 def test_default_runtime_exposes_rootfs_build_plane() -> None:
     runtime = composition.build_local_runtime(secret_registry=SecretRegistry())
 
-    assert isinstance(runtime.rootfs_build_plane, LocalLibvirtRootfsBuildPlane)
+    assert runtime.rootfs is not None
+    assert isinstance(runtime.rootfs.build_plane, LocalLibvirtRootfsBuildPlane)
 
 
 def test_provider_runtime_discovery_hook_is_optional() -> None:
@@ -296,7 +298,7 @@ def test_default_resolver_registers_only_local_libvirt(
     resolver = composition.ProviderComposition().build_provider_resolver()
     assert resolver.registered_kinds() == frozenset({ResourceKind.LOCAL_LIBVIRT})
     local = resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
-    assert local.component_sources.provider == "local-libvirt"
+    assert local.support.component_sources.provider == "local-libvirt"
 
 
 def test_enabling_fault_inject_registers_both_kinds(
@@ -316,7 +318,7 @@ def test_fault_inject_runtime_advertises_its_provider_identity() -> None:
     runtime = composition.build_fault_inject_runtime()
 
     assert isinstance(runtime.profile_policy, FaultInjectProfilePolicy)
-    assert runtime.component_sources.provider == "fault-inject"
+    assert runtime.support.component_sources.provider == "fault-inject"
     assert runtime.discovery_registrar is not None
 
 
@@ -870,7 +872,7 @@ def test_remote_runtime_advertises_all_four_capture_methods() -> None:
     # (ADR-0083/0085, #302), and the reconciler-owned console collector (#303, ADR-0095).
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
-    assert runtime.supported_capture_methods == frozenset(
+    assert runtime.support.capture_methods == frozenset(
         {
             CaptureMethod.KDUMP,
             CaptureMethod.HOST_DUMP,
@@ -886,8 +888,8 @@ def test_remote_runtime_advertises_its_debug_and_introspection_descriptor() -> N
     # live, the wired RemoteLibvirtVmcoreIntrospect / RemoteLibvirtLiveIntrospect ports).
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
-    assert runtime.supported_debug_transports == frozenset({"gdbstub", "drgn-live"})
-    assert runtime.supported_introspection == frozenset({"offline-vmcore", "live", "live-script"})
+    assert runtime.support.debug_transports == frozenset({"gdbstub", "drgn-live"})
+    assert runtime.support.introspection == frozenset({"offline-vmcore", "live", "live-script"})
 
 
 def test_remote_runtime_advertises_host_dump_as_a_capture_method() -> None:
@@ -895,7 +897,7 @@ def test_remote_runtime_advertises_host_dump_as_a_capture_method() -> None:
     # vmcore.fetch(method=host_dump) on remote through the existing tool.
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
-    assert CaptureMethod.HOST_DUMP in runtime.supported_capture_methods
+    assert CaptureMethod.HOST_DUMP in runtime.support.capture_methods
 
 
 def test_remote_runtime_advertises_gdbstub_as_a_capture_method() -> None:
@@ -904,7 +906,7 @@ def test_remote_runtime_advertises_gdbstub_as_a_capture_method() -> None:
     # path to gate; the assertion is membership in the advertised set.
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
-    assert CaptureMethod.GDBSTUB in runtime.supported_capture_methods
+    assert CaptureMethod.GDBSTUB in runtime.support.capture_methods
 
 
 def test_remote_runtime_advertises_console_as_a_capture_method() -> None:
@@ -913,7 +915,7 @@ def test_remote_runtime_advertises_console_as_a_capture_method() -> None:
     # not through vmcore.fetch, so the assertion is membership in the advertised set.
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
-    assert CaptureMethod.CONSOLE in runtime.supported_capture_methods
+    assert CaptureMethod.CONSOLE in runtime.support.capture_methods
 
 
 def test_remote_runtime_gdbstub_debug_path_is_unchanged(
@@ -937,8 +939,9 @@ def test_remote_runtime_has_real_control_and_retrieve() -> None:
 
     assert isinstance(runtime.profile_policy, RemoteLibvirtProfilePolicy)
     assert isinstance(runtime.controller, RemoteLibvirtControl)
-    assert isinstance(runtime.retriever, RemoteLibvirtRetrieve)
-    assert runtime.crash_postmortem is runtime.retriever
+    assert isinstance(runtime.retriever, RemoteLibvirtRetriever)
+    assert isinstance(runtime.crash_postmortem, CrashPostmortemAdapter)
+    assert runtime.crash_postmortem is not runtime.retriever
 
 
 def test_remote_runtime_has_real_provisioner(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -951,15 +954,15 @@ def test_remote_runtime_has_real_provisioner(monkeypatch: pytest.MonkeyPatch) ->
     assert isinstance(runtime.provisioner, RemoteLibvirtProvisioning)
 
 
-def test_remote_runtime_has_noop_rootfs_validator(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The systems registrar hard-fails on rootfs_validator=None, so the remote runtime
-    # must supply the no-op contract (a remote profile has no rootfs; it is never
-    # invoked) - the fault-inject precedent.
+def test_remote_runtime_has_no_rootfs_validator(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Remote owns rootfs image builds, but profile admission has no provider-specific
+    # rootfs validation to add; the registrar supplies the no-op boundary behavior.
     monkeypatch.delenv("KDIVE_REMOTE_LIBVIRT_URI", raising=False)
 
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
-    assert runtime.rootfs_validator is not None
+    assert runtime.rootfs is not None
+    assert runtime.rootfs.validator is None
 
 
 def test_remote_runtime_exposes_rootfs_build_plane(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -967,7 +970,8 @@ def test_remote_runtime_exposes_rootfs_build_plane(monkeypatch: pytest.MonkeyPat
 
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
-    assert isinstance(runtime.rootfs_build_plane, RemoteLibvirtRootfsBuildPlane)
+    assert runtime.rootfs is not None
+    assert isinstance(runtime.rootfs.build_plane, RemoteLibvirtRootfsBuildPlane)
 
 
 def test_remote_runtime_has_real_installer_and_booter(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1010,7 +1014,7 @@ def test_remote_runtime_accepts_local_and_catalog_config_and_local_patch_sources
     # {"catalog", "local"} and PATCH as {"local"} (ADR-0081/0096).
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
-    accepted = runtime.component_sources.accepted_component_sources
+    accepted = runtime.support.component_sources.accepted_component_sources
     assert accepted.get(CONFIG_COMPONENT) == frozenset({"catalog", "local"})
     assert accepted.get(PATCH_COMPONENT) == frozenset({"local"})
-    assert runtime.component_sources.provider == ResourceKind.REMOTE_LIBVIRT.value
+    assert runtime.support.component_sources.provider == ResourceKind.REMOTE_LIBVIRT.value

@@ -26,7 +26,8 @@ from kdive.providers.remote_libvirt.lifecycle.provisioning import (
     RemoteLibvirtProvisioning,
 )
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
-from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
+from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
+from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -43,7 +44,8 @@ def test_remote_runtime_sets_rebind_for_resource() -> None:
     # ADR-0187: the remote runtime carries a per-resource rebind hook so the resolver can bind it
     # to the granted host; the base runtime is buildable without operator config (ADR-0076).
     runtime = composition.build_runtime(secret_registry=SecretRegistry())
-    assert runtime.rebind_for_resource is not None
+    assert runtime.binding is not None
+    assert runtime.binding.rebind_for_resource is not None
 
 
 def test_rebind_for_resource_threads_resource_name_into_provisioner(
@@ -79,7 +81,7 @@ def test_rebind_for_resource_threads_resource_name_into_provisioner(
 def test_for_resource_is_identity_without_rebind_hook() -> None:
     # A runtime with no rebind hook (single-host providers like local-libvirt) returns itself.
     runtime = composition.build_runtime(secret_registry=SecretRegistry())
-    plain = replace(runtime, rebind_for_resource=None)
+    plain = replace(runtime, binding=None)
     assert plain.for_resource("anything") is plain
 
 
@@ -129,8 +131,8 @@ def test_console_open_resolves_the_systems_own_host_config(
 
 def test_build_runtime_wires_each_port_to_its_remote_adapter() -> None:
     # build_runtime must wire every port to its remote-libvirt adapter (not None and not a
-    # different adapter). booter reuses the installer instance and crash_postmortem reuses the
-    # retriever instance.
+    # different adapter). booter reuses the installer instance; capture and crash postmortem use
+    # separate ports so capture-method dispatch cannot hide crash-command behavior.
     runtime = composition.build_runtime(secret_registry=SecretRegistry())
 
     assert isinstance(runtime.profile_policy, RemoteLibvirtProfilePolicy)
@@ -139,17 +141,19 @@ def test_build_runtime_wires_each_port_to_its_remote_adapter() -> None:
     assert runtime.booter is runtime.installer
     assert isinstance(runtime.connector, RemoteLibvirtConnect)
     assert isinstance(runtime.controller, RemoteLibvirtControl)
-    assert isinstance(runtime.retriever, RemoteLibvirtRetrieve)
-    assert runtime.crash_postmortem is runtime.retriever
+    assert isinstance(runtime.retriever, RemoteLibvirtRetriever)
+    assert isinstance(runtime.crash_postmortem, CrashPostmortemAdapter)
+    assert runtime.crash_postmortem is not runtime.retriever
     assert isinstance(runtime.vmcore_introspector, RemoteLibvirtVmcoreIntrospect)
     assert isinstance(runtime.live_introspector, RemoteLibvirtLiveIntrospect)
-    assert isinstance(runtime.rootfs_build_plane, RemoteLibvirtRootfsBuildPlane)
+    assert runtime.rootfs is not None
+    assert isinstance(runtime.rootfs.build_plane, RemoteLibvirtRootfsBuildPlane)
 
 
 def test_build_runtime_supported_capture_methods() -> None:
     # The remote provider supports exactly KDUMP, HOST_DUMP, GDBSTUB, CONSOLE.
     runtime = composition.build_runtime(secret_registry=SecretRegistry())
-    assert runtime.supported_capture_methods == frozenset(
+    assert runtime.support.capture_methods == frozenset(
         {
             CaptureMethod.KDUMP,
             CaptureMethod.HOST_DUMP,
@@ -185,11 +189,11 @@ def test_build_runtime_engine_redactor_uses_the_provider_secret_registry() -> No
 
 def test_build_runtime_validators_and_component_sources() -> None:
     runtime = composition.build_runtime(secret_registry=SecretRegistry())
-    # rootfs_validator accepts any rootfs and returns None (remote has no rootfs to validate).
-    assert runtime.rootfs_validator is not None
-    assert runtime.rootfs_validator(object()) is None  # ty: ignore[invalid-argument-type]
+    # Remote owns rootfs image builds, but has no provider-specific rootfs validation to add.
+    assert runtime.rootfs is not None
+    assert runtime.rootfs.validator is None
     # component_sources reflects _component_sources(): the remote provider id and source map.
-    sources = runtime.component_sources
+    sources = runtime.support.component_sources
     assert sources.provider == ResourceKind.REMOTE_LIBVIRT.value
     assert sources.accepted_component_sources[CONFIG_COMPONENT] == frozenset({"catalog", "local"})
     assert sources.accepted_component_sources[PATCH_COMPONENT] == frozenset({"local"})
@@ -213,10 +217,11 @@ def test_build_runtime_threads_secret_registry_into_each_registry_port() -> None
     assert runtime.installer._secret_registry is registry  # ty: ignore[unresolved-attribute]
     assert runtime.live_introspector._secret_registry is registry  # ty: ignore[unresolved-attribute]
     assert runtime.vmcore_introspector._secret_registry is registry  # ty: ignore[unresolved-attribute]
-    # retriever composes three capturers; each must receive the provider registry.
+    # Retriever capture collaborators and the separate crash-postmortem port all receive the same
+    # provider registry.
     assert runtime.retriever._kdump._secret_registry is registry  # ty: ignore[unresolved-attribute]
     assert runtime.retriever._host_dump._secret_registry is registry  # ty: ignore[unresolved-attribute]
-    assert runtime.retriever._postmortem._secret_registry is registry  # ty: ignore[unresolved-attribute]
+    assert runtime.crash_postmortem._secret_registry is registry  # ty: ignore[unresolved-attribute]
     # controller and provisioner consume the registry lazily via a secret-backend factory
     # closure; the built backend must carry the provider registry, not None.
     assert runtime.controller._secret_backend_factory()._registry is registry  # ty: ignore[unresolved-attribute]
@@ -272,7 +277,9 @@ def test_build_runtime_staged_volume_probe_threads_config_factory(
     runtime = composition.build_runtime(
         secret_registry=SecretRegistry(), config_factory=fake_config_factory
     )
-    result = runtime.staged_volume_probe(["vol-1", "vol-2"])  # ty: ignore[call-non-callable]
+    assert runtime.resource_details is not None
+    assert runtime.resource_details.staged_volume_probe is not None
+    result = runtime.resource_details.staged_volume_probe(["vol-1", "vol-2"])
 
     assert result == "sentinel"
     assert captured["volumes"] == ["vol-1", "vol-2"]
@@ -310,7 +317,8 @@ def test_build_runtime_resource_detail_projector_threads_config_factory(
     runtime = composition.build_runtime(
         secret_registry=SecretRegistry(), config_factory=fake_config_factory
     )
-    projector = runtime.resource_detail_projector
+    assert runtime.resource_details is not None
+    projector = runtime.resource_details.projector
     assert projector is not None
     result = asyncio.run(projector(cast(Any, "pool"), ("proj",)))
 

@@ -36,12 +36,16 @@ class JobKind(StrEnum):
     CHECK_SSH_REACHABLE = "check_ssh_reachable"
 
 
-DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.TEARDOWN, JobKind.FORCE_CRASH})
-"""Job kinds gated by the destructive-operation admission gate (ADR-0130, ADR-0320, ADR-0326).
+RETIRED_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT})
+"""Persisted historical job kinds that are no longer valid active enqueue/filter choices."""
 
-Power (ADR-0320) and reprovision (ADR-0326) both left this set: each is contributor
-leaseholder lifecycle over its own transient resource, not destructive administration.
-"""
+DEFAULT_JOB_DISPATCH_LANE = "default"
+"""Dispatch lane used by the generic worker pool and all historical jobs."""
+
+ACTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
+    kind for kind in JobKind if kind not in RETIRED_JOB_KINDS
+)
+"""Job kinds accepted by current tool affordances and production handler registration."""
 
 OPT_IN_DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.FORCE_CRASH})
 """Destructive ops whose opt-in factor is resolved from a profile's ``destructive_ops`` list.
@@ -54,10 +58,8 @@ CONTRIBUTOR_CANCELABLE_JOB_KINDS: frozenset[JobKind] = frozenset(
     {
         JobKind.PROVISION,
         JobKind.REPROVISION,
-        JobKind.BUILD,
         JobKind.INSTALL,
         JobKind.BOOT,
-        JobKind.BUILD_INSTALL_BOOT,
         JobKind.POWER,
         JobKind.DIAGNOSTIC_SYSRQ,
         JobKind.CAPTURE_VMCORE,
@@ -67,8 +69,10 @@ CONTRIBUTOR_CANCELABLE_JOB_KINDS: frozenset[JobKind] = frozenset(
 )
 """Job kinds a contributor may cancel: the leaseholder-lifecycle jobs a contributor (or a lower
 role) can itself enqueue, so cancelling one is acting on its own transient resource — matching
-``runs.cancel`` over the build/install/boot lane (ADR-0320). The provision lane
+``runs.cancel`` over the install/boot lane (ADR-0320). The provision lane
 (``provision``/``reprovision``) joined when it became contributor leaseholder control (ADR-0326).
+Retired server-build kinds are intentionally absent: historical rows remain readable, but no
+active handler is registered for ``build`` or ``build_install_boot``.
 ``jobs.cancel`` requires operator for every other kind: the destructive kinds
 (``teardown``/``force_crash``) and the platform/internal kinds
 (image_build/diagnostics_worker_check/console_rotate). The gate fails closed — a kind absent
@@ -96,6 +100,7 @@ class Job(DomainModel):
     """A durable unit of async work; the ``jobs`` table is the queue."""
 
     kind: JobKind
+    dispatch_lane: str = DEFAULT_JOB_DISPATCH_LANE
     payload: dict[str, Any] = Field(default_factory=dict)
     state: JobState
     attempt: int = 0
@@ -111,9 +116,11 @@ class Job(DomainModel):
 
 
 __all__ = [
+    "ACTIVE_JOB_KINDS",
     "CONTRIBUTOR_CANCELABLE_JOB_KINDS",
-    "DESTRUCTIVE_JOB_KINDS",
+    "DEFAULT_JOB_DISPATCH_LANE",
     "OPT_IN_DESTRUCTIVE_JOB_KINDS",
+    "RETIRED_JOB_KINDS",
     "Job",
     "JobAuthorizing",
     "JobKind",

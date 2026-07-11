@@ -103,6 +103,27 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "postmortem test (#816). Unset → that test skips.",
     ),
     ExternalEnvVar(
+        "KDIVE_LIVE_VM_GDBMI_VMLINUX",
+        "test",
+        None,
+        "Path to the vmlinux debuginfo matching KDIVE_LIVE_VM_BZIMAGE for the gated gdb-MI "
+        "debug tool smoke. Unset → that test skips.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIVE_VM_GDBMI_MODULE_KO",
+        "test",
+        None,
+        "Path to a loaded module .ko for the optional gated gdb-MI module-symbol load smoke. "
+        "Unset → that portion of the test skips.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIVE_VM_GDBMI_MODULE_NAME",
+        "test",
+        None,
+        "Loaded module name matching KDIVE_LIVE_VM_GDBMI_MODULE_KO for the optional gated "
+        "gdb-MI module-symbol load smoke. Defaults to the .ko path stem.",
+    ),
+    ExternalEnvVar(
         "KDIVE_REQUIRE_DOCKER",
         "test",
         "0",

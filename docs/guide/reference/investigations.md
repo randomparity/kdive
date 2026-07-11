@@ -26,7 +26,7 @@ Return one investigation.
 
 `implemented`
 
-Link a run to an investigation.
+Link an external tracker ref to an Investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -67,11 +67,15 @@ Open an investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `description` | string (nullable) | no | Optional free-form description for reporting (<=4096 chars). |
-| `external_refs` | array<object> (nullable) | no | Optional external tracker refs (each with tracker, id, url). |
-| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
-| `project` | string | yes | Project to create the Investigation under. |
-| `title` | string | yes | Human-readable title (1..=200 chars). |
+| `request` | object | yes | Investigation creation request. |
+
+`request` fields:
+
+- `project` (`string`, required) — Project to create the Investigation under.
+- `title` (`string`, required) — Human-readable title (1..=200 chars).
+- `description` (`string (nullable)`, optional) — Optional free-form description for reporting (<=4096 chars).
+- `external_refs` (`array<object> (nullable)`, optional) — Optional external tracker refs (each with tracker, id, url).
+- `idempotency_key` (`string (nullable)`, optional) — Replay-safe key; a repeated key returns the prior envelope.
 
 ## `investigations.set`
 
@@ -89,7 +93,7 @@ Edit a non-terminal Investigation's title and/or free-form description.
 
 `implemented`
 
-Unlink a run from an investigation.
+Remove an external tracker ref from an Investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

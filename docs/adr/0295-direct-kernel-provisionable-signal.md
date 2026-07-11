@@ -22,7 +22,7 @@ destructive trial-and-error. ADR-0286 already recorded `direct_kernel_bootable` 
 `PLANNED_SIGNAL` (#954) precisely because "direct-kernel provisionability is discovered only by
 failure" — no honest per-image operand existed yet.
 
-See `docs/superpowers/specs/2026-07-02-direct-kernel-provisionable-signal-954.md`.
+See `docs/archive/superpowers/specs/2026-07-02-direct-kernel-provisionable-signal-954.md`.
 
 ## Decision
 

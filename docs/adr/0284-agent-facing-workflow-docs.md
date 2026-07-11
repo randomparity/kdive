@@ -8,7 +8,7 @@
   [ADR-0269](0269-derive-agent-schemas-from-composed-providers.md) (provider-derived
   exposure). Respects [ADR-0270](0270-no-adr-refs-in-agent-surface.md) (no ADR refs in the
   agent surface).
-- Spec: [2026-06-30-issue-940-agent-facing-doc-system-design.md](../superpowers/specs/2026-06-30-issue-940-agent-facing-doc-system-design.md)
+- Spec: [2026-06-30-issue-940-agent-facing-doc-system-design.md](../archive/superpowers/specs/2026-06-30-issue-940-agent-facing-doc-system-design.md)
 
 ## Context
 

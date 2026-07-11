@@ -32,8 +32,8 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.jobs import queue
-from kdive.jobs.handlers import control as control_plane
 from kdive.jobs.handlers import systems as systems_handlers
+from kdive.jobs.handlers.control import control as control_plane
 from kdive.jobs.payloads import PowerPayload, SystemPayload
 from tests.adversarial.conftest import seed_allocation, seed_resource
 from tests.mcp.systems_support import provider_resolver

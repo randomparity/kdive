@@ -26,13 +26,11 @@ class ConsoleTelemetry:
 
     @classmethod
     def disabled(cls) -> ConsoleTelemetry:
-        """Return a no-op telemetry for tests or an un-instrumented run."""
         instance = cls.__new__(cls)
         instance._enabled = False
         return instance
 
     def record(self, byte_len: int) -> None:
-        """Add ``byte_len`` under ``success``, or mark an empty finalize under ``empty``."""
         if not self._enabled:
             return
         if byte_len > 0:

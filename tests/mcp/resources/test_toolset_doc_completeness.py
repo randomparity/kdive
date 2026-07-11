@@ -15,7 +15,7 @@ from pathlib import Path
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.mcp.app import build_app
+from kdive.mcp.assembly.app import build_app
 from kdive.mcp.resources.registrar import DOC_RESOURCES
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.test_tool_index import _verifier

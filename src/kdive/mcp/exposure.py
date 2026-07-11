@@ -26,7 +26,12 @@ from enum import StrEnum
 import kdive.config as config
 from kdive.config.core_settings import MCP_TOOL_GATEWAY
 from kdive.security.authz.context import RequestContext
-from kdive.security.authz.rbac import _PLATFORM_IMPLIES, PlatformRole, Role
+from kdive.security.authz.rbac import (
+    PlatformRole,
+    Role,
+    platform_role_satisfies,
+    role_satisfies,
+)
 
 
 def gateway_enabled() -> bool:
@@ -37,14 +42,6 @@ def gateway_enabled() -> bool:
     reads it so the advertised instructions match the surface the agent actually sees.
     """
     return (config.get(MCP_TOOL_GATEWAY) or "").strip().lower() in {"on", "1", "true"}
-
-
-_ROLE_RANK: dict[Role, int] = {
-    Role.VIEWER: 0,
-    Role.CONTRIBUTOR: 1,
-    Role.OPERATOR: 2,
-    Role.ADMIN: 3,
-}
 
 
 class ExposureScope(StrEnum):
@@ -109,6 +106,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "allocations.renew": _CONTRIBUTOR,
     # artifacts
     "artifacts.get": _VIEWER,
+    "artifacts.find": _VIEWER,
     "artifacts.list": _VIEWER,
     "artifacts.fetch_raw": _CONTRIBUTOR,  # raw vmcore/vmlinux egress, ADR-0243
     "artifacts.create_run_upload": _CONTRIBUTOR,
@@ -279,30 +277,12 @@ def required_scopes(tool_name: str) -> frozenset[ExposureScope]:
     return _TOOL_SCOPES.get(tool_name, frozenset())
 
 
-def _max_project_rank(ctx: RequestContext) -> int:
-    return max(
-        (
-            _ROLE_RANK[role]
-            for project in ctx.projects
-            if (role := ctx.roles.get(project)) is not None
-        ),
-        default=-1,
-    )
-
-
-def _has_platform(ctx: RequestContext, needed: PlatformRole) -> bool:
-    for held in ctx.platform_roles:
-        if held is needed or needed in _PLATFORM_IMPLIES.get(held, frozenset()):
-            return True
-    return False
-
-
 def scope_satisfied(scope: ExposureScope, ctx: RequestContext) -> bool:
     """Whether ``ctx`` holds the grant ``scope`` names, under any granted project."""
     project_role = _PROJECT_SCOPE.get(scope)
     if project_role is not None:
-        return _max_project_rank(ctx) >= _ROLE_RANK[project_role]
-    return _has_platform(ctx, _PLATFORM_SCOPE[scope])
+        return any(role_satisfies(ctx.roles.get(project), project_role) for project in ctx.projects)
+    return platform_role_satisfies(ctx.platform_roles, _PLATFORM_SCOPE[scope])
 
 
 def tool_visible(tool_name: str, ctx: RequestContext) -> bool:
@@ -328,9 +308,8 @@ def _project_scope_satisfied(scope: ExposureScope, ctx: RequestContext, project:
     """
     project_role = _PROJECT_SCOPE.get(scope)
     if project_role is not None:
-        held = ctx.roles.get(project)
-        return held is not None and _ROLE_RANK[held] >= _ROLE_RANK[project_role]
-    return _has_platform(ctx, _PLATFORM_SCOPE[scope])
+        return role_satisfies(ctx.roles.get(project), project_role)
+    return platform_role_satisfies(ctx.platform_roles, _PLATFORM_SCOPE[scope])
 
 
 def project_tool_visible(tool_name: str, ctx: RequestContext, project: str) -> bool:

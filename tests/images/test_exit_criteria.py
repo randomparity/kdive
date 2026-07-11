@@ -49,11 +49,12 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts import storage as artifact_types
 from kdive.artifacts.storage import ObjectListing
+from kdive.domain.capacity.state import SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.catalog import resolve_rootfs
-from kdive.images.validation import GUEST_CONTRACT_PATHS, InspectSeam
+from kdive.images.cataloging.catalog import resolve_rootfs
+from kdive.images.cataloging.validation import GUEST_CONTRACT_PATHS, InspectSeam
 from kdive.reconciler.cleanup.images import (
     repair_dangling_images,
     repair_leaked_images,
@@ -265,6 +266,7 @@ def test_half_published_row_without_object_is_reconciled(migrated_url: str) -> N
 async def _insert_row(
     conn: psycopg.AsyncConnection,
     *,
+    provider: str = "local-libvirt",
     name: str,
     state: str,
     object_key: str | None,
@@ -272,6 +274,7 @@ async def _insert_row(
     visibility: str = "public",
     owner: str | None = None,
     expires_in_seconds: float | None = None,
+    volume: str | None = None,
 ):
     expires = (
         "now() + make_interval(secs => %(expires_secs)s)"
@@ -280,13 +283,15 @@ async def _insert_row(
     )
     cur = await conn.execute(
         "INSERT INTO image_catalog "
-        "(provider, name, arch, format, root_device, object_key, digest, visibility, owner, "
-        " expires_at, state, pending_since) "
-        "VALUES ('local-libvirt', %(name)s, 'x86_64', 'qcow2', '/dev/vda', %(object_key)s, "
-        " %(digest)s, %(visibility)s, %(owner)s, "
+        "(provider, name, arch, format, root_device, volume, object_key, digest, "
+        " visibility, owner, expires_at, state, pending_since) "
+        "VALUES (%(provider)s, %(name)s, 'x86_64', 'qcow2', '/dev/vda', %(volume)s, "
+        " %(object_key)s, %(digest)s, %(visibility)s, %(owner)s, "
         f"{expires}, %(state)s, now() - make_interval(secs => %(pending_secs)s)) RETURNING id",
         {
+            "provider": provider,
             "name": name,
+            "volume": volume,
             "object_key": object_key,
             "digest": None if object_key is None else "sha256:abc",
             "visibility": visibility,
@@ -379,6 +384,72 @@ def test_expired_private_referenced_by_live_system_is_not_pruned(migrated_url: s
     asyncio.run(_run())
 
 
+def test_expired_private_remote_volume_referenced_by_live_system_is_not_pruned(
+    migrated_url: str,
+) -> None:
+    # Remote-libvirt Systems boot from a staged volume, not a local-libvirt catalog rootfs. The
+    # retention guard must still defer expiry when a non-terminal System references that volume.
+    async def _run() -> None:
+        volume = "kdive-remote-used-base.qcow2"
+        async with await connect(migrated_url) as seed:
+            row_id = await _insert_row(
+                seed,
+                provider="remote-libvirt",
+                name="remote-used",
+                state="registered",
+                object_key=None,
+                pending_age_hours=2,
+                visibility="private",
+                owner=_PROJECT,
+                expires_in_seconds=-1,
+                volume=volume,
+            )
+            system_id = await seed_system(seed)  # READY: non-terminal
+            await _reference_remote_volume(seed, system_id, volume=volume)
+        store = _FakeImageStore({})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: repair_expired_private_images(c, store))
+        assert count == 0
+        assert store.deleted == []
+        async with await connect(migrated_url) as check:
+            assert await _row_count(check, row_id) == 1
+
+    asyncio.run(_run())
+
+
+def test_expired_private_remote_volume_referenced_by_terminal_system_is_pruned(
+    migrated_url: str,
+) -> None:
+    # A terminal remote-libvirt System no longer protects the base volume, mirroring the
+    # local-libvirt catalog-rootfs guard.
+    async def _run() -> None:
+        volume = "kdive-remote-dead-base.qcow2"
+        async with await connect(migrated_url) as seed:
+            row_id = await _insert_row(
+                seed,
+                provider="remote-libvirt",
+                name="remote-dead",
+                state="registered",
+                object_key=None,
+                pending_age_hours=2,
+                visibility="private",
+                owner=_PROJECT,
+                expires_in_seconds=-1,
+                volume=volume,
+            )
+            system_id = await seed_system(seed, system_state=SystemState.TORN_DOWN)
+            await _reference_remote_volume(seed, system_id, volume=volume)
+        store = _FakeImageStore({})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: repair_expired_private_images(c, store))
+        assert count == 1
+        assert store.deleted == []
+        async with await connect(migrated_url) as check:
+            assert await _row_count(check, row_id) == 0
+
+    asyncio.run(_run())
+
+
 async def _reference_image(conn: psycopg.AsyncConnection, system_id, *, name: str) -> None:
     """Point a System's provisioning_profile at the catalog rootfs ``(local-libvirt, name)``."""
     from psycopg.types.json import Jsonb
@@ -395,6 +466,26 @@ async def _reference_image(conn: psycopg.AsyncConnection, system_id, *, name: st
                 "rootfs": {"kind": "catalog", "provider": "local-libvirt", "name": name}
             }
         },
+    }
+    await conn.execute(
+        "UPDATE systems SET provisioning_profile = %s WHERE id = %s", (Jsonb(profile), system_id)
+    )
+
+
+async def _reference_remote_volume(
+    conn: psycopg.AsyncConnection, system_id, *, volume: str
+) -> None:
+    """Point a System's provisioning_profile at a remote-libvirt base image volume."""
+    from psycopg.types.json import Jsonb
+
+    profile = {
+        "version": 1,
+        "arch": "x86_64",
+        "vcpu": 1,
+        "memory_mb": 1024,
+        "disk_gb": 10,
+        "boot_method": "disk-image",
+        "provider": {"remote-libvirt": {"base_image_volume": volume}},
     }
     await conn.execute(
         "UPDATE systems SET provisioning_profile = %s WHERE id = %s", (Jsonb(profile), system_id)

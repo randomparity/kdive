@@ -14,13 +14,14 @@ from pathlib import Path
 from kdive.images.families.base import CustomizeContext
 from kdive.images.families.debian import DebianFamily
 from kdive.images.planes._build_common import MAKEDUMPFILE_MARKER_GUEST_PATH
+from kdive.images.rootfs.kinds import RootfsImageKind
 
 
 def _ctx(
     tmp_path: Path,
     *,
     is_cloud_image: bool,
-    kind: str = "debug",
+    kind: RootfsImageKind = "debug",
     distro: str = "debian",
     version: str = "12",
 ) -> CustomizeContext:

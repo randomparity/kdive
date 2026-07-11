@@ -16,18 +16,18 @@ Return one allocation visible to the caller.
 
 `implemented` · `read-only`
 
-List allocations visible in a project, newest first, filterable by state.
+List allocations visible to the caller, newest first, filterable by project and state.
 
 Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
 ``cursor`` for the next page. The ``state`` filter composes with the cursor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object | yes | Allocations list filters and pagination request. |
+| `request` | object (nullable) | no | Allocations list filters and pagination request. |
 
 `request` fields:
 
-- `project` (`string`, required) — Project whose allocations to list.
+- `project` (`string (nullable)`, optional) — Optional project whose allocations to list; omitted lists readable projects.
 - `state` (``requested`, `granted`, `active`, `releasing`, `released`, `expired`, `failed` (nullable)`, optional) — Only allocations in this lifecycle state.
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
 - `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.

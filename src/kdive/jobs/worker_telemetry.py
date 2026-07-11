@@ -16,7 +16,7 @@ from __future__ import annotations
 import contextlib
 import time
 from collections.abc import Iterable, Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from opentelemetry.metrics import CallbackOptions, Observation
 from opentelemetry.trace import SpanKind, Status, StatusCode
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 #: Histogram bucket bounds (seconds) for per-job duration — kdive jobs run from
 #: sub-second (teardown) to many minutes (kernel build), so the upper buckets are coarse.
 _DURATION_BUCKETS = (0.5, 1.0, 5.0, 15.0, 60.0, 300.0, 900.0, 1800.0, 3600.0)
+type TelemetryOutcome = Literal["ok", "error"]
 
 
 class WorkerTelemetry:
@@ -179,8 +180,8 @@ class JobSpan:
     def __init__(self, span: Span | None, job_kind: str) -> None:
         self.span = span
         self.job_kind = job_kind
-        self.outcome = "ok"
+        self.outcome: TelemetryOutcome = "ok"
 
-    def set_outcome(self, outcome: str) -> None:
+    def set_outcome(self, outcome: TelemetryOutcome) -> None:
         """Stamp the job's terminal outcome (``ok``/``error``) for the duration label."""
         self.outcome = outcome

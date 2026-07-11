@@ -8,7 +8,7 @@ from typing import Any
 
 from kdive.components.references import CatalogComponentRef
 from kdive.config.core_settings import DATABASE_URL
-from kdive.providers.local_libvirt.lifecycle import rootfs_catalog_fetch as mod
+from kdive.providers.local_libvirt.lifecycle.rootfs import rootfs_catalog_fetch as mod
 
 
 def test_fetch_threads_ref_arch_roots_and_cache_to_registered_rootfs(monkeypatch) -> None:

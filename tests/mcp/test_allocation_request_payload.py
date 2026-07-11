@@ -14,11 +14,12 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.mcp.tool_payloads import (
+from kdive.mcp.schema.tool_payloads import (
     AllocationRequestPayload,
     EstimateRequestPayload,
     ResourceByKind,
     ResourceByPool,
+    ShapeXorCustomError,
 )
 
 
@@ -84,7 +85,9 @@ def _xor_error_entry(payload: dict[str, object]) -> tuple[str, object]:
         assert len(entries) == 1
         entry = entries[0]
         ctx = entry.get("ctx") or {}
-        return str(entry["type"]), ctx.get("both")
+        error = ctx.get("error")
+        assert isinstance(error, ShapeXorCustomError)
+        return error.code, error.both
     raise AssertionError("expected a ValidationError")
 
 

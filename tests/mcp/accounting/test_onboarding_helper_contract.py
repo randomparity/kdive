@@ -20,7 +20,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import scripts.kdive_set_accounting as acct
 from kdive.db.repositories import BUDGETS, QUOTAS
-from kdive.mcp.app import build_app
+from kdive.mcp.assembly.app import build_app
 from kdive.mcp.tools.accounting import admin as accounting_admin
 from kdive.mcp.tools.accounting import usage as accounting_usage
 from kdive.security.authz.context import RequestContext

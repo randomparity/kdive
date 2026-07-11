@@ -2,7 +2,7 @@
 
 Automates `docs/operating/runbooks/remote-libvirt-host-setup.md` steps 1–6 for a
 kdive **remote-libvirt** provider host (Ubuntu 26.04 / Fedora 44 / RHEL-Rocky 10,
-x86_64 or ppc64le). Design: `docs/superpowers/specs/2026-06-18-ansible-remote-libvirt-host-setup-design.md`.
+x86_64 or ppc64le). Design: `docs/archive/superpowers/specs/2026-06-18-ansible-remote-libvirt-host-setup-design.md`.
 
 ## What it produces
 

@@ -12,6 +12,7 @@ from typing import LiteralString, NamedTuple, Protocol
 
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
+from pydantic import Field
 
 import kdive.config as config
 from kdive.artifacts.storage import FetchedArtifact, HeadResult
@@ -23,6 +24,7 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import not_found as _not_found
@@ -41,9 +43,10 @@ from kdive.store.objectstore import (
 
 _log = logging.getLogger(__name__)
 
-# The largest object `artifacts.get` pulls whole into memory to slice a window from or to
-# search with `find` (ADR-0247, ADR-0283). Larger objects omit inline content and a `find`
-# request rejects (`artifact_too_large`); the always-present `refs.download_uri` serves them.
+# The largest object pulled whole into memory for `artifacts.get` windows or `artifacts.find`
+# searches (ADR-0247, ADR-0283). Larger objects omit inline content from `artifacts.get` and
+# reject `artifacts.find` (`artifact_too_large`); the always-present `refs.download_uri` serves
+# them.
 _MAX_WINDOWED_FETCH_BYTES = 1024 * 1024
 # The default inline window `artifacts.get` returns when the caller names no `max_bytes`
 # (ADR-0247): 16 KiB ≈ 4k–5k tokens, sized to the tool-result token budget rather than the
@@ -70,6 +73,82 @@ _PROJECT_SQL_BY_OWNER_KIND: dict[str, LiteralString] = {
     "systems": "SELECT project FROM systems WHERE id = %s",
     "runs": "SELECT project FROM runs WHERE id = %s",
 }
+
+_ARTIFACT_ID_DESCRIPTION = "The redacted artifact to fetch (sensitive ids are not-found)."
+_BYTE_OFFSET_DESCRIPTION = (
+    "Start byte of the window (0-based). With direction=forward (default) a negative value "
+    "reads from the start; with direction=backward the window runs up from this byte and an "
+    "omitted (0) or negative value means end-of-artifact. Page with the returned "
+    "data.next_offset until data.content_truncated is false."
+)
+_MAX_BYTES_DESCRIPTION = (
+    f"Maximum inline window bytes; default {ARTIFACT_GET_WINDOW_DEFAULT_BYTES}, sized to the "
+    "tool-result token budget. The server caps the window at the smaller of a hard "
+    f"{ARTIFACT_GET_WINDOW_MAX_BYTES}-byte token-safe ceiling and "
+    "KDIVE_ARTIFACT_INLINE_MAX_BYTES, so a larger value still returns at most "
+    f"{ARTIFACT_GET_WINDOW_MAX_BYTES} bytes with data.next_offset to page the rest; an "
+    "artifact above the fetch ceiling omits inline content — use refs.download_uri for the "
+    "whole object when present. Store or redaction failures set data.content_unavailable and "
+    "omit download_uri."
+)
+_GET_DIRECTION_DESCRIPTION = (
+    "Cursor direction for paging. forward starts at byte_offset (the artifact start when "
+    "omitted). backward starts at end-of-artifact when byte_offset is omitted (read the tail "
+    "and page up); a positive byte_offset bounds it."
+)
+_QUERY_DESCRIPTION = (
+    "Literal search terms. '|' separates alternatives (e.g. 'BUG: KASAN|Call Trace'); the "
+    "nearest term in direction is returned with data.match_offset, data.match_line, the "
+    "surrounding data.content, and data.next_offset to continue (data.match_found is false "
+    "when none remain). Per-line literal substring, case-sensitive, no regex and no Unicode "
+    "normalization — match the artifact's exact bytes (kernel signatures are ASCII)."
+)
+_FIND_MAX_BYTES_DESCRIPTION = (
+    f"Maximum surrounding content bytes on a match; default {ARTIFACT_GET_WINDOW_DEFAULT_BYTES}. "
+    "The server caps this at the smaller of a hard "
+    f"{ARTIFACT_GET_WINDOW_MAX_BYTES}-byte token-safe ceiling and "
+    "KDIVE_ARTIFACT_INLINE_MAX_BYTES."
+)
+_FIND_DIRECTION_DESCRIPTION = (
+    "Search direction. forward starts at byte_offset (the artifact start when omitted). "
+    "backward starts at end-of-artifact when byte_offset is omitted; a positive byte_offset "
+    "bounds it."
+)
+
+
+class ArtifactsGetRequest(ToolPayload):
+    """Request payload for ``artifacts.get`` byte-window reads."""
+
+    artifact_id: str = Field(description=_ARTIFACT_ID_DESCRIPTION)
+    byte_offset: int = Field(default=0, description=_BYTE_OFFSET_DESCRIPTION)
+    max_bytes: int = Field(
+        default=ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
+        description=_MAX_BYTES_DESCRIPTION,
+    )
+    direction: JumpDirection = Field(default="forward", description=_GET_DIRECTION_DESCRIPTION)
+
+
+class ArtifactsFindRequest(ToolPayload):
+    """Request payload for ``artifacts.find`` literal searches."""
+
+    artifact_id: str = Field(
+        description="The redacted artifact to search (sensitive ids are not-found)."
+    )
+    query: str = Field(description=_QUERY_DESCRIPTION)
+    byte_offset: int = Field(
+        default=0,
+        description=(
+            "Start byte for the search cursor. With direction=forward (default), search starts "
+            "at this byte and a negative value starts from the beginning. With "
+            "direction=backward, search runs up from this byte and an omitted (0) or negative "
+            "value means end-of-artifact."
+        ),
+    )
+    max_bytes: int = Field(
+        default=ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
+        description=_FIND_MAX_BYTES_DESCRIPTION,
+    )
+    direction: JumpDirection = Field(default="forward", description=_FIND_DIRECTION_DESCRIPTION)
 
 
 class _SearchStore(Protocol):
@@ -148,72 +227,90 @@ async def artifacts_get(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
-    artifact_id: str,
-    byte_offset: int = 0,
-    max_bytes: int = ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
-    find: str | None = None,
-    direction: JumpDirection = "forward",
+    request: ArtifactsGetRequest,
     store_factory: Callable[[], _SearchStore] = object_store_from_env,
 ) -> ToolResponse:
-    """Return one `redacted` artifact's content window, or jump to a literal match.
+    """Return one `redacted` artifact's content window.
 
-    Without ``find`` this returns a byte window: ``data[byte_offset : byte_offset +
-    effective_max]`` where ``effective_max = min(max_bytes, KDIVE_ARTIFACT_INLINE_MAX_BYTES,
+    This returns a byte window: ``data[byte_offset : byte_offset + effective_max]`` where
+    ``effective_max = min(max_bytes, KDIVE_ARTIFACT_INLINE_MAX_BYTES,
     ARTIFACT_GET_WINDOW_MAX_BYTES)`` (the last a hard 24 KiB token-safe ceiling, ADR-0257);
     ``data["content_truncated"]``/``data["next_offset"]`` page the rest. ``direction`` pages
     ``forward`` (default; ``byte_offset`` from the start) or ``backward`` (``byte_offset`` from
     end-of-artifact, the tail), so a caller can read the end and walk up.
 
-    With ``find`` the call jumps to the nearest literal ``|``-OR match in ``direction`` over the
-    whole body (#939): ``data["match_found"]`` plus, on a hit, ``data["match_offset"]``,
-    ``data["match_line"]``, the surrounding ``data["content"]`` window, and a direction-relative
-    ``data["next_offset"]`` to continue. Matching is byte-space literal (no regex, no Unicode
-    normalization). An artifact larger than ``_MAX_WINDOWED_FETCH_BYTES`` cannot be searched (its
-    bytes are never fetched), so ``find`` rejects it with ``configuration_error``
-    ``reason=artifact_too_large`` rather than a misleading ``match_found=false``.
-
     A negative ``byte_offset`` reads from the direction's natural edge and ``max_bytes <= 0``
     floors to a 1-byte window (clamped, never rejected). Objects larger than
-    ``_MAX_WINDOWED_FETCH_BYTES`` omit inline content (``content_omitted``) on a plain read and
-    are retrieved via ``refs["download_uri"]``. A store outage degrades to a
-    ``data["content_unavailable"]`` reason; the metadata envelope still returns (ADR-0140,
-    ADR-0247). Missing or unauthorized rows return ``not_found``. A visible redacted row whose
-    object metadata or fetched object is no longer redacted is redaction drift and returns
-    ``configuration_error``.
+    ``_MAX_WINDOWED_FETCH_BYTES`` omit inline content (``content_omitted``) and are retrieved via
+    ``refs["download_uri"]``. A store outage degrades to a ``data["content_unavailable"]`` reason;
+    the metadata envelope still returns (ADR-0140, ADR-0247). Missing or unauthorized rows return
+    ``not_found``. A visible redacted row whose object metadata or fetched object is no longer
+    redacted is redaction drift and returns ``configuration_error``.
     """
-    authorized = await _authorized_redacted_artifact(pool, ctx, artifact_id=artifact_id)
+    authorized = await _authorized_redacted_artifact(pool, ctx, artifact_id=request.artifact_id)
     if isinstance(authorized, ToolResponse):
         return authorized
-    terms: tuple[str, ...] | None = None
-    if find is not None:
-        try:
-            terms = parse_literal_terms(find)
-        except ArtifactSearchInputError:
-            return _config_error(artifact_id, data={"reason": "bad_search_input"})
     refs: dict[str, str] = {"object": authorized.key}
     loaded = await _load_redacted_plaintext(authorized.key, store_factory, refs)
     if loaded.drift:  # head/fetched object's sensitivity is not REDACTED (the redaction gate)
-        return _config_error(artifact_id)
-    if terms is not None:
-        find_data = _find_response_data(
-            loaded,
-            terms=terms,
-            direction=direction,
-            byte_offset=byte_offset,
-            max_bytes=max_bytes,
-            artifact_id=artifact_id,
-        )
-        if isinstance(find_data, ToolResponse):
-            return find_data
-        data = find_data
-    else:
-        data = _window_response_data(
-            loaded, byte_offset=byte_offset, max_bytes=max_bytes, direction=direction
-        )
+        return _config_error(request.artifact_id)
+    data = _window_response_data(
+        loaded,
+        byte_offset=request.byte_offset,
+        max_bytes=request.max_bytes,
+        direction=request.direction,
+    )
     return ToolResponse.success(
-        artifact_id,
+        request.artifact_id,
         "available",
         suggested_next_actions=["artifacts.get"],
+        refs=refs,
+        data=data,
+    )
+
+
+async def artifacts_find(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    request: ArtifactsFindRequest,
+    store_factory: Callable[[], _SearchStore] = object_store_from_env,
+) -> ToolResponse:
+    """Jump to a literal match in one `redacted` artifact.
+
+    The call jumps to the nearest literal ``|``-OR match in ``direction`` over the whole body
+    (#939): ``data["match_found"]`` plus, on a hit, ``data["match_offset"]``,
+    ``data["match_line"]``, the surrounding ``data["content"]`` window, and a direction-relative
+    ``data["next_offset"]`` to continue. Matching is byte-space literal (no regex, no Unicode
+    normalization). An artifact larger than ``_MAX_WINDOWED_FETCH_BYTES`` cannot be searched (its
+    bytes are never fetched), so this rejects it with ``configuration_error``
+    ``reason=artifact_too_large`` rather than a misleading ``match_found=false``.
+    """
+    authorized = await _authorized_redacted_artifact(pool, ctx, artifact_id=request.artifact_id)
+    if isinstance(authorized, ToolResponse):
+        return authorized
+    try:
+        terms = parse_literal_terms(request.query)
+    except ArtifactSearchInputError:
+        return _config_error(request.artifact_id, data={"reason": "bad_search_input"})
+    refs: dict[str, str] = {"object": authorized.key}
+    loaded = await _load_redacted_plaintext(authorized.key, store_factory, refs)
+    if loaded.drift:
+        return _config_error(request.artifact_id)
+    data = _find_response_data(
+        loaded,
+        terms=terms,
+        direction=request.direction,
+        byte_offset=request.byte_offset,
+        max_bytes=request.max_bytes,
+        artifact_id=request.artifact_id,
+    )
+    if isinstance(data, ToolResponse):
+        return data
+    return ToolResponse.success(
+        request.artifact_id,
+        "available",
+        suggested_next_actions=["artifacts.find"],
         refs=refs,
         data=data,
     )
@@ -339,7 +436,7 @@ def _find_response_data(
                 artifact_id,
                 data={"reason": "artifact_too_large", "size_bytes": loaded.size_bytes},
             )
-        # Store outage: surface only the content_unavailable reason (like plain `artifacts.get`).
+        # Store outage: surface only the content_unavailable reason (like `artifacts.get`).
         # `match_found` is omitted because no search ran — emitting `match_found=false` would
         # read as "searched, no such signature" when the truth is "could not read the log".
         return loaded.degraded or {}

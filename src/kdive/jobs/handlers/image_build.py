@@ -18,14 +18,14 @@ from psycopg import AsyncConnection
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.images.planes.base import RootfsBuildPlane
-from kdive.images.rootfs_specs import CatalogRootfsBuild, catalog_rootfs_build
-from kdive.images.validation import (
+from kdive.images.cataloging.validation import (
     DEFAULT_INSPECT,
     GUEST_CONTRACT_PATHS,
     InspectSeam,
     validate_guest_contract,
 )
+from kdive.images.planes.base import RootfsBuildPlane
+from kdive.images.rootfs.specs import CatalogRootfsBuild, catalog_rootfs_build
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ImageBuildPayload, load_payload
 from kdive.providers.core.resolver import ProviderResolver
@@ -114,14 +114,14 @@ def _resolve_build_plane(resolver: ProviderResolver, provider: str) -> RootfsBui
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"provider": provider},
         ) from exc
-    plane = resolver.resolve(kind).rootfs_build_plane
-    if plane is None:
+    rootfs = resolver.resolve(kind).rootfs
+    if rootfs is None or rootfs.build_plane is None:
         raise CategorizedError(
             "provider runtime does not support rootfs image builds",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"provider": provider},
         )
-    return plane
+    return rootfs.build_plane
 
 
 def register_handlers(

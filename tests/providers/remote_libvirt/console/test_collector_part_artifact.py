@@ -3,7 +3,7 @@
 ``RemoteConsolePartStore.put_part`` writes the internal ``console-parts-<index>`` assembly object
 unchanged (the per-Run evidence, ADR-0235) and additionally registers a separate
 gzip-compressed ``console-part-0-<index>`` artifact so an agent observes a remote System's live
-console through the same ``artifacts.{list,get,search_text}`` surface the local path uses.
+console through the same ``artifacts.{list,get,find}`` surface the local path uses.
 """
 
 from __future__ import annotations

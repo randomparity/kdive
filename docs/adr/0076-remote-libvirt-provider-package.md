@@ -19,19 +19,19 @@ M1.5 built the per-kind `ProviderRuntime` registry (ADR-0071) precisely so M2 co
 hypothesis against a real second provider rather than the in-process mock.
 
 `local_libvirt` was the M0 bootstrap. In production the MCP server and worker tier run
-**separately** from the libvirt-enabled development hosts, so local-libvirt — which assumes a
-shared filesystem and a local `qemu:///system` connection — is **not** the production provider
-and is headed for removal once `remote_libvirt` is enabled. This reframes a tempting move: a
-shared `libvirt_common` layer factored out of local-libvirt and reused by remote-libvirt would
-couple the production provider to a module slated for deletion, producing exactly the
-backward-compatible shim / migration path the project's "replace, don't deprecate" standard
-forbids.
+**separately** from the libvirt-enabled development hosts, so this ADR originally expected
+local-libvirt to be removed once `remote_libvirt` was enabled. Later local-libvirt parity work
+kept local-libvirt as the default provider and test backbone, while remote-libvirt remains
+operator-configured opt-in. The package-boundary decision still stands: factoring a shared
+`libvirt_common` layer out of local-libvirt and reusing it from remote-libvirt would couple the
+remote provider to local provider internals and create the backward-compatible shim / migration
+path the project's "replace, don't deprecate" standard forbids.
 
 The remote host's libvirt API calls (define/start/destroy XML, capability parse) are nearly
 identical to local-libvirt's — only the connection, file movement, and secret resolution
 differ (ADR-0077, ADR-0078, ADR-0079). The question is how to draw the package boundary so the
-falsifiability metric stays meaningful, DRY does not couple a production provider to a doomed
-one, and the removal of local-libvirt later is a clean deletion rather than an untangling.
+falsifiability metric stays meaningful and DRY does not couple an opt-in remote provider to the
+default local provider's internals.
 
 ## Decision
 
@@ -74,14 +74,13 @@ refactor away.
   named allowlist, so provider-specific logic leaking into core surfaces as a smell to refactor
   away (the milestone's co-equal goal) rather than being silently absorbed. The gate runs
   against a stable baseline — a `pre-M2` tag cut at milestone start — because local-libvirt stays.
-- **Removal of local-libvirt later is a clean deletion.** Because remote-libvirt shares no code
-  with local-libvirt, the follow-up that removes local-libvirt deletes a package and its
-  composition entry — no shared layer to disentangle, no consumer to migrate.
-- **Cost: some libvirt-API code is duplicated** between the two packages for the duration that
-  both exist. This is accepted deliberately: the duplication is bounded (define/start/destroy
-  and capability parse), it is short-lived (local-libvirt is going away), and "no premature
-  abstraction" plus "replace, don't deprecate" both argue against extracting a shared layer to
-  serve a module being removed.
+- **Provider independence stays explicit.** Because remote-libvirt shares no provider-internal
+  code with local-libvirt, the two providers can evolve independently and no shared
+  `libvirt_common` layer becomes a migration surface.
+- **Cost: some libvirt-API code is duplicated** between the two packages. This is accepted
+  deliberately: the duplication is bounded (define/start/destroy and capability parse), and
+  "no premature abstraction" plus "replace, don't deprecate" both argue against extracting a
+  shared provider-internal layer before a stable cross-provider ownership rule exists.
 - **No new resolver call sites.** Registration is a third entry in the composition map; the
   post-System resolution path (ADR-0071) already exists, so M2 threads no new resolver wiring —
   which is what keeps provider-specific logic out of core.
@@ -101,9 +100,8 @@ refactor away.
 
 - **Extract a shared `libvirt_common` layer** consumed by both providers. DRY, and refactoring
   within `providers/*` would not falsify the (core-and-tool-surface) diff gate. Rejected: it
-  couples the production provider to local-libvirt, a module slated for removal, creating the
-  migration-shim the "replace, don't deprecate" standard forbids and turning local-libvirt's
-  later deletion into an untangling instead of a delete.
+  couples the opt-in remote provider to local-libvirt internals, creating the migration-shim the
+  "replace, don't deprecate" standard forbids before a stable shared ownership boundary exists.
 - **Parameterize `local_libvirt` with a `qemu+ssh://`/`qemu+tls://` URI** and an injected
   transport adapter — no new package. Least new code, but it makes the "second provider" story
   and the falsifiability metric **vacuous** (nothing distinct to diff), and it conflicts with

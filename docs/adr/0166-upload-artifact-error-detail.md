@@ -12,7 +12,7 @@
   posture), [ADR-0124](0124-provisioning-profile-discoverability.md) /
   [ADR-0160](0160-buildhost-source-kind-discovery.md) (the `*_profile_examples`
   discovery pattern the new tool mirrors).
-- **Spec:** [`../specs/2026-06-17-upload-artifact-error-detail.md`](../specs/2026-06-17-upload-artifact-error-detail.md)
+- **Spec:** [`../specs/2026-06-17-upload-artifact-error-detail.md`](../design/2026-06-17-upload-artifact-error-detail.md)
 - **Issue:** [#551](https://github.com/randomparity/kdive/issues/551)
 
 ## Context

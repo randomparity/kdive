@@ -8,7 +8,7 @@
   [ADR-0174](0174-config-error-actionable-detail.md) (the actionable `data.reason` /
   `accepted_values` `CONFIGURATION_ERROR` detail pattern this reuses),
   [ADR-0097](0097-not-found-conflict-error-categories.md) (map to existing categories, invent none).
-- **Spec:** [`../superpowers/specs/2026-06-22-local-libvirt-service-parity-honesty.md`](../superpowers/specs/2026-06-22-local-libvirt-service-parity-honesty.md)
+- **Spec:** [`../superpowers/specs/2026-06-22-local-libvirt-service-parity-honesty.md`](../archive/superpowers/specs/2026-06-22-local-libvirt-service-parity-honesty.md)
 
 ## Context
 

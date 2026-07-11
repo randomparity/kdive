@@ -37,8 +37,8 @@ def test_capture_coverage_matches_the_real_advertised_provider_sets() -> None:
     from kdive.security.secrets.secret_registry import SecretRegistry
 
     registry = SecretRegistry()
-    remote = build_remote_runtime(secret_registry=registry).supported_capture_methods
-    local = build_local_runtime(secret_registry=registry).supported_capture_methods
+    remote = build_remote_runtime(secret_registry=registry).support.capture_methods
+    local = build_local_runtime(secret_registry=registry).support.capture_methods
     assert CAPTURE_COVERAGE["remote-libvirt"] == frozenset(m.value for m in remote)
     assert CAPTURE_COVERAGE["local-libvirt"] == frozenset(m.value for m in local)
     # Remote advertises all four methods; local advertises kdump + host_dump (ADR-0208 narrowed it
@@ -142,7 +142,7 @@ def test_allowlist_is_exactly_the_named_touch_points() -> None:
                 "src/kdive/mcp/tools/catalog/fixtures.py",
                 "src/kdive/security/secrets/secret_registry.py",
                 "src/kdive/mcp/tools/ops/diagnostics.py",
-                "src/kdive/mcp/app.py",
+                "src/kdive/mcp/assembly/app.py",
                 "src/kdive/mcp/middleware.py",
                 "src/kdive/reconciler/provider_reaping.py",
                 "src/kdive/db/schema/0022_egress_probe_guests.sql",

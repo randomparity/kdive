@@ -15,6 +15,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 import kdive.config as config
+from kdive.artifacts import upload_manifest
 from kdive.artifacts.reassembly import reassemble_chunked
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import HeadResult, StoredArtifact, chunk_key
@@ -22,7 +23,6 @@ from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.build_artifacts.validation import validate_external_artifacts
 from kdive.config.core_settings import UPLOAD_TTL_SECONDS
-from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS
 from kdive.domain.capacity.state import RunState

@@ -13,8 +13,8 @@ Verified against `main`: `runs.create` (`runs/registrar.py:56-115`,
 `runs/create.py:117-137`), `systems.define`, and `systems.provision`
 (`systems/registrar.py:122-201`) accept no client name/label, and none is echoed.
 `investigations` already carry a freeform `title`/`description`
-(`investigations_handlers.py:65-78`), so the codebase already has a precedent for
-echoing client-supplied text.
+(`src/kdive/mcp/tools/lifecycle/investigations/common.py`), so the codebase already has
+a precedent for echoing client-supplied text.
 
 This ADR scopes to the well-defined parts of #867: accept an optional freeform label
 and echo it. The proposed "label in place of a UUID" shorthand is a larger, ambiguous

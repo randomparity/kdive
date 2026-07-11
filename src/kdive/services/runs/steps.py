@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import LiteralString, cast
+from typing import Final, LiteralString, cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -14,7 +14,16 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Run, System
-from kdive.domain.platform import arch_traits
+from kdive.domain.lifecycle.run_steps import (
+    BOOT_OUTCOME_READY,
+    RUN_STEP_PENDING,
+    RUN_STEP_SUCCEEDED,
+    BootOutcome,
+    RunStepState,
+    parse_boot_outcome,
+    parse_persisted_run_step_state,
+)
+from kdive.domain.platform.arch_traits import arch_traits
 from kdive.images.families._fedora_customize import READINESS_MARKER
 from kdive.jobs import queue
 from kdive.profiles.provider_policy import ProfilePolicy, capture_method
@@ -140,9 +149,9 @@ _PROGRESS_STEPS = ("install", "boot")
 class StepProgress:
     """Install/boot progress for a built Run, read from the `run_steps` ledger (ADR-0179)."""
 
-    install: str
-    boot: str
-    boot_outcome: str | None
+    install: RunStepState
+    boot: RunStepState
+    boot_outcome: BootOutcome | None
     console_evidence_artifact_id: str | None = None
     available_capture: list[str] | None = None
     inert_capture: list[str] | None = None
@@ -152,11 +161,11 @@ class StepProgress:
 
     def steps_map(self) -> dict[str, str]:
         """The fixed-key `runs.get` `data.steps` map; `build` is `succeeded` by construction."""
-        return {"build": "succeeded", "install": self.install, "boot": self.boot}
+        return {"build": RUN_STEP_SUCCEEDED, "install": self.install, "boot": self.boot}
 
 
 # The persisted `boot` step `boot_outcome` value for a clean boot (recorded by the boot handler).
-READY_BOOT_OUTCOME = "ready"
+READY_BOOT_OUTCOME: Final[BootOutcome] = BOOT_OUTCOME_READY
 _READY_BOOT_SIGNAL = "console_marker"
 _READY_BOOT_RULE = "marker line reached with no pre-marker crash signature"
 
@@ -199,8 +208,8 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
     is the applied kdump reservation the install handler recorded (ADR-0300, #989); ``None`` when
     install is unrecorded or the default 256M was in force.
     """
-    states = {step: "pending" for step in _PROGRESS_STEPS}
-    boot_outcome: str | None = None
+    states: dict[str, RunStepState] = {step: RUN_STEP_PENDING for step in _PROGRESS_STEPS}
+    boot_outcome: BootOutcome | None = None
     console_evidence_artifact_id: str | None = None
     available_capture: list[str] | None = None
     inert_capture: list[str] | None = None
@@ -214,15 +223,15 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
         )
         rows = await cur.fetchall()
     for row in rows:
-        states[row["step"]] = row["state"]
-        if row["step"] == "install" and isinstance(row["result"], Mapping):
+        step = cast("str", row["step"])
+        states[step] = parse_persisted_run_step_state(row["state"], run_id=run_id, step=step)
+        if step == "install" and isinstance(row["result"], Mapping):
             install_result = cast("Mapping[str, object]", row["result"])
             installed_cmdline = _optional_str(install_result.get("cmdline"))
             installed_crashkernel = _optional_str(install_result.get("crashkernel"))
-        if row["step"] == "boot" and isinstance(row["result"], Mapping):
+        if step == "boot" and isinstance(row["result"], Mapping):
             boot_result = cast("Mapping[str, object]", row["result"])
-            outcome = boot_result.get("boot_outcome")
-            boot_outcome = outcome if isinstance(outcome, str) else None
+            boot_outcome = parse_boot_outcome(boot_result.get("boot_outcome"))
             console_evidence_artifact_id = _optional_str(boot_result.get("evidence_artifact_id"))
             available_capture = _optional_str_list(boot_result.get("available_capture"))
             inert_capture = _optional_str_list(boot_result.get("inert_capture"))

@@ -21,7 +21,6 @@ from kdive.db.repositories import (
     RUNS,
     SYSTEMS,
 )
-from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
@@ -34,12 +33,13 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigation, Run, System
 from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.jobs import queue
-from kdive.jobs.handlers import control as control_plane
+from kdive.jobs.handlers.control import control as control_plane
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PowerPayload, SystemPayload
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.lifecycle import control as control_tools
+from kdive.mcp.tools.lifecycle.control import registrar as control_tools
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.rbac import AuthorizationError, Role
 from tests.mcp.systems_support import provider_resolver

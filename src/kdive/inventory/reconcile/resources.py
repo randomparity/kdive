@@ -37,7 +37,7 @@ from datetime import datetime
 from typing import Any, cast
 from uuid import UUID
 
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, AsyncCursor
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -274,7 +274,7 @@ def _declared_caps(inst: FaultInjectInstance | RemoteLibvirtInstance) -> Resourc
 
 
 async def _upsert_config_resource(
-    cur: Any,
+    cur: AsyncCursor[dict[str, Any]],
     diff: ReconcileDiff,
     *,
     declared: _DeclaredResource,
@@ -348,7 +348,7 @@ async def _upsert_config_resource(
 
 
 async def _insert_config_resource(
-    cur: Any,
+    cur: AsyncCursor[dict[str, Any]],
     diff: ReconcileDiff,
     *,
     declared: _DeclaredResource,
@@ -371,7 +371,7 @@ async def _insert_config_resource(
 
 
 async def _adopt_config_resource(
-    cur: Any,
+    cur: AsyncCursor[dict[str, Any]],
     diff: ReconcileDiff,
     *,
     row: _UpsertResourceRow,
@@ -397,7 +397,7 @@ async def _adopt_config_resource(
 
 
 async def _update_config_resource(
-    cur: Any,
+    cur: AsyncCursor[dict[str, Any]],
     diff: ReconcileDiff,
     *,
     row: _UpsertResourceRow,
@@ -431,7 +431,12 @@ def _needs_config_adoption(row: _UpsertResourceRow) -> bool:
 
 
 async def _find_existing(
-    cur: Any, *, kind: ResourceKind, name: str, host_uri: str, adopt_by_host: bool
+    cur: AsyncCursor[dict[str, Any]],
+    *,
+    kind: ResourceKind,
+    name: str,
+    host_uri: str,
+    adopt_by_host: bool,
 ) -> _UpsertResourceRow | None:
     """Resolve the existing row to upsert: by (kind, name) first, then host-adopt for remote."""
     await cur.execute(
@@ -465,7 +470,9 @@ async def _overlay_local_libvirt(
             await _overlay_one_local(cur, inst, diff)
 
 
-async def _overlay_one_local(cur: Any, inst: LocalLibvirtInstance, diff: ReconcileDiff) -> None:
+async def _overlay_one_local(
+    cur: AsyncCursor[dict[str, Any]], inst: LocalLibvirtInstance, diff: ReconcileDiff
+) -> None:
     await cur.execute(
         "SELECT id, name, cost_class, capabilities, pool FROM resources "
         "WHERE kind = %s AND host_uri = %s FOR UPDATE",

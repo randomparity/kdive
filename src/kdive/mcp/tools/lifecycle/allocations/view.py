@@ -6,6 +6,7 @@ import asyncio
 import logging
 import math
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from psycopg import sql
 from psycopg.rows import dict_row
@@ -17,9 +18,9 @@ from kdive.domain.capacity.state import AllocationState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Allocation
 from kdive.log import bind_context
-from kdive.mcp.exposure import visible_next_actions
-from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools._common import ConfigErrorReason, InvalidCursor
+from kdive.mcp.exposure import tool_visible, visible_next_actions
+from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, ConfigErrorReason, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
@@ -101,46 +102,74 @@ async def wait_allocation(
 
 
 _ALLOCATIONS_LIST_TAG = "allocations.list"
+_ALLOCATIONS_COLLECTION_ACTIONS = ["allocations.get", "allocations.release"]
+
+
+@dataclass(frozen=True, slots=True)
+class AllocationsListRequest:
+    """Filter payload for ``allocations.list``."""
+
+    project: str | None = None
+    state: AllocationState | None = None
+    limit: int = DEFAULT_LIST_LIMIT
+    cursor: str | None = None
+
+
+def _viewer_projects(ctx: RequestContext) -> list[str]:
+    """Projects the caller may view: a member project with any granted role."""
+    return [p for p in ctx.projects if ctx.roles.get(p) is not None]
+
+
+def _project_filter(ctx: RequestContext, project: str | None) -> list[str]:
+    if project is not None:
+        require_project(ctx, project)
+        require_role(ctx, project, Role.VIEWER)
+        return [project]
+    return _viewer_projects(ctx)
 
 
 async def list_allocations(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    *,
-    project: str,
-    limit: int,
-    cursor: str | None = None,
-    state: AllocationState | None = None,
+    request: AllocationsListRequest | None = None,
 ) -> ToolResponse:
-    """Return a page of the newest allocations for a project (keyset-paginated, ADR-0192).
+    """Return a page of the newest visible allocations (keyset-paginated, ADR-0192).
 
     Fetches one row past ``limit`` to set ``data.truncated``/``data.next_cursor`` exactly
     from the last kept allocation's ``(created_at, id)``. A ``cursor`` resumes strictly
     after a prior page; a malformed/wrong-tool cursor is an ``invalid_cursor`` config error.
 
+    Omit ``project`` to list allocations across every project where the caller has at least
+    viewer access. Supplying ``project`` preserves the stricter single-project authorization
+    errors used by the previous contract.
+
     Optional ``state`` filter (ADR-0197) narrows by lifecycle state, applied before the
     keyset seek so the cursor stays a pure boundary and following ``next_cursor`` drains
     the full filtered set.
     """
-    require_project(ctx, project)
-    require_role(ctx, project, Role.VIEWER)
-    capped = _clamp_list_limit(limit)
+    request = request or AllocationsListRequest()
+    projects = _project_filter(ctx, request.project)
+    capped = _clamp_list_limit(request.limit)
     after = None
-    if cursor:
+    if request.cursor:
         try:
-            after = _decode_ts_uuid_cursor(_ALLOCATIONS_LIST_TAG, cursor)
+            after = _decode_ts_uuid_cursor(_ALLOCATIONS_LIST_TAG, request.cursor)
         except InvalidCursor:
             return _invalid_cursor_error("allocations")
-    where_parts: list[Composable] = [sql.SQL("project = %s")]
-    params: list[object] = [project]
-    if state is not None:
+    where_parts: list[Composable] = [sql.SQL("project = ANY(%s)")]
+    params: list[object] = [projects]
+    if request.state is not None:
         where_parts.append(sql.SQL("state = %s"))
-        params.append(state.value)
+        params.append(request.state.value)
     if after is not None:
         where_parts.append(sql.SQL("(created_at, id) < (%s, %s)"))
         params.extend(after)
     params.append(capped + 1)
     with bind_context(principal=ctx.principal):
+        if not projects:
+            return _allocations_collection(
+                ctx, [], project=request.project, truncated=False, next_cursor=None
+            )
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             query = sql.SQL(
                 "SELECT * FROM allocations WHERE {where} ORDER BY created_at DESC, id DESC LIMIT %s"
@@ -167,12 +196,35 @@ async def list_allocations(
             if truncated and kept
             else None
         )
-        return ToolResponse.collection(
-            "allocations",
-            "ok",
+        return _allocations_collection(
+            ctx,
             responses,
-            suggested_next_actions=visible_next_actions(
-                ["allocations.get", "allocations.release"], ctx, project
-            ),
-            data={"project": project, "truncated": truncated, "next_cursor": next_cursor},
+            project=request.project,
+            truncated=truncated,
+            next_cursor=next_cursor,
         )
+
+
+def _allocations_collection(
+    ctx: RequestContext,
+    responses: list[ToolResponse],
+    *,
+    project: str | None,
+    truncated: bool,
+    next_cursor: str | None,
+) -> ToolResponse:
+    actions = (
+        visible_next_actions(_ALLOCATIONS_COLLECTION_ACTIONS, ctx, project)
+        if project is not None
+        else [name for name in _ALLOCATIONS_COLLECTION_ACTIONS if tool_visible(name, ctx)]
+    )
+    data: dict[str, JsonValue] = {"truncated": truncated, "next_cursor": next_cursor}
+    if project is not None:
+        data["project"] = project
+    return ToolResponse.collection(
+        "allocations",
+        "ok",
+        responses,
+        suggested_next_actions=actions,
+        data=data,
+    )
