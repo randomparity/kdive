@@ -29,6 +29,9 @@ from kdive.mcp.tools._common import (
 from kdive.mcp.tools._common import (
     config_error as _config_error,
 )
+from kdive.mcp.tools._common import (
+    invalid_uuid_error as _invalid_uuid_error,
+)
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools.lifecycle.systems.view import defined_system_envelope
 from kdive.profiles.provider_policy import ProfilePolicy
@@ -186,7 +189,7 @@ class SystemProvisionHandlers:
         """Mint a System for a ``granted`` Allocation and enqueue its provision job."""
         uid = _as_uuid(allocation_id)
         if uid is None:
-            return _config_error(allocation_id)
+            return _invalid_uuid_error("allocation_id", allocation_id)
         cleaned = _validated_label(allocation_id, label)
         if isinstance(cleaned, ToolResponse):
             return cleaned
@@ -213,7 +216,7 @@ class SystemProvisionHandlers:
         """Admit a ``defined`` System after its upload window is complete."""
         uid = _as_uuid(system_id)
         if uid is None:
-            return _config_error(system_id)
+            return _invalid_uuid_error("system_id", system_id)
 
         async def _provision_defined(recorder: SystemRecorder | None) -> AdmissionResult:
             with bind_context(principal=ctx.principal):

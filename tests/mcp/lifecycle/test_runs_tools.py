@@ -3724,11 +3724,28 @@ def test_install_cross_project_is_config_error(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_install_malformed_uuid_is_config_error(migrated_url: str) -> None:
+def test_install_malformed_uuid_is_invalid_uuid(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await _install(pool, _ctx(), "not-a-uuid")
-        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None
+        assert "run_id" in resp.detail and "not-a-uuid" in resp.detail
+
+    asyncio.run(_run())
+
+
+def test_boot_malformed_uuid_is_invalid_uuid(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _boot(pool, _ctx(), "not-a-uuid")
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None
+        assert "run_id" in resp.detail and "not-a-uuid" in resp.detail
 
     asyncio.run(_run())
 
@@ -5382,12 +5399,15 @@ def test_cancel_unknown_run_id_is_not_found(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_cancel_malformed_run_id_is_configuration_error(migrated_url: str) -> None:
+def test_cancel_malformed_run_id_is_invalid_uuid(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await cancel_run(pool, _ctx(Role.OPERATOR), "not-a-uuid")
             assert resp.status == "error"
             assert resp.error_category == "configuration_error"
+            assert resp.data["reason"] == "invalid_uuid"
+            assert resp.detail is not None
+            assert "run_id" in resp.detail and "not-a-uuid" in resp.detail
 
     asyncio.run(_run())
 

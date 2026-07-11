@@ -794,12 +794,15 @@ def test_provision_viewer_denied_before_provider_rootfs_validation(
     assert calls == []
 
 
-def test_provision_malformed_uuid_is_config_error(migrated_url: str) -> None:
+def test_provision_malformed_uuid_is_invalid_uuid(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await _provision(pool, _ctx(), "not-a-uuid", _profile())
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None
+        assert "allocation_id" in resp.detail and "not-a-uuid" in resp.detail
 
     asyncio.run(_run())
 
@@ -2211,6 +2214,19 @@ def test_provision_defined_admits_defined_system(migrated_url: str) -> None:
         assert sys_row is not None and sys_row["state"] == "provisioning"
         assert alloc_row is not None and alloc_row["state"] == "active"  # untouched (set at define)
         assert audit_row is not None and audit_row["n"] == 1
+
+    asyncio.run(_run())
+
+
+def test_provision_defined_malformed_uuid_is_invalid_uuid(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _provision_defined(pool, _ctx(), "not-a-uuid")
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None
+        assert "system_id" in resp.detail and "not-a-uuid" in resp.detail
 
     asyncio.run(_run())
 

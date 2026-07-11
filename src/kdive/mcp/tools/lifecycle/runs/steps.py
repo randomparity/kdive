@@ -24,6 +24,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._idempotency import keyed_mutation
 from kdive.mcp.tools.lifecycle.runs.common import run_job_envelope
 from kdive.providers.core.resolver import ProviderResolver
@@ -82,7 +83,7 @@ async def install_run(
     """
     uid = _as_uuid(run_id)
     if uid is None:
-        return _config_error(run_id)
+        return _invalid_uuid_error("run_id", run_id)
     owned = platform_owned_cmdline_token(cmdline)
     if owned is not None:
         return _config_error(
@@ -216,7 +217,7 @@ async def boot_run(
     """
     uid = _as_uuid(run_id)
     if uid is None:
-        return _config_error(run_id)
+        return _invalid_uuid_error("run_id", run_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             run = await RUNS.get(conn, uid)

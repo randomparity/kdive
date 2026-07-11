@@ -16,7 +16,7 @@ from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
-from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
@@ -47,7 +47,7 @@ async def cancel_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str
     """
     uid = _as_uuid(run_id)
     if uid is None:
-        return _config_error(run_id)
+        return _invalid_uuid_error("run_id", run_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             run = await RUNS.get(conn, uid)
