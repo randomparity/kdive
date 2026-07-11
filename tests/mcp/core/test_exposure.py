@@ -194,16 +194,19 @@ _CONTRIBUTOR_LOOP = frozenset(
         "allocations.request",
         "investigations.open",
         "control.power",  # leaseholder power lifecycle over a READY transient VM (ADR-0320)
+        # the provision lane instantiates a System on the slot the contributor holds (ADR-0326)
+        "systems.define",
+        "systems.provision",
+        "systems.provision_defined",
+        "systems.reprovision",
+        "artifacts.create_system_upload",
     }
 )
 
 #: What must remain above contributor: operator-only and admin-only project tools.
 _ABOVE_CONTRIBUTOR = frozenset(
     {
-        "systems.define",
-        "systems.provision",
-        "images.upload",
-        "artifacts.create_system_upload",  # system upload stays operator
+        "images.upload",  # mutates the shared cross-tenant image catalog (operator)
         "systems.teardown",  # admin
         "control.force_crash",  # admin
     }
@@ -231,13 +234,14 @@ def test_operator_still_sees_the_whole_loop_and_above() -> None:
     }
 
 
-def test_create_system_upload_stays_operator_but_run_upload_drops() -> None:
-    # The shared upload seam splits by owner kind: run-upload → contributor, system → operator.
+def test_both_upload_kinds_are_contributor() -> None:
+    # The shared upload seam is contributor for both owner kinds: run-upload feeds the build lane,
+    # system-upload feeds the leaseholder's define→provision lane (ADR-0326).
     assert required_scopes("artifacts.create_run_upload") == frozenset(
         {ExposureScope.PROJECT_CONTRIBUTOR}
     )
     assert required_scopes("artifacts.create_system_upload") == frozenset(
-        {ExposureScope.PROJECT_OPERATOR}
+        {ExposureScope.PROJECT_CONTRIBUTOR}
     )
 
 
@@ -294,20 +298,23 @@ def test_viewer_sees_no_live_session_tool() -> None:
 
 
 def test_project_tool_visible_honours_role_on_the_named_project() -> None:
-    # systems.provision is project-operator: only an operator+ on the named project sees it.
+    # images.upload is project-operator: only an operator+ on the named project sees it. (The
+    # provision lane moved to contributor, ADR-0326, so an operator-only tool is used here.)
     contributor = _ctx(roles={"a": Role.CONTRIBUTOR})
     operator = _ctx(roles={"a": Role.OPERATOR})
-    assert not project_tool_visible("systems.provision", contributor, "a")
-    assert project_tool_visible("systems.provision", operator, "a")
+    assert not project_tool_visible("images.upload", contributor, "a")
+    assert project_tool_visible("images.upload", operator, "a")
+    # systems.provision is now contributor-visible on the named project.
+    assert project_tool_visible("systems.provision", contributor, "a")
 
 
 def test_project_tool_visible_is_per_project_not_connection_union() -> None:
-    # Operator on b, contributor on a: provisioning a's allocation must NOT be advertised,
-    # even though the connection-scoped tool_visible would admit it (the #862 bug class).
+    # Operator on b, contributor on a: an operator-only tool (images.upload) must NOT be
+    # advertised on a, even though the connection-scoped tool_visible would admit it (#862 bug).
     mixed = _ctx(roles={"a": Role.CONTRIBUTOR, "b": Role.OPERATOR})
-    assert tool_visible("systems.provision", mixed)  # connection union admits it
-    assert not project_tool_visible("systems.provision", mixed, "a")
-    assert project_tool_visible("systems.provision", mixed, "b")
+    assert tool_visible("images.upload", mixed)  # connection union admits it
+    assert not project_tool_visible("images.upload", mixed, "a")
+    assert project_tool_visible("images.upload", mixed, "b")
 
 
 def test_project_tool_visible_member_without_role_sees_only_public() -> None:
@@ -325,9 +332,11 @@ def test_project_tool_visible_platform_scope_uses_connection_grant() -> None:
 
 def test_visible_next_actions_filters_preserves_order_no_dedup() -> None:
     contributor = _ctx(roles={"a": Role.CONTRIBUTOR})
-    actions = ["allocations.get", "systems.provision", "allocations.release"]
+    # images.upload stays operator-only; systems.provision is now contributor (ADR-0326).
+    actions = ["allocations.get", "images.upload", "systems.provision", "allocations.release"]
     assert visible_next_actions(actions, contributor, "a") == [
         "allocations.get",
+        "systems.provision",
         "allocations.release",
     ]
     viewer = _ctx(roles={"a": Role.VIEWER})

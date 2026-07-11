@@ -414,9 +414,11 @@ def test_exposure_map_covers_every_registered_tool() -> None:
     assert required_scopes("control.force_crash") == frozenset({ExposureScope.PROJECT_ADMIN})
     assert required_scopes("systems.teardown") == frozenset({ExposureScope.PROJECT_ADMIN})
     assert required_scopes("ops.reconcile_now") == frozenset({ExposureScope.PLATFORM_OPERATOR})
-    # allocations.request drops to contributor (ADR-0234); systems.define stays operator.
+    # allocations.request (ADR-0234) and the provision lane (ADR-0326) are contributor;
+    # images.upload stays operator (shared cross-tenant catalog).
     assert required_scopes("allocations.request") == frozenset({ExposureScope.PROJECT_CONTRIBUTOR})
-    assert required_scopes("systems.define") == frozenset({ExposureScope.PROJECT_OPERATOR})
+    assert required_scopes("systems.define") == frozenset({ExposureScope.PROJECT_CONTRIBUTOR})
+    assert required_scopes("images.upload") == frozenset({ExposureScope.PROJECT_OPERATOR})
 
 
 # --- Canonical lifecycle prompts (ADR-0202) ---------------------------------------------

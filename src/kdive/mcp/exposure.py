@@ -112,7 +112,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "artifacts.list": _VIEWER,
     "artifacts.fetch_raw": _CONTRIBUTOR,  # raw vmcore/vmlinux egress, ADR-0243
     "artifacts.create_run_upload": _CONTRIBUTOR,
-    "artifacts.create_system_upload": _OPERATOR,
+    "artifacts.create_system_upload": _CONTRIBUTOR,  # define-lane leaseholder control (ADR-0326)
     # audit (dual: project admin or platform auditor)
     "audit.query": frozenset({ExposureScope.PROJECT_ADMIN, ExposureScope.PLATFORM_AUDITOR}),
     # control
@@ -170,8 +170,8 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "jobs.get": _VIEWER,
     "jobs.list": _VIEWER,
     "jobs.wait": _VIEWER,
-    "jobs.cancel": _CONTRIBUTOR,  # lowest bar: contributor cancels leaseholder-kind jobs; the
-    # handler keeps operator for the provision lane and destructive kinds
+    "jobs.cancel": _CONTRIBUTOR,  # lowest bar: contributor cancels leaseholder-kind jobs
+    # (incl. the provision lane, ADR-0326); the handler keeps operator for the destructive kinds
     # ops (platform)
     "ops.diagnostics": _PLAT_OP,
     "ops.export_cost_classes": _PLAT_OP,
@@ -216,10 +216,10 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     # systems
     "systems.get": _VIEWER,
     "systems.list": _VIEWER,
-    "systems.define": _OPERATOR,
-    "systems.provision": _OPERATOR,
-    "systems.provision_defined": _OPERATOR,
-    "systems.reprovision": _OPERATOR,
+    "systems.define": _CONTRIBUTOR,  # provision lane is leaseholder control (ADR-0326)
+    "systems.provision": _CONTRIBUTOR,
+    "systems.provision_defined": _CONTRIBUTOR,
+    "systems.reprovision": _CONTRIBUTOR,
     "systems.teardown": _ADMIN,
     "systems.ssh_info": _VIEWER,
     "systems.check_ssh_reachable": _VIEWER,
