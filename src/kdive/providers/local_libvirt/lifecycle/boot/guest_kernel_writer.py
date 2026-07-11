@@ -64,6 +64,7 @@ class _GuestFS(Protocol):  # pragma: no cover - live_vm (libguestfs binding surf
     def rm_rf(self, path: str) -> None: ...
     def tar_in(self, tarfile: str, directory: str, *, compress: str) -> None: ...
     def command(self, arguments: list[str]) -> str: ...
+    # Mirrors the libguestfs binding's integer truth value; call sites wrap it as bool.
     def is_file(self, path: str) -> int: ...
     def mkdir_p(self, path: str) -> None: ...
     def upload(self, filename: str, remotefilename: str) -> None: ...
@@ -131,7 +132,7 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
             raise _RealGuestKernelWriter._io_failure(
                 "extracting and indexing the kernel modules", overlay, exc
             ) from exc
-        if not guest.is_file(f"{version_dir}/modules.dep"):
+        if not _guest_path_is_file(guest, f"{version_dir}/modules.dep"):
             raise CategorizedError(
                 "module injection completed but modules.dep is absent after depmod",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -192,3 +193,7 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"overlay": overlay, "error": type(exc).__name__},
         )
+
+
+def _guest_path_is_file(guest: _GuestFS, path: str) -> bool:
+    return bool(guest.is_file(path))
