@@ -17,6 +17,7 @@ from kdive.inventory.reconcile.prune import (
     prune_or_cordon_removed_resource,
     prune_or_cordon_resource,
 )
+from kdive.inventory.reconcile.records import PruneOutcome
 
 _KIND = ResourceKind.LOCAL_LIBVIRT
 _LEASE = datetime(2026, 1, 1, tzinfo=UTC)
@@ -38,6 +39,21 @@ async def _insert_image(
         "VALUES ('local-libvirt', %s, 'x86_64', 'qcow2', '/dev/vda', 'public', "
         "'registered', %s, %s) RETURNING id",
         (name, f"images/{name}.qcow2", managed_by.value),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return row[0]
+
+
+async def _insert_remote_volume_image(
+    conn: psycopg.AsyncConnection, *, name: str, volume: str
+) -> UUID:
+    cur = await conn.execute(
+        "INSERT INTO image_catalog "
+        "(provider, name, arch, format, root_device, visibility, state, volume, managed_by) "
+        "VALUES ('remote-libvirt', %s, 'x86_64', 'qcow2', '/dev/vda', 'public', "
+        "'registered', %s, %s) RETURNING id",
+        (name, volume, ManagedBy.CONFIG.value),
     )
     row = await cur.fetchone()
     assert row is not None
@@ -89,6 +105,17 @@ async def _insert_non_terminal_system(
             }
         }
     }
+    await conn.execute(
+        "INSERT INTO systems (principal, project, allocation_id, state, provisioning_profile) "
+        "VALUES ('alice', 'proj', %s, %s, %s)",
+        (allocation_id, SystemState.READY.value, Jsonb(profile)),
+    )
+
+
+async def _insert_remote_volume_system(conn: psycopg.AsyncConnection, *, volume: str) -> None:
+    resource_id = await _insert_resource(conn, name=f"remote-system-host-{uuid4()}")
+    allocation_id = await _insert_allocation(conn, resource_id, AllocationState.ACTIVE)
+    profile = {"provider": {"remote-libvirt": {"base_image_volume": volume}}}
     await conn.execute(
         "INSERT INTO systems (principal, project, allocation_id, state, provisioning_profile) "
         "VALUES ('alice', 'proj', %s, %s, %s)",
@@ -151,6 +178,26 @@ def test_prune_image_cordons_when_live_system_references_it(migrated_url: str) -
 
             assert outcome.pruned is False
             assert outcome.cordoned is True
+            assert await _image_exists(conn, image_id) is True
+
+    asyncio.run(_run())
+
+
+def test_prune_image_cordons_when_live_remote_system_references_volume(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            volume = f"remote-base-{uuid4()}.qcow2"
+            image_id = await _insert_remote_volume_image(
+                conn,
+                name=f"remote-referenced-{uuid4()}",
+                volume=volume,
+            )
+            await _insert_remote_volume_system(conn, volume=volume)
+            outcome = await prune_or_cordon_image(conn, image_id)
+
+            assert outcome == PruneOutcome(pruned=False, cordoned=True)
             assert await _image_exists(conn, image_id) is True
 
     asyncio.run(_run())
