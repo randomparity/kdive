@@ -8,10 +8,9 @@ from kdive.security.secrets.redaction import (
     REDACTION,
     Redactor,
     SecretRedactionFilter,
-    process_global_redactor,
     redact_url_credentials,
 )
-from kdive.security.secrets.secret_registry import PROCESS_SECRET_REGISTRY, SecretRegistry
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 
 def test_redact_url_credentials_strips_userinfo() -> None:
@@ -88,29 +87,21 @@ def test_redactor_masks_a_secret_named_mapping_key() -> None:
     assert result == {"token": REDACTION, "api_key": REDACTION, "plain": "ok"}
 
 
-def test_process_global_redactor_seeds_from_process_global_registry() -> None:
-    scope = object()
-    PROCESS_SECRET_REGISTRY.register("process-global-sentinel-xyz", scope=scope)
-    try:
-        redactor = process_global_redactor()
-        assert redactor.redact_text("leak process-global-sentinel-xyz here") == (
-            f"leak {REDACTION} here"
-        )
-    finally:
-        PROCESS_SECRET_REGISTRY.release(scope)
+def test_redactor_seeds_only_from_the_explicit_registry() -> None:
+    source = SecretRegistry()
+    other = SecretRegistry()
+    source.register("explicit-registry-sentinel", scope=object())
+    other.register("other-registry-sentinel", scope=object())
 
+    redactor = Redactor(registry=source)
 
-def test_redactor_does_not_seed_from_process_global_registry() -> None:
-    scope = object()
-    PROCESS_SECRET_REGISTRY.register("ordinary-redactor-global-sentinel", scope=scope)
-    try:
-        redactor = Redactor(registry=SecretRegistry())
-        assert (
-            redactor.redact_text("leak ordinary-redactor-global-sentinel here")
-            == "leak ordinary-redactor-global-sentinel here"
-        )
-    finally:
-        PROCESS_SECRET_REGISTRY.release(scope)
+    assert redactor.redact_text("leak explicit-registry-sentinel here") == (
+        f"leak {REDACTION} here"
+    )
+    assert (
+        redactor.redact_text("leak other-registry-sentinel here")
+        == "leak other-registry-sentinel here"
+    )
 
 
 def test_redaction_filter_masks_newly_registered_value() -> None:

@@ -2,8 +2,7 @@
 
 Ported from the PoC ``kdive.safety.redaction``. Runtime code passes the app-owned
 ``SecretRegistry`` so ``Redactor`` and ``SecretRedactionFilter`` share the same
-source of registered values. Tests and small CLI helpers that intentionally use the
-process-global registry call :func:`process_global_redactor`.
+source of registered values.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from kdive.security.secrets.secret_registry import PROCESS_SECRET_REGISTRY, SecretRegistry
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 REDACTION = "[REDACTED]"
 
@@ -92,11 +91,6 @@ class Redactor:
         if isinstance(value, tuple):
             return tuple(self.redact_value(item) for item in value)
         return value
-
-
-def process_global_redactor(secret_values: list[str] | None = None) -> Redactor:
-    """Build a redactor from the process-global registry for tests and CLI helpers."""
-    return Redactor(secret_values, registry=PROCESS_SECRET_REGISTRY)
 
 
 class SecretRedactionFilter(logging.Filter):

@@ -326,8 +326,8 @@ Applied across every plane.
   HMC tokens never appear in requests, state rows, or responses. The service
   resolves references from a pluggable secret backend at the worker boundary;
   only `(present, source-ref)` is persisted. When a worker resolves a reference,
-  it **registers the resolved value into the redaction registry** (the ported
-  `PROCESS_SECRET_REGISTRY.register`) for the op's lifetime, so any transcript or
+  it **registers the resolved value into the process-owned redaction registry**
+  passed through runtime composition (ADR-0327) for the op's lifetime, so any transcript or
   console output capturing the value is masked by **exact-value replacement**, not
   merely by the redactor's secret-name patterns. Output captured before
   registration completes is quarantined (object-store, sensitive) until redacted.

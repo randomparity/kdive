@@ -9,7 +9,7 @@ import pytest
 
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.redaction import REDACTION, Redactor
-from kdive.security.secrets.secret_registry import PROCESS_SECRET_REGISTRY, SecretRegistry
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import (
     FileRefBackend,
     read_secret_file,
@@ -148,16 +148,17 @@ def test_file_exactly_at_the_size_cap_is_accepted(tmp_path: Path) -> None:
     assert backend.resolve(str(tmp_path / "at-cap")) == "x" * (64 * 1024)
 
 
-def test_backend_can_explicitly_register_into_process_global(tmp_path: Path) -> None:
+def test_backend_can_explicitly_register_into_supplied_registry(tmp_path: Path) -> None:
+    registry = SecretRegistry()
     scope = object()
-    _write(tmp_path, "key", "default-global-value\n")
-    backend = FileRefBackend(tmp_path, PROCESS_SECRET_REGISTRY, scope=scope)
-    try:
-        value = backend.resolve(str(tmp_path / "key"))
-        assert value in PROCESS_SECRET_REGISTRY.snapshot()
-    finally:
-        PROCESS_SECRET_REGISTRY.release(scope)
-    assert value not in PROCESS_SECRET_REGISTRY.snapshot()
+    _write(tmp_path, "key", "explicit-registry-value\n")
+    backend = FileRefBackend(tmp_path, registry, scope=scope)
+
+    value = backend.resolve(str(tmp_path / "key"))
+
+    assert value in registry.snapshot()
+    registry.release(scope)
+    assert value not in registry.snapshot()
 
 
 def test_scope_is_plumbed_through(tmp_path: Path) -> None:
