@@ -196,7 +196,6 @@ def reconciler_probe(
     build_worker_probe: Callable[..., HealthProbe],
     object_store_factory: Callable[[], object],
 ) -> HealthProbe:
-    """Build the reconciler readiness probe."""
     return build_worker_probe(
         postgres_ping=build_postgres_ping(pool), object_store_factory=object_store_factory
     )

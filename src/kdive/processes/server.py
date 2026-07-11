@@ -19,7 +19,6 @@ HTTP_KEEPALIVE_S = 65.0
 
 
 def server_uvicorn_config() -> dict[str, Any]:
-    """Return the extra uvicorn config the MCP server passes to ``run_async``."""
     return {"timeout_keep_alive": HTTP_KEEPALIVE_S}
 
 
