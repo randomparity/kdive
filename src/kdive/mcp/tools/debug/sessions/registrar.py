@@ -33,7 +33,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 if TYPE_CHECKING:
-    from kdive.mcp.tools.debug.operations import DebugRuntimeResolver
+    from kdive.mcp.tools.debug.operations.runtime import DebugRuntimeResolver
 
 
 class _DebugSessionsListPayload(ToolPayload):
@@ -91,7 +91,8 @@ def register(
     telemetry: DebugSessionTelemetry | None = None,
 ) -> None:
     """Register the ``debug.*`` tools on ``app``, bound to ``pool``."""
-    from kdive.mcp.tools.debug.operations import DebugRuntimeResolver, _register_debug_ops
+    from kdive.mcp.tools.debug.operations.registrar import _register_debug_ops
+    from kdive.mcp.tools.debug.operations.runtime import DebugRuntimeResolver
 
     runtime = DebugRuntimeResolver(resolver)
     handlers = DebugSessionHandlers.from_resolver(

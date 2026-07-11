@@ -22,9 +22,9 @@ import pytest
 from fastmcp import Client, FastMCP
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.mcp.tools.debug.operations.registrar as debug_ops_registrar
 from kdive.domain.capacity.state import SystemState
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.debug import operations as debug_ops
 from kdive.mcp.tools.debug import (
     sessions as debug_tools,
 )
@@ -235,7 +235,7 @@ async def _debug_client(
     ):
         monkeypatch.setattr(module, "current_context", _ctx)
     app: FastMCP = FastMCP(name="live-gdbmi-smoke")
-    debug_ops._register_debug_ops(app, pool, cast(Any, runtime_resolver))
+    debug_ops_registrar._register_debug_ops(app, pool, cast(Any, runtime_resolver))
     async with Client(app) as client:
         yield client
 

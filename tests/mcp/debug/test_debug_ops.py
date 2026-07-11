@@ -24,6 +24,8 @@ from fastmcp import Client, FastMCP
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.mcp.tools.debug.operations.registrar as debug_ops_registrar
+import kdive.mcp.tools.debug.operations.runtime as debug_runtime
 from kdive.db.repositories import ALLOCATIONS, DEBUG_SESSIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import (
@@ -37,7 +39,6 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.debug import operations as debug_ops
 from kdive.mcp.tools.debug import sessions as debug_tools
 from kdive.mcp.tools.debug.operations import (
     DebugEngineRuntime,
@@ -358,16 +359,16 @@ def test_op_audit_descriptor_covers_only_mutating_and_sensitive_ops() -> None:
         "debug.continue",
         "debug.interrupt",
         "debug.load_module_symbols",
-    } == debug_ops._AUDITED_OPS
-    assert debug_ops._op_audit("debug.read_memory", address="0x1", byte_count=4) == (
-        debug_ops._OpAudit(
+    } == debug_runtime._AUDITED_OPS
+    assert debug_runtime._op_audit("debug.read_memory", address="0x1", byte_count=4) == (
+        debug_runtime._OpAudit(
             tool="debug.read_memory",
             transition="read_memory",
             args={"address": "0x1", "byte_count": 4},
         )
     )
     for bounded in ("debug.backtrace", "debug.read_registers", "debug.resolve_symbol"):
-        assert debug_ops._op_audit(bounded) is None
+        assert debug_runtime._op_audit(bounded) is None
 
 
 async def _call_registered_debug_tool(
@@ -390,7 +391,9 @@ async def _call_registered_debug_tool(
     ):
         monkeypatch.setattr(module, "current_context", lambda: ctx)
     app: FastMCP = FastMCP(name="t")
-    debug_ops._register_debug_ops(app, pool, cast(Any, _FixedDebugRuntimeResolver(runtime)))
+    debug_ops_registrar._register_debug_ops(
+        app, pool, cast(Any, _FixedDebugRuntimeResolver(runtime))
+    )
     async with Client(app) as client:
         result = await client.call_tool(tool, arguments, raise_on_error=False)
     assert result.structured_content is not None
@@ -452,7 +455,7 @@ def test_read_memory_writes_audit_row(migrated_url: str) -> None:
                 session_id,
                 runtime,
                 _op_for("read_memory", runtime, session_id, address=0x1000, byte_count=4),
-                audit=debug_ops._op_audit("debug.read_memory", address="0x1000", byte_count=4),
+                audit=debug_runtime._op_audit("debug.read_memory", address="0x1000", byte_count=4),
             )
             rows = await _audit_rows(pool, session_id)
         assert len(rows) == 1
@@ -481,7 +484,7 @@ def test_non_audited_op_writes_no_audit_row(migrated_url: str) -> None:
                 session_id,
                 runtime,
                 _op_for("read_registers", runtime, session_id, registers=["rip"]),
-                audit=debug_ops._op_audit("debug.read_registers"),
+                audit=debug_runtime._op_audit("debug.read_registers"),
             )
             rows = await _audit_rows(pool, session_id)
         assert rows == []
@@ -502,7 +505,7 @@ def test_gate_failure_writes_no_audit_row(migrated_url: str) -> None:
                 session_id,
                 runtime,
                 _op_for("read_memory", runtime, session_id, address=0x1000, byte_count=4),
-                audit=debug_ops._op_audit("debug.read_memory", address="0x1000", byte_count=4),
+                audit=debug_runtime._op_audit("debug.read_memory", address="0x1000", byte_count=4),
             )
             rows = await _audit_rows(pool, session_id)
         assert resp.status == "error"
@@ -1164,7 +1167,7 @@ def test_attach_runs_once_for_concurrent_ops(migrated_url: str) -> None:
 
 
 def test_provider_debug_runtime_cache_uses_binding_cache_key() -> None:
-    resolver = debug_ops.DebugRuntimeResolver(cast(ProviderResolver, object()))
+    resolver = debug_runtime.DebugRuntimeResolver(cast(ProviderResolver, object()))
     first_attach = _CountingAttach()
     first_provider = cast(
         ProviderRuntime,
@@ -1190,7 +1193,7 @@ def test_provider_debug_runtime_cache_uses_binding_cache_key() -> None:
 
 
 def test_provider_debug_runtime_cache_separates_resource_names() -> None:
-    resolver = debug_ops.DebugRuntimeResolver(cast(ProviderResolver, object()))
+    resolver = debug_runtime.DebugRuntimeResolver(cast(ProviderResolver, object()))
     first_provider = cast(
         ProviderRuntime,
         SimpleNamespace(
@@ -1225,7 +1228,7 @@ def test_provider_debug_runtime_cache_separates_resource_names() -> None:
 
 
 def test_provider_debug_runtime_fails_when_debug_capability_absent() -> None:
-    resolver = debug_ops.DebugRuntimeResolver(cast(ProviderResolver, object()))
+    resolver = debug_runtime.DebugRuntimeResolver(cast(ProviderResolver, object()))
     provider = cast(ProviderRuntime, SimpleNamespace(debug=None))
 
     response = resolver.runtime_for_binding(

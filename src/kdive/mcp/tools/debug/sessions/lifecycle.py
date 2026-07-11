@@ -67,7 +67,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
 
 if TYPE_CHECKING:
-    from kdive.mcp.tools.debug.operations import DebugEngineRuntime, DebugRuntimeResolver
+    from kdive.mcp.tools.debug.operations.runtime import DebugEngineRuntime, DebugRuntimeResolver
 
 _GDBSTUB = "gdbstub"
 _DRGN_LIVE = "drgn-live"

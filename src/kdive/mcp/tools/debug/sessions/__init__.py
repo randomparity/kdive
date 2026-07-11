@@ -18,7 +18,7 @@ from kdive.mcp.tools.debug.sessions.registrar import (
 from kdive.mcp.tools.debug.sessions.registrar import register
 
 if TYPE_CHECKING:
-    from kdive.mcp.tools.debug.operations import DebugRuntimeResolver
+    from kdive.mcp.tools.debug.operations.runtime import DebugRuntimeResolver
     from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
     from kdive.providers.core.resolver import ProviderResolver
     from kdive.security.secrets.secret_registry import SecretRegistry
