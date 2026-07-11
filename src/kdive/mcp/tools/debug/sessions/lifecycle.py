@@ -18,7 +18,6 @@ insert, and a lost race closes the just-opened transport (ADR-0032 §6a). The
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,14 +25,12 @@ from typing import TYPE_CHECKING, Any, LiteralString, cast
 from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection
-from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import DEBUG_SESSIONS, RUNS, SYSTEMS
-from kdive.domain.capacity.state import DebugSessionState, RunState, SystemState
+from kdive.db.repositories import RUNS, SYSTEMS
+from kdive.domain.capacity.state import RunState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle.records import DebugSession, Run, System
+from kdive.domain.lifecycle.records import Run, System
 from kdive.domain.lifecycle.run_steps import RUN_STEP_SUCCEEDED
 from kdive.kernel_config.gate import debuginfo_warning
 from kdive.log import bind_context
@@ -60,18 +57,17 @@ from kdive.providers.ports.lifecycle import (
     Connector,
     DebugTransportKind,
 )
-from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
+from kdive.services.debug import lifecycle as debug_lifecycle
 
 if TYPE_CHECKING:
     from kdive.mcp.tools.debug.operations.runtime import DebugEngineRuntime, DebugRuntimeResolver
 
 _GDBSTUB = "gdbstub"
 _DRGN_LIVE = "drgn-live"
-_log = logging.getLogger("kdive.mcp.tools.debug.sessions")
 # An attach failure maps these provider categories onto the response envelope. A
 # MISSING_DEPENDENCY (no live_vm host / unresolvable endpoint) surfaces as an attach failure:
 # the agent cannot attach either way.
@@ -86,19 +82,6 @@ _BOOT_FIRST_DETAIL = "run has no successful boot; boot it before starting a live
 _CRASHED_HALTED_LIVE_DRGN_DETAIL = (
     "run crashed during early boot and is halted with a live gdbstub; attach over gdbstub. "
     "drgn-live needs a running in-guest sshd, which a halted crash does not have"
-)
-
-# A live/attach session occupies the System's single endpoint **for that transport kind**
-# (single-attach per transport, ADR-0039 §4): a gdbstub and a drgn-live session may coexist on
-# one System, but a second attach over the same transport is `transport_conflict`.
-_OCCUPIED_SQL: LiteralString = (
-    "SELECT 1 FROM debug_sessions s "
-    "JOIN runs r ON r.id = s.run_id "
-    "WHERE r.system_id = %s AND s.transport = %s AND s.state = ANY(%s) LIMIT 1"
-)
-_OCCUPIED_STATES: tuple[str, ...] = (
-    DebugSessionState.ATTACH.value,
-    DebugSessionState.LIVE.value,
 )
 
 
@@ -202,9 +185,7 @@ async def _succeeded_boot_result(conn: AsyncConnection, run_id: UUID) -> dict[st
 async def _system_occupied(
     conn: AsyncConnection, system_id: UUID, transport: DebugTransportKind
 ) -> bool:
-    async with conn.cursor() as cur:
-        await cur.execute(_OCCUPIED_SQL, (system_id, transport, list(_OCCUPIED_STATES)))
-        return await cur.fetchone() is not None
+    return await debug_lifecycle.system_occupied(conn, system_id, transport)
 
 
 async def _open_transport(
@@ -550,74 +531,21 @@ async def _insert_session_locked(
     request: _AttachRequest,
     handle: TransportHandle,
 ) -> ToolResponse:
-    """Re-check conflict + ready under the per-System lock, then insert + drive `-> live`.
-
-    A lost race (System crashed, or another attach committed first) closes the just-opened
-    transport and returns the categorized error — no `live` row escapes the lock. The
-    conflict re-check is scoped to ``transport`` (per-transport single-attach, ADR-0039 §4).
-    """
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, request.system.id):
-        current = await SYSTEMS.get(conn, request.system.id)
-        if current is None or current.state is not SystemState.READY:
-            await _close(request.connector, str(handle))
-            status = current.state.value if current else "torn_down"
-            return _config_error(str(request.run.id), data={"current_status": status})
-        if await _system_occupied(conn, request.system.id, request.transport):
-            await _close(request.connector, str(handle))
-            return ToolResponse.failure(str(request.run.id), ErrorCategory.TRANSPORT_CONFLICT)
-        now = datetime.now(UTC)  # placeholder; the DB owns created_at/updated_at
-        session = await DEBUG_SESSIONS.insert(
-            conn,
-            DebugSession(
-                id=request.session_id,
-                created_at=now,
-                updated_at=now,
-                principal=ctx.principal,
-                agent_session=ctx.agent_session,
-                project=request.run.project,
-                run_id=request.run.id,
-                state=DebugSessionState.ATTACH,
-                transport=request.transport,
-                transport_handle=str(handle),
-                worker_heartbeat_at=now,
-            ),
-        )
-        await audit.record(
-            conn,
-            ctx,
-            audit.AuditEvent(
-                tool="debug.start_session",
-                object_kind="debug_sessions",
-                object_id=session.id,
-                transition="->attach",
-                args={"run_id": str(request.run.id)},
-                project=request.run.project,
-            ),
-        )
-        await DEBUG_SESSIONS.update_state(conn, session.id, DebugSessionState.LIVE)
-        await audit.record(
-            conn,
-            ctx,
-            audit.AuditEvent(
-                tool="debug.start_session",
-                object_kind="debug_sessions",
-                object_id=session.id,
-                transition="attach->live",
-                args={"run_id": str(request.run.id)},
-                project=request.run.project,
-            ),
-        )
-    data: dict[str, JsonValue] = {"project": request.run.project}
-    actions = ["debug.end_session"]
-    if request.missing_debuginfo is not None:
-        data["missing_debuginfo"] = request.missing_debuginfo
-        actions = ["artifacts.feature_config_requirements", "debug.end_session"]
-    return ToolResponse.success(
-        str(session.id),
-        "live",
-        suggested_next_actions=actions,
-        data=data,
+    """Persist an admitted session and render the transport-neutral service result."""
+    result = await debug_lifecycle.insert_session_locked(
+        conn,
+        ctx,
+        debug_lifecycle.AttachRequest(
+            run=request.run,
+            system=request.system,
+            session_id=request.session_id,
+            transport=request.transport,
+            connector=request.connector,
+            missing_debuginfo=request.missing_debuginfo,
+        ),
+        handle,
     )
+    return _render_attach_result(result)
 
 
 async def _detach_locked(
@@ -627,54 +555,49 @@ async def _detach_locked(
     system_id: UUID,
     connector: Connector,
 ) -> ToolResponse:
-    select_q: LiteralString = (
-        "SELECT state, transport_handle, project FROM debug_sessions WHERE id = %s FOR UPDATE"
-    )
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        async with conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(select_q, (session_id,))
-            row = await cur.fetchone()
-        if row is None:
-            return _config_error(str(session_id))
-        try:
-            state = DebugSessionState(row["state"])
-        except ValueError as exc:
-            raise CategorizedError(
-                f"debug session has an unrecognized state {row['state']!r}",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"session_id": str(session_id)},
-            ) from exc
-        if state is DebugSessionState.DETACHED:
-            return _detached_envelope(session_id, row["project"])
-        await _close(connector, row["transport_handle"])
-        await DEBUG_SESSIONS.update_state(conn, session_id, DebugSessionState.DETACHED)
-        await audit.record(
-            conn,
-            ctx,
-            audit.AuditEvent(
-                tool="debug.end_session",
-                object_kind="debug_sessions",
-                object_id=session_id,
-                transition=f"{row['state']}->detached",
-                args={"session_id": str(session_id)},
-                project=row["project"],
-            ),
-        )
-    return _detached_envelope(session_id, row["project"])
+    result = await debug_lifecycle.detach_locked(conn, ctx, session_id, system_id, connector)
+    return _render_detach_result(result)
 
 
 async def _close(connector: Connector, handle: str | None) -> None:
     """Close the transport best-effort; a missing/failing close never blocks the detach."""
-    if handle is None:
-        return
-    try:
-        await asyncio.to_thread(connector.close_transport, TransportHandle(handle))
-    except Exception:
-        _log.warning(
-            "debug transport close failed; continuing detach",
-            extra={"handle": handle},
-            exc_info=True,
-        )
+    await debug_lifecycle.close_transport(connector, handle)
+
+
+def _render_attach_result(
+    result: debug_lifecycle.AttachAdmitted | debug_lifecycle.DebugSessionRejected,
+) -> ToolResponse:
+    if isinstance(result, debug_lifecycle.DebugSessionRejected):
+        return _render_rejection(result)
+    data: dict[str, JsonValue] = {"project": result.project}
+    actions = ["debug.end_session"]
+    if result.missing_debuginfo is not None:
+        data["missing_debuginfo"] = result.missing_debuginfo
+        actions = ["artifacts.feature_config_requirements", "debug.end_session"]
+    return ToolResponse.success(
+        str(result.session_id),
+        "live",
+        suggested_next_actions=actions,
+        data=data,
+    )
+
+
+def _render_detach_result(
+    result: debug_lifecycle.DetachedSession | debug_lifecycle.DebugSessionRejected,
+) -> ToolResponse:
+    if isinstance(result, debug_lifecycle.DebugSessionRejected):
+        return _render_rejection(result)
+    return _detached_envelope(result.session_id, result.project)
+
+
+def _render_rejection(result: debug_lifecycle.DebugSessionRejected) -> ToolResponse:
+    return ToolResponse.failure(
+        result.object_id,
+        result.category,
+        detail=result.detail,
+        suggested_next_actions=result.suggested_next_actions,
+        data=result.data,
+    )
 
 
 def _detached_envelope(session_id: UUID, project: str) -> ToolResponse:
