@@ -116,7 +116,7 @@ The RBAC matrix (`docs/guide/safety-and-rbac.md`) is generated from `exposure.py
 **Files:**
 - Modify: `src/kdive/mcp/exposure.py` (L115, L219-222: `_OPERATOR → _CONTRIBUTOR`; stale jobs.cancel comment L173-174)
 - Modify (generated + hand-written): `docs/guide/safety-and-rbac.md`
-- Test: `tests/mcp/core/test_exposure.py`
+- Test: `tests/mcp/core/test_exposure.py`, `tests/mcp/core/test_app.py:417-419` (spot-pin of `systems.define == PROJECT_OPERATOR`)
 
 **Interfaces:**
 - Produces: `required_scopes(<each of the five tools>) == {PROJECT_CONTRIBUTOR}`.
@@ -126,10 +126,11 @@ The RBAC matrix (`docs/guide/safety-and-rbac.md`) is generated from `exposure.py
   - Rewrite `test_create_system_upload_stays_operator_but_run_upload_drops`: both upload kinds now `PROJECT_CONTRIBUTOR`; rename it.
   - Rewrite `test_project_tool_visible_honours_role_on_the_named_project`: `project_tool_visible("systems.provision", contributor, "a")` is now True; use a still-operator tool (e.g. `images.upload`) to prove the per-project gate still discriminates.
   - Fix `test_project_tool_visible_is_per_project_not_connection_union` (uses provision) for contributor semantics.
+  - `test_app.py:417-419`: the spot-pin `required_scopes("systems.define") == {PROJECT_OPERATOR}` (comment "systems.define stays operator") must become `PROJECT_CONTRIBUTOR`, or repoint the spot-pin to a still-operator tool (`images.upload`); fix the L417 comment. `control.force_crash`/`systems.teardown`/`ops.reconcile_now` pins above it stay.
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/mcp/core/test_exposure.py -q`
+Run: `uv run python -m pytest tests/mcp/core/test_exposure.py tests/mcp/core/test_app.py -q`
 Expected: FAIL.
 
 - [ ] **Step 3: Flip the exposure constants + fix the comment** — `exposure.py`: `_OPERATOR → _CONTRIBUTOR` for `artifacts.create_system_upload` (L115), `systems.define` (L219), `systems.provision` (L220), `systems.provision_defined` (L221), `systems.reprovision` (L222). Leave `systems.provision` in `CORE_TOOLS`. Update the jobs.cancel comment at L173-174 — the handler no longer "keeps operator for the provision lane"; it keeps operator only for the remaining destructive/platform kinds.
@@ -140,13 +141,13 @@ Expected: FAIL.
 
 - [ ] **Step 5: Run to verify pass (incl. the in-sync gate)**
 
-Run: `uv run python -m pytest tests/mcp/core/test_exposure.py tests/scripts/test_gen_rbac_tool_matrix.py -q && just rbac-matrix-check`
+Run: `uv run python -m pytest tests/mcp/core/test_exposure.py tests/mcp/core/test_app.py tests/scripts/test_gen_rbac_tool_matrix.py -q && just rbac-matrix-check`
 Expected: PASS, in sync.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/kdive/mcp/exposure.py tests/mcp/core/test_exposure.py docs/guide/safety-and-rbac.md
+git add src/kdive/mcp/exposure.py tests/mcp/core/test_exposure.py tests/mcp/core/test_app.py docs/guide/safety-and-rbac.md
 git commit -m "feat(security): expose provision lane + reprovision to contributor (#1081)"
 ```
 
