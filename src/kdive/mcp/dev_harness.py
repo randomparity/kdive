@@ -19,7 +19,6 @@ This module imports no pytest symbols so it stays importable as a plain library.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping, Sequence
 from typing import Self
 
@@ -27,6 +26,7 @@ from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.server.auth.providers.jwt import RSAKeyPair
 
+import kdive.config as config
 from kdive.cli.login import (
     _DEFAULT_AUDIENCE,
     _DEFAULT_CLIENT_ID,
@@ -35,10 +35,12 @@ from kdive.cli.login import (
     _build_claims,
     _exchange_code,
 )
+from kdive.config.core_settings import OIDC_AUDIENCE, OIDC_ISSUER
 from kdive.mcp.responses import ToolResponse
 
 ISSUER = "https://idp.test.kdive"
 AUDIENCE = _DEFAULT_AUDIENCE
+OIDC_CLIENT_ID_ENV = "KDIVE_OIDC_CLIENT_ID"
 
 __all__ = [
     "AUDIENCE",
@@ -83,19 +85,18 @@ def _tool_error_text(result: object) -> str:
 
 
 def oidc_issuer_from_env() -> OidcIssuer:
-    """Resolve the mock-OIDC issuer from ``KDIVE_OIDC_*`` (test seam; raw env is allowed here).
+    """Resolve the mock-OIDC issuer from the config snapshot.
 
-    The CLI resolves the issuer through ``kdive.config`` (``OidcIssuer.from_config``); this
-    test-side reader keeps the original raw-env behaviour, including the test-only
-    ``KDIVE_OIDC_CLIENT_ID`` override that is not a server setting.
+    This keeps the test-side reader aligned with the CLI's ``kdive.config`` path while still
+    honoring the test-only ``KDIVE_OIDC_CLIENT_ID`` override catalogued as external env.
     """
-    base_url = os.environ.get("KDIVE_OIDC_ISSUER")
+    base_url = config.get(OIDC_ISSUER)
     if not base_url:
         raise RuntimeError("KDIVE_OIDC_ISSUER is not set; cannot reach the mock-OIDC issuer")
     return OidcIssuer(
         base_url=base_url,
-        audience=os.environ.get("KDIVE_OIDC_AUDIENCE", _DEFAULT_AUDIENCE),
-        client_id=os.environ.get("KDIVE_OIDC_CLIENT_ID", _DEFAULT_CLIENT_ID),
+        audience=config.get(OIDC_AUDIENCE) or _DEFAULT_AUDIENCE,
+        client_id=config.env_snapshot().get(OIDC_CLIENT_ID_ENV, _DEFAULT_CLIENT_ID),
     )
 
 
