@@ -1,4 +1,4 @@
-"""Application-facing artifact read-model helpers."""
+"""Artifact read-model helpers shared by services, MCP, workers, and feature packages."""
 
 from __future__ import annotations
 

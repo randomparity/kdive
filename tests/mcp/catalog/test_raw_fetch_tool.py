@@ -17,13 +17,13 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.read_model import run_fetch_context, system_project
 from kdive.artifacts.storage import HeadResult
 from kdive.mcp.assembly.app import build_app
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.catalog.artifacts.raw_fetch import RawAsset, fetch_raw
 from kdive.security.authz.rbac import Role, RoleDenied
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.artifacts.read_model import run_fetch_context, system_project
 from tests.integration._seed import seed_unbound_running_run
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair

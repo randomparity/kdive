@@ -14,6 +14,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
+from kdive.artifacts.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
 from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
 from kdive.artifacts.uploads import (
     MAX_PART_BYTES,
@@ -42,7 +43,6 @@ from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.serialization import JsonValue
-from kdive.services.artifacts.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
 from kdive.store.objectstore import (
     artifact_key,
     chunk_key,

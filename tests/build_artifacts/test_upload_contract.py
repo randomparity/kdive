@@ -12,6 +12,7 @@ import json
 
 import pytest
 
+from kdive.artifacts.read_model import RUN_ARTIFACT_NAMES
 from kdive.artifacts.storage import HeadResult
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts import validation
@@ -22,7 +23,6 @@ from kdive.build_artifacts.validation import (
     validate_external_artifacts,
 )
 from kdive.domain.errors import CategorizedError
-from kdive.services.artifacts.read_model import RUN_ARTIFACT_NAMES
 
 
 class _UntouchedStore:

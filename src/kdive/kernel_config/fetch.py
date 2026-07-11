@@ -17,8 +17,8 @@ from uuid import UUID
 import psycopg
 from psycopg import AsyncConnection
 
+from kdive.artifacts.read_model import effective_config_key
 from kdive.artifacts.storage import FetchedArtifact
-from kdive.db.artifact_queries import effective_config_key
 from kdive.domain.errors import CategorizedError
 from kdive.kernel_config.parse import KernelConfig, parse_kernel_config
 from kdive.store.objectstore import object_store_from_env
