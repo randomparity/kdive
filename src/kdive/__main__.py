@@ -353,7 +353,9 @@ async def _run_server(
             )
         )
 
-    async def run(pool: AsyncConnectionPool, heartbeat: Heartbeat, probe: HealthProbe) -> None:
+    async def serve_mcp(
+        pool: AsyncConnectionPool, heartbeat: Heartbeat, probe: HealthProbe
+    ) -> None:
         del heartbeat, probe
         app = build_app(pool, secret_registry=secret_registry)
         await app.run_async(
@@ -367,7 +369,7 @@ async def _run_server(
         telemetry=telemetry,
         heartbeat_stale_after=_HEARTBEAT_STALE_SECONDS,
         probe_builder=build_probe,
-        body=run,
+        body=serve_mcp,
         tick_heartbeat=True,
     )
 
@@ -464,7 +466,9 @@ async def _run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> 
             postgres_ping=build_postgres_ping(pool), object_store_factory=object_store_from_env
         )
 
-    async def run(pool: AsyncConnectionPool, heartbeat: Heartbeat, probe: HealthProbe) -> None:
+    async def run_worker_body(
+        pool: AsyncConnectionPool, heartbeat: Heartbeat, probe: HealthProbe
+    ) -> None:
         worker = Worker(
             pool,
             build_handler_registry(secret_registry=secret_registry),
@@ -488,7 +492,7 @@ async def _run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> 
         telemetry=telemetry,
         heartbeat_stale_after=_HEARTBEAT_STALE_SECONDS,
         probe_builder=build_probe,
-        body=run,
+        body=run_worker_body,
     )
 
 
@@ -510,7 +514,9 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
             pool, build_postgres_ping, build_worker_probe, object_store_from_env
         )
 
-    async def run(pool: AsyncConnectionPool, heartbeat: Heartbeat, probe: HealthProbe) -> None:
+    async def run_reconciler_process(
+        pool: AsyncConnectionPool, heartbeat: Heartbeat, probe: HealthProbe
+    ) -> None:
         del probe
         await _run_reconciler_body(pool, heartbeat, stop, secret_registry, telemetry)
 
@@ -521,7 +527,7 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
         telemetry=telemetry,
         heartbeat_stale_after=_RECONCILER_HEARTBEAT_STALE_SECONDS,
         probe_builder=build_probe,
-        body=run,
+        body=run_reconciler_process,
     )
 
 
