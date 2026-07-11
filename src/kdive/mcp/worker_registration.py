@@ -10,8 +10,11 @@ from psycopg import AsyncConnection
 
 from kdive.domain.errors import CategorizedError
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.handlers import console_rotate, control, image_build, systems, vmcore
-from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
+from kdive.jobs.handlers import image_build, systems
+from kdive.jobs.handlers.artifacts import vmcore
+from kdive.jobs.handlers.console import console_rotate
+from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
+from kdive.jobs.handlers.control import control
 from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.models import HandlerRegistry, JobHandler
 from kdive.providers.core.resolver import ProviderResolver
@@ -79,7 +82,7 @@ def _register_diagnostic_sysrq_handler(
     registry: HandlerRegistry,
     assembly: WorkerHandlerAssembly,
 ) -> None:
-    from kdive.jobs.handlers import diagnostic_sysrq
+    from kdive.jobs.handlers.control import diagnostic_sysrq
 
     diagnostic_sysrq.register_handlers(
         registry,

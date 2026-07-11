@@ -26,7 +26,7 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.handlers import diagnostic_sysrq
+from kdive.jobs.handlers.control import diagnostic_sysrq
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore

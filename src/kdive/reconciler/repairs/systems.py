@@ -14,7 +14,7 @@ from kdive.domain.capacity.state import AllocationState, JobState, SystemState
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers.control import detach_audit_event, detach_system_debug_sessions
+from kdive.jobs.handlers.control.control import detach_audit_event, detach_system_debug_sessions
 from kdive.jobs.payloads import SystemPayload
 from kdive.reconciler.repairs.allocations import SYSTEM_RECONCILER_PRINCIPAL
 from kdive.security import audit

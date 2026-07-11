@@ -34,7 +34,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigation, Run, System
 from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.jobs import queue
-from kdive.jobs.handlers import control as control_plane
+from kdive.jobs.handlers.control import control as control_plane
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PowerPayload, SystemPayload
 from kdive.mcp.auth import RequestContext

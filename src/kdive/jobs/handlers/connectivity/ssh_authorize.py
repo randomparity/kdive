@@ -17,8 +17,8 @@ from psycopg import AsyncConnection
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
-from kdive.jobs.handlers.console_evidence import redacted_console_tail
-from kdive.jobs.handlers.ssh_reachable import ProbeFn, _real_probe
+from kdive.jobs.handlers.connectivity.ssh_reachable import ProbeFn, _real_probe
+from kdive.jobs.handlers.console.console_evidence import redacted_console_tail
 from kdive.jobs.payloads import AuthorizeSshKeyPayload, load_payload
 from kdive.prereqs.system_bootstrap_key import (
     load_system_bootstrap_private_key,

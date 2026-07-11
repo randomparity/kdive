@@ -15,8 +15,8 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind, JobState
-from kdive.jobs.handlers import ssh_reachable
-from kdive.jobs.handlers.ssh_reachable import (
+from kdive.jobs.handlers.connectivity import ssh_reachable
+from kdive.jobs.handlers.connectivity.ssh_reachable import (
     _DETAIL_FAILED_LAYER,
     ReachResult,
     _real_probe,

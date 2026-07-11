@@ -24,8 +24,8 @@ from kdive.domain.lifecycle.records import System
 from kdive.domain.lifecycle.rules import TERMINAL_SYSTEM_STATES
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
-from kdive.jobs.handlers.ssh_authorize import authorize_ssh_key_handler
-from kdive.jobs.handlers.ssh_reachable import check_ssh_reachable_handler
+from kdive.jobs.handlers.connectivity.ssh_authorize import authorize_ssh_key_handler
+from kdive.jobs.handlers.connectivity.ssh_reachable import check_ssh_reachable_handler
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReprovisionPayload, SystemPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind

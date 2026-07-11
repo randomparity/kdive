@@ -20,8 +20,8 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers import vmcore as vmcore_plane
-from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
+from kdive.jobs.handlers.artifacts import vmcore as vmcore_plane
+from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
 from kdive.mcp.auth import RequestContext

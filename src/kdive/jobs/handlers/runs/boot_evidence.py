@@ -22,7 +22,7 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.crash_signatures import CONSOLE_CRASH_KINDS
 from kdive.domain.lifecycle.records import Run
-from kdive.jobs.handlers.console_evidence import read_redacted_console
+from kdive.jobs.handlers.console.console_evidence import read_redacted_console
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.ports.console import ConsoleSnapshotter

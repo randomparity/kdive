@@ -4,7 +4,7 @@
 ADR-0320) admits only a ``READY`` System — a ``CRASHING`` (mid-force_crash) or ``CRASHED``
 System holds crash evidence and is refused. `control.force_crash` (two-check gated, admin)
 admits synchronously and enqueues a durable job. Worker-owned execution lives in
-``kdive.jobs.handlers.control``; `power` moves no System state (a domain restart is not a
+``kdive.jobs.handlers.control.control``; `power` moves no System state (a domain restart is not a
 reprovision), while `force_crash` drives System ``ready -> crashing -> crashed`` (the
 ``crashing`` marker is set before the physical NMI so power cannot race it, ADR-0325) and every
 non-terminal DebugSession of the System ``-> detached`` (joined through ``runs``).

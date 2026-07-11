@@ -30,7 +30,7 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.handlers import console_rotate
+from kdive.jobs.handlers.console import console_rotate
 from kdive.providers.console_parts.rotation import RotationState, rotate
 from kdive.providers.console_parts.sidecar import read_sidecar
 from kdive.security.secrets.secret_registry import SecretRegistry

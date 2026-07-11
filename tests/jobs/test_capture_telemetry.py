@@ -7,7 +7,7 @@ from typing import Any
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
-from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
+from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
 
 
 def _points(reader: InMemoryMetricReader, name: str) -> list[Any]:

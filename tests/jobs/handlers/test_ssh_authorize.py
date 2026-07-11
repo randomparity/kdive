@@ -18,14 +18,14 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind, JobState
 from kdive.jobs import worker
-from kdive.jobs.handlers import ssh_authorize
-from kdive.jobs.handlers.ssh_authorize import (
+from kdive.jobs.handlers.connectivity import ssh_authorize
+from kdive.jobs.handlers.connectivity.ssh_authorize import (
     _attach_console_tail,
     _raise_on_authorize_failure,
     authorize_ssh_key_handler,
     build_authorize_argv,
 )
-from kdive.jobs.handlers.ssh_reachable import ReachResult
+from kdive.jobs.handlers.connectivity.ssh_reachable import ReachResult
 from kdive.prereqs.system_bootstrap_key import ensure_system_bootstrap_key
 from kdive.security.secrets.secret_registry import SecretRegistry
 
