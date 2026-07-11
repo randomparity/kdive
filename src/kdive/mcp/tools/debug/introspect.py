@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import math
-from collections.abc import Awaitable, Callable
 from typing import Annotated, NamedTuple, cast
 from uuid import UUID
 
@@ -167,9 +166,12 @@ class LiveDrgnSession(NamedTuple):
     missing_debuginfo: dict[str, JsonValue] | None = None
 
 
-type _LiveIntrospectionAction = Callable[
-    [LiveDrgnSession, ProviderRuntime, str], Awaitable[ToolResponse]
-]
+class LiveDrgnContext(NamedTuple):
+    """Resolved live drgn inputs after session/runtime/key gating."""
+
+    session: LiveDrgnSession
+    runtime: ProviderRuntime
+    private_key: str
 
 
 async def resolve_live_drgn_session(
@@ -207,7 +209,7 @@ async def resolve_live_drgn_session(
     )
 
 
-async def _with_live_introspection(
+async def _resolve_live_introspection_context(
     *,
     pool: AsyncConnectionPool,
     resolver: ProviderResolver,
@@ -215,8 +217,7 @@ async def _with_live_introspection(
     session_id: str,
     mode: IntrospectionMode,
     secret_registry: SecretRegistry,
-    action: _LiveIntrospectionAction,
-) -> ToolResponse:
+) -> LiveDrgnContext | ToolResponse:
     async with pool.connection() as conn:
         try:
             resolved = await resolve_live_drgn_session(conn, ctx, session_id)
@@ -237,7 +238,7 @@ async def _with_live_introspection(
             resolved = resolved._replace(missing_debuginfo=warning)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(session_id, exc)
-    return await action(resolved, runtime, private_key)
+    return LiveDrgnContext(resolved, runtime, private_key)
 
 
 def _session_config_error() -> CategorizedError:
@@ -278,26 +279,22 @@ async def introspect_run(
     importing drgn.
     """
     with bind_context(principal=ctx.principal):
-
-        async def _run_live_helper(
-            resolved: LiveDrgnSession, runtime: ProviderRuntime, private_key: str
-        ) -> ToolResponse:
-            return await _introspect_live_session(
-                session_id,
-                resolved=resolved,
-                helper=helper,
-                introspector=runtime.live_introspector,
-                private_key=private_key,
-            )
-
-        return await _with_live_introspection(
+        resolved = await _resolve_live_introspection_context(
             pool=pool,
             resolver=resolver,
             ctx=ctx,
             session_id=session_id,
             mode=_LIVE_INTROSPECTION,
             secret_registry=secret_registry,
-            action=_run_live_helper,
+        )
+        if isinstance(resolved, ToolResponse):
+            return resolved
+        return await _introspect_live_session(
+            session_id,
+            resolved=resolved.session,
+            helper=helper,
+            introspector=resolved.runtime.live_introspector,
+            private_key=resolved.private_key,
         )
 
 
@@ -361,31 +358,27 @@ async def introspect_script(
     ``missing_dependency`` instead of importing drgn (ADR-0240).
     """
     with bind_context(principal=ctx.principal):
-
-        async def _run_live_script_callback(
-            resolved: LiveDrgnSession, runtime: ProviderRuntime, private_key: str
-        ) -> ToolResponse:
-            resp = await _run_live_script(
-                session_id,
-                resolved=resolved,
-                script=script,
-                timeout_sec=timeout_sec,
-                introspector=runtime.live_introspector,
-                private_key=private_key,
-            )
-            if resp.error_category is None:
-                await _audit_introspect_script(pool, ctx, resolved, script)
-            return resp
-
-        return await _with_live_introspection(
+        resolved = await _resolve_live_introspection_context(
             pool=pool,
             resolver=resolver,
             ctx=ctx,
             session_id=session_id,
             mode=_LIVE_SCRIPT,
             secret_registry=secret_registry,
-            action=_run_live_script_callback,
         )
+        if isinstance(resolved, ToolResponse):
+            return resolved
+        resp = await _run_live_script(
+            session_id,
+            resolved=resolved.session,
+            script=script,
+            timeout_sec=timeout_sec,
+            introspector=resolved.runtime.live_introspector,
+            private_key=resolved.private_key,
+        )
+        if resp.error_category is None:
+            await _audit_introspect_script(pool, ctx, resolved.session, script)
+        return resp
 
 
 async def _audit_introspect_script(
