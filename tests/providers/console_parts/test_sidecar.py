@@ -8,10 +8,14 @@ store-layer tests do.
 
 from __future__ import annotations
 
+import logging
 from uuid import uuid4
 
 import pytest
 
+from kdive.artifacts.storage import ArtifactWriteRequest, FetchedArtifact, StoredArtifact
+from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.console_parts.rotation import RotationState
 from kdive.providers.console_parts.sidecar import (
     ZERO,
@@ -20,6 +24,28 @@ from kdive.providers.console_parts.sidecar import (
     write_sidecar,
 )
 from kdive.store.objectstore import ObjectStore
+
+
+class _ReadOnlyStore:
+    def __init__(
+        self,
+        *,
+        data: bytes | None = None,
+        error: CategorizedError | None = None,
+    ) -> None:
+        self._data = data
+        self._error = error
+
+    def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:
+        del key, etag
+        if self._error is not None:
+            raise self._error
+        assert self._data is not None
+        return FetchedArtifact(self._data, Sensitivity.REDACTED, "console")
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        del request
+        raise AssertionError("read-only store cannot write")
 
 
 def test_sidecar_object_name_is_stable() -> None:
@@ -54,11 +80,47 @@ def test_absent_sidecar_returns_zero(minio_store: ObjectStore, key_ns: str) -> N
     assert result == ZERO
 
 
+def test_stale_sidecar_handle_returns_zero() -> None:
+    system_id = uuid4()
+    store = _ReadOnlyStore(
+        error=CategorizedError(
+            "missing rotation sidecar",
+            category=ErrorCategory.STALE_HANDLE,
+        )
+    )
+
+    assert read_sidecar(store, "tenant", system_id) == ZERO
+
+
+def test_store_failure_propagates_typed_error() -> None:
+    system_id = uuid4()
+    store = _ReadOnlyStore(
+        error=CategorizedError(
+            "object store unavailable",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
+    )
+
+    with pytest.raises(CategorizedError) as excinfo:
+        read_sidecar(store, "tenant", system_id)
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_corrupt_body_logs_context_and_returns_zero(caplog: pytest.LogCaptureFixture) -> None:
+    system_id = uuid4()
+    store = _ReadOnlyStore(data=b"not-valid-json-{{{{")
+
+    with caplog.at_level(logging.WARNING):
+        result = read_sidecar(store, "tenant", system_id)
+
+    assert result == ZERO
+    assert str(system_id) in caplog.text
+    assert "tenant/systems" in caplog.text
+
+
 def test_corrupt_body_returns_zero(minio_store: ObjectStore, key_ns: str) -> None:
     """A sidecar with a garbage JSON body returns ZERO without raising."""
-    from kdive.artifacts.storage import ArtifactWriteRequest
-    from kdive.domain.catalog.artifacts import Sensitivity
-
     system_id = uuid4()
     minio_store.put_artifact(
         ArtifactWriteRequest(
@@ -78,9 +140,6 @@ def test_corrupt_body_returns_zero(minio_store: ObjectStore, key_ns: str) -> Non
 def test_invalid_base64_carry_returns_zero(minio_store: ObjectStore, key_ns: str) -> None:
     """A sidecar with invalid base64 in the carry field returns ZERO without raising."""
     import json
-
-    from kdive.artifacts.storage import ArtifactWriteRequest
-    from kdive.domain.catalog.artifacts import Sensitivity
 
     system_id = uuid4()
     body = json.dumps(
@@ -142,9 +201,6 @@ def test_wrong_typed_field_returns_zero(
     ``ValueError``); neither must escape ``read_sidecar``.
     """
     import json
-
-    from kdive.artifacts.storage import ArtifactWriteRequest
-    from kdive.domain.catalog.artifacts import Sensitivity
 
     system_id = uuid4()
     body = json.dumps(
