@@ -164,7 +164,8 @@ def _register_systems_define(
     ) -> ToolResponse:
         """Create a System in 'defined' for a granted Allocation, opening a pre-provision
         rootfs-upload window; follow with `systems.provision_defined` once the upload is done.
-        Use `systems.provision` instead when the profile needs no upload window. Operator only.
+        Use `systems.provision` instead when the profile needs no upload window. Requires
+        contributor on the Allocation's project.
         """
         ctx = current_context()
         try:
@@ -218,7 +219,7 @@ def _register_systems_provision(
         must be uploaded before provisioning. One System per Allocation: if this Allocation's
         System already failed, retrying does not mint a new one — release this Allocation and
         request a fresh one (`allocations.release`, then `allocations.request`) for a fresh
-        System. Operator only.
+        System. Requires contributor on the Allocation's project.
         """
         ctx = current_context()
         try:
@@ -262,7 +263,7 @@ def _register_systems_provision_defined(
     ) -> ToolResponse:
         """Admit a DEFINED System after its upload window is complete; not for a fresh System —
         create it with `systems.define` first (this is the second step of that lane).
-        Requires operator.
+        Requires contributor on the System's project.
         """
         ctx = current_context()
         return await with_runtime_for_system(
@@ -439,7 +440,7 @@ def _register_systems_reprovision(
         system_id: Annotated[str, Field(description="The ready System to reprovision in place.")],
         profile: Annotated[
             ProvisioningProfile,
-            Field(description="New provisioning profile; must opt in to reprovision."),
+            Field(description="New provisioning profile to re-stage on the READY System."),
         ],
         idempotency_key: Annotated[
             str | None,
@@ -447,7 +448,8 @@ def _register_systems_reprovision(
         ] = None,
     ) -> ToolResponse:
         """Enqueue in-place reprovision for a ready System; not for creating a new System —
-        use `systems.provision` instead. Requires operator and opt-in.
+        use `systems.provision` instead. Requires contributor on the System's project (no
+        destructive_ops opt-in).
         """
         ctx = current_context()
         try:

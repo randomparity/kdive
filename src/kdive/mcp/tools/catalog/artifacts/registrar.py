@@ -249,7 +249,8 @@ def _register_artifacts_create_system_upload(
             ),
         ],
     ) -> ToolResponse:
-        """Mint a presigned PUT for a DEFINED System's rootfs. Requires operator."""
+        """Mint a presigned PUT for a DEFINED System's rootfs. Requires contributor on the
+        System's project."""
         return await artifact_uploads.create_system_upload(
             pool,
             current_context(),

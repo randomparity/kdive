@@ -77,9 +77,9 @@ _REPLACE_NOTE = (
     "example's provider.local-libvirt.debug block (gdbstub/preserve_on_crash) is bound at "
     "systems.provision: set it here if you intend to debug or triage this System, since it cannot "
     "be added to a System that is already provisioned without reprovisioning. The provider "
-    "destructive_ops list opts into force_crash (deliberate kernel crash / fault injection) and "
-    "reprovision only; leave it empty unless you need those. control.power "
-    "(reboot/off/cycle/reset) is contributor lifecycle and no longer requires it."
+    "destructive_ops list opts into force_crash (deliberate kernel crash / fault injection) "
+    "only; leave it empty unless you need that. control.power (reboot/off/cycle/reset) and "
+    "systems.reprovision are contributor lifecycle and do not require it."
 )
 
 # Sizing guidance (#461): the example carries concrete vcpu/memory_mb/disk_gb so it parses alone
