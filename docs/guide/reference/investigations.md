@@ -26,7 +26,7 @@ Return one investigation.
 
 `implemented`
 
-Link a run to an investigation.
+Link an external tracker ref to an Investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -89,7 +89,7 @@ Edit a non-terminal Investigation's title and/or free-form description.
 
 `implemented`
 
-Unlink a run from an investigation.
+Remove an external tracker ref from an Investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

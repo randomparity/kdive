@@ -5,7 +5,7 @@ Status: accepted (implemented by ADR-0148)
 ## Problem
 
 `build_app()` registers all ~71 plane tools unconditionally
-(`mcp/app.py` `_PLANE_REGISTRARS`), and every `list_tools` response returns the full
+(`mcp/assembly/app.py` `_PLANE_REGISTRARS`), and every `list_tools` response returns the full
 flat catalog to every caller. Tool-selection accuracy for LLM agents degrades as the
 catalog grows — the LongFuncEval result cited in #506 shows selection performance
 dropping with catalog size even at 128K context. A large flat catalog makes the model

@@ -52,7 +52,7 @@ from kdive.domain.lifecycle.records import Allocation, Investigation, Run, Syste
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.mcp.auth import AuthError
-from kdive.mcp.tool_payloads import AllocationRequestPayload, EstimateRequestPayload
+from kdive.mcp.schema.tool_payloads import AllocationRequestPayload, EstimateRequestPayload
 from kdive.mcp.tools.accounting.admin import QuotaSetRequest, set_budget, set_quota
 from kdive.mcp.tools.accounting.estimate import estimate
 from kdive.mcp.tools.accounting.usage import usage_investigation, usage_project

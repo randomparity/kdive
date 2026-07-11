@@ -106,7 +106,7 @@ modules). Each now has a direct unit test; per module:
 
 - **mutmut copy-scope / baseline (≈15):** the module's covering test reads files mutmut does
   not copy into `mutants/` (e.g. the top-level `docs/` tree), or a `tests/conftest.py`
-  re-import fails in the copy. Examples: `mcp/resources/registrar.py`, `mcp/app.py`,
+  re-import fails in the copy. Examples: `mcp/resources/registrar.py`, `mcp/assembly/app.py`,
   `db/repositories.py`, `config/external_env.py`, `security/secrets/secret_registry.py`,
   `version.py`, and `mcp/middleware/binding_errors` (its import chain resolves a source path that
   404s as `mutants/<frozen importlib._bootstrap>` in the copy — covered by a direct test, but the

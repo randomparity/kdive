@@ -44,7 +44,7 @@ from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
-from kdive.mcp.tool_payloads import ToolPayload
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid

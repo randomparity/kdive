@@ -11,7 +11,7 @@ from pydantic import Field
 from kdive.domain.capacity.state import DebugSessionState
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import ToolPayload
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT

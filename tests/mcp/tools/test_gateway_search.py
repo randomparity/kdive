@@ -17,7 +17,7 @@ import pytest
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.mcp.app import build_app
+from kdive.mcp.assembly.app import build_app
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair

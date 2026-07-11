@@ -116,7 +116,7 @@ from an orphaned thread is reclaimed by `reap_orphan_build_vms` once the heartbe
 - **Single-flight:** a **module-level** `SingleFlight` (reused from `egress_probe`) keyed on
   `build_host_id`. It **must** be a process-level singleton, not built per factory call:
   `default_service_factory` is invoked fresh on every `ops.diagnostics` call (the `_service_factory`
-  closure in `mcp/app.py`), so a per-assembly coalescer would coalesce nothing — `egress_probe`'s
+  closure in `mcp/assembly/app.py`), so a per-assembly coalescer would coalesce nothing — `egress_probe`'s
   own `SingleFlight` docstring calls this out. The DB partial-unique index on
   `build_host_id WHERE released_at IS NULL` is the cross-process backstop: a second *process* that
   cannot share the coalescer hits the index → `ProbeInFlightError` → that host contributes
@@ -150,7 +150,7 @@ verdict. A DB error resolving the flag fails **open to enabled** (never hides th
 | Reaper guard | `reconciler/repairs/build_hosts.py` | `reap_orphan_build_vms` honors a fresh probe heartbeat |
 | Tool | `mcp/tools/ops/diagnostics.py` | `with_buildhost_agent` param + distinct audit event |
 | CLI | `cli/commands/registry.py`, `cli/commands/doctor.py` | `--with-buildhost-agent` flag → payload |
-| App wiring | `mcp/app.py` | thread `with_buildhost_agent` through `_service_factory` |
+| App wiring | `mcp/assembly/app.py` | thread `with_buildhost_agent` through `_service_factory` |
 
 ## Acceptance criteria
 

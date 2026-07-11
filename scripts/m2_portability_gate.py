@@ -108,7 +108,7 @@ ALLOWED_FILES = frozenset(
         # CORE_PREFIXES) and reach the tool only through the injected service factory; this module
         # is the same authz-gated/audited ops surface as its siblings above.
         "src/kdive/mcp/tools/ops/diagnostics.py",
-        "src/kdive/mcp/app.py",
+        "src/kdive/mcp/assembly/app.py",
         # Server telemetry middleware (#266, ADR-0090 §5): a provider-agnostic platform
         # change adding TelemetryMiddleware (a span per MCP tool call + per-tool RED
         # metrics) at the dispatch boundary and registering it in build_app. The labels

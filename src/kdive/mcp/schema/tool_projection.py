@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastmcp.tools import Tool
 
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.mcp.provider_schema import project_tool_schema
+from kdive.mcp.schema.provider_schema import project_tool_schema
 
 #: Tools whose published ``inputSchema`` is narrowed to the composed ``ResourceKind`` set.
 NARROWED_TOOLS: frozenset[str] = frozenset(

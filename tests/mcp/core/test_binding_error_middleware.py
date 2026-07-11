@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import AllocationRequestPayload, ShapeXorCustomError
+from kdive.mcp.schema.tool_payloads import AllocationRequestPayload, ShapeXorCustomError
 from kdive.profiles.build import BuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
 
@@ -256,7 +256,7 @@ def test_field_level_error_on_allocations_request_is_reraised_not_collapsed() ->
 def test_end_to_end_malformed_profile_returns_envelope_not_toolerror() -> None:
     # The integration proof: a typed-profile tool behind the middleware returns the envelope for a
     # malformed profile rather than raising a client-side ToolError.
-    from kdive.mcp.schema_advertising import advertise_envelope_output_schema
+    from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
 
     app: FastMCP = FastMCP(name="probe")
     app.add_middleware(BindingErrorMiddleware())
@@ -290,7 +290,7 @@ def test_end_to_end_runs_create_typed_build_profile_publishes_schema_and_envelop
     # The integration proof for #482: runs.create with a typed flat `build_profile` publishes its
     # input schema, accepts a valid profile, and returns the envelope (not a ToolError) for a
     # malformed one — exercising the real _BINDING_CONVERSIONS["runs.create"] entry.
-    from kdive.mcp.schema_advertising import advertise_envelope_output_schema
+    from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
 
     app: FastMCP = FastMCP(name="probe")
     app.add_middleware(BindingErrorMiddleware())

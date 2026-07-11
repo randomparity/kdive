@@ -4,8 +4,8 @@ import pytest
 
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.mcp.provider_schema import assert_kind_composed, project_tool_schema
-from kdive.mcp.tool_payloads import AllocationRequestPayload
+from kdive.mcp.schema.provider_schema import assert_kind_composed, project_tool_schema
+from kdive.mcp.schema.tool_payloads import AllocationRequestPayload
 from kdive.profiles.provisioning import ProvisioningProfile
 
 LOCAL = ResourceKind.LOCAL_LIBVIRT

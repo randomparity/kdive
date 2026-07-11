@@ -26,7 +26,7 @@ from kdive.domain.accounting.records import Budget, Quota
 from kdive.domain.capacity.state import AllocationState, InvestigationState, RunState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
-from kdive.mcp.app import build_app
+from kdive.mcp.assembly.app import build_app
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as resources_tools
 from kdive.mcp.tools.catalog.artifacts import registrar as artifacts_tools

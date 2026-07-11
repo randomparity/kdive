@@ -22,9 +22,9 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.mcp.app import build_app
+from kdive.mcp.assembly.app import build_app
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.schema_advertising import advertise_envelope_output_schema
+from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.tools import gateway
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext

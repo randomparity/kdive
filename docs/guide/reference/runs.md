@@ -112,8 +112,8 @@ Return one run; `succeeded` means build done. `data.steps` has install/boot stat
 args (e.g. `dhash_entries=1`) with the `cmdline` parameter on `runs.complete_build`.
 
 Console evidence: `refs.console` is the boot-window console snapshot and
-`data.console_access` names how to read it (`artifacts.get` windowed/paged, or jumped to
-a literal match with its `find` parameter) — both always present on a booted Run.
+`data.console_access` names how to read it (`artifacts.get` windowed/paged, or
+`artifacts.find` for literal search) — both always present on a booted Run.
 `data.console_artifacts` is the Run-scoped console manifest and is **opt-in**: it appears
 only when you pass `include_console_artifacts=true`. When requested it is an ordered,
 newest-first list of `{artifact_id, object_key, created_at}` for every console artifact

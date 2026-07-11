@@ -10,6 +10,8 @@ from opentelemetry import metrics, trace
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.jobs.models import HandlerRegistry
+from kdive.mcp.assembly.tool_registration import PLANE_REGISTRARS, AppAssembly
+from kdive.mcp.assembly.worker_registration import HANDLER_REGISTRARS, WorkerHandlerAssembly
 from kdive.mcp.auth import build_verifier
 from kdive.mcp.exposure import gateway_enabled
 from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
@@ -19,11 +21,9 @@ from kdive.mcp.middleware.doc_exposure import DocExposureMiddleware
 from kdive.mcp.middleware.exposure import ToolExposureMiddleware
 from kdive.mcp.middleware.telemetry import TelemetryMiddleware
 from kdive.mcp.middleware.usage import UsageTrackingMiddleware
-from kdive.mcp.schema_advertising import advertise_envelope_output_schema
-from kdive.mcp.tool_index import build_instructions
-from kdive.mcp.tool_registration import PLANE_REGISTRARS, AppAssembly
+from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
+from kdive.mcp.schema.tool_index import build_instructions
 from kdive.mcp.verbosity import compact_responses_enabled
-from kdive.mcp.worker_registration import HANDLER_REGISTRARS, WorkerHandlerAssembly
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import build_object_store_assembly

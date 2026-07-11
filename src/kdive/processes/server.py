@@ -29,7 +29,7 @@ async def run_server(
     from kdive.health.probe import HealthProbe
     from kdive.health.processes.server import build_oidc_ping, build_postgres_ping
     from kdive.health.server_checks import build_server_checks
-    from kdive.mcp.app import build_app
+    from kdive.mcp.assembly.app import build_app
     from kdive.store.objectstore import object_store_from_env
 
     def build_probe(pool: AsyncConnectionPool) -> HealthProbe:

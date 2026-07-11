@@ -31,6 +31,6 @@ Run a caller drgn script over a live drgn-live DebugSession. Requires contributo
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `script` | string | yes | A drgn (Python) script run against the live guest kernel; `prog` is the live drgn.Program. Its stdout is returned (byte-capped). Each call is a fresh drgn process — put any multi-step work in one script. |
+| `script` | string | yes | A drgn (Python) script run against the live guest kernel; `prog` is the live drgn.Program. Its stdout is returned (byte-capped). Each call is a fresh drgn process - put any multi-step work in one script. |
 | `session_id` | string | yes | A live drgn-live DebugSession. |
 | `timeout_sec` | number | no | In-guest execution bound (seconds); clamped to [1.0, operator ceiling]. Defaults to 30. A wedged script is recovered with debug.end_session. |

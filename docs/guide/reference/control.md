@@ -36,7 +36,7 @@ Requires admin + gate.
 
 ## `control.power`
 
-`implemented` · `destructive`
+`implemented`
 
 Power action on a READY System: on/off/cycle/reset, all contributor-level
 leaseholder control. reset/cycle recover a wedged READY guest. Refused on a

@@ -14,7 +14,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.mcp.tool_payloads import (
+from kdive.mcp.schema.tool_payloads import (
     AllocationRequestPayload,
     EstimateRequestPayload,
     ResourceByKind,

@@ -106,7 +106,7 @@ It registers one `FunctionPrompt` per spec via `app.add_prompt(...)` whose rende
 function returns the pre-rendered body string (FastMCP wraps a returned `str` as a
 single user-role text message — verified against fastmcp-slim 3.4.2). Returns the count.
 
-### 2. Wiring (mcp/app.py)
+### 2. Wiring (mcp/assembly/app.py)
 
 `build_app` already reaches into `app.local_provider._components` once, in
 `_advertise_envelope_output_schema`, to sweep registered `Tool` instances. Extract a

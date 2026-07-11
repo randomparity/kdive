@@ -33,8 +33,8 @@ holds the agent's private key.
    the guest with a fixed argv and the managed identity. The authorize job reuses this
    shape (an injected SSH-exec callable) so it is unit-tested with a fake and `live_vm` is
    the only real-SSH gate.
-4. **Tool/job registration + RBAC.** `mcp/tool_registration.py` (`PLANE_REGISTRARS`) and
-   `mcp/worker_registration.py` register new tools/job handlers; `mcp/exposure.py`
+4. **Tool/job registration + RBAC.** `mcp/assembly/tool_registration.py` (`PLANE_REGISTRARS`) and
+   `mcp/assembly/worker_registration.py` register new tools/job handlers; `mcp/exposure.py`
    `_TOOL_SCOPES` classifies exposure; `security/authz/rbac.py` `require_role` enforces.
    `mcp/responses.py` `ToolResponse` is the uniform envelope; `ToolResponse.from_job`
    lifts a worker job into one.

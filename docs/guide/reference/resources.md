@@ -12,8 +12,12 @@ A point-in-time hint, not a reservation; the admission path stays the authority.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `pcie` | string (nullable) | no | Optional PCIe match spec ('<4hex>:<4hex>' or 'class=' plus 2 or 4 hex); narrows to hosts with a free matching device. |
-| `shape` | string (nullable) | no | Optional shape name; restricts the fitting computation to it. |
+| `request` | object (nullable) | no | Resource availability filters request; omit for an unfiltered view. |
+
+`request` fields:
+
+- `pcie` (`string (nullable)`, optional) — Optional PCIe match spec ('<4hex>:<4hex>' or 'class=' plus 2 or 4 hex); narrows to hosts with a free matching device.
+- `shape` (`string (nullable)`, optional) — Optional shape name; restricts the fitting computation to it.
 
 ## `resources.cordon`
 

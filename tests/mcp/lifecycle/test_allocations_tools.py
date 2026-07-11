@@ -21,7 +21,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Allocation
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import AllocationRequestPayload
+from kdive.mcp.schema.tool_payloads import AllocationRequestPayload
 from kdive.mcp.tools.lifecycle.allocations.common import envelope_for_allocation
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import (
     ReleaseOutcome,

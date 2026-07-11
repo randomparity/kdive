@@ -10,8 +10,12 @@ Generate a platform-wide consolidated report over every project.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `formats` | array<string> (nullable) | no | Spreadsheet formats: subset of ['csv','xlsx']; omit for both. |
-| `window` | array<string (nullable)> (nullable) | no | [start, end] ISO-8601 timestamptz pair; omit for all time. |
+| `request` | object (nullable) | no | All-project report filters request; omit for defaults. |
+
+`request` fields:
+
+- `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit for all time.
+- `formats` (`array<string> (nullable)`, optional) — Spreadsheet formats: subset of ['csv','xlsx']; omit for both.
 
 ## `reports.generate_granted_set`
 
@@ -21,6 +25,10 @@ Generate a consolidated report over the caller's granted projects.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `formats` | array<string> (nullable) | no | Spreadsheet formats: subset of ['csv','xlsx']; omit for both. |
-| `projects` | array<string> (nullable) | no | Named project subset; omit for all member projects with a role. |
-| `window` | array<string (nullable)> (nullable) | no | [start, end] ISO-8601 timestamptz pair; omit for all time. |
+| `request` | object (nullable) | no | Granted-project report filters request; omit for defaults. |
+
+`request` fields:
+
+- `projects` (`array<string> (nullable)`, optional) — Named project subset; omit for all member projects with a role.
+- `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit for all time.
+- `formats` (`array<string> (nullable)`, optional) — Spreadsheet formats: subset of ['csv','xlsx']; omit for both.

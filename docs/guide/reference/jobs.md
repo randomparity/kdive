@@ -9,8 +9,8 @@
 Cancel a queued or running job.
 
 A contributor may cancel their own leaseholder-lifecycle jobs (provision/reprovision/
-build/install/boot/power/authorize_ssh_key/…). Cancelling a destructive job
-(teardown/force_crash) requires operator.
+install/boot/power/authorize_ssh_key/…). Cancelling a destructive job
+(teardown/force_crash) or retired server-build job requires operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -33,7 +33,8 @@ Return one durable job visible to the caller.
 List jobs visible to the caller, newest first, filterable by status/kind/investigation.
 
 Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-``cursor`` to read the next page. Filters compose with the cursor.
+``cursor`` to read the next page. Filters compose with the cursor. The ``kind`` filter
+accepts active job kinds only; historical retired build jobs remain readable by id.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -42,8 +43,8 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 `request` fields:
 
 - `status` (``queued`, `running`, `succeeded`, `failed`, `canceled` (nullable)`, optional) — Only jobs in this lifecycle state.
-- `kind` (``provision`, `reprovision`, `teardown`, `build`, `install`, `boot`, `force_crash`, `power`, `capture_vmcore`, `image_build`, `diagnostics_worker_check`, `build_install_boot`, `authorize_ssh_key`, `console_rotate`, `diagnostic_sysrq`, `check_ssh_reachable` (nullable)`, optional) — Only jobs of this kind.
-- `investigation_id` (`string (nullable)`, optional) — Only run-bearing jobs (build/install/boot) whose Run belongs to this Investigation.
+- `kind` (``provision`, `reprovision`, `teardown`, `build`, `install`, `boot`, `force_crash`, `power`, `capture_vmcore`, `image_build`, `diagnostics_worker_check`, `build_install_boot`, `authorize_ssh_key`, `console_rotate`, `diagnostic_sysrq`, `check_ssh_reachable` (nullable)`, optional) — Only active jobs of this kind.
+- `investigation_id` (`string (nullable)`, optional) — Only active run-bearing jobs whose Run belongs to this Investigation.
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
 - `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
 

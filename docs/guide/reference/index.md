@@ -22,6 +22,7 @@
 | [`artifacts.expected_uploads`](artifacts.md#artifactsexpected_uploads) | `implemented` |
 | [`artifacts.feature_config_requirements`](artifacts.md#artifactsfeature_config_requirements) | `implemented` |
 | [`artifacts.fetch_raw`](artifacts.md#artifactsfetch_raw) | `implemented` |
+| [`artifacts.find`](artifacts.md#artifactsfind) | `implemented` |
 | [`artifacts.get`](artifacts.md#artifactsget) | `implemented` |
 | [`artifacts.list`](artifacts.md#artifactslist) | `implemented` |
 | [`audit.query`](audit.md#auditquery) | `implemented` |

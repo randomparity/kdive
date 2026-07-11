@@ -20,7 +20,7 @@ from kdive.mcp.middleware.binding_errors import (
     _profile_envelope,
     _shape_xor_envelope,
 )
-from kdive.mcp.tool_payloads import ShapeXorCustomError
+from kdive.mcp.schema.tool_payloads import ShapeXorCustomError
 
 
 class _Errs(Exception):

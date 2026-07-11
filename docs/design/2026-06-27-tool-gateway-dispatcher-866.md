@@ -140,7 +140,7 @@ construct a `tools.invoke` call, not a name hint. Reuses the schema-serialisatio
   keeps the catalog-reduction win from being undone by one broad search — the cost is paid per
   capability actually needed, not for the whole plane.
 - **Ranking.** Deterministic lexical over `name + description + curated keywords`
-  (`mcp/tool_index.py`, the `_TOOL_SCOPES` idiom); ranked by match strength, `limit`-capped;
+  (`mcp/schema/tool_index.py`, the `_TOOL_SCOPES` idiom); ranked by match strength, `limit`-capped;
   defaults to tokenised name+description when a tool has no keyword entry.
 - **Search-miss telemetry.** Zero-result queries are logged structured (query + count) — the
   "agent reached for a capability it could not find" signal, the feedback loop for keyword curation.
@@ -237,7 +237,7 @@ visible = rbac_visible(ctx, names) ∩ CORE_TOOLS        # gateway on
 Add `instructions` to `FastMCP(name="kdive", …)` carrying (1) the gateway pattern — not every tool
 is listed; `tools.search` by capability, then `tools.invoke(name, arguments)` — and (2) a namespace
 TOC (the 18 namespaces with one-liners), restoring the ambient workflow map at ~18 lines instead of
-83 schemas. A reviewed constant (`mcp/tool_index.py`) with a guard test asserting every live
+83 schemas. A reviewed constant (`mcp/schema/tool_index.py`) with a guard test asserting every live
 namespace appears.
 
 ### 6. Meta-tool skip-set (recording correctness across the re-entered chain)

@@ -76,7 +76,7 @@ The seam where the dead-end is built is the MCP mapper `_request_response` /
 ### #473 — `shape` description + XOR-as-envelope
 
 The XOR rule is enforced in `AllocationRequestPayload._shape_xor_custom_triple`
-(`src/kdive/mcp/tool_payloads.py`). It raises `ValidationError` at the FastMCP boundary
+(`src/kdive/mcp/schema/tool_payloads.py`). It raises `ValidationError` at the FastMCP boundary
 before the handler runs.
 
 5. **Describe `shape`.** Add to the field:
@@ -153,7 +153,7 @@ Confirm each new test red for the right reason before implementing.
   on `RequestAdmissionResult`.
 - `src/kdive/mcp/tools/lifecycle/allocations.py` — `_request_response` /
   `_denial_response` detail + actions; capacity reason→prose helper.
-- `src/kdive/mcp/tool_payloads.py` — `shape` description + `shape_xor_custom` typed
+- `src/kdive/mcp/schema/tool_payloads.py` — `shape` description + `shape_xor_custom` typed
   validator error (with `both` context flag).
 - `src/kdive/mcp/middleware.py` — generalize the profile-binding seam to a per-tool
   registry; add the `allocations.request` shape-XOR binding-error → envelope case.

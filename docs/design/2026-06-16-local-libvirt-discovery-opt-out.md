@@ -51,7 +51,7 @@ fix is the gate, not a re-raise change (which would weaken
 ## Scope of the gate
 
 The descriptor gate feeds every `build_provider_resolver` caller: reconciler
-(`__main__`), server (`mcp/app.py`), worker (`build_handler_registry`), and bootstrap
+(`__main__`), server (`mcp/assembly/app.py`), worker (`build_handler_registry`), and bootstrap
 (`admin/bootstrap.register_discovered_resources`). This is intentional — disabling local-libvirt
 declares the deployment has no local libvirt, so no plane should serve a local-libvirt
 System. A local-libvirt System on a local-disabled deploy now fails its post-System ops

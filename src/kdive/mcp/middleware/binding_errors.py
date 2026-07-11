@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import ShapeXorCustomError
+from kdive.mcp.schema.tool_payloads import ShapeXorCustomError
 
 
 def _loc_under(param: str) -> Callable[[ValidationError], bool]:

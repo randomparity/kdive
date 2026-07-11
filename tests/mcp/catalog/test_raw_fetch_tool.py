@@ -18,7 +18,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import HeadResult
-from kdive.mcp.app import build_app
+from kdive.mcp.assembly.app import build_app
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.catalog.artifacts.raw_fetch import RawAsset, fetch_raw
 from kdive.security.authz.rbac import Role, RoleDenied

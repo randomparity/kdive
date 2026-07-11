@@ -15,7 +15,7 @@ step. A referenced tool that is unknown to
 the live registry or marked `planned` (advertised but unavailable) raises at registration
 — a fail-fast that also catches an accidental registrar reordering. `register` takes the
 maturity map explicitly, so it is pure with respect to FastMCP internals and unit-testable
-with a fabricated map; the live map is assembled in `mcp/app.py` from the registered tool
+with a fabricated map; the live map is assembled in `mcp/assembly/app.py` from the registered tool
 metas.
 """
 

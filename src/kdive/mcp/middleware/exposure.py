@@ -13,7 +13,7 @@ from opentelemetry import metrics
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.mcp.exposure import CORE_TOOLS, gateway_enabled, visible_tool_names
 from kdive.mcp.middleware.shared import request_context
-from kdive.mcp.tool_projection import project_listed_tool
+from kdive.mcp.schema.tool_projection import project_listed_tool
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.errors import AuthError
 

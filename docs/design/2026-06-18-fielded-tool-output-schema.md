@@ -8,7 +8,7 @@
 ## Problem
 
 Every MCP tool advertises the flat constant `{"type": "object"}` as its `outputSchema`
-([ADR-0113](../adr/0113-flat-tool-output-schema.md), `src/kdive/mcp/app.py`
+([ADR-0113](../adr/0113-flat-tool-output-schema.md), `src/kdive/mcp/assembly/app.py`
 `ENVELOPE_OUTPUT_SCHEMA`). That constant was chosen to remove a recursive `$ref` schema
 that broke the FastMCP 3.4.0 client's per-call `TypeAdapter`. It works, but it tells a
 black-box agent nothing: from `tools/list` alone the agent cannot learn that a result
@@ -71,7 +71,7 @@ shared model for every consumer, not just the MCP boundary).
 
 ## Behavior
 
-### The schema (`ENVELOPE_OUTPUT_SCHEMA`, `src/kdive/mcp/app.py`)
+### The schema (`ENVELOPE_OUTPUT_SCHEMA`, `src/kdive/mcp/assembly/app.py`)
 
 A flat object schema with a `properties` entry per envelope field and **no `$defs` / no
 `$ref`**:
@@ -97,7 +97,7 @@ the drift-guard test fails, deliberately.
 `items` advertises an array of generic objects rather than a self-`$ref`: this is what
 breaks the recursion. The doc resource explains that each item is itself a `ToolResponse`.
 
-### The sweep (`_advertise_envelope_output_schema`, `src/kdive/mcp/app.py`)
+### The sweep (`_advertise_envelope_output_schema`, `src/kdive/mcp/assembly/app.py`)
 
 Unchanged in structure from ADR-0113: iterate the live `app.local_provider._components`,
 set `output_schema = dict(ENVELOPE_OUTPUT_SCHEMA)` on each `Tool`, raise if zero tools were

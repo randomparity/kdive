@@ -11,14 +11,14 @@ from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
 
-import kdive.mcp.app as app_module
-import kdive.mcp.schema_advertising as envelope_module
-import kdive.mcp.tool_registration as tool_module
-import kdive.mcp.worker_registration as handler_module
+import kdive.mcp.assembly.app as app_module
+import kdive.mcp.assembly.tool_registration as tool_module
+import kdive.mcp.assembly.worker_registration as handler_module
+import kdive.mcp.schema.schema_advertising as envelope_module
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.models import HandlerRegistry
-from kdive.mcp.app import build_app, build_handler_registry
+from kdive.mcp.assembly.app import build_app, build_handler_registry
 from kdive.providers.assembly import composition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
@@ -547,7 +547,7 @@ def test_build_app_logs_when_compact_enabled(
 ) -> None:
     monkeypatch.setenv("KDIVE_COMPACT_RESPONSES", "on")
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    with caplog.at_level("INFO", logger="kdive.mcp.app"):
+    with caplog.at_level("INFO", logger="kdive.mcp.assembly.app"):
         build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
     assert sum("compact_responses enabled" in r.getMessage() for r in caplog.records) == 1
 
@@ -557,6 +557,6 @@ def test_build_app_silent_when_compact_disabled(
 ) -> None:
     monkeypatch.delenv("KDIVE_COMPACT_RESPONSES", raising=False)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    with caplog.at_level("INFO", logger="kdive.mcp.app"):
+    with caplog.at_level("INFO", logger="kdive.mcp.assembly.app"):
         build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
     assert not any("compact_responses enabled" in r.getMessage() for r in caplog.records)

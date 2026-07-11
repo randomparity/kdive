@@ -28,7 +28,7 @@ from kdive.images.planes.base import PROVENANCE_OS_RELEASE
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import ToolPayload
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidCursor, _short_id
 from kdive.mcp.tools._common import ConfigErrorReason as _ConfigErrorReason

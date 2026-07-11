@@ -14,7 +14,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.artifacts.storage import FetchedArtifact, HeadResult
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.mcp.app import build_app
+from kdive.mcp.assembly.app import build_app
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.catalog.artifacts.reads import (
     _MAX_WINDOWED_FETCH_BYTES,

@@ -32,7 +32,7 @@ from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.platform_auth import ALL_PROJECTS_SCOPE
 from kdive.mcp.responses import JsonValue, ToolResponse
-from kdive.mcp.tool_payloads import ToolPayload
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit

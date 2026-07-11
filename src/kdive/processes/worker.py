@@ -28,7 +28,7 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
     from kdive.health.processes.worker import build_worker_probe
     from kdive.jobs.worker import Worker, WorkerConfig
     from kdive.jobs.worker_telemetry import WorkerTelemetry
-    from kdive.mcp.app import build_handler_registry
+    from kdive.mcp.assembly.app import build_handler_registry
     from kdive.store.objectstore import object_store_from_env
 
     stop = install_stop()

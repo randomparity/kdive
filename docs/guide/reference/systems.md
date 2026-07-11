@@ -209,7 +209,7 @@ Requires contributor on the System's project.
 
 ## `systems.reprovision`
 
-`implemented` · `destructive`
+`implemented`
 
 Enqueue in-place reprovision for a ready System; not for creating a new System —
 use `systems.provision` instead. Requires contributor on the System's project (no

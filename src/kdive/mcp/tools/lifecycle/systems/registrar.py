@@ -12,9 +12,9 @@ from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError
 from kdive.domain.labels import LABEL_MAX_LEN
 from kdive.mcp.auth import current_context
-from kdive.mcp.provider_schema import assert_kind_composed
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import ToolPayload
+from kdive.mcp.schema.provider_schema import assert_kind_composed
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT

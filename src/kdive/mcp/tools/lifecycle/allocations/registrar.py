@@ -13,7 +13,7 @@ from kdive.domain.capacity.state import AllocationState
 from kdive.domain.errors import CategorizedError
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import AllocationRequestPayload, ToolPayload
+from kdive.mcp.schema.tool_payloads import AllocationRequestPayload, ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
 from kdive.mcp.tools.lifecycle.allocations.common import MAX_WAIT_S

@@ -63,6 +63,6 @@ No DB migration. No deploy/helm change (the chart already sets
   the existing `resolve` test.
 - `register_all_discovery`'s `INFO` line must not log secrets (it logs only `kind.value`
   strings — no connection data).
-- Other resolver call sites (`mcp/app.py`, `build_handler_registry`,
+- Other resolver call sites (`mcp/assembly/app.py`, `build_handler_registry`,
   `register_discovered_resources`) call `build_provider_resolver()` with no args, so they inherit
   the env-driven default — no signature break.

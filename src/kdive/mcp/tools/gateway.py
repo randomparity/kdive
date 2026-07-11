@@ -19,9 +19,9 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import current_context
 from kdive.mcp.exposure import tool_visible
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.schema_advertising import registered_tools
-from kdive.mcp.tool_index import TOOL_KEYWORDS
-from kdive.mcp.tool_projection import project_listed_tool
+from kdive.mcp.schema.schema_advertising import registered_tools
+from kdive.mcp.schema.tool_index import TOOL_KEYWORDS
+from kdive.mcp.schema.tool_projection import project_listed_tool
 from kdive.mcp.tools import _docmeta
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.serialization import JsonValue

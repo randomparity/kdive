@@ -90,7 +90,7 @@ shaping, not tool exposure.
 ### The transform
 
 A new `CompactResponseMiddleware(Middleware)` with an `on_call_tool` hook,
-registered in `build_app` (`src/kdive/mcp/app.py`) as the **outermost** response
+registered in `build_app` (`src/kdive/mcp/assembly/app.py`) as the **outermost** response
 middleware — specifically *outer* of both `DenialAuditMiddleware` (`app.py:51`,
 which synthesizes `authorization_denied` envelopes) and `BindingErrorMiddleware`
 (`app.py:52`, currently innermost, which synthesizes `configuration_error`

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.mcp.app import build_app
+from kdive.mcp.assembly.app import build_app
 from kdive.mcp.middleware import doc_exposure
 from kdive.mcp.resources import registrar
 from kdive.mcp.resources.registrar import DOC_RESOURCES

@@ -48,7 +48,7 @@ from kdive.domain.pcie import (
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
-from kdive.mcp.tool_payloads import ToolPayload
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.security.authz.rbac import Role, projects_with_role
 from kdive.services.allocation.admission.affinity import resource_visible_to_projects

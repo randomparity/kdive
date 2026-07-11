@@ -24,7 +24,7 @@ from kdive.domain.accounting.records import Budget, Quota
 from kdive.domain.pcie import PCIeClaim
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import AllocationRequestPayload
+from kdive.mcp.schema.tool_payloads import AllocationRequestPayload
 from kdive.mcp.tools.lifecycle.allocations.request import request_allocation
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.rbac import Role

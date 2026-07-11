@@ -29,6 +29,10 @@ not cursor-continuable — narrow with the project/resource filters instead.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `limit` | integer | no | Maximum rows per stream returned (capped at 200). |
-| `project` | string (nullable) | no | Filter the summary to one project; omit for all. |
-| `resource_id` | string (nullable) | no | Filter to allocations/systems on one host UUID. |
+| `request` | object (nullable) | no | Inventory summary filters request; omit for the full summary. |
+
+`request` fields:
+
+- `project` (`string (nullable)`, optional) — Filter the summary to one project; omit for all.
+- `resource_id` (`string (nullable)`, optional) — Filter to allocations/systems on one host UUID.
+- `limit` (`integer`, optional) — Maximum rows per stream returned (capped at 200).

@@ -13,9 +13,9 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Allocation
 from kdive.log import bind_context
 from kdive.mcp.exposure import visible_next_actions
-from kdive.mcp.provider_schema import assert_kind_composed
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import (
+from kdive.mcp.schema.provider_schema import assert_kind_composed
+from kdive.mcp.schema.tool_payloads import (
     AllocationRequestPayload,
     ResourceById,
     ResourceByKind,

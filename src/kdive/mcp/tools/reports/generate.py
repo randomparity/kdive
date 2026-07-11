@@ -33,7 +33,7 @@ from kdive.mcp.platform_auth import (
     held_platform_roles,
 )
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import ToolPayload
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._time_window import parse_timestamptz_window
 from kdive.security import audit
