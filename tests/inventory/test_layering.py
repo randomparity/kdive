@@ -3,7 +3,7 @@
 The shared name/coeff rule lives in kdive.domain precisely so the inventory model can
 validate a [[cost_class]] without importing kdive.mcp.tools.ops — a core→tool inversion.
 This static check walks every inventory module's imports and fails if any reaches kdive.mcp
-or unapproved kdive.services modules.
+or kdive.services modules.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ import ast
 from pathlib import Path
 
 _INVENTORY = Path(__file__).resolve().parents[2] / "src" / "kdive" / "inventory"
-_ALLOWED_SERVICE_IMPORTS = frozenset({"kdive.services.images.read_model"})
 
 
 def _imported_modules(path: Path) -> set[str]:
@@ -42,11 +41,7 @@ def test_inventory_never_imports_services() -> None:
         path.relative_to(_INVENTORY).as_posix(): sorted(
             module
             for module in _imported_modules(path)
-            if (
-                module == "kdive.services"
-                or module.startswith("kdive.services.")
-                and module not in _ALLOWED_SERVICE_IMPORTS
-            )
+            if module == "kdive.services" or module.startswith("kdive.services.")
         )
         for path in sorted(_INVENTORY.rglob("*.py"))
     }

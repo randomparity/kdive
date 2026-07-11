@@ -1,4 +1,4 @@
-"""Application-facing image catalog read-model helpers."""
+"""Image catalog read queries shared below service and inventory layers."""
 
 from __future__ import annotations
 
