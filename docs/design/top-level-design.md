@@ -498,7 +498,7 @@ Milestone-based. ("Sprint" is avoided per the project doc-style guard.)
   the highest-payoff piece and depends only on the CLI. M2.2–M2.4 act on the
   service, so M2.1 may be developed in parallel (its image is still a prerequisite
   of the band gate). See
-  [the design](../superpowers/specs/2026-06-10-m2x-productionization-band-design.md).*
+  [the design](../archive/superpowers/specs/2026-06-10-m2x-productionization-band-design.md).*
 
 - **M2.1 — Deployment & packaging.** Official container image(s) for the three
   processes (one image, entrypoints matching `python -m kdive
