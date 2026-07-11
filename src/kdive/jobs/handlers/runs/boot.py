@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -13,6 +13,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
+from kdive.domain.lifecycle.run_steps import BOOT_OUTCOME_READY, BootStepResult
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.runs import boot_evidence
@@ -28,6 +29,7 @@ from kdive.providers.ports.lifecycle import (
 )
 from kdive.security.authz.context import RequestContext
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.serialization import JsonValue
 from kdive.store.objectstore import ObjectStore
 
 
@@ -42,7 +44,7 @@ async def _run_boot_and_capture_outcome(
     artifact_store: ObjectStore | None,
     snapshotter: ConsoleSnapshotter | None,
     mark: int,
-) -> dict[str, Any]:
+) -> BootStepResult:
     system_id = run.require_system_id()
     try:
         await asyncio.to_thread(booter.boot, system_id)
@@ -102,11 +104,13 @@ async def _run_boot_and_capture_outcome(
         mark=mark,
     )
     await boot_evidence.record_boot_audit(conn, job_ctx, run)
-    return {
+    result: BootStepResult = {
         "system_id": str(system_id),
-        "boot_outcome": "ready",
-        **({"evidence_artifact_id": str(artifact.id)} if artifact else {}),
+        "boot_outcome": BOOT_OUTCOME_READY,
     }
+    if artifact is not None:
+        result["evidence_artifact_id"] = str(artifact.id)
+    return result
 
 
 async def boot_handler(
@@ -172,5 +176,5 @@ async def boot_handler(
         advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
         advisory_xact_lock(conn, LockScope.RUN, run_id),
     ):
-        await complete_run_step(conn, run_id, "boot", result)
+        await complete_run_step(conn, run_id, "boot", cast(JsonValue, result))
     return str(run_id)

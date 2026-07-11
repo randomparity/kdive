@@ -30,6 +30,7 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
+from kdive.domain.lifecycle.run_steps import BootOutcome
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.domain.pcie import PCIeClaim
 from kdive.jobs.handlers.console import console_evidence
@@ -874,7 +875,7 @@ def test_envelope_for_run_console_access_hint_absent_without_step_progress() -> 
     assert "console_access" not in resp.data
 
 
-def _ready_progress(boot_outcome: str | None) -> StepProgress:
+def _ready_progress(boot_outcome: BootOutcome | None) -> StepProgress:
     return StepProgress(install="succeeded", boot="succeeded", boot_outcome=boot_outcome)
 
 

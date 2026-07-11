@@ -16,6 +16,7 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
+from kdive.domain.lifecycle.run_steps import BootStepResult
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers.console import console_evidence
 from kdive.jobs.handlers.runs import boot as runs_boot
@@ -332,7 +333,7 @@ def _record(
     console: bytes | None,
     reachable: bool,
     failure_category: ErrorCategory = ErrorCategory.DEBUG_ATTACH_FAILURE,
-) -> tuple[dict[str, object] | None, list[object]]:
+) -> tuple[BootStepResult | None, list[object]]:
     audits: list[object] = []
 
     async def _fake_get(_conn: object, _system_id: object) -> _FakeSystem:
@@ -350,7 +351,7 @@ def _record(
     monkeypatch.setattr(boot_evidence, "_capture_console_artifact", _fake_capture)
     monkeypatch.setattr(boot_evidence, "record_boot_audit", _fake_audit)
 
-    async def _run() -> dict[str, object] | None:
+    async def _run() -> BootStepResult | None:
         return await boot_evidence.record_crash_halted_live(
             cast(AsyncConnection, object()),
             cast(RequestContext, object()),
@@ -433,7 +434,7 @@ def _record_expected(
     host_dump: bool,
     kdump: bool,
     system_present: bool,
-) -> tuple[dict[str, object] | None, list[object]]:
+) -> tuple[BootStepResult | None, list[object]]:
     audits: list[object] = []
 
     async def _fake_get(_conn: object, _system_id: object) -> _FakeSystem | None:
@@ -447,7 +448,7 @@ def _record_expected(
 
     artifact = boot_evidence.ConsoleArtifact(uuid4(), "tenant/console", _PANIC_CONSOLE)
 
-    async def _run() -> dict[str, object] | None:
+    async def _run() -> BootStepResult | None:
         return await boot_evidence.record_expected_crash(
             cast(AsyncConnection, object()),
             cast(RequestContext, object()),

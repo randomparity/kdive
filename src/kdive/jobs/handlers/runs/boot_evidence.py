@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, LiteralString, NamedTuple
+from typing import LiteralString, NamedTuple
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -22,6 +22,11 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.crash_signatures import CONSOLE_CRASH_KINDS
 from kdive.domain.lifecycle.records import Run
+from kdive.domain.lifecycle.run_steps import (
+    BOOT_OUTCOME_CRASHED_HALTED_LIVE,
+    BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED,
+    BootStepResult,
+)
 from kdive.jobs.handlers.console.console_evidence import read_redacted_console
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
@@ -265,7 +270,7 @@ async def record_crash_halted_live(
     artifact_store: ObjectStore | None,
     snapshotter: ConsoleSnapshotter | None,
     mark: int,
-) -> dict[str, Any] | None:
+) -> BootStepResult | None:
     """Record ``crashed_halted_live`` iff console panics and the provisioned stub answers."""
     system = await SYSTEMS.get(conn, system_id)
     if system is None:
@@ -289,7 +294,7 @@ async def record_crash_halted_live(
     await record_boot_audit(conn, job_ctx, run)
     return {
         "system_id": str(system_id),
-        "boot_outcome": "crashed_halted_live",
+        "boot_outcome": BOOT_OUTCOME_CRASHED_HALTED_LIVE,
         "evidence_kind": "console",
         "evidence_artifact_id": str(artifact.id),
         "available_capture": available_capture(profile_policy, profile),
@@ -325,13 +330,13 @@ async def record_expected_crash(
     profile_policy: ProfilePolicy,
     artifact: ConsoleArtifact,
     matched_line: str,
-) -> dict[str, Any]:
+) -> BootStepResult:
     """Record ``expected_crash_observed`` with console evidence and inert capture disclosure."""
     inert = await _expected_crash_inert_capture(conn, system_id, profile_policy)
     await record_boot_audit(conn, job_ctx, run)
     return {
         "system_id": str(system_id),
-        "boot_outcome": "expected_crash_observed",
+        "boot_outcome": BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED,
         "expectation_matched": True,
         "evidence_kind": "console",
         "evidence_artifact_id": str(artifact.id),

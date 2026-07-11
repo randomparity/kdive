@@ -9,7 +9,10 @@ from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory, suppressed_detail
 from kdive.domain.lifecycle.records import Run
-from kdive.domain.lifecycle.run_steps import RUN_STEP_SUCCEEDED
+from kdive.domain.lifecycle.run_steps import (
+    BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED,
+    RUN_STEP_SUCCEEDED,
+)
 from kdive.domain.operations.jobs import Job
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import job_envelope
@@ -142,7 +145,7 @@ def _succeeded_next_step(run: Run, progress: StepProgress | None) -> list[str]:
         return ["runs.install"]
     if progress.boot != RUN_STEP_SUCCEEDED:
         return ["runs.boot"]
-    if progress.boot_outcome == "expected_crash_observed":
+    if progress.boot_outcome == BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED:
         return ["postmortem.triage", "vmcore.fetch"]
     return ["debug.start_session"]
 
@@ -226,7 +229,7 @@ def _capture_data(step_progress: StepProgress | None) -> dict[str, JsonValue]:
         data["available_capture"] = cast(JsonValue, step_progress.available_capture)
     if step_progress.inert_capture is not None:
         data["inert_capture"] = cast(JsonValue, step_progress.inert_capture)
-        if step_progress.boot_outcome == "expected_crash_observed":
+        if step_progress.boot_outcome == BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED:
             # Console-crash panic precedes kexec, so live attach/vmcore are impossible by design
             # (#802). Reuse the same wording as debug.start_session/vmcore.fetch.
             data["inert_capture_reason"] = CONSOLE_CRASH_GUIDANCE

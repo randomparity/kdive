@@ -31,7 +31,12 @@ from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import RunState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run, System
-from kdive.domain.lifecycle.run_steps import RUN_STEP_SUCCEEDED
+from kdive.domain.lifecycle.run_steps import (
+    BOOT_OUTCOME_CRASHED_HALTED_LIVE,
+    BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED,
+    RUN_STEP_SUCCEEDED,
+    parse_boot_outcome,
+)
 from kdive.kernel_config.gate import debuginfo_warning
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
@@ -486,7 +491,8 @@ async def _attach_preconditions(
             suggested_next_actions=["runs.boot", "runs.get"],
             data={"reason": "boot_first"},
         )
-    if boot_result.get("boot_outcome") == "expected_crash_observed":
+    boot_outcome = parse_boot_outcome(boot_result.get("boot_outcome"))
+    if boot_outcome == BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED:
         # An expected console_crash leaves the System READY, so vmcore.fetch always rejects and
         # postmortem.triage only self-corrects back to the console (#759). Point straight at the
         # console artifact and reuse postmortem.triage's shared CONSOLE_CRASH_GUIDANCE so the two
@@ -498,7 +504,7 @@ async def _attach_preconditions(
             suggested_next_actions=["runs.get", "artifacts.list"],
             data={"reason": "expected_crash_not_live_debuggable"},
         )
-    if boot_result.get("boot_outcome") == "crashed_halted_live" and transport == _DRGN_LIVE:
+    if boot_outcome == BOOT_OUTCOME_CRASHED_HALTED_LIVE and transport == _DRGN_LIVE:
         return ToolResponse.failure(
             str(run.id),
             ErrorCategory.CONFIGURATION_ERROR,

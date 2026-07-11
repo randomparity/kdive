@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import LiteralString, cast
+from typing import Final, LiteralString, cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -15,9 +15,12 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Run, System
 from kdive.domain.lifecycle.run_steps import (
+    BOOT_OUTCOME_READY,
     RUN_STEP_PENDING,
     RUN_STEP_SUCCEEDED,
+    BootOutcome,
     RunStepState,
+    parse_boot_outcome,
     parse_persisted_run_step_state,
 )
 from kdive.domain.platform.arch_traits import arch_traits
@@ -148,7 +151,7 @@ class StepProgress:
 
     install: RunStepState
     boot: RunStepState
-    boot_outcome: str | None
+    boot_outcome: BootOutcome | None
     console_evidence_artifact_id: str | None = None
     available_capture: list[str] | None = None
     inert_capture: list[str] | None = None
@@ -162,7 +165,7 @@ class StepProgress:
 
 
 # The persisted `boot` step `boot_outcome` value for a clean boot (recorded by the boot handler).
-READY_BOOT_OUTCOME = "ready"
+READY_BOOT_OUTCOME: Final[BootOutcome] = BOOT_OUTCOME_READY
 _READY_BOOT_SIGNAL = "console_marker"
 _READY_BOOT_RULE = "marker line reached with no pre-marker crash signature"
 
@@ -206,7 +209,7 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
     install is unrecorded or the default 256M was in force.
     """
     states: dict[str, RunStepState] = {step: RUN_STEP_PENDING for step in _PROGRESS_STEPS}
-    boot_outcome: str | None = None
+    boot_outcome: BootOutcome | None = None
     console_evidence_artifact_id: str | None = None
     available_capture: list[str] | None = None
     inert_capture: list[str] | None = None
@@ -228,8 +231,7 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
             installed_crashkernel = _optional_str(install_result.get("crashkernel"))
         if step == "boot" and isinstance(row["result"], Mapping):
             boot_result = cast("Mapping[str, object]", row["result"])
-            outcome = boot_result.get("boot_outcome")
-            boot_outcome = outcome if isinstance(outcome, str) else None
+            boot_outcome = parse_boot_outcome(boot_result.get("boot_outcome"))
             console_evidence_artifact_id = _optional_str(boot_result.get("evidence_artifact_id"))
             available_capture = _optional_str_list(boot_result.get("available_capture"))
             inert_capture = _optional_str_list(boot_result.get("inert_capture"))
