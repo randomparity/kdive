@@ -28,6 +28,7 @@ from kdive.images.families._fedora_customize import (
 )
 from kdive.images.families.base import CustomizeContext, _mac_tag
 from kdive.images.planes._build_common import run_guestfs_tool
+from kdive.images.rootfs_kinds import RootfsImageKind
 
 # Debian debug/guest rootfs: the in-target crash + introspection toolchain by apt name. ``drgn``
 # ships as ``python3-drgn`` (which provides ``/usr/bin/drgn``, so the ``kdive-drgn`` helper's
@@ -69,14 +70,16 @@ class DebianFamily:
     kdump_unit = "kdump-tools.service"
     guest_mac = "apparmor"
 
-    def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
+    def packages(self, kind: RootfsImageKind, distro: str, version: str) -> tuple[str, ...]:
         """Return the apt package set for ``kind`` (``distro``/``version`` reserved for parity)."""
         del distro, version
         if kind == "build":
             return _DEBIAN_BUILD_PACKAGES
         return _DEBIAN_DEBUG_PACKAGES
 
-    def capabilities(self, kind: str, distro: str, version: str) -> tuple[Capability, ...]:
+    def capabilities(
+        self, kind: RootfsImageKind, distro: str, version: str
+    ) -> tuple[Capability, ...]:
         """Return the tags this family bakes (distro/version unused, kept for parity)."""
         del distro, version
         mac = _mac_tag(self.guest_mac)

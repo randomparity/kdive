@@ -14,6 +14,7 @@ from kdive.images.rootfs_catalog import (
     load_rootfs_catalog,
     resolve_rootfs_entry,
 )
+from kdive.images.rootfs_kinds import RootfsImageKind
 
 _CLOUD_URL = "https://example.test/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
 
@@ -50,7 +51,8 @@ def test_loads_both_fedora_entries() -> None:
 def test_loads_fedora_build_host_entry() -> None:
     cat = load_rootfs_catalog()
     entry = cat["fedora-kdive-build-44"]
-    assert entry.kind == "build"
+    kind: RootfsImageKind = entry.kind
+    assert kind == "build"
     assert entry.distro == "fedora"
     assert entry.version == "44"
 
@@ -168,6 +170,26 @@ source = { kind = "virt-builder", template = "fedora-44" }
         load_rootfs_catalog(path=path)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details["field"] == "family"
+
+
+def test_unknown_rootfs_kind_is_config_error(tmp_path: Path) -> None:
+    path = _write_catalog(
+        tmp_path,
+        """
+[[image]]
+name = "bad-rootfs-kind"
+distro = "fedora"
+version = "44"
+family = "rhel"
+arch = "x86_64"
+kind = "rescue"
+source = { kind = "virt-builder", template = "fedora-44" }
+""",
+    )
+    with pytest.raises(CategorizedError) as exc:
+        load_rootfs_catalog(path=path)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["field"] == "kind"
 
 
 def test_cloud_image_missing_sha256_is_config_error(tmp_path: Path) -> None:

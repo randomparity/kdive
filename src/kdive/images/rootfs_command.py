@@ -10,8 +10,10 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildPlane, RootfsBuildSpec
+from kdive.images.rootfs_kinds import RootfsImageKind
 from kdive.images.rootfs_specs import catalog_rootfs_build
 from kdive.images.staged_provenance import write_sidecar
 from kdive.providers.assembly.composition import build_local_rootfs_build_plane
@@ -102,7 +104,7 @@ class _BuildParams:
     """The image identity and base-source provenance a ``build-fs`` invocation resolves to."""
 
     name: str
-    kind: str
+    kind: RootfsImageKind
     dest: str
     spec: RootfsBuildSpec
 
@@ -155,8 +157,8 @@ def _write_provenance_sidecar(dest: Path, output: RootfsBuildOutput) -> None:
         _log.warning("could not write provenance sidecar for %s; skipping", dest, exc_info=True)
 
 
-def _kind_for_capabilities(capabilities: tuple[str, ...]) -> str:
+def _kind_for_capabilities(capabilities: tuple[Capability, ...]) -> RootfsImageKind:
     """Return the operator-facing image kind label for logging."""
-    if "build" in capabilities:
+    if Capability.BUILD in capabilities:
         return "build"
     return "debug"

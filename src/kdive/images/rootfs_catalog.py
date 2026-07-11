@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.rootfs_kinds import RootfsImageKind, parse_rootfs_image_kind
 
 DEFAULT_CATALOG_PATH = (
     Path(__file__).parents[3] / "fixtures" / "local-libvirt" / "rootfs_catalog.toml"
@@ -57,7 +58,7 @@ class RootfsCatalogEntry:
     version: str
     family: str
     arch: str
-    kind: str
+    kind: RootfsImageKind
     source: RootfsSource
     makedumpfile_version: str
 
@@ -89,6 +90,13 @@ def _parse_source(raw: object) -> RootfsSource:
     raise _catalog_error("rootfs catalog source.kind is not recognized", "source.kind")
 
 
+def _require_rootfs_kind(row: dict[str, Any]) -> RootfsImageKind:
+    kind = parse_rootfs_image_kind(_require_str(row, "kind"))
+    if kind is None:
+        raise _catalog_error("rootfs catalog kind is not recognized", "kind")
+    return kind
+
+
 def _parse_entry(row: dict[str, Any]) -> RootfsCatalogEntry:
     family = _require_str(row, "family")
     if family not in _VALID_FAMILIES:
@@ -99,7 +107,7 @@ def _parse_entry(row: dict[str, Any]) -> RootfsCatalogEntry:
         version=_require_str(row, "version"),
         family=family,
         arch=_require_str(row, "arch"),
-        kind=_require_str(row, "kind"),
+        kind=_require_rootfs_kind(row),
         source=_parse_source(row.get("source")),
         makedumpfile_version=_require_str(row, "makedumpfile_version"),
     )

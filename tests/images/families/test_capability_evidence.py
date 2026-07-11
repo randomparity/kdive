@@ -9,6 +9,7 @@ import pytest
 from kdive.domain.catalog.images import Capability
 from kdive.images.families import _FAMILIES
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer, _mac_tag
+from kdive.images.rootfs_kinds import RootfsImageKind
 from kdive.images.validation import GUEST_CONTRACT_PATHS
 
 
@@ -25,7 +26,7 @@ def test_mac_tag_unmapped_raises_naming_posture() -> None:
         _mac_tag("tomoyo")
 
 
-_KINDS = ("debug", "build")
+_KINDS: tuple[RootfsImageKind, ...] = ("debug", "build")
 # EVERY (distro, version) pair whose packages() output is distinct, so the evidence check covers
 # the EL-major branch in RhelFamily.packages() (EL8/EL9 vs EL10/Fedora) — not just one
 # representative. A tag declared but unbacked on *any* of these fails the guard.
@@ -35,7 +36,9 @@ _PROBE_PAIRS: dict[str, tuple[tuple[str, str], ...]] = {
 }
 
 
-def _evidenced(packages: tuple[str, ...], guest_mac: str, kind: str, tag: Capability) -> bool:
+def _evidenced(
+    packages: tuple[str, ...], guest_mac: str, kind: RootfsImageKind, tag: Capability
+) -> bool:
     if tag is Capability.SSH:
         return "openssh-server" in packages
     if tag in (Capability.SELINUX, Capability.APPARMOR):
