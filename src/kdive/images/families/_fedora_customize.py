@@ -16,7 +16,7 @@ from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families.base import CustomizeContext
-from kdive.images.planes._build_common import MAKEDUMPFILE_MARKER_GUEST_PATH
+from kdive.images.planes.provenance_probes import MAKEDUMPFILE_MARKER_GUEST_PATH
 
 # Today's debug/guest rootfs: the in-target crash + introspection toolchain. ``keyutils`` provides
 # ``keyctl``, which Fedora ``kdumpctl`` invokes building the crash environment (ADR-0213, #688).

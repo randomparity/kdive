@@ -35,8 +35,6 @@ from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes._build_common import (
-    DEFAULT_VERSION_INSPECT,
-    VersionInspectSeam,
     build_workspace,
     digest_file,
     publish_qcow2,
@@ -44,6 +42,7 @@ from kdive.images.planes._build_common import (
     validate_image_name,
 )
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
+from kdive.images.planes.provenance_probes import DEFAULT_VERSION_INSPECT, VersionInspectSeam
 from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
 
 _log = logging.getLogger(__name__)

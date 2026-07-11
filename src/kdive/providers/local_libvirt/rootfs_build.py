@@ -46,6 +46,14 @@ from kdive.images.families._fedora_customize import (
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.kdump_support import MakedumpfileVersion
 from kdive.images.planes._build_common import (
+    build_workspace,
+    digest_file,
+    publish_qcow2,
+    run_guestfs_tool,
+    validate_image_name,
+)
+from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
+from kdive.images.planes.provenance_probes import (
     DEFAULT_BOOT_ENTRIES_PROBE,
     DEFAULT_KERNEL_CONFIG_PROBE,
     DEFAULT_MAKEDUMPFILE_PROBE,
@@ -56,13 +64,7 @@ from kdive.images.planes._build_common import (
     MakedumpfileProbeSeam,
     OsReleaseProbeSeam,
     VersionInspectSeam,
-    build_workspace,
-    digest_file,
-    publish_qcow2,
-    run_guestfs_tool,
-    validate_image_name,
 )
-from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
 from kdive.images.rootfs_catalog import (
     CloudImageSource,
     RootfsCatalogEntry,
