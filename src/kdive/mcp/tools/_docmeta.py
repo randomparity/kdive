@@ -9,84 +9,16 @@ administration set the guard test (`tests/mcp/test_tool_docs.py`) holds the
 
 from __future__ import annotations
 
-from enum import StrEnum
-from typing import Any, Literal
+from typing import Literal
 
 from mcp.types import ToolAnnotations
 
-Maturity = Literal["implemented", "partial", "planned"]
+Maturity = Literal["implemented", "planned"]
 
 
-class MaturityReason(StrEnum):
-    """Why a `partial` tool is not yet `implemented` (ADR-0175).
-
-    A closed vocabulary so a black-box agent can branch on the *category* of the
-    limitation; the human specifics live in the free-text ``detail`` alongside it.
-    """
-
-    PROVIDER_SUPPORT = "provider_support"
-    LIVE_DEPENDENCY = "live_dependency"
-    UNPROVEN_WORKER_PATH = "unproven_worker_path"
-    OPERATOR_GATE = "operator_gate"
-    DEGRADED_STUB = "degraded_stub"
-
-
-def _one_line(field: str, value: str) -> str:
-    text = value.strip()
-    if not text:
-        raise ValueError(f"maturity_meta: {field} must be a non-empty string")
-    if "|" in text or "\n" in text:
-        raise ValueError(f"maturity_meta: {field} has a table-breaking character (| or newline)")
-    return text
-
-
-def maturity_meta(
-    maturity: Maturity,
-    *,
-    reason: MaturityReason | None = None,
-    detail: str | None = None,
-    promotion: str | None = None,
-    providers: str | None = None,
-) -> dict[str, Any]:
-    """Build the `@app.tool(meta=...)` dict, enforcing the ADR-0175 invariants.
-
-    A ``partial`` tool must carry a ``reason`` (closed enum), a one-line ``detail``
-    (why it is partial today), and a one-line ``promotion`` (the bar to reach
-    ``implemented``); ``providers`` is an optional one-line pointer for
-    provider-dependent tools. A non-``partial`` tool must carry none of these — a
-    leftover reason after promotion is a coding error.
-
-    Args:
-        maturity: The tool's maturity marker.
-        reason: Required for ``partial``; forbidden otherwise.
-        detail: One-line explanation; required for ``partial``, forbidden otherwise.
-        promotion: One-line promotion bar; required for ``partial``, forbidden otherwise.
-        providers: Optional one-line provider-support pointer (``partial`` only).
-
-    Returns:
-        The ``meta`` dict: ``{"maturity": ...}`` plus a ``maturity_detail`` object
-        when ``partial``.
-
-    Raises:
-        ValueError: When the maturity/field combination violates the invariants.
-    """
-    if maturity != "partial":
-        if any(v is not None for v in (reason, detail, promotion, providers)):
-            raise ValueError(
-                f"maturity_meta: {maturity!r} tool must not carry maturity_detail fields"
-            )
-        return {"maturity": maturity}
-
-    if reason is None or detail is None or promotion is None:
-        raise ValueError("maturity_meta: 'partial' requires reason, detail, and promotion")
-    detail_obj: dict[str, str] = {
-        "reason": reason.value,
-        "detail": _one_line("detail", detail),
-        "promotion": _one_line("promotion", promotion),
-    }
-    if providers is not None:
-        detail_obj["providers"] = _one_line("providers", providers)
-    return {"maturity": maturity, "maturity_detail": detail_obj}
+def maturity_meta(maturity: Maturity) -> dict[str, object]:
+    """Build the `@app.tool(meta=...)` dict for the implemented/planned contract."""
+    return {"maturity": maturity}
 
 
 DESTRUCTIVE_TOOLS = frozenset(

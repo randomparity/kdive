@@ -3,7 +3,7 @@
 Builds the app with a null pool + a local-keypair verifier (the service-test
 path; needs no DB and no OIDC env), then asserts every tool is fully
 documented, the destructive hint matches the reviewed set, and every
-`implemented` or `partial` tool is assigned to a non-live behavior test module.
+`implemented` tool is assigned to a non-live behavior test module.
 """
 
 from __future__ import annotations
@@ -494,57 +494,16 @@ def test_resource_register_tools_are_variant_specific() -> None:
 
 
 def test_every_tool_has_a_valid_maturity() -> None:
-    valid = {"implemented", "partial", "planned"}
+    valid = {"implemented", "planned"}
     offenders = [t.name for t in TOOLS if (t.meta or {}).get("maturity") not in valid]
     assert not offenders, f"tools with missing/invalid maturity: {offenders}"
 
 
-_VALID_MATURITY_REASONS = {r.value for r in _docmeta.MaturityReason}
+def test_tools_have_no_maturity_detail() -> None:
+    # A maturity_detail left behind after a tool is promoted would mislead.
+    offenders = [t.name for t in TOOLS if "maturity_detail" in (t.meta or {})]
+    assert not offenders, f"tools carrying a stale maturity_detail: {offenders}"
 
-
-def test_partial_tools_carry_a_maturity_reason() -> None:
-    # ADR-0175: every `partial` tool must explain itself with a structured
-    # maturity_detail (a closed reason + a one-line detail + a one-line promotion
-    # bar) so a black-box agent reads WHY, not just `partial`.
-    offenders: list[str] = []
-    for t in TOOLS:
-        meta = t.meta or {}
-        if meta.get("maturity") != "partial":
-            continue
-        detail = meta.get("maturity_detail")
-        if not isinstance(detail, dict):
-            offenders.append(f"{t.name}: missing maturity_detail")
-            continue
-        if detail.get("reason") not in _VALID_MATURITY_REASONS:
-            offenders.append(f"{t.name}: invalid reason {detail.get('reason')!r}")
-        if not (detail.get("detail") or "").strip():
-            offenders.append(f"{t.name}: empty detail")
-        if not (detail.get("promotion") or "").strip():
-            offenders.append(f"{t.name}: empty promotion")
-    assert not offenders, f"partial tools missing maturity explanation: {offenders}"
-
-
-def test_non_partial_tools_have_no_maturity_detail() -> None:
-    # A maturity_detail left behind after a tool is promoted to `implemented`
-    # would mislead; only `partial` tools carry one.
-    offenders = [
-        t.name
-        for t in TOOLS
-        if (t.meta or {}).get("maturity") != "partial" and "maturity_detail" in (t.meta or {})
-    ]
-    assert not offenders, f"non-partial tools carrying a stale maturity_detail: {offenders}"
-
-
-# The introspect planes whose local-libvirt seam is still an Epic-B stub (M2.8 honesty,
-# #673). Their `providers` pointer must say the local-libvirt path is *planned* and the
-# remote-libvirt path *implemented* — not the pre-honesty "wired" half-truth. A promotion to
-# `implemented` for a plane is the diff that flips its pointer here. The `debug.*` planes moved
-# to their own implemented-guard once B1 (#675) wired the gdbstub transport they run over;
-# `introspect.from_vmcore` got its own implemented-guard once B2 (#676) wired it and B6 (#680)
-# proved it live; and `introspect.run` got its own implemented-guard once B3 (#677/ADR-0219)
-# wired the live drgn-over-SSH seam and B6 proved it live (#682/ADR-0221) — so no local plane is
-# a MISSING_DEPENDENCY stub any more.
-_LOCAL_PLANNED_PROVIDER_TOOLS: frozenset[str] = frozenset()
 
 # The `debug.*` planes were proven live end-to-end on real KVM (M2.8 B6 #680, ADR-0208
 # invariant 5): start_session opened a live gdbstub session, set_breakpoint("schedule") →
@@ -595,34 +554,11 @@ _LOCAL_PROVEN_DEBUG_TOOLS = frozenset(
 def test_introspect_from_vmcore_promoted_to_implemented() -> None:
     # M2.8 B6 (#680): local offline drgn introspection was proven live on a real host_dump core
     # (sysinfo release 7.0.0, cpus_online=1, modules.decode_errors=0, all_failed=false), so the
-    # tool is now `implemented` (ADR-0175: a non-partial tool carries no maturity_detail).
+    # tool is now `implemented` and carries no maturity_detail.
     by_name = {t.name: t for t in TOOLS}
     tool = by_name["introspect.from_vmcore"]
     assert (tool.meta or {}).get("maturity") == "implemented"
     assert (tool.meta or {}).get("maturity_detail") is None
-
-
-def test_local_stubbed_planes_advertise_planned_provider_pointer() -> None:
-    # #673 / M2.8 honesty: a local-libvirt System cannot run these planes today
-    # (the seam raises MISSING_DEPENDENCY); the catalog must say so. Each in-scope
-    # tool carries a `providers` pointer marking local-libvirt `planned` and
-    # remote-libvirt `implemented`.
-    by_name = {t.name: t for t in TOOLS}
-    offenders: list[str] = []
-    for name in sorted(_LOCAL_PLANNED_PROVIDER_TOOLS):
-        tool = by_name.get(name)
-        if tool is None:
-            offenders.append(f"{name}: tool not registered")
-            continue
-        providers = ((tool.meta or {}).get("maturity_detail") or {}).get("providers")
-        if not isinstance(providers, str):
-            offenders.append(f"{name}: missing providers pointer")
-            continue
-        if "local-libvirt: planned" not in providers:
-            offenders.append(f"{name}: local-libvirt not marked planned ({providers!r})")
-        if "remote-libvirt: implemented" not in providers:
-            offenders.append(f"{name}: remote-libvirt not marked implemented ({providers!r})")
-    assert not offenders, f"stubbed local planes with a dishonest provider pointer: {offenders}"
 
 
 def test_introspect_run_promoted_to_implemented() -> None:
@@ -641,7 +577,7 @@ def test_introspect_run_promoted_to_implemented() -> None:
 def test_local_proven_debug_planes_are_implemented() -> None:
     # B6 (#680): the gdb-MI debug surface was proven live on real KVM (ADR-0208 invariant 5
     # satisfied), so every debug.* op is now `implemented` and — per ADR-0175 — carries no
-    # maturity_detail. Guards against a leftover `partial`/maturity_detail after promotion.
+    # maturity_detail. Guards against a leftover maturity_detail after promotion.
     by_name = {t.name: t for t in TOOLS}
     offenders: list[str] = []
     for name in sorted(_LOCAL_PROVEN_DEBUG_TOOLS):
@@ -682,21 +618,6 @@ def test_postmortem_crash_triage_promoted_to_implemented() -> None:
         if "maturity_detail" in meta:
             offenders.append(f"{name}: implemented tool still carries maturity_detail")
     assert not offenders, f"postmortem tools not promoted to implemented: {offenders}"
-
-
-def test_maturity_meta_rejects_partial_without_reason() -> None:
-    with pytest.raises(ValueError, match="requires reason"):
-        _docmeta.maturity_meta("partial")
-
-
-def test_maturity_meta_rejects_reason_on_non_partial() -> None:
-    with pytest.raises(ValueError, match="must not carry"):
-        _docmeta.maturity_meta(
-            "implemented",
-            reason=_docmeta.MaturityReason.OPERATOR_GATE,
-            detail="x",
-            promotion="y",
-        )
 
 
 def test_destructive_hint_matches_reviewed_set() -> None:
@@ -962,7 +883,7 @@ def test_bound_literal_guard_detects_and_ignores() -> None:
 
 
 def test_active_tools_have_a_covering_test() -> None:
-    covered_maturities = {"implemented", "partial"}
+    covered_maturities = {"implemented"}
     active = {t.name for t in TOOLS if (t.meta or {}).get("maturity") in covered_maturities}
     mapped = set(_BEHAVIOR_TESTS_BY_TOOL)
     assert active == mapped, (
