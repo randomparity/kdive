@@ -40,13 +40,12 @@ from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cur
 from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
 from kdive.mcp.tools._common import paginate as _paginate
 from kdive.mcp.tools.ops import _reads
+from kdive.mcp.tools.ops.audit.read_pipeline import query_platform_audited_page
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import (
     AuthorizationError,
-    PlatformRole,
     Role,
     RoleDenied,
-    require_platform_role,
     require_role,
 )
 
@@ -230,27 +229,21 @@ async def _query_cross_project(
 ) -> ToolResponse:
     """Cross-project form: require ``platform_auditor``, read all projects, read-audit."""
     args = _audit_args(filters)
-    try:
-        require_platform_role(ctx, PlatformRole.PLATFORM_AUDITOR)
-    except AuthorizationError:
-        await _reads.audit_denial(pool, ctx, tool=_TOOL, args=args)
-        return ToolResponse.failure(
-            _OBJECT_ID, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[_TOOL]
-        )
-    # Decode the cursor only after authz + read-audit so a bad cursor cannot change either.
-    after: tuple[datetime, UUID] | None = None
-    if cursor:
-        try:
-            after = _decode_ts_uuid_cursor(_LIST_TAG, cursor)
-        except InvalidCursor:
-            async with pool.connection() as conn:
-                await _reads.record_read(conn, ctx, tool=_TOOL, args=args)
-            return _invalid_cursor_error(_OBJECT_ID)
-    capped = _clamp_list_limit(limit)
-    async with pool.connection() as conn:
-        rows = await _fetch_rows(conn, project=None, filters=filters, limit=capped, after=after)
-        await _reads.record_read(conn, ctx, tool=_TOOL, args=args)
-    return _response(rows, capped)
+    return await query_platform_audited_page(
+        pool,
+        ctx,
+        tool=_TOOL,
+        object_id=_OBJECT_ID,
+        list_tag=_LIST_TAG,
+        args=args,
+        limit=limit,
+        cursor=cursor,
+        fetch_rows=lambda conn, capped, after: _fetch_rows(
+            conn, project=None, filters=filters, limit=capped, after=after
+        ),
+        row_data=_row_data,
+        row_object_id=lambda _row, data: data["object_id"] or _OBJECT_ID,
+    )
 
 
 async def _fetch_rows(

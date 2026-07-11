@@ -27,27 +27,17 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.platform_auth import ALL_PROJECTS_SCOPE
-from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.responses import ToolResponse
 from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidCursor
-from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
-from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
-from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
-from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
-from kdive.mcp.tools._common import paginate as _paginate
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
 from kdive.mcp.tools._time_window import parse_timestamptz_window
-from kdive.mcp.tools.ops import _reads
+from kdive.mcp.tools.ops.audit.read_pipeline import query_platform_audited_page
 from kdive.security.authz.context import RequestContext
-from kdive.security.authz.rbac import (
-    AuthorizationError,
-    PlatformRole,
-    require_platform_role,
-)
 
 _TOOL = "ops.tool_trail"
 _OBJECT_ID = "ops.tool_trail"
@@ -146,27 +136,21 @@ async def _query(
 ) -> ToolResponse:
     """Auditor-gate, read-audit, then read a keyset page (mirrors ``audit.query``)."""
     args = _audit_args(filters)
-    try:
-        require_platform_role(ctx, PlatformRole.PLATFORM_AUDITOR)
-    except AuthorizationError:
-        await _reads.audit_denial(pool, ctx, tool=_TOOL, args=args)
-        return ToolResponse.failure(
-            _OBJECT_ID, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[_TOOL]
-        )
-    # Decode the cursor only after authz + read-audit so a bad cursor cannot change either.
-    after: tuple[datetime, UUID] | None = None
-    if cursor:
-        try:
-            after = _decode_ts_uuid_cursor(_LIST_TAG, cursor)
-        except InvalidCursor:
-            async with pool.connection() as conn:
-                await _reads.record_read(conn, ctx, tool=_TOOL, args=args)
-            return _invalid_cursor_error(_OBJECT_ID)
-    capped = _clamp_list_limit(limit)
-    async with pool.connection() as conn:
-        rows = await _fetch_rows(conn, filters=filters, limit=capped, after=after)
-        await _reads.record_read(conn, ctx, tool=_TOOL, args=args)
-    return _response(rows, capped)
+    return await query_platform_audited_page(
+        pool,
+        ctx,
+        tool=_TOOL,
+        object_id=_OBJECT_ID,
+        list_tag=_LIST_TAG,
+        args=args,
+        limit=limit,
+        cursor=cursor,
+        fetch_rows=lambda conn, capped, after: _fetch_rows(
+            conn, filters=filters, limit=capped, after=after
+        ),
+        row_data=_row_data,
+        row_object_id=lambda row, _data: str(row["id"]) if row["id"] is not None else _OBJECT_ID,
+    )
 
 
 async def _fetch_rows(
@@ -247,30 +231,6 @@ def _row_data(row: dict[str, object]) -> dict[str, str]:
 
 def _as_str(value: object) -> str:
     return "" if value is None else str(value)
-
-
-def _response(rows: list[dict[str, object]], limit: int) -> ToolResponse:
-    kept, truncated = _paginate(rows, limit)
-    items: list[ToolResponse] = []
-    for row in kept:
-        data = _row_data(row)
-        row_id = row["id"]
-        items.append(
-            ToolResponse.success(str(row_id) if row_id is not None else _OBJECT_ID, "ok", data=data)
-        )
-    next_cursor: JsonValue = None
-    if truncated and kept:
-        last = kept[-1]
-        ts, row_id = last["ts"], last["id"]
-        if isinstance(ts, datetime) and isinstance(row_id, UUID):
-            next_cursor = _encode_ts_uuid_cursor(_LIST_TAG, ts, row_id)
-    return ToolResponse.collection(
-        _OBJECT_ID,
-        "ok",
-        items,
-        suggested_next_actions=[_TOOL],
-        data={"truncated": truncated, "next_cursor": next_cursor},
-    )
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
