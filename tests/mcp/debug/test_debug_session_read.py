@@ -30,7 +30,7 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.debug import sessions_read
+from kdive.mcp.tools.debug.sessions import read as sessions_read
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.mcp.tools.lifecycle.systems.view import get_system as _get_system
 from kdive.providers.ports.lifecycle import (

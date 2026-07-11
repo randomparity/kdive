@@ -30,8 +30,8 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as resources_tools
 from kdive.mcp.tools.catalog.artifacts import registrar as artifacts_tools
 from kdive.mcp.tools.catalog.artifacts import uploads as artifact_upload_tools
-from kdive.mcp.tools.debug import ops_breakpoints as debug_breakpoint_tools
 from kdive.mcp.tools.debug import sessions as debug_sessions_tools
+from kdive.mcp.tools.debug.operations import breakpoints as debug_breakpoint_tools
 from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_tools
 from kdive.mcp.tools.lifecycle.runs import registrar as runs_tools
 from kdive.mcp.tools.lifecycle.systems import registrar as systems_tools

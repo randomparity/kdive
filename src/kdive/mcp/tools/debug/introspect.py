@@ -37,7 +37,7 @@ from kdive.mcp.tools._common import capability_unsupported as _capability_unsupp
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_target_failure
-from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
+from kdive.mcp.tools.debug.sessions.context import resolve_debug_session_context
 from kdive.prereqs.system_bootstrap_key import (
     load_system_bootstrap_private_key,
     materialized_private_key,

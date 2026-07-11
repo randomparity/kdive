@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.mcp.tools.debug.session_registry import GdbMiSessionRegistry
+from kdive.mcp.tools.debug.sessions.registry import GdbMiSessionRegistry
 from kdive.providers.ports.debug import (
     GdbFrame,
     GdbMiAttachment,

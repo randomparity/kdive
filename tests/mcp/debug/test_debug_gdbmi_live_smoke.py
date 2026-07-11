@@ -24,21 +24,31 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import SystemState
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.debug import (
-    ops as debug_ops,
-)
-from kdive.mcp.tools.debug import (
-    ops_breakpoints,
-    ops_execution,
-    ops_memory,
-    ops_modules,
-    ops_stack,
-    ops_watchpoints,
-)
+from kdive.mcp.tools.debug import operations as debug_ops
 from kdive.mcp.tools.debug import (
     sessions as debug_tools,
 )
-from kdive.mcp.tools.debug.ops import DebugEngineRuntime
+from kdive.mcp.tools.debug.operations import (
+    DebugEngineRuntime,
+)
+from kdive.mcp.tools.debug.operations import (
+    breakpoints as ops_breakpoints,
+)
+from kdive.mcp.tools.debug.operations import (
+    execution as ops_execution,
+)
+from kdive.mcp.tools.debug.operations import (
+    memory as ops_memory,
+)
+from kdive.mcp.tools.debug.operations import (
+    modules as ops_modules,
+)
+from kdive.mcp.tools.debug.operations import (
+    stack as ops_stack,
+)
+from kdive.mcp.tools.debug.operations import (
+    watchpoints as ops_watchpoints,
+)
 from kdive.providers.core.resolver import ProviderBinding
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.ports.debug import GdbMiAttachment

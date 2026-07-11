@@ -44,8 +44,8 @@ from kdive.mcp.tools._common import capability_unsupported as _capability_unsupp
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
-from kdive.mcp.tools.debug.ops import DebugEngineRuntime, DebugRuntimeResolver
-from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
+from kdive.mcp.tools.debug.operations import DebugEngineRuntime, DebugRuntimeResolver
+from kdive.mcp.tools.debug.sessions.context import resolve_debug_session_context
 from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.prereqs.system_bootstrap_key import load_system_bootstrap_private_key

@@ -40,10 +40,10 @@ from kdive.domain.lifecycle.records import DebugSession
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools.debug.session_context import (
+from kdive.mcp.tools.debug.sessions.context import (
     resolve_debug_session_context,
 )
-from kdive.mcp.tools.debug.session_registry import GdbMiSessionRegistry
+from kdive.mcp.tools.debug.sessions.registry import GdbMiSessionRegistry
 from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
 from kdive.providers.ports.debug import (
     AttachSeam,
@@ -350,18 +350,18 @@ def _register_debug_ops(
     app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     """Register the sixteen gdb-MI `debug.*` tools on ``app``, sharing ``runtime``."""
-    from kdive.mcp.tools.debug import (
-        ops_breakpoints,
-        ops_execution,
-        ops_memory,
-        ops_modules,
-        ops_stack,
-        ops_watchpoints,
+    from kdive.mcp.tools.debug.operations import (
+        breakpoints,
+        execution,
+        memory,
+        modules,
+        stack,
+        watchpoints,
     )
 
-    ops_breakpoints.register(app, pool, runtime)
-    ops_memory.register(app, pool, runtime)
-    ops_execution.register(app, pool, runtime)
-    ops_stack.register(app, pool, runtime)
-    ops_watchpoints.register(app, pool, runtime)
-    ops_modules.register(app, pool, runtime)
+    breakpoints.register(app, pool, runtime)
+    memory.register(app, pool, runtime)
+    execution.register(app, pool, runtime)
+    stack.register(app, pool, runtime)
+    watchpoints.register(app, pool, runtime)
+    modules.register(app, pool, runtime)
