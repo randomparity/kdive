@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from fastmcp import FastMCP
 from fastmcp.prompts import Prompt
 
+from kdive.mcp.tools._docmeta import ToolMaturityValue
+
 
 @dataclass(frozen=True, slots=True)
 class ToolMaturity:
@@ -37,7 +39,7 @@ class ToolMaturity:
         reason: The ``maturity_detail.reason`` for a ``partial`` tool, else ``None``.
     """
 
-    maturity: str
+    maturity: ToolMaturityValue
     reason: str | None
 
 

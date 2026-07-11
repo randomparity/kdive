@@ -495,7 +495,7 @@ def test_resource_register_tools_are_variant_specific() -> None:
 
 
 def test_every_tool_has_a_valid_maturity() -> None:
-    valid = {"implemented", "planned"}
+    valid = {"implemented", "partial", "planned"}
     offenders = [t.name for t in TOOLS if (t.meta or {}).get("maturity") not in valid]
     assert not offenders, f"tools with missing/invalid maturity: {offenders}"
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from fastmcp import FastMCP
@@ -13,7 +13,7 @@ from kdive.diagnostics.service import DiagnosticsService, default_service_factor
 from kdive.mcp.prompts import registrar as lifecycle_prompts
 from kdive.mcp.resources import registrar as doc_resources
 from kdive.mcp.schema_advertising import registered_tools
-from kdive.mcp.tools import gateway, jobs
+from kdive.mcp.tools import _docmeta, gateway, jobs
 from kdive.mcp.tools.accounting.admin import register as register_accounting_admin
 from kdive.mcp.tools.accounting.estimate import register as register_accounting_estimate
 from kdive.mcp.tools.accounting.reports import register as register_accounting_reports
@@ -212,13 +212,16 @@ def _register_doc_resources(
 def _register_lifecycle_prompts(
     app: FastMCP, _pool: AsyncConnectionPool, _assembly: AppAssembly
 ) -> None:
-    tool_maturity = {
-        tool.name: lifecycle_prompts.ToolMaturity(
-            maturity=(tool.meta or {}).get("maturity", "implemented"),
-            reason=(tool.meta or {}).get("maturity_detail", {}).get("reason"),
+    def maturity_record(meta: Mapping[str, object] | None) -> lifecycle_prompts.ToolMaturity:
+        meta = meta or {}
+        detail = meta.get("maturity_detail")
+        reason = detail.get("reason") if isinstance(detail, Mapping) else None
+        return lifecycle_prompts.ToolMaturity(
+            maturity=_docmeta.normalize_maturity(meta.get("maturity", "implemented")),
+            reason=reason if isinstance(reason, str) else None,
         )
-        for tool in registered_tools(app)
-    }
+
+    tool_maturity = {tool.name: maturity_record(tool.meta) for tool in registered_tools(app)}
     lifecycle_prompts.register(app, tool_maturity=tool_maturity)
 
 

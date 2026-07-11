@@ -9,16 +9,29 @@ administration set the guard test (`tests/mcp/test_tool_docs.py`) holds the
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
 from mcp.types import ToolAnnotations
 
-Maturity = Literal["implemented", "planned"]
+ToolMaturityValue = Literal["implemented", "partial", "planned"]
+Maturity = ToolMaturityValue
+
+TOOL_MATURITY_VALUES: frozenset[ToolMaturityValue] = frozenset(
+    {"implemented", "partial", "planned"}
+)
 
 
 def maturity_meta(maturity: Maturity) -> dict[str, object]:
-    """Build the `@app.tool(meta=...)` dict for the implemented/planned contract."""
+    """Build the `@app.tool(meta=...)` dict for the closed maturity contract."""
     return {"maturity": maturity}
+
+
+def normalize_maturity(value: object) -> ToolMaturityValue:
+    """Return a closed maturity value, or fail fast on malformed tool metadata."""
+    if value in TOOL_MATURITY_VALUES:
+        return cast("ToolMaturityValue", value)
+    choices = ", ".join(sorted(TOOL_MATURITY_VALUES))
+    raise ValueError(f"invalid tool maturity {value!r}; expected one of: {choices}")
 
 
 DESTRUCTIVE_TOOLS = frozenset(
