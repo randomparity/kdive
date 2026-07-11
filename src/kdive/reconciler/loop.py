@@ -106,25 +106,10 @@ _sweep_expired_allocations = allocation_repairs.sweep_expired_allocations
 _sweep_console_rotation = console_rotation_repairs.sweep_console_rotation
 
 __all__ = [
+    "ALL_REPAIR_KINDS",
     "ReconcileConfig",
     "ReconcileReport",
     "Reconciler",
-    "_expire_one",
-    "_gc_expired_build_artifacts",
-    "_gc_idempotency_keys",
-    "_gc_investigation_artifacts",
-    "_gc_report_artifacts",
-    "_promote_pending",
-    "_reap_expired_runtime_resources",
-    "_reap_orphaned_active_allocations",
-    "_reap_console_collectors",
-    "_reap_orphaned_dump_volumes",
-    "_repair_abandoned_jobs",
-    "_repair_dead_sessions",
-    "_repair_orphaned_systems",
-    "_repair_stalled_crashing_systems",
-    "_sweep_console_rotation",
-    "_sweep_expired_allocations",
     "reconcile_once",
 ]
 

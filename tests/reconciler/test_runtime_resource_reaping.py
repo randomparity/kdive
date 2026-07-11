@@ -345,8 +345,9 @@ def test_reap_spec_present_in_plan_without_probe() -> None:
 
 
 def test_reap_spec_registered_in_loop() -> None:
-    """The _reap_expired_runtime_resources alias is exported from the loop module."""
-    assert "_reap_expired_runtime_resources" in loop.__all__
+    """The runtime-resource repair is registered without advertising private loop aliases."""
+    assert "_reap_expired_runtime_resources" not in loop.__all__
+    assert "reaped_runtime_resources" in loop.ALL_REPAIR_KINDS
     assert callable(loop._reap_expired_runtime_resources)
 
 
