@@ -1,4 +1,4 @@
-"""Image catalog read-model predicates."""
+"""Shared image catalog predicates."""
 
 from __future__ import annotations
 
