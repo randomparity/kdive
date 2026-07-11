@@ -36,6 +36,7 @@ from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
 from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
 from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
 from kdive.mcp.tools._resource_envelopes import resource_config_error, resource_envelope
@@ -196,7 +197,7 @@ async def describe_resource(
     try:
         uid = UUID(resource_id)
     except ValueError:
-        return resource_config_error(resource_id)
+        return _invalid_uuid_error("resource_id", resource_id)
     with bind_context(principal=ctx.principal):
         viewer_projects = tuple(projects_with_role(ctx, Role.VIEWER))
         async with pool.connection() as conn:

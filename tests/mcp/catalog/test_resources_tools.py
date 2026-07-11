@@ -367,6 +367,7 @@ def test_describe_malformed_id_is_error(migrated_url: str) -> None:
             resp = await catalog_resources_tools.describe_resource(pool, CTX, "not-a-uuid")
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
 
     asyncio.run(_run())
 
@@ -690,6 +691,19 @@ def test_set_status_unknown_host_is_error(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_set_status_malformed_resource_id_is_invalid_uuid(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await resources_tools.set_resource_status(
+                pool, _OPERATOR, resource_id="not-a-uuid", status="offline"
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+
+    asyncio.run(_run())
+
+
 def test_set_status_does_not_clear_cordoned(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -735,6 +749,17 @@ def test_cordon_unknown_host_is_error(migrated_url: str) -> None:
             resp = await resources_tools.cordon_resource(pool, _OPERATOR, resource_id=str(uuid4()))
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
+def test_cordon_malformed_resource_id_is_invalid_uuid(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await resources_tools.cordon_resource(pool, _OPERATOR, resource_id="not-a-uuid")
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
 
     asyncio.run(_run())
 
@@ -1230,6 +1255,7 @@ def test_drain_bad_uuid_is_error_unaudited(migrated_url: str) -> None:
             audited = await _platform_audit_rows(pool)
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
         assert audited == []
 
     asyncio.run(_run())

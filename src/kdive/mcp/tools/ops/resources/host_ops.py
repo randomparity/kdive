@@ -28,6 +28,7 @@ from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platf
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._resource_envelopes import resource_config_error, resource_envelope
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
@@ -110,7 +111,7 @@ async def set_resource_status(
         return _denied(resource_id)
     uid = _as_uuid(resource_id)
     if uid is None:
-        return resource_config_error(resource_id)
+        return _invalid_uuid_error("resource_id", resource_id)
     try:
         new_status = ResourceStatus(status)
     except ValueError:
@@ -156,7 +157,7 @@ async def _set_cordoned(
         return _denied(resource_id)
     uid = _as_uuid(resource_id)
     if uid is None:
-        return resource_config_error(resource_id)
+        return _invalid_uuid_error("resource_id", resource_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             resource = await _apply_cordon(conn, uid, cordoned=cordoned)
@@ -256,7 +257,7 @@ async def drain_resource(
         return resource_config_error(resource_id)
     uid = _as_uuid(resource_id)
     if uid is None:
-        return resource_config_error(resource_id)
+        return _invalid_uuid_error("resource_id", resource_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             resource = await _apply_cordon(conn, uid, cordoned=True)
