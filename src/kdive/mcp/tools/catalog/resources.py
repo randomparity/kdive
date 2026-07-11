@@ -226,9 +226,13 @@ async def _resource_detail_data(
     runtime: ProviderRuntime | None,
     viewer_projects: tuple[str, ...],
 ) -> dict[str, JsonValue]:
-    if runtime is None or runtime.resource_detail_projector is None:
+    if (
+        runtime is None
+        or runtime.resource_details is None
+        or runtime.resource_details.projector is None
+    ):
         return {}
-    return await runtime.resource_detail_projector(pool, viewer_projects)
+    return await runtime.resource_details.projector(pool, viewer_projects)
 
 
 def _project_capabilities(envelope: ToolResponse, runtime: ProviderRuntime | None) -> None:
@@ -244,10 +248,10 @@ def _project_capabilities(envelope: ToolResponse, runtime: ProviderRuntime | Non
         return
     capabilities: list[JsonValue] = [plane for plane in _capability_planes(runtime)]
     capture: list[JsonValue] = [
-        method.value for method in sorted(runtime.supported_capture_methods, key=lambda m: m.value)
+        method.value for method in sorted(runtime.support.capture_methods, key=lambda m: m.value)
     ]
-    transports: list[JsonValue] = [t for t in sorted(runtime.supported_debug_transports)]
-    introspection: list[JsonValue] = [m for m in sorted(runtime.supported_introspection)]
+    transports: list[JsonValue] = [t for t in sorted(runtime.support.debug_transports)]
+    introspection: list[JsonValue] = [m for m in sorted(runtime.support.introspection)]
     envelope.data["capabilities"] = capabilities
     envelope.data["supported_capture_methods"] = capture
     envelope.data["supported_debug_transports"] = transports
@@ -262,13 +266,13 @@ def _capability_planes(runtime: ProviderRuntime) -> list[str]:
     non-empty transport/introspection sets.
     """
     planes = {"build", "boot"}
-    if CaptureMethod.KDUMP in runtime.supported_capture_methods:
+    if CaptureMethod.KDUMP in runtime.support.capture_methods:
         planes.add("kdump")
-    if CaptureMethod.HOST_DUMP in runtime.supported_capture_methods:
+    if CaptureMethod.HOST_DUMP in runtime.support.capture_methods:
         planes.add("host-dump")
-    if runtime.supported_debug_transports:
+    if runtime.support.debug_transports:
         planes.add("debug")
-    if runtime.supported_introspection:
+    if runtime.support.introspection:
         planes.add("introspect")
     return sorted(planes)
 

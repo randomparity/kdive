@@ -139,8 +139,8 @@ def _resolved_connector_for_run(resolver: ProviderResolver) -> _ConnectorForRun:
         return _AttachResources(
             connector=runtime.connector,
             profile_policy=runtime.profile_policy,
-            supported_debug_transports=runtime.supported_debug_transports,
-            provider=runtime.component_sources.provider,
+            supported_debug_transports=runtime.support.debug_transports,
+            provider=runtime.support.component_sources.provider,
         )
 
     return connector_for_run

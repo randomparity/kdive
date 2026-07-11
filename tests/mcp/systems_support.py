@@ -29,7 +29,12 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.core.runtime import (
+    BootstrapKeyCapabilities,
+    ProviderRuntime,
+    ProviderSupport,
+    RootfsCapabilities,
+)
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.lifecycle.overlay_customize import authorized_key_customizer
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
@@ -123,9 +128,8 @@ def provider_resolver(
     ``platform_root_cmdline`` defaults to the local-libvirt root device; pass ``None`` to model a
     provider (e.g. remote-libvirt) whose in-guest bootloader owns the root device (ADR-0183).
 
-    The capability-descriptor fields (``supported_capture_methods`` / ``supported_debug_transports``
-    / ``supported_introspection``) default to the **full** set so a test provider is capable by
-    default (matching the historic permissive ``supported_capture_methods`` default); a
+    The support descriptor fields default to the **full** set so a test provider is capable by
+    default (matching the historic permissive capture-method default); a
     capability-aware-admission test (ADR-0209) passes an empty/narrowed set to model an unsupported
     plane. ``vmcore_introspector`` is injectable so an admission *admit*-path test can run a fake
     port behind the gate; it defaults to an unused port for the deny/short-circuit tests.
@@ -150,23 +154,31 @@ def provider_resolver(
             Any, vmcore_introspector if vmcore_introspector is not None else unused_port
         ),
         live_introspector=unused_port,
-        supported_capture_methods=(
-            supported_capture_methods
-            if supported_capture_methods is not None
-            else frozenset(CaptureMethod)
+        support=ProviderSupport(
+            component_sources=TEST_COMPONENT_SOURCES,
+            capture_methods=(
+                supported_capture_methods
+                if supported_capture_methods is not None
+                else frozenset(CaptureMethod)
+            ),
+            debug_transports=(
+                supported_debug_transports
+                if supported_debug_transports is not None
+                else DEBUG_TRANSPORT_KINDS
+            ),
+            introspection=(
+                supported_introspection
+                if supported_introspection is not None
+                else INTROSPECTION_MODES
+            ),
         ),
-        supported_debug_transports=(
-            supported_debug_transports
-            if supported_debug_transports is not None
-            else DEBUG_TRANSPORT_KINDS
-        ),
-        supported_introspection=(
-            supported_introspection if supported_introspection is not None else INTROSPECTION_MODES
-        ),
-        component_sources=TEST_COMPONENT_SOURCES,
-        rootfs_validator=lambda _: None,
+        rootfs=RootfsCapabilities(validator=lambda _: None),
         platform_root_cmdline=platform_root_cmdline,
-        bootstrap_key_customizer=bootstrap_key_customizer,
+        bootstrap_key=(
+            None
+            if bootstrap_key_customizer is None
+            else BootstrapKeyCapabilities(customizer=bootstrap_key_customizer)
+        ),
     )
     return ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
 

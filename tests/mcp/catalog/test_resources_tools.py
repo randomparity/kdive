@@ -26,7 +26,12 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as catalog_resources_tools
 from kdive.mcp.tools.ops.resources import host_ops as resources_tools
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.core.runtime import (
+    ProviderRuntime,
+    ProviderSupport,
+    ResourceBindingCapabilities,
+    ResourceDetailCapabilities,
+)
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.remote_libvirt.resource_details import (
     StagedVolumeProbe,
@@ -88,8 +93,10 @@ def _resolver_with_staged_projector(probe: StagedVolumeProbe) -> ProviderResolve
         crash_postmortem=unused_port,
         vmcore_introspector=unused_port,
         live_introspector=unused_port,
-        resource_detail_projector=lambda pool, viewer_projects: project_resource_details(
-            pool, viewer_projects, staged_probe=probe
+        resource_details=ResourceDetailCapabilities(
+            projector=lambda pool, viewer_projects: project_resource_details(
+                pool, viewer_projects, staged_probe=probe
+            )
         ),
     )
     return ProviderResolver({ResourceKind.REMOTE_LIBVIRT: runtime})
@@ -224,9 +231,11 @@ def _descriptor_runtime(
         crash_postmortem=unused_port,
         vmcore_introspector=unused_port,
         live_introspector=unused_port,
-        supported_capture_methods=capture,
-        supported_debug_transports=cast(Any, transports),
-        supported_introspection=cast(Any, introspection),
+        support=ProviderSupport(
+            capture_methods=capture,
+            debug_transports=cast(Any, transports),
+            introspection=cast(Any, introspection),
+        ),
     )
 
 
@@ -460,13 +469,19 @@ def _resolver_with_rebound_staged_probe(
             crash_postmortem=unused_port,
             vmcore_introspector=unused_port,
             live_introspector=unused_port,
-            resource_detail_projector=lambda pool, viewer_projects: project_resource_details(
-                pool, viewer_projects, staged_probe=probe
+            resource_details=ResourceDetailCapabilities(
+                projector=lambda pool, viewer_projects: project_resource_details(
+                    pool, viewer_projects, staged_probe=probe
+                )
             ),
         )
 
     base = _runtime(unbound)
-    object.__setattr__(base, "rebind_for_resource", lambda name: _runtime(bound_by_name[name]))
+    object.__setattr__(
+        base,
+        "binding",
+        ResourceBindingCapabilities(rebind_for_resource=lambda name: _runtime(bound_by_name[name])),
+    )
     return ProviderResolver({ResourceKind.REMOTE_LIBVIRT: base})
 
 

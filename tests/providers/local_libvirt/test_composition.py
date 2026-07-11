@@ -64,22 +64,23 @@ def test_build_runtime_wires_local_ports_and_capabilities() -> None:
     assert isinstance(runtime.crash_postmortem, LocalLibvirtRetrieve)
     assert isinstance(runtime.vmcore_introspector, LocalLibvirtVmcoreIntrospect)
     assert isinstance(runtime.live_introspector, LocalLibvirtLiveIntrospect)
-    assert isinstance(runtime.rootfs_build_plane, LocalLibvirtRootfsBuildPlane)
+    assert runtime.rootfs is not None
+    assert isinstance(runtime.rootfs.build_plane, LocalLibvirtRootfsBuildPlane)
     # ADR-0208/0210/0211/0218/0219: local advertises both core-producing capture methods it can
     # fetch — KDUMP (overlay harvest) and HOST_DUMP (libvirt domain core dump, B4) — both debug
     # transports (gdbstub B1 #675, drgn-live-over-SSH #697/ADR-0218), and both introspection modes:
     # offline-vmcore (B2 #676) and live (B3 #677/ADR-0219, drgn-live SSH-exec of in-guest helper).
-    assert runtime.supported_capture_methods == frozenset(
+    assert runtime.support.capture_methods == frozenset(
         {CaptureMethod.KDUMP, CaptureMethod.HOST_DUMP}
     )
-    assert runtime.supported_debug_transports == frozenset({"gdbstub", "drgn-live"})
-    assert runtime.supported_introspection == frozenset({"offline-vmcore", "live", "live-script"})
+    assert runtime.support.debug_transports == frozenset({"gdbstub", "drgn-live"})
+    assert runtime.support.introspection == frozenset({"offline-vmcore", "live", "live-script"})
     assert runtime.debug is not None
     assert isinstance(runtime.debug.engine, GdbMiEngine)
     # Direct-kernel boot: the platform owns the whole-disk root device (ADR-0183).
     assert runtime.platform_root_cmdline == "root=/dev/vda"
-    assert runtime.component_sources.provider == ResourceKind.LOCAL_LIBVIRT.value
-    assert runtime.component_sources.accepted_component_sources == {
+    assert runtime.support.component_sources.provider == ResourceKind.LOCAL_LIBVIRT.value
+    assert runtime.support.component_sources.accepted_component_sources == {
         ROOTFS_COMPONENT: frozenset({"catalog", "local"}),
         KERNEL_COMPONENT: frozenset({"local"}),
         INITRD_COMPONENT: frozenset({"local"}),
@@ -87,14 +88,16 @@ def test_build_runtime_wires_local_ports_and_capabilities() -> None:
         PATCH_COMPONENT: frozenset({"local"}),
         VMLINUX_COMPONENT: frozenset({"local"}),
     }
-    assert runtime.rootfs_validator is not None
+    assert runtime.rootfs is not None
+    assert runtime.rootfs.validator is not None
 
 
 def test_local_runtime_sets_rebind_for_resource() -> None:
     # ADR-0313/0187: local now carries a per-Resource rebind hook so the resolver binds the
     # operator's guest_egress opt-in to the allocated Resource by name (previously identity/no-op).
     runtime = composition.build_runtime(secret_registry=SecretRegistry())
-    assert runtime.rebind_for_resource is not None
+    assert runtime.binding is not None
+    assert runtime.binding.rebind_for_resource is not None
 
 
 def test_rebind_threads_guest_egress_into_provisioner(

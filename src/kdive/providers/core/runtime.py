@@ -60,6 +60,55 @@ class DebugCapabilities:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderSupport:
+    """Provider-advertised support metadata read by admission and surfaces."""
+
+    component_sources: ComponentSourceCapabilities = field(
+        default_factory=_unconfigured_component_sources
+    )
+    capture_methods: frozenset[CaptureMethod] = frozenset()
+    debug_transports: frozenset[DebugTransportKind] = frozenset()
+    introspection: frozenset[IntrospectionMode] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
+class RootfsCapabilities:
+    """Rootfs validation and build support for providers that own those planes."""
+
+    validator: RootfsValidator | None = None
+    build_plane: RootfsBuildPlane | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceDetailCapabilities:
+    """Inventory-detail projection and remote staged-volume probing support."""
+
+    projector: ResourceDetailProjector | None = None
+    staged_volume_probe: StagedVolumeProbe | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ConsoleCapabilities:
+    """Provider-managed console artifact capture support."""
+
+    snapshotter: ConsoleSnapshotter
+
+
+@dataclass(frozen=True, slots=True)
+class BootstrapKeyCapabilities:
+    """System bootstrap-key overlay customization support."""
+
+    customizer: Callable[[str], Callable[[str], None]]
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceBindingCapabilities:
+    """Per-resource runtime rebinding support for multi-resource providers."""
+
+    rebind_for_resource: Callable[[str], ProviderRuntime]
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderRuntime:
     """Typed provider ports for the active runtime."""
 
@@ -73,46 +122,20 @@ class ProviderRuntime:
     crash_postmortem: CrashPostmortem
     vmcore_introspector: VmcoreIntrospector
     live_introspector: LiveIntrospector
-    # The provider capability descriptor (ADR-0208): three sibling frozensets read by the surface
-    # (resources.describe) and capability-aware admission to answer "what can this provider do?".
-    # Each defaults to **empty** (fail-closed): an unconfigured or partially-wired provider
-    # advertises *no* capability, so the surface can never report a stubbed plane as working. A
-    # plane joins its set only in the change that wires its real seam. ``supported_capture_methods``
-    # is the authority for which core-producing methods ``vmcore.fetch`` admits; the per-System
-    # default method is owned by ``ProfilePolicy.capture_method`` (ADR-0209), not duplicated here.
-    supported_capture_methods: frozenset[CaptureMethod] = frozenset()
-    supported_debug_transports: frozenset[DebugTransportKind] = frozenset()
-    supported_introspection: frozenset[IntrospectionMode] = frozenset()
     # The platform-owned root device cmdline (ADR-0183). ``"root=/dev/vda"`` for direct-kernel
     # boot (local-libvirt's whole-disk-ext4 overlay); ``None`` when the in-guest bootloader owns
     # the root device (remote-libvirt inherits ``root=UUID=…`` via ``grubby --copy-default``).
     platform_root_cmdline: str | None = "root=/dev/vda"
     discovery_registrar: DiscoveryRegistrar | None = None
+    # Provider-advertised support (ADR-0208). Defaults fail closed: an unconfigured or partially
+    # wired provider advertises no capture, debug, introspection, or component-source capability.
+    support: ProviderSupport = field(default_factory=ProviderSupport)
     debug: DebugCapabilities | None = None
-    component_sources: ComponentSourceCapabilities = field(
-        default_factory=_unconfigured_component_sources
-    )
-    rootfs_validator: RootfsValidator | None = None
-    rootfs_build_plane: RootfsBuildPlane | None = None
-    staged_volume_probe: StagedVolumeProbe | None = None
-    resource_detail_projector: ResourceDetailProjector | None = None
-    # Per-Run console snapshot (ADR-0235). Set by providers whose console is captured out-of-band
-    # (remote-libvirt: reconciler-resident collector → S3 parts); the boot worker invokes it to
-    # persist an immutable ``console-<run>`` artifact. ``None`` → the boot handler captures the
-    # worker-local console log directly (local-libvirt).
-    console_snapshotter: ConsoleSnapshotter | None = None
-    # Per-resource rebind hook (ADR-0187). A provider whose connection identity varies per
-    # granted Resource (remote-libvirt: one inventory instance per host) sets this so the
-    # resolver can bind the runtime's ports to the op's Resource by name. ``None`` → identity
-    # (local-libvirt / fault-inject share one host, so no per-resource config).
-    rebind_for_resource: Callable[[str], ProviderRuntime] | None = None
-    # Per-System bootstrap-key overlay customizer factory (ADR-0289, #963). Given the System's
-    # bootstrap public key, returns an ``OverlayCustomizer`` (``Callable[[str], None]`` over the
-    # overlay path) the provision/reprovision handler passes to ``Provisioner.provision``. Set by
-    # local-libvirt's composition to its ``virt-customize``-backed injector; ``None`` for a
-    # provider with no local overlay to customize (fault-inject, remote-libvirt) — the handler
-    # then passes no customizers, matching those provisioners' no-op acceptance of the kwarg.
-    bootstrap_key_customizer: Callable[[str], Callable[[str], None]] | None = None
+    rootfs: RootfsCapabilities | None = None
+    resource_details: ResourceDetailCapabilities | None = None
+    console: ConsoleCapabilities | None = None
+    bootstrap_key: BootstrapKeyCapabilities | None = None
+    binding: ResourceBindingCapabilities | None = None
 
     async def register_discovery(self, pool: AsyncConnectionPool) -> None:
         if self.discovery_registrar is not None:
@@ -125,6 +148,6 @@ class ProviderRuntime:
         (remote-libvirt) resolves the *allocated* host's connection config, while single-host
         providers return themselves unchanged (ADR-0187).
         """
-        if self.rebind_for_resource is None:
+        if self.binding is None:
             return self
-        return self.rebind_for_resource(resource_name)
+        return self.binding.rebind_for_resource(resource_name)

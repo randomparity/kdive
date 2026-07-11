@@ -78,14 +78,15 @@ async def _bootstrap_key_material(
     The ``ensure`` commits in its own transaction BEFORE this returns (ADR-0289, #963): the
     overlay is created and the key injected into it strictly after this call, so a later
     rollback in the caller's transaction never un-records a key the overlay may already trust.
-    A provider runtime with no ``bootstrap_key_customizer`` factory (no local overlay to
+    A provider runtime with no ``bootstrap_key`` capability (no local overlay to
     customize) yields no customizers; the returned ``pubkey`` is still passed to the provider as
     ``bootstrap_pubkey`` so remote-libvirt can inject it over the guest agent (ADR-0291, #966).
     """
     async with conn.transaction():
         pubkey = await ensure_system_bootstrap_key(conn, system_id, secret_registry=secret_registry)
-    factory = runtime.bootstrap_key_customizer
-    customizers = (factory(pubkey),) if factory is not None else ()
+    customizers = (
+        () if runtime.bootstrap_key is None else (runtime.bootstrap_key.customizer(pubkey),)
+    )
     return customizers, pubkey
 
 

@@ -115,7 +115,7 @@ async def boot_handler(
     binding = await resolver.binding_for_run(conn, run_id)
     set_provider_kind(binding.kind.value)
     booter = binding.runtime.booter
-    snapshotter = binding.runtime.console_snapshotter
+    snapshotter = None if binding.runtime.console is None else binding.runtime.console.snapshotter
     system_id = run.require_system_id()
     mark = await boot_evidence.mark_boot_window(system_id, snapshotter)
 

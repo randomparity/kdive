@@ -32,6 +32,6 @@ def _unconfigured_runtime() -> ProviderRuntime:
 def test_unconfigured_runtime_reports_empty_for_every_capability_field() -> None:
     runtime = _unconfigured_runtime()
 
-    assert runtime.supported_capture_methods == frozenset()
-    assert runtime.supported_debug_transports == frozenset()
-    assert runtime.supported_introspection == frozenset()
+    assert runtime.support.capture_methods == frozenset()
+    assert runtime.support.debug_transports == frozenset()
+    assert runtime.support.introspection == frozenset()

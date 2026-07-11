@@ -117,20 +117,20 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
 
 
 def _rootfs_validator(runtime: ProviderRuntime):
-    if runtime.rootfs_validator is None:
-        raise RuntimeError("systems registrar requires an injected rootfs validator")
-    return runtime.rootfs_validator
+    if runtime.rootfs is None or runtime.rootfs.validator is None:
+        return lambda _rootfs: None
+    return runtime.rootfs.validator
 
 
 def _provision_handlers(runtime: ProviderRuntime) -> _SystemProvisionHandlers:
     return _SystemProvisionHandlers(
-        runtime.profile_policy, runtime.component_sources, _rootfs_validator(runtime)
+        runtime.profile_policy, runtime.support.component_sources, _rootfs_validator(runtime)
     )
 
 
 def _admin_handlers(runtime: ProviderRuntime) -> _SystemAdminHandlers:
     return _SystemAdminHandlers(
-        runtime.profile_policy, runtime.component_sources, _rootfs_validator(runtime)
+        runtime.profile_policy, runtime.support.component_sources, _rootfs_validator(runtime)
     )
 
 

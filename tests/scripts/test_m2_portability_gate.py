@@ -37,8 +37,8 @@ def test_capture_coverage_matches_the_real_advertised_provider_sets() -> None:
     from kdive.security.secrets.secret_registry import SecretRegistry
 
     registry = SecretRegistry()
-    remote = build_remote_runtime(secret_registry=registry).supported_capture_methods
-    local = build_local_runtime(secret_registry=registry).supported_capture_methods
+    remote = build_remote_runtime(secret_registry=registry).support.capture_methods
+    local = build_local_runtime(secret_registry=registry).support.capture_methods
     assert CAPTURE_COVERAGE["remote-libvirt"] == frozenset(m.value for m in remote)
     assert CAPTURE_COVERAGE["local-libvirt"] == frozenset(m.value for m in local)
     # Remote advertises all four methods; local advertises kdump + host_dump (ADR-0208 narrowed it

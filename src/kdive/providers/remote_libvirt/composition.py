@@ -26,9 +26,14 @@ from kdive.providers.core.discovery_registration import (
     ProviderDiscoveryRegistration,
 )
 from kdive.providers.core.runtime import (
+    ConsoleCapabilities,
     DebugCapabilities,
     ProviderRuntime,
+    ProviderSupport,
+    ResourceBindingCapabilities,
+    ResourceDetailCapabilities,
     ResourceDetailProjector,
+    RootfsCapabilities,
     StagedVolumeProbe,
 )
 from kdive.providers.core.transport_reset import TransportResetter
@@ -293,33 +298,38 @@ def build_runtime(
         crash_postmortem=retriever,
         vmcore_introspector=vmcore_introspector,
         live_introspector=live_introspector,
-        supported_capture_methods=frozenset(
-            {
-                CaptureMethod.KDUMP,
-                CaptureMethod.HOST_DUMP,
-                CaptureMethod.GDBSTUB,
-                CaptureMethod.CONSOLE,
-            }
+        support=ProviderSupport(
+            component_sources=_component_sources(),
+            capture_methods=frozenset(
+                {
+                    CaptureMethod.KDUMP,
+                    CaptureMethod.HOST_DUMP,
+                    CaptureMethod.GDBSTUB,
+                    CaptureMethod.CONSOLE,
+                }
+            ),
+            # ADR-0208: remote reports what it already implements — both live-debug transports
+            # (gdbstub + drgn-live, ADR-0083/0085) and both introspection modes (the wired
+            # RemoteLibvirtVmcoreIntrospect / RemoteLibvirtLiveIntrospect ports).
+            debug_transports=frozenset({"gdbstub", "drgn-live"}),
+            introspection=frozenset({"offline-vmcore", "live", "live-script"}),
         ),
-        # ADR-0208: remote reports what it already implements — both live-debug transports
-        # (gdbstub + drgn-live, ADR-0083/0085) and both introspection modes (the wired
-        # RemoteLibvirtVmcoreIntrospect / RemoteLibvirtLiveIntrospect ports).
-        supported_debug_transports=frozenset({"gdbstub", "drgn-live"}),
-        supported_introspection=frozenset({"offline-vmcore", "live", "live-script"}),
         debug=_debug_capabilities(secret_registry),
-        component_sources=_component_sources(),
-        rootfs_validator=lambda _rootfs: None,
-        rootfs_build_plane=RemoteLibvirtRootfsBuildPlane.from_env(),
-        staged_volume_probe=_staged_volume_probe(config_factory),
-        resource_detail_projector=_resource_detail_projector(config_factory),
+        rootfs=RootfsCapabilities(build_plane=RemoteLibvirtRootfsBuildPlane.from_env()),
+        resource_details=ResourceDetailCapabilities(
+            staged_volume_probe=_staged_volume_probe(config_factory),
+            projector=_resource_detail_projector(config_factory),
+        ),
         # ADR-0235: the reconciler-resident collector streams the console to S3 parts; the boot
         # worker assembles them into an immutable per-Run `console-<run>` artifact so a later boot
         # of the same System never overwrites earlier crash→fix evidence. Builds its store lazily
         # (this composition stays buildable without S3 config, ADR-0076).
-        console_snapshotter=RemoteLibvirtConsoleSnapshotter(),
+        console=ConsoleCapabilities(snapshotter=RemoteLibvirtConsoleSnapshotter()),
         # The remote base image is partitioned and boots via in-guest GRUB, which already carries
         # the correct root=UUID=… (inherited by the install helper's grubby --copy-default). The
         # platform must not inject a root device or it overrides that (ADR-0183, #587).
         platform_root_cmdline=None,
-        rebind_for_resource=_rebind_for_resource(secret_registry),
+        binding=ResourceBindingCapabilities(
+            rebind_for_resource=_rebind_for_resource(secret_registry)
+        ),
     )

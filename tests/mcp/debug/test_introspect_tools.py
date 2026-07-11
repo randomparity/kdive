@@ -16,6 +16,7 @@ from fastmcp import Client, FastMCP
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.repositories import DEBUG_SESSIONS
 from kdive.domain.capacity.state import DebugSessionState
 from kdive.domain.catalog.resources import ResourceKind
@@ -26,7 +27,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug import introspect as introspect_tools
 from kdive.prereqs.system_bootstrap_key import ensure_system_bootstrap_key
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.core.runtime import ProviderRuntime, ProviderSupport
 from kdive.providers.ports.retrieve import (
     IntrospectOutput,
     LiveScriptOutput,
@@ -484,6 +485,15 @@ class _CountingResolver(ProviderResolver):
         return self._runtime
 
 
+def _support(introspection: frozenset[str]) -> ProviderSupport:
+    return ProviderSupport(
+        component_sources=ComponentSourceCapabilities(
+            provider="local-libvirt", accepted_component_sources={}
+        ),
+        introspection=cast(Any, introspection),
+    )
+
+
 def _live_resolver(
     port: _FakeLiveIntrospector,
     *,
@@ -494,8 +504,7 @@ def _live_resolver(
         SimpleNamespace(
             vmcore_introspector=_FakeIntrospector(),
             live_introspector=port,
-            supported_introspection=supported_introspection,
-            component_sources=SimpleNamespace(provider="local-libvirt"),
+            support=_support(supported_introspection),
         ),
     )
     return _CountingResolver(runtime)
@@ -665,8 +674,7 @@ def test_run_tool_uses_already_resolved_live_session(
                 SimpleNamespace(
                     vmcore_introspector=_FakeIntrospector(),
                     live_introspector=port,
-                    supported_introspection=frozenset({"live"}),
-                    component_sources=SimpleNamespace(provider="local-libvirt"),
+                    support=_support(frozenset({"live"})),
                 ),
             )
             resolver = _CountingResolver(runtime)
@@ -1007,8 +1015,7 @@ def test_require_introspection_rejects_when_live_script_unadvertised() -> None:
     runtime = cast(
         ProviderRuntime,
         SimpleNamespace(
-            supported_introspection=frozenset({"offline-vmcore", "live"}),  # no live-script
-            component_sources=SimpleNamespace(provider="local-libvirt"),
+            support=_support(frozenset({"offline-vmcore", "live"})),  # no live-script
         ),
     )
     denied = introspect_tools._require_introspection("sess-1", runtime, "live-script")

@@ -34,7 +34,7 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import Authorizing, ImageBuildPayload
 from kdive.jobs.worker import Worker
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.core.runtime import ProviderRuntime, RootfsCapabilities
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -106,7 +106,7 @@ def _resolver_with_plane(plane: _FakePlane | None) -> ProviderResolver:
         crash_postmortem=cast(Any, object()),
         vmcore_introspector=cast(Any, object()),
         live_introspector=cast(Any, object()),
-        rootfs_build_plane=plane,
+        rootfs=None if plane is None else RootfsCapabilities(build_plane=plane),
     )
     return ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
 

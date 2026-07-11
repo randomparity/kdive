@@ -99,13 +99,13 @@ def _require_introspection(
     ``None`` when the provider advertises ``mode``. The check reads ``supported_introspection`` and
     never branches on ``ResourceKind``.
     """
-    if mode in runtime.supported_introspection:
+    if mode in runtime.support.introspection:
         return None
     return _capability_unsupported(
         object_id,
         capability=f"introspection:{mode}",
-        provider=runtime.component_sources.provider,
-        supported=sorted(runtime.supported_introspection),
+        provider=runtime.support.component_sources.provider,
+        supported=sorted(runtime.support.introspection),
     )
 
 

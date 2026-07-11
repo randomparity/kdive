@@ -114,14 +114,14 @@ def _resolve_build_plane(resolver: ProviderResolver, provider: str) -> RootfsBui
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"provider": provider},
         ) from exc
-    plane = resolver.resolve(kind).rootfs_build_plane
-    if plane is None:
+    rootfs = resolver.resolve(kind).rootfs
+    if rootfs is None or rootfs.build_plane is None:
         raise CategorizedError(
             "provider runtime does not support rootfs image builds",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"provider": provider},
         )
-    return plane
+    return rootfs.build_plane
 
 
 def register_handlers(

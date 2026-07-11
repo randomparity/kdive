@@ -144,7 +144,7 @@ class VmcoreHandlers:
 
 def _supported_method_values(runtime: ProviderRuntime) -> list[str]:
     """Provider's supported core methods as sorted tokens for an error's ``supported`` set."""
-    return [m.value for m in sorted(runtime.supported_capture_methods, key=lambda m: m.value)]
+    return [m.value for m in sorted(runtime.support.capture_methods, key=lambda m: m.value)]
 
 
 def _resolve_capture_method(
@@ -173,11 +173,11 @@ def _resolve_capture_method(
             return _config_error(
                 object_id, data={"method": method, "reason": "method does not produce a vmcore"}
             )
-        if explicit not in runtime.supported_capture_methods:
+        if explicit not in runtime.support.capture_methods:
             return _capability_unsupported(
                 object_id,
                 capability=f"capture_method:{explicit.value}",
-                provider=runtime.component_sources.provider,
+                provider=runtime.support.component_sources.provider,
                 supported=_supported_method_values(runtime),
             )
         return explicit
@@ -186,7 +186,7 @@ def _resolve_capture_method(
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(object_id, exc)
     resolved = runtime.profile_policy.capture_method(profile)
-    if resolved in _VMCORE_METHODS and resolved in runtime.supported_capture_methods:
+    if resolved in _VMCORE_METHODS and resolved in runtime.support.capture_methods:
         return resolved
     return _config_error_reason(
         object_id,
