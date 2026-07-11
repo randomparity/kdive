@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -37,10 +37,10 @@ async def _power_target(conn: AsyncConnection, system_id: UUID) -> _ControlTarge
     """Resolve a power job's domain/project, re-checking READY under the SYSTEM lock.
 
     The READY re-check is power-specific policy (ADR-0320): a power job admitted while READY
-    may dequeue after a ready->crashed transition, and a CRASHED System holds crash evidence
-    that must not be destroyed through the power path. ``terminal=True`` because the state
-    will not improve on retry — dead-letter rather than churn. (`force_crash` has its own
-    ``_force_crash_target``; this helper is power-only.)
+    may dequeue after a ready->crashing/crashed transition, and a CRASHING (mid-force_crash) or
+    CRASHED System holds crash evidence that must not be destroyed through the power path
+    (ADR-0325). ``terminal=True`` because the state will not improve on retry — dead-letter rather
+    than churn. (`force_crash` has its own precheck path; this helper is power-only.)
     """
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
@@ -104,24 +104,17 @@ async def power_handler(
     return str(system_id)
 
 
-async def force_crash_handler(
-    conn: AsyncConnection,
-    job: Job,
-    *,
-    resolver: ProviderResolver,
-) -> str | None:
-    """Crash the guest and drive System ready->crashed + DebugSession live->detached."""
-    system_id = UUID(load_payload(job, SystemPayload).system_id)
-    target = await _force_crash_target(conn, system_id)
-    if target is None:
-        return str(system_id)
-    control = await _controller(conn, system_id, resolver)
-    await asyncio.to_thread(control.force_crash, target.domain_name)
-    await _finalize_force_crash(conn, job, system_id, target.project)
-    return str(system_id)
+_CrashAction = Literal["done", "finalize", "crash"]
 
 
-async def _force_crash_target(conn: AsyncConnection, system_id: UUID) -> _ControlTarget | None:
+async def _force_crash_precheck(conn: AsyncConnection, system_id: UUID) -> _CrashAction:
+    """Classify a force_crash without transitioning, under the SYSTEM lock (ADR-0325).
+
+    ``crash`` is the first attempt (READY): the caller resolves the controller, enters CRASHING,
+    then fires the NMI. ``finalize`` is a retry whose CRASHING marker is already set: finalize
+    only, no controller and no NMI (the marker means "NMI already dispatched"; re-firing into a
+    mid-kdump guest can corrupt the dump). ``done`` is terminal or already CRASHED: nothing to do.
+    """
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
@@ -130,14 +123,66 @@ async def _force_crash_target(conn: AsyncConnection, system_id: UUID) -> _Contro
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"system_id": str(system_id)},
             )
-        if system.state in TERMINAL_SYSTEM_STATES:
+        if system.state in TERMINAL_SYSTEM_STATES or system.state is SystemState.CRASHED:
+            return "done"
+        if system.state is SystemState.CRASHING:
+            return "finalize"
+        if system.state is SystemState.READY:
+            return "crash"
+        raise CategorizedError(
+            "force_crash requires a READY system",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"system_id": str(system_id), "current_status": system.state.value},
+            terminal=True,
+        )
+
+
+async def _enter_crashing(conn: AsyncConnection, system_id: UUID) -> _ControlTarget | None:
+    """Commit READY -> CRASHING under the lock, the last DB write before the NMI (ADR-0325).
+
+    Returns ``None`` if the state moved out of READY between the precheck and here (a raced
+    teardown), so the caller skips the NMI.
+    """
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        system = await SYSTEMS.get(conn, system_id)
+        if system is None or system.state is not SystemState.READY:
             return None
+        await SYSTEMS.update_state(conn, system_id, SystemState.CRASHING)
         return _ControlTarget(_resolved_domain_name(system), system.project)
 
 
-async def _finalize_force_crash(
-    conn: AsyncConnection, job: Job, system_id: UUID, project: str
-) -> None:
+async def force_crash_handler(
+    conn: AsyncConnection,
+    job: Job,
+    *,
+    resolver: ProviderResolver,
+) -> str | None:
+    """Crash the guest and drive System ready->crashing->crashed + DebugSession live->detached.
+
+    The CRASHING marker is committed under the SYSTEM lock before the unlocked NMI so the power
+    path's non-READY guard refuses the System for the whole NMI-to-CRASHED window (ADR-0325). A
+    retry whose marker is already set finalizes without re-firing the NMI; an NMI-call raise
+    propagates (the worker requeues) and is resolved evidence-first on retry / by the reconciler.
+    """
+    system_id = UUID(load_payload(job, SystemPayload).system_id)
+    action = await _force_crash_precheck(conn, system_id)
+    if action == "done":
+        return str(system_id)
+    if action == "finalize":
+        await _finalize_force_crash(conn, job, system_id)
+        return str(system_id)
+    # First attempt: resolve the controller while still READY (a failure here leaves READY),
+    # then commit CRASHING as the last DB write before the NMI.
+    control = await _controller(conn, system_id, resolver)
+    target = await _enter_crashing(conn, system_id)
+    if target is None:
+        return str(system_id)  # raced out of READY; nothing physical to do
+    await asyncio.to_thread(control.force_crash, target.domain_name)
+    await _finalize_force_crash(conn, job, system_id)
+    return str(system_id)
+
+
+async def _finalize_force_crash(conn: AsyncConnection, job: Job, system_id: UUID) -> None:
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
@@ -148,25 +193,31 @@ async def _finalize_force_crash(
             )
         if system.state in TERMINAL_SYSTEM_STATES:
             return
-        if system.state is SystemState.READY:
+        if system.state is SystemState.CRASHING:
             await SYSTEMS.update_state(conn, system_id, SystemState.CRASHED)
             await audit.record(
                 conn,
-                job_context_from_job(job, project),
+                job_context_from_job(job, system.project),
                 audit.AuditEvent(
                     tool="control.force_crash",
                     object_kind="systems",
                     object_id=system_id,
-                    transition="ready->crashed",
+                    transition="crashing->crashed",
                     args={"system_id": str(system_id)},
-                    project=project,
+                    project=system.project,
                 ),
             )
         await detach_sessions(conn, job, system)
 
 
-async def detach_sessions(conn: AsyncConnection, job: Job, system: System) -> None:
-    """Drive every non-terminal DebugSession of ``system`` to detached."""
+async def detach_system_debug_sessions(
+    conn: AsyncConnection, system: System
+) -> list[tuple[UUID, str]]:
+    """Drive every non-terminal DebugSession of ``system`` to detached; return ``(id, old_state)``.
+
+    The transition SQL only — the caller audits the returned rows under its own principal
+    (`detach_sessions` for a job, the reconciler under the system principal).
+    """
     async with conn.cursor() as cur:
         await cur.execute(
             "WITH targets AS ("
@@ -185,19 +236,28 @@ async def detach_sessions(conn: AsyncConnection, job: Job, system: System) -> No
                 DebugSessionState.DETACHED.value,
             ),
         )
-        rows = await cur.fetchall()
-    for session_id, old_state in rows:
+        return await cur.fetchall()
+
+
+def detach_audit_event(system: System, session_id: UUID, old_state: str) -> audit.AuditEvent:
+    """The `<old_state>->detached` audit event for a force_crash session detach."""
+    return audit.AuditEvent(
+        tool="control.force_crash",
+        object_kind="debug_sessions",
+        object_id=session_id,
+        transition=f"{old_state}->detached",
+        args={"system_id": str(system.id)},
+        project=system.project,
+    )
+
+
+async def detach_sessions(conn: AsyncConnection, job: Job, system: System) -> None:
+    """Drive every non-terminal DebugSession of ``system`` to detached (audited under the job)."""
+    for session_id, old_state in await detach_system_debug_sessions(conn, system):
         await audit.record(
             conn,
             job_context_from_job(job, system.project),
-            audit.AuditEvent(
-                tool="control.force_crash",
-                object_kind="debug_sessions",
-                object_id=session_id,
-                transition=f"{old_state}->detached",
-                args={"system_id": str(system.id)},
-                project=system.project,
-            ),
+            detach_audit_event(system, session_id, old_state),
         )
 
 

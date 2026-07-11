@@ -364,7 +364,10 @@ async def assert_audit(db_url: str, *, project: str, allocation_id: str, system_
     """#2: audit per transition + force_crash, split by attributing principal."""
     assert (
         await count_audit(
-            db_url, object_id=system_id, transition="ready->crashed", principal=f"admin-{project}"
+            db_url,
+            object_id=system_id,
+            transition="crashing->crashed",
+            principal=f"admin-{project}",
         )
         == 1
     ), "force_crash not audited under admin (#2)"

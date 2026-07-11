@@ -351,6 +351,20 @@ def test_power_on_crashed_system_is_config_error(migrated_url: str, action: str)
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("action", ["on", "off", "cycle", "reset"])
+def test_power_on_crashing_system_is_config_error(migrated_url: str, action: str) -> None:
+    # A CRASHING System is mid-force_crash; power is refused, protecting crash evidence (#1078).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.CRASHING)
+            resp = await _power(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, action=action)
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["current_status"] == "crashing"
+
+    asyncio.run(_run())
+
+
 def test_power_cross_project_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -419,8 +433,8 @@ def test_power_handler_calls_provider_and_audits(migrated_url: str) -> None:
 
 
 def test_power_handler_refuses_non_ready_system(migrated_url: str) -> None:
-    # A power job admitted READY but executed after ready->crashed must fail terminally and
-    # never drive the physical domain — protecting crash evidence at execution (ADR-0320).
+    # A power job admitted READY but executed after ready->crashing/crashed must fail terminally
+    # and never drive the physical domain — protecting crash evidence at execution (ADR-0320).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
@@ -634,10 +648,10 @@ def test_force_crash_handler_already_crashed_is_idempotent(migrated_url: str) ->
                 await control_plane.force_crash_handler(
                     conn, job, resolver=provider_resolver(controller=ctrl)
                 )  # no raise
-            assert ctrl.crashed == ["kdive-x"]  # NMI re-attempted
+            assert ctrl.crashed == []  # already CRASHED: force_crash is a no-op, NMI not re-fired
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
-                    "SELECT count(*) AS n FROM audit_log WHERE transition = 'ready->crashed'"
+                    "SELECT count(*) AS n FROM audit_log WHERE transition = 'crashing->crashed'"
                 )
                 row = await cur.fetchone()
         assert row is not None and row["n"] == 0  # no transition audited on idempotent re-run
@@ -659,6 +673,31 @@ def test_force_crash_handler_terminal_system_does_not_crash(migrated_url: str) -
                     conn, job, resolver=provider_resolver(controller=ctrl)
                 )
             assert ctrl.crashed == []  # teardown won the race; no NMI
+
+    asyncio.run(_run())
+
+
+def test_force_crash_dedup_key_is_canonical_for_non_canonical_uuid(migrated_url: str) -> None:
+    # The reconciler's leak-recovery predicate matches the dedup_key against `s.id::text`
+    # (canonical). Admission must mint the key from the canonical UUID even when the agent passes
+    # a non-canonical form (uppercase), or the reconciler misses the live job (#1078).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(
+                pool, alloc_id, SystemState.READY, destructive_ops=["force_crash"]
+            )
+            resp = await _crash(pool, _admin_ctx(), sys_id.upper())  # non-canonical input
+            assert resp.status != "error", resp
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT dedup_key FROM jobs WHERE kind = 'force_crash' "
+                    "AND payload->>'system_id' = %s",
+                    (sys_id.upper(),),
+                )
+                row = await cur.fetchone()
+        assert row is not None
+        assert row["dedup_key"] == f"{sys_id}:force_crash"  # canonical lowercase
 
     asyncio.run(_run())
 

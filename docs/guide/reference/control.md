@@ -25,7 +25,9 @@ a `configuration_error`.
 
 `implemented` · `destructive`
 
-Inject an NMI to crash a ready System; drives ready->crashed. Requires admin + gate.
+Inject an NMI to crash a ready System; drives ready->crashing->crashed.
+
+Requires admin + gate.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -38,11 +40,11 @@ Inject an NMI to crash a ready System; drives ready->crashed. Requires admin + g
 
 Power action on a READY System: on/off/cycle/reset, all contributor-level
 leaseholder control. reset/cycle recover a wedged READY guest. Refused on a
-non-READY System (a CRASHED System holds crash evidence — use the crash workflow).
-Enqueues a power job.
+non-READY System (a CRASHED or CRASHING System holds crash evidence — use the crash
+workflow). Enqueues a power job.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `action` | string | yes | Power action: `on`/`off`/`cycle`/`reset`. All require `contributor` (leaseholder control over your transient VM). Use `reset`/`cycle` to recover a wedged but READY guest. Admitted only on a READY System. |
+| `action` | string | yes | Power action: `on`/`off`/`cycle`/`reset`. All require `contributor` (leaseholder control over your transient VM). Use `reset`/`cycle` to recover a wedged but READY guest. Admitted only on a READY System; refused on a CRASHED or CRASHING (mid-force_crash) System. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `system_id` | string | yes | The READY System to act on. |

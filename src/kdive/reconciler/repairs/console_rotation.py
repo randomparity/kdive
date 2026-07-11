@@ -30,7 +30,11 @@ _log = logging.getLogger(__name__)
 # A System whose libvirt domain has booted and is not yet torn down: its console log is growing
 # (or holds a captured crash), so rotation must keep running. `defined`/`provisioning` have not
 # booted; `reprovisioning` is mid-rebuild with the domain down; `torn_down`/`failed` are gone.
-_LIVE_SYSTEM_STATES: tuple[str, ...] = (SystemState.READY.value, SystemState.CRASHED.value)
+_LIVE_SYSTEM_STATES: tuple[str, ...] = (
+    SystemState.READY.value,
+    SystemState.CRASHING.value,
+    SystemState.CRASHED.value,
+)
 _LOCAL_PROVIDER = ResourceKind.LOCAL_LIBVIRT.value
 _IN_FLIGHT_JOB_STATES: tuple[str, ...] = (JobState.QUEUED.value, JobState.RUNNING.value)
 

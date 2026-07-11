@@ -67,12 +67,17 @@ LEGAL: dict[type[StrEnum], dict[StrEnum, set[StrEnum]]] = {
             SystemState.TORN_DOWN,
         },
         SystemState.READY: {
-            SystemState.CRASHED,
+            SystemState.CRASHING,
             SystemState.TORN_DOWN,
             SystemState.REPROVISIONING,
             SystemState.FAILED,
         },
         SystemState.REPROVISIONING: {SystemState.READY, SystemState.FAILED},
+        SystemState.CRASHING: {
+            SystemState.CRASHED,
+            SystemState.FAILED,
+            SystemState.TORN_DOWN,
+        },
         SystemState.CRASHED: {SystemState.TORN_DOWN, SystemState.FAILED},
         SystemState.TORN_DOWN: set(),
         SystemState.FAILED: set(),
@@ -212,8 +217,18 @@ def test_system_reprovision_cycle_edges_are_legal() -> None:
 
 
 def test_force_crash_edge_is_legal_teardown_skip_is_not() -> None:
-    # The spec's force_crash path: ready -> crashed -> torn_down.
-    assert can_transition(SystemState.READY, SystemState.CRASHED) is True
+    # The force_crash path is now two-step: ready -> crashing -> crashed -> torn_down (#1078).
+    assert can_transition(SystemState.READY, SystemState.CRASHING) is True
+    assert can_transition(SystemState.CRASHING, SystemState.CRASHED) is True
     assert can_transition(SystemState.CRASHED, SystemState.TORN_DOWN) is True
+    # The direct ready -> crashed edge is removed: force_crash goes through crashing.
+    assert can_transition(SystemState.READY, SystemState.CRASHED) is False
     # A System cannot un-crash back to ready.
     assert can_transition(SystemState.CRASHED, SystemState.READY) is False
+
+
+def test_system_crashing_edges() -> None:
+    assert can_transition(SystemState.CRASHING, SystemState.FAILED)
+    assert can_transition(SystemState.CRASHING, SystemState.TORN_DOWN)
+    # crashing cannot go back to ready (evidence-first; recovery is to crashed).
+    assert not can_transition(SystemState.CRASHING, SystemState.READY)

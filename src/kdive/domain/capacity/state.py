@@ -8,7 +8,7 @@ Two readings of that table are pinned here because its notation is ambiguous:
 
 * **System ``ready`` is not terminal.** The table bolds ``ready`` but the prose,
   the walking-skeleton path, and ``force_crash`` all transition out of it
-  (``ready → crashed`` and ``ready → torn_down``); only ``torn_down`` and
+  (``ready → crashing → crashed`` and ``ready → torn_down``); only ``torn_down`` and
   ``failed`` are terminal.
 * **DebugSession is forward-only.** The conceptual model is ``attach ↔ live ↔
   detached``, but runtime tools do not reattach or step backward. The platform
@@ -64,13 +64,16 @@ class SystemState(StrEnum):
     ``ready → reprovisioning → ready`` on the same row; an interrupted reprovision fails to
     ``reprovisioning → failed``. ``defined → torn_down`` lets an abandoned
     create-without-provision System be torn down without first advancing to
-    ``provisioning``.
+    ``provisioning``. ``force_crash`` cycles a ready System ``ready → crashing → crashed``: the
+    ``crashing`` marker is committed before the physical NMI so the power path (which refuses any
+    non-``ready`` System) cannot reset the guest mid-crash.
     """
 
     DEFINED = "defined"
     PROVISIONING = "provisioning"
     READY = "ready"
     REPROVISIONING = "reprovisioning"
+    CRASHING = "crashing"
     CRASHED = "crashed"
     TORN_DOWN = "torn_down"
     FAILED = "failed"
@@ -168,13 +171,16 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
         ),
         SystemState.READY: frozenset(
             {
-                SystemState.CRASHED,
+                SystemState.CRASHING,
                 SystemState.TORN_DOWN,
                 SystemState.REPROVISIONING,
                 SystemState.FAILED,
             }
         ),
         SystemState.REPROVISIONING: frozenset({SystemState.READY, SystemState.FAILED}),
+        SystemState.CRASHING: frozenset(
+            {SystemState.CRASHED, SystemState.FAILED, SystemState.TORN_DOWN}
+        ),
         SystemState.CRASHED: frozenset({SystemState.TORN_DOWN, SystemState.FAILED}),
         SystemState.TORN_DOWN: frozenset(),
         SystemState.FAILED: frozenset(),

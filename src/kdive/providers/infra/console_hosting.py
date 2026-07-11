@@ -26,6 +26,7 @@ _IDLE_PUMP_BACKOFF_SECONDS = 0.5
 _RUNNING_SYSTEM_STATE_VALUES = (
     SystemState.READY.value,
     SystemState.REPROVISIONING.value,
+    SystemState.CRASHING.value,  # keep streaming the crash-window console (#1078)
     SystemState.CRASHED.value,
 )
 _REMOTE_KIND_VALUE = ResourceKind.REMOTE_LIBVIRT.value

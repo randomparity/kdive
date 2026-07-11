@@ -101,6 +101,7 @@ _reap_queue_timeouts_for = allocation_repairs.reap_queue_timeouts_for
 _repair_abandoned_jobs = job_repairs.repair_abandoned_jobs
 _repair_dead_sessions = debug_session_repairs.repair_dead_sessions
 _repair_orphaned_systems = system_repairs.repair_orphaned_systems
+_repair_stalled_crashing_systems = system_repairs.repair_stalled_crashing_systems
 _sweep_expired_allocations = allocation_repairs.sweep_expired_allocations
 _sweep_console_rotation = console_rotation_repairs.sweep_console_rotation
 
@@ -121,6 +122,7 @@ __all__ = [
     "_repair_abandoned_jobs",
     "_repair_dead_sessions",
     "_repair_orphaned_systems",
+    "_repair_stalled_crashing_systems",
     "_sweep_console_rotation",
     "_sweep_expired_allocations",
     "reconcile_once",
@@ -373,6 +375,10 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     ),
     _RepairCatalogEntry("orphaned_systems", lambda _r, _c, _g: _repair_orphaned_systems),
     _RepairCatalogEntry("abandoned_jobs", lambda _r, _c, _g: _repair_abandoned_jobs),
+    # Runs after abandoned_jobs, which dead-letters a lease-lapsed-and-exhausted force_crash job.
+    _RepairCatalogEntry(
+        "stalled_crashing_systems", lambda _r, _c, _g: _repair_stalled_crashing_systems
+    ),
     _RepairCatalogEntry("console_rotations_enqueued", lambda _r, _c, _g: _sweep_console_rotation),
     _RepairCatalogEntry(
         "reaped_runtime_resources",
