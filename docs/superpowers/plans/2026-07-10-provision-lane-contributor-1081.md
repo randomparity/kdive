@@ -116,7 +116,9 @@ The RBAC matrix (`docs/guide/safety-and-rbac.md`) is generated from `exposure.py
 **Files:**
 - Modify: `src/kdive/mcp/exposure.py` (L115, L219-222: `_OPERATOR → _CONTRIBUTOR`; stale jobs.cancel comment L173-174)
 - Modify (generated + hand-written): `docs/guide/safety-and-rbac.md`
-- Test: `tests/mcp/core/test_exposure.py`, `tests/mcp/core/test_app.py:417-419` (spot-pin of `systems.define == PROJECT_OPERATOR`)
+- Test: `tests/mcp/core/test_exposure.py`, `tests/mcp/core/test_app.py:417-419` (spot-pin of `systems.define == PROJECT_OPERATOR`), `tests/mcp/lifecycle/test_allocations_tools.py` (next-action filter tests pinning `systems.provision` as absent for a contributor)
+
+The exposure flip ripples through **three** test surfaces, all driven by the exposure map: direct `required_scopes` pins, `project_tool_visible` checks, and `suggested_next_actions` role-filters (ADR-0261). The last one lives in files with no `operator` token (`"systems.provision" not in contributor_actions`), so grep-for-operator misses it — every next-action test that omits `systems.provision` for a contributor must flip to **include** it (the contributor can now provision the slot it holds).
 
 **Interfaces:**
 - Produces: `required_scopes(<each of the five tools>) == {PROJECT_CONTRIBUTOR}`.
@@ -126,11 +128,13 @@ The RBAC matrix (`docs/guide/safety-and-rbac.md`) is generated from `exposure.py
   - Rewrite `test_create_system_upload_stays_operator_but_run_upload_drops`: both upload kinds now `PROJECT_CONTRIBUTOR`; rename it.
   - Rewrite `test_project_tool_visible_honours_role_on_the_named_project`: `project_tool_visible("systems.provision", contributor, "a")` is now True; use a still-operator tool (e.g. `images.upload`) to prove the per-project gate still discriminates.
   - Fix `test_project_tool_visible_is_per_project_not_connection_union` (uses provision) for contributor semantics.
+  - `test_exposure.py::test_visible_next_actions_filters_preserves_order_no_dedup` (L326-337): the contributor expectation (L329) omits `systems.provision` — add it (contributor now sees all three actions; viewer/operator lines stay).
   - `test_app.py:417-419`: the spot-pin `required_scopes("systems.define") == {PROJECT_OPERATOR}` (comment "systems.define stays operator") must become `PROJECT_CONTRIBUTOR`, or repoint the spot-pin to a still-operator tool (`images.upload`); fix the L417 comment. `control.force_crash`/`systems.teardown`/`ops.reconcile_now` pins above it stay.
+  - `test_allocations_tools.py`: the contributor next-action assertions that currently drop `systems.provision` must now include it — `test_request_grant_drops_systems_provision_for_contributor` (L273: rename; L281 `not in` → `in`; L282 exact list gains `systems.provision`), `test_get_granted_filters_next_actions_by_role` (L298 contributor exact list), `test_envelope_role_filters_success_next_actions` (L977 contributor exact list), `test_envelope_filter_is_per_project_not_connection_union` (L996 contributor-on-project), `test_renew_response_role_filters_success_next_actions` (L1011 contributor). Keep the **viewer** negative controls (viewer still never sees `systems.provision`) and the operator cases (unchanged).
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/mcp/core/test_exposure.py tests/mcp/core/test_app.py -q`
+Run: `uv run python -m pytest tests/mcp/core/test_exposure.py tests/mcp/core/test_app.py tests/mcp/lifecycle/test_allocations_tools.py -q`
 Expected: FAIL.
 
 - [ ] **Step 3: Flip the exposure constants + fix the comment** — `exposure.py`: `_OPERATOR → _CONTRIBUTOR` for `artifacts.create_system_upload` (L115), `systems.define` (L219), `systems.provision` (L220), `systems.provision_defined` (L221), `systems.reprovision` (L222). Leave `systems.provision` in `CORE_TOOLS`. Update the jobs.cancel comment at L173-174 — the handler no longer "keeps operator for the provision lane"; it keeps operator only for the remaining destructive/platform kinds.
@@ -141,13 +145,13 @@ Expected: FAIL.
 
 - [ ] **Step 5: Run to verify pass (incl. the in-sync gate)**
 
-Run: `uv run python -m pytest tests/mcp/core/test_exposure.py tests/mcp/core/test_app.py tests/scripts/test_gen_rbac_tool_matrix.py -q && just rbac-matrix-check`
+Run: `uv run python -m pytest tests/mcp/core/test_exposure.py tests/mcp/core/test_app.py tests/mcp/lifecycle/test_allocations_tools.py tests/scripts/test_gen_rbac_tool_matrix.py -q && just rbac-matrix-check`
 Expected: PASS, in sync.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/kdive/mcp/exposure.py tests/mcp/core/test_exposure.py tests/mcp/core/test_app.py docs/guide/safety-and-rbac.md
+git add src/kdive/mcp/exposure.py tests/mcp/core/test_exposure.py tests/mcp/core/test_app.py tests/mcp/lifecycle/test_allocations_tools.py docs/guide/safety-and-rbac.md
 git commit -m "feat(security): expose provision lane + reprovision to contributor (#1081)"
 ```
 
