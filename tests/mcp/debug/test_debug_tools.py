@@ -37,6 +37,7 @@ from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigati
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug import sessions as debug_tools
+from kdive.mcp.tools.debug.sessions import lifecycle as debug_lifecycle
 from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
 from kdive.prereqs.system_bootstrap_key import (
     ensure_system_bootstrap_key,
@@ -478,14 +479,14 @@ def test_locked_recheck_closes_transport_when_system_crashed(migrated_url: str) 
                 )
                 conn_fake = _RaisingCloseConnector()
                 handle = conn_fake.open_transport(SystemHandle("kdive-x"), "gdbstub")
-                request = debug_tools._AttachRequest(
+                request = debug_lifecycle._AttachRequest(
                     run=run,
                     system=system,
                     session_id=uuid4(),
                     transport="gdbstub",
                     connector=conn_fake,
                 )
-                resp = await debug_tools._insert_session_locked(conn, _ctx(), request, handle)
+                resp = await debug_lifecycle._insert_session_locked(conn, _ctx(), request, handle)
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert resp.data["current_status"] == "crashed"
@@ -511,14 +512,14 @@ def test_locked_recheck_closes_transport_when_conflict_appears(migrated_url: str
                 assert run is not None and system is not None
                 conn_fake = _RaisingCloseConnector()
                 handle = conn_fake.open_transport(SystemHandle("kdive-x"), "gdbstub")
-                request = debug_tools._AttachRequest(
+                request = debug_lifecycle._AttachRequest(
                     run=run,
                     system=system,
                     session_id=uuid4(),
                     transport="gdbstub",
                     connector=conn_fake,
                 )
-                resp = await debug_tools._insert_session_locked(conn, _ctx(), request, handle)
+                resp = await debug_lifecycle._insert_session_locked(conn, _ctx(), request, handle)
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "transport_conflict"
         assert count == 1  # only the race winner's row
@@ -1101,7 +1102,7 @@ def test_start_session_cleans_up_open_transport_on_insert_failure(migrated_url: 
             async def _raise_after_open(
                 _conn: Any,
                 _ctx: RequestContext,
-                _request: debug_tools._AttachRequest,
+                _request: debug_lifecycle._AttachRequest,
                 _handle: TransportHandle,
             ) -> ToolResponse:
                 raise RuntimeError("insert failed")

@@ -24,8 +24,14 @@ from fastmcp import Client, FastMCP
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.mcp.tools.debug.operations.breakpoints as ops_breakpoints
+import kdive.mcp.tools.debug.operations.execution as ops_execution
+import kdive.mcp.tools.debug.operations.memory as ops_memory
+import kdive.mcp.tools.debug.operations.modules as ops_modules
 import kdive.mcp.tools.debug.operations.registrar as debug_ops_registrar
 import kdive.mcp.tools.debug.operations.runtime as debug_runtime
+import kdive.mcp.tools.debug.operations.stack as ops_stack
+import kdive.mcp.tools.debug.operations.watchpoints as ops_watchpoints
 from kdive.db.repositories import ALLOCATIONS, DEBUG_SESSIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import (
@@ -40,28 +46,7 @@ from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigati
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug import sessions as debug_tools
-from kdive.mcp.tools.debug.operations import (
-    DebugEngineRuntime,
-    run_engine_op_with_runtime,
-)
-from kdive.mcp.tools.debug.operations import (
-    breakpoints as ops_breakpoints,
-)
-from kdive.mcp.tools.debug.operations import (
-    execution as ops_execution,
-)
-from kdive.mcp.tools.debug.operations import (
-    memory as ops_memory,
-)
-from kdive.mcp.tools.debug.operations import (
-    modules as ops_modules,
-)
-from kdive.mcp.tools.debug.operations import (
-    stack as ops_stack,
-)
-from kdive.mcp.tools.debug.operations import (
-    watchpoints as ops_watchpoints,
-)
+from kdive.mcp.tools.debug.operations.runtime import DebugEngineRuntime, run_engine_op_with_runtime
 from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
 from kdive.providers.core.runtime import DebugCapabilities, ProviderRuntime
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
