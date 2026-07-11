@@ -32,8 +32,8 @@ from kdive.jobs.handlers.artifacts import vmcore as vmcore_plane
 from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.catalog.artifacts.reads import artifacts_get, artifacts_list
-from kdive.mcp.tools.lifecycle import control as control_tools
-from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
+from kdive.mcp.tools.lifecycle.control import registrar as control_tools
+from kdive.mcp.tools.lifecycle.vmcore import handlers as vmcore_tools
 from kdive.providers.ports.retrieve import (
     CaptureOutput,
     CrashOutput,

@@ -30,12 +30,12 @@ from kdive.mcp.tools.catalog.artifacts import registrar as artifacts_tools
 from kdive.mcp.tools.debug.introspection import registrar as introspect
 from kdive.mcp.tools.debug.sessions import registrar as debug_tools
 from kdive.mcp.tools.identity import projects, session
-from kdive.mcp.tools.lifecycle import control as control_tools
-from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
 from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_tools
+from kdive.mcp.tools.lifecycle.control import registrar as control_tools
 from kdive.mcp.tools.lifecycle.investigations import registrar as investigations
 from kdive.mcp.tools.lifecycle.runs import registrar as runs_tools
 from kdive.mcp.tools.lifecycle.systems import registrar as systems_tools
+from kdive.mcp.tools.lifecycle.vmcore import registrar as vmcore_tools
 from kdive.mcp.tools.ops import diagnostics as ops_diagnostics_tools
 from kdive.mcp.tools.ops import queue as ops_queue_tools
 from kdive.mcp.tools.ops import tuning as ops_tuning_tools

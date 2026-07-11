@@ -29,7 +29,7 @@ from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._idempotency import keyed_mutation
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_target_failure
-from kdive.mcp.tools.lifecycle.vmcore_view import (
+from kdive.mcp.tools.lifecycle.vmcore.view import (
     console_crash_redirect,
     postmortem_success_response,
     triage_response,

@@ -12,12 +12,9 @@ from kdive.domain.capture import CaptureMethod
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools.lifecycle.vmcore_handlers import VmcoreHandlers, list_vmcores
-from kdive.mcp.tools.lifecycle.vmcore_view import CONSOLE_CRASH_GUIDANCE
+from kdive.mcp.tools.lifecycle.vmcore.handlers import VmcoreHandlers, list_vmcores
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.secrets.secret_registry import SecretRegistry
-
-__all__ = ["CONSOLE_CRASH_GUIDANCE", "VmcoreHandlers", "list_vmcores", "register"]
 
 
 def register(

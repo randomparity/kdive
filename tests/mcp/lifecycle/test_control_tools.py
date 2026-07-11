@@ -38,7 +38,7 @@ from kdive.jobs.handlers.control import control as control_plane
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PowerPayload, SystemPayload
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.lifecycle import control as control_tools
+from kdive.mcp.tools.lifecycle.control import registrar as control_tools
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.rbac import AuthorizationError, Role

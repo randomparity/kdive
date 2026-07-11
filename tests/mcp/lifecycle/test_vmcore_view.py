@@ -12,7 +12,7 @@ from kdive.mcp.tools._vmcore_targets import (
     NO_BUILD,
     NO_VMCORE,
 )
-from kdive.mcp.tools.lifecycle.vmcore_view import (
+from kdive.mcp.tools.lifecycle.vmcore.view import (
     CONSOLE_CRASH_GUIDANCE,
     console_crash_redirect,
     postmortem_success_response,

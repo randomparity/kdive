@@ -13,7 +13,7 @@ from kdive.domain.lifecycle.run_steps import RUN_STEP_SUCCEEDED
 from kdive.domain.operations.jobs import Job
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import job_envelope
-from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
+from kdive.mcp.tools.lifecycle.vmcore.view import CONSOLE_CRASH_GUIDANCE
 from kdive.services.artifacts.listing import ConsoleManifest
 from kdive.services.runs import states as run_states
 from kdive.services.runs.steps import (

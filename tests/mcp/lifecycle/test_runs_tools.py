@@ -38,7 +38,6 @@ from kdive.jobs.handlers.runs import registrar as runs_handlers
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run_target_kind
-from kdive.mcp.tools.lifecycle import vmcore
 from kdive.mcp.tools.lifecycle.runs import common as runs_common
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest, bind_run
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
@@ -50,6 +49,7 @@ from kdive.mcp.tools.lifecycle.runs.create import (
 from kdive.mcp.tools.lifecycle.runs.create import _created_response as _created_response
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
+from kdive.mcp.tools.lifecycle.vmcore import view as vmcore_view
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.artifacts.listing import CONSOLE_MANIFEST_MAX, ConsoleManifest
@@ -1252,7 +1252,7 @@ def test_get_expected_crash_surfaces_capture_disclosure(migrated_url: str) -> No
             resp = await get_run(pool, _ctx(), run_id)
         assert resp.data["available_capture"] == ["console"]
         assert resp.data["inert_capture"] == ["gdbstub", "host_dump"]
-        assert resp.data["inert_capture_reason"] == vmcore.CONSOLE_CRASH_GUIDANCE
+        assert resp.data["inert_capture_reason"] == vmcore_view.CONSOLE_CRASH_GUIDANCE
 
     asyncio.run(_run())
 
