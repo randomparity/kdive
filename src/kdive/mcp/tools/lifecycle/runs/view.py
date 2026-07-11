@@ -12,12 +12,12 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
-from kdive.mcp.tools.debug.sessions_read import active_session_ids_for_run
 from kdive.mcp.tools.lifecycle.runs.common import envelope_for_run
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.artifacts.listing import list_run_console_artifacts
+from kdive.services.debug.sessions import active_session_ids_for_run
 from kdive.services.runs.steps import existing_build_result as _existing_build_result
 from kdive.services.runs.steps import failed_boot_attempt as _failed_boot_attempt
 from kdive.services.runs.steps import install_method_for as _install_method_for

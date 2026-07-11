@@ -38,6 +38,7 @@ from kdive.providers.ports.lifecycle import (
     TransportHandleKind,
 )
 from kdive.security.authz.rbac import Role
+from kdive.services.debug.sessions import active_session_ids_for_run, active_session_ids_for_system
 from tests.mcp.systems_support import provider_resolver
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
@@ -438,8 +439,8 @@ def test_recovery_flow_list_get_then_active_ids(migrated_url: str) -> None:
             got = await sessions_read.get_session(pool, _ctx(), recovered)
             assert got.status == "live"
             async with pool.connection() as conn:
-                by_run = await sessions_read.active_session_ids_for_run(conn, UUID(run_id))
-                by_system = await sessions_read.active_session_ids_for_system(conn, UUID(sys_id))
+                by_run = await active_session_ids_for_run(conn, UUID(run_id))
+                by_system = await active_session_ids_for_system(conn, UUID(sys_id))
         assert by_run == [session_id]
         assert by_system == [session_id]
 
@@ -451,8 +452,8 @@ def test_active_session_ids_exclude_detached(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             _, run_id, sys_id = await _seeded_session(pool, DebugSessionState.DETACHED)
             async with pool.connection() as conn:
-                by_run = await sessions_read.active_session_ids_for_run(conn, UUID(run_id))
-                by_system = await sessions_read.active_session_ids_for_system(conn, UUID(sys_id))
+                by_run = await active_session_ids_for_run(conn, UUID(run_id))
+                by_system = await active_session_ids_for_system(conn, UUID(sys_id))
         assert by_run == []
         assert by_system == []
 

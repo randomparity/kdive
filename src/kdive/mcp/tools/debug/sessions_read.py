@@ -10,10 +10,9 @@ state is read as persisted.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import LiteralString
 from uuid import UUID
 
-from psycopg import AsyncConnection, sql
+from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.sql import Composable
 from psycopg_pool import AsyncConnectionPool
@@ -34,15 +33,9 @@ from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.debug.sessions import ACTIVE_SESSION_STATES
 
 _SESSIONS_LIST_TAG = "debug.list_sessions"
-
-# A session still holds the single-attach transport while `attach`/`live`; once `detached`
-# it occupies nothing. The active set is what a recovering agent needs to end or operate.
-ACTIVE_SESSION_STATES: tuple[DebugSessionState, ...] = (
-    DebugSessionState.ATTACH,
-    DebugSessionState.LIVE,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,32 +211,3 @@ def _sessions_collection(
         suggested_next_actions=["debug.get_session"],
         data=data,
     )
-
-
-_ACTIVE_BY_RUN_SQL: LiteralString = (
-    "SELECT s.id FROM debug_sessions s "
-    "WHERE s.run_id = %s AND s.state IN ('attach', 'live') ORDER BY s.id"
-)
-_ACTIVE_BY_SYSTEM_SQL: LiteralString = (
-    "SELECT s.id FROM debug_sessions s JOIN runs r ON r.id = s.run_id "
-    "WHERE r.system_id = %s AND s.state IN ('attach', 'live') ORDER BY s.id"
-)
-
-
-async def active_session_ids_for_run(conn: AsyncConnection, run_id: UUID) -> list[str]:
-    """Return the ids of `attach`/`live` debug sessions for one Run (ADR-0176)."""
-    return await _active_session_ids(conn, _ACTIVE_BY_RUN_SQL, run_id)
-
-
-async def active_session_ids_for_system(conn: AsyncConnection, system_id: UUID) -> list[str]:
-    """Return the ids of `attach`/`live` debug sessions for any Run on one System."""
-    return await _active_session_ids(conn, _ACTIVE_BY_SYSTEM_SQL, system_id)
-
-
-async def _active_session_ids(
-    conn: AsyncConnection, query: LiteralString, value: UUID
-) -> list[str]:
-    async with conn.cursor() as cur:
-        await cur.execute(query, (value,))
-        rows = await cur.fetchall()
-    return [str(row[0]) for row in rows]
