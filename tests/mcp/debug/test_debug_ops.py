@@ -1,10 +1,9 @@
 """debug.* gdb-MI tool tests — handlers driven with a real seeded session + a fake attach seam.
 
-The seven Debug-plane handlers (`run_engine_op` + the op factories) are the unit of testing:
-a `live` `DebugSession` is seeded in the migrated DB, and a fake `AttachSeam` returns a
-`GdbMiAttachment` over a scripted fake `MiController`, so the gate, the per-session lock, the
-attach-once behavior, the envelopes, the §5a `data["code"]` discriminators, and the
-`end_session` reap are exercised without gdb or a socket.
+The direct-runtime Debug-plane helper plus the op factories are the unit of testing: a `live`
+`DebugSession` is seeded in the migrated DB, and a fake `AttachSeam` returns a `GdbMiAttachment`
+over a scripted fake `MiController`, so the gate, lock, attach-once behavior, envelopes, §5a
+`data["code"]` discriminators, and `end_session` reap are exercised without gdb or a socket.
 """
 
 from __future__ import annotations
@@ -42,7 +41,7 @@ from kdive.mcp.tools.debug import ops as debug_ops
 from kdive.mcp.tools.debug import sessions as debug_tools
 from kdive.mcp.tools.debug.ops import (
     DebugEngineRuntime,
-    run_engine_op,
+    run_engine_op_with_runtime,
 )
 from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
 from kdive.providers.core.runtime import DebugCapabilities, ProviderRuntime
@@ -145,6 +144,11 @@ def _runtime(attach: Any) -> DebugEngineRuntime:
 class _FixedDebugRuntimeResolver:
     def __init__(self, runtime: DebugEngineRuntime) -> None:
         self._runtime = runtime
+
+    async def runtime_for_session(
+        self, _pool: AsyncConnectionPool, _session_id: object
+    ) -> DebugEngineRuntime:
+        return self._runtime
 
     def runtime_for_binding(self, binding: Any, *, object_id: str) -> DebugEngineRuntime:
         del binding, object_id
@@ -299,7 +303,7 @@ def test_set_breakpoint_returns_set(migrated_url: str) -> None:
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -360,7 +364,7 @@ async def _call_registered_debug_tool(
     """Register the gdb-MI tools and invoke one through the FastMCP transport (the wrapper path)."""
     monkeypatch.setattr(debug_ops, "current_context", lambda: ctx)
     app: FastMCP = FastMCP(name="t")
-    debug_ops._register_debug_ops(app, pool, runtime)
+    debug_ops._register_debug_ops(app, pool, cast(Any, _FixedDebugRuntimeResolver(runtime)))
     async with Client(app) as client:
         result = await client.call_tool(tool, arguments, raise_on_error=False)
     assert result.structured_content is not None
@@ -370,7 +374,7 @@ async def _call_registered_debug_tool(
 def test_registered_set_breakpoint_handler_writes_audit_row(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Drive a mutating op through the REGISTERED wrapper (not run_engine_op directly) so the
+    # Drive a mutating op through the REGISTERED wrapper, not the direct-runtime helper, so the
     # handler's own `audit=_op_audit("debug.set_breakpoint", ...)` wiring is exercised end-to-end.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -416,7 +420,7 @@ def test_read_memory_writes_audit_row(migrated_url: str) -> None:
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
-            await run_engine_op(
+            await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -445,7 +449,7 @@ def test_non_audited_op_writes_no_audit_row(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
             runtime = _runtime(_CountingAttach())
-            await run_engine_op(
+            await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -466,7 +470,7 @@ def test_gate_failure_writes_no_audit_row(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_session(pool, state=DebugSessionState.DETACHED)
             runtime = _runtime(_CountingAttach())
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -497,7 +501,7 @@ def test_read_memory_returns_verbatim_hex(migrated_url: str) -> None:
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -540,7 +544,7 @@ def test_read_registers_returns_direct_values(migrated_url: str) -> None:
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -559,7 +563,7 @@ def test_read_memory_over_cap_is_rejected_without_attach(migrated_url: str) -> N
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
             attach = _CountingAttach()
             runtime = _runtime(attach)
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -587,7 +591,7 @@ def test_continue_returns_stopped(migrated_url: str) -> None:
                 {"type": "result", "message": "done", "payload": None}
             ]
             runtime = _runtime(_CountingAttach(controller))
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -618,7 +622,7 @@ def test_resolve_symbol_returns_resolved(migrated_url: str) -> None:
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -639,7 +643,7 @@ def test_resolve_symbol_bad_name_rejected_without_command(migrated_url: str) -> 
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
             attach = _CountingAttach()
             runtime = _runtime(attach)
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -671,7 +675,7 @@ def test_resolve_symbol_inlined_is_symbol_not_found(migrated_url: str) -> None:
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -718,7 +722,7 @@ def test_backtrace_returns_walked(migrated_url: str) -> None:
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -754,7 +758,7 @@ def test_backtrace_running_inferior_is_categorized(migrated_url: str) -> None:
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -794,7 +798,7 @@ def test_read_frame_returns_read(migrated_url: str) -> None:
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -834,7 +838,7 @@ def test_disassemble_returns_disassembled(migrated_url: str) -> None:
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -870,7 +874,7 @@ def test_disassemble_no_instructions_is_categorized(migrated_url: str) -> None:
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -907,7 +911,7 @@ def test_set_watchpoint_returns_watching(migrated_url: str) -> None:
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -952,7 +956,7 @@ def test_list_watchpoints_returns_listed(migrated_url: str) -> None:
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool, _ctx(), session_id, runtime, _op_for("list_watchpoints", runtime, session_id)
             )
         assert resp.status == "listed"
@@ -967,7 +971,7 @@ def test_clear_watchpoint_returns_cleared(migrated_url: str) -> None:
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
             controller = _FakeMiController({})
             runtime = _runtime(_CountingAttach(controller))
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -995,7 +999,7 @@ def test_set_watchpoint_unsupported_is_categorized(migrated_url: str) -> None:
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -1018,7 +1022,7 @@ def test_bad_session_id(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             runtime = _runtime(_CountingAttach())
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 "not-a-uuid",
@@ -1036,7 +1040,7 @@ def test_unknown_session(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             sid = str(uuid4())
             runtime = _runtime(_CountingAttach())
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool, _ctx(), sid, runtime, _op_for("list_breakpoints", runtime, sid)
             )
         assert resp.data["code"] == "unknown_session"
@@ -1049,7 +1053,7 @@ def test_cross_project_session_is_unknown(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
             runtime = _runtime(_CountingAttach())
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(projects=("other",)),
                 session_id,
@@ -1067,7 +1071,7 @@ def test_non_operator_raises(migrated_url: str) -> None:
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
             runtime = _runtime(_CountingAttach())
             with pytest.raises(AuthorizationError):
-                await run_engine_op(
+                await run_engine_op_with_runtime(
                     pool,
                     _ctx(Role.VIEWER),
                     session_id,
@@ -1083,7 +1087,7 @@ def test_non_live_session_is_not_live(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_session(pool, state=DebugSessionState.DETACHED)
             runtime = _runtime(_CountingAttach())
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool, _ctx(), session_id, runtime, _op_for("list_breakpoints", runtime, session_id)
             )
         assert resp.data["code"] == "not_live"
@@ -1097,7 +1101,7 @@ def test_missing_dependency_attach_surfaces_as_debug_attach_failure(migrated_url
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
             runtime = _runtime(_raising_attach)
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool, _ctx(), session_id, runtime, _op_for("list_breakpoints", runtime, session_id)
             )
         assert resp.status == "error"
@@ -1117,7 +1121,7 @@ def test_attach_runs_once_for_concurrent_ops(migrated_url: str) -> None:
             attach = _CountingAttach()
             runtime = _runtime(attach)
             ops = [
-                run_engine_op(
+                run_engine_op_with_runtime(
                     pool,
                     _ctx(),
                     session_id,
@@ -1180,7 +1184,7 @@ def test_end_session_reaps_engine(migrated_url: str) -> None:
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
             attach = _CountingAttach()
             runtime = _runtime(attach)
-            await run_engine_op(
+            await run_engine_op_with_runtime(
                 pool, _ctx(), session_id, runtime, _op_for("list_breakpoints", runtime, session_id)
             )
             # The engine is registered; end_session must exit + drop it.
@@ -1189,7 +1193,7 @@ def test_end_session_reaps_engine(migrated_url: str) -> None:
             assert resp.status == "detached"
             assert attach.controller.exited is True
             # A subsequent op on the now-detached session is rejected at the state gate.
-            follow = await run_engine_op(
+            follow = await run_engine_op_with_runtime(
                 pool, _ctx(), session_id, runtime, _op_for("list_breakpoints", runtime, session_id)
             )
         assert follow.data["code"] == "not_live"
@@ -1261,7 +1265,7 @@ def test_list_modules_returns_listed(migrated_url: str) -> None:
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
             controller = _FakeMiController(_module_walk_responses())
             runtime = _runtime(_CountingAttach(controller))
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool, _ctx(), session_id, runtime, _op_for("list_modules", runtime, session_id)
             )
         assert resp.status == "listed"
@@ -1282,7 +1286,7 @@ def test_load_module_symbols_returns_loaded(migrated_url: str) -> None:
             controller = _FakeMiController(_module_walk_responses())
             info = ModuleDebuginfo(path=Path("/x/ext4.ko"), srcversion="SRC1", build_id=None)
             runtime = _runtime_with_resolver(_CountingAttach(controller), info)
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,
@@ -1307,7 +1311,7 @@ def test_load_module_symbols_stale_is_categorized(migrated_url: str) -> None:
             controller = _FakeMiController(_module_walk_responses())
             info = ModuleDebuginfo(path=Path("/x/ext4.ko"), srcversion="SRC1", build_id=None)
             runtime = _runtime_with_resolver(_CountingAttach(controller), info)
-            resp = await run_engine_op(
+            resp = await run_engine_op_with_runtime(
                 pool,
                 _ctx(),
                 session_id,

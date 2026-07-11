@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -228,6 +228,9 @@ class DebugRuntimeResolver:
             return runtime
 
 
+_RuntimeLookup = Callable[[DebugSession], Awaitable[DebugEngineRuntime | ToolResponse]]
+
+
 def _op_failure(session_id: str, exc: CategorizedError) -> ToolResponse:
     """Map an engine ``CategorizedError`` onto a failure envelope (with its ``code`` if any)."""
     category = exc.category
@@ -247,11 +250,45 @@ async def _live_session(
     return resolved.session
 
 
-async def run_engine_op(
+async def run_engine_op_with_runtime(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     session_id: str,
-    runtime: DebugEngineRuntime | DebugRuntimeResolver,
+    runtime: DebugEngineRuntime,
+    op: _EngineOp,
+    *,
+    audit: _OpAudit | None = None,
+) -> ToolResponse:
+    """Run a Debug-plane op against an already constructed engine runtime."""
+
+    async def _runtime_for_session(_session: DebugSession) -> DebugEngineRuntime:
+        return runtime
+
+    return await _run_engine_op(pool, ctx, session_id, _runtime_for_session, op, audit=audit)
+
+
+async def run_engine_op_with_resolver(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    session_id: str,
+    runtime_resolver: DebugRuntimeResolver,
+    op: _EngineOp,
+    *,
+    audit: _OpAudit | None = None,
+) -> ToolResponse:
+    """Run a Debug-plane op after resolving the session's provider debug runtime."""
+
+    async def _runtime_for_session(session: DebugSession) -> DebugEngineRuntime | ToolResponse:
+        return await runtime_resolver.runtime_for_session(pool, session.id)
+
+    return await _run_engine_op(pool, ctx, session_id, _runtime_for_session, op, audit=audit)
+
+
+async def _run_engine_op(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    session_id: str,
+    runtime_for_session: _RuntimeLookup,
     op: _EngineOp,
     *,
     audit: _OpAudit | None = None,
@@ -272,7 +309,7 @@ async def run_engine_op(
         if isinstance(gated, ToolResponse):
             return gated
         session = gated
-        resolved_runtime = await _runtime_for_op(pool, session, runtime)
+        resolved_runtime = await runtime_for_session(session)
         if isinstance(resolved_runtime, ToolResponse):
             return resolved_runtime
         async with resolved_runtime.lock_for(session_id):
@@ -306,16 +343,6 @@ async def _record_op_audit(
                 project=session.project,
             ),
         )
-
-
-async def _runtime_for_op(
-    pool: AsyncConnectionPool,
-    session: DebugSession,
-    runtime: DebugEngineRuntime | DebugRuntimeResolver,
-) -> DebugEngineRuntime | ToolResponse:
-    if isinstance(runtime, DebugRuntimeResolver):
-        return await runtime.runtime_for_session(pool, session.id)
-    return runtime
 
 
 def _attach_and_run(
@@ -587,7 +614,7 @@ def _stop_data(reason: str | None, timed_out: bool) -> dict[str, JsonValue]:
 
 
 def _register_debug_ops(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     """Register the sixteen gdb-MI `debug.*` tools on ``app``, sharing ``runtime`` (ADR-0034)."""
     _register_debug_set_breakpoint(app, pool, runtime)
@@ -609,7 +636,7 @@ def _register_debug_ops(
 
 
 def _register_debug_set_breakpoint(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(
         name="debug.set_breakpoint",
@@ -623,7 +650,7 @@ def _register_debug_set_breakpoint(
         location: Annotated[str, Field(description="Bare C function or symbol name to break at.")],
     ) -> ToolResponse:
         """Set a breakpoint on a live DebugSession via gdb-MI. Requires contributor."""
-        return await run_engine_op(
+        return await run_engine_op_with_resolver(
             pool,
             current_context(),
             session_id,
@@ -634,7 +661,7 @@ def _register_debug_set_breakpoint(
 
 
 def _register_debug_clear_breakpoint(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(
         name="debug.clear_breakpoint",
@@ -651,7 +678,7 @@ def _register_debug_clear_breakpoint(
         ],
     ) -> ToolResponse:
         """Clear a breakpoint by number on a live DebugSession. Requires contributor."""
-        return await run_engine_op(
+        return await run_engine_op_with_resolver(
             pool,
             current_context(),
             session_id,
@@ -662,7 +689,7 @@ def _register_debug_clear_breakpoint(
 
 
 def _register_debug_list_breakpoints(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(
         name="debug.list_breakpoints",
@@ -675,13 +702,13 @@ def _register_debug_list_breakpoints(
         ],
     ) -> ToolResponse:
         """List all breakpoints on a live DebugSession. Requires contributor."""
-        return await run_engine_op(
+        return await run_engine_op_with_resolver(
             pool, current_context(), session_id, runtime, _list_breakpoints_op(session_id)
         )
 
 
 def _register_debug_read_memory(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(
         name="debug.read_memory",
@@ -696,7 +723,7 @@ def _register_debug_read_memory(
         ],
     ) -> ToolResponse:
         """Read raw memory bytes from a live DebugSession (bounded by byte_count). Contributor."""
-        return await run_engine_op(
+        return await run_engine_op_with_resolver(
             pool,
             current_context(),
             session_id,
@@ -707,7 +734,7 @@ def _register_debug_read_memory(
 
 
 def _register_debug_read_registers(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(
         name="debug.read_registers",
@@ -724,7 +751,7 @@ def _register_debug_read_registers(
         ],
     ) -> ToolResponse:
         """Read named registers from a live DebugSession. Requires contributor."""
-        return await run_engine_op(
+        return await run_engine_op_with_resolver(
             pool,
             current_context(),
             session_id,
@@ -734,7 +761,7 @@ def _register_debug_read_registers(
 
 
 def _register_debug_resolve_symbol(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(
         name="debug.resolve_symbol",
@@ -756,7 +783,7 @@ def _register_debug_resolve_symbol(
         ],
     ) -> ToolResponse:
         """Resolve a kernel symbol to its address on a live DebugSession. Requires contributor."""
-        return await run_engine_op(
+        return await run_engine_op_with_resolver(
             pool,
             current_context(),
             session_id,
@@ -766,7 +793,7 @@ def _register_debug_resolve_symbol(
 
 
 def _register_debug_continue(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(
         name="debug.continue",
@@ -786,7 +813,7 @@ def _register_debug_continue(
         ] = 0.0,
     ) -> ToolResponse:
         """Resume a live DebugSession and wait for a stop event. Requires contributor."""
-        return await run_engine_op(
+        return await run_engine_op_with_resolver(
             pool,
             current_context(),
             session_id,
@@ -797,7 +824,7 @@ def _register_debug_continue(
 
 
 def _register_debug_interrupt(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(
         name="debug.interrupt",
@@ -808,7 +835,7 @@ def _register_debug_interrupt(
         session_id: Annotated[str, Field(description="The live DebugSession to interrupt.")],
     ) -> ToolResponse:
         """Send an interrupt to halt a running live DebugSession. Requires contributor."""
-        return await run_engine_op(
+        return await run_engine_op_with_resolver(
             pool,
             current_context(),
             session_id,
@@ -819,7 +846,7 @@ def _register_debug_interrupt(
 
 
 def _register_debug_backtrace(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(
         name="debug.backtrace",
@@ -838,7 +865,7 @@ def _register_debug_backtrace(
         ] = 64,
     ) -> ToolResponse:
         """Walk the stopped kernel's stack on a live DebugSession. Requires contributor."""
-        return await run_engine_op(
+        return await run_engine_op_with_resolver(
             pool,
             current_context(),
             session_id,
@@ -848,7 +875,7 @@ def _register_debug_backtrace(
 
 
 def _register_debug_read_frame(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(
         name="debug.read_frame",
@@ -865,7 +892,7 @@ def _register_debug_read_frame(
         ],
     ) -> ToolResponse:
         """Inspect one selected stack frame on a live DebugSession. Requires contributor."""
-        return await run_engine_op(
+        return await run_engine_op_with_resolver(
             pool,
             current_context(),
             session_id,
@@ -875,7 +902,7 @@ def _register_debug_read_frame(
 
 
 def _register_debug_disassemble(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(
         name="debug.disassemble",
@@ -903,7 +930,7 @@ def _register_debug_disassemble(
 
         Requires contributor.
         """
-        return await run_engine_op(
+        return await run_engine_op_with_resolver(
             pool,
             current_context(),
             session_id,
@@ -913,7 +940,7 @@ def _register_debug_disassemble(
 
 
 def _register_debug_set_watchpoint(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(
         name="debug.set_watchpoint",
@@ -942,7 +969,7 @@ def _register_debug_set_watchpoint(
         Watchpoints are hardware (debug-register) watchpoints: the stub may accept one yet never
         trap, surfacing as a debug.continue timeout rather than an error. Requires contributor.
         """
-        return await run_engine_op(
+        return await run_engine_op_with_resolver(
             pool,
             current_context(),
             session_id,
@@ -958,7 +985,7 @@ def _register_debug_set_watchpoint(
 
 
 def _register_debug_list_watchpoints(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(
         name="debug.list_watchpoints",
@@ -971,13 +998,13 @@ def _register_debug_list_watchpoints(
         ],
     ) -> ToolResponse:
         """List all watchpoints on a live DebugSession. Requires contributor."""
-        return await run_engine_op(
+        return await run_engine_op_with_resolver(
             pool, current_context(), session_id, runtime, _list_watchpoints_op(session_id)
         )
 
 
 def _register_debug_clear_watchpoint(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(
         name="debug.clear_watchpoint",
@@ -993,7 +1020,7 @@ def _register_debug_clear_watchpoint(
         ],
     ) -> ToolResponse:
         """Clear a watchpoint by number on a live DebugSession. Requires contributor."""
-        return await run_engine_op(
+        return await run_engine_op_with_resolver(
             pool,
             current_context(),
             session_id,
@@ -1004,7 +1031,7 @@ def _register_debug_clear_watchpoint(
 
 
 def _register_debug_list_modules(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(
         name="debug.list_modules",
@@ -1020,13 +1047,13 @@ def _register_debug_list_modules(
 
         Requires contributor.
         """
-        return await run_engine_op(
+        return await run_engine_op_with_resolver(
             pool, current_context(), session_id, runtime, _list_modules_op(session_id)
         )
 
 
 def _register_debug_load_module_symbols(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(
         name="debug.load_module_symbols",
@@ -1053,7 +1080,7 @@ def _register_debug_load_module_symbols(
 
         Requires contributor.
         """
-        return await run_engine_op(
+        return await run_engine_op_with_resolver(
             pool,
             current_context(),
             session_id,
