@@ -88,16 +88,15 @@ _BUILD_LOG_FAILURE_DETAIL = "failure_detail_build_log_artifact"
 
 # The VIEWER-accessible read path for the REDACTED ``refs["console"]`` artifact (ADR-0226),
 # surfaced as ``data["console_access"]`` so an agent learns it from the envelope, not out of
-# band (#864, ADR-0262, ADR-0283): ``artifacts.get`` both jumps to a targeted match (``find``)
-# and pages the full log (``next_offset`` until ``content_truncated`` is ``false``; ADR-0247's
-# per-window cap means whole-log = paging). ``search`` and ``full_text`` name the same tool —
-# ``find`` distinguishes them. ``artifacts.fetch_raw`` is deliberately absent: it egresses only
-# the ``vmcore``/``vmlinux`` ``RawAsset`` allow-list keyed by ``run_id``+``asset`` and is
-# ``contributor``-gated, so it neither serves the console artifact nor is callable by a
-# console-ref viewer. Copied per envelope so the shared constant stays immutable.
+# band (#864, ADR-0262, ADR-0283): ``artifacts.find`` jumps to a targeted match and
+# ``artifacts.get`` pages the full log (``next_offset`` until ``content_truncated`` is ``false``;
+# ADR-0247's per-window cap means whole-log = paging). ``artifacts.fetch_raw`` is deliberately
+# absent: it egresses only the ``vmcore``/``vmlinux`` ``RawAsset`` allow-list keyed by
+# ``run_id``+``asset`` and is ``contributor``-gated, so it neither serves the console artifact nor
+# is callable by a console-ref viewer. Copied per envelope so the shared constant stays immutable.
 _CONSOLE_ACCESS_HINT: dict[str, str] = {
     "ref": "console",
-    "search": "artifacts.get",
+    "search": "artifacts.find",
     "full_text": "artifacts.get",
 }
 
@@ -108,8 +107,8 @@ def _run_artifact_refs(
     """The Run's object-store artifact keys, for the envelope ``refs`` slot.
 
     ``console_ref`` is the boot step's console evidence artifact id (ADR-0226), surfaced as
-    ``console``; the REDACTED console artifact is read via ``artifacts.get`` (windowed and paged,
-    or jumped to a match with ``find``), and ``data["console_access"]`` names it
+    ``console``; the REDACTED console artifact is read via ``artifacts.get`` (windowed and paged)
+    or searched via ``artifacts.find``, and ``data["console_access"]`` names those paths
     (``_CONSOLE_ACCESS_HINT``, ADR-0262/0283) so the agent need not know it out of band. It is
     supplied only on the ``runs.get`` success path (which loads the boot step), and omitted when no
     boot step recorded evidence. ``build_log_ref`` is the failed build's build-log artifact id

@@ -41,9 +41,10 @@ from kdive.store.objectstore import (
 
 _log = logging.getLogger(__name__)
 
-# The largest object `artifacts.get` pulls whole into memory to slice a window from or to
-# search with `find` (ADR-0247, ADR-0283). Larger objects omit inline content and a `find`
-# request rejects (`artifact_too_large`); the always-present `refs.download_uri` serves them.
+# The largest object pulled whole into memory for `artifacts.get` windows or `artifacts.find`
+# searches (ADR-0247, ADR-0283). Larger objects omit inline content from `artifacts.get` and
+# reject `artifacts.find` (`artifact_too_large`); the always-present `refs.download_uri` serves
+# them.
 _MAX_WINDOWED_FETCH_BYTES = 1024 * 1024
 # The default inline window `artifacts.get` returns when the caller names no `max_bytes`
 # (ADR-0247): 16 KiB ≈ 4k–5k tokens, sized to the tool-result token budget rather than the
@@ -151,69 +152,91 @@ async def artifacts_get(
     artifact_id: str,
     byte_offset: int = 0,
     max_bytes: int = ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
-    find: str | None = None,
     direction: JumpDirection = "forward",
     store_factory: Callable[[], _SearchStore] = object_store_from_env,
 ) -> ToolResponse:
-    """Return one `redacted` artifact's content window, or jump to a literal match.
+    """Return one `redacted` artifact's content window.
 
-    Without ``find`` this returns a byte window: ``data[byte_offset : byte_offset +
-    effective_max]`` where ``effective_max = min(max_bytes, KDIVE_ARTIFACT_INLINE_MAX_BYTES,
+    This returns a byte window: ``data[byte_offset : byte_offset + effective_max]`` where
+    ``effective_max = min(max_bytes, KDIVE_ARTIFACT_INLINE_MAX_BYTES,
     ARTIFACT_GET_WINDOW_MAX_BYTES)`` (the last a hard 24 KiB token-safe ceiling, ADR-0257);
     ``data["content_truncated"]``/``data["next_offset"]`` page the rest. ``direction`` pages
     ``forward`` (default; ``byte_offset`` from the start) or ``backward`` (``byte_offset`` from
     end-of-artifact, the tail), so a caller can read the end and walk up.
 
-    With ``find`` the call jumps to the nearest literal ``|``-OR match in ``direction`` over the
-    whole body (#939): ``data["match_found"]`` plus, on a hit, ``data["match_offset"]``,
-    ``data["match_line"]``, the surrounding ``data["content"]`` window, and a direction-relative
-    ``data["next_offset"]`` to continue. Matching is byte-space literal (no regex, no Unicode
-    normalization). An artifact larger than ``_MAX_WINDOWED_FETCH_BYTES`` cannot be searched (its
-    bytes are never fetched), so ``find`` rejects it with ``configuration_error``
-    ``reason=artifact_too_large`` rather than a misleading ``match_found=false``.
-
     A negative ``byte_offset`` reads from the direction's natural edge and ``max_bytes <= 0``
     floors to a 1-byte window (clamped, never rejected). Objects larger than
-    ``_MAX_WINDOWED_FETCH_BYTES`` omit inline content (``content_omitted``) on a plain read and
-    are retrieved via ``refs["download_uri"]``. A store outage degrades to a
-    ``data["content_unavailable"]`` reason; the metadata envelope still returns (ADR-0140,
-    ADR-0247). Missing or unauthorized rows return ``not_found``. A visible redacted row whose
-    object metadata or fetched object is no longer redacted is redaction drift and returns
-    ``configuration_error``.
+    ``_MAX_WINDOWED_FETCH_BYTES`` omit inline content (``content_omitted``) and are retrieved via
+    ``refs["download_uri"]``. A store outage degrades to a ``data["content_unavailable"]`` reason;
+    the metadata envelope still returns (ADR-0140, ADR-0247). Missing or unauthorized rows return
+    ``not_found``. A visible redacted row whose object metadata or fetched object is no longer
+    redacted is redaction drift and returns ``configuration_error``.
     """
     authorized = await _authorized_redacted_artifact(pool, ctx, artifact_id=artifact_id)
     if isinstance(authorized, ToolResponse):
         return authorized
-    terms: tuple[str, ...] | None = None
-    if find is not None:
-        try:
-            terms = parse_literal_terms(find)
-        except ArtifactSearchInputError:
-            return _config_error(artifact_id, data={"reason": "bad_search_input"})
     refs: dict[str, str] = {"object": authorized.key}
     loaded = await _load_redacted_plaintext(authorized.key, store_factory, refs)
     if loaded.drift:  # head/fetched object's sensitivity is not REDACTED (the redaction gate)
         return _config_error(artifact_id)
-    if terms is not None:
-        find_data = _find_response_data(
-            loaded,
-            terms=terms,
-            direction=direction,
-            byte_offset=byte_offset,
-            max_bytes=max_bytes,
-            artifact_id=artifact_id,
-        )
-        if isinstance(find_data, ToolResponse):
-            return find_data
-        data = find_data
-    else:
-        data = _window_response_data(
-            loaded, byte_offset=byte_offset, max_bytes=max_bytes, direction=direction
-        )
+    data = _window_response_data(
+        loaded, byte_offset=byte_offset, max_bytes=max_bytes, direction=direction
+    )
     return ToolResponse.success(
         artifact_id,
         "available",
         suggested_next_actions=["artifacts.get"],
+        refs=refs,
+        data=data,
+    )
+
+
+async def artifacts_find(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    artifact_id: str,
+    query: str,
+    byte_offset: int = 0,
+    max_bytes: int = ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
+    direction: JumpDirection = "forward",
+    store_factory: Callable[[], _SearchStore] = object_store_from_env,
+) -> ToolResponse:
+    """Jump to a literal match in one `redacted` artifact.
+
+    The call jumps to the nearest literal ``|``-OR match in ``direction`` over the whole body
+    (#939): ``data["match_found"]`` plus, on a hit, ``data["match_offset"]``,
+    ``data["match_line"]``, the surrounding ``data["content"]`` window, and a direction-relative
+    ``data["next_offset"]`` to continue. Matching is byte-space literal (no regex, no Unicode
+    normalization). An artifact larger than ``_MAX_WINDOWED_FETCH_BYTES`` cannot be searched (its
+    bytes are never fetched), so this rejects it with ``configuration_error``
+    ``reason=artifact_too_large`` rather than a misleading ``match_found=false``.
+    """
+    authorized = await _authorized_redacted_artifact(pool, ctx, artifact_id=artifact_id)
+    if isinstance(authorized, ToolResponse):
+        return authorized
+    try:
+        terms = parse_literal_terms(query)
+    except ArtifactSearchInputError:
+        return _config_error(artifact_id, data={"reason": "bad_search_input"})
+    refs: dict[str, str] = {"object": authorized.key}
+    loaded = await _load_redacted_plaintext(authorized.key, store_factory, refs)
+    if loaded.drift:
+        return _config_error(artifact_id)
+    data = _find_response_data(
+        loaded,
+        terms=terms,
+        direction=direction,
+        byte_offset=byte_offset,
+        max_bytes=max_bytes,
+        artifact_id=artifact_id,
+    )
+    if isinstance(data, ToolResponse):
+        return data
+    return ToolResponse.success(
+        artifact_id,
+        "available",
+        suggested_next_actions=["artifacts.find"],
         refs=refs,
         data=data,
     )
@@ -339,7 +362,7 @@ def _find_response_data(
                 artifact_id,
                 data={"reason": "artifact_too_large", "size_bytes": loaded.size_bytes},
             )
-        # Store outage: surface only the content_unavailable reason (like plain `artifacts.get`).
+        # Store outage: surface only the content_unavailable reason (like `artifacts.get`).
         # `match_found` is omitted because no search ran — emitting `match_found=false` would
         # read as "searched, no such signature" when the truth is "could not read the log".
         return loaded.degraded or {}

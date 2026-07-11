@@ -109,6 +109,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "allocations.renew": _CONTRIBUTOR,
     # artifacts
     "artifacts.get": _VIEWER,
+    "artifacts.find": _VIEWER,
     "artifacts.list": _VIEWER,
     "artifacts.fetch_raw": _CONTRIBUTOR,  # raw vmcore/vmlinux egress, ADR-0243
     "artifacts.create_run_upload": _CONTRIBUTOR,

@@ -68,6 +68,7 @@ def test_build_app_registers_jobs_tools() -> None:
             "vmcore.list",
             "artifacts.list",
             "artifacts.get",
+            "artifacts.find",
             "postmortem.crash",
             "postmortem.triage",
         } <= names

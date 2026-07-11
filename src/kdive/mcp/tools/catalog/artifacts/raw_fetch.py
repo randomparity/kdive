@@ -4,7 +4,8 @@ Mints a presigned download URL for a Run's raw debug asset — its ``vmlinux`` d
 raw ``vmcore`` of the System it booted — gated by project membership plus the ``contributor``
 role on the **asset's own** owning project, not by sensitivity. The raw objects stay
 ``SENSITIVE``; the closed ``RawAsset`` enum is the egress allow-list. URL-only (these are
-multi-GB binaries); the ``REDACTED``-only inline/search gate on ``artifacts.get`` is unchanged.
+multi-GB binaries); the ``REDACTED``-only inline/search gate on ``artifacts.get`` /
+``artifacts.find`` is unchanged.
 """
 
 from __future__ import annotations

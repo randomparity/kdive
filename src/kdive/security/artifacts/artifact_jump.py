@@ -1,9 +1,9 @@
-"""Byte-space literal jump matcher for ``artifacts.get`` (#939).
+"""Byte-space literal jump matcher for ``artifacts.find`` (#939).
 
 Locates a literal ``|``-OR term over the whole fetched artifact body and returns one
 direction-anchored window plus a strictly-advancing continuation cursor. Matching is on raw
 bytes (UTF-8-encoded terms) with line boundaries on ``\\n`` only, so the byte-offset cursor
-``artifacts.get`` already uses stays exact and Unicode line separators do not over-split.
+shared with ``artifacts.get`` stays exact and Unicode line separators do not over-split.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class JumpHit:
 def resolve_anchor(size: int, *, direction: JumpDirection, byte_offset: int) -> int:
     """Resolve the search anchor to the direction's natural edge when unset/degenerate.
 
-    Forward keeps the existing ``artifacts.get`` meaning (``0``/negative = from the start).
+    Forward keeps the shared cursor meaning (``0``/negative = from the start).
     Backward treats an omitted/``0``/negative ``byte_offset`` as end-of-artifact (a strict
     backward search from byte 0 is degenerate), and clamps a positive value to ``size``.
     """

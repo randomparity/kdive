@@ -60,6 +60,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
         "tests/mcp/catalog/test_feature_config_requirements_tool.py",
     ),
     "artifacts.fetch_raw": ("tests/mcp/catalog/test_raw_fetch_tool.py",),
+    "artifacts.find": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "artifacts.get": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "artifacts.list": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "audit.query": ("tests/mcp/ops/test_audit_query.py",),

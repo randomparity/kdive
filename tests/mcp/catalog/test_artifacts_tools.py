@@ -20,6 +20,7 @@ from kdive.mcp.tools.catalog.artifacts.reads import (
     _MAX_WINDOWED_FETCH_BYTES,
     ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
     ARTIFACT_GET_WINDOW_MAX_BYTES,
+    artifacts_find,
     artifacts_get,
     artifacts_list,
 )
@@ -775,15 +776,15 @@ def test_artifacts_get_schema_advertises_window_params() -> None:
     assert str(ARTIFACT_GET_WINDOW_MAX_BYTES) in max_bytes_desc
 
 
-def test_get_find_forward_returns_match_window(migrated_url: str) -> None:
+def test_artifacts_find_forward_returns_match_window(migrated_url: str) -> None:
     body = b"boot ok\nBUG: KASAN slab-out-of-bounds\nCall Trace:\n func+0x1\n"
     store = _SearchStore(body)
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="BUG: KASAN"
+            resp = await artifacts_find(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, query="BUG: KASAN"
             )
             assert resp.status == "available"
             assert data_bool(resp, "match_found") is True
@@ -794,14 +795,14 @@ def test_get_find_forward_returns_match_window(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_get_find_no_match(migrated_url: str) -> None:
+def test_artifacts_find_no_match(migrated_url: str) -> None:
     store = _SearchStore(b"clean boot\nno crash here\n")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="BUG:"
+            resp = await artifacts_find(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, query="BUG:"
             )
             assert resp.status == "available"
             assert data_bool(resp, "match_found") is False
@@ -810,19 +811,19 @@ def test_get_find_no_match(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_get_find_backward_from_end(migrated_url: str) -> None:
+def test_artifacts_find_backward_from_end(migrated_url: str) -> None:
     body = b"BUG: first\nmid\nBUG: second\nend\n"
     store = _SearchStore(body)
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_get(
+            resp = await artifacts_find(
                 pool,
                 _ctx(),
                 artifact_id=red_id,
                 store_factory=lambda: store,
-                find="BUG:",
+                query="BUG:",
                 direction="backward",
             )
             assert data_int(resp, "match_offset") == body.rindex(b"BUG:")
@@ -830,14 +831,14 @@ def test_get_find_backward_from_end(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_get_find_oversized_rejects(migrated_url: str) -> None:
+def test_artifacts_find_oversized_rejects(migrated_url: str) -> None:
     store = _SearchStore(b"", size=_MAX_WINDOWED_FETCH_BYTES + 1)
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="BUG:"
+            resp = await artifacts_find(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, query="BUG:"
             )
             assert resp.status == "error"
             assert resp.data["reason"] == "artifact_too_large"
@@ -845,14 +846,14 @@ def test_get_find_oversized_rejects(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_get_find_malformed_rejects(migrated_url: str) -> None:
+def test_artifacts_find_malformed_rejects(migrated_url: str) -> None:
     store = _SearchStore(b"anything")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="a||b"
+            resp = await artifacts_find(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, query="a||b"
             )
             assert resp.status == "error"
             assert resp.data["reason"] == "bad_search_input"
@@ -879,14 +880,14 @@ def test_get_backward_no_find_is_tail(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_get_find_quarantined_is_not_found(migrated_url: str) -> None:
+def test_artifacts_find_quarantined_is_not_found(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id, _, _ = await _seed_system_with_artifacts(pool)
             quar_id = await _seed_quarantined_artifact(pool, sys_id)
             store = _SearchStore(b"BUG: panic")
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=quar_id, store_factory=lambda: store, find="BUG:"
+            resp = await artifacts_find(
+                pool, _ctx(), artifact_id=quar_id, store_factory=lambda: store, query="BUG:"
             )
             assert resp.status == "error"
             assert resp.error_category == "not_found"
@@ -895,14 +896,24 @@ def test_get_find_quarantined_is_not_found(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_get_schema_advertises_find_and_direction() -> None:
+def test_get_schema_omits_search_params() -> None:
     props = _tool_param_schema("artifacts.get")
-    assert "find" in props and "direction" in props
+    assert "find" not in props
+    assert "query" not in props
+    assert "direction" in props
     assert "forward" in str(props["direction"]) and "backward" in str(props["direction"])
-    assert "no regex" in str(props["find"]["description"]).lower()
 
 
-def test_search_text_tool_is_removed() -> None:
+def test_find_schema_advertises_query_and_direction() -> None:
+    props = _tool_param_schema("artifacts.find")
+    assert "query" in props
+    assert props["query"]["type"] == "string"
+    assert "no regex" in str(props["query"]["description"]).lower()
+    assert "direction" in props
+    assert "forward" in str(props["direction"]) and "backward" in str(props["direction"])
+
+
+def test_search_text_tool_is_removed_and_find_exists() -> None:
     # build_app + app.get_tool mirrors _tool_param_schema; an absent tool returns None.
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     kp = make_keypair()
@@ -910,9 +921,10 @@ def test_search_text_tool_is_removed() -> None:
     app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
     assert asyncio.run(app.get_tool("artifacts.search_text")) is None
     assert asyncio.run(app.get_tool("artifacts.get")) is not None
+    assert asyncio.run(app.get_tool("artifacts.find")) is not None
 
 
-def test_get_find_store_outage_omits_match_found(migrated_url: str) -> None:
+def test_artifacts_find_store_outage_omits_match_found(migrated_url: str) -> None:
     # A transient store failure must not claim match_found=false (could-not-search != no-match);
     # it degrades exactly like a plain artifacts.get: content_unavailable, no match_found.
     error = CategorizedError("head down", category=ErrorCategory.TRANSPORT_FAILURE)
@@ -921,8 +933,8 @@ def test_get_find_store_outage_omits_match_found(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, find="BUG:"
+            resp = await artifacts_find(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store, query="BUG:"
             )
             assert resp.status == "available"
             assert resp.data["content_unavailable"] == "store_error"
