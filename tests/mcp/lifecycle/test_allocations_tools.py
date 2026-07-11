@@ -270,16 +270,19 @@ def test_request_under_cap_grants(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_request_grant_drops_systems_provision_for_contributor(migrated_url: str) -> None:
-    # #862/ADR-0261: a contributor's granted request must not be pointed at operator-only
-    # systems.provision (allocations.request needs only contributor).
+def test_request_grant_points_contributor_at_systems_provision(migrated_url: str) -> None:
+    # #862/ADR-0261 + ADR-0326: the provision lane is contributor leaseholder control, so a
+    # contributor's granted request IS pointed at systems.provision (the create-a-VM next step).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _register(pool, cap=2)
             resp = await _request(pool, _ctx(role=Role.CONTRIBUTOR))
         assert resp.status == "granted"
-        assert "systems.provision" not in resp.suggested_next_actions
-        assert resp.suggested_next_actions == ["allocations.get", "allocations.release"]
+        assert resp.suggested_next_actions == [
+            "allocations.get",
+            "systems.provision",
+            "allocations.release",
+        ]
 
     asyncio.run(_run())
 
@@ -295,7 +298,11 @@ def test_get_granted_filters_next_actions_by_role(migrated_url: str) -> None:
             contributor = await get_allocation(pool, _ctx(role=Role.CONTRIBUTOR), alloc_id)
             operator = await get_allocation(pool, _ctx(role=Role.OPERATOR), alloc_id)
         assert viewer.suggested_next_actions == ["allocations.get"]
-        assert contributor.suggested_next_actions == ["allocations.get", "allocations.release"]
+        assert contributor.suggested_next_actions == [
+            "allocations.get",
+            "systems.provision",
+            "allocations.release",
+        ]
         assert "systems.provision" in operator.suggested_next_actions
 
     asyncio.run(_run())
@@ -975,47 +982,47 @@ def _granted_alloc(*, project: str = "proj") -> Allocation:
 
 
 def test_envelope_role_filters_success_next_actions() -> None:
-    # ADR-0261: a GRANTED envelope's breadcrumb is filtered by the caller's role on the
-    # allocation's project, so a non-operator is never pointed at operator-only systems.provision.
+    # ADR-0261 + ADR-0326: a GRANTED envelope's breadcrumb is filtered by the caller's role on the
+    # allocation's project. systems.provision is contributor leaseholder control, so a contributor
+    # is pointed at it; a viewer/role-less caller still gets only the reads they can see.
     alloc = _granted_alloc()
     operator = envelope_for_allocation(alloc, _ctx(role=Role.OPERATOR))
     contributor = envelope_for_allocation(alloc, _ctx(role=Role.CONTRIBUTOR))
     viewer = envelope_for_allocation(alloc, _ctx(role=Role.VIEWER))
     role_less = envelope_for_allocation(alloc, _ctx(role=None))
 
-    assert operator.suggested_next_actions == [
-        "allocations.get",
-        "systems.provision",
-        "allocations.release",
-    ]
-    assert contributor.suggested_next_actions == ["allocations.get", "allocations.release"]
+    expected = ["allocations.get", "systems.provision", "allocations.release"]
+    assert operator.suggested_next_actions == expected
+    assert contributor.suggested_next_actions == expected
     assert viewer.suggested_next_actions == ["allocations.get"]
     assert role_less.suggested_next_actions == []
 
 
 def test_envelope_filter_is_per_project_not_connection_union() -> None:
-    # Operator on "other", only contributor on the allocation's project: systems.provision must
-    # be dropped — the per-project leak the connection-scoped exposure filter cannot catch.
+    # Viewer on the allocation's project, operator on "other": the breadcrumb must be filtered by
+    # the alloc project's (viewer) role, not the connection union — so systems.provision and
+    # allocations.release are dropped even though "other"'s operator grant would admit them (#862).
     alloc = _granted_alloc(project="proj")
     ctx = RequestContext(
         principal="user-1",
         agent_session="s",
         projects=("proj", "other"),
-        roles={"proj": Role.CONTRIBUTOR, "other": Role.OPERATOR},
+        roles={"proj": Role.VIEWER, "other": Role.OPERATOR},
     )
     resp = envelope_for_allocation(alloc, ctx)
     assert "systems.provision" not in resp.suggested_next_actions
-    assert resp.suggested_next_actions == ["allocations.get", "allocations.release"]
+    assert resp.suggested_next_actions == ["allocations.get"]
 
 
 def test_renew_response_role_filters_success_next_actions() -> None:
     # A renew that keeps a GRANTED allocation re-emits the breadcrumb; filter it too (#862).
+    # systems.provision is contributor leaseholder control (ADR-0326), so a contributor sees it.
     alloc = _granted_alloc()
     outcome = RenewOutcome(renewed=True, allocation=alloc)
     contributor = _renew_response(alloc.id, outcome, _ctx(role=Role.CONTRIBUTOR))
     operator = _renew_response(alloc.id, outcome, _ctx(role=Role.OPERATOR))
 
-    assert "systems.provision" not in contributor.suggested_next_actions
+    assert "systems.provision" in contributor.suggested_next_actions
     assert "systems.provision" in operator.suggested_next_actions
 
 

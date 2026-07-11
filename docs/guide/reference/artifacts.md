@@ -62,7 +62,8 @@ Examples for `artifacts`:
 
 `implemented`
 
-Mint a presigned PUT for a DEFINED System's rootfs. Requires operator.
+Mint a presigned PUT for a DEFINED System's rootfs. Requires contributor on the
+System's project.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

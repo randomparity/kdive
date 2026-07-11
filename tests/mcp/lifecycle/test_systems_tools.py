@@ -1459,14 +1459,12 @@ def test_teardown_handler_already_torn_down_reattempts_destroy_no_transition(
 
 
 def _active_allocation_profile() -> dict[str, Any]:
-    """A profile that opts reprovision in (the gate's opt-in factor)."""
-    p = _profile()
-    p["provider"]["local-libvirt"]["destructive_ops"] = ["reprovision"]
-    return p
+    """A profile for reprovision; no destructive_ops opt-in needed (ADR-0326)."""
+    return _profile()
 
 
 async def _scoped_active_allocation(pool: AsyncConnectionPool) -> str:
-    """A granted->active allocation; reprovision is granted by the profile opt-in + role."""
+    """A granted->active allocation; reprovision is granted by the contributor role alone."""
     alloc_id = await _granted_allocation(pool)
     async with pool.connection() as conn:
         await conn.execute(
@@ -1646,13 +1644,15 @@ def test_reprovision_non_ready_system_is_config_error(migrated_url: str) -> None
     asyncio.run(_run())
 
 
-def test_reprovision_operator_may_invoke(migrated_url: str) -> None:
+def test_reprovision_contributor_may_invoke_without_opt_in(migrated_url: str) -> None:
+    # ADR-0326: reprovision is contributor leaseholder control; a contributor may reprovision its
+    # own READY System with no destructive_ops opt-in.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             resp = await _reprovision(
-                pool, _ctx(Role.OPERATOR), sys_id, _active_allocation_profile()
+                pool, _ctx(Role.CONTRIBUTOR), sys_id, _active_allocation_profile()
             )
         assert resp.status == "queued"
 
@@ -1664,18 +1664,12 @@ def test_reprovision_viewer_denied(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
-            resp = await _reprovision(pool, _ctx(Role.VIEWER), sys_id, _active_allocation_profile())
+            with pytest.raises(AuthorizationError):
+                await _reprovision(pool, _ctx(Role.VIEWER), sys_id, _active_allocation_profile())
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
                 sys_row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM audit_log WHERE transition = 'reprovision:denied'"
-                )
-                audit_n = await cur.fetchone()
-        assert resp.status == "error"
-        assert resp.error_category == "authorization_denied"
         assert sys_row is not None and sys_row["state"] == "ready"  # untouched
-        assert audit_n is not None and audit_n["n"] == 1  # the denial is audited
 
     asyncio.run(_run())
 
@@ -1692,38 +1686,23 @@ def test_reprovision_viewer_denied_before_provider_rootfs_validation(
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             profile = _local_rootfs_profile(outside)
-            profile["provider"]["local-libvirt"]["destructive_ops"] = ["reprovision"]
-            resp = await _admin_handlers(_failing_rootfs_validator(calls)).reprovision_system(
-                pool,
-                _ctx(Role.VIEWER),
-                system_id=sys_id,
-                profile=profile,
-            )
+            with pytest.raises(AuthorizationError):
+                await _admin_handlers(_failing_rootfs_validator(calls)).reprovision_system(
+                    pool,
+                    _ctx(Role.VIEWER),
+                    system_id=sys_id,
+                    profile=profile,
+                )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
                 sys_row = await cur.fetchone()
                 await cur.execute("SELECT count(*) AS n FROM jobs")
                 job_n = await cur.fetchone()
-        assert resp.status == "error"
-        assert resp.error_category == "authorization_denied"
         assert sys_row is not None and sys_row["state"] == "ready"
         assert job_n is not None and job_n["n"] == 0
 
     asyncio.run(_run())
-    assert calls == []
-
-
-def test_reprovision_without_profile_opt_in_denied(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _scoped_active_allocation(pool)
-            sys_id = await _seed_ready_system(pool, alloc_id)
-            no_opt_in = _profile()  # no destructive_ops -> opt-in factor fails
-            resp = await _reprovision(pool, _ctx(Role.OPERATOR), sys_id, no_opt_in)
-        assert resp.status == "error"
-        assert resp.error_category == "authorization_denied"
-
-    asyncio.run(_run())
+    assert calls == []  # role check fires before the provider rootfs validator
 
 
 def test_reprovision_cross_project_is_config_error(migrated_url: str) -> None:
@@ -1807,7 +1786,6 @@ def test_reprovision_rejects_local_rootfs_outside_allowed_root_before_mutating_r
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             profile = _local_rootfs_profile(outside)
-            profile["provider"]["local-libvirt"]["destructive_ops"] = ["reprovision"]
             resp = await _admin_handlers(_rootfs_validator(allowed_root)).reprovision_system(
                 pool,
                 _ctx(),
@@ -2012,7 +1990,6 @@ def test_reprovision_rejects_upload_rootfs(migrated_url: str) -> None:
             alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
             profile = _upload_profile()
-            profile["provider"]["local-libvirt"]["destructive_ops"] = ["reprovision"]
             resp = await _SYSTEM_ADMIN_HANDLERS.reprovision_system(
                 pool,
                 _ctx(),

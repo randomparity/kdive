@@ -186,26 +186,25 @@ def test_reject_unknown_destructive_ops_flags_typo_directly() -> None:
     # The message names the offending field so an operator can find the typo, and the
     # details advertise the exact closed set of accepted tokens under a stable key.
     assert str(exc.value) == "provisioning profile declares unknown destructive_ops tokens"
-    # Only the opt-in-consuming ops are accepted (ADR-0320): power is contributor lifecycle,
-    # and teardown gates by role only (ADR-0129) — both are rejected as non-gating tokens.
-    assert exc.value.details["valid_destructive_ops"] == [
-        "force_crash",
-        "reprovision",
-    ]
+    # Only force_crash opts in now (ADR-0326): power is contributor lifecycle, teardown gates by
+    # role only (ADR-0129), and reprovision became contributor leaseholder control (ADR-0326) —
+    # all three are rejected as non-gating tokens.
+    assert exc.value.details["valid_destructive_ops"] == ["force_crash"]
 
 
 def test_reject_unknown_destructive_ops_accepts_known_directly() -> None:
-    _reject_unknown_destructive_ops(_profile_with_ops(["force_crash", "reprovision"]))
+    _reject_unknown_destructive_ops(_profile_with_ops(["force_crash"]))
 
 
-@pytest.mark.parametrize("token", ["power", "teardown"])
+@pytest.mark.parametrize("token", ["power", "teardown", "reprovision"])
 def test_reject_unknown_destructive_ops_rejects_non_opt_in_tokens(token: str) -> None:
-    # power (contributor lifecycle) and teardown (role-only gate) no longer opt into anything
-    # via destructive_ops, so listing either is a rejected token (ADR-0320).
+    # power (contributor lifecycle), teardown (role-only gate), and reprovision (contributor
+    # leaseholder control, ADR-0326) no longer opt into anything via destructive_ops, so listing
+    # any of them is a rejected token.
     with pytest.raises(CategorizedError) as exc:
         _reject_unknown_destructive_ops(_profile_with_ops([token]))
     assert exc.value.details["unknown_destructive_ops"] == [token]
-    assert exc.value.details["valid_destructive_ops"] == ["force_crash", "reprovision"]
+    assert exc.value.details["valid_destructive_ops"] == ["force_crash"]
 
 
 def test_validate_profile_for_provider_rejects_unknown_token() -> None:
@@ -218,7 +217,7 @@ def test_validate_profile_for_provider_rejects_unknown_token() -> None:
 
 def test_validate_profile_for_provider_accepts_known_tokens() -> None:
     validate_profile_for_provider(
-        _profile_with_ops(["force_crash", "reprovision"]), _LOCAL_POLICY, _capabilities("local")
+        _profile_with_ops(["force_crash"]), _LOCAL_POLICY, _capabilities("local")
     )
 
 

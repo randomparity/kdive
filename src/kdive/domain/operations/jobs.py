@@ -36,25 +36,24 @@ class JobKind(StrEnum):
     CHECK_SSH_REACHABLE = "check_ssh_reachable"
 
 
-DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
-    {JobKind.REPROVISION, JobKind.TEARDOWN, JobKind.FORCE_CRASH}
-)
-"""Job kinds gated by the destructive-operation admission gate (ADR-0130, ADR-0320).
+DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.TEARDOWN, JobKind.FORCE_CRASH})
+"""Job kinds gated by the destructive-operation admission gate (ADR-0130, ADR-0320, ADR-0326).
 
-Power left this set (ADR-0320): it is contributor leaseholder lifecycle, not destructive
-administration.
+Power (ADR-0320) and reprovision (ADR-0326) both left this set: each is contributor
+leaseholder lifecycle over its own transient resource, not destructive administration.
 """
 
-OPT_IN_DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
-    {JobKind.FORCE_CRASH, JobKind.REPROVISION}
-)
-"""Destructive ops whose opt-in factor is resolved from a profile's ``destructive_ops`` list
-(ADR-0320). ``teardown`` is gated by role only (ADR-0129); ``power`` is not destructive — so
-neither is a valid ``destructive_ops`` token.
+OPT_IN_DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.FORCE_CRASH})
+"""Destructive ops whose opt-in factor is resolved from a profile's ``destructive_ops`` list.
+Only ``force_crash`` remains: ``teardown`` is gated by role only (ADR-0129); ``power`` is not
+destructive; ``reprovision`` became contributor leaseholder lifecycle (ADR-0326) — so none of
+the three is a valid ``destructive_ops`` token.
 """
 
 CONTRIBUTOR_CANCELABLE_JOB_KINDS: frozenset[JobKind] = frozenset(
     {
+        JobKind.PROVISION,
+        JobKind.REPROVISION,
         JobKind.BUILD,
         JobKind.INSTALL,
         JobKind.BOOT,
@@ -68,11 +67,13 @@ CONTRIBUTOR_CANCELABLE_JOB_KINDS: frozenset[JobKind] = frozenset(
 )
 """Job kinds a contributor may cancel: the leaseholder-lifecycle jobs a contributor (or a lower
 role) can itself enqueue, so cancelling one is acting on its own transient resource — matching
-``runs.cancel`` over the build/install/boot lane (ADR-0320). ``jobs.cancel`` requires operator
-for every other kind: the destructive kinds, the operator-gated provision lane, and the
-platform/internal kinds (image_build/diagnostics_worker_check/console_rotate). The gate fails
-closed — a kind absent here requires operator — so a newly added privileged kind is never
-silently contributor-cancellable.
+``runs.cancel`` over the build/install/boot lane (ADR-0320). The provision lane
+(``provision``/``reprovision``) joined when it became contributor leaseholder control (ADR-0326).
+``jobs.cancel`` requires operator for every other kind: the destructive kinds
+(``teardown``/``force_crash``) and the platform/internal kinds
+(image_build/diagnostics_worker_check/console_rotate). The gate fails closed — a kind absent
+here requires operator — so a newly added privileged kind is never silently
+contributor-cancellable.
 """
 
 

@@ -10,8 +10,8 @@ rank: a higher role satisfies every lower requirement.
 | Role | Capabilities |
 |---|---|
 | `viewer` | Read-only: `*.get`, `*.list`, read-only debug/introspection ops — accounting, audit, and activity review. |
-| `contributor` | All viewer capabilities plus the crash-investigation loop: create/bind/build runs, upload a built kernel (`artifacts.create_run_upload`), `complete_build`, install, boot, attach and drive debug sessions, run post-mortem/`vmcore.fetch`, and request/hold the allocations and open/close the investigations that loop needs. |
-| `operator` | All contributor capabilities plus shared-resource management: define and provision systems, manage project images (`images.upload`/`delete`), upload system rootfs (`artifacts.create_system_upload`), and reversible power-on. |
+| `contributor` | All viewer capabilities plus the full crash-investigation loop over the resources it leases: create/bind/build runs, upload a built kernel (`artifacts.create_run_upload`), `complete_build`, install, boot, attach and drive debug sessions, run post-mortem/`vmcore.fetch`, request/hold allocations, open/close investigations, power-cycle the guest (`control.power`), and instantiate a System on a granted Allocation — `systems.define`/`provision`/`provision_defined`/`reprovision` and the system-rootfs upload (`artifacts.create_system_upload`). |
+| `operator` | All contributor capabilities plus shared-resource management: manage project images (`images.upload`/`delete`). |
 | `admin` | All operator capabilities plus destructive ops (see below). |
 
 The `contributor` role lets an agent build a kernel in its own checkout, upload it, and boot and
@@ -47,7 +47,7 @@ visible to every authenticated token regardless of grants.
 | Profile | Tools visible |
 |---|--:|
 | Viewer | 41 |
-| Contributor | 84 |
+| Contributor | 89 |
 | Operator | 91 |
 | Admin | 96 |
 | Plat-Op | 34 |
@@ -71,7 +71,7 @@ visible to every authenticated token regardless of grants.
 | `allocations.request` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `allocations.wait` | viewer | ✓ | ✓ | ✓ | ✓ |  |  |  |
 | `artifacts.create_run_upload` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
-| `artifacts.create_system_upload` | operator |  |  | ✓ | ✓ |  |  |  |
+| `artifacts.create_system_upload` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `artifacts.expected_uploads` | *(public)* | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `artifacts.feature_config_requirements` | *(public)* | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `artifacts.fetch_raw` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
@@ -173,13 +173,13 @@ visible to every authenticated token regardless of grants.
 | `shapes.set` | plat-operator |  |  |  |  | ✓ |  |  |
 | `systems.authorize_ssh_key` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `systems.check_ssh_reachable` | viewer | ✓ | ✓ | ✓ | ✓ |  |  |  |
-| `systems.define` | operator |  |  | ✓ | ✓ |  |  |  |
+| `systems.define` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `systems.get` | viewer | ✓ | ✓ | ✓ | ✓ |  |  |  |
 | `systems.list` | viewer | ✓ | ✓ | ✓ | ✓ |  |  |  |
 | `systems.profile_examples` | *(public)* | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `systems.provision` | operator |  |  | ✓ | ✓ |  |  |  |
-| `systems.provision_defined` | operator |  |  | ✓ | ✓ |  |  |  |
-| `systems.reprovision` | operator |  |  | ✓ | ✓ |  |  |  |
+| `systems.provision` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
+| `systems.provision_defined` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
+| `systems.reprovision` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `systems.ssh_info` | viewer | ✓ | ✓ | ✓ | ✓ |  |  |  |
 | `systems.teardown` | admin |  |  |  | ✓ |  |  |  |
 | `tools.invoke` | *(public)* | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -197,15 +197,14 @@ Destructive operations are protected at two tiers
 
 ### The two-check gate
 
-`control.force_crash` and `systems.reprovision` pass through the full
-`assert_destructive_allowed` gate, which evaluates two independent checks that
-must both pass (deny-by-default):
+`control.force_crash` passes through the full `assert_destructive_allowed` gate,
+which evaluates two independent checks that must both pass (deny-by-default):
 
-1. **RBAC role** — `force_crash` requires `admin`; `reprovision` requires
-   `operator` (reprovisioning your own granted System is iterating, not
-   administering).
+1. **RBAC role** — `force_crash` requires `admin`. (`systems.reprovision` left
+   this gate in ADR-0326: re-staging your own granted System is contributor
+   leaseholder control, not destructive administration.)
 2. **Provisioning-profile opt-in** — the controlling provisioning profile
-   explicitly opts in to the operation (e.g. `destructive_ops: ["force_crash"]`).
+   explicitly opts in to the operation (`destructive_ops: ["force_crash"]`).
    The default is an empty list; an unmodified profile cannot force-crash.
 
 Both checks are evaluated and any missing check is reported. A denied

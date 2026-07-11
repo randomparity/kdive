@@ -1005,9 +1005,7 @@ def test_c6_admin_and_operator_succeed_on_their_surfaces(migrated_url: str) -> N
                 pool,
                 op,
                 allocation_id=grant.object_id,
-                profile=provisioning_profile(
-                    destructive_ops=["reprovision"], vcpu=2, memory_mb=4096, disk_gb=10
-                ),
+                profile=provisioning_profile(vcpu=2, memory_mb=4096, disk_gb=10),
             )
             sys_id = data_str(prov, "system_id")
             async with pool.connection() as conn:
@@ -1018,9 +1016,7 @@ def test_c6_admin_and_operator_succeed_on_their_surfaces(migrated_url: str) -> N
                 pool,
                 op,
                 system_id=sys_id,
-                profile=provisioning_profile(
-                    destructive_ops=["reprovision"], vcpu=2, memory_mb=4096, disk_gb=10
-                ),
+                profile=provisioning_profile(vcpu=2, memory_mb=4096, disk_gb=10),
             )
             assert reprov.status == "queued"
 
@@ -1102,9 +1098,7 @@ def test_c7_reprovision_in_place_cycle(migrated_url: str) -> None:
                 pool,
                 op,
                 allocation_id=grant.object_id,
-                profile=provisioning_profile(
-                    destructive_ops=["reprovision"], vcpu=2, memory_mb=4096, disk_gb=10
-                ),
+                profile=provisioning_profile(vcpu=2, memory_mb=4096, disk_gb=10),
             )
             sys_id = data_str(prov, "system_id")
             async with pool.connection() as conn:
@@ -1112,7 +1106,7 @@ def test_c7_reprovision_in_place_cycle(migrated_url: str) -> None:
                     "UPDATE systems SET state = 'ready', domain_name = %s WHERE id = %s",
                     (f"kdive-{sys_id}", sys_id),
                 )
-            new_profile = provisioning_profile(destructive_ops=["reprovision"])
+            new_profile = provisioning_profile()
             new_profile["vcpu"] = 8
             resp = await _SYSTEM_ADMIN_HANDLERS.reprovision_system(
                 pool,

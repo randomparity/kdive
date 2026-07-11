@@ -198,12 +198,11 @@ def test_cancel_job_contributor_can_cancel(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-@pytest.mark.parametrize("kind", [JobKind.FORCE_CRASH, JobKind.PROVISION])
+@pytest.mark.parametrize("kind", [JobKind.FORCE_CRASH, JobKind.TEARDOWN])
 def test_cancel_operator_gated_job_denied_to_contributor(migrated_url: str, kind: JobKind) -> None:
-    # Per-kind gate (#1080, ADR-0320): a destructive job (force_crash) and the operator-gated
-    # provision lane both keep the operator gate, so a contributor cannot veto an operator's op.
-    # PROVISION in particular is deliberately out of #1080's scope (the provision-lane RBAC
-    # review). The cancel must not land: the job stays queued.
+    # Per-kind gate (#1080, ADR-0320): the destructive kinds (force_crash/teardown) keep the
+    # operator cancel gate, so a contributor cannot veto an operator's op. The cancel must not
+    # land: the job stays queued. (The provision lane left this set in ADR-0326 — see below.)
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue_system_job(pool, kind, f"opgate-{kind.value}")
@@ -213,6 +212,20 @@ def test_cancel_operator_gated_job_denied_to_contributor(migrated_url: str, kind
         assert excinfo.value.held is Role.CONTRIBUTOR
         assert excinfo.value.required is Role.OPERATOR
         assert owned.status == "queued"
+
+    asyncio.run(_run())
+
+
+def test_cancel_provision_job_allowed_to_contributor(migrated_url: str) -> None:
+    # ADR-0326: the provision lane is contributor leaseholder control, so a contributor may cancel
+    # a provision job it can itself enqueue — matching runs.cancel over its own lane. (reprovision
+    # shares the identical kind-keyed cancel path; its membership is covered by the role-gate unit
+    # guard above.)
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue_system_job(pool, JobKind.PROVISION, "lane-provision")
+            resp = await jobs_tools.cancel_job(pool, CONTRIB_CTX, job_id)
+        assert resp.status == "canceled"
 
     asyncio.run(_run())
 
@@ -231,16 +244,19 @@ def test_cancel_operator_gated_job_allowed_to_operator(migrated_url: str) -> Non
 
 def test_cancel_role_classification_covers_every_kind_and_fails_closed() -> None:
     # Guard the per-kind cancel gate against fail-open drift: every JobKind maps to contributor
-    # or operator, and every kind outside the contributor allowlist (all destructive kinds and
-    # the operator-gated provision lane) must fail closed to operator — so a newly added
-    # privileged kind is never silently contributor-cancellable.
+    # or operator, and every kind outside the contributor allowlist (the destructive kinds and
+    # the platform/internal kinds) must fail closed to operator — so a newly added privileged
+    # kind is never silently contributor-cancellable.
     for kind in JobKind:
         role = jobs_tools._cancel_role(kind)
         assert role in (Role.CONTRIBUTOR, Role.OPERATOR), kind
         if kind not in CONTRIBUTOR_CANCELABLE_JOB_KINDS:
             assert role is Role.OPERATOR, kind
     assert not CONTRIBUTOR_CANCELABLE_JOB_KINDS & DESTRUCTIVE_JOB_KINDS  # destructive never lowered
-    assert JobKind.PROVISION not in CONTRIBUTOR_CANCELABLE_JOB_KINDS  # provision lane out of scope
+    # The provision lane is contributor leaseholder control (ADR-0326): a contributor that can
+    # enqueue provision/reprovision can cancel the job it enqueued.
+    assert JobKind.PROVISION in CONTRIBUTOR_CANCELABLE_JOB_KINDS
+    assert JobKind.REPROVISION in CONTRIBUTOR_CANCELABLE_JOB_KINDS
 
 
 def test_cancel_terminal_job_is_error_envelope(migrated_url: str) -> None:

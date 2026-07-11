@@ -2,17 +2,17 @@
 
 A destructive operation is allowed only when both independent checks pass: the principal
 holds the required role on the allocation's project, and the controlling profile explicitly
-opted the op in. The role factor is `admin` for the project-administration op `force_crash`
-and `operator` for `reprovision` (ADR-0038 §3) — reprovisioning your own granted System is
-iterating, not administering — so the gate takes the required role as a per-op parameter
-(defaulting to `admin`). `control.power` is not gated here: it is contributor leaseholder
-lifecycle over a transient VM (ADR-0320). The gate is pure policy over `(ctx, allocation,
+opted the op in. The sole gated op is `force_crash` (role factor `admin`); the gate still
+takes the required role as a per-op parameter (defaulting to `admin`). `control.power`
+(ADR-0320) and `systems.reprovision` (ADR-0326) are not gated here: each is contributor
+leaseholder lifecycle over its own transient resource — re-staging your own granted System is
+iterating, not administering. The gate is pure policy over `(ctx, allocation,
 op)`; it reads the role check from data and trusts the handler to resolve the
 `profile_opt_in` factor. ADR-0130 dropped the former third check — the allocation's
 `capability_scope` — because it was never populated in production (admission always wrote
 `{}`); the grant model is now role + profile opt-in, both satisfiable on the normal MCP
 path. A denial raises `DestructiveOpDenied` listing every missing check (the role check
-names the required role, e.g. `operator_role`), so an audit/log line shows the full reason.
+names the required role, e.g. `admin_role`), so an audit/log line shows the full reason.
 The gate never writes audit rows (it has no connection); a handler that catches
 `DestructiveOpDenied` audits the denied attempt with `transition=f"{op.kind}:denied"`.
 """
@@ -67,8 +67,8 @@ def assert_destructive_allowed(
         ctx: The caller's request context.
         allocation: The allocation controlling the op (binds the project for the role check).
         op: The destructive op and its resolved profile opt-in.
-        required_role: The role factor for this op — ``admin`` for the
-            project-administration ops, ``operator`` for reprovision (ADR-0038 §3).
+        required_role: The role factor for this op — ``admin`` for the sole gated
+            project-administration op, ``force_crash``.
 
     Raises:
         DestructiveOpDenied: The required role or profile opt-in is absent; ``.missing``

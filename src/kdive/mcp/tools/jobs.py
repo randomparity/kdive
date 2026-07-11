@@ -8,9 +8,10 @@ error :class:`~kdive.mcp.responses.ToolResponse` (with the most specific
 
 Every read/cancel is **project-scoped**: a job is visible only to a caller with
 ``viewer`` on the owning project (``authorizing->>'project'``). Cancellation requires
-``contributor`` for leaseholder-lifecycle kinds (matching ``runs.cancel``) and ``operator`` for
-the provision lane and destructive kinds (provision/reprovision/teardown/force_crash), keyed off
-the job's kind, not its enqueuing principal. A by-id read or cancel of a job in an ungranted
+``contributor`` for leaseholder-lifecycle kinds — including the provision lane
+(provision/reprovision) — matching ``runs.cancel``, and ``operator`` for the destructive kinds
+(teardown/force_crash), keyed off the job's kind, not its enqueuing principal. A by-id read or
+cancel of a job in an ungranted
 project returns the same
 not-found-shaped error as a missing job, so existence is not leaked (matching
 ``systems``/``runs``/``allocations`` getters); ``list`` returns only readable jobs.
@@ -405,9 +406,9 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         """Cancel a queued or running job.
 
-        A contributor may cancel their own lifecycle jobs (build/install/boot/power/
-        authorize_ssh_key/…). Cancelling a provisioning or destructive job
-        (provision/reprovision/teardown/force_crash) requires operator.
+        A contributor may cancel their own leaseholder-lifecycle jobs (provision/reprovision/
+        build/install/boot/power/authorize_ssh_key/…). Cancelling a destructive job
+        (teardown/force_crash) requires operator.
         """
         return await cancel_job(pool, current_context(), job_id)
 

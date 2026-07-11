@@ -148,11 +148,12 @@ def test_one_example_per_configured_provider(tmp_path: Path) -> None:
 
 def test_note_documents_destructive_ops_scope() -> None:
     # The note surfaces the destructive_ops opt-in scope so an agent learns it from the MCP
-    # surface: it opts into force_crash and reprovision, and power/reboot no longer need it.
+    # surface: it opts into force_crash only; power and reprovision are contributor lifecycle
+    # and no longer need it (ADR-0326).
     doc = InventoryDoc.parse({"schema_version": 2, "local_libvirt": [], "remote_libvirt": []})
     note = _examples(doc)["local-libvirt"]["note"]
     assert "destructive_ops" in note
-    assert "force_crash" in note and "reprovision" in note
+    assert "force_crash" in note
 
 
 def test_full_inventory_examples_are_valid_and_use_real_refs(

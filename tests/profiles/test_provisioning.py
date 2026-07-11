@@ -103,7 +103,7 @@ def test_valid_fault_inject_profile_parses_and_dumps_alias() -> None:
     data["provider"] = {
         "fault-inject": {
             "capture_method": "host_dump",
-            "destructive_ops": ["reprovision"],
+            "destructive_ops": ["force_crash"],
         }
     }
 
@@ -111,12 +111,12 @@ def test_valid_fault_inject_profile_parses_and_dumps_alias() -> None:
 
     assert profile.provider.fault_inject.capture_method is CaptureMethod.HOST_DUMP
     assert profile.provider.kind is ResourceKind.FAULT_INJECT
-    assert _FAULT_POLICY.destructive_opt_in(profile, JobKind.REPROVISION) is True
+    assert _FAULT_POLICY.destructive_opt_in(profile, JobKind.FORCE_CRASH) is True
     assert rootfs_upload_window_allowed(_FAULT_POLICY, profile) is False
     assert dump_profile(profile)["provider"] == {
         "fault-inject": {
             "capture_method": "host_dump",
-            "destructive_ops": ["reprovision"],
+            "destructive_ops": ["force_crash"],
         }
     }
 
