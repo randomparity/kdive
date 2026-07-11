@@ -28,6 +28,7 @@ from kdive.images.planes.base import PROVENANCE_OS_RELEASE
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidCursor, _short_id
 from kdive.mcp.tools._common import ConfigErrorReason as _ConfigErrorReason
@@ -59,6 +60,18 @@ _LIST_SQL = """
     ORDER BY provider, name, arch
     LIMIT %(limit)s
 """
+
+
+class _ImagesListPayload(ToolPayload):
+    """Public payload for ``images.list`` pagination."""
+
+    limit: int = Field(
+        default=DEFAULT_LIST_LIMIT,
+        description=f"Maximum rows returned (capped at {MAX_LIST_LIMIT}).",
+    )
+    cursor: str | None = Field(
+        default=None, description="Opaque continuation cursor from a prior page's next_cursor."
+    )
 
 
 def _compact_os(provenance: dict[str, Any]) -> dict[str, JsonValue]:
@@ -252,12 +265,9 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def images_list(
-        limit: Annotated[
-            int, Field(description=f"Maximum rows returned (capped at {MAX_LIST_LIMIT}).")
-        ] = DEFAULT_LIST_LIMIT,
-        cursor: Annotated[
-            str | None,
-            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
+        request: Annotated[
+            _ImagesListPayload | None,
+            Field(description="Image list pagination request; omit for the first page."),
         ] = None,
     ) -> ToolResponse:
         """List visible image catalog entries across publish states.
@@ -267,9 +277,12 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         default, ``""`` when unknown) so an agent can compare images on merit — distro, version,
         default kernel — in one call. The publish state appears as the item envelope ``status`` and
         as ``data.state``. Keyset-paginated: when ``data.truncated`` is true, pass
-        ``data.next_cursor`` back as ``cursor`` for the next page.
+        ``data.next_cursor`` back as ``request.cursor`` for the next page.
         """
-        return await list_images(pool, current_context(), limit=limit, cursor=cursor)
+        payload = request or _ImagesListPayload()
+        return await list_images(
+            pool, current_context(), limit=payload.limit, cursor=payload.cursor
+        )
 
     @app.tool(
         name=_DESCRIBE_TOOL,
