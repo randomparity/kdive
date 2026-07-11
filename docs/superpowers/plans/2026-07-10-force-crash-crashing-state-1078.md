@@ -29,10 +29,12 @@
 **Files:**
 - Modify: `src/kdive/domain/capacity/state.py` (enum ~line 70; `SystemState` adjacency ~line 162-181)
 - Modify: `tests/domain/test_state.py` (mirror adjacency ~line 58-78)
+- Modify: `tests/mcp/debug/test_debug_tools.py` (~line 472 — a guarded `update_state(..., CRASHED)` on a READY row that the removed edge now rejects)
 - Create: `src/kdive/db/schema/0065_system_crashing_state.sql`
 
 **Interfaces:**
 - Produces: `SystemState.CRASHING = "crashing"`. New legal edges: `READY→CRASHING`, `CRASHING→{CRASHED,FAILED,TORN_DOWN}`. Removed edge: `READY→CRASHED` (dead — `force_crash` was its only producer). `can_transition(frm, to)` reflects these.
+- **Existing tests that break on the removed edge (must be fixed in this task's commit to keep guardrails green):** `tests/domain/test_state.py` (the edge-legality assertion, Step 1) and `tests/mcp/debug/test_debug_tools.py:472` (Step 1b — it drives a `READY` row to `CRASHED` via the guarded `update_state` to scaffold a mid-flight crash; the guard now rejects `READY→CRASHED`).
 
 - [ ] **Step 1: Write the failing transition tests**
 
@@ -82,6 +84,19 @@ Also grep the file for any other `READY`/`CRASHED` adjacency assertion and recon
 ```bash
 rg -n "READY.*CRASHED|CRASHED.*READY" tests/domain/test_state.py
 ```
+
+- [ ] **Step 1b: Fix the guarded `READY→CRASHED` scaffold in `test_debug_tools.py`**
+
+`tests/mcp/debug/test_debug_tools.py:472` (`test_locked_recheck_closes_transport_when_system_crashed`) seeds a `READY` System then calls `await SYSTEMS.update_state(conn, system.id, SystemState.CRASHED)` to scaffold a mid-flight crash. `update_state` enforces `can_transition`, so after the edge removal this raises `IllegalTransition`. The test only needs the System to *end up* `CRASHED` (it does not exercise the transition path), so replace the guarded call with a direct SQL `UPDATE` that bypasses `can_transition`:
+
+```python
+                await conn.execute(
+                    "UPDATE systems SET state = %s WHERE id = %s",
+                    (SystemState.CRASHED.value, system.id),
+                )
+```
+
+(was `await SYSTEMS.update_state(conn, system.id, SystemState.CRASHED)`.) Confirm this is the only test-side `update_state(..., CRASHED)` on a READY row: `rg -n "update_state.*CRASHED" tests/`.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -140,8 +155,8 @@ ALTER TABLE systems ADD CONSTRAINT systems_state_check
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `uv run python -m pytest tests/domain/test_state.py -q`
-Expected: PASS (including the pre-existing mirror-equality test).
+Run: `uv run python -m pytest tests/domain/test_state.py "tests/mcp/debug/test_debug_tools.py::test_locked_recheck_closes_transport_when_system_crashed" -q`
+Expected: PASS (including the pre-existing mirror-equality test and the fixed debug-tools scaffold).
 
 - [ ] **Step 7: Lint + type**
 
@@ -151,7 +166,7 @@ Expected: clean.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/kdive/domain/capacity/state.py tests/domain/test_state.py src/kdive/db/schema/0065_system_crashing_state.sql
+git add src/kdive/domain/capacity/state.py tests/domain/test_state.py tests/mcp/debug/test_debug_tools.py src/kdive/db/schema/0065_system_crashing_state.sql
 git commit -m "feat(state): add transient CRASHING System state + migration 0065 (#1078)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
@@ -855,8 +870,14 @@ Expected hits to fix:
 
 The two-step path should read consistently everywhere it is described. Grep and update each to name the `crashing` transient:
 
-Run: `rg -n "ready ?-> ?crashed|ready->crashed" src/kdive`
-Update: `src/kdive/mcp/tools/lifecycle/control.py` module docstring (~lines 8, 14, 84) and `src/kdive/jobs/handlers/control.py` (the `force_crash_handler` docstring — already rewritten in Task 3), plus any comment in `console_rotate.py` / `state.py` that describes the force_crash lifecycle. Then re-run `just docs && just docs-check` so the generated reference matches (the `control.py` module docstring may not serialize into the tool schema, but keep it accurate).
+Run a grep that matches **both** the ASCII and the Unicode (U+2192 `→`) arrow: `rg -n "ready ?(->|→) ?crashed" src/kdive`
+Update each, giving priority to the **agent-facing** strings:
+- `src/kdive/mcp/tools/lifecycle/control.py:330` — the `control.force_crash` **tool docstring** ("drives ready->crashed"). This serializes into the tool schema and generates `docs/guide/reference/control.md`, so it is what agents read; change it to name the `ready->crashing->crashed` path. (`just docs-check` will *not* flag a stale line 330 on its own — the generated doc regenerates from the docstring and stays self-consistent — so it must be fixed by hand here.)
+- `src/kdive/mcp/tools/lifecycle/control.py` module docstring (~lines 8, 14, 84).
+- `src/kdive/domain/capacity/state.py:11` — the `SystemState` **module docstring** uses the Unicode arrow `ready → crashed`; update it to the two-step path.
+- `src/kdive/jobs/handlers/control.py` — the `force_crash_handler` docstring (already rewritten in Task 3) and any `ready->crashed` comment (e.g. line 40 describing the power race).
+
+Then re-run `just docs && just docs-check` so the generated reference matches the updated tool docstring.
 
 - [ ] **Step 4: Run the full gate**
 
@@ -887,7 +908,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ## Self-Review (author checklist — completed)
 
 - **Spec coverage:** R1 → Task 4 (AC3/AC3b) + the marker in Task 3; R2 → Task 4 (AC2); R3 → Task 5 (AC5/AC5a/AC5b); R4 → Task 3 (AC4/AC4a/AC4b); R5 → no power logic change (Task 4). Fan-out table → Task 2 (AC6). Migration → Task 1. AC7 → Task 6.
-- **Existing-test breakage (plan-review findings, now covered):** `tests/domain/test_state.py:214-219` (Task 1 — flip the removed `READY→CRASHED` edge); `tests/mcp/lifecycle/test_control_tools.py` idempotent test (Task 4 Step 5 — no NMI re-fire on `CRASHED`); `tests/integration/live_stack/spine.py:367` + the `ready->crashed` audit literal (Task 6 Steps 2-3, incl. the `live_stack` proof `just ci` excludes).
+- **Existing-test breakage (plan-review findings, now covered):** `tests/domain/test_state.py:214-219` (Task 1 Step 1 — flip the removed `READY→CRASHED` edge); `tests/mcp/debug/test_debug_tools.py:472` (Task 1 Step 1b — a guarded `update_state(..., CRASHED)` on a READY row → direct UPDATE); `tests/mcp/lifecycle/test_control_tools.py` idempotent test (Task 4 Step 5 — no NMI re-fire on `CRASHED`); `tests/integration/live_stack/spine.py:367` + the `ready->crashed` audit literal (Task 6 Steps 2-3, incl. the `live_stack` proof `just ci` excludes). Confirmed via `rg` that `test_debug_tools.py:472` is the only test-side `update_state(..., CRASHED)` on a READY row.
 - **Placeholder scan:** all shown test blocks are copy-clean (the illegal `CRASHED→READY` scaffold was removed — the retry test sets `CRASHING` directly via `_set_state`). The reconciler helper and the `dedup_key` SQL are inlined correctly (predicate `s.id::text || ':force_crash'`; import block a diff against the real `systems.py` header). The new `_detach_sessions_reconciler` SQL is guarded by `test_recovers_crashing_detaches_live_session` (Task 5).
 - **CI visibility of the audit literal:** `crashing->crashed` is asserted by a non-gated test (`test_force_crash_drives_ready_crashing_crashed`), so `just ci` catches a rename even though the `live_stack` proof that also uses it is excluded from CI.
 - **Type consistency:** `_ControlTarget`, `_CrashPrecheck`, `_resolved_domain_name`, `_controller`, `detach_sessions`, `SYSTEMS.update_state(conn, id, state)`, `advisory_xact_lock(conn, LockScope.SYSTEM, id)` all match the current `control.py`. `SystemState.CRASHING` is defined in Task 1 before every consumer.
