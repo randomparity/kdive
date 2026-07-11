@@ -1,4 +1,4 @@
-"""Shared image catalog predicates."""
+"""Application-facing image catalog read-model helpers."""
 
 from __future__ import annotations
 
@@ -13,26 +13,12 @@ from kdive.domain.catalog.resources import ResourceKind
 
 _TERMINAL_SYSTEM_STATES = (SystemState.TORN_DOWN, SystemState.FAILED)
 _TERMINAL_SYSTEM_STATE_VALUES = tuple(state.value for state in _TERMINAL_SYSTEM_STATES)
-# A local-libvirt System references a catalog rootfs by (provider, name) under its provider
-# section; a remote-libvirt System references its operator-staged base image by the volume
-# name under its section (ADR-0080 ``base_image_volume``). The reference guard probes both so
-# inventory prune (ADR-0112) never deletes an in-use base image of EITHER kind.
 _LOCAL_LIBVIRT_SECTION = ResourceKind.LOCAL_LIBVIRT.value
 _REMOTE_LIBVIRT_SECTION = ResourceKind.REMOTE_LIBVIRT.value
 
 
 async def image_referenced_by_live_system(cur: AsyncCursor[DictRow], row_id: UUID) -> bool:
-    """Return whether a non-terminal System references this image as its base.
-
-    Covers both reference shapes (ADR-0112 prune guard):
-
-    * **local-libvirt** — a ``catalog`` rootfs naming the image's ``(provider, name)``;
-    * **remote-libvirt** — a ``base_image_volume`` naming the image's staged ``volume``
-      (ADR-0080); only checked when the image carries a ``volume``.
-
-    A non-terminal System matching either shape returns ``True`` so prune cordons rather
-    than deletes the in-use base image.
-    """
+    """Return whether a non-terminal System references this image as its base."""
     await cur.execute("SELECT provider, name, volume FROM image_catalog WHERE id = %s", (row_id,))
     image = await cur.fetchone()
     if image is None:
