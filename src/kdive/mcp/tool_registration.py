@@ -39,11 +39,9 @@ from kdive.mcp.tools.lifecycle.vmcore import registrar as vmcore_tools
 from kdive.mcp.tools.ops import diagnostics as ops_diagnostics_tools
 from kdive.mcp.tools.ops import queue as ops_queue_tools
 from kdive.mcp.tools.ops import tuning as ops_tuning_tools
-from kdive.mcp.tools.ops.audit import audit as audit_tools
-from kdive.mcp.tools.ops.audit import tool_trail as ops_tool_trail_tools
+from kdive.mcp.tools.ops.audit import registrar as ops_audit_tools
 from kdive.mcp.tools.ops.images import registrar as ops_images_tools
-from kdive.mcp.tools.ops.inventory import inventory as inventory_tools
-from kdive.mcp.tools.ops.inventory import inventory_export as ops_inventory_export_tools
+from kdive.mcp.tools.ops.inventory import registrar as ops_inventory_tools
 from kdive.mcp.tools.ops.reconcile import reconcile as ops_reconcile_tools
 from kdive.mcp.tools.ops.reconcile import reconcile_systems as ops_reconcile_systems_tools
 from kdive.mcp.tools.ops.resources import host_ops as ops_resource_host_tools
@@ -254,11 +252,9 @@ PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _register_introspection_tools,
     _pool_only_plane_registrar(ops_queue_tools.register),
     _pool_only_plane_registrar(ops_tuning_tools.register),
-    _pool_only_plane_registrar(ops_inventory_export_tools.register),
-    _pool_only_plane_registrar(ops_tool_trail_tools.register),
-    _pool_only_plane_registrar(audit_tools.register),
+    _pool_only_plane_registrar(ops_audit_tools.register),
     _register_diagnostics_tools,
-    _pool_only_plane_registrar(inventory_tools.register),
+    _pool_only_plane_registrar(ops_inventory_tools.register),
     _pool_only_plane_registrar(fixtures.register),
     _pool_only_plane_registrar(catalog_images.register),
     _pool_only_plane_registrar(kernel_config.register),
