@@ -23,6 +23,7 @@ import asyncio
 import logging
 import math
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Annotated
 from uuid import UUID
 
@@ -91,6 +92,17 @@ class _JobsListPayload(ToolPayload):
         if value in RETIRED_JOB_KINDS:
             raise ValueError(f"{value.value} is a retired job kind")
         return value
+
+
+@dataclass(frozen=True, slots=True)
+class JobsListRequest:
+    """Filter payload for ``jobs.list``."""
+
+    status: JobState | None = None
+    kind: JobKind | None = None
+    investigation_id: str | None = None
+    limit: int = DEFAULT_LIST_LIMIT
+    cursor: str | None = None
 
 
 def _error(object_id: str, category: ErrorCategory) -> ToolResponse:
@@ -294,12 +306,7 @@ _JOBS_LIST_TAG = "jobs.list"
 async def list_jobs(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    *,
-    limit: int,
-    cursor: str | None = None,
-    status: JobState | None = None,
-    kind: JobKind | None = None,
-    investigation_id: str | None = None,
+    request: JobsListRequest | None = None,
 ) -> ToolResponse:
     """Return a page of the newest jobs (keyset-paginated) in one collection envelope.
 
@@ -314,22 +321,23 @@ async def list_jobs(
     error). Filters compose with the cursor — following ``next_cursor`` drains the full
     filtered set.
     """
-    capped = _clamp_list_limit(limit)
-    if kind in RETIRED_JOB_KINDS:
+    request = request or JobsListRequest()
+    capped = _clamp_list_limit(request.limit)
+    if request.kind in RETIRED_JOB_KINDS:
         return ToolResponse.failure(
             "jobs",
             ErrorCategory.CONFIGURATION_ERROR,
-            data={"reason": "retired_job_kind", "kind": kind.value},
+            data={"reason": "retired_job_kind", "kind": request.kind.value},
         )
     investigation_uid = None
-    if investigation_id is not None:
-        investigation_uid = _as_uuid(investigation_id)
+    if request.investigation_id is not None:
+        investigation_uid = _as_uuid(request.investigation_id)
         if investigation_uid is None:
-            return _invalid_uuid_error("investigation_id", investigation_id)
+            return _invalid_uuid_error("investigation_id", request.investigation_id)
     after = None
-    if cursor:
+    if request.cursor:
         try:
-            after = _decode_ts_uuid_cursor(_JOBS_LIST_TAG, cursor)
+            after = _decode_ts_uuid_cursor(_JOBS_LIST_TAG, request.cursor)
         except InvalidCursor:
             return _invalid_cursor_error("jobs")
     with bind_context(principal=ctx.principal):
@@ -339,8 +347,8 @@ async def list_jobs(
                 capped + 1,
                 _readable_projects(ctx),
                 after=after,
-                status=status,
-                kind=kind,
+                status=request.status,
+                kind=request.kind,
                 investigation_id=investigation_uid,
             )
         kept, truncated = _paginate(jobs, capped)
@@ -449,9 +457,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         return await list_jobs(
             pool,
             current_context(),
-            limit=request.limit,
-            cursor=request.cursor,
-            status=request.status,
-            kind=request.kind,
-            investigation_id=request.investigation_id,
+            JobsListRequest(
+                limit=request.limit,
+                cursor=request.cursor,
+                status=request.status,
+                kind=request.kind,
+                investigation_id=request.investigation_id,
+            ),
         )

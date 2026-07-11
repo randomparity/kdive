@@ -91,6 +91,29 @@ async def _enqueue(pool: AsyncConnectionPool, dedup: str) -> str:
     return await _enqueue_in(pool, dedup, "proj")
 
 
+async def _list_jobs(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    limit: int,
+    cursor: str | None = None,
+    status: JobState | None = None,
+    kind: JobKind | None = None,
+    investigation_id: str | None = None,
+) -> Any:
+    return await jobs_tools.list_jobs(
+        pool,
+        ctx,
+        jobs_tools.JobsListRequest(
+            limit=limit,
+            cursor=cursor,
+            status=status,
+            kind=kind,
+            investigation_id=investigation_id,
+        ),
+    )
+
+
 async def _enqueue_system_job(pool: AsyncConnectionPool, kind: JobKind, dedup: str) -> str:
     """Enqueue a SystemPayload job of ``kind`` (provision/force_crash) owned by ``proj``."""
     async with pool.connection() as conn:
@@ -580,7 +603,7 @@ def test_list_jobs_newest_first_and_capped(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             for i in range(3):
                 await _enqueue(pool, f"d{i}")
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=2)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=2)
         items = resp.items
         assert resp.object_id == "jobs"
         assert resp.status == "ok"
@@ -594,7 +617,7 @@ def test_list_jobs_newest_first_and_capped(migrated_url: str) -> None:
 def test_list_jobs_empty(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50)
         assert resp.status == "ok"
         assert resp.items == []
 
@@ -614,7 +637,7 @@ def test_list_jobs_isolates_invariant_violating_row(
             # Force the bad row into a state that violates "category iff failed".
             await _mark_failed_without_category(pool, bad_id)
             caplog.set_level(logging.WARNING, logger=jobs_tools.__name__)
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50)
         items = resp.items
         by_id = {r.object_id: r for r in items}
         assert len(items) == 2  # the bad row did not blank the list
@@ -764,7 +787,7 @@ def test_list_jobs_only_returns_callers_project(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             mine = await _enqueue_in(pool, "mine", "proj")
             await _enqueue_in(pool, "theirs", "other")
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50)
         ids = {r.object_id for r in resp.items}
         assert ids == {mine}  # the "other"-project job is not listed
 
@@ -775,7 +798,7 @@ def test_list_jobs_excludes_roleless_projects(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _enqueue(pool, "d1")
-            resp = await jobs_tools.list_jobs(pool, CTX, limit=50)
+            resp = await _list_jobs(pool, CTX, limit=50)
         assert resp.items == []
 
     asyncio.run(_run())
@@ -794,7 +817,7 @@ def test_list_jobs_excludes_jobs_with_no_project(migrated_url: str) -> None:
                         Jsonb({"principal": "p"}),
                     ),
                 )
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50)
         assert resp.items == []
 
     asyncio.run(_run())
@@ -805,7 +828,7 @@ def test_list_jobs_first_page_sets_truncated_and_cursor(migrated_url: str) -> No
         async with _pool(migrated_url) as pool:
             for i in range(3):
                 await _enqueue(pool, f"p{i}")
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=2)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=2)
         assert resp.data["truncated"] is True
         assert isinstance(resp.data["next_cursor"], str)
         assert len(resp.items) == 2
@@ -818,7 +841,7 @@ def test_list_jobs_no_truncation_at_exactly_limit(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             for i in range(2):
                 await _enqueue(pool, f"e{i}")
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=2)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=2)
         assert resp.data["truncated"] is False
         assert resp.data["next_cursor"] is None
 
@@ -828,7 +851,7 @@ def test_list_jobs_no_truncation_at_exactly_limit(migrated_url: str) -> None:
 def test_list_jobs_empty_pagination_fields(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50)
         assert resp.data["truncated"] is False
         assert resp.data["next_cursor"] is None
         assert resp.data["count"] == 0
@@ -844,7 +867,7 @@ def test_list_jobs_drains_every_row_following_cursor(migrated_url: str) -> None:
             seen: list[str] = []
             cursor: str | None = None
             for _ in range(10):  # bound the loop defensively
-                resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=2, cursor=cursor)
+                resp = await _list_jobs(pool, VIEWER_CTX, limit=2, cursor=cursor)
                 seen.extend(item.object_id for item in resp.items)
                 if not resp.data["truncated"]:
                     break
@@ -860,7 +883,7 @@ def test_list_jobs_drains_every_row_following_cursor(migrated_url: str) -> None:
 def test_list_jobs_malformed_cursor_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=2, cursor="!!!")
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=2, cursor="!!!")
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data["reason"] == "invalid_cursor"
@@ -922,7 +945,7 @@ def test_list_jobs_filters_by_status(migrated_url: str) -> None:
             failed = await _enqueue(pool, "f")
             await _set_state(pool, failed, JobState.FAILED)
             await _enqueue(pool, "q")  # stays queued
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50, status=JobState.FAILED)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, status=JobState.FAILED)
         assert [r.object_id for r in resp.items] == [failed]
 
     asyncio.run(_run())
@@ -933,7 +956,7 @@ def test_list_jobs_filters_by_kind(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             install_id = await _enqueue(pool, "i")
             await _enqueue_provision(pool, "p")
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50, kind=JobKind.INSTALL)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, kind=JobKind.INSTALL)
         assert [r.object_id for r in resp.items] == [install_id]
 
     asyncio.run(_run())
@@ -949,7 +972,7 @@ def test_jobs_list_payload_rejects_retired_kind_filters(kind: JobKind) -> None:
 def test_list_jobs_rejects_retired_kind_filters(migrated_url: str, kind: JobKind) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50, kind=kind)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, kind=kind)
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data == {"reason": "retired_job_kind", "kind": kind.value}
@@ -963,9 +986,7 @@ def test_list_jobs_filters_by_investigation_id(migrated_url: str) -> None:
             investigation_id = await _enqueue_install_for_investigation(pool, "in-inv")
             await _enqueue(pool, "other")  # install for an unrelated run
             await _enqueue_provision(pool, "no-run")  # run-less, never matches
-            resp = await jobs_tools.list_jobs(
-                pool, VIEWER_CTX, limit=50, investigation_id=investigation_id
-            )
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, investigation_id=investigation_id)
         assert [r.data["kind"] for r in resp.items] == ["install"]
         assert len(resp.items) == 1
 
@@ -975,9 +996,7 @@ def test_list_jobs_filters_by_investigation_id(migrated_url: str) -> None:
 def test_list_jobs_malformed_investigation_id_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await jobs_tools.list_jobs(
-                pool, VIEWER_CTX, limit=50, investigation_id="not-a-uuid"
-            )
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, investigation_id="not-a-uuid")
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data["reason"] == "invalid_uuid"
@@ -989,9 +1008,7 @@ def test_list_jobs_investigation_filter_no_match_is_empty(migrated_url: str) -> 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _enqueue(pool, "b")
-            resp = await jobs_tools.list_jobs(
-                pool, VIEWER_CTX, limit=50, investigation_id=str(uuid4())
-            )
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, investigation_id=str(uuid4()))
         assert resp.status == "ok"
         assert resp.items == []
 
