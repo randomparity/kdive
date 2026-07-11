@@ -3,16 +3,30 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbBacktrace, GdbFrame, GdbMiAttachment
-from kdive.providers.shared.debug_common.gdbmi.host import GdbMiCommandHost
 from kdive.providers.shared.debug_common.gdbmi.mi_protocol import MiRecord, mi_int, stack_frames
+from kdive.security.secrets.redaction import Redactor
 
 MAX_BACKTRACE_FRAMES = 64
 _RUNNING_RE = re.compile(r"running", re.IGNORECASE)
 _NO_STACK_RE = re.compile(r"no (stack|frame)|not enough frames", re.IGNORECASE)
+
+
+class _StackHost(Protocol):
+    def execute_mi_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]: ...
+
+    def _redactor(self) -> Redactor: ...
+
+    def _frame_from(self, payload: dict[str, Any]) -> GdbFrame: ...
+
+    def _stack_command(
+        self, attachment: GdbMiAttachment, command: str, *, missing: CategorizedError
+    ) -> list[MiRecord]: ...
+
+    def _redact_frame(self, frame: GdbFrame) -> GdbFrame: ...
 
 
 def _config_error(
@@ -26,7 +40,7 @@ class GdbMiStackCommands:
     """Stack/read-frame GDB/MI commands."""
 
     def backtrace(
-        self: GdbMiCommandHost,
+        self: _StackHost,
         attachment: GdbMiAttachment,
         *,
         max_frames: int = MAX_BACKTRACE_FRAMES,
@@ -53,7 +67,7 @@ class GdbMiStackCommands:
         frames = [self._redact_frame(frame) for frame in parsed[:max_frames]]
         return GdbBacktrace(frames=frames, truncated=truncated)
 
-    def read_frame(self: GdbMiCommandHost, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
+    def read_frame(self: _StackHost, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
         """Inspect one selected stack frame by ``level`` (ADR-0275)."""
         if not isinstance(level, int) or level < 0:
             raise _config_error(
@@ -74,7 +88,7 @@ class GdbMiStackCommands:
         return self._redact_frame(self._frame_from(rows[0]))
 
     def _stack_command(
-        self: GdbMiCommandHost,
+        self: _StackHost,
         attachment: GdbMiAttachment,
         command: str,
         *,
@@ -98,7 +112,7 @@ class GdbMiStackCommands:
                         raise missing from exc
             raise
 
-    def _redact_frame(self: GdbMiCommandHost, frame: GdbFrame) -> GdbFrame:
+    def _redact_frame(self: _StackHost, frame: GdbFrame) -> GdbFrame:
         return GdbFrame.model_validate(self._redactor().redact_value(frame.model_dump(mode="json")))
 
     def _frame_from(self, payload: dict[str, Any]) -> GdbFrame:

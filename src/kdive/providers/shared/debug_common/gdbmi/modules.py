@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment, GdbModule, GdbModuleList
-from kdive.providers.shared.debug_common.gdbmi.debuginfo import ModuleDebuginfo
-from kdive.providers.shared.debug_common.gdbmi.host import GdbMiCommandHost
-from kdive.providers.shared.debug_common.gdbmi.mi_protocol import evaluate_value
+from kdive.providers.shared.debug_common.gdbmi.debuginfo import (
+    ModuleDebuginfo,
+    ModuleDebuginfoResolverSeam,
+)
+from kdive.providers.shared.debug_common.gdbmi.mi_protocol import MiRecord, evaluate_value
+from kdive.security.secrets.redaction import Redactor
 
 MAX_MODULES = 512
 _MODULE_BASE_FIELDS = ("mem[0].base", "core_layout.base")
@@ -17,6 +21,58 @@ _MODULE_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 _BUILD_ID_BYTES = 20
 _RUNNING_RE = re.compile(r"running", re.IGNORECASE)
 _ADDR_RE = re.compile(r"0x[0-9a-fA-F]+")
+
+
+class _ModuleHost(Protocol):
+    _module_resolver: ModuleDebuginfoResolverSeam
+
+    def execute_mi_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]: ...
+
+    def _redactor(self) -> Redactor: ...
+
+    def read_memory(
+        self, attachment: GdbMiAttachment, *, address: int, byte_count: int
+    ) -> bytes: ...
+
+    def _mi_path(self, path: Path) -> str: ...
+
+    def _module_walk(
+        self, attachment: GdbMiAttachment, *, limit: int
+    ) -> tuple[list[tuple[str, int, int]], bool, int]: ...
+
+    def _module_eval_required(self, attachment: GdbMiAttachment, expr: str) -> int: ...
+
+    def _module_eval_optional(self, attachment: GdbMiAttachment, expr: str) -> int | None: ...
+
+    def _module_name(self, attachment: GdbMiAttachment, module_ptr: int) -> str | None: ...
+
+    def _module_base(
+        self, attachment: GdbMiAttachment, module_ptr: int, base_field: str
+    ) -> tuple[int | None, str]: ...
+
+    def _module_walk_error(self, exc: CategorizedError) -> CategorizedError: ...
+
+    def _redact_module(self, module: GdbModule) -> GdbModule: ...
+
+    def _module_locate(
+        self, attachment: GdbMiAttachment, module: str
+    ) -> tuple[int, int] | None: ...
+
+    def _verify_identity(
+        self, attachment: GdbMiAttachment, module: str, module_ptr: int, info: ModuleDebuginfo
+    ) -> bool: ...
+
+    def _identity_match(self, module: str, ok: bool) -> bool: ...
+
+    def _module_text_field(
+        self, attachment: GdbMiAttachment, module_ptr: int, field: str
+    ) -> str | None: ...
+
+    def _module_build_id(self, attachment: GdbMiAttachment, module_ptr: int) -> str | None: ...
+
+    def _add_symbol_file(
+        self, attachment: GdbMiAttachment, module: str, path: Path, base: int
+    ) -> None: ...
 
 
 def _config_error(
@@ -30,7 +86,7 @@ class GdbMiModuleCommands:
     """Kernel module enumeration and symbol loading commands."""
 
     def list_modules(
-        self: GdbMiCommandHost,
+        self: _ModuleHost,
         attachment: GdbMiAttachment,
         *,
         max_modules: int = MAX_MODULES,
@@ -50,7 +106,7 @@ class GdbMiModuleCommands:
         return GdbModuleList(modules=modules, truncated=truncated, decode_errors=decode_errors)
 
     def _module_walk(
-        self: GdbMiCommandHost, attachment: GdbMiAttachment, *, limit: int
+        self: _ModuleHost, attachment: GdbMiAttachment, *, limit: int
     ) -> tuple[list[tuple[str, int, int]], bool, int]:
         """Walk ``modules`` from ``modules.next`` to ``&modules``, bounded to ``limit``."""
         offset = self._module_eval_required(attachment, "&((struct module *)0)->list")
@@ -79,9 +135,7 @@ class GdbMiModuleCommands:
             node = nxt
         return rows, truncated, decode_errors
 
-    def _module_eval_required(
-        self: GdbMiCommandHost, attachment: GdbMiAttachment, expr: str
-    ) -> int:
+    def _module_eval_required(self: _ModuleHost, attachment: GdbMiAttachment, expr: str) -> int:
         try:
             value = evaluate_value(self.execute_mi_command(attachment, _eval_command(expr)))
         except CategorizedError as exc:
@@ -96,7 +150,7 @@ class GdbMiModuleCommands:
         return addr
 
     def _module_eval_optional(
-        self: GdbMiCommandHost, attachment: GdbMiAttachment, expr: str
+        self: _ModuleHost, attachment: GdbMiAttachment, expr: str
     ) -> int | None:
         try:
             value = evaluate_value(self.execute_mi_command(attachment, _eval_command(expr)))
@@ -105,9 +159,7 @@ class GdbMiModuleCommands:
             return None
         return _hex_from(value)
 
-    def _module_name(
-        self: GdbMiCommandHost, attachment: GdbMiAttachment, module_ptr: int
-    ) -> str | None:
+    def _module_name(self: _ModuleHost, attachment: GdbMiAttachment, module_ptr: int) -> str | None:
         try:
             value = evaluate_value(
                 self.execute_mi_command(
@@ -123,7 +175,7 @@ class GdbMiModuleCommands:
         return name or None
 
     def _module_base(
-        self: GdbMiCommandHost,
+        self: _ModuleHost,
         attachment: GdbMiAttachment,
         module_ptr: int,
         base_field: str,
@@ -142,7 +194,7 @@ class GdbMiModuleCommands:
             details={"code": "module_decode_failed", "fields": list(_MODULE_BASE_FIELDS)},
         )
 
-    def _module_walk_error(self: GdbMiCommandHost, exc: CategorizedError) -> CategorizedError:
+    def _module_walk_error(self: _ModuleHost, exc: CategorizedError) -> CategorizedError:
         payload = exc.details.get("payload")
         msg = payload.get("msg") if isinstance(payload, dict) else None
         if isinstance(msg, str) and _RUNNING_RE.search(msg):
@@ -157,13 +209,13 @@ class GdbMiModuleCommands:
             details={"code": "module_decode_failed"},
         )
 
-    def _redact_module(self: GdbMiCommandHost, module: GdbModule) -> GdbModule:
+    def _redact_module(self: _ModuleHost, module: GdbModule) -> GdbModule:
         return GdbModule.model_validate(
             self._redactor().redact_value(module.model_dump(mode="json"))
         )
 
     def load_module_symbols(
-        self: GdbMiCommandHost,
+        self: _ModuleHost,
         attachment: GdbMiAttachment,
         *,
         module: str,
@@ -208,7 +260,7 @@ class GdbMiModuleCommands:
         )
 
     def _module_locate(
-        self: GdbMiCommandHost, attachment: GdbMiAttachment, module: str
+        self: _ModuleHost, attachment: GdbMiAttachment, module: str
     ) -> tuple[int, int] | None:
         rows, _truncated, _decode_errors = self._module_walk(attachment, limit=MAX_MODULES)
         for name, base, module_ptr in rows:
@@ -217,7 +269,7 @@ class GdbMiModuleCommands:
         return None
 
     def _verify_identity(
-        self: GdbMiCommandHost,
+        self: _ModuleHost,
         attachment: GdbMiAttachment,
         module: str,
         module_ptr: int,
@@ -241,7 +293,7 @@ class GdbMiModuleCommands:
         )
 
     def _module_text_field(
-        self: GdbMiCommandHost, attachment: GdbMiAttachment, module_ptr: int, field: str
+        self: _ModuleHost, attachment: GdbMiAttachment, module_ptr: int, field: str
     ) -> str | None:
         try:
             value = evaluate_value(
@@ -257,7 +309,7 @@ class GdbMiModuleCommands:
         return match.group(1) if match is not None and match.group(1) else None
 
     def _module_build_id(
-        self: GdbMiCommandHost, attachment: GdbMiAttachment, module_ptr: int
+        self: _ModuleHost, attachment: GdbMiAttachment, module_ptr: int
     ) -> str | None:
         addr = self._module_eval_optional(
             attachment, f"&((struct module *)0x{module_ptr:x})->build_id"
@@ -272,7 +324,7 @@ class GdbMiModuleCommands:
         return blob.hex()
 
     def _add_symbol_file(
-        self: GdbMiCommandHost,
+        self: _ModuleHost,
         attachment: GdbMiAttachment,
         module: str,
         path: Path,

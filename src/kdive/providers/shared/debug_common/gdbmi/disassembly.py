@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import (
@@ -11,16 +11,43 @@ from kdive.providers.ports.debug import (
     GdbInstruction,
     GdbMiAttachment,
 )
-from kdive.providers.shared.debug_common.gdbmi.host import GdbMiCommandHost
 from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
     MiRecord,
     disassembly_rows,
     mi_int,
 )
+from kdive.security.secrets.redaction import Redactor
 
 MAX_DISASSEMBLE_INSTRUCTIONS = 256
 MAX_INSTRUCTION_BYTES = 16
 _NO_MEMORY_RE = re.compile(r"cannot access memory", re.IGNORECASE)
+
+
+class _DisassemblyHost(Protocol):
+    def execute_mi_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]: ...
+
+    def _redactor(self) -> Redactor: ...
+
+    def resolve_symbol(self, attachment: GdbMiAttachment, name: str) -> int: ...
+
+    def _resolve_target(
+        self, attachment: GdbMiAttachment, *, symbol: str | None, address: int | None
+    ) -> int: ...
+
+    def _disassemble_command(
+        self,
+        attachment: GdbMiAttachment,
+        start: int,
+        instruction_count: int,
+        *,
+        missing: CategorizedError,
+    ) -> list[MiRecord]: ...
+
+    def _is_unreadable_memory(self, exc: CategorizedError) -> bool: ...
+
+    def _instruction_from(self, payload: dict[str, Any]) -> GdbInstruction: ...
+
+    def _redact_instruction(self, instruction: GdbInstruction) -> GdbInstruction: ...
 
 
 def _config_error(
@@ -34,7 +61,7 @@ class GdbMiDisassemblyCommands:
     """Disassembly and symbol/address target resolution commands."""
 
     def disassemble(
-        self: GdbMiCommandHost,
+        self: _DisassemblyHost,
         attachment: GdbMiAttachment,
         *,
         symbol: str | None = None,
@@ -69,7 +96,7 @@ class GdbMiDisassemblyCommands:
         return GdbDisassembly(instructions=instructions, truncated=truncated)
 
     def _resolve_target(
-        self: GdbMiCommandHost,
+        self: _DisassemblyHost,
         attachment: GdbMiAttachment,
         *,
         symbol: str | None,
@@ -93,7 +120,7 @@ class GdbMiDisassemblyCommands:
         return address
 
     def _disassemble_command(
-        self: GdbMiCommandHost,
+        self: _DisassemblyHost,
         attachment: GdbMiAttachment,
         start: int,
         instruction_count: int,
@@ -132,7 +159,7 @@ class GdbMiDisassemblyCommands:
             offset=mi_int(payload.get("offset")),
         )
 
-    def _redact_instruction(self: GdbMiCommandHost, instruction: GdbInstruction) -> GdbInstruction:
+    def _redact_instruction(self: _DisassemblyHost, instruction: GdbInstruction) -> GdbInstruction:
         return GdbInstruction.model_validate(
             self._redactor().redact_value(instruction.model_dump(mode="json"))
         )

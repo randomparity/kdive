@@ -3,19 +3,29 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbBreakpointRef, GdbMiAttachment
-from kdive.providers.shared.debug_common.gdbmi.host import GdbMiCommandHost
 from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
     MiRecord,
     breakpoint_rows,
     result_payload_dict,
 )
+from kdive.security.secrets.redaction import Redactor
 
 _BREAK_LOCATION_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _BREAK_ID_RE = re.compile(r"^[0-9]+$")
+
+
+class _BreakpointHost(Protocol):
+    def execute_mi_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]: ...
+
+    def _redactor(self) -> Redactor: ...
+
+    def _breakpoint_ref(self, records: list[MiRecord], *, key: str) -> GdbBreakpointRef: ...
+
+    def _breakpoint_ref_from(self, entry: dict[str, Any]) -> GdbBreakpointRef: ...
 
 
 def _config_error(
@@ -29,7 +39,7 @@ class GdbMiBreakpointCommands:
     """Software breakpoint GDB/MI commands."""
 
     def set_breakpoint(
-        self: GdbMiCommandHost, attachment: GdbMiAttachment, location: str
+        self: _BreakpointHost, attachment: GdbMiAttachment, location: str
     ) -> GdbBreakpointRef:
         if not _BREAK_LOCATION_RE.match(location):
             raise _config_error(
@@ -44,7 +54,7 @@ class GdbMiBreakpointCommands:
             self.execute_mi_command(attachment, f"-break-insert {location}"), key="bkpt"
         )
 
-    def clear_breakpoint(self: GdbMiCommandHost, attachment: GdbMiAttachment, number: str) -> None:
+    def clear_breakpoint(self: _BreakpointHost, attachment: GdbMiAttachment, number: str) -> None:
         if not _BREAK_ID_RE.match(number):
             raise _config_error(
                 f"breakpoint id must be numeric, got {number!r}",
@@ -54,7 +64,7 @@ class GdbMiBreakpointCommands:
         self.execute_mi_command(attachment, f"-break-delete {number}")
 
     def list_breakpoints(
-        self: GdbMiCommandHost, attachment: GdbMiAttachment
+        self: _BreakpointHost, attachment: GdbMiAttachment
     ) -> list[GdbBreakpointRef]:
         return [
             self._breakpoint_ref_from(entry)
@@ -62,7 +72,7 @@ class GdbMiBreakpointCommands:
         ]
 
     def _breakpoint_ref(
-        self: GdbMiCommandHost, records: list[MiRecord], *, key: str
+        self: _BreakpointHost, records: list[MiRecord], *, key: str
     ) -> GdbBreakpointRef:
         payload = result_payload_dict(records)
         entry = payload.get(key)
@@ -74,7 +84,7 @@ class GdbMiBreakpointCommands:
             )
         return self._breakpoint_ref_from(entry)
 
-    def _breakpoint_ref_from(self: GdbMiCommandHost, entry: dict[str, Any]) -> GdbBreakpointRef:
+    def _breakpoint_ref_from(self: _BreakpointHost, entry: dict[str, Any]) -> GdbBreakpointRef:
         return GdbBreakpointRef.model_validate(
             self._redactor().redact_value(
                 {

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import re
+from typing import Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment
-from kdive.providers.shared.debug_common.gdbmi.host import GdbMiCommandHost
 from kdive.providers.shared.debug_common.gdbmi.mi_protocol import MiRecord, evaluate_value
+from kdive.security.secrets.redaction import Redactor
 
 _SYMBOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SYMBOL_ADDR_RE = re.compile(r"0x[0-9a-fA-F]+")
@@ -15,6 +16,14 @@ _SYMBOL_NOT_FOUND_RE = re.compile(
     r"No symbol .* in current context|address of value not located in memory", re.IGNORECASE
 )
 _SYMBOL_INLINE_HINT = "symbol may be inlined or optimized away; try disassembling its caller."
+
+
+class _SymbolHost(Protocol):
+    def execute_mi_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]: ...
+
+    def _redactor(self) -> Redactor: ...
+
+    def _evaluate_symbol(self, attachment: GdbMiAttachment, name: str) -> list[MiRecord]: ...
 
 
 def _config_error(
@@ -27,7 +36,7 @@ def _config_error(
 class GdbMiSymbolCommands:
     """Symbol-address lookup GDB/MI commands."""
 
-    def resolve_symbol(self: GdbMiCommandHost, attachment: GdbMiAttachment, name: str) -> int:
+    def resolve_symbol(self: _SymbolHost, attachment: GdbMiAttachment, name: str) -> int:
         """Resolve a bare C symbol ``name`` to its address via ``-data-evaluate-expression``.
 
         The Run's DWARF ``vmlinux`` is already loaded at attach, so the symbol table is present.
@@ -67,7 +76,7 @@ class GdbMiSymbolCommands:
         return int(match.group(0), 16)
 
     def _evaluate_symbol(
-        self: GdbMiCommandHost, attachment: GdbMiAttachment, name: str
+        self: _SymbolHost, attachment: GdbMiAttachment, name: str
     ) -> list[MiRecord]:
         """Evaluate ``&name``, narrowing a resolution ``^error`` to ``SYMBOL_NOT_FOUND``."""
         try:

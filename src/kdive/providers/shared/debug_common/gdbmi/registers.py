@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import re
+from typing import Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment
-from kdive.providers.shared.debug_common.gdbmi.host import GdbMiCommandHost
+from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
+    MiRecord,
+    register_values_by_number,
+)
 from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
     register_names as parsed_register_names,
 )
-from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
-    register_values_by_number,
-)
+from kdive.security.secrets.redaction import Redactor
 
 _REGISTER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+class _RegisterHost(Protocol):
+    def execute_mi_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]: ...
+
+    def _redactor(self) -> Redactor: ...
 
 
 def _config_error(
@@ -28,7 +36,7 @@ class GdbMiRegisterCommands:
     """Register-read GDB/MI commands."""
 
     def read_registers(
-        self: GdbMiCommandHost,
+        self: _RegisterHost,
         attachment: GdbMiAttachment,
         register_names: list[str],
     ) -> dict[str, object]:

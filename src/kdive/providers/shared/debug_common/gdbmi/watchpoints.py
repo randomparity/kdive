@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment, GdbWatchpointRef
-from kdive.providers.shared.debug_common.gdbmi.host import GdbMiCommandHost
 from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
     MiRecord,
     breakpoint_rows,
     result_payload_dict,
 )
+from kdive.security.secrets.redaction import Redactor
 
 WATCH_BYTE_SIZES = (1, 2, 4, 8)
 DEFAULT_WATCH_BYTES = 8
@@ -21,6 +21,22 @@ _RUNNING_RE = re.compile(r"running", re.IGNORECASE)
 _NO_WATCHPOINT_RE = re.compile(
     r"does not support\b.*watchpoint|cannot set hardware watchpoint", re.IGNORECASE
 )
+
+
+class _WatchpointHost(Protocol):
+    def execute_mi_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]: ...
+
+    def _redactor(self) -> Redactor: ...
+
+    def _resolve_target(
+        self, attachment: GdbMiAttachment, *, symbol: str | None, address: int | None
+    ) -> int: ...
+
+    def _watchpoint_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]: ...
+
+    def _watchpoint_ref(self, records: list[MiRecord]) -> GdbWatchpointRef: ...
+
+    def _watchpoint_ref_from(self, entry: dict[str, Any]) -> GdbWatchpointRef: ...
 
 
 def _config_error(
@@ -34,7 +50,7 @@ class GdbMiWatchpointCommands:
     """Hardware write-watchpoint GDB/MI commands."""
 
     def set_watchpoint(
-        self: GdbMiCommandHost,
+        self: _WatchpointHost,
         attachment: GdbMiAttachment,
         *,
         symbol: str | None = None,
@@ -54,7 +70,7 @@ class GdbMiWatchpointCommands:
         return self._watchpoint_ref(records)
 
     def list_watchpoints(
-        self: GdbMiCommandHost, attachment: GdbMiAttachment
+        self: _WatchpointHost, attachment: GdbMiAttachment
     ) -> list[GdbWatchpointRef]:
         """List watchpoints only (filtering out breakpoints) from ``-break-list`` (ADR-0277)."""
         return [
@@ -63,7 +79,7 @@ class GdbMiWatchpointCommands:
             if _is_watchpoint_row(entry)
         ]
 
-    def clear_watchpoint(self: GdbMiCommandHost, attachment: GdbMiAttachment, number: str) -> None:
+    def clear_watchpoint(self: _WatchpointHost, attachment: GdbMiAttachment, number: str) -> None:
         """Delete a watchpoint by ``number`` via ``-break-delete`` (ADR-0277)."""
         if not _BREAK_ID_RE.match(number):
             raise _config_error(
@@ -74,7 +90,7 @@ class GdbMiWatchpointCommands:
         self.execute_mi_command(attachment, f"-break-delete {number}")
 
     def _watchpoint_command(
-        self: GdbMiCommandHost, attachment: GdbMiAttachment, command: str
+        self: _WatchpointHost, attachment: GdbMiAttachment, command: str
     ) -> list[MiRecord]:
         """Issue a watch command, classifying running-target then unsupported gdb ``^error``s."""
         try:
@@ -98,7 +114,7 @@ class GdbMiWatchpointCommands:
                         ) from exc
             raise
 
-    def _watchpoint_ref(self: GdbMiCommandHost, records: list[MiRecord]) -> GdbWatchpointRef:
+    def _watchpoint_ref(self: _WatchpointHost, records: list[MiRecord]) -> GdbWatchpointRef:
         entry = result_payload_dict(records).get("wpt")
         if not isinstance(entry, dict):
             raise CategorizedError(
@@ -108,7 +124,7 @@ class GdbMiWatchpointCommands:
             )
         return self._watchpoint_ref_from(entry)
 
-    def _watchpoint_ref_from(self: GdbMiCommandHost, entry: dict[str, Any]) -> GdbWatchpointRef:
+    def _watchpoint_ref_from(self: _WatchpointHost, entry: dict[str, Any]) -> GdbWatchpointRef:
         expression = entry.get("exp") if isinstance(entry.get("exp"), str) else None
         if expression is None and isinstance(entry.get("what"), str):
             expression = entry.get("what")
