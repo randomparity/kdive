@@ -53,16 +53,34 @@ In `tests/domain/test_state.py`, first update the mirror adjacency table (it is 
         SystemState.CRASHED: {SystemState.TORN_DOWN, SystemState.FAILED},
 ```
 
-Then add explicit edge tests (place near the other `SystemState` transition tests):
+Then **update the existing** `test_force_crash_edge_is_legal_teardown_skip_is_not` (currently at `tests/domain/test_state.py:214-219`) — it asserts the now-removed direct edge. Replace its body:
+
+```python
+def test_force_crash_edge_is_legal_teardown_skip_is_not() -> None:
+    # The force_crash path is now two-step: ready -> crashing -> crashed -> torn_down (#1078).
+    assert can_transition(SystemState.READY, SystemState.CRASHING) is True
+    assert can_transition(SystemState.CRASHING, SystemState.CRASHED) is True
+    assert can_transition(SystemState.CRASHED, SystemState.TORN_DOWN) is True
+    # The direct ready -> crashed edge is removed: force_crash goes through crashing.
+    assert can_transition(SystemState.READY, SystemState.CRASHED) is False
+    # A System cannot un-crash back to ready.
+    assert can_transition(SystemState.CRASHED, SystemState.READY) is False
+```
+
+Then add explicit new edge tests (place near the other `SystemState` transition tests):
 
 ```python
 def test_system_crashing_edges() -> None:
-    assert can_transition(SystemState.READY, SystemState.CRASHING)
-    assert can_transition(SystemState.CRASHING, SystemState.CRASHED)
     assert can_transition(SystemState.CRASHING, SystemState.FAILED)
     assert can_transition(SystemState.CRASHING, SystemState.TORN_DOWN)
-    # READY->CRASHED is removed: force_crash now goes through CRASHING.
-    assert not can_transition(SystemState.READY, SystemState.CRASHED)
+    # crashing cannot go back to ready (evidence-first; recovery is to crashed).
+    assert not can_transition(SystemState.CRASHING, SystemState.READY)
+```
+
+Also grep the file for any other `READY`/`CRASHED` adjacency assertion and reconcile it with the new table:
+
+```bash
+rg -n "READY.*CRASHED|CRASHED.*READY" tests/domain/test_state.py
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -229,12 +247,14 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ### Task 3: `force_crash` handler — state-conditional, finalize-only retry
 
 **Files:**
-- Modify: `src/kdive/jobs/handlers/control.py` (`force_crash_handler` ~line 107; `_force_crash_target` ~line 124; `_finalize_force_crash` ~line 138)
+- Modify: `src/kdive/jobs/handlers/control.py` (`force_crash_handler` ~line 107; `_force_crash_target` ~line 124 — deleted; `_finalize_force_crash` ~line 138)
 - Test: `tests/adversarial/test_provider_state_races.py` (reuse the `_RecordingController`/`_seed_system`/`_enqueue`/`_system_state` harness)
+- Test: `tests/mcp/lifecycle/test_control_tools.py` (existing force_crash-handler tests — one asserts the old re-fire-on-CRASHED contract)
 
 **Interfaces:**
 - Consumes: `SystemState.CRASHING`, transitions (Task 1); `SYSTEMS.get`/`SYSTEMS.update_state`; `advisory_xact_lock(conn, LockScope.SYSTEM, system_id)`; `_controller(conn, system_id, resolver)`; `detach_sessions(conn, job, system)`; `audit.record`.
 - Produces: `force_crash_handler` drives `ready → crashing → crashed`. New locked helpers: `_force_crash_precheck(conn, system_id) -> _CrashPrecheck` and `_enter_crashing(conn, system_id) -> _ControlTarget | None`. A retry with the System already `crashing` finalizes without re-firing the NMI and without resolving the controller. `control.force_crash` raising propagates (no `CRASHING → FAILED` in the handler).
+- **Intentional contract change:** `force_crash` on an already-`CRASHED` System is now a no-op (`precheck → "done"`, **no NMI re-fire**), where the old handler re-fired the NMI (it treated non-terminal `CRASHED` as a fresh target). This matches the finalize-only / never-re-fire-into-a-crashed-guest rule (ADR-0325) and the audited system transition becomes `crashing->crashed` (was `ready->crashed`). Both are asserted by existing tests that must be updated (Step 6 below).
 
 - [ ] **Step 1: Write the failing handler tests**
 
@@ -450,15 +470,35 @@ Delete the now-unused `_force_crash_target` function. Ensure `NamedTuple` is imp
 Run: `uv run python -m pytest tests/adversarial/test_provider_state_races.py -k "force_crash_drives or retry_after_crashing or nmi_raise or concurrent_force_crash_and_teardown" -q`
 Expected: PASS (including the existing `concurrent_force_crash_and_teardown` test — the terminal-early-return still holds; update it only if it asserted `ready->crashed` semantics).
 
-- [ ] **Step 5: Lint + type**
+- [ ] **Step 5: Update the existing `test_control_tools.py` force_crash-handler tests**
+
+In `tests/mcp/lifecycle/test_control_tools.py`, `test_force_crash_handler_already_crashed_is_idempotent` (~line 626) asserts the **old** re-fire contract. Update it to the new no-op-on-`CRASHED` semantics:
+
+```python
+            assert ctrl.crashed == []  # already CRASHED: force_crash is a no-op, NMI not re-fired
+```
+(was `assert ctrl.crashed == ["kdive-x"]  # NMI re-attempted`)
+
+Also update the stale audit-transition literal in that test's query (~line 640) — the count is still 0 either way (nothing is audited on the no-op), but keep the literal current:
+
+```python
+                    "SELECT count(*) AS n FROM audit_log WHERE transition = 'crashing->crashed'"
+```
+
+Verify the other two handler tests still pass unchanged: `test_force_crash_handler_crashes_and_detaches` (~line 577 — a fresh `READY` crash still fires the NMI exactly once → `ctrl.crashed == ["kdive-x"]`, state `crashed`, sessions detached) and `test_force_crash_handler_terminal_system_does_not_crash` (~line 648 — `TORN_DOWN` → `ctrl.crashed == []`). No change needed to those two.
+
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py -k force_crash_handler -q`
+Expected: PASS.
+
+- [ ] **Step 6: Lint + type**
 
 Run: `just lint && just type`
 Expected: clean. (`_finalize_force_crash` and `force_crash_handler` stay under 100 lines / complexity 8.)
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/kdive/jobs/handlers/control.py tests/adversarial/test_provider_state_races.py
+git add src/kdive/jobs/handlers/control.py tests/adversarial/test_provider_state_races.py tests/mcp/lifecycle/test_control_tools.py
 git commit -m "feat(control): force_crash drives ready->crashing->crashed, finalize-only retry (#1078)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
@@ -613,12 +653,17 @@ Expected: FAIL — `repair_stalled_crashing_systems` does not exist.
 
 Add to `src/kdive/reconciler/repairs/systems.py`:
 
-```python
-from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.domain.capacity.state import DebugSessionState, JobState, SystemState
-from kdive.security import audit
-from kdive.reconciler.repairs.allocations import SYSTEM_RECONCILER_PRINCIPAL
+**Imports — a diff against the *existing* `systems.py` header (do not re-import what is
+already there).** `systems.py` already imports `LockScope, advisory_xact_lock`,
+`from kdive.domain.capacity.state import AllocationState, SystemState`, and
+`SYSTEM_RECONCILER_PRINCIPAL`. Make exactly these changes:
+- **Extend** the state import: `from kdive.domain.capacity.state import AllocationState, DebugSessionState, JobState, SystemState`
+- **Add** `from kdive.db.repositories import SYSTEMS`
+- **Add** `from kdive.security import audit`
+Do **not** re-add `LockScope`/`advisory_xact_lock`/`SystemState`/`SYSTEM_RECONCILER_PRINCIPAL`
+(already present — a duplicate is a ruff F811).
 
+```python
 _ACTIVE_JOB_STATE_VALUES = (JobState.QUEUED.value, JobState.RUNNING.value)
 
 
@@ -637,7 +682,7 @@ async def repair_stalled_crashing_systems(conn: AsyncConnection) -> int:
             "WHERE s.state = %s "
             "  AND NOT EXISTS ( "
             "    SELECT 1 FROM jobs j "
-            "    WHERE j.dedup_key = 'force_crash:' || s.id "  # see note in Step 4 on the key form
+            "    WHERE j.dedup_key = s.id::text || ':force_crash' "
             "      AND j.state = ANY(%s) "
             "  )",
             (SystemState.CRASHING.value, list(_ACTIVE_JOB_STATE_VALUES)),
@@ -671,11 +716,13 @@ async def repair_stalled_crashing_systems(conn: AsyncConnection) -> int:
 
 `detach_sessions` in `control.py` takes a `Job` and audits each detach via `audit.record` (needs a `RequestContext`); the reconciler has neither. Add `_detach_sessions_reconciler(conn, system)` in `systems.py` that mirrors `detach_sessions`' SQL (the `WITH targets ... UPDATE debug_sessions ... RETURNING` statement) but audits each detached session with `audit.record_system(conn, principal=SYSTEM_RECONCILER_PRINCIPAL, event=AuditEvent(tool="control.force_crash", object_kind="debug_sessions", object_id=session_id, transition=f"{old_state}->detached", args={"system_id": str(system.id)}, project=system.project))`. Keep it small and local to the repair; do not refactor `detach_sessions`' `Job`-based signature (the force_crash call site still uses it as-is).
 
-**Confirm the dedup_key form** before finalizing the query (Step 4): the enqueue site uses `f"{system_id}:force_crash"`, so the SQL predicate must be `j.dedup_key = s.id || ':force_crash'` (or bind the composed string). Match the exact format from `mcp/tools/lifecycle/control.py:207`.
+The Step 3 predicate `j.dedup_key = s.id::text || ':force_crash'` matches the enqueue key
+`f"{system_id}:force_crash"` (`mcp/tools/lifecycle/control.py:207`); `jobs.dedup_key` is `text`
+(schema `0001_init.sql:166`), so the concat/compare typechecks.
 
 - [ ] **Step 4: Verify the dedup_key predicate against the enqueue site**
 
-Read `src/kdive/mcp/tools/lifecycle/control.py:207` — the key is `f"{system_id}:force_crash"`. Set the SQL predicate to `j.dedup_key = s.id::text || ':force_crash'`. Also confirm the `jobs` table has a `dedup_key` column and its type (`text`) so the concat/compare typechecks. Adjust the query in Step 3 to the exact form.
+Read `src/kdive/mcp/tools/lifecycle/control.py:207` and confirm the force_crash enqueue key is exactly `f"{system_id}:force_crash"`. If it differs, adjust the Step 3 predicate to match. (This is a one-line verification; the Step 3 code already ships the correct form.)
 
 - [ ] **Step 5: Register the repair in the reconciler loop**
 
@@ -723,16 +770,39 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 Run: `rg -n "SystemState.CRASHED" src/kdive` and confirm the only writer of `CRASHED` is `_finalize_force_crash` (CRASHING→CRASHED) and the reconciler repair (CRASHING→CRASHED). No path transitions `READY → CRASHED`. If any exists, either route it through `CRASHING` or restore the edge with justification (do not silently leave a dead edge).
 
-- [ ] **Step 2: Run the full gate**
+- [ ] **Step 2: Sweep the `ready->crashed` audit literal across `tests/` (including gated suites)**
+
+`force_crash` now audits the system transition as `crashing->crashed`. `just ci` runs `-m "not live_vm and not live_stack"`, so it does **not** catch the gated live-stack proof. Grep and fix:
+
+Run: `rg -n "ready->crashed" tests/ src/`
+Expected hits to fix:
+- `tests/integration/live_stack/spine.py:367` — change `transition="ready->crashed"` to `transition="crashing->crashed"` (this is a `live_stack` proof `just ci` does **not** run; this dev host runs live proofs, so update it or the on-host proof fails).
+- `tests/mcp/lifecycle/test_control_tools.py:640` — already handled in Task 4 Step 5 (the count query literal).
+- Comment-only hits (e.g. `test_control_tools.py:422`, `test_provider_state_races.py:251`) — update the prose to `ready->crashing->crashed` for accuracy; no assertion depends on them.
+
+- [ ] **Step 3: Sweep stale `ready -> crashed` prose in `src/` docstrings/comments**
+
+The two-step path should read consistently everywhere it is described. Grep and update each to name the `crashing` transient:
+
+Run: `rg -n "ready ?-> ?crashed|ready->crashed" src/kdive`
+Update: `src/kdive/mcp/tools/lifecycle/control.py` module docstring (~lines 8, 14, 84) and `src/kdive/jobs/handlers/control.py` (the `force_crash_handler` docstring — already rewritten in Task 3), plus any comment in `console_rotate.py` / `state.py` that describes the force_crash lifecycle. Then re-run `just docs && just docs-check` so the generated reference matches (the `control.py` module docstring may not serialize into the tool schema, but keep it accurate).
+
+- [ ] **Step 4: Run the full gate**
 
 Run: `just ci`
 Expected: green (lint, `type`, lint-shell, lint-workflows, check-mermaid, test). Also run `just docs-check`, `just adr-status-check`, `just rbac-matrix-check` if not already covered by `ci`.
 
-- [ ] **Step 3: Fix any drift and re-run**
+- [ ] **Step 5: Run the gated proofs this host can run**
+
+This dev host runs KVM/libvirt live proofs. Run the live-stack spine proof (or at least confirm the edited `spine.py` assertion compiles/imports) so the `crashing->crashed` audit change is not silently broken by `just ci`'s exclusion:
+
+Run: `just test-live-stack` (skips cleanly if the stack/fixtures are absent — note the skip if so, do not treat absence as pass).
+
+- [ ] **Step 6: Fix any drift and re-run**
 
 Address every failure (generated-doc drift → re-run `just docs`/`just rbac-matrix`; type/lint → fix). Re-run `just ci` until green.
 
-- [ ] **Step 4: Commit any fixups**
+- [ ] **Step 7: Commit any fixups**
 
 ```bash
 git add <explicit fixed paths>
@@ -746,5 +816,6 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ## Self-Review (author checklist — completed)
 
 - **Spec coverage:** R1 → Task 4 (AC3/AC3b) + the marker in Task 3; R2 → Task 4 (AC2); R3 → Task 5 (AC5/AC5a/AC5b); R4 → Task 3 (AC4/AC4a/AC4b); R5 → no power logic change (Task 4). Fan-out table → Task 2 (AC6). Migration → Task 1. AC7 → Task 6.
-- **Placeholder scan:** the two `# test scaffold` lines in Task 3 Step 1 are explicitly flagged for deletion (they illustrate intent; the real setup is the `_set_state(..., CRASHING)` call). The reconciler `detach_sessions` refactor-vs-helper choice and the exact `dedup_key` SQL are pinned by Step 4/Step 3 read-and-confirm instructions rather than guessed.
+- **Existing-test breakage (plan-review findings, now covered):** `tests/domain/test_state.py:214-219` (Task 1 — flip the removed `READY→CRASHED` edge); `tests/mcp/lifecycle/test_control_tools.py` idempotent test (Task 4 Step 5 — no NMI re-fire on `CRASHED`); `tests/integration/live_stack/spine.py:367` + the `ready->crashed` audit literal (Task 6 Steps 2-3, incl. the `live_stack` proof `just ci` excludes).
+- **Placeholder scan:** the two `# test scaffold` lines in Task 3 Step 1 are explicitly flagged for deletion (they illustrate intent; the real setup is the `_set_state(..., CRASHING)` call). The reconciler helper and the `dedup_key` SQL are now inlined correctly (dedup predicate `s.id::text || ':force_crash'`; import block a diff against the real `systems.py` header).
 - **Type consistency:** `_ControlTarget`, `_CrashPrecheck`, `_resolved_domain_name`, `_controller`, `detach_sessions`, `SYSTEMS.update_state(conn, id, state)`, `advisory_xact_lock(conn, LockScope.SYSTEM, id)` all match the current `control.py`. `SystemState.CRASHING` is defined in Task 1 before every consumer.
