@@ -247,8 +247,8 @@ def test_cancel_queued_job_transitions(migrated_url: str) -> None:
 
 
 def test_cancel_job_contributor_can_cancel(migrated_url: str) -> None:
-    # Leaseholder-control (#1080, ADR-0320): cancelling your own leaseholder-kind job is
-    # contributor, matching runs.cancel. A contributor cancels a queued install job they own.
+    # Leaseholder-control (#1080, ADR-0320): leaseholder-kind jobs are contributor-cancelable
+    # within the project, matching runs.cancel.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")

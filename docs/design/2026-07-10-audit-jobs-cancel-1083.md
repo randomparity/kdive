@@ -31,9 +31,10 @@ transaction as the mutation:
 - `systems.power` / destructive gate — `control.py:147` audits the denial.
 
 Since PR#1082 lowered `jobs.cancel` from operator to a per-kind gate, two actor
-sets can cancel jobs: a **contributor** cancelling its own leaseholder-lifecycle
-job (`CONTRIBUTOR_CANCELABLE_JOB_KINDS`), and an **operator** cancelling a
-provision-lane or destructive job (provision/reprovision/teardown/force_crash).
+sets can cancel jobs: a **contributor** cancelling leaseholder-lifecycle jobs
+(`CONTRIBUTOR_CANCELABLE_JOB_KINDS`) in their project, and an **operator**
+cancelling a provision-lane or destructive job
+(provision/reprovision/teardown/force_crash).
 An operator cooperatively aborting another principal's in-flight
 destructive/provision job is exactly the cross-principal action that warrants an
 attribution trail, and today it leaves no record.
