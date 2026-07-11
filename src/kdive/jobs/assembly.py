@@ -32,7 +32,7 @@ class WorkerHandlerAssembly:
     object_stores: ObjectStoreAssembly
 
 
-type HandlerRegistrar = Callable[[HandlerRegistry, WorkerHandlerAssembly], None]
+type HandlerRegistrar = Callable[[HandlerRegistry], None]
 
 
 def build_handler_registry(
@@ -48,103 +48,118 @@ def build_handler_registry(
         secret_registry=composition.secret_registry,
         object_stores=build_object_store_assembly(),
     )
-    for register in HANDLER_REGISTRARS:
-        register(registry, assembly)
+    for register in build_handler_registrars(assembly):
+        register(registry)
     return registry
 
 
-def _register_system_handlers(
-    registry: HandlerRegistry,
-    assembly: WorkerHandlerAssembly,
-) -> None:
-    systems.register_handlers(
-        registry,
-        resolver=assembly.resolver,
-        secret_registry=assembly.secret_registry,
-        artifact_store=assembly.object_stores.optional_upload_store,
-    )
+def _system_handlers_registrar(
+    *,
+    resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
+    object_stores: ObjectStoreAssembly,
+) -> HandlerRegistrar:
+    def _register(registry: HandlerRegistry) -> None:
+        systems.register_handlers(
+            registry,
+            resolver=resolver,
+            secret_registry=secret_registry,
+            artifact_store=object_stores.optional_upload_store,
+        )
+
+    return _register
 
 
-def _register_run_handlers(
-    registry: HandlerRegistry,
-    assembly: WorkerHandlerAssembly,
-) -> None:
-    runs.register_handlers(
-        registry,
-        ports=runs.RunHandlerPorts(
-            resolver=assembly.resolver,
-            secret_registry=assembly.secret_registry,
-            artifact_store=assembly.object_stores.optional_upload_store,
-        ),
-    )
+def _run_handlers_registrar(
+    *,
+    resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
+    object_stores: ObjectStoreAssembly,
+) -> HandlerRegistrar:
+    def _register(registry: HandlerRegistry) -> None:
+        runs.register_handlers(
+            registry,
+            ports=runs.RunHandlerPorts(
+                resolver=resolver,
+                secret_registry=secret_registry,
+                artifact_store=object_stores.optional_upload_store,
+            ),
+        )
+
+    return _register
 
 
-def _register_console_rotate_handler(
-    registry: HandlerRegistry,
-    assembly: WorkerHandlerAssembly,
-) -> None:
-    console_rotate.register_handlers(
-        registry,
-        secret_registry=assembly.secret_registry,
-        artifact_store=assembly.object_stores.optional_upload_store,
-    )
+def _console_rotate_handler_registrar(
+    *, secret_registry: SecretRegistry, object_stores: ObjectStoreAssembly
+) -> HandlerRegistrar:
+    def _register(registry: HandlerRegistry) -> None:
+        console_rotate.register_handlers(
+            registry,
+            secret_registry=secret_registry,
+            artifact_store=object_stores.optional_upload_store,
+        )
+
+    return _register
 
 
-def _register_control_handlers(
-    registry: HandlerRegistry,
-    assembly: WorkerHandlerAssembly,
-) -> None:
-    control.register_handlers(registry, resolver=assembly.resolver)
+def _control_handlers_registrar(resolver: ProviderResolver) -> HandlerRegistrar:
+    def _register(registry: HandlerRegistry) -> None:
+        control.register_handlers(registry, resolver=resolver)
+
+    return _register
 
 
-def _register_diagnostic_sysrq_handler(
-    registry: HandlerRegistry,
-    assembly: WorkerHandlerAssembly,
-) -> None:
-    from kdive.jobs.handlers.control import diagnostic_sysrq
+def _diagnostic_sysrq_handler_registrar(
+    *,
+    resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
+    object_stores: ObjectStoreAssembly,
+) -> HandlerRegistrar:
+    def _register(registry: HandlerRegistry) -> None:
+        from kdive.jobs.handlers.control import diagnostic_sysrq
 
-    diagnostic_sysrq.register_handlers(
-        registry,
-        resolver=assembly.resolver,
-        secret_registry=assembly.secret_registry,
-        artifact_store=assembly.object_stores.optional_upload_store,
-    )
+        diagnostic_sysrq.register_handlers(
+            registry,
+            resolver=resolver,
+            secret_registry=secret_registry,
+            artifact_store=object_stores.optional_upload_store,
+        )
 
-
-def _register_vmcore_handlers(
-    registry: HandlerRegistry,
-    assembly: WorkerHandlerAssembly,
-) -> None:
-    vmcore.register_handlers(
-        registry,
-        resolver=assembly.resolver,
-        telemetry=CaptureTelemetry(meter=metrics.get_meter("kdive.worker")),
-    )
+    return _register
 
 
-def _register_diagnostics_handlers(
-    registry: HandlerRegistry,
-    _assembly: WorkerHandlerAssembly,
-) -> None:
+def _vmcore_handlers_registrar(resolver: ProviderResolver) -> HandlerRegistrar:
+    def _register(registry: HandlerRegistry) -> None:
+        vmcore.register_handlers(
+            registry,
+            resolver=resolver,
+            telemetry=CaptureTelemetry(meter=metrics.get_meter("kdive.worker")),
+        )
+
+    return _register
+
+
+def _register_diagnostics_handlers(registry: HandlerRegistry) -> None:
     from kdive.jobs.handlers import diagnostics as diagnostics_handler
 
     diagnostics_handler.register_handlers(registry)
 
 
-def _register_image_build_handler(
-    registry: HandlerRegistry,
-    assembly: WorkerHandlerAssembly,
-) -> None:
-    """Bind the IMAGE_BUILD handler, preserving setup errors as job failures."""
-    store = assembly.object_stores.required_image_build_store
-    if isinstance(store, CategorizedError):
-        registry.register(JobKind.IMAGE_BUILD, _unconfigured_image_build_handler(store))
-        return
-    image_build.register_handlers(
-        registry,
-        resolver=assembly.resolver,
-        store=store,
-    )
+def _image_build_handler_registrar(
+    *, resolver: ProviderResolver, object_stores: ObjectStoreAssembly
+) -> HandlerRegistrar:
+    def _register(registry: HandlerRegistry) -> None:
+        store = object_stores.required_image_build_store
+        if isinstance(store, CategorizedError):
+            registry.register(JobKind.IMAGE_BUILD, _unconfigured_image_build_handler(store))
+            return
+        image_build.register_handlers(
+            registry,
+            resolver=resolver,
+            store=store,
+        )
+
+    return _register
 
 
 def _unconfigured_image_build_handler(
@@ -158,13 +173,32 @@ def _unconfigured_image_build_handler(
     return _handler
 
 
-HANDLER_REGISTRARS: tuple[HandlerRegistrar, ...] = (
-    _register_system_handlers,
-    _register_run_handlers,
-    _register_console_rotate_handler,
-    _register_control_handlers,
-    _register_diagnostic_sysrq_handler,
-    _register_vmcore_handlers,
-    _register_image_build_handler,
-    _register_diagnostics_handlers,
-)
+def build_handler_registrars(assembly: WorkerHandlerAssembly) -> tuple[HandlerRegistrar, ...]:
+    """Build worker registrars from the narrow dependencies each group uses."""
+    return (
+        _system_handlers_registrar(
+            resolver=assembly.resolver,
+            secret_registry=assembly.secret_registry,
+            object_stores=assembly.object_stores,
+        ),
+        _run_handlers_registrar(
+            resolver=assembly.resolver,
+            secret_registry=assembly.secret_registry,
+            object_stores=assembly.object_stores,
+        ),
+        _console_rotate_handler_registrar(
+            secret_registry=assembly.secret_registry,
+            object_stores=assembly.object_stores,
+        ),
+        _control_handlers_registrar(assembly.resolver),
+        _diagnostic_sysrq_handler_registrar(
+            resolver=assembly.resolver,
+            secret_registry=assembly.secret_registry,
+            object_stores=assembly.object_stores,
+        ),
+        _vmcore_handlers_registrar(assembly.resolver),
+        _image_build_handler_registrar(
+            resolver=assembly.resolver, object_stores=assembly.object_stores
+        ),
+        _register_diagnostics_handlers,
+    )

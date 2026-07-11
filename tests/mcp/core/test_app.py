@@ -303,15 +303,16 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
         def build_provider_resolver(self) -> object:
             return resolver
 
-    def _capture(
-        _registry: HandlerRegistry,
+    def _build(
         assembly: handler_module.WorkerHandlerAssembly,
-    ) -> None:
+    ) -> tuple[handler_module.HandlerRegistrar, ...]:
         captured["resolver"] = assembly.resolver
         captured["secret_registry"] = assembly.secret_registry
         captured["object_stores"] = assembly.object_stores
 
-    monkeypatch.setattr(handler_module, "HANDLER_REGISTRARS", (_capture,))
+        return ()
+
+    monkeypatch.setattr(handler_module, "build_handler_registrars", _build)
 
     build_handler_registry(
         secret_registry=caller_registry,
@@ -341,20 +342,17 @@ def test_image_build_handler_preserves_store_config_error(
     def _raise_store() -> object:
         raise error
 
-    handler_module._register_image_build_handler(
-        registry,
-        handler_module.WorkerHandlerAssembly(
-            resolver=cast(Any, None),
-            secret_registry=SecretRegistry(),
-            object_stores=ObjectStoreAssembly(
-                optional_upload_store=None,
-                optional_image_store=None,
-                optional_ops_image_store=None,
-                required_image_build_store=error,
-                request_time_store_factory=cast(Any, _raise_store),
-            ),
-        ),
+    object_stores = ObjectStoreAssembly(
+        optional_upload_store=None,
+        optional_image_store=None,
+        optional_ops_image_store=None,
+        required_image_build_store=error,
+        request_time_store_factory=cast(Any, _raise_store),
     )
+    register = handler_module._image_build_handler_registrar(
+        resolver=cast(Any, None), object_stores=object_stores
+    )
+    register(registry)
     handler = registry.get(JobKind.IMAGE_BUILD)
     assert handler is not None
 
