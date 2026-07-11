@@ -9,10 +9,12 @@ to the same instrument name at the collector — the same pattern as ``kdive.err
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from opentelemetry.metrics import Histogram, Meter
+
+type DebugSessionOutcome = Literal["ok", "error", "reaped"]
 
 _DURATION_BUCKETS = (1.0, 10.0, 60.0, 300.0, 1800.0, 3600.0, 14400.0)
 
@@ -35,7 +37,7 @@ class DebugSessionTelemetry:
         instance._enabled = False
         return instance
 
-    def record(self, transport: str, outcome: str, seconds: float) -> None:
+    def record(self, transport: str, outcome: DebugSessionOutcome, seconds: float) -> None:
         if not self._enabled or seconds < 0.0:
             return
         self._duration.record(seconds, {"transport": transport, "outcome": outcome})

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from opentelemetry.metrics import Histogram, Meter
+
+type CaptureOutcome = Literal["ok", "error"]
 
 _DURATION_BUCKETS = (1.0, 5.0, 15.0, 60.0, 300.0, 900.0, 1800.0)
 _BYTE_BUCKETS = (1e6, 1e7, 1e8, 5e8, 1e9, 5e9)
@@ -40,7 +42,7 @@ class CaptureTelemetry:
         self,
         capture_method: str,
         provider: str,
-        outcome: str,
+        outcome: CaptureOutcome,
         *,
         seconds: float,
         size_bytes: int | None = None,

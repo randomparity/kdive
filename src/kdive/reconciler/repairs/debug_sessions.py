@@ -10,7 +10,10 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.domain.capacity.state import DebugSessionState
-from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
+from kdive.observability.debug_session_telemetry import (
+    DebugSessionOutcome,
+    DebugSessionTelemetry,
+)
 from kdive.providers.core.transport_reset import TransportResetter
 
 _log = logging.getLogger(__name__)
@@ -47,7 +50,8 @@ async def repair_dead_sessions(
         rows = await cur.fetchall()
     for row in rows:
         _log.info("reconciler: dead debug_session %s -> detached", row["id"])
-        telemetry.record(row["transport"], "reaped", float(row["age_seconds"]))
+        outcome: DebugSessionOutcome = "reaped"
+        telemetry.record(row["transport"], outcome, float(row["age_seconds"]))
         await _reset_dead_transport(conn, resetter, row)
     return len(rows)
 

@@ -18,7 +18,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run, System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
-from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
+from kdive.jobs.handlers.console.capture_telemetry import CaptureOutcome, CaptureTelemetry
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import CaptureVmcorePayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
@@ -140,11 +140,17 @@ async def capture_handler(
         result = await finalize_capture(conn, job, run, method, output)
     except Exception:
         elapsed = time.perf_counter() - started
-        telemetry.record(method.value, binding.kind.value, "error", seconds=elapsed)
+        outcome: CaptureOutcome = "error"
+        telemetry.record(method.value, binding.kind.value, outcome, seconds=elapsed)
         raise
     elapsed = time.perf_counter() - started
+    outcome: CaptureOutcome = "ok"
     telemetry.record(
-        method.value, binding.kind.value, "ok", seconds=elapsed, size_bytes=output.raw_size_bytes
+        method.value,
+        binding.kind.value,
+        outcome,
+        seconds=elapsed,
+        size_bytes=output.raw_size_bytes,
     )
     return result
 

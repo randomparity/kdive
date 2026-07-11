@@ -43,7 +43,10 @@ from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools.debug.sessions.context import resolve_debug_session_context
 from kdive.mcp.tools.lifecycle.vmcore.view import CONSOLE_CRASH_GUIDANCE
-from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
+from kdive.observability.debug_session_telemetry import (
+    DebugSessionOutcome,
+    DebugSessionTelemetry,
+)
 from kdive.prereqs.system_bootstrap_key import load_system_bootstrap_private_key
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
@@ -452,7 +455,7 @@ async def _end_debug_session(
             async with resources.runtime.lock_for(session_id):
                 resources.runtime.reap(session_id)
         seconds = (datetime.now(UTC) - resolved_session.session.created_at).total_seconds()
-        outcome = "ok" if envelope.status != "error" else "error"
+        outcome: DebugSessionOutcome = "ok" if envelope.status != "error" else "error"
         telemetry.record(resolved_session.session.transport, outcome, seconds)
         return envelope
 
