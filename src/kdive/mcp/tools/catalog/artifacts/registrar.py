@@ -112,7 +112,8 @@ def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
                     "and KDIVE_ARTIFACT_INLINE_MAX_BYTES, so a larger value still returns at most "
                     f"{artifact_reads.ARTIFACT_GET_WINDOW_MAX_BYTES} bytes with data.next_offset "
                     "to page the rest; an artifact above the fetch ceiling omits inline content "
-                    "— use refs.download_uri for the whole object."
+                    "— use refs.download_uri for the whole object when present. Store or "
+                    "redaction failures set data.content_unavailable and omit download_uri."
                 )
             ),
         ] = artifact_reads.ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
@@ -134,8 +135,10 @@ def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
         ceiling and KDIVE_ARTIFACT_INLINE_MAX_BYTES); `data.content_truncated` and
         `data.next_offset` page the rest, in `direction` (forward from the start, or backward
         from the tail). An artifact above the fetch ceiling sets `content_omitted` and is
-        retrieved via the always-present presigned `refs.download_uri`. Use `artifacts.find`
-        for literal search. Requires viewer; sensitive ids are not-found.
+        retrieved via presigned `refs.download_uri` when the store is reachable and redaction
+        checks pass. When the response sets `data.content_unavailable`, callers must handle the
+        degraded result without a `download_uri`. Use `artifacts.find` for literal search.
+        Requires viewer; sensitive ids are not-found.
         """
         return await artifact_reads.artifacts_get(
             pool,
