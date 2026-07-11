@@ -110,12 +110,10 @@ _BY_ID: dict[str, FeatureRequirement] = {f.feature: f for f in FEATURE_REQUIREME
 
 
 def feature_requirement(feature_id: str) -> FeatureRequirement:
-    """Return the registry entry for ``feature_id`` (raises ``KeyError`` if unknown)."""
     return _BY_ID[feature_id]
 
 
 def feature_manifest() -> list[dict[str, JsonValue]]:
-    """Render the advertised manifest (advisory): one entry per feature, ``advertised`` only."""
     manifest: list[dict[str, JsonValue]] = []
     for f in FEATURE_REQUIREMENTS:
         # Inner comprehension (not bare sorted()) widens list[str] -> list[JsonValue].
