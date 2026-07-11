@@ -40,9 +40,9 @@ from kdive.inventory.overrides import (
 )
 from kdive.inventory.reconcile.locks import resource_identity_lock
 from kdive.log import bind_context
+from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
-from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.tools.ops.resources._common import DEREGISTER_TOOL, config_error, denied
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext

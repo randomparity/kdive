@@ -26,14 +26,14 @@ from kdive.config.core_settings import ARTIFACT_DOWNLOAD_TTL_SECONDS, REPORT_INL
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
-from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._platform_auth import (
+from kdive.mcp.platform_auth import (
     ALL_PROJECTS_SCOPE,
     actor_for,
     audit_platform_denial,
     held_platform_roles,
 )
+from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._time_window import parse_timestamptz_window
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext

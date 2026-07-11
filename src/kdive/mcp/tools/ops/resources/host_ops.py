@@ -24,10 +24,10 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Allocation
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
+from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
-from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.tools._resource_envelopes import resource_config_error, resource_envelope
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext

@@ -17,9 +17,9 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.middleware.exposure import NARROWED_TOOLS
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload, ResourceByKind, ResourceByPool
+from kdive.mcp.tool_projection import NARROWED_TOOLS
 from kdive.mcp.tools import gateway
 from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_registrar
 from kdive.mcp.tools.lifecycle.allocations.request import _guard_resource_kind
@@ -352,5 +352,5 @@ def test_guarded_tools_are_subset_of_narrowed_tools() -> None:
     extra = guarded_names - NARROWED_TOOLS
     assert not extra, (
         f"Tool(s) call the kind guard but are missing from NARROWED_TOOLS: {sorted(extra)}. "
-        "Add them to NARROWED_TOOLS in src/kdive/mcp/middleware/exposure.py."
+        "Add them to NARROWED_TOOLS in src/kdive/mcp/tool_projection.py."
     )

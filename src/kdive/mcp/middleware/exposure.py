@@ -13,7 +13,7 @@ from opentelemetry import metrics
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.mcp.exposure import CORE_TOOLS, gateway_enabled, visible_tool_names
 from kdive.mcp.middleware.shared import request_context
-from kdive.mcp.provider_schema import project_tool_schema
+from kdive.mcp.tool_projection import project_listed_tool
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.errors import AuthError
 
@@ -27,28 +27,6 @@ _EXPOSURE_FAILOPEN = metrics.get_meter("kdive.mcp").create_counter(
     "kdive_mcp_tool_exposure_fail_open",
     description="tool-exposure filter fell open to the full catalog (ADR-0269)",
 )
-
-#: Tools whose published ``inputSchema`` is narrowed to the composed ``ResourceKind`` set.
-NARROWED_TOOLS: frozenset[str] = frozenset(
-    {"allocations.request", "systems.define", "systems.provision", "systems.reprovision"}
-)
-
-
-def project_listed_tool(tool: Tool, kinds: frozenset[ResourceKind]) -> Tool:
-    """Return ``tool`` with its inputSchema narrowed to ``kinds`` (or unchanged).
-
-    Args:
-        tool: A FastMCP ``Tool`` instance from the live registry.
-        kinds: The frozenset of currently composed ``ResourceKind`` values.
-
-    Returns:
-        A new ``Tool`` (via ``model_copy``) with narrowed parameters for tools in
-        ``NARROWED_TOOLS``, or the original ``tool`` object for unaffected tools.
-    """
-    if tool.name not in NARROWED_TOOLS:
-        return tool
-    projected = project_tool_schema(tool.parameters, kinds)
-    return tool.model_copy(update={"parameters": projected})
 
 
 def _narrow_or_passthrough(tool: Tool, kinds: frozenset[ResourceKind] | None) -> Tool:

@@ -36,8 +36,8 @@ from kdive.domain.catalog.resource_capabilities import (
 from kdive.domain.catalog.resources import ManagedBy, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.reconcile.locks import resource_identity_lock
+from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.tools.ops.resources._common import (
     REGISTER_FAULT_INJECT_TOOL,
     REGISTER_LOCAL_LIBVIRT_TOOL,

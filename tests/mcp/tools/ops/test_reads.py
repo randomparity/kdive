@@ -10,7 +10,7 @@ from typing import Any, cast
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.mcp.tools._platform_auth import ALL_PROJECTS_SCOPE
+from kdive.mcp.platform_auth import ALL_PROJECTS_SCOPE
 from kdive.mcp.tools.ops import _reads
 from kdive.security.authz.context import RequestContext
 

@@ -15,7 +15,7 @@ from kdive.mcp.middleware.shared import (
     request_context,
     result_error_category,
 )
-from kdive.mcp.tools._platform_auth import actor_for
+from kdive.mcp.platform_auth import actor_for
 from kdive.security.authz.rbac import AuthorizationError
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry

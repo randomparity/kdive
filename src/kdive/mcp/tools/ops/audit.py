@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
+from kdive.mcp.platform_auth import ALL_PROJECTS_SCOPE
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidCursor
@@ -37,7 +38,6 @@ from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cur
 from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
 from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
 from kdive.mcp.tools._common import paginate as _paginate
-from kdive.mcp.tools._platform_auth import ALL_PROJECTS_SCOPE
 from kdive.mcp.tools.ops import _reads
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import (

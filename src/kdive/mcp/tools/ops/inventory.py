@@ -36,17 +36,17 @@ from kdive.inventory.overrides import clear_override as clear_override_entry
 from kdive.inventory.reconcile.locks import resource_identity_lock
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
-from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
-from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
-from kdive.mcp.tools._common import paginate as _paginate
-from kdive.mcp.tools._platform_auth import (
+from kdive.mcp.platform_auth import (
     ALL_PROJECTS_SCOPE,
     actor_for,
     audit_platform_denial,
     held_platform_roles,
 )
+from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
+from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
+from kdive.mcp.tools._common import paginate as _paginate
 from kdive.mcp.tools.ops import _reads
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext

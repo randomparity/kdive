@@ -17,14 +17,14 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.auth import current_context
-from kdive.mcp.responses import JsonValue, ToolResponse
-from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._platform_auth import (
+from kdive.mcp.platform_auth import (
     ALL_PROJECTS_SCOPE,
     actor_for,
     audit_platform_denial,
     held_platform_roles,
 )
+from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.tools import _docmeta
 from kdive.security import audit
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
 from kdive.security.secrets.secret_registry import SecretRegistry

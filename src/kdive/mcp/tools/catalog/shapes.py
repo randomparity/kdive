@@ -41,9 +41,9 @@ from kdive.domain.lifecycle.records import SystemShape
 from kdive.domain.pcie import parse_match_spec
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
+from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.security import audit
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
 from kdive.serialization import JsonValue

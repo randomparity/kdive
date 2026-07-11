@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.mcp.tools._platform_auth import (
+from kdive.mcp.platform_auth import (
     ALL_PROJECTS_SCOPE,
     actor_for,
     audit_platform_denial,
