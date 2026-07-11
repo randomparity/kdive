@@ -70,12 +70,13 @@ def test_non_destructive_job_kind_is_rejected() -> None:
         DestructiveOp(kind=JobKind.BUILD, profile_opt_in=True)
 
 
-def test_power_and_reprovision_are_no_longer_destructive_job_kinds() -> None:
-    # Power (ADR-0320) and reprovision (ADR-0326) both left DESTRUCTIVE_JOB_KINDS: neither can be
-    # routed through the gate. force_crash is the sole opt-in-consuming destructive op that still
-    # constructs.
+def test_only_force_crash_is_an_opt_in_destructive_job_kind() -> None:
+    # Power (ADR-0320), teardown (ADR-0129), and reprovision (ADR-0326) are not profile opt-in
+    # destructive ops. force_crash is the sole opt-in-consuming operation this gate accepts.
     with pytest.raises(ValueError, match="power is not a destructive job kind"):
         DestructiveOp(kind=JobKind.POWER, profile_opt_in=True)
+    with pytest.raises(ValueError, match="teardown is not a destructive job kind"):
+        DestructiveOp(kind=JobKind.TEARDOWN, profile_opt_in=True)
     with pytest.raises(ValueError, match="reprovision is not a destructive job kind"):
         DestructiveOp(kind=JobKind.REPROVISION, profile_opt_in=True)
     DestructiveOp(kind=JobKind.FORCE_CRASH, profile_opt_in=True)

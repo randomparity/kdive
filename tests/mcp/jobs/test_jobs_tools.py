@@ -16,7 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.capacity.state import JobState
 from kdive.domain.operations.jobs import (
     CONTRIBUTOR_CANCELABLE_JOB_KINDS,
-    DESTRUCTIVE_JOB_KINDS,
+    OPT_IN_DESTRUCTIVE_JOB_KINDS,
     JobKind,
 )
 from kdive.jobs import queue
@@ -252,7 +252,7 @@ def test_cancel_role_classification_covers_every_kind_and_fails_closed() -> None
         assert role in (Role.CONTRIBUTOR, Role.OPERATOR), kind
         if kind not in CONTRIBUTOR_CANCELABLE_JOB_KINDS:
             assert role is Role.OPERATOR, kind
-    assert not CONTRIBUTOR_CANCELABLE_JOB_KINDS & DESTRUCTIVE_JOB_KINDS  # destructive never lowered
+    assert not CONTRIBUTOR_CANCELABLE_JOB_KINDS & OPT_IN_DESTRUCTIVE_JOB_KINDS
     # The provision lane is contributor leaseholder control (ADR-0326): a contributor that can
     # enqueue provision/reprovision can cancel the job it enqueued.
     assert JobKind.PROVISION in CONTRIBUTOR_CANCELABLE_JOB_KINDS

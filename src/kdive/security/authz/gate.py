@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from kdive.domain.operations.jobs import DESTRUCTIVE_JOB_KINDS, JobKind
+from kdive.domain.operations.jobs import OPT_IN_DESTRUCTIVE_JOB_KINDS, JobKind
 from kdive.security.authz.rbac import AuthorizationError, Role, require_role
 
 if TYPE_CHECKING:
@@ -42,7 +42,7 @@ class DestructiveOp:
     profile_opt_in: bool = False
 
     def __post_init__(self) -> None:
-        if self.kind not in DESTRUCTIVE_JOB_KINDS:
+        if self.kind not in OPT_IN_DESTRUCTIVE_JOB_KINDS:
             raise ValueError(f"{self.kind.value} is not a destructive job kind")
 
 

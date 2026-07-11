@@ -36,13 +36,6 @@ class JobKind(StrEnum):
     CHECK_SSH_REACHABLE = "check_ssh_reachable"
 
 
-DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.TEARDOWN, JobKind.FORCE_CRASH})
-"""Job kinds gated by the destructive-operation admission gate (ADR-0130, ADR-0320, ADR-0326).
-
-Power (ADR-0320) and reprovision (ADR-0326) both left this set: each is contributor
-leaseholder lifecycle over its own transient resource, not destructive administration.
-"""
-
 OPT_IN_DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.FORCE_CRASH})
 """Destructive ops whose opt-in factor is resolved from a profile's ``destructive_ops`` list.
 Only ``force_crash`` remains: ``teardown`` is gated by role only (ADR-0129); ``power`` is not
@@ -112,7 +105,6 @@ class Job(DomainModel):
 
 __all__ = [
     "CONTRIBUTOR_CANCELABLE_JOB_KINDS",
-    "DESTRUCTIVE_JOB_KINDS",
     "OPT_IN_DESTRUCTIVE_JOB_KINDS",
     "Job",
     "JobAuthorizing",

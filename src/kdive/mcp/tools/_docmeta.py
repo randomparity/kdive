@@ -105,7 +105,7 @@ DESTRUCTIVE_TOOLS = frozenset(
         "images.extend",
         # The gateway dispatcher can reach a destructive inner tool, so it carries the
         # destructive hint (errs toward client prompting). Membership here is hint-only:
-        # the real gate is DESTRUCTIVE_JOB_KINDS / assert_destructive_allowed on the
+        # the real gate is OPT_IN_DESTRUCTIVE_JOB_KINDS / assert_destructive_allowed on the
         # re-entered inner call, not this set (ADR-0268, #866).
         "tools.invoke",
     }
