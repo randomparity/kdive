@@ -225,26 +225,34 @@ class DiagnosticsWorkerCheckPayload(_PayloadBase):
 _PayloadModel = (
     type[SystemPayload]
     | type[ReprovisionPayload]
+    | type[AuthorizeSshKeyPayload]
+    | type[CheckSshReachablePayload]
+    | type[ConsoleRotatePayload]
     | type[RunPayload]
+    | type[BuildPayload]
+    | type[BuildInstallBootPayload]
+    | type[InstallPayload]
     | type[PowerPayload]
     | type[SysRqPayload]
     | type[CaptureVmcorePayload]
     | type[ImageBuildPayload]
     | type[DiagnosticsWorkerCheckPayload]
-    | type[BuildInstallBootPayload]
-    | type[ConsoleRotatePayload]
 )
 PayloadModel = (
     SystemPayload
     | ReprovisionPayload
+    | AuthorizeSshKeyPayload
+    | CheckSshReachablePayload
+    | ConsoleRotatePayload
     | RunPayload
+    | BuildPayload
+    | BuildInstallBootPayload
+    | InstallPayload
     | PowerPayload
     | SysRqPayload
     | CaptureVmcorePayload
     | ImageBuildPayload
     | DiagnosticsWorkerCheckPayload
-    | BuildInstallBootPayload
-    | ConsoleRotatePayload
 )
 
 _PAYLOAD_MODELS: dict[JobKind, _PayloadModel] = {
