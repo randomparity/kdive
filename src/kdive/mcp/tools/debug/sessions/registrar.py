@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
@@ -17,13 +17,7 @@ from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT
 from kdive.mcp.tools.debug.sessions.lifecycle import (
     _GDBSTUB,
-    _insert_session_locked,
-    _InsertSession,
-    _resolved_connector_for_run,
-    _resolved_detach_resources,
-)
-from kdive.mcp.tools.debug.sessions.lifecycle import (
-    DebugSessionHandlers as _LifecycleDebugSessionHandlers,
+    DebugSessionHandlers,
 )
 from kdive.mcp.tools.debug.sessions.read import SessionsListRequest as _SessionsListRequest
 from kdive.mcp.tools.debug.sessions.read import get_session as _get_session
@@ -31,9 +25,6 @@ from kdive.mcp.tools.debug.sessions.read import list_sessions as _list_sessions
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.secrets.secret_registry import SecretRegistry
-
-if TYPE_CHECKING:
-    from kdive.mcp.tools.debug.operations.runtime import DebugRuntimeResolver
 
 
 class _DebugSessionsListPayload(ToolPayload):
@@ -56,30 +47,6 @@ class _DebugSessionsListPayload(ToolPayload):
     cursor: str | None = Field(
         default=None, description="Opaque continuation cursor from a prior page's next_cursor."
     )
-
-
-class DebugSessionHandlers(_LifecycleDebugSessionHandlers):
-    """Registrar-facing lifecycle handler preserving the historical test seam."""
-
-    @classmethod
-    def from_resolver(
-        cls,
-        resolver: ProviderResolver,
-        *,
-        runtime_resolver: DebugRuntimeResolver | None,
-        insert_session_locked: _InsertSession | None = None,
-        secret_registry: SecretRegistry,
-        telemetry: DebugSessionTelemetry | None = None,
-    ) -> DebugSessionHandlers:
-        return cls(
-            connector_for_run=_resolved_connector_for_run(resolver),
-            detach_resources=_resolved_detach_resources(resolver, runtime_resolver),
-            insert_session_locked=(
-                _insert_session_locked if insert_session_locked is None else insert_session_locked
-            ),
-            secret_registry=secret_registry,
-            telemetry=telemetry,
-        )
 
 
 def register(
