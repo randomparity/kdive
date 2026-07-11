@@ -121,7 +121,6 @@ async def _deregister_runtime(
     resource_id: str,
     force: bool,
 ) -> ToolResponse:
-    """The original runtime-resource deregister path (no ledger write)."""
     async with pool.connection() as conn, conn.transaction():
         row = await _locked_runtime_row(conn, uid)
         if row is None:
@@ -169,7 +168,6 @@ async def _classify_ownership(pool: AsyncConnectionPool, uid: UUID) -> tuple[str
 
 
 def _reject_non_runtime(resource_id: str, managed_by: str) -> ToolResponse:
-    """A config (non-remote-libvirt) or discovery row is not deregistered here (``conflict``)."""
     return ToolResponse.failure(
         resource_id,
         ErrorCategory.CONFLICT,
@@ -184,7 +182,6 @@ def _reject_non_runtime(resource_id: str, managed_by: str) -> ToolResponse:
 
 
 def _refuse_live(resource_id: str, live: int) -> ToolResponse:
-    """The destructive-tier refusal envelope for a row carrying live allocations."""
     return ToolResponse.failure(
         resource_id,
         ErrorCategory.CONFLICT,
@@ -265,7 +262,6 @@ async def _deregister_config_remote_libvirt(
 
 
 async def _locked_config_remote_row(conn: AsyncConnection, uid: UUID) -> dict[str, object] | None:
-    """SELECT … FOR UPDATE the row only if it is a config-owned remote-libvirt row."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id FROM resources WHERE id = %s AND managed_by = %s AND kind = %s FOR UPDATE",
@@ -293,7 +289,6 @@ async def _apply_removed_disposition(conn: AsyncConnection, uid: UUID) -> str:
 
 
 async def _locked_runtime_row(conn: AsyncConnection, uid: UUID) -> dict[str, object] | None:
-    """SELECT … FOR UPDATE the resource row only if it is ``managed_by='runtime'``."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id, managed_by FROM resources WHERE id = %s AND managed_by = %s FOR UPDATE",
@@ -303,7 +298,6 @@ async def _locked_runtime_row(conn: AsyncConnection, uid: UUID) -> dict[str, obj
 
 
 async def _classify_absent(conn: AsyncConnection, uid: UUID, resource_id: str) -> ToolResponse:
-    """Distinguish a truly-absent id (not_found) from a config/discovery row (conflict)."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute("SELECT managed_by FROM resources WHERE id = %s", (uid,))
         row = await cur.fetchone()
@@ -323,7 +317,6 @@ async def _classify_absent(conn: AsyncConnection, uid: UUID, resource_id: str) -
 
 
 async def _live_count(conn: AsyncConnection, uid: UUID) -> int:
-    """Count allocations holding a slot on the resource."""
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT count(*) FROM allocations WHERE resource_id = %s AND state = ANY(%s)",
@@ -364,7 +357,6 @@ async def _remove(conn: AsyncConnection, uid: UUID) -> str:
 
 
 async def _has_any_allocation(conn: AsyncConnection, uid: UUID) -> bool:
-    """Whether any allocation row (any state) FK-references the resource."""
     async with conn.cursor() as cur:
         await cur.execute("SELECT 1 FROM allocations WHERE resource_id = %s LIMIT 1", (uid,))
         return (await cur.fetchone()) is not None
@@ -379,7 +371,6 @@ async def _audit_deregister(
     live: int,
     disposition: str,
 ) -> None:
-    """Write the deregister audit row."""
     await audit.record_platform(
         conn,
         principal=ctx.principal,
