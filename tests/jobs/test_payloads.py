@@ -206,13 +206,6 @@ def test_payload_validation_rejects_wrong_shape_for_kind() -> None:
 def test_run_id_from_payload_returns_uuid_for_run_jobs() -> None:
     run_id = uuid4()
 
-    assert (
-        run_id_from_payload(
-            JobKind.BUILD,
-            {"run_id": str(run_id), "build_host_id": str(WORKER_LOCAL_ID)},
-        )
-        == run_id
-    )
     assert run_id_from_payload(JobKind.INSTALL, {"run_id": str(run_id)}) == run_id
     assert run_id_from_payload(JobKind.BOOT, {"run_id": str(run_id)}) == run_id
     assert (
@@ -228,9 +221,16 @@ def test_run_id_from_payload_returns_none_for_system_jobs() -> None:
     assert run_id_from_payload(JobKind.PROVISION, {"system_id": str(uuid4())}) is None
 
 
+def test_run_id_from_payload_returns_none_for_retired_build_jobs() -> None:
+    run_id = uuid4()
+    payload = {"run_id": str(run_id), "build_host_id": str(WORKER_LOCAL_ID)}
+    assert run_id_from_payload(JobKind.BUILD, payload) is None
+    assert run_id_from_payload(JobKind.BUILD_INSTALL_BOOT, payload) is None
+
+
 def test_run_id_from_payload_rejects_malformed_run_jobs() -> None:
-    with pytest.raises(PayloadValidationError, match="invalid build payload"):
-        run_id_from_payload(JobKind.BUILD, {"run_id": "not-a-uuid"})
+    with pytest.raises(PayloadValidationError, match="invalid install payload"):
+        run_id_from_payload(JobKind.INSTALL, {"run_id": "not-a-uuid"})
 
 
 def test_reprovision_payload_includes_profile_digest() -> None:

@@ -15,12 +15,14 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import JobState
 from kdive.domain.operations.jobs import (
+    ACTIVE_JOB_KINDS,
     CONTRIBUTOR_CANCELABLE_JOB_KINDS,
     OPT_IN_DESTRUCTIVE_JOB_KINDS,
+    RETIRED_JOB_KINDS,
     JobKind,
 )
 from kdive.jobs import queue
-from kdive.jobs.payloads import Authorizing, BuildPayload, SystemPayload
+from kdive.jobs.payloads import Authorizing, BuildPayload, InstallPayload, SystemPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
 from kdive.mcp.tools import jobs as jobs_tools
@@ -57,6 +59,10 @@ def _build_payload() -> BuildPayload:
     return BuildPayload(run_id=str(uuid4()), build_host_id=str(WORKER_LOCAL_ID))
 
 
+def _install_payload() -> InstallPayload:
+    return InstallPayload(run_id=str(uuid4()))
+
+
 @asynccontextmanager
 async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
     pool = AsyncConnectionPool(url, min_size=1, max_size=2, open=False)
@@ -72,8 +78,8 @@ async def _enqueue_in(pool: AsyncConnectionPool, dedup: str, project: str) -> st
     async with pool.connection() as conn:
         job = await queue.enqueue(
             conn,
-            JobKind.BUILD,
-            _build_payload(),
+            JobKind.INSTALL,
+            _install_payload(),
             Authorizing(principal="p", project=project),
             dedup,
         )
@@ -130,7 +136,7 @@ def test_get_known_job_returns_status(migrated_url: str) -> None:
             resp = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
         assert resp.object_id == job_id
         assert resp.status == "queued"
-        assert resp.data == {"kind": "build"}
+        assert resp.data == {"kind": "install"}
 
     asyncio.run(_run())
 
@@ -188,7 +194,7 @@ def test_cancel_queued_job_transitions(migrated_url: str) -> None:
 
 def test_cancel_job_contributor_can_cancel(migrated_url: str) -> None:
     # Leaseholder-control (#1080, ADR-0320): cancelling your own leaseholder-kind job is
-    # contributor, matching runs.cancel. A contributor cancels a queued build job they own.
+    # contributor, matching runs.cancel. A contributor cancels a queued install job they own.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
@@ -253,10 +259,14 @@ def test_cancel_role_classification_covers_every_kind_and_fails_closed() -> None
         if kind not in CONTRIBUTOR_CANCELABLE_JOB_KINDS:
             assert role is Role.OPERATOR, kind
     assert not CONTRIBUTOR_CANCELABLE_JOB_KINDS & OPT_IN_DESTRUCTIVE_JOB_KINDS
+    assert not CONTRIBUTOR_CANCELABLE_JOB_KINDS & RETIRED_JOB_KINDS
+    assert RETIRED_JOB_KINDS.isdisjoint(ACTIVE_JOB_KINDS)
     # The provision lane is contributor leaseholder control (ADR-0326): a contributor that can
     # enqueue provision/reprovision can cancel the job it enqueued.
     assert JobKind.PROVISION in CONTRIBUTOR_CANCELABLE_JOB_KINDS
     assert JobKind.REPROVISION in CONTRIBUTOR_CANCELABLE_JOB_KINDS
+    assert JobKind.INSTALL in CONTRIBUTOR_CANCELABLE_JOB_KINDS
+    assert JobKind.BOOT in CONTRIBUTOR_CANCELABLE_JOB_KINDS
 
 
 def test_cancel_terminal_job_is_error_envelope(migrated_url: str) -> None:
@@ -276,7 +286,7 @@ def test_cancel_terminal_job_is_error_envelope(migrated_url: str) -> None:
 def test_cancel_running_leaseholder_job_writes_audit_row(migrated_url: str) -> None:
     # #1083: a successful cancel writes one readable audit row attributing the actor, tool,
     # object, project, and a transition that names the job kind in plaintext (not only in the
-    # one-way args_digest). BUILD is a contributor-cancelable leaseholder kind.
+    # one-way args_digest). INSTALL is a contributor-cancelable leaseholder kind.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "audit-run")
@@ -291,8 +301,8 @@ def test_cancel_running_leaseholder_job_writes_audit_row(migrated_url: str) -> N
         assert object_kind == "jobs"
         assert object_id == job_id
         assert project == "proj"
-        assert transition == "build:running->canceled"
-        assert digest == args_digest({"job_id": job_id, "kind": "build"})
+        assert transition == "install:running->canceled"
+        assert digest == args_digest({"job_id": job_id, "kind": "install"})
 
     asyncio.run(_run())
 
@@ -341,7 +351,7 @@ def test_cancel_audits_locked_prior_state_not_stale_read(
         assert resp.status == "canceled"
         assert len(rows) == 1
         # Labeled from the locked real state (running), not the stale pre-read (queued).
-        assert rows[0][5] == "build:running->canceled"
+        assert rows[0][5] == "install:running->canceled"
 
     asyncio.run(_run())
 
@@ -844,8 +854,8 @@ async def _enqueue_provision(pool: AsyncConnectionPool, dedup: str) -> str:
     return str(job.id)
 
 
-async def _enqueue_build_for_investigation(pool: AsyncConnectionPool, dedup: str) -> str:
-    """Seed an Investigation + Run and a build job whose payload run_id points at it.
+async def _enqueue_install_for_investigation(pool: AsyncConnectionPool, dedup: str) -> str:
+    """Seed an Investigation + Run and an install job whose payload run_id points at it.
 
     Returns the Investigation id (the filter key). ``runs.system_id`` is nullable since
     ADR-0169, so the Run needs only its Investigation FK + a committed ``target_kind``.
@@ -867,8 +877,8 @@ async def _enqueue_build_for_investigation(pool: AsyncConnectionPool, dedup: str
         assert run_row is not None
         await queue.enqueue(
             conn,
-            JobKind.BUILD,
-            BuildPayload(run_id=str(run_row[0]), build_host_id=str(WORKER_LOCAL_ID)),
+            JobKind.INSTALL,
+            InstallPayload(run_id=str(run_row[0])),
             Authorizing(principal="p", project="proj"),
             dedup,
         )
@@ -890,10 +900,22 @@ def test_list_jobs_filters_by_status(migrated_url: str) -> None:
 def test_list_jobs_filters_by_kind(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            build_id = await _enqueue(pool, "b")
+            install_id = await _enqueue(pool, "i")
             await _enqueue_provision(pool, "p")
-            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50, kind=JobKind.BUILD)
-        assert [r.object_id for r in resp.items] == [build_id]
+            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50, kind=JobKind.INSTALL)
+        assert [r.object_id for r in resp.items] == [install_id]
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("kind", [JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT])
+def test_list_jobs_rejects_retired_kind_filters(migrated_url: str, kind: JobKind) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50, kind=kind)
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data == {"reason": "retired_job_kind", "kind": kind.value}
 
     asyncio.run(_run())
 
@@ -901,13 +923,13 @@ def test_list_jobs_filters_by_kind(migrated_url: str) -> None:
 def test_list_jobs_filters_by_investigation_id(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            investigation_id = await _enqueue_build_for_investigation(pool, "in-inv")
-            await _enqueue(pool, "other")  # build for an unrelated run
+            investigation_id = await _enqueue_install_for_investigation(pool, "in-inv")
+            await _enqueue(pool, "other")  # install for an unrelated run
             await _enqueue_provision(pool, "no-run")  # run-less, never matches
             resp = await jobs_tools.list_jobs(
                 pool, VIEWER_CTX, limit=50, investigation_id=investigation_id
             )
-        assert [r.data["kind"] for r in resp.items] == ["build"]
+        assert [r.data["kind"] for r in resp.items] == ["install"]
         assert len(resp.items) == 1
 
     asyncio.run(_run())

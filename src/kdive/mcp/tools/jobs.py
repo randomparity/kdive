@@ -34,7 +34,13 @@ from pydantic import Field
 from kdive.db.repositories import JOBS, ObjectNotFound
 from kdive.domain.capacity.state import IllegalTransition, JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.operations.jobs import CONTRIBUTOR_CANCELABLE_JOB_KINDS, Job, JobKind
+from kdive.domain.operations.jobs import (
+    CONTRIBUTOR_CANCELABLE_JOB_KINDS,
+    RETIRED_JOB_KINDS,
+    ActiveJobKind,
+    Job,
+    JobKind,
+)
 from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
@@ -67,12 +73,10 @@ class _JobsListPayload(ToolPayload):
     """Public payload for ``jobs.list`` filters and pagination."""
 
     status: JobState | None = Field(default=None, description="Only jobs in this lifecycle state.")
-    kind: JobKind | None = Field(default=None, description="Only jobs of this kind.")
+    kind: ActiveJobKind | None = Field(default=None, description="Only active jobs of this kind.")
     investigation_id: str | None = Field(
         default=None,
-        description=(
-            "Only run-bearing jobs (build/install/boot) whose Run belongs to this Investigation."
-        ),
+        description=("Only active run-bearing jobs whose Run belongs to this Investigation."),
     )
     limit: int = Field(
         default=DEFAULT_LIST_LIMIT,
@@ -305,6 +309,12 @@ async def list_jobs(
     filtered set.
     """
     capped = _clamp_list_limit(limit)
+    if kind in RETIRED_JOB_KINDS:
+        return ToolResponse.failure(
+            "jobs",
+            ErrorCategory.CONFIGURATION_ERROR,
+            data={"reason": "retired_job_kind", "kind": kind.value},
+        )
     investigation_uid = None
     if investigation_id is not None:
         investigation_uid = _as_uuid(investigation_id)
@@ -407,8 +417,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """Cancel a queued or running job.
 
         A contributor may cancel their own leaseholder-lifecycle jobs (provision/reprovision/
-        build/install/boot/power/authorize_ssh_key/…). Cancelling a destructive job
-        (teardown/force_crash) requires operator.
+        install/boot/power/authorize_ssh_key/…). Cancelling a destructive job
+        (teardown/force_crash) or retired server-build job requires operator.
         """
         return await cancel_job(pool, current_context(), job_id)
 
@@ -426,7 +436,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """List jobs visible to the caller, newest first, filterable by status/kind/investigation.
 
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-        ``cursor`` to read the next page. Filters compose with the cursor.
+        ``cursor`` to read the next page. Filters compose with the cursor. The ``kind`` filter
+        accepts active job kinds only; historical retired build jobs remain readable by id.
         """
         request = request or _JobsListPayload()
         return await list_jobs(

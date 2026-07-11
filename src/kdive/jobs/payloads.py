@@ -274,11 +274,9 @@ _PAYLOAD_MODELS: dict[JobKind, _PayloadModel] = {
     JobKind.CONSOLE_ROTATE: ConsoleRotatePayload,
 }
 _RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
-    JobKind.BUILD: BuildPayload,
     JobKind.INSTALL: InstallPayload,
     JobKind.BOOT: RunPayload,
     JobKind.CAPTURE_VMCORE: CaptureVmcorePayload,
-    JobKind.BUILD_INSTALL_BOOT: BuildInstallBootPayload,
 }
 
 
