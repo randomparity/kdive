@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import SHAPE_XOR_ERROR_TYPE
+from kdive.mcp.tool_payloads import ShapeXorCustomError
 
 
 def _loc_under(param: str) -> Callable[[ValidationError], bool]:
@@ -51,7 +51,15 @@ def _any_match(*predicates: Callable[[ValidationError], bool]) -> Callable[[Vali
 def _is_shape_xor_error(exc: ValidationError) -> bool:
     """Whether every error entry is the shape-XOR-custom validator error."""
     errors = exc.errors()
-    return bool(errors) and all(err.get("type") == SHAPE_XOR_ERROR_TYPE for err in errors)
+    return bool(errors) and all(_shape_xor_error(err) is not None for err in errors)
+
+
+def _shape_xor_error(err: Mapping[str, Any]) -> ShapeXorCustomError | None:
+    ctx = err.get("ctx")
+    if not isinstance(ctx, dict):
+        return None
+    error = ctx.get("error")
+    return error if isinstance(error, ShapeXorCustomError) else None
 
 
 def _profile_envelope(object_id: str, exc: ValidationError) -> ToolResponse:
@@ -80,7 +88,7 @@ def _build_profile_envelope(object_id: str, exc: ValidationError) -> ToolRespons
 
 def _shape_xor_envelope(object_id: str, exc: ValidationError) -> ToolResponse:
     """Envelope a shape-XOR-custom binding error with a precise ``detail``."""
-    both = any(err.get("ctx", {}).get("both") for err in exc.errors())
+    both = any(error.both for err in exc.errors() if (error := _shape_xor_error(err)) is not None)
     detail = (
         "supplied both a shape and a custom size; supply exactly one sizing source "
         "(a shape, or the full {vcpus, memory_gb, disk_gb} triple)"

@@ -19,6 +19,7 @@ from kdive.mcp.tool_payloads import (
     EstimateRequestPayload,
     ResourceByKind,
     ResourceByPool,
+    ShapeXorCustomError,
 )
 
 
@@ -84,7 +85,9 @@ def _xor_error_entry(payload: dict[str, object]) -> tuple[str, object]:
         assert len(entries) == 1
         entry = entries[0]
         ctx = entry.get("ctx") or {}
-        return str(entry["type"]), ctx.get("both")
+        error = ctx.get("error")
+        assert isinstance(error, ShapeXorCustomError)
+        return error.code, error.both
     raise AssertionError("expected a ValidationError")
 
 

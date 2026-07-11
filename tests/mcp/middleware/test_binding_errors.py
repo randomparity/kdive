@@ -20,7 +20,7 @@ from kdive.mcp.middleware.binding_errors import (
     _profile_envelope,
     _shape_xor_envelope,
 )
-from kdive.mcp.tool_payloads import SHAPE_XOR_ERROR_TYPE
+from kdive.mcp.tool_payloads import ShapeXorCustomError
 
 
 class _Errs(Exception):
@@ -63,7 +63,8 @@ def test_loc_under_false_when_loc_missing() -> None:
 
 
 def test_is_shape_xor_error_true_when_all_entries_match() -> None:
-    assert _is_shape_xor_error(_ve([{"type": SHAPE_XOR_ERROR_TYPE}]))
+    error = ShapeXorCustomError("bad shape", both=True)
+    assert _is_shape_xor_error(_ve([{"type": "value_error", "ctx": {"error": error}}]))
 
 
 def test_is_shape_xor_error_false_for_other_type() -> None:
@@ -90,12 +91,14 @@ def test_build_profile_envelope_is_configuration_error() -> None:
 
 
 def test_shape_xor_envelope_both_branch() -> None:
-    resp = _shape_xor_envelope("proj", _ve([{"ctx": {"both": True}}]))
+    error = ShapeXorCustomError("bad shape", both=True)
+    resp = _shape_xor_envelope("proj", _ve([{"ctx": {"error": error}}]))
     assert "both a shape and a custom size" in (resp.detail or "")
 
 
 def test_shape_xor_envelope_neither_branch() -> None:
-    resp = _shape_xor_envelope("proj", _ve([{"ctx": {}}]))
+    error = ShapeXorCustomError("bad shape", both=False)
+    resp = _shape_xor_envelope("proj", _ve([{"ctx": {"error": error}}]))
     assert "neither a shape nor" in (resp.detail or "")
 
 

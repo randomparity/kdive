@@ -6,7 +6,6 @@ from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from pydantic_core import PydanticCustomError
 
 from kdive.domain.catalog.resources import ResourceKind
 
@@ -15,10 +14,20 @@ _DEFAULT_COST_CLASS = "local"
 _WINDOW_DESCRIPTION = "Lease window length in hours, e.g. 24."
 _WINDOW_EXAMPLE = 24
 
-# Stable error type for the shape-XOR-custom violation. The binding middleware (ADR-0132)
-# keys on this to distinguish the XOR violation from a field-level error and to surface the
-# `both` context flag as the envelope `detail`.
+# Stable local exception for the shape-XOR-custom violation. The binding middleware (ADR-0132)
+# keys on Pydantic's wrapped original exception to distinguish the XOR violation from a
+# field-level error and to surface the `both` flag as the envelope `detail`.
 SHAPE_XOR_ERROR_TYPE = "shape_xor_custom"
+
+
+class ShapeXorCustomError(ValueError):
+    """Allocation size-source XOR violation."""
+
+    code = SHAPE_XOR_ERROR_TYPE
+
+    def __init__(self, message: str, *, both: bool) -> None:
+        super().__init__(message)
+        self.both = both
 
 
 class ToolPayload(BaseModel):
@@ -111,17 +120,15 @@ class AllocationRequestPayload(SelectorPayload):
         custom_set = [v is not None for v in custom]
         if self.shape is not None:
             if any(custom_set):
-                raise PydanticCustomError(
-                    SHAPE_XOR_ERROR_TYPE,
+                raise ShapeXorCustomError(
                     "supply a shape or a custom size, not both",
-                    {"both": True},
+                    both=True,
                 )
             return self
         if not all(custom_set):
-            raise PydanticCustomError(
-                SHAPE_XOR_ERROR_TYPE,
+            raise ShapeXorCustomError(
                 "supply a shape, or the full custom triple {vcpus, memory_gb, disk_gb}",
-                {"both": False},
+                both=False,
             )
         return self
 
