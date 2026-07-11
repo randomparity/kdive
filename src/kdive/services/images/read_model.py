@@ -1,4 +1,4 @@
-"""Shared image catalog predicates used below service orchestration."""
+"""Image catalog read-model predicates."""
 
 from __future__ import annotations
 
@@ -16,9 +16,7 @@ _TERMINAL_SYSTEM_STATE_VALUES = tuple(state.value for state in _TERMINAL_SYSTEM_
 # A local-libvirt System references a catalog rootfs by (provider, name) under its provider
 # section; a remote-libvirt System references its operator-staged base image by the volume
 # name under its section (ADR-0080 ``base_image_volume``). The reference guard probes both so
-# inventory prune (ADR-0112) never deletes an in-use base image of EITHER kind — a stale guard
-# that missed the remote shape would let prune delete the row of a live remote base image,
-# after which ``repair_leaked_images`` would reclaim its S3 object (deferred data loss).
+# inventory prune (ADR-0112) never deletes an in-use base image of EITHER kind.
 _LOCAL_LIBVIRT_SECTION = ResourceKind.LOCAL_LIBVIRT.value
 _REMOTE_LIBVIRT_SECTION = ResourceKind.REMOTE_LIBVIRT.value
 
@@ -30,9 +28,9 @@ async def image_referenced_by_live_system(cur: AsyncCursor[DictRow], row_id: UUI
 
     * **local-libvirt** — a ``catalog`` rootfs naming the image's ``(provider, name)``;
     * **remote-libvirt** — a ``base_image_volume`` naming the image's staged ``volume``
-      (ADR-0080); only checked when the image carries a ``volume`` (a staged image).
+      (ADR-0080); only checked when the image carries a ``volume``.
 
-    A non-terminal System matching **either** shape returns ``True`` so prune cordons rather
+    A non-terminal System matching either shape returns ``True`` so prune cordons rather
     than deletes the in-use base image.
     """
     await cur.execute("SELECT provider, name, volume FROM image_catalog WHERE id = %s", (row_id,))

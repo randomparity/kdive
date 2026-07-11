@@ -55,6 +55,7 @@ UPDATE image_catalog SET managed_by = 'config' WHERE visibility = 'public' AND o
 -- affinity already defaults global (owner_project NULL); no allocation regresses.
 
 -- NOTE: NO new system->image column. A reference already exists — the prune guard reuses
--- db/image_queries.py:image_referenced_by_live_system, which resolves "a non-terminal
--- System references this image" via a JSONB-containment probe on systems.provisioning_profile
--- keyed by (provider, name), already ADR-0109 terminal-state-filtered.
+-- services/images/read_model.py:image_referenced_by_live_system, which resolves "a
+-- non-terminal System references this image" via a JSONB-containment probe on
+-- systems.provisioning_profile keyed by (provider, name), already ADR-0109
+-- terminal-state-filtered.
