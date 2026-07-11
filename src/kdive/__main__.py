@@ -11,63 +11,33 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import logging
-import os
-import signal
-import socket
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import TYPE_CHECKING, Any
-
-from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.config.core_settings import (
-    BUILD_ARTIFACT_RETENTION_DAYS,
     HTTP_HOST,
     HTTP_PORT,
-    INVESTIGATION_CLEANUP_GRACE_DAYS,
     LOG_LEVEL,
-    REPORT_ARTIFACT_RETENTION_DAYS,
-    S3_BUCKET,
-    S3_ENDPOINT_URL,
-    S3_REGION,
 )
 from kdive.db.pool import create_pool
-from kdive.domain.errors import CategorizedError
 from kdive.images.rootfs_command import add_build_fs_parser, run_build_fs
-from kdive.providers.infra.console_hosting import start_console_hosting
+from kdive.processes.reconciler import (
+    optional_reconciler_object_store as _optional_reconciler_object_store,
+)
+from kdive.processes.reconciler import run_reconciler as _run_reconciler
+from kdive.processes.server import run_server as _run_server
+from kdive.processes.worker import run_worker as _run_worker
 from kdive.version import full_version
 
 if TYPE_CHECKING:
-    from kdive.health.heartbeat import Heartbeat
-    from kdive.health.probe import HealthProbe
     from kdive.observability.facade import Telemetry
-    from kdive.providers.core.resolver import ProviderResolver
     from kdive.security.secrets.secret_registry import SecretRegistry
-    from kdive.store.objectstore import ObjectStore
 
-# Server /livez heartbeat: ticked at this cadence, stale after the larger bound. The
-# server's "loop" is its asyncio event loop, so a stale tick means the loop is wedged.
-# The worker reuses the same stale bound: its poll interval is ~1s, so a healthy claim
-# loop re-ticks well inside 10s, while a wedged loop (no poll pass) goes stale.
-_HEARTBEAT_TICK_SECONDS = 1.0
-_HEARTBEAT_STALE_SECONDS = 10.0
-# The reconciler ticks once per pass on a 30s interval (DEFAULT_INTERVAL); the stale bound
-# is sized above two intervals so a single slow-but-progressing pass never reads not-live,
-# while a wedged loop that misses two scheduled passes does.
-_RECONCILER_HEARTBEAT_STALE_SECONDS = 90.0
-_PROVIDER_DISCOVERY_TIMEOUT_SECONDS = 30.0
-# uvicorn idle keepalive between requests on a reused TCP connection (ADR-0138). Sized just
-# above the common 60s proxy idle default so a connection-reusing client's gap between rapid
-# short `jobs.wait` polls is not churned closed. It does NOT extend the in-flight lifetime of a
-# single long `jobs.wait` (no uvicorn knob does); the documented retry contract covers that.
-_HTTP_KEEPALIVE_S = 65.0
 
 _log = logging.getLogger(__name__)
-_S3_OPTIONAL_ENV_NAMES = frozenset({S3_ENDPOINT_URL.name, S3_BUCKET.name, S3_REGION.name})
 
 
 class _VersionAction(argparse.Action):
@@ -89,8 +59,6 @@ class _VersionAction(argparse.Action):
 type _CommandHandler = Callable[[argparse.Namespace, SecretRegistry, Telemetry | None], None]
 type _ArgumentAdder = Callable[[argparse.ArgumentParser], None]
 type _CommandRegistrar = Callable[[Any], None]
-type _ProbeBuilder = Callable[[AsyncConnectionPool], HealthProbe]
-type _ProcessBody = Callable[[AsyncConnectionPool, Heartbeat, HealthProbe], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,364 +290,6 @@ def build_parser() -> argparse.ArgumentParser:
     for command in _COMMANDS:
         command.register(sub)
     return parser
-
-
-def _server_uvicorn_config() -> dict[str, Any]:
-    """Return the extra uvicorn config the MCP server passes to ``run_async`` (ADR-0138).
-
-    Built by a pure helper, not inlined, because ``_run_server`` awaits ``app.run_async`` (which
-    blocks until the server stops) — a unit test asserts on this return value directly rather
-    than mocking a forever-blocking call. ``run_async`` forwards ``uvicorn_config`` to
-    ``run_http_async``, which merges it into ``uvicorn.Config`` (fastmcp-slim 3.4.0).
-    """
-    return {"timeout_keep_alive": _HTTP_KEEPALIVE_S}
-
-
-async def _run_server(
-    host: str, port: int, secret_registry: SecretRegistry, telemetry: Telemetry
-) -> None:
-    from kdive.health.probe import HealthProbe
-    from kdive.health.processes.server import build_oidc_ping, build_postgres_ping
-    from kdive.health.server_checks import build_server_checks
-    from kdive.mcp.app import build_app
-    from kdive.store.objectstore import object_store_from_env
-
-    def build_probe(pool: AsyncConnectionPool) -> HealthProbe:
-        return HealthProbe(
-            checks=build_server_checks(
-                postgres_ping=build_postgres_ping(pool),
-                object_store_factory=object_store_from_env,
-                oidc_ping=build_oidc_ping(),
-            )
-        )
-
-    async def serve_mcp(
-        pool: AsyncConnectionPool, heartbeat: Heartbeat, probe: HealthProbe
-    ) -> None:
-        del heartbeat, probe
-        app = build_app(pool, secret_registry=secret_registry)
-        await app.run_async(
-            transport="http", host=host, port=port, uvicorn_config=_server_uvicorn_config()
-        )
-
-    await _run_process_runtime(
-        process="server",
-        pool=create_pool(),
-        secret_registry=secret_registry,
-        telemetry=telemetry,
-        heartbeat_stale_after=_HEARTBEAT_STALE_SECONDS,
-        probe_builder=build_probe,
-        body=serve_mcp,
-        tick_heartbeat=True,
-    )
-
-
-async def _run_process_runtime(
-    *,
-    process: str,
-    pool: AsyncConnectionPool,
-    secret_registry: SecretRegistry,
-    telemetry: Telemetry,
-    heartbeat_stale_after: float,
-    probe_builder: _ProbeBuilder,
-    body: _ProcessBody,
-    tick_heartbeat: bool = False,
-) -> None:
-    from kdive.health.aux_bind import resolve_health_bind
-    from kdive.health.aux_listener import build_aux_app, serve_aux
-    from kdive.health.heartbeat import Heartbeat
-
-    tasks: list[asyncio.Task[None]] = []
-    await pool.open()
-    try:
-        heartbeat = Heartbeat(stale_after=heartbeat_stale_after)
-        probe = probe_builder(pool)
-        aux_host, aux_port = resolve_health_bind(process)
-        aux_app = build_aux_app(
-            heartbeat=heartbeat, probe=probe, metric_reader=telemetry.scrape_reader
-        )
-        tasks.append(asyncio.create_task(serve_aux(aux_app, host=aux_host, port=aux_port)))
-        if tick_heartbeat:
-            tasks.append(asyncio.create_task(_tick_heartbeat(heartbeat)))
-        await body(pool, heartbeat, probe)
-    finally:
-        await _cancel(*tasks)
-        secret_registry.clear()
-        await pool.close()
-
-
-async def _cancel(*tasks: asyncio.Task[None]) -> None:
-    """Cancel and await aux background tasks before the pool/registry are torn down.
-
-    Awaiting (suppressing ``CancelledError``) drains an in-flight ``/readyz`` — which
-    borrows a pool connection — so the pool never closes underneath it, and avoids a
-    "Task was destroyed but it is pending" warning on exit.
-    """
-    for task in tasks:
-        task.cancel()
-    for task in tasks:
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
-
-async def _tick_heartbeat(heartbeat: Heartbeat) -> None:
-    while True:
-        heartbeat.tick()
-        await asyncio.sleep(_HEARTBEAT_TICK_SECONDS)
-
-
-def _install_stop() -> asyncio.Event:
-    """Build a stop event set on SIGINT/SIGTERM (the worker/reconciler shutdown signal)."""
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
-    return stop
-
-
-def _readiness(probe: HealthProbe) -> Callable[[], Awaitable[bool]]:
-    """Adapt a :class:`HealthProbe` into the worker's boolean readiness gate (ADR-0090 §5).
-
-    The worker pauses dequeuing new jobs while not-ready; the probe's healthy-cached /
-    failure-immediate asymmetry means a recovered backend resumes claiming at once.
-    """
-
-    async def ready() -> bool:
-        return (await probe.check()).ready
-
-    return ready
-
-
-async def _run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
-    from kdive.health.processes.server import build_postgres_ping
-    from kdive.health.processes.worker import build_worker_probe
-    from kdive.jobs.worker import Worker, WorkerConfig
-    from kdive.jobs.worker_telemetry import WorkerTelemetry
-    from kdive.mcp.app import build_handler_registry
-    from kdive.store.objectstore import object_store_from_env
-
-    stop = _install_stop()
-    worker_id = f"{socket.gethostname()}:{os.getpid()}"
-
-    def build_probe(pool: AsyncConnectionPool) -> HealthProbe:
-        return build_worker_probe(
-            postgres_ping=build_postgres_ping(pool), object_store_factory=object_store_from_env
-        )
-
-    async def run_worker_body(
-        pool: AsyncConnectionPool, heartbeat: Heartbeat, probe: HealthProbe
-    ) -> None:
-        worker = Worker(
-            pool,
-            build_handler_registry(secret_registry=secret_registry),
-            worker_id=worker_id,
-            secret_registry=secret_registry,
-            config=WorkerConfig(
-                heartbeat=heartbeat,
-                readiness=_readiness(probe),
-                telemetry=WorkerTelemetry(
-                    tracer=telemetry.tracer_provider.get_tracer("kdive.worker"),
-                    meter=telemetry.meter_provider.get_meter("kdive.worker"),
-                ),
-            ),
-        )
-        await worker.run(stop)
-
-    await _run_process_runtime(
-        process="worker",
-        pool=create_pool(min_size=2, max_size=4),
-        secret_registry=secret_registry,
-        telemetry=telemetry,
-        heartbeat_stale_after=_HEARTBEAT_STALE_SECONDS,
-        probe_builder=build_probe,
-        body=run_worker_body,
-    )
-
-
-async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
-    from kdive.health.processes.server import build_postgres_ping
-    from kdive.health.processes.worker import build_worker_probe
-    from kdive.providers.infra.libvirt_event_loop import ensure_libvirt_event_loop
-    from kdive.store.objectstore import object_store_from_env
-
-    # Before any libvirt connection opens: libvirt services stream events only on connections
-    # opened after the event loop is registered, and remote console capture polls a non-blocking
-    # stream that the event loop must pump (ADR-0182).
-    ensure_libvirt_event_loop()
-
-    stop = _install_stop()
-
-    def build_probe(pool: AsyncConnectionPool) -> HealthProbe:
-        return _reconciler_probe(
-            pool, build_postgres_ping, build_worker_probe, object_store_from_env
-        )
-
-    async def run_reconciler_process(
-        pool: AsyncConnectionPool, heartbeat: Heartbeat, probe: HealthProbe
-    ) -> None:
-        del probe
-        await _run_reconciler_body(pool, heartbeat, stop, secret_registry, telemetry)
-
-    await _run_process_runtime(
-        process="reconciler",
-        pool=create_pool(min_size=1),
-        secret_registry=secret_registry,
-        telemetry=telemetry,
-        heartbeat_stale_after=_RECONCILER_HEARTBEAT_STALE_SECONDS,
-        probe_builder=build_probe,
-        body=run_reconciler_process,
-    )
-
-
-async def _run_reconciler_body(
-    pool: AsyncConnectionPool,
-    heartbeat: Heartbeat,
-    stop: asyncio.Event,
-    secret_registry: SecretRegistry,
-    telemetry: Telemetry,
-) -> None:
-    from kdive.providers.assembly.composition import ProviderComposition
-    from kdive.store.objectstore import object_store_from_env
-
-    upload_store = _optional_reconciler_object_store(object_store_from_env)
-    provider_composition = ProviderComposition(secret_registry=secret_registry)
-    provider_resolver = provider_composition.build_provider_resolver()
-    discovery_task = asyncio.create_task(_register_provider_resources(pool, provider_resolver))
-    try:
-        await _run_reconciler_with_composition(
-            pool,
-            heartbeat,
-            stop,
-            telemetry,
-            provider_composition,
-            upload_store,
-        )
-    finally:
-        await _cancel(discovery_task)
-
-
-async def _run_reconciler_with_composition(
-    pool: AsyncConnectionPool,
-    heartbeat: Heartbeat,
-    stop: asyncio.Event,
-    telemetry: Telemetry,
-    provider_composition: Any,
-    upload_store: ObjectStore | None,
-) -> None:
-    from kdive.observability.console_telemetry import ConsoleTelemetry
-    from kdive.reconciler.loop import Reconciler
-
-    console_hosting = await provider_composition.build_reconciler_console_hosting(
-        console_telemetry=ConsoleTelemetry(
-            meter=telemetry.meter_provider.get_meter("kdive.reconciler")
-        ),
-    )
-    reconciler = Reconciler(
-        pool,
-        provider_composition.build_reconciler_reaper(),
-        config=_build_reconcile_config(
-            provider_composition,
-            upload_store=upload_store,
-            console_registry=console_hosting.registry if console_hosting else None,
-            heartbeat=heartbeat,
-            telemetry=telemetry,
-        ),
-    )
-    hosting_task = start_console_hosting(console_hosting, stop)
-    try:
-        await reconciler.run(stop)
-    finally:
-        await _cancel(*([hosting_task] if hosting_task else []))
-        if console_hosting is not None:
-            await console_hosting.close()
-
-
-def _build_reconcile_config(
-    provider_composition: Any,
-    *,
-    upload_store: ObjectStore | None,
-    console_registry: Any,
-    heartbeat: Heartbeat,
-    telemetry: Telemetry,
-) -> Any:
-    from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
-    from kdive.reconciler.fleet import FleetTelemetry
-    from kdive.reconciler.loop import ReconcileConfig
-    from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
-    from kdive.services.allocation.admission.metrics import AdmissionMetrics
-
-    meter = telemetry.meter_provider.get_meter("kdive.reconciler")
-    return ReconcileConfig(
-        upload_store=upload_store,
-        image_store=upload_store,
-        report_artifact_retention=timedelta(days=config.require(REPORT_ARTIFACT_RETENTION_DAYS)),
-        investigation_cleanup_grace=timedelta(
-            days=config.require(INVESTIGATION_CLEANUP_GRACE_DAYS)
-        ),
-        build_artifact_retention=timedelta(days=config.require(BUILD_ARTIFACT_RETENTION_DAYS)),
-        console_registry=console_registry,
-        resetter=provider_composition.build_reconciler_transport_resetter(),
-        dump_volume_reaper=provider_composition.build_reconciler_dump_volume_reaper(),
-        heartbeat=heartbeat,
-        telemetry=ReconcilerTelemetry(
-            tracer=telemetry.tracer_provider.get_tracer("kdive.reconciler"),
-            meter=meter,
-        ),
-        fleet_telemetry=FleetTelemetry(meter=meter),
-        admission_metrics=AdmissionMetrics(meter=meter),
-        debug_session_telemetry=DebugSessionTelemetry(meter=meter),
-    )
-
-
-def _optional_reconciler_object_store(
-    store_factory: Callable[[], ObjectStore],
-) -> ObjectStore | None:
-    """Return the object store, or ``None`` only when S3 is wholly unconfigured."""
-    try:
-        return store_factory()
-    except CategorizedError:
-        if _s3_env_is_absent():
-            return None
-        raise
-
-
-def _s3_env_is_absent() -> bool:
-    env = config.env_snapshot()
-    return _S3_OPTIONAL_ENV_NAMES.isdisjoint(env)
-
-
-def _reconciler_probe(
-    pool: AsyncConnectionPool,
-    build_postgres_ping: Callable[[AsyncConnectionPool], Callable[[], Awaitable[None]]],
-    build_worker_probe: Callable[..., HealthProbe],
-    object_store_factory: Callable[[], object],
-) -> HealthProbe:
-    """Build the reconciler readiness probe (PG + MinIO, no OIDC — same set as the worker)."""
-    return build_worker_probe(
-        postgres_ping=build_postgres_ping(pool), object_store_factory=object_store_factory
-    )
-
-
-async def _register_provider_resources(
-    pool: AsyncConnectionPool, resolver: ProviderResolver
-) -> None:
-    """Best-effort provider discovery registration so allocations.request has a Resource.
-
-    A provider that can't be reached/registered must not crash the reconciler — the other
-    repairs still run, and the next startup retries; the failure is logged.
-    """
-    try:
-        await asyncio.wait_for(
-            resolver.register_all_discovery(pool),
-            timeout=_PROVIDER_DISCOVERY_TIMEOUT_SECONDS,
-        )
-    except TimeoutError:
-        _log.warning(
-            "reconciler: provider discovery registration timed out after %ss",
-            _PROVIDER_DISCOVERY_TIMEOUT_SECONDS,
-        )
-    except Exception:  # noqa: BLE001 - registration failure must not crash the reconciler
-        _log.warning("reconciler: provider discovery registration failed", exc_info=True)
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -7,10 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from kdive.__main__ import _HTTP_KEEPALIVE_S, _server_uvicorn_config, build_parser
+from kdive.__main__ import build_parser
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildOutput
 from kdive.images.rootfs_command import run_build_fs
+from kdive.processes.server import HTTP_KEEPALIVE_S, server_uvicorn_config
 
 
 def _patch_plane(monkeypatch: pytest.MonkeyPatch, plane: object) -> None:
@@ -46,8 +47,8 @@ def test_server_uvicorn_config_sets_explicit_keepalive() -> None:
     blocks until the server stops, so the kwarg is built by this helper instead — testing the
     real value, not a forever-blocking mock.
     """
-    assert _HTTP_KEEPALIVE_S == 65.0
-    assert _server_uvicorn_config() == {"timeout_keep_alive": 65.0}
+    assert HTTP_KEEPALIVE_S == 65.0
+    assert server_uvicorn_config() == {"timeout_keep_alive": 65.0}
 
 
 def test_build_fs_subcommand_parses_with_defaults() -> None:
