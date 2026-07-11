@@ -28,12 +28,11 @@ from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     CREATE_RUN_UPLOAD_TOOL,
     CREATE_SYSTEM_UPLOAD_TOOL,
-    RUN_ARTIFACT_NAMES,
-    SYSTEM_ARTIFACT_NAMES,
 )
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
+from kdive.services.artifacts.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
 
 
 def _items(resp: ToolResponse) -> dict[str, dict[str, Any]]:

@@ -42,6 +42,7 @@ from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.serialization import JsonValue
+from kdive.services.artifacts.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
 from kdive.store.objectstore import (
     artifact_key,
     chunk_key,
@@ -57,9 +58,6 @@ _TENANT = "local"
 # validator below enforces — the advertisement can never drift from the accepted names.
 CREATE_RUN_UPLOAD_TOOL = "artifacts.create_run_upload"
 CREATE_SYSTEM_UPLOAD_TOOL = "artifacts.create_system_upload"
-RUN_ARTIFACT_NAMES = frozenset({"effective_config", "kernel", "initrd", "vmlinux"})
-_ROOTFS_NAME = "rootfs"
-SYSTEM_ARTIFACT_NAMES = frozenset({_ROOTFS_NAME})
 _RETENTION_CLASS = "build"
 
 # Upper bound on an offending artifact-name string echoed back in an error's ``data.value``

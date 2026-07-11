@@ -7,7 +7,6 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.db.artifact_queries import raw_vmcore_key
 from kdive.db.repositories import RUNS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
@@ -15,6 +14,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.artifacts.read_model import raw_vmcore_key
 from kdive.services.runs.steps import existing_build_result
 
 # Structured `reason` tokens for the distinct vmcore-target preconditions (#487, ADR-0142).

@@ -22,7 +22,7 @@ from kdive.build_artifacts.validation import (
     validate_external_artifacts,
 )
 from kdive.domain.errors import CategorizedError
-from kdive.mcp.tools.catalog.artifacts.uploads import RUN_ARTIFACT_NAMES
+from kdive.services.artifacts.read_model import RUN_ARTIFACT_NAMES
 
 
 class _UntouchedStore:

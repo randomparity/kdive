@@ -22,11 +22,6 @@ from psycopg_pool import AsyncConnectionPool
 import kdive.config as config
 from kdive.artifacts.storage import HeadResult
 from kdive.config.core_settings import ARTIFACT_DOWNLOAD_TTL_SECONDS
-from kdive.db.artifact_queries import (
-    RunFetchContext,
-    raw_vmcore_key,
-    run_fetch_context,
-)
 from kdive.domain.errors import CategorizedError
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
@@ -36,6 +31,11 @@ from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.artifacts.read_model import (
+    RunFetchContext,
+    raw_vmcore_key,
+    run_fetch_context,
+)
 from kdive.store.objectstore import object_store_from_env
 
 
