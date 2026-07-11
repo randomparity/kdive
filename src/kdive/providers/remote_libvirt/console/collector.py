@@ -30,17 +30,12 @@ import threading
 from typing import Protocol
 from uuid import UUID
 
+from kdive.providers.console_parts.rotation import ROTATION_THRESHOLD, SEAM_OVERLAP
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _log = logging.getLogger(__name__)
 
-# Steady-state rotation threshold (ADR-0095): small, so the unflushed crash-tail window is
-# bounded — the durability trade the ADR's Consequences section calls out.
-DEFAULT_ROTATION_THRESHOLD = 64 * 1024
-# Trailing overlap re-scanned across the rotation seam so a secret split between two parts is
-# still redacted (AC2). Sized to cover a registered secret value plus a key=value token.
-DEFAULT_SEAM_OVERLAP = 4 * 1024
 # Cap on a single console-stream read so a chatty guest cannot grow the buffer unboundedly
 # between rotations.
 DEFAULT_READ_CHUNK = 16 * 1024
@@ -106,8 +101,8 @@ class ConsoleCollector:
         open_console: OpenConsole,
         store: ConsolePartStore,
         secret_registry: SecretRegistry,
-        rotation_threshold: int = DEFAULT_ROTATION_THRESHOLD,
-        seam_overlap: int = DEFAULT_SEAM_OVERLAP,
+        rotation_threshold: int = ROTATION_THRESHOLD,
+        seam_overlap: int = SEAM_OVERLAP,
         read_chunk: int = DEFAULT_READ_CHUNK,
         telemetry: ConsoleRecorder | None = None,
     ) -> None:
