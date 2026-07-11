@@ -27,11 +27,12 @@ not a cost to accept:
    hypothesis (`top-level-design.md` §Roadmap), measured against a real second provider for the
    first time. A second unplanned core change is the gate firing, not a new allowlist entry.
 
-`local_libvirt` is a bootstrap headed for removal once `remote_libvirt` is enabled in
-production (the MCP server runs separately from the libvirt-enabled development hosts). **M2
-keeps `local_libvirt`** as the default and the test/baseline backbone — its removal is an
-explicit follow-up milestone, not M2 — so the falsifiability diff has a stable "before"
-baseline and the M1.2 / M1.5 scaffolding standing on local-libvirt is undisturbed.
+ADR-0076 originally treated `local_libvirt` as a bootstrap that would be removed after
+`remote_libvirt` came online. Later local-libvirt parity work kept `local_libvirt` as the
+default and the test/baseline backbone, while `remote_libvirt` remains an
+operator-configured opt-in provider. The M2 falsifiability diff therefore has a stable
+"before" baseline and the M1.2 / M1.5 scaffolding standing on local-libvirt is
+undisturbed.
 
 - **Decisions:** [ADR-0076](../adr/0076-remote-libvirt-provider-package.md) (the independent
   `remote_libvirt` package + `ResourceKind.REMOTE_LIBVIRT` + composition registration + the
@@ -64,10 +65,10 @@ baseline and the M1.2 / M1.5 scaffolding standing on local-libvirt is undisturbe
   with its own discovery, lifecycle (provisioning / install / connect / control), build,
   retrieve, and debug (gdb-MI + introspect) modules, composing the same typed `ProviderRuntime`
   ports (ADR-0063). It does **not** share a `libvirt_common` layer with `local_libvirt`:
-  local-libvirt is headed for removal, so coupling the production provider to a doomed module
-  would create exactly the migration-shim the "replace, don't deprecate" standard forbids
-  (ADR-0076). A new `ResourceKind.REMOTE_LIBVIRT = "remote-libvirt"` and migration `0020`
-  (CHECK widen) register the third kind behind the per-kind `ProviderResolver` (ADR-0071).
+  ADR-0076 accepts bounded libvirt-API duplication so remote-libvirt remains independent
+  from local-libvirt while both providers coexist. A new
+  `ResourceKind.REMOTE_LIBVIRT = "remote-libvirt"` and migration `0020` (CHECK widen)
+  register the third kind behind the per-kind `ProviderResolver` (ADR-0071).
 - **A `qemu+tls://` control transport (mutual TLS)** — discovery, provisioning (define/start),
   control (power/reset/force-crash), and capability enumeration call libvirt over `qemu+tls://`;
   the worker presents a client cert **and** verifies the libvirtd server cert against a
