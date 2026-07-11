@@ -202,6 +202,9 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_IMAGE` | — | Container image ref under test for the image smoke test; unset → the smoke test skips. |
 | `KDIVE_LIVE_SSH_TARGET` | — | SSH target gating the criterion-5 live_stack tier; unset → the live_stack suite skips. |
 | `KDIVE_LIVE_VM_BZIMAGE` | — | Path to a kernel image that panics early in boot (no usable rootfs) for the gated local-libvirt preserve-crash live-attach test (#747); unset → that test skips. |
+| `KDIVE_LIVE_VM_GDBMI_MODULE_KO` | — | Path to a loaded module .ko for the optional gated gdb-MI module-symbol load smoke. Unset → that portion of the test skips. |
+| `KDIVE_LIVE_VM_GDBMI_MODULE_NAME` | — | Loaded module name matching KDIVE_LIVE_VM_GDBMI_MODULE_KO for the optional gated gdb-MI module-symbol load smoke. Defaults to the .ko path stem. |
+| `KDIVE_LIVE_VM_GDBMI_VMLINUX` | — | Path to the vmlinux debuginfo matching KDIVE_LIVE_VM_BZIMAGE for the gated gdb-MI debug tool smoke. Unset → that test skips. |
 | `KDIVE_LIVE_VM_SYSTEM_ID` | — | System id of a pre-provisioned live VM for the gated local-libvirt install test. |
 | `KDIVE_LIVE_VM_VMCORE` | — | Path to a real captured vmcore for the live_vm crash(8) postmortem test (#816); paired with KDIVE_LIVE_VM_VMLINUX. Unset → that test skips. |
 | `KDIVE_LIVE_VM_VMLINUX` | — | Path to the vmlinux debuginfo matching KDIVE_LIVE_VM_VMCORE for the live_vm crash(8) postmortem test (#816). Unset → that test skips. |
