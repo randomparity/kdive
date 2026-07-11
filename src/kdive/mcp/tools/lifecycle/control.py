@@ -205,7 +205,11 @@ async def force_crash_system(
                     JobKind.FORCE_CRASH,
                     SystemPayload(system_id=system_id),
                     job_authorizing(ctx, system.project),
-                    f"{system_id}:force_crash",
+                    # Canonical uid (not the raw agent string, which UUID() accepts in
+                    # non-canonical forms): the reconciler's leak-recovery predicate matches this
+                    # dedup_key against `s.id::text` (canonical), so a non-canonical key would hide
+                    # a live force_crash job and trigger premature recovery (#1078).
+                    f"{uid}:force_crash",
                 )
                 return job_envelope(job, "system_id", uid)
 

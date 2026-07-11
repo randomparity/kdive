@@ -677,6 +677,31 @@ def test_force_crash_handler_terminal_system_does_not_crash(migrated_url: str) -
     asyncio.run(_run())
 
 
+def test_force_crash_dedup_key_is_canonical_for_non_canonical_uuid(migrated_url: str) -> None:
+    # The reconciler's leak-recovery predicate matches the dedup_key against `s.id::text`
+    # (canonical). Admission must mint the key from the canonical UUID even when the agent passes
+    # a non-canonical form (uppercase), or the reconciler misses the live job (#1078).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(
+                pool, alloc_id, SystemState.READY, destructive_ops=["force_crash"]
+            )
+            resp = await _crash(pool, _admin_ctx(), sys_id.upper())  # non-canonical input
+            assert resp.status != "error", resp
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT dedup_key FROM jobs WHERE kind = 'force_crash' "
+                    "AND payload->>'system_id' = %s",
+                    (sys_id.upper(),),
+                )
+                row = await cur.fetchone()
+        assert row is not None
+        assert row["dedup_key"] == f"{sys_id}:force_crash"  # canonical lowercase
+
+    asyncio.run(_run())
+
+
 def test_force_crash_handler_missing_system_is_infra_failure(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

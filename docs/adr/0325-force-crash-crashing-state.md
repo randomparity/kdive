@@ -116,6 +116,13 @@ must be a durable marker the power path already respects.
   *before* dispatching the NMI, a healthy guest is mislabelled `crashed` and torn down rather
   than powered. Accepted — that window is orders of magnitude smaller than the
   NMI-to-`CRASHED` window, and evidence-first is the safe default for a crash-debugging tool.
+- **Deploy ordering.** `crashing` is a new enum value that older code parses with
+  `SystemState(row["state"])`, which raises on an unknown value — the standard forward-only
+  concern for any added state (this ADR adds one like the seven before it). The safe order is the
+  usual one: migration `0065` and the code that *reads* `crashing` roll out before any worker can
+  *produce* it, and `force_crash` (admin + gate + opt-in, rare) is quiescent across a deploy. No
+  new deploy machinery is introduced; the assumption is the same atomic/forward-only rollout the
+  project already relies on for every state value.
 
 ## Considered & rejected
 
