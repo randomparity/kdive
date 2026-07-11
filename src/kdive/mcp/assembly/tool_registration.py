@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Protocol
 
 from fastmcp import FastMCP
 from opentelemetry import metrics
@@ -68,148 +69,147 @@ class AppAssembly:
     object_stores: ObjectStoreAssembly
 
 
-type PlaneRegistrar = Callable[[FastMCP, AsyncConnectionPool, AppAssembly], None]
+type PlaneRegistrar = Callable[[FastMCP, AsyncConnectionPool], None]
+
+
+class ResolverRegistrar(Protocol):
+    """Registrar shape for planes that only need the provider resolver."""
+
+    def __call__(
+        self, app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver
+    ) -> None: ...
 
 
 def _pool_only_plane_registrar(
     register: Callable[[FastMCP, AsyncConnectionPool], None],
 ) -> PlaneRegistrar:
-    def _register(
-        app: FastMCP,
-        pool: AsyncConnectionPool,
-        _: AppAssembly,
-    ) -> None:
-        register(app, pool)
+    return register
+
+
+def _gateway_tools_registrar(resolver: ProviderResolver) -> PlaneRegistrar:
+    def _register(app: FastMCP, _pool: AsyncConnectionPool) -> None:
+        gateway.register(app, resolver=resolver)
 
     return _register
 
 
-def _register_gateway_tools(
-    app: FastMCP, _pool: AsyncConnectionPool, assembly: AppAssembly
-) -> None:
-    gateway.register(app, resolver=assembly.resolver)
+def _reconcile_tools_registrar(
+    *,
+    reaper: InfraReaper,
+    dump_volume_reaper: DumpVolumeReaper,
+    object_stores: ObjectStoreAssembly,
+) -> PlaneRegistrar:
+    def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+        ports = ops_reconcile_tools.ReconcileRepairPorts(
+            reaper=reaper,
+            upload_store=object_stores.optional_upload_store,
+            image_store=object_stores.optional_image_store,
+            dump_volume_reaper=dump_volume_reaper,
+        )
+        ops_reconcile_tools.register(app, pool, ports=ports)
+
+    return _register
 
 
-def _register_reconcile_tools(
-    app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
-) -> None:
-    ports = ops_reconcile_tools.ReconcileRepairPorts(
-        reaper=assembly.reaper,
-        upload_store=assembly.object_stores.optional_upload_store,
-        image_store=assembly.object_stores.optional_image_store,
-        dump_volume_reaper=assembly.dump_volume_reaper,
-    )
-    ops_reconcile_tools.register(app, pool, ports=ports)
-
-
-def _register_reconcile_systems_tools(
-    app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
-) -> None:
-    ops_reconcile_systems_tools.register(
-        app, pool, image_store=assembly.object_stores.optional_image_store
-    )
-
-
-def _register_ops_resource_host_tools(
-    app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly
-) -> None:
-    ops_resource_host_tools.register(app, pool)
-
-
-def _register_allocations_tools(
-    app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
-) -> None:
-    allocations_tools.register(app, pool, resolver=assembly.resolver)
-
-
-def _register_systems_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:
-    systems_tools.register(app, pool, resolver=assembly.resolver)
-
-
-def _register_catalog_resources(
-    app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
-) -> None:
-    resources.register(app, pool, resolver=assembly.resolver)
-
-
-def _register_runs_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:
-    runs_tools.register(app, pool, resolver=assembly.resolver)
-
-
-def _register_control_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:
-    control_tools.register(app, pool, resolver=assembly.resolver)
-
-
-def _register_artifact_tools(
-    app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
-) -> None:
-    artifacts_tools.register(app, pool, resolver=assembly.resolver)
-
-
-def _register_vmcore_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:
-    vmcore_tools.register(
-        app, pool, resolver=assembly.resolver, secret_registry=assembly.secret_registry
-    )
-
-
-def _register_debug_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:
-    debug_tools.register(
-        app,
-        pool,
-        resolver=assembly.resolver,
-        secret_registry=assembly.secret_registry,
-        telemetry=DebugSessionTelemetry(meter=metrics.get_meter("kdive.mcp")),
-    )
-
-
-def _register_introspection_tools(
-    app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
-) -> None:
-    introspect.register(
-        app, pool, resolver=assembly.resolver, secret_registry=assembly.secret_registry
-    )
-
-
-def _register_diagnostics_tools(
-    app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly
-) -> None:
-    def _service_factory(provider: str | None, *, with_egress: bool = False) -> DiagnosticsService:
-        return default_service_factory(
-            provider,
-            with_egress=with_egress,
-            pool=pool,
-            provider_contributions=diagnostic_provider_contributions(),
+def _reconcile_systems_tools_registrar(object_stores: ObjectStoreAssembly) -> PlaneRegistrar:
+    def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+        ops_reconcile_systems_tools.register(
+            app, pool, image_store=object_stores.optional_image_store
         )
 
-    ops_diagnostics_tools.register(app, pool, _service_factory)
+    return _register
 
 
-def _register_ops_images_tools(
-    app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
-) -> None:
-    store = assembly.object_stores.optional_ops_image_store
-    ops_images_tools.register(app, pool, image_store=store, upload_store=store)
+def _resolver_tools_registrar(
+    register: ResolverRegistrar,
+    resolver: ProviderResolver,
+) -> PlaneRegistrar:
+    def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+        register(app, pool, resolver=resolver)
+
+    return _register
 
 
-def _register_ops_secrets_tools(
-    app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
-) -> None:
-    ops_secrets_tools.register(app, pool, assembly.secret_registry)
+def _vmcore_tools_registrar(
+    resolver: ProviderResolver, secret_registry: SecretRegistry
+) -> PlaneRegistrar:
+    def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+        vmcore_tools.register(app, pool, resolver=resolver, secret_registry=secret_registry)
+
+    return _register
 
 
-def _register_report_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:
-    reports_generate.register(app, pool, secret_registry=assembly.secret_registry)
+def _debug_tools_registrar(
+    resolver: ProviderResolver, secret_registry: SecretRegistry
+) -> PlaneRegistrar:
+    def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+        debug_tools.register(
+            app,
+            pool,
+            resolver=resolver,
+            secret_registry=secret_registry,
+            telemetry=DebugSessionTelemetry(meter=metrics.get_meter("kdive.mcp")),
+        )
+
+    return _register
 
 
-def _register_doc_resources(
-    app: FastMCP, _pool: AsyncConnectionPool, assembly: AppAssembly
-) -> None:
-    doc_resources.register(app, resolver=assembly.resolver)
+def _introspection_tools_registrar(
+    resolver: ProviderResolver, secret_registry: SecretRegistry
+) -> PlaneRegistrar:
+    def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+        introspect.register(app, pool, resolver=resolver, secret_registry=secret_registry)
+
+    return _register
 
 
-def _register_lifecycle_prompts(
-    app: FastMCP, _pool: AsyncConnectionPool, _assembly: AppAssembly
-) -> None:
+def _diagnostics_tools_registrar() -> PlaneRegistrar:
+    def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+        def _service_factory(
+            provider: str | None, *, with_egress: bool = False
+        ) -> DiagnosticsService:
+            return default_service_factory(
+                provider,
+                with_egress=with_egress,
+                pool=pool,
+                provider_contributions=diagnostic_provider_contributions(),
+            )
+
+        ops_diagnostics_tools.register(app, pool, _service_factory)
+
+    return _register
+
+
+def _ops_images_tools_registrar(object_stores: ObjectStoreAssembly) -> PlaneRegistrar:
+    def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+        store = object_stores.optional_ops_image_store
+        ops_images_tools.register(app, pool, image_store=store, upload_store=store)
+
+    return _register
+
+
+def _ops_secrets_tools_registrar(secret_registry: SecretRegistry) -> PlaneRegistrar:
+    def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+        ops_secrets_tools.register(app, pool, secret_registry)
+
+    return _register
+
+
+def _report_tools_registrar(secret_registry: SecretRegistry) -> PlaneRegistrar:
+    def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+        reports_generate.register(app, pool, secret_registry=secret_registry)
+
+    return _register
+
+
+def _doc_resources_registrar(resolver: ProviderResolver) -> PlaneRegistrar:
+    def _register(app: FastMCP, _pool: AsyncConnectionPool) -> None:
+        doc_resources.register(app, resolver=resolver)
+
+    return _register
+
+
+def _register_lifecycle_prompts(app: FastMCP, _pool: AsyncConnectionPool) -> None:
     def maturity_record(meta: Mapping[str, object] | None) -> lifecycle_prompts.ToolMaturity:
         meta = meta or {}
         detail = meta.get("maturity_detail")
@@ -223,43 +223,49 @@ def _register_lifecycle_prompts(
     lifecycle_prompts.register(app, tool_maturity=tool_maturity)
 
 
-PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
-    _register_gateway_tools,
-    _pool_only_plane_registrar(jobs.register),
-    _register_catalog_resources,
-    _pool_only_plane_registrar(availability.register),
-    _pool_only_plane_registrar(projects.register),
-    _pool_only_plane_registrar(session.register),
-    _pool_only_plane_registrar(shapes.register),
-    _pool_only_plane_registrar(register_accounting_estimate),
-    _pool_only_plane_registrar(register_accounting_usage),
-    _pool_only_plane_registrar(register_accounting_reports),
-    _pool_only_plane_registrar(register_accounting_admin),
-    _register_report_tools,
-    _register_reconcile_tools,
-    _register_reconcile_systems_tools,
-    _register_ops_resource_host_tools,
-    _pool_only_plane_registrar(ops_resource_mutation_tools.register),
-    _register_allocations_tools,
-    _pool_only_plane_registrar(ops_breakglass_tools.register),
-    _register_systems_tools,
-    _pool_only_plane_registrar(investigations.register),
-    _register_runs_tools,
-    _register_control_tools,
-    _register_artifact_tools,
-    _register_vmcore_tools,
-    _register_debug_tools,
-    _register_introspection_tools,
-    _pool_only_plane_registrar(ops_queue_tools.register),
-    _pool_only_plane_registrar(ops_tuning_tools.register),
-    _pool_only_plane_registrar(ops_audit_tools.register),
-    _register_diagnostics_tools,
-    _pool_only_plane_registrar(ops_inventory_tools.register),
-    _pool_only_plane_registrar(fixtures.register),
-    _pool_only_plane_registrar(catalog_images.register),
-    _pool_only_plane_registrar(kernel_config.register),
-    _register_ops_images_tools,
-    _register_ops_secrets_tools,
-    _register_doc_resources,
-    _register_lifecycle_prompts,
-)
+def build_plane_registrars(assembly: AppAssembly) -> tuple[PlaneRegistrar, ...]:
+    """Build plane registrars from the narrow dependencies each group actually uses."""
+    return (
+        _gateway_tools_registrar(assembly.resolver),
+        _pool_only_plane_registrar(jobs.register),
+        _resolver_tools_registrar(resources.register, assembly.resolver),
+        _pool_only_plane_registrar(availability.register),
+        _pool_only_plane_registrar(projects.register),
+        _pool_only_plane_registrar(session.register),
+        _pool_only_plane_registrar(shapes.register),
+        _pool_only_plane_registrar(register_accounting_estimate),
+        _pool_only_plane_registrar(register_accounting_usage),
+        _pool_only_plane_registrar(register_accounting_reports),
+        _pool_only_plane_registrar(register_accounting_admin),
+        _report_tools_registrar(assembly.secret_registry),
+        _reconcile_tools_registrar(
+            reaper=assembly.reaper,
+            dump_volume_reaper=assembly.dump_volume_reaper,
+            object_stores=assembly.object_stores,
+        ),
+        _reconcile_systems_tools_registrar(assembly.object_stores),
+        _pool_only_plane_registrar(ops_resource_host_tools.register),
+        _pool_only_plane_registrar(ops_resource_mutation_tools.register),
+        _resolver_tools_registrar(allocations_tools.register, assembly.resolver),
+        _pool_only_plane_registrar(ops_breakglass_tools.register),
+        _resolver_tools_registrar(systems_tools.register, assembly.resolver),
+        _pool_only_plane_registrar(investigations.register),
+        _resolver_tools_registrar(runs_tools.register, assembly.resolver),
+        _resolver_tools_registrar(control_tools.register, assembly.resolver),
+        _resolver_tools_registrar(artifacts_tools.register, assembly.resolver),
+        _vmcore_tools_registrar(assembly.resolver, assembly.secret_registry),
+        _debug_tools_registrar(assembly.resolver, assembly.secret_registry),
+        _introspection_tools_registrar(assembly.resolver, assembly.secret_registry),
+        _pool_only_plane_registrar(ops_queue_tools.register),
+        _pool_only_plane_registrar(ops_tuning_tools.register),
+        _pool_only_plane_registrar(ops_audit_tools.register),
+        _diagnostics_tools_registrar(),
+        _pool_only_plane_registrar(ops_inventory_tools.register),
+        _pool_only_plane_registrar(fixtures.register),
+        _pool_only_plane_registrar(catalog_images.register),
+        _pool_only_plane_registrar(kernel_config.register),
+        _ops_images_tools_registrar(assembly.object_stores),
+        _ops_secrets_tools_registrar(assembly.secret_registry),
+        _doc_resources_registrar(assembly.resolver),
+        _register_lifecycle_prompts,
+    )

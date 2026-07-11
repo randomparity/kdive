@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -184,20 +183,19 @@ def test_build_app_uses_injected_composition_secret_registry(
 ) -> None:
     captured: list[app_module.AppAssembly] = []
 
-    def _capture_assembly(
-        app: FastMCP,
-        _pool: AsyncConnectionPool,
-        assembly: app_module.AppAssembly,
-    ) -> None:
+    def _build_registrars(assembly: app_module.AppAssembly) -> tuple[tool_module.PlaneRegistrar]:
         captured.append(assembly)
 
-        # Register one tool so build_app produces a non-empty surface — a real registrar always
-        # registers tools, and build_app's flat-schema sweep raises on a zero-tool count (ADR-0113).
-        @app.tool(name="_probe")
-        def _probe() -> str:
-            return "ok"
+        def _register(app: FastMCP, _pool: AsyncConnectionPool) -> None:
+            # Register one tool so build_app produces a non-empty surface — a real registrar always
+            # registers tools, and build_app's flat-schema sweep raises on zero tools (ADR-0113).
+            @app.tool(name="_probe")
+            def _probe() -> str:
+                return "ok"
 
-    monkeypatch.setattr(app_module, "PLANE_REGISTRARS", (_capture_assembly,))
+        return (_register,)
+
+    monkeypatch.setattr(app_module, "build_plane_registrars", _build_registrars)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     composition_registry = SecretRegistry()
     caller_registry = SecretRegistry()
@@ -237,17 +235,15 @@ def test_ops_images_registration_uses_standard_register_entrypoint(
         captured["upload_store"] = upload_store
 
     monkeypatch.setattr(tool_module.ops_images_tools, "register", _register)
-    assembly = SimpleNamespace(
-        object_stores=ObjectStoreAssembly(
-            optional_upload_store=cast(Any, store),
-            optional_image_store=cast(Any, store),
-            optional_ops_image_store=cast(Any, store),
-            required_image_build_store=cast(Any, store),
-            request_time_store_factory=cast(Any, _store_from_env),
-        )
+    object_stores = ObjectStoreAssembly(
+        optional_upload_store=cast(Any, store),
+        optional_image_store=cast(Any, store),
+        optional_ops_image_store=cast(Any, store),
+        required_image_build_store=cast(Any, store),
+        request_time_store_factory=cast(Any, _store_from_env),
     )
 
-    tool_module._register_ops_images_tools(app, pool, cast(Any, assembly))
+    tool_module._ops_images_tools_registrar(object_stores)(app, pool)
 
     assert not hasattr(tool_module.ops_images_tools, "register_from_env")
     assert captured == {
@@ -515,11 +511,15 @@ def test_prompts_add_no_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     # Graceful degradation: the prompts plane registers no tools and removes none.
     with_prompts = {t.name for t in asyncio.run(_built_app().list_tools())}
 
-    without = tuple(
-        r for r in app_module.PLANE_REGISTRARS if r is not tool_module._register_lifecycle_prompts
-    )
-    assert len(without) == len(app_module.PLANE_REGISTRARS) - 1
-    monkeypatch.setattr(app_module, "PLANE_REGISTRARS", without)
+    def _without_prompts(
+        assembly: app_module.AppAssembly,
+    ) -> tuple[tool_module.PlaneRegistrar, ...]:
+        registrars = tool_module.build_plane_registrars(assembly)
+        without = tuple(r for r in registrars if r is not tool_module._register_lifecycle_prompts)
+        assert len(without) == len(registrars) - 1
+        return without
+
+    monkeypatch.setattr(app_module, "build_plane_registrars", _without_prompts)
     without_prompts = {t.name for t in asyncio.run(_built_app().list_tools())}
 
     assert with_prompts == without_prompts

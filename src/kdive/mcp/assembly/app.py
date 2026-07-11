@@ -9,7 +9,7 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from opentelemetry import metrics, trace
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.mcp.assembly.tool_registration import PLANE_REGISTRARS, AppAssembly
+from kdive.mcp.assembly.tool_registration import AppAssembly, build_plane_registrars
 from kdive.mcp.auth import build_verifier
 from kdive.mcp.exposure import gateway_enabled
 from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
@@ -65,7 +65,7 @@ def build_app(
         dump_volume_reaper=composition.build_reconciler_dump_volume_reaper(),
         object_stores=build_object_store_assembly(),
     )
-    for register in PLANE_REGISTRARS:
-        register(app, pool, assembly)
+    for register in build_plane_registrars(assembly):
+        register(app, pool)
     advertise_envelope_output_schema(app)
     return app
