@@ -162,8 +162,8 @@ class DefinedSystemAdmitted:
 type AdmissionResult = AdmissionFailure | ProvisionJobAdmitted | DefinedSystemAdmitted
 
 # Idempotency recorder (ADR-0193): given the open admission connection and a success result,
-# persists the success envelope in that transaction. The success envelope is built by the MCP
-# adapter (which owns response shaping) and closed over in the callback.
+# persists the service-owned AdmissionResult serialization in that transaction. The MCP adapter
+# supplies this recorder and renders ToolResponse after replay or admission.
 type SystemRecorder = Callable[[AsyncConnection, AdmissionResult], Awaitable[None]]
 
 
