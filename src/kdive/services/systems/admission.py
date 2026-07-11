@@ -48,6 +48,7 @@ from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.serialization import safe_error_details
+from kdive.services.idempotency.envelope import StoredResult
 from kdive.services.systems.validation import (
     RootfsValidator,
     validate_profile_for_provider,
@@ -164,6 +165,46 @@ type AdmissionResult = AdmissionFailure | ProvisionJobAdmitted | DefinedSystemAd
 # persists the success envelope in that transaction. The success envelope is built by the MCP
 # adapter (which owns response shaping) and closed over in the callback.
 type SystemRecorder = Callable[[AsyncConnection, AdmissionResult], Awaitable[None]]
+
+
+def stored_admission_result(result: AdmissionResult) -> StoredResult:
+    """Serialize a successful system admission result for idempotent replay."""
+    if isinstance(result, ProvisionJobAdmitted):
+        return StoredResult(
+            document={
+                "type": "provision_job",
+                "job": result.job.model_dump(mode="json"),
+                "system_id": str(result.system_id),
+            }
+        )
+    if isinstance(result, DefinedSystemAdmitted):
+        return StoredResult(
+            document={
+                "type": "defined_system",
+                "system": result.system.model_dump(mode="json"),
+            }
+        )
+    raise TypeError(f"cannot store admission failure: {type(result).__name__}")
+
+
+def admission_result_from_stored(stored: StoredResult) -> AdmissionResult:
+    """Deserialize a stored successful system admission result."""
+    match stored.document.get("type"):
+        case "provision_job":
+            job = Job.model_validate(stored.document["job"])
+            return ProvisionJobAdmitted(
+                job=job,
+                system_id=UUID(str(stored.document["system_id"])),
+            )
+        case "defined_system":
+            system = System.model_validate(stored.document["system"])
+            return DefinedSystemAdmitted(system)
+        case _:
+            raise CategorizedError(
+                "stored system admission result is invalid",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"reason": "invalid_idempotency_result"},
+            )
 
 
 def _failure_from_error(subject_id: UUID, exc: CategorizedError) -> AdmissionFailure:

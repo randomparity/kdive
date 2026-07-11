@@ -39,6 +39,8 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.serialization import JsonValue
+from kdive.services.idempotency.envelope import StoredResult
 from kdive.services.runs.states import (
     ALLOC_HOSTABLE,
     INVESTIGATION_OPEN_FOR_RUN,
@@ -139,6 +141,45 @@ class RunCreateResult:
 
 
 type RunCreateRecorder = Callable[[AsyncConnection, RunCreateResult], Awaitable[None]]
+
+
+def stored_run_create_result(result: RunCreateResult) -> StoredResult:
+    """Serialize a successful Run creation result for idempotent replay."""
+    document: dict[str, JsonValue] = {
+        "type": "run_create",
+        "run_id": str(result.run_id),
+        "project": result.project,
+        "investigation_id": str(result.investigation_id),
+        "target_kind": result.target_kind.value,
+        "system_id": str(result.system_id) if result.system_id is not None else None,
+        "expected_boot_failure_kind": result.expected_boot_failure_kind,
+        "label": result.label,
+    }
+    return StoredResult(document=document)
+
+
+def run_create_result_from_stored(stored: StoredResult) -> RunCreateResult:
+    """Deserialize a stored successful Run creation result."""
+    if stored.document.get("type") != "run_create":
+        raise CategorizedError(
+            "stored run creation result is invalid",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"reason": "invalid_idempotency_result"},
+        )
+    system_id = stored.document["system_id"]
+    return RunCreateResult(
+        run_id=UUID(str(stored.document["run_id"])),
+        project=str(stored.document["project"]),
+        investigation_id=UUID(str(stored.document["investigation_id"])),
+        target_kind=ResourceKind(str(stored.document["target_kind"])),
+        system_id=UUID(str(system_id)) if isinstance(system_id, str) else None,
+        expected_boot_failure_kind=_optional_str(stored.document["expected_boot_failure_kind"]),
+        label=_optional_str(stored.document["label"]),
+    )
+
+
+def _optional_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 async def create_run(
