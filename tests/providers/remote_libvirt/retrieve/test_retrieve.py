@@ -1,4 +1,4 @@
-"""RemoteLibvirtRetrieve tests — injected agent/store/opener, no host or S3."""
+"""RemoteLibvirtRetriever tests — injected agent/store/opener, no host or S3."""
 
 from __future__ import annotations
 
@@ -21,15 +21,14 @@ from kdive.artifacts.storage import (
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports.retrieve import CrashResult
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.guest.agent import AgentExecResult, qemu_agent_command
-from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.retrieve.kdump_capture import (
     DEFAULT_PUT_EXPIRY_S,
     DEFAULT_READINESS_POLL_S,
     KdumpCapturer,
 )
+from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend
@@ -123,7 +122,7 @@ def _retrieve(
     tmp_path: Path,
     *,
     readiness_timeout_s: float = 300.0,
-) -> RemoteLibvirtRetrieve:
+) -> RemoteLibvirtRetriever:
     conn = FakeControlConn({_domain_name(): FakeDomain(_domain_name())})
     kdump = KdumpCapturer(
         secret_registry=SecretRegistry(),
@@ -140,7 +139,7 @@ def _retrieve(
         sleep=lambda _s: None,
         monotonic=lambda: 0.0,
     )
-    return RemoteLibvirtRetrieve(
+    return RemoteLibvirtRetriever(
         secret_registry=SecretRegistry(),
         config_factory=_config,
         store_factory=lambda: store,
@@ -278,17 +277,3 @@ def test_capture_nonzero_inspect_exit_is_infrastructure_failure(tmp_path: Path) 
     with pytest.raises(CategorizedError) as exc:
         _retrieve(_NonZeroInspect(), store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-
-
-def test_run_crash_postmortem_delegates() -> None:
-    rt = RemoteLibvirtRetrieve(
-        secret_registry=SecretRegistry(),
-        config_factory=_config,
-        fetch_object=lambda ref: b"CORE",
-        read_build_id=lambda data: "deadbeef",
-        run_crash=lambda vmlinux, core, script: CrashResult(0, b"OK", b""),
-    )
-    out = rt.run_crash_postmortem(
-        vmcore_ref="r", debuginfo_ref="d", expected_build_id="deadbeef", commands=["bt"]
-    )
-    assert out.transcript == "OK"

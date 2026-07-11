@@ -71,7 +71,8 @@ from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtP
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
 from kdive.providers.remote_libvirt.resource_details import project_resource_details
-from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
+from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
+from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.providers.shared.debug_common.gdbmi.debuginfo import real_module_debuginfo_resolver
 from kdive.providers.shared.debug_common.gdbmi.engine import GdbMiEngine
@@ -273,9 +274,10 @@ def build_runtime(
     installer = RemoteLibvirtInstall.from_env(
         secret_registry=secret_registry, config_factory=config_factory
     )
-    retriever = RemoteLibvirtRetrieve.from_env(
+    retriever = RemoteLibvirtRetriever.from_env(
         secret_registry=secret_registry, config_factory=config_factory
     )
+    crash_postmortem = CrashPostmortemAdapter(secret_registry=secret_registry)
     vmcore_introspector = RemoteLibvirtVmcoreIntrospect.from_env(secret_registry=secret_registry)
     live_introspector = RemoteLibvirtLiveIntrospect.from_env(
         secret_registry=secret_registry, config_factory=config_factory
@@ -295,7 +297,7 @@ def build_runtime(
             secret_registry=secret_registry, config_factory=config_factory
         ),
         retriever=retriever,
-        crash_postmortem=retriever,
+        crash_postmortem=crash_postmortem,
         vmcore_introspector=vmcore_introspector,
         live_introspector=live_introspector,
         support=ProviderSupport(

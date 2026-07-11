@@ -7,6 +7,9 @@ from kdive.providers.shared.debug_common.crash_postmortem import (
     FetchObject,
     ReadBuildId,
     RunCrash,
+    _real_run_crash,
+    default_fetch_object,
+    default_read_vmcore_build_id,
 )
 from kdive.providers.shared.debug_common.crash_postmortem import (
     run_crash_postmortem as _run_crash_postmortem,
@@ -21,16 +24,16 @@ class CrashPostmortemAdapter:
         self,
         *,
         secret_registry: SecretRegistry,
-        fetch_object: FetchObject,
-        read_build_id: ReadBuildId,
-        run_crash: RunCrash,
+        fetch_object: FetchObject = default_fetch_object,
+        read_build_id: ReadBuildId = default_read_vmcore_build_id,
+        run_crash: RunCrash = _real_run_crash,
     ) -> None:
         self._secret_registry = secret_registry
         self._fetch_object = fetch_object
         self._read_build_id = read_build_id
         self._run_crash = run_crash
 
-    def run(
+    def run_crash_postmortem(
         self,
         *,
         vmcore_ref: str,

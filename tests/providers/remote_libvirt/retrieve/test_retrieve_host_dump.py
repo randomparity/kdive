@@ -1,4 +1,4 @@
-"""RemoteLibvirtRetrieve host_dump tests — injected libvirt/store/drgn, no host or S3 (ADR-0094).
+"""RemoteLibvirtRetriever host_dump tests — injected libvirt/store/drgn, no host or S3 (ADR-0094).
 
 Self-contained fakes (ADR-0076: the remote provider keeps its own test doubles, no shared
 layer): a fake libvirt connection exposing the storage-pool + core-dump slice host_dump drives,
@@ -32,7 +32,6 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
-from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.retrieve.host_dump_capture import (
     HostDumpCapturer,
     HostDumpOptions,
@@ -40,6 +39,7 @@ from kdive.providers.remote_libvirt.retrieve.host_dump_capture import (
     host_dump_volume_name,
     pool_type_and_target_strict,
 )
+from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
 from kdive.providers.shared.debug_common.core_file import DMESG_UNAVAILABLE
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -285,7 +285,7 @@ def _retrieve(
     build_id_error: Exception | None = None,
     dmesg_error: Exception | None = None,
     max_core_bytes: int = 5 * 1024**3,
-) -> RemoteLibvirtRetrieve:
+) -> RemoteLibvirtRetriever:
     def _read_build_id(path: Path) -> str:
         if build_id_error is not None:
             raise build_id_error
@@ -312,7 +312,7 @@ def _retrieve(
             max_core_bytes=max_core_bytes,
         ),
     )
-    return RemoteLibvirtRetrieve(
+    return RemoteLibvirtRetriever(
         secret_registry=SecretRegistry(),
         config_factory=_config,
         store_factory=lambda: store,

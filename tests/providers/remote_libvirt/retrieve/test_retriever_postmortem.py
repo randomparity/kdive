@@ -1,4 +1,4 @@
-"""Remote-libvirt retrieve facade and postmortem wiring tests."""
+"""Remote-libvirt retriever and postmortem wiring tests."""
 
 from __future__ import annotations
 
@@ -17,9 +17,9 @@ from kdive.providers.ports.retrieve import (
     CrashResult,
 )
 from kdive.providers.remote_libvirt.retrieve import postmortem
-from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.retrieve.host_dump_capture import HostDumpCapturer
 from kdive.providers.remote_libvirt.retrieve.kdump_capture import KdumpCapturer
+from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 
@@ -36,11 +36,11 @@ class _Capturer:
         )
 
 
-def test_facade_dispatches_supported_capture_methods() -> None:
+def test_retriever_dispatches_supported_capture_methods() -> None:
     system_id = UUID("00000000-0000-0000-0000-00000000faca")
     kdump = _Capturer("kdump")
     host_dump = _Capturer("host")
-    retrieve = RemoteLibvirtRetrieve(
+    retrieve = RemoteLibvirtRetriever(
         secret_registry=SecretRegistry(),
         kdump_capturer=cast(KdumpCapturer, kdump),
         host_dump_capturer=cast(HostDumpCapturer, host_dump),
@@ -53,8 +53,8 @@ def test_facade_dispatches_supported_capture_methods() -> None:
     assert host_dump.calls == [(system_id, run_id)]
 
 
-def test_facade_rejects_unsupported_capture_method() -> None:
-    retrieve = RemoteLibvirtRetrieve(
+def test_retriever_rejects_unsupported_capture_method() -> None:
+    retrieve = RemoteLibvirtRetriever(
         secret_registry=SecretRegistry(),
         kdump_capturer=cast(KdumpCapturer, _Capturer("kdump")),
         host_dump_capturer=cast(HostDumpCapturer, _Capturer("host")),
@@ -71,40 +71,6 @@ def test_facade_rejects_unsupported_capture_method() -> None:
     assert str(exc.value) == "remote-libvirt capture supports only the kdump and host_dump methods"
     # The details name the offending method under a stable key so the caller can act.
     assert exc.value.details == {"method": "console"}
-
-
-def test_facade_run_crash_postmortem_forwards_refs_and_commands(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[dict[str, object]] = []
-
-    def fake_run_crash_postmortem(**kwargs: object) -> CrashOutput:
-        calls.append(kwargs)
-        return CrashOutput(results={"ok": True}, transcript="done", truncated=False)
-
-    monkeypatch.setattr(postmortem, "_run_crash_postmortem", fake_run_crash_postmortem)
-    retrieve = RemoteLibvirtRetrieve(
-        secret_registry=SecretRegistry(),
-        kdump_capturer=cast(KdumpCapturer, _Capturer("kdump")),
-        host_dump_capturer=cast(HostDumpCapturer, _Capturer("host")),
-        fetch_object=lambda _ref: b"object",
-        read_build_id=lambda _data: "build-id",
-        run_crash=lambda _vmlinux, _vmcore, _script: CrashResult(0, b"", b""),
-    )
-
-    output = retrieve.run_crash_postmortem(
-        vmcore_ref="the-vmcore",
-        debuginfo_ref="the-vmlinux",
-        expected_build_id="build-id",
-        commands=["bt", "ps"],
-    )
-
-    assert output.results == {"ok": True}
-    # The facade forwards each ref and the command list verbatim (no None/empty swaps).
-    assert calls[0]["vmcore_ref"] == "the-vmcore"
-    assert calls[0]["debuginfo_ref"] == "the-vmlinux"
-    assert calls[0]["expected_build_id"] == "build-id"
-    assert calls[0]["commands"] == ["bt", "ps"]
 
 
 def test_crash_postmortem_adapter_passes_injected_seams(
@@ -135,7 +101,7 @@ def test_crash_postmortem_adapter_passes_injected_seams(
         run_crash=run_crash,
     )
 
-    output = adapter.run(
+    output = adapter.run_crash_postmortem(
         vmcore_ref="vmcore",
         debuginfo_ref="vmlinux",
         expected_build_id="build-id",
@@ -155,12 +121,14 @@ def test_crash_postmortem_adapter_passes_injected_seams(
     assert calls[0]["run_crash"] is run_crash
 
 
-def test_remote_facade_defaults_to_real_crash_runner() -> None:
-    # The remote facade wraps run_crash inside CrashPostmortemAdapter (no `_run_crash` on the
-    # facade), so the constructor default is the wiring site to pin to the real runner.
+def test_crash_postmortem_adapter_defaults_to_real_crash_runner() -> None:
     import inspect
 
     from kdive.providers.shared.debug_common.crash_postmortem import _real_run_crash
 
-    default = inspect.signature(RemoteLibvirtRetrieve.__init__).parameters["run_crash"].default
+    default = (
+        inspect.signature(postmortem.CrashPostmortemAdapter.__init__)
+        .parameters["run_crash"]
+        .default
+    )
     assert default is _real_run_crash

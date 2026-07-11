@@ -1,4 +1,4 @@
-"""Remote-libvirt Retrieve facade: kdump, host_dump, and crash postmortem (ADR-0084)."""
+"""Remote-libvirt vmcore capture dispatcher (ADR-0084)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.retrieve import (
     CaptureOutput,
-    CrashOutput,
 )
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
 from kdive.providers.remote_libvirt.guest.agent import (
@@ -34,27 +33,18 @@ from kdive.providers.remote_libvirt.retrieve.kdump_capture import (
     DEFAULT_READINESS_TIMEOUT_S,
     KdumpCapturer,
 )
-from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
 from kdive.providers.shared.debug_common.core_file import (
     MAX_CORE_BYTES,
     read_core_build_id_from_file,
     read_core_dmesg_from_file,
-)
-from kdive.providers.shared.debug_common.crash_postmortem import (
-    FetchObject,
-    ReadBuildId,
-    RunCrash,
-    _real_run_crash,
-    default_fetch_object,
-    default_read_vmcore_build_id,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 from kdive.store.objectstore import object_store_from_env
 
 
-class RemoteLibvirtRetrieve:
-    """The realized remote `Retriever` + `CrashPostmortem` facade (ADR-0084)."""
+class RemoteLibvirtRetriever:
+    """The realized remote `Retriever` port for kdump and host_dump capture."""
 
     def __init__(
         self,
@@ -65,9 +55,6 @@ class RemoteLibvirtRetrieve:
         store_factory: Callable[[], StorePort] = object_store_from_env,
         secret_backend_factory: Callable[[], SecretBackend] | None = None,
         pki_base_dir: Path | None = None,
-        fetch_object: FetchObject = default_fetch_object,
-        read_build_id: ReadBuildId = default_read_vmcore_build_id,
-        run_crash: RunCrash = _real_run_crash,
         kdump_capturer: KdumpCapturer | None = None,
         host_dump_capturer: HostDumpCapturer | None = None,
     ) -> None:
@@ -103,12 +90,6 @@ class RemoteLibvirtRetrieve:
                 max_core_bytes=MAX_CORE_BYTES,
             ),
         )
-        self._postmortem = CrashPostmortemAdapter(
-            secret_registry=secret_registry,
-            fetch_object=fetch_object,
-            read_build_id=read_build_id,
-            run_crash=run_crash,
-        )
 
     @classmethod
     def from_env(
@@ -116,7 +97,7 @@ class RemoteLibvirtRetrieve:
         *,
         secret_registry: SecretRegistry,
         config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
-    ) -> RemoteLibvirtRetrieve:
+    ) -> RemoteLibvirtRetriever:
         """Build from the shared worker env; opens no connection and mints no URL here."""
         return cls(secret_registry=secret_registry, config_factory=config_factory)
 
@@ -136,23 +117,7 @@ class RemoteLibvirtRetrieve:
             details={"method": method.value},
         )
 
-    def run_crash_postmortem(
-        self,
-        *,
-        vmcore_ref: str,
-        debuginfo_ref: str,
-        expected_build_id: str,
-        commands: list[str],
-    ) -> CrashOutput:
-        """Delegate to the provider-neutral worker-side crash postmortem (ADR-0084)."""
-        return self._postmortem.run(
-            vmcore_ref=vmcore_ref,
-            debuginfo_ref=debuginfo_ref,
-            expected_build_id=expected_build_id,
-            commands=commands,
-        )
-
 
 __all__ = [
-    "RemoteLibvirtRetrieve",
+    "RemoteLibvirtRetriever",
 ]
