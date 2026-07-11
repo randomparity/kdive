@@ -59,6 +59,7 @@ from kdive.providers.ports.lifecycle import (
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.debug import lifecycle as debug_service_lifecycle
 from tests.mcp.systems_support import provider_resolver
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
@@ -479,7 +480,7 @@ def test_locked_recheck_closes_transport_when_system_crashed(migrated_url: str) 
                 )
                 conn_fake = _RaisingCloseConnector()
                 handle = conn_fake.open_transport(SystemHandle("kdive-x"), "gdbstub")
-                request = debug_lifecycle._AttachRequest(
+                request = debug_service_lifecycle.AttachRequest(
                     run=run,
                     system=system,
                     session_id=uuid4(),
@@ -512,7 +513,7 @@ def test_locked_recheck_closes_transport_when_conflict_appears(migrated_url: str
                 assert run is not None and system is not None
                 conn_fake = _RaisingCloseConnector()
                 handle = conn_fake.open_transport(SystemHandle("kdive-x"), "gdbstub")
-                request = debug_lifecycle._AttachRequest(
+                request = debug_service_lifecycle.AttachRequest(
                     run=run,
                     system=system,
                     session_id=uuid4(),
@@ -1102,7 +1103,7 @@ def test_start_session_cleans_up_open_transport_on_insert_failure(migrated_url: 
             async def _raise_after_open(
                 _conn: Any,
                 _ctx: RequestContext,
-                _request: debug_lifecycle._AttachRequest,
+                _request: debug_service_lifecycle.AttachRequest,
                 _handle: TransportHandle,
             ) -> ToolResponse:
                 raise RuntimeError("insert failed")

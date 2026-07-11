@@ -86,17 +86,6 @@ _CRASHED_HALTED_LIVE_DRGN_DETAIL = (
 
 
 @dataclass(frozen=True)
-class _AttachRequest:
-    run: Run
-    system: System
-    session_id: UUID
-    transport: DebugTransportKind
-    connector: Connector
-    # Non-fatal drgn-live debuginfo warning (ADR-0322); spread into the `live` envelope when set.
-    missing_debuginfo: dict[str, JsonValue] | None = None
-
-
-@dataclass(frozen=True)
 class _DetachResources:
     connector: Connector
     runtime: DebugEngineRuntime | None = None
@@ -115,11 +104,12 @@ type _DetachResourcesForSession = Callable[
     [AsyncConnection, UUID], Awaitable[_DetachResources | ToolResponse]
 ]
 type _InsertSession = Callable[
-    [AsyncConnection, RequestContext, _AttachRequest, TransportHandle], Awaitable[ToolResponse]
+    [AsyncConnection, RequestContext, debug_lifecycle.AttachRequest, TransportHandle],
+    Awaitable[ToolResponse],
 ]
 type _PrepareAttachRequest = Callable[
     [AsyncConnection, RequestContext, UUID, DebugTransportKind, UUID],
-    Awaitable[_AttachRequest | ToolResponse],
+    Awaitable[debug_lifecycle.AttachRequest | ToolResponse],
 ]
 
 
@@ -299,7 +289,7 @@ class DebugSessionHandlers:
         run_id: UUID,
         transport: DebugTransportKind,
         session_id: UUID,
-    ) -> _AttachRequest | ToolResponse:
+    ) -> debug_lifecycle.AttachRequest | ToolResponse:
         run = await RUNS.get(conn, run_id)
         if run is None or run.project not in ctx.projects:
             return _config_error(str(run_id))
@@ -321,7 +311,7 @@ class DebugSessionHandlers:
         if isinstance(seeded, ToolResponse):
             return seeded
         missing = await self._debuginfo_warning(conn, run, transport)
-        return _AttachRequest(
+        return debug_lifecycle.AttachRequest(
             run=run,
             system=system,
             session_id=session_id,
@@ -528,23 +518,11 @@ async def _attach_preconditions(
 async def _insert_session_locked(
     conn: AsyncConnection,
     ctx: RequestContext,
-    request: _AttachRequest,
+    request: debug_lifecycle.AttachRequest,
     handle: TransportHandle,
 ) -> ToolResponse:
     """Persist an admitted session and render the transport-neutral service result."""
-    result = await debug_lifecycle.insert_session_locked(
-        conn,
-        ctx,
-        debug_lifecycle.AttachRequest(
-            run=request.run,
-            system=request.system,
-            session_id=request.session_id,
-            transport=request.transport,
-            connector=request.connector,
-            missing_debuginfo=request.missing_debuginfo,
-        ),
-        handle,
-    )
+    result = await debug_lifecycle.insert_session_locked(conn, ctx, request, handle)
     return _render_attach_result(result)
 
 
