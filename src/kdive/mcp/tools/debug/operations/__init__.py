@@ -188,7 +188,7 @@ class DebugRuntimeResolver:
     def __init__(self, resolver: ProviderResolver, *, transcript_dir: Path | None = None) -> None:
         self._resolver = resolver
         self._transcript_dir = transcript_dir
-        self._runtimes: dict[ResourceKind, DebugEngineRuntime] = {}
+        self._runtimes: dict[tuple[ResourceKind, str | None], DebugEngineRuntime] = {}
         self._guard = threading.Lock()
 
     async def runtime_for_session(
@@ -212,14 +212,14 @@ class DebugRuntimeResolver:
                 data={"reason": "provider_debug_unavailable"},
             )
         with self._guard:
-            runtime = self._runtimes.get(binding.kind)
+            runtime = self._runtimes.get(binding.cache_key)
             if runtime is None:
                 runtime = DebugEngineRuntime(
                     engine=debug.engine,
                     attach=debug.attach_seam,
                     transcript_dir=self._transcript_dir,
                 )
-                self._runtimes[binding.kind] = runtime
+                self._runtimes[binding.cache_key] = runtime
             return runtime
 
 

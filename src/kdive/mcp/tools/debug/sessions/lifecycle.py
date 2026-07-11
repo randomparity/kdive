@@ -22,7 +22,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, LiteralString, cast
+from typing import TYPE_CHECKING, Any, LiteralString, cast
 from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection
@@ -44,7 +44,6 @@ from kdive.mcp.tools._common import capability_unsupported as _capability_unsupp
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
-from kdive.mcp.tools.debug.operations import DebugEngineRuntime, DebugRuntimeResolver
 from kdive.mcp.tools.debug.sessions.context import resolve_debug_session_context
 from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
@@ -66,6 +65,9 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
+
+if TYPE_CHECKING:
+    from kdive.mcp.tools.debug.operations import DebugEngineRuntime, DebugRuntimeResolver
 
 _GDBSTUB = "gdbstub"
 _DRGN_LIVE = "drgn-live"

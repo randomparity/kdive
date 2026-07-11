@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
@@ -15,7 +15,6 @@ from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT
-from kdive.mcp.tools.debug.operations import DebugRuntimeResolver, _register_debug_ops
 from kdive.mcp.tools.debug.sessions.lifecycle import (
     _GDBSTUB,
     _AttachRequest,
@@ -33,6 +32,9 @@ from kdive.mcp.tools.debug.sessions.read import list_sessions as _list_sessions
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.secrets.secret_registry import SecretRegistry
+
+if TYPE_CHECKING:
+    from kdive.mcp.tools.debug.operations import DebugRuntimeResolver
 
 __all__ = [
     "DebugSessionHandlers",
@@ -98,6 +100,8 @@ def register(
     telemetry: DebugSessionTelemetry | None = None,
 ) -> None:
     """Register the ``debug.*`` tools on ``app``, bound to ``pool``."""
+    from kdive.mcp.tools.debug.operations import DebugRuntimeResolver, _register_debug_ops
+
     runtime = DebugRuntimeResolver(resolver)
     handlers = DebugSessionHandlers.from_resolver(
         resolver,

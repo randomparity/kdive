@@ -1163,7 +1163,7 @@ def test_attach_runs_once_for_concurrent_ops(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_provider_debug_runtime_cache_uses_binding_kind() -> None:
+def test_provider_debug_runtime_cache_uses_binding_cache_key() -> None:
     resolver = debug_ops.DebugRuntimeResolver(cast(ProviderResolver, object()))
     first_attach = _CountingAttach()
     first_provider = cast(
@@ -1187,6 +1187,41 @@ def test_provider_debug_runtime_cache_uses_binding_kind() -> None:
     assert isinstance(same_runtime, DebugEngineRuntime)
 
     assert same_runtime is runtime
+
+
+def test_provider_debug_runtime_cache_separates_resource_names() -> None:
+    resolver = debug_ops.DebugRuntimeResolver(cast(ProviderResolver, object()))
+    first_provider = cast(
+        ProviderRuntime,
+        SimpleNamespace(
+            debug=DebugCapabilities(engine=GdbMiEngine(), attach_seam=_CountingAttach())
+        ),
+    )
+    first = resolver.runtime_for_binding(
+        ProviderBinding(
+            kind=ResourceKind.REMOTE_LIBVIRT,
+            runtime=first_provider,
+            resource_name="host-a",
+        )
+    )
+    assert isinstance(first, DebugEngineRuntime)
+
+    second_provider = cast(
+        ProviderRuntime,
+        SimpleNamespace(
+            debug=DebugCapabilities(engine=GdbMiEngine(), attach_seam=_CountingAttach())
+        ),
+    )
+    second = resolver.runtime_for_binding(
+        ProviderBinding(
+            kind=ResourceKind.REMOTE_LIBVIRT,
+            runtime=second_provider,
+            resource_name="host-b",
+        )
+    )
+    assert isinstance(second, DebugEngineRuntime)
+
+    assert second is not first
 
 
 def test_provider_debug_runtime_fails_when_debug_capability_absent() -> None:

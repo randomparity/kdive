@@ -55,10 +55,16 @@ _KIND_FOR_SESSION: LiteralString = (
 
 @dataclass(frozen=True, slots=True)
 class ProviderBinding:
-    """A resolved provider runtime paired with the Resource kind that selected it."""
+    """A resolved provider runtime paired with the Resource identity that selected it."""
 
     kind: ResourceKind
     runtime: ProviderRuntime
+    resource_name: str | None = None
+
+    @property
+    def cache_key(self) -> tuple[ResourceKind, str | None]:
+        """Stable key for caches whose runtime may be resource-specific."""
+        return (self.kind, self.resource_name)
 
 
 class ProviderResolver:
@@ -139,12 +145,16 @@ class ProviderResolver:
     async def binding_for_system(self, conn: AsyncConnection, system_id: UUID) -> ProviderBinding:
         """Resolve the System's provider kind and bound runtime (ADR-0191 F)."""
         kind, name = await self._kind_and_name(conn, _KIND_FOR_SYSTEM, system_id, "system")
-        return ProviderBinding(kind=kind, runtime=self.resolve(kind).for_resource(name))
+        return ProviderBinding(
+            kind=kind, runtime=self.resolve(kind).for_resource(name), resource_name=name
+        )
 
     async def binding_for_run(self, conn: AsyncConnection, run_id: UUID) -> ProviderBinding:
         """Resolve the Run's provider kind and bound runtime (ADR-0191 F)."""
         kind, name = await self._kind_and_name(conn, _KIND_FOR_RUN, run_id, "run")
-        return ProviderBinding(kind=kind, runtime=self.resolve(kind).for_resource(name))
+        return ProviderBinding(
+            kind=kind, runtime=self.resolve(kind).for_resource(name), resource_name=name
+        )
 
     async def runtime_for_system(self, conn: AsyncConnection, system_id: UUID) -> ProviderRuntime:
         return (await self.binding_for_system(conn, system_id)).runtime
@@ -165,7 +175,9 @@ class ProviderResolver:
 
     async def binding_for_session(self, conn: AsyncConnection, session_id: UUID) -> ProviderBinding:
         kind, name = await self._kind_and_name(conn, _KIND_FOR_SESSION, session_id, "session")
-        return ProviderBinding(kind=kind, runtime=self.resolve(kind).for_resource(name))
+        return ProviderBinding(
+            kind=kind, runtime=self.resolve(kind).for_resource(name), resource_name=name
+        )
 
     async def _kind_and_name(
         self, conn: AsyncConnection, sql: LiteralString, object_id: UUID, object_kind: str
