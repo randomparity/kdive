@@ -98,10 +98,18 @@ Flip `_OPERATOR → _CONTRIBUTOR` for the five entries:
 construction, the `assert_destructive_allowed` call, and the `DestructiveOpDenied`
 denial/audit branch; `_reprovision_opt_in` (`admin.py:197-199`) is deleted. The
 role check the removed gate provided is already carried by the registrar-layer
-`require_role(CONTRIBUTOR)`; project ownership, `REPROVISIONING` dedup,
-`READY`-only (`admin.py:176-177`), no-live-run, and rootfs validation are all
-retained. If `_audit_destructive_denied`/`_authz_denied` become unreferenced
-after this, delete them (dead code).
+`require_role(CONTRIBUTOR)` (reached via `with_runtime_for_system` →
+`_runtime_resolution._authorized_kind` on the sole path to `_reprovision_in_lock`);
+project ownership, `REPROVISIONING` dedup, `READY`-only (`admin.py:176-177`),
+no-live-run, and rootfs validation are all retained.
+
+`_audit_destructive_denied` (`admin.py:202`) and `_authz_denied` (the `_common`
+alias) **stay** — `teardown_system` (`admin.py:337-338`) still calls both; do not
+delete them. What must be removed to keep ruff clean (zero-warning policy) are the
+now-unused gate imports `DestructiveOp, DestructiveOpDenied, assert_destructive_allowed`
+(`admin.py:42`) and the `_REPROVISION` alias (`admin.py:51`) once the gate removal
+leaves it unreferenced — it is distinct from `_REPROVISION_KIND`, the
+idempotency-kind string, which stays.
 
 The `_docmeta.destructive()` MCP annotation on the `reprovision` wrapper is
 retained: like power's, it is an agent caution hint (re-stage interrupts the
@@ -121,7 +129,16 @@ Reprovision follows power out of the destructive taxonomy:
   enqueued — the same "acting on its own transient resource" rule the set's
   docstring states, and the reason its old `# operator-gated provision lane`
   justification no longer holds. Fail-closed membership is preserved.
-- Update the three docstrings to name the new membership and cite this decision.
+- Update the three frozenset docstrings in this module to name the new membership.
+
+The reviewed guard test encodes the reversed decision and must be flipped:
+`tests/mcp/jobs/test_jobs_tools.py:243` currently asserts
+`JobKind.PROVISION not in CONTRIBUTOR_CANCELABLE_JOB_KINDS` ("provision lane out of
+scope") with the L235 "operator-gated provision lane" comment. Rewrite it to assert
+`PROVISION`/`REPROVISION` **are** contributor-cancelable and keep the fail-closed
+check for the remaining operator-only kinds. The sibling L242 assertion
+(`not CONTRIBUTOR_CANCELABLE & DESTRUCTIVE`) still holds because `REPROVISION` also
+leaves `DESTRUCTIVE_JOB_KINDS`.
 
 ### 5. Write-boundary validator — automatic, plus a rejected token
 
@@ -140,6 +157,21 @@ Update the wrapper docstrings + `Field` descriptions for the five tools to state
 the `contributor` classification and, for `reprovision`, that it no longer
 consumes a `destructive_ops` opt-in. No ADR references in any text that
 serializes into the tool schema (`test_no_adr_leak`).
+
+Two more agent-facing surfaces name the old classification and must be corrected —
+both serialize into a tool schema, the drift class this project guards against:
+
+- **`jobs.cancel`** (`mcp/tools/jobs.py`): the `jobs_cancel` wrapper docstring
+  (~L406-411) and the module docstring (~L11-16) say cancelling
+  `provision`/`reprovision` "requires operator." Move `provision`/`reprovision`
+  into the contributor-cancelable sentence, leaving only `teardown`/`force_crash`
+  (and the platform/internal kinds) as operator-only.
+- **`destructive_ops` advertisements**: `profile_examples.py:81` ("...reprovision
+  only; leave it empty...") and the `ProvisioningProfile` field docstrings
+  `provisioning.py:116` and `:165` name `reprovision` as a valid opt-in token.
+  Strike `reprovision` so they advertise `force_crash` only — mirroring ADR-0320's
+  `power` cleanup. (`profile_examples.py:79` "without reprovisioning" and
+  `provisioning.py:425` dedup-factor doc are unrelated and stay.)
 
 ### 7. Generated docs
 
