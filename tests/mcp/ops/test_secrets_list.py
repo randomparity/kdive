@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.mcp.tools.ops import secrets
+from kdive.mcp.tools.ops.security import secrets
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry

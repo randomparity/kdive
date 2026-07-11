@@ -30,7 +30,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as resources_tools
 from kdive.mcp.tools.catalog.artifacts import registrar as artifacts_tools
 from kdive.mcp.tools.catalog.artifacts import uploads as artifact_upload_tools
-from kdive.mcp.tools.debug import ops as debug_ops_tools
+from kdive.mcp.tools.debug import ops_breakpoints as debug_breakpoint_tools
 from kdive.mcp.tools.debug import sessions as debug_sessions_tools
 from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_tools
 from kdive.mcp.tools.lifecycle.runs import registrar as runs_tools
@@ -406,7 +406,7 @@ def test_debug_ops_resolve_fault_inject_runtime_through_fastmcp(
         async with _pool(migrated_url) as pool:
             run_id = await _seed_fault_inject_run(pool)
             monkeypatch.setattr(debug_sessions_tools, "current_context", _ctx)
-            monkeypatch.setattr(debug_ops_tools, "current_context", _ctx)
+            monkeypatch.setattr(debug_breakpoint_tools, "current_context", _ctx)
             monkeypatch.setenv("KDIVE_FAULT_INJECT", "1")
             config.load()  # re-snapshot: the pool setup above already primed the snapshot
             secret_registry = SecretRegistry()

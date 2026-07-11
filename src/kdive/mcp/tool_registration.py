@@ -35,20 +35,20 @@ from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
 from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_tools
 from kdive.mcp.tools.lifecycle.runs import registrar as runs_tools
 from kdive.mcp.tools.lifecycle.systems import registrar as systems_tools
-from kdive.mcp.tools.ops import audit as audit_tools
-from kdive.mcp.tools.ops import breakglass as ops_breakglass_tools
 from kdive.mcp.tools.ops import diagnostics as ops_diagnostics_tools
-from kdive.mcp.tools.ops import inventory as inventory_tools
-from kdive.mcp.tools.ops import inventory_export as ops_inventory_export_tools
 from kdive.mcp.tools.ops import queue as ops_queue_tools
-from kdive.mcp.tools.ops import reconcile as ops_reconcile_tools
-from kdive.mcp.tools.ops import reconcile_systems as ops_reconcile_systems_tools
-from kdive.mcp.tools.ops import secrets as ops_secrets_tools
-from kdive.mcp.tools.ops import tool_trail as ops_tool_trail_tools
 from kdive.mcp.tools.ops import tuning as ops_tuning_tools
+from kdive.mcp.tools.ops.audit import audit as audit_tools
+from kdive.mcp.tools.ops.audit import tool_trail as ops_tool_trail_tools
 from kdive.mcp.tools.ops.images import registrar as ops_images_tools
+from kdive.mcp.tools.ops.inventory import inventory as inventory_tools
+from kdive.mcp.tools.ops.inventory import inventory_export as ops_inventory_export_tools
+from kdive.mcp.tools.ops.reconcile import reconcile as ops_reconcile_tools
+from kdive.mcp.tools.ops.reconcile import reconcile_systems as ops_reconcile_systems_tools
 from kdive.mcp.tools.ops.resources import host_ops as ops_resource_host_tools
 from kdive.mcp.tools.ops.resources import registrar as ops_resource_mutation_tools
+from kdive.mcp.tools.ops.security import breakglass as ops_breakglass_tools
+from kdive.mcp.tools.ops.security import secrets as ops_secrets_tools
 from kdive.mcp.tools.reports import generate as reports_generate
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions

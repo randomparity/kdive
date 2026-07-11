@@ -26,7 +26,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.ops import tool_trail as trail_tools
+from kdive.mcp.tools.ops.audit import tool_trail as trail_tools
 from kdive.security.authz.rbac import PlatformRole, Role
 
 _NOW = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)

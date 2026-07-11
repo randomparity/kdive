@@ -28,7 +28,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.domain.errors import CategorizedError
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.ops import reconcile as ops_reconcile
+from kdive.mcp.tools.ops.reconcile import reconcile as ops_reconcile
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler.loop import ReconcileConfig, reconcile_once
 from kdive.security.authz.context import RequestContext

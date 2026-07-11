@@ -29,7 +29,7 @@ from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.ops import inventory as inventory_tools
+from kdive.mcp.tools.ops.inventory import inventory as inventory_tools
 from kdive.security.authz.rbac import PlatformRole, Role
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

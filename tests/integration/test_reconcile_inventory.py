@@ -1890,7 +1890,7 @@ def test_on_demand_reconcile_systems_also_prices(
 ) -> None:
     # The path that silently skipped pricing before Task 4 — pin it explicitly.
     import kdive.config as config
-    from kdive.mcp.tools.ops import reconcile_systems as rs
+    from kdive.mcp.tools.ops.reconcile import reconcile_systems as rs
 
     async def _run() -> None:
         path = _write_toml(tmp_path, _priced_remote_toml("4.0"))

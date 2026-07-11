@@ -25,7 +25,7 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.mcp.tools.ops import reconcile_systems as ops_reconcile_systems
+from kdive.mcp.tools.ops.reconcile import reconcile_systems as ops_reconcile_systems
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 

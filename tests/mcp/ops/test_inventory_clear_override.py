@@ -30,7 +30,7 @@ from kdive.inventory.overrides import (
     set_override,
 )
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.ops import inventory as inventory_tools
+from kdive.mcp.tools.ops.inventory import inventory as inventory_tools
 from kdive.security.authz.rbac import PlatformRole, Role
 
 
