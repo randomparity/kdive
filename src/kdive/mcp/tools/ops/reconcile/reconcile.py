@@ -30,10 +30,17 @@ from kdive.providers.infra.reaping import (
     InfraReaper,
     NullDumpVolumeReaper,
 )
-from kdive.reconciler.loop import ReconcileConfig, ReconcileReport, UploadStore, reconcile_once
+from kdive.reconciler.loop import (
+    ALL_REPAIR_KINDS,
+    ReconcileConfig,
+    ReconcileReport,
+    UploadStore,
+    reconcile_once,
+)
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
+from kdive.serialization import JsonValue
 from kdive.services.images.retention import ImageSweepStore
 
 # A module-level singleton so it can be a stateless default arg (ruff B008).
@@ -111,28 +118,33 @@ async def reconcile_now(
 
 def _reconcile_response(report: ReconcileReport) -> ToolResponse:
     """Render a :class:`ReconcileReport` as a per-class summary ``ToolResponse``."""
+    repair_counts: dict[str, JsonValue] = {
+        repair_kind: report.repair_counts[repair_kind] for repair_kind in ALL_REPAIR_KINDS
+    }
+    data: dict[str, JsonValue] = {
+        "repair_counts": repair_counts,
+        "expired_allocations": report.expired_allocations,
+        "reaped_active_allocations": report.reaped_active_allocations,
+        "promoted_allocations": report.promoted_allocations,
+        "queue_timeouts": report.queue_timeouts,
+        "orphaned_systems": report.orphaned_systems,
+        "abandoned_jobs": report.abandoned_jobs,
+        "dead_sessions": report.dead_sessions,
+        "leaked_domains": report.leaked_domains,
+        "idempotency_keys_gc_count": report.idempotency_keys_gc_count,
+        "abandoned_uploads": report.abandoned_uploads,
+        "reconciled_inventory": report.reconciled_inventory,
+        "leaked_images": report.leaked_images,
+        "dangling_images": report.dangling_images,
+        "expired_private_images": report.expired_private_images,
+        "reaped_dump_volumes": report.reaped_dump_volumes,
+        "failures": ",".join(report.failures),
+    }
     return ToolResponse.success(
         _RECONCILE_OBJECT_ID,
         "ok",
         suggested_next_actions=["ops.reconcile_now"],
-        data={
-            "expired_allocations": report.expired_allocations,
-            "reaped_active_allocations": report.reaped_active_allocations,
-            "promoted_allocations": report.promoted_allocations,
-            "queue_timeouts": report.queue_timeouts,
-            "orphaned_systems": report.orphaned_systems,
-            "abandoned_jobs": report.abandoned_jobs,
-            "dead_sessions": report.dead_sessions,
-            "leaked_domains": report.leaked_domains,
-            "idempotency_keys_gc_count": report.idempotency_keys_gc_count,
-            "abandoned_uploads": report.abandoned_uploads,
-            "reconciled_inventory": report.reconciled_inventory,
-            "leaked_images": report.leaked_images,
-            "dangling_images": report.dangling_images,
-            "expired_private_images": report.expired_private_images,
-            "reaped_dump_volumes": report.reaped_dump_volumes,
-            "failures": ",".join(report.failures),
-        },
+        data=data,
     )
 
 
@@ -150,7 +162,11 @@ def register(
         meta={"maturity": "implemented"},
     )
     async def ops_reconcile_now() -> ToolResponse:
-        """Run reconciler cleanup once."""
+        """Run reconciler cleanup once.
+
+        Returns `data.repair_counts`, keyed by every cataloged repair kind, plus the
+        human-readable scalar summary fields and comma-joined `data.failures`.
+        """
         return await reconcile_now(
             pool,
             current_context(),
