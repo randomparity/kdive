@@ -133,6 +133,28 @@ def test_breakpoint_commands_build_expected_mi_strings() -> None:
     assert host.commands == ["-break-insert panic", "-break-delete 1"]
 
 
+def test_breakpoint_list_projects_breakpoint_rows() -> None:
+    host = _CommandHost()
+    host.responses["-break-list"] = _done(
+        {
+            "BreakpointTable": {
+                "body": [
+                    {"bkpt": {"number": "1", "type": "breakpoint", "func": "panic"}},
+                    {"bkpt": {"number": "2", "type": "hw watchpoint", "what": "watched"}},
+                ]
+            }
+        }
+    )
+
+    refs = host.list_breakpoints(_attachment())
+
+    assert [(ref.number, ref.func, ref.what) for ref in refs] == [
+        ("1", "panic", None),
+        ("2", None, "watched"),
+    ]
+    assert host.commands == ["-break-list"]
+
+
 @pytest.mark.parametrize(("location", "code"), [("panic()", "bad_location"), ("", "bad_location")])
 def test_breakpoint_rejects_invalid_locations(location: str, code: str) -> None:
     host = _CommandHost()
@@ -142,6 +164,28 @@ def test_breakpoint_rejects_invalid_locations(location: str, code: str) -> None:
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details["code"] == code
+
+
+def test_breakpoint_rejects_non_numeric_clear_id() -> None:
+    host = _CommandHost()
+
+    with pytest.raises(CategorizedError) as exc:
+        host.clear_breakpoint(_attachment(), "bkpt-1")
+
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"code": "bad_breakpoint_id", "number": "bkpt-1"}
+    assert host.commands == []
+
+
+def test_breakpoint_insert_missing_record_is_debug_attach_failure() -> None:
+    host = _CommandHost()
+    host.responses["-break-insert panic"] = _done({})
+
+    with pytest.raises(CategorizedError) as exc:
+        host.set_breakpoint(_attachment(), "panic")
+
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details == {"command_key": "bkpt"}
 
 
 def test_watchpoint_commands_build_expected_mi_strings_and_filter_list() -> None:
