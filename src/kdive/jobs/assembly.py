@@ -1,4 +1,4 @@
-"""Table-driven worker job handler registration."""
+"""Worker job handler registry assembly."""
 
 from __future__ import annotations
 
@@ -17,9 +17,10 @@ from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
 from kdive.jobs.handlers.control import control
 from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.models import HandlerRegistry, JobHandler
+from kdive.providers.assembly.composition import ProviderComposition
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.assembly import ObjectStoreAssembly
+from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +33,24 @@ class WorkerHandlerAssembly:
 
 
 type HandlerRegistrar = Callable[[HandlerRegistry, WorkerHandlerAssembly], None]
+
+
+def build_handler_registry(
+    *,
+    secret_registry: SecretRegistry,
+    provider_composition: ProviderComposition | None = None,
+) -> HandlerRegistry:
+    """Build the worker's `HandlerRegistry` from provider-aware handler registrars."""
+    composition = provider_composition or ProviderComposition(secret_registry=secret_registry)
+    registry = HandlerRegistry()
+    assembly = WorkerHandlerAssembly(
+        resolver=composition.build_provider_resolver(),
+        secret_registry=composition.secret_registry,
+        object_stores=build_object_store_assembly(),
+    )
+    for register in HANDLER_REGISTRARS:
+        register(registry, assembly)
+    return registry
 
 
 def _register_system_handlers(

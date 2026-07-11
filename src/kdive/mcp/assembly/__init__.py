@@ -1,1 +1,1 @@
-"""MCP application and worker assembly facades."""
+"""MCP application assembly facade."""

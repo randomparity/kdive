@@ -48,7 +48,7 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
     )
     monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: "store")
     monkeypatch.setattr(
-        "kdive.mcp.assembly.app.build_handler_registry",
+        "kdive.jobs.assembly.build_handler_registry",
         lambda **kw: handler_registry if kw["secret_registry"] is secret_registry else None,
     )
 

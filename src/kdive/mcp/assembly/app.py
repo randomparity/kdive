@@ -1,4 +1,4 @@
-"""FastMCP application and worker handler assembly facades."""
+"""FastMCP application assembly facade."""
 
 from __future__ import annotations
 
@@ -9,9 +9,7 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from opentelemetry import metrics, trace
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.assembly.tool_registration import PLANE_REGISTRARS, AppAssembly
-from kdive.mcp.assembly.worker_registration import HANDLER_REGISTRARS, WorkerHandlerAssembly
 from kdive.mcp.auth import build_verifier
 from kdive.mcp.exposure import gateway_enabled
 from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
@@ -71,21 +69,3 @@ def build_app(
         register(app, pool, assembly)
     advertise_envelope_output_schema(app)
     return app
-
-
-def build_handler_registry(
-    *,
-    secret_registry: SecretRegistry,
-    provider_composition: ProviderComposition | None = None,
-) -> HandlerRegistry:
-    """Build the worker's `HandlerRegistry` from provider-aware handler registrars."""
-    composition = provider_composition or ProviderComposition(secret_registry=secret_registry)
-    registry = HandlerRegistry()
-    assembly = WorkerHandlerAssembly(
-        resolver=composition.build_provider_resolver(),
-        secret_registry=composition.secret_registry,
-        object_stores=build_object_store_assembly(),
-    )
-    for register in HANDLER_REGISTRARS:
-        register(registry, assembly)
-    return registry

@@ -13,12 +13,13 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.mcp.assembly.app as app_module
 import kdive.mcp.assembly.tool_registration as tool_module
-import kdive.mcp.assembly.worker_registration as handler_module
 import kdive.mcp.schema.schema_advertising as envelope_module
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
+from kdive.jobs import assembly as handler_module
+from kdive.jobs.assembly import build_handler_registry
 from kdive.jobs.models import HandlerRegistry
-from kdive.mcp.assembly.app import build_app, build_handler_registry
+from kdive.mcp.assembly.app import build_app
 from kdive.providers.assembly import composition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
@@ -308,13 +309,13 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
 
     def _capture(
         _registry: HandlerRegistry,
-        assembly: app_module.WorkerHandlerAssembly,
+        assembly: handler_module.WorkerHandlerAssembly,
     ) -> None:
         captured["resolver"] = assembly.resolver
         captured["secret_registry"] = assembly.secret_registry
         captured["object_stores"] = assembly.object_stores
 
-    monkeypatch.setattr(app_module, "HANDLER_REGISTRARS", (_capture,))
+    monkeypatch.setattr(handler_module, "HANDLER_REGISTRARS", (_capture,))
 
     build_handler_registry(
         secret_registry=caller_registry,

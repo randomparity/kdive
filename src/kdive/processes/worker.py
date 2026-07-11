@@ -26,9 +26,9 @@ if TYPE_CHECKING:
 async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
     from kdive.health.processes.server import build_postgres_ping
     from kdive.health.processes.worker import build_worker_probe
+    from kdive.jobs.assembly import build_handler_registry
     from kdive.jobs.worker import Worker, WorkerConfig
     from kdive.jobs.worker_telemetry import WorkerTelemetry
-    from kdive.mcp.assembly.app import build_handler_registry
     from kdive.store.objectstore import object_store_from_env
 
     stop = install_stop()
