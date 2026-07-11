@@ -22,15 +22,15 @@ from kdive.providers.ports.debug import (
     GdbModule,
     GdbStopRecord,
 )
-from kdive.providers.shared.debug_common import gdbmi
-from kdive.providers.shared.debug_common.gdbmi import (
+from kdive.providers.shared.debug_common.gdbmi import engine as gdbmi
+from kdive.providers.shared.debug_common.gdbmi.debuginfo import DebuginfoResolver
+from kdive.providers.shared.debug_common.gdbmi.engine import (
     MAX_MEMORY_READ_BYTES,
     GdbMiEngine,
     MiRecord,
     PygdbmiController,
     parse_mi_records,
 )
-from kdive.providers.shared.debug_common.gdbmi.debuginfo import DebuginfoResolver
 from kdive.providers.shared.debug_common.gdbmi.execution import ExecutionControl
 from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
     disassembly_rows,

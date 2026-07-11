@@ -49,7 +49,7 @@ from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.ports.debug import GdbMiAttachment
 from kdive.providers.ports.lifecycle import TransportHandleData
-from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
+from kdive.providers.shared.debug_common.gdbmi.engine import GdbMiEngine
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.systems_support import provider_resolver

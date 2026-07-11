@@ -11,8 +11,8 @@ split, ADR-0210 §1).
 
 from __future__ import annotations
 
-from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine as _GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.debuginfo import gdb_attach_seam
+from kdive.providers.shared.debug_common.gdbmi.engine import GdbMiEngine as _GdbMiEngine
 
 default_attach_seam = gdb_attach_seam(engine_factory=_GdbMiEngine)
 

@@ -54,7 +54,7 @@ from kdive.providers.ports.debug import (
     GdbMiEngine,
 )
 from kdive.providers.ports.lifecycle import TransportHandleData
-from kdive.providers.shared.debug_common.gdbmi import MAX_MEMORY_READ_BYTES, MAX_MODULES
+from kdive.providers.shared.debug_common.gdbmi.engine import MAX_MEMORY_READ_BYTES, MAX_MODULES
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.serialization import JsonValue

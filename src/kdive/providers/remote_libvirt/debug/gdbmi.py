@@ -11,8 +11,8 @@ orchestration is unit-tested with injected seams.
 
 from __future__ import annotations
 
-from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine as _GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.debuginfo import gdb_attach_seam
+from kdive.providers.shared.debug_common.gdbmi.engine import GdbMiEngine as _GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.hostpolicy import allow_acl_remote
 
 remote_attach_seam = gdb_attach_seam(
