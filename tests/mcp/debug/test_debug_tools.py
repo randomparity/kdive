@@ -469,7 +469,12 @@ def test_locked_recheck_closes_transport_when_system_crashed(migrated_url: str) 
                 assert run is not None and system is not None
                 # Drive the real row to `crashed` so the locked re-read observes the race,
                 # while the `system` object handed to the locked insert is still stale-ready.
-                await SYSTEMS.update_state(conn, system.id, SystemState.CRASHED)
+                # Direct UPDATE bypassing can_transition: the test only needs the end state, and
+                # ready->crashed is no longer a legal edge (force_crash goes via crashing; #1078).
+                await conn.execute(
+                    "UPDATE systems SET state = %s WHERE id = %s",
+                    (SystemState.CRASHED.value, system.id),
+                )
                 conn_fake = _RaisingCloseConnector()
                 handle = conn_fake.open_transport(SystemHandle("kdive-x"), "gdbstub")
                 request = debug_tools._AttachRequest(
