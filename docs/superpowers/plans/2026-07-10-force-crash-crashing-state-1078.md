@@ -283,6 +283,15 @@ def test_force_crash_drives_ready_crashing_crashed(migrated_url: str) -> None:
                 await control_plane.force_crash_handler(conn, job, resolver=resolver)
             assert await _system_state(pool, system_id) == SystemState.CRASHED.value
             assert ctrl.crashed == ["kdive-x"]  # NMI fired exactly once
+            # Non-skippable CI guard on the system-transition audit literal (also used by the
+            # gated live_stack proof and the reconciler recovery):
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM audit_log "
+                    "WHERE object_kind = 'systems' AND transition = 'crashing->crashed'"
+                )
+                row = await cur.fetchone()
+            assert row is not None and row["n"] == 1
 
     asyncio.run(_run())
 
@@ -294,18 +303,13 @@ def test_force_crash_retry_after_crashing_finalizes_without_second_nmi(migrated_
             ctrl = _RecordingController()
             resolver = provider_resolver(provisioner=_TrackingProvisioner(), controller=ctrl)
             job = await _enqueue(pool, JobKind.FORCE_CRASH, system_id, f"{system_id}:force_crash")
-            async with pool.connection() as conn:
-                await control_plane.force_crash_handler(conn, job, resolver=resolver)
-            # Second run of the same job (a retry / lease-lapse redispatch): System already CRASHED,
-            # then reset to CRASHING to model a handler that died between NMI and finalize.
-            async with pool.connection() as conn:
-                await SYSTEMS.update_state(conn, UUID(system_id), SystemState.READY)  # test scaffold
-            # Instead of the above scaffold, model the mid-window retry directly:
+            # Model a handler that marked CRASHING and fired the NMI but died before finalize:
+            # set CRASHING directly (bypassing can_transition), then run the handler as a retry.
             await _set_state(pool, system_id, SystemState.CRASHING.value)
             async with pool.connection() as conn:
                 await control_plane.force_crash_handler(conn, job, resolver=resolver)
             assert await _system_state(pool, system_id) == SystemState.CRASHED.value
-            assert ctrl.crashed == ["kdive-x"]  # STILL one NMI — the retry finalized only
+            assert ctrl.crashed == []  # finalize-only retry: NMI NOT re-fired
 
     asyncio.run(_run())
 
@@ -330,11 +334,12 @@ Add a `_set_state` helper near `_system_state` (a direct UPDATE that bypasses `c
 
 ```python
 async def _set_state(pool: AsyncConnectionPool, system_id: str, state: str) -> None:
+    """Direct state UPDATE bypassing can_transition — for scaffolding a mid-window state."""
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute("UPDATE systems SET state = %s WHERE id = %s", (state, system_id))
 ```
 
-(Delete the two scaffold lines in `test_force_crash_retry...` marked `# test scaffold` — the `_set_state(..., CRASHING)` call is the real setup; they are shown only to illustrate the intent. Keep only the `_set_state(pool, system_id, SystemState.CRASHING.value)` line before the second handler run.)
+(`dict_row` is already imported at the top of this test file.)
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -623,7 +628,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Test: `tests/reconciler/test_stalled_crashing_recovery.py` (create)
 
 **Interfaces:**
-- Consumes: `SystemState.CRASHING/CRASHED`, `advisory_xact_lock`, `SYSTEMS.update_state`, `detach_sessions` (from `kdive.jobs.handlers.control`), `audit.record`, `JobState`, dedup_key `{system_id}:force_crash`.
+- Consumes: `SystemState.CRASHING/CRASHED`, `DebugSessionState`, `advisory_xact_lock`, `SYSTEMS.get`/`SYSTEMS.update_state`, `audit.record_system`, `JobState`, dedup_key `{system_id}:force_crash`. (Task 5 does **not** modify `control.py` — the session detach is a local `_detach_sessions_reconciler`.)
 - Produces: `async def repair_stalled_crashing_systems(conn) -> int`; catalog kind `"stalled_crashing_systems"` (auto-joins `ALL_REPAIR_KINDS` via `_REPAIR_CATALOG`).
 
 - [ ] **Step 1: Write the failing tests**
@@ -635,12 +640,22 @@ Create `tests/reconciler/test_stalled_crashing_recovery.py`. Model each case: a 
 def test_recovers_crashing_with_failed_job(migrated_url): ...       # job FAILED -> system crashed
 def test_recovers_crashing_with_canceled_job(migrated_url): ...     # job CANCELED -> system crashed
 def test_recovers_crashing_with_no_job_row(migrated_url): ...       # no force_crash row -> crashed
+# AC5, detach path (guards the hand-copied _detach_sessions_reconciler SQL):
+def test_recovers_crashing_detaches_live_session(migrated_url): ...  # LIVE session -> detached + audited
 # AC5a: active job -> left alone.
 def test_leaves_crashing_with_running_valid_lease(migrated_url): ...  # running, lease ahead -> crashing
 def test_leaves_crashing_with_queued_job(migrated_url): ...          # queued -> crashing
 # AC5b: lease-lapsed running with attempts remaining -> left alone this tick (a worker reclaims).
 def test_leaves_crashing_with_lease_lapsed_running(migrated_url): ...  # running, lease past, attempt<max -> crashing
 ```
+
+The `test_recovers_crashing_detaches_live_session` case is the guard for the new hand-copied
+`_detach_sessions_reconciler` SQL: seed a `crashing` System with a `FAILED` force_crash job **and**
+a Run carrying a `LIVE` DebugSession, run the repair, then assert (a) the System is `crashed`,
+(b) the DebugSession is `detached`, and (c) an `audit_log` row exists with
+`object_kind='debug_sessions'`, `transition='live->detached'`, and `principal='system:reconciler'`.
+Reuse the session-seeding pattern from `tests/mcp/lifecycle/test_control_tools.py`'s
+`_seed_live_session` / the force_crash detach test.
 
 Each recover-case asserts `state == "crashed"` after the repair and that the repair returned `1`; each leave-alone case asserts `state == "crashing"` and the repair returned `0`. For the recover cases, also assert an audit row with `transition = "crashing->crashed"`. (Follow the audit-row assertion style in `tests/security/test_audit.py`.)
 
@@ -754,7 +769,7 @@ Expected: clean.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/kdive/reconciler/repairs/systems.py src/kdive/reconciler/loop.py src/kdive/jobs/handlers/control.py tests/reconciler/test_stalled_crashing_recovery.py
+git add src/kdive/reconciler/repairs/systems.py src/kdive/reconciler/loop.py tests/reconciler/test_stalled_crashing_recovery.py
 git commit -m "feat(reconciler): recover stalled crashing Systems to crashed (#1078)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
@@ -776,7 +791,7 @@ Run: `rg -n "SystemState.CRASHED" src/kdive` and confirm the only writer of `CRA
 
 Run: `rg -n "ready->crashed" tests/ src/`
 Expected hits to fix:
-- `tests/integration/live_stack/spine.py:367` — change `transition="ready->crashed"` to `transition="crashing->crashed"` (this is a `live_stack` proof `just ci` does **not** run; this dev host runs live proofs, so update it or the on-host proof fails).
+- `tests/integration/live_stack/spine.py:367` — change `transition="ready->crashed"` to `transition="crashing->crashed"` (this is a `live_stack` proof `just ci` does **not** run; this dev host runs live proofs, so update it or the on-host proof fails). The `crashing->crashed` literal itself is guarded under `just ci` by the system-audit assertion added in Task 3 Step 1 (`test_force_crash_drives_ready_crashing_crashed`), so a stray rename of the literal is caught by CI even though this specific `spine.py` assertion is not.
 - `tests/mcp/lifecycle/test_control_tools.py:640` — already handled in Task 4 Step 5 (the count query literal).
 - Comment-only hits (e.g. `test_control_tools.py:422`, `test_provider_state_races.py:251`) — update the prose to `ready->crashing->crashed` for accuracy; no assertion depends on them.
 
@@ -817,5 +832,6 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - **Spec coverage:** R1 → Task 4 (AC3/AC3b) + the marker in Task 3; R2 → Task 4 (AC2); R3 → Task 5 (AC5/AC5a/AC5b); R4 → Task 3 (AC4/AC4a/AC4b); R5 → no power logic change (Task 4). Fan-out table → Task 2 (AC6). Migration → Task 1. AC7 → Task 6.
 - **Existing-test breakage (plan-review findings, now covered):** `tests/domain/test_state.py:214-219` (Task 1 — flip the removed `READY→CRASHED` edge); `tests/mcp/lifecycle/test_control_tools.py` idempotent test (Task 4 Step 5 — no NMI re-fire on `CRASHED`); `tests/integration/live_stack/spine.py:367` + the `ready->crashed` audit literal (Task 6 Steps 2-3, incl. the `live_stack` proof `just ci` excludes).
-- **Placeholder scan:** the two `# test scaffold` lines in Task 3 Step 1 are explicitly flagged for deletion (they illustrate intent; the real setup is the `_set_state(..., CRASHING)` call). The reconciler helper and the `dedup_key` SQL are now inlined correctly (dedup predicate `s.id::text || ':force_crash'`; import block a diff against the real `systems.py` header).
+- **Placeholder scan:** all shown test blocks are copy-clean (the illegal `CRASHED→READY` scaffold was removed — the retry test sets `CRASHING` directly via `_set_state`). The reconciler helper and the `dedup_key` SQL are inlined correctly (predicate `s.id::text || ':force_crash'`; import block a diff against the real `systems.py` header). The new `_detach_sessions_reconciler` SQL is guarded by `test_recovers_crashing_detaches_live_session` (Task 5).
+- **CI visibility of the audit literal:** `crashing->crashed` is asserted by a non-gated test (`test_force_crash_drives_ready_crashing_crashed`), so `just ci` catches a rename even though the `live_stack` proof that also uses it is excluded from CI.
 - **Type consistency:** `_ControlTarget`, `_CrashPrecheck`, `_resolved_domain_name`, `_controller`, `detach_sessions`, `SYSTEMS.update_state(conn, id, state)`, `advisory_xact_lock(conn, LockScope.SYSTEM, id)` all match the current `control.py`. `SystemState.CRASHING` is defined in Task 1 before every consumer.
