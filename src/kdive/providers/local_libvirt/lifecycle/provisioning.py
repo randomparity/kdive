@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import logging
 import socket
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
 import libvirt
+from defusedxml.common import DefusedXmlException
+from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 import kdive.config as config
 from kdive.components.references import (
@@ -59,7 +62,10 @@ from kdive.providers.local_libvirt.lifecycle.storage import (
 )
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
-from kdive.providers.shared.libvirt_xml import recorded_gdb_port, recorded_ssh_port
+from kdive.providers.shared.libvirt_xml import (
+    recorded_gdb_port_from_root,
+    recorded_ssh_port_from_root,
+)
 from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for
 
 __all__ = [
@@ -110,6 +116,17 @@ def _close(conn: _LibvirtConn) -> None:
         conn.close()
     except libvirt.libvirtError:
         _log.warning("libvirt connection close failed; continuing", exc_info=True)
+
+
+def _parse_recorded_domain_xml(xml: str, *, domain_name: str, port_name: str) -> ET.Element:
+    try:
+        return _safe_fromstring(xml)
+    except (ET.ParseError, DefusedXmlException) as exc:
+        raise CategorizedError(
+            f"malformed libvirt domain XML reading the recorded {port_name} port",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"domain": domain_name},
+        ) from exc
 
 
 def reject_rootfs_without_upload_window(rootfs: RootfsSource) -> None:
@@ -309,13 +326,16 @@ class LocalLibvirtProvisioning:
             conn = self._connect()
         except libvirt.libvirtError as exc:
             raise self._infra("connecting to libvirt to read the gdbstub port", "") from exc
+        name = domain_name_for(system_id)
         try:
-            domain = conn.lookupByName(domain_name_for(system_id))
-            return recorded_gdb_port(domain.XMLDesc(0))
+            domain = conn.lookupByName(name)
+            root = _parse_recorded_domain_xml(
+                domain.XMLDesc(0), domain_name=name, port_name="gdbstub"
+            )
+            return recorded_gdb_port_from_root(root)
         except libvirt.libvirtError as exc:
             if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
                 return None
-            name = domain_name_for(system_id)
             raise self._infra("reading the recorded gdbstub port", name) from exc
         finally:
             _close(conn)
@@ -340,13 +360,14 @@ class LocalLibvirtProvisioning:
             conn = self._connect()
         except libvirt.libvirtError as exc:
             raise self._infra("connecting to libvirt to read the SSH port", "") from exc
+        name = domain_name_for(system_id)
         try:
-            domain = conn.lookupByName(domain_name_for(system_id))
-            return recorded_ssh_port(domain.XMLDesc(0))
+            domain = conn.lookupByName(name)
+            root = _parse_recorded_domain_xml(domain.XMLDesc(0), domain_name=name, port_name="SSH")
+            return recorded_ssh_port_from_root(root)
         except libvirt.libvirtError as exc:
             if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
                 return None
-            name = domain_name_for(system_id)
             raise self._infra("reading the recorded SSH port", name) from exc
         finally:
             _close(conn)

@@ -902,6 +902,20 @@ def test_provision_gdbstub_port_lookup_infra_error_is_infrastructure_failure() -
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
+def test_provision_gdbstub_malformed_recorded_xml_is_infrastructure_failure() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name, xml_desc="<domain>")})
+
+    def fail_free_port() -> int:
+        raise AssertionError("malformed live XML must not allocate a replacement gdbstub port")
+
+    with pytest.raises(CategorizedError) as caught:
+        _prov_with_port(conn, free_port=fail_free_port).provision(_SYS, _gdb_profile())
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"domain": name}
+    assert conn.closed == 1
+
+
 def test_provision_already_running_domain_is_idempotent() -> None:
     # A retry after a partial provision: defineXML redefines, create() reports "already
     # running" (OPERATION_INVALID) — the desired post-state, not a failure.
@@ -960,6 +974,20 @@ def test_provision_ssh_port_lookup_infra_error_is_infrastructure_failure() -> No
     with pytest.raises(CategorizedError) as caught:
         _prov_with_port(conn, free_port=lambda: 40022).provision(_SYS, _ssh_profile())
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_provision_ssh_malformed_recorded_xml_is_infrastructure_failure() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name, xml_desc="<domain>")})
+
+    def fail_free_port() -> int:
+        raise AssertionError("malformed live XML must not allocate a replacement SSH port")
+
+    with pytest.raises(CategorizedError) as caught:
+        _prov_with_port(conn, free_port=fail_free_port).provision(_SYS, _ssh_profile())
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"domain": name}
+    assert conn.closed == 1
 
 
 def test_provision_gdbstub_and_ssh_allocate_both_ports() -> None:
