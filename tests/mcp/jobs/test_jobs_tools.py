@@ -908,6 +908,12 @@ def test_list_jobs_filters_by_kind(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("kind", sorted(RETIRED_JOB_KINDS, key=lambda item: item.value))
+def test_jobs_list_payload_rejects_retired_kind_filters(kind: JobKind) -> None:
+    with pytest.raises(ValueError, match="retired job kind"):
+        jobs_tools._JobsListPayload(kind=kind)
+
+
 @pytest.mark.parametrize("kind", [JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT])
 def test_list_jobs_rejects_retired_kind_filters(migrated_url: str, kind: JobKind) -> None:
     async def _run() -> None:

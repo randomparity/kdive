@@ -24,17 +24,10 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.payloads import Authorizing, BuildPayload, InstallPayload
+from kdive.jobs.payloads import Authorizing, InstallPayload
 from tests.adversarial.conftest import count_rows, open_conn, open_conns
 
-WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
-
-
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
-
-
-def _build_payload() -> BuildPayload:
-    return BuildPayload(run_id=str(uuid4()), build_host_id=str(WORKER_LOCAL_ID))
 
 
 def _install_payload() -> InstallPayload:
@@ -56,7 +49,9 @@ def test_concurrent_dequeue_claims_each_job_once(
     async def _run() -> None:
         async with open_conn(migrated_url) as seed:
             for i in range(jobs):
-                await queue.enqueue(seed, JobKind.BUILD, _build_payload(), _AUTHORIZING, f"dk-{i}")
+                await queue.enqueue(
+                    seed, JobKind.INSTALL, _install_payload(), _AUTHORIZING, f"dk-{i}"
+                )
         async with open_conns(migrated_url, workers) as conns:
             claimed = await asyncio.gather(
                 *(queue.dequeue(c, f"w{i}") for i, c in enumerate(conns))
@@ -78,7 +73,12 @@ def test_attempt_charging_caps_total_claims_across_reclaim(migrated_url: str) ->
     async def _run() -> None:
         async with open_conn(migrated_url) as conn:
             job = await queue.enqueue(
-                conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk", max_attempts=max_attempts
+                conn,
+                JobKind.INSTALL,
+                _install_payload(),
+                _AUTHORIZING,
+                "dk",
+                max_attempts=max_attempts,
             )
             claims = 0
             for _ in range(max_attempts + 5):  # try well past the cap
@@ -99,7 +99,7 @@ def test_reclaimed_worker_cannot_finalize(migrated_url: str) -> None:
     async def _run() -> None:
         async with open_conn(migrated_url) as conn:
             job = await queue.enqueue(
-                conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk", max_attempts=5
+                conn, JobKind.INSTALL, _install_payload(), _AUTHORIZING, "dk", max_attempts=5
             )
             claimed_a = await queue.dequeue(conn, "A")
             assert claimed_a is not None and claimed_a.worker_id == "A"
@@ -137,7 +137,7 @@ def test_concurrent_enqueue_same_dedup_key_makes_one_row(migrated_url: str, race
         async with open_conns(migrated_url, racers) as conns:
             jobs = await asyncio.gather(
                 *(
-                    queue.enqueue(c, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-shared")
+                    queue.enqueue(c, JobKind.INSTALL, _install_payload(), _AUTHORIZING, "dk-shared")
                     for i, c in enumerate(conns)
                 )
             )

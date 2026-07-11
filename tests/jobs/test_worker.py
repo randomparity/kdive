@@ -26,7 +26,6 @@ from kdive.jobs import worker as worker_module
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import (
     Authorizing,
-    BuildPayload,
     InstallPayload,
     RunPayload,
     load_payload,
@@ -40,8 +39,6 @@ from tests.integration._seed import (
     seed_system,
 )
 
-WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
-
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 
 
@@ -53,8 +50,8 @@ class _CountingHeartbeat:
         self.ticks += 1
 
 
-def _build_payload() -> BuildPayload:
-    return BuildPayload(run_id=str(uuid4()), build_host_id=str(WORKER_LOCAL_ID))
+def _build_payload() -> InstallPayload:
+    return InstallPayload(run_id=str(uuid4()))
 
 
 async def _final_state(url: str, job_id: UUID) -> Job:
@@ -142,11 +139,11 @@ def test_run_once_happy_path(migrated_url: str) -> None:
                 return "s3://out"
 
             reg = HandlerRegistry()
-            reg.register(JobKind.BUILD, handler)
+            reg.register(JobKind.INSTALL, handler)
             worker = _worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-happy"
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-happy"
                 )
 
             processed = await worker.run_once()
@@ -168,7 +165,7 @@ def test_run_once_unknown_kind_dead_letters(migrated_url: str) -> None:
             worker = _worker(pool, HandlerRegistry(), worker_id="w1")  # no handlers
             async with pool.connection() as conn:
                 job = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-unk"
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-unk"
                 )
             await worker.run_once()
             final = await _final_state(migrated_url, job.id)
@@ -190,14 +187,14 @@ def test_run_once_dedup_runs_handler_once(migrated_url: str) -> None:
                 return "s3://out"
 
             reg = HandlerRegistry()
-            reg.register(JobKind.BUILD, handler)
+            reg.register(JobKind.INSTALL, handler)
             worker = _worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 first = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-dedup"
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-dedup"
                 )
                 second = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-dedup"
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-dedup"
                 )
             assert second.id == first.id
 
@@ -219,11 +216,16 @@ def test_run_once_dead_letters_after_max_attempts(migrated_url: str) -> None:
                 raise CategorizedError("boom", category=ErrorCategory.BUILD_FAILURE)
 
             reg = HandlerRegistry()
-            reg.register(JobKind.BUILD, always_raises)
+            reg.register(JobKind.INSTALL, always_raises)
             worker = _worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-poison", max_attempts=3
+                    conn,
+                    JobKind.INSTALL,
+                    _build_payload(),
+                    _AUTHORIZING,
+                    "dk-poison",
+                    max_attempts=3,
                 )
 
             for _ in range(3):
@@ -253,12 +255,12 @@ def test_run_once_terminal_error_dead_letters_at_once(migrated_url: str) -> None
                 )
 
             reg = HandlerRegistry()
-            reg.register(JobKind.BUILD, terminal_raises)
+            reg.register(JobKind.INSTALL, terminal_raises)
             worker = _worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn,
-                    JobKind.BUILD,
+                    JobKind.INSTALL,
                     _build_payload(),
                     _AUTHORIZING,
                     "dk-terminal",
@@ -276,7 +278,7 @@ def test_run_once_terminal_error_dead_letters_at_once(migrated_url: str) -> None
     asyncio.run(_run())
 
 
-@pytest.mark.parametrize("kind", [JobKind.BUILD, JobKind.INSTALL])
+@pytest.mark.parametrize("kind", [JobKind.BOOT, JobKind.INSTALL])
 def test_terminal_run_job_failure_marks_owning_run_failed(migrated_url: str, kind: JobKind) -> None:
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
@@ -289,9 +291,7 @@ def test_terminal_run_job_failure_marks_owning_run_failed(migrated_url: str, kin
             reg.register(kind, raises_uncategorized)
             worker = _worker(pool, reg, worker_id="w1")
             payload: RunPayload = (
-                BuildPayload(run_id=run_id, build_host_id=str(WORKER_LOCAL_ID))
-                if kind is JobKind.BUILD
-                else InstallPayload(run_id=run_id)
+                RunPayload(run_id=run_id) if kind is JobKind.BOOT else InstallPayload(run_id=run_id)
             )
             async with pool.connection() as conn:
                 job = await queue.enqueue(
@@ -334,11 +334,11 @@ def test_failed_job_persists_redacted_failure_context(
                 )
 
             reg = HandlerRegistry()
-            reg.register(JobKind.BUILD, always_raises)
+            reg.register(JobKind.INSTALL, always_raises)
             worker = _worker(pool, reg, worker_id="w1", secret_registry=secret_registry)
             async with pool.connection() as conn:
                 job = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-context"
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-context"
                 )
 
             for _ in range(queue.DEFAULT_MAX_ATTEMPTS):
@@ -361,11 +361,11 @@ def test_invalid_persisted_payload_fails_as_configuration_error(migrated_url: st
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
 
             async def handler(conn: psycopg.AsyncConnection, job: Job) -> str:
-                load_payload(job, BuildPayload)
+                load_payload(job, InstallPayload)
                 raise AssertionError("malformed payload should not validate")
 
             reg = HandlerRegistry()
-            reg.register(JobKind.BUILD, handler)
+            reg.register(JobKind.INSTALL, handler)
             worker = _worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn, conn.transaction():
                 cur = await conn.execute(
@@ -374,7 +374,7 @@ def test_invalid_persisted_payload_fails_as_configuration_error(migrated_url: st
                     "VALUES (%s, %s, 'queued', 1, %s, %s) "
                     "RETURNING id",
                     (
-                        JobKind.BUILD,
+                        JobKind.INSTALL,
                         Jsonb({"run_id": "not-a-uuid"}),
                         Jsonb(_AUTHORIZING.model_dump(mode="json")),
                         "dk-invalid-payload",
@@ -389,7 +389,7 @@ def test_invalid_persisted_payload_fails_as_configuration_error(migrated_url: st
             final = await _final_state(migrated_url, job_id)
             assert final.state is JobState.FAILED
             assert final.error_category is ErrorCategory.CONFIGURATION_ERROR
-            assert final.failure_context["failure_message"].startswith("invalid build payload:")
+            assert final.failure_context["failure_message"].startswith("invalid install payload:")
 
     asyncio.run(_run())
 
@@ -405,11 +405,11 @@ def test_run_once_reclaims_lapsed_lease(migrated_url: str) -> None:
                 return "s3://out"
 
             reg = HandlerRegistry()
-            reg.register(JobKind.BUILD, handler)
+            reg.register(JobKind.INSTALL, handler)
             worker = _worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-lapse"
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-lapse"
                 )
                 # Simulate a dead worker holding a now-lapsed lease.
                 await conn.execute(
@@ -461,7 +461,7 @@ def test_heartbeat_renews_live_lease(migrated_url: str, monkeypatch: pytest.Monk
                 return "s3://out"
 
             reg = HandlerRegistry()
-            reg.register(JobKind.BUILD, slow)
+            reg.register(JobKind.INSTALL, slow)
             worker = _worker(
                 pool,
                 reg,
@@ -473,7 +473,7 @@ def test_heartbeat_renews_live_lease(migrated_url: str, monkeypatch: pytest.Monk
             )
             async with pool.connection() as conn:
                 job = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-hb-live"
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-hb-live"
                 )
 
             task = asyncio.create_task(worker.run_once())
@@ -518,7 +518,7 @@ def test_heartbeat_error_does_not_crash_dispatch(
                 return "s3://out"
 
             reg = HandlerRegistry()
-            reg.register(JobKind.BUILD, handler)
+            reg.register(JobKind.INSTALL, handler)
             worker = _worker(
                 pool,
                 reg,
@@ -530,7 +530,7 @@ def test_heartbeat_error_does_not_crash_dispatch(
             )
             async with pool.connection() as conn:
                 job = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-hberr"
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-hberr"
                 )
 
             processed = await worker.run_once()  # a failing heartbeat must not raise here
@@ -557,11 +557,11 @@ def test_run_once_claims_nothing_while_paused(migrated_url: str) -> None:
                 return "s3://out"
 
             reg = HandlerRegistry()
-            reg.register(JobKind.BUILD, handler)
+            reg.register(JobKind.INSTALL, handler)
             worker = _worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-paused"
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-paused"
                 )
                 await queue.set_queue_paused(conn, True)
 
@@ -582,11 +582,11 @@ def test_resume_restores_claiming(migrated_url: str) -> None:
                 return "s3://out"
 
             reg = HandlerRegistry()
-            reg.register(JobKind.BUILD, handler)
+            reg.register(JobKind.INSTALL, handler)
             worker = _worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-resume"
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-resume"
                 )
                 await queue.set_queue_paused(conn, True)
             assert await worker.run_once() is None  # paused
@@ -613,7 +613,7 @@ def test_paused_worker_completes_job_already_in_flight(migrated_url: str) -> Non
                 return "s3://out"
 
             reg = HandlerRegistry()
-            reg.register(JobKind.BUILD, slow)
+            reg.register(JobKind.INSTALL, slow)
             worker = _worker(
                 pool,
                 reg,
@@ -625,10 +625,10 @@ def test_paused_worker_completes_job_already_in_flight(migrated_url: str) -> Non
             )
             async with pool.connection() as conn:
                 in_flight = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-inflight"
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-inflight"
                 )
                 later = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-later"
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-later"
                 )
 
             task = asyncio.create_task(worker.run_once())  # claims in_flight, blocks in handler
@@ -757,11 +757,11 @@ def test_run_once_dequeues_when_ready_again(migrated_url: str) -> None:
                 return "s3://out"
 
             reg = HandlerRegistry()
-            reg.register(JobKind.BUILD, handler)
+            reg.register(JobKind.INSTALL, handler)
             worker = _worker(pool, reg, worker_id="w1", config=WorkerConfig(readiness=readiness))
             async with pool.connection() as conn:
                 job = await queue.enqueue(
-                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-notready"
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-notready"
                 )
             assert await worker.run_once() is None  # not ready: no claim
             assert (await _final_state(migrated_url, job.id)).attempt == 0
@@ -856,7 +856,7 @@ def test_run_schedules_ticker_concurrent_with_the_claim_loop(
         )
 
         async def long_run_once() -> Job | None:
-            await job_can_finish.wait()  # a "build" outlasting stale_after; ticker keeps us live
+            await job_can_finish.wait()  # a job outlasting stale_after; ticker keeps us live
             stop.set()
             return None
 
@@ -946,12 +946,12 @@ def test_non_terminal_handler_error_records_retry(migrated_url: str) -> None:
                 raise CategorizedError("transient", category=ErrorCategory.TRANSPORT_FAILURE)
 
             reg = HandlerRegistry()
-            reg.register(JobKind.BUILD, flaky)
+            reg.register(JobKind.INSTALL, flaky)
             worker, reader = _telemetry_worker(pool, reg)
             async with pool.connection() as conn:
                 await queue.enqueue(
                     conn,
-                    JobKind.BUILD,
+                    JobKind.INSTALL,
                     _build_payload(),
                     _AUTHORIZING,
                     "dk-retry-yes",
@@ -964,7 +964,7 @@ def test_non_terminal_handler_error_records_retry(migrated_url: str) -> None:
             points = _retry_points(reader)
             assert points, "retry counter not incremented for a non-terminal failure"
             assert points[0].value == 1
-            assert points[0].attributes["job_kind"] == "build"
+            assert points[0].attributes["job_kind"] == "install"
 
     asyncio.run(_run())
 
@@ -983,12 +983,12 @@ def test_terminal_handler_error_does_not_record_retry(migrated_url: str) -> None
                 )
 
             reg = HandlerRegistry()
-            reg.register(JobKind.BUILD, fatal)
+            reg.register(JobKind.INSTALL, fatal)
             worker, reader = _telemetry_worker(pool, reg)
             async with pool.connection() as conn:
                 await queue.enqueue(
                     conn,
-                    JobKind.BUILD,
+                    JobKind.INSTALL,
                     _build_payload(),
                     _AUTHORIZING,
                     "dk-retry-no",

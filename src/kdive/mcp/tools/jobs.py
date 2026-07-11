@@ -29,7 +29,7 @@ from uuid import UUID
 from fastmcp import FastMCP
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from kdive.db.repositories import JOBS, ObjectNotFound
 from kdive.domain.capacity.state import IllegalTransition, JobState
@@ -37,7 +37,6 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import (
     CONTRIBUTOR_CANCELABLE_JOB_KINDS,
     RETIRED_JOB_KINDS,
-    ActiveJobKind,
     Job,
     JobKind,
 )
@@ -73,7 +72,7 @@ class _JobsListPayload(ToolPayload):
     """Public payload for ``jobs.list`` filters and pagination."""
 
     status: JobState | None = Field(default=None, description="Only jobs in this lifecycle state.")
-    kind: ActiveJobKind | None = Field(default=None, description="Only active jobs of this kind.")
+    kind: JobKind | None = Field(default=None, description="Only active jobs of this kind.")
     investigation_id: str | None = Field(
         default=None,
         description=("Only active run-bearing jobs whose Run belongs to this Investigation."),
@@ -85,6 +84,13 @@ class _JobsListPayload(ToolPayload):
     cursor: str | None = Field(
         default=None, description="Opaque continuation cursor from a prior page's next_cursor."
     )
+
+    @field_validator("kind")
+    @classmethod
+    def _reject_retired_kind(cls, value: JobKind | None) -> JobKind | None:
+        if value in RETIRED_JOB_KINDS:
+            raise ValueError(f"{value.value} is a retired job kind")
+        return value
 
 
 def _error(object_id: str, category: ErrorCategory) -> ToolResponse:

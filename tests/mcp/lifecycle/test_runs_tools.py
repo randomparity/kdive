@@ -2859,14 +2859,24 @@ from kdive.jobs.payloads import (  # noqa: E402
 
 
 async def _enqueue_build_job(pool: AsyncConnectionPool, run_id: str) -> Job:
-    async with pool.connection() as conn:
-        return await queue.enqueue(
-            conn,
-            JobKind.BUILD,
-            BuildPayload(run_id=run_id, build_host_id=str(WORKER_LOCAL_ID)),
-            {"principal": "user-1", "agent_session": "s", "project": "proj"},
-            f"{run_id}:build",
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "INSERT INTO jobs (kind, payload, state, max_attempts, authorizing, dedup_key) "
+            "VALUES (%s, %s, 'queued', 3, %s, %s) RETURNING *",
+            (
+                JobKind.BUILD.value,
+                Jsonb(
+                    BuildPayload(run_id=run_id, build_host_id=str(WORKER_LOCAL_ID)).model_dump(
+                        mode="json", exclude_none=True
+                    )
+                ),
+                Jsonb({"principal": "user-1", "agent_session": "s", "project": "proj"}),
+                f"{run_id}:build",
+            ),
         )
+        row = await cur.fetchone()
+    assert row is not None
+    return Job.model_validate(row)
 
 
 async def _seed_running_run(pool: AsyncConnectionPool) -> str:

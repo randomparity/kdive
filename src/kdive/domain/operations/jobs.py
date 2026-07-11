@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal, TypedDict
+from typing import Any, TypedDict
 
 from pydantic import Field
 
@@ -35,23 +35,6 @@ class JobKind(StrEnum):
     DIAGNOSTIC_SYSRQ = "diagnostic_sysrq"
     CHECK_SSH_REACHABLE = "check_ssh_reachable"
 
-
-type ActiveJobKind = Literal[
-    JobKind.PROVISION,
-    JobKind.REPROVISION,
-    JobKind.TEARDOWN,
-    JobKind.INSTALL,
-    JobKind.BOOT,
-    JobKind.FORCE_CRASH,
-    JobKind.POWER,
-    JobKind.CAPTURE_VMCORE,
-    JobKind.IMAGE_BUILD,
-    JobKind.DIAGNOSTICS_WORKER_CHECK,
-    JobKind.AUTHORIZE_SSH_KEY,
-    JobKind.CONSOLE_ROTATE,
-    JobKind.DIAGNOSTIC_SYSRQ,
-    JobKind.CHECK_SSH_REACHABLE,
-]
 
 RETIRED_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT})
 """Persisted historical job kinds that are no longer valid active enqueue/filter choices."""
@@ -133,7 +116,6 @@ __all__ = [
     "CONTRIBUTOR_CANCELABLE_JOB_KINDS",
     "OPT_IN_DESTRUCTIVE_JOB_KINDS",
     "RETIRED_JOB_KINDS",
-    "ActiveJobKind",
     "Job",
     "JobAuthorizing",
     "JobKind",

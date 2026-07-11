@@ -21,7 +21,7 @@ from psycopg.types.json import Jsonb
 
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.operations.jobs import Job, JobAuthorizing, JobKind
+from kdive.domain.operations.jobs import RETIRED_JOB_KINDS, Job, JobAuthorizing, JobKind
 from kdive.jobs.payloads import (
     Authorizing,
     PayloadModel,
@@ -65,9 +65,12 @@ async def enqueue(
 
     Raises:
         ValueError: ``max_attempts < 1`` (a job that ``dequeue`` could never claim).
+        ValueError: ``kind`` is a retired historical kind without an active handler.
     """
     if max_attempts < 1:
         raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
+    if kind in RETIRED_JOB_KINDS:
+        raise ValueError(f"job kind {kind.value!r} is retired and cannot be enqueued")
     payload_json = dump_payload(kind, payload)
     authorizing = dump_authorizing(authorizing)
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
