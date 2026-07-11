@@ -213,7 +213,7 @@ def _response(
         _OBJECT_ID,
         "ok",
         items,
-        suggested_next_actions=["audit.query"],
+        suggested_next_actions=[_TOOL],
         data={
             "allocation_count": len(kept_allocs),
             "system_count": len(kept_systems),
