@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 
 from kdive.cli.commands.mutations import run_mutating_tool
-from kdive.cli.commands.reads import fetch_read_envelope, flatten_collection_rows
+from kdive.cli.commands.reads import fetch_collection_rows
 from kdive.cli.render import render
 
 
@@ -36,9 +36,8 @@ def _image_build_request(args: argparse.Namespace) -> dict[str, object]:
 
 
 async def images_list(args: argparse.Namespace) -> int:
-    envelope = await fetch_read_envelope("images.list", {})
     render(
-        flatten_collection_rows(envelope),
+        await fetch_collection_rows("images.list", {}),
         columns=["id", "name", "arch", "visibility", "owner", "state"],
         as_json=args.json,
     )
