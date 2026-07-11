@@ -336,14 +336,19 @@ async def _create_locked(
                     "target_kind": explicit_target_kind,
                 },
             )
-        run = await _insert_run(
+        run = await _insert_created_run(
             conn,
             ctx,
-            targets,
-            build_profile,
-            expected_boot_failure,
-            project,
+            investigation_id=targets.investigation_id,
+            system_id=targets.system_id,
+            build_profile=build_profile,
+            expected_boot_failure=expected_boot_failure,
+            project=project,
             target_kind=target_kind,
+            audit_args={
+                "investigation_id": str(targets.investigation_id),
+                "system_id": str(targets.system_id),
+            },
             label=label,
         )
         await _flip_investigation_if_open(conn, ctx, inv, targets.investigation_id, project)
@@ -353,15 +358,17 @@ async def _create_locked(
     return result
 
 
-async def _insert_run(
+async def _insert_created_run(
     conn: AsyncConnection,
     ctx: RequestContext,
-    targets: RunHostTargets,
+    *,
+    investigation_id: UUID,
+    system_id: UUID | None,
     build_profile: BuildProfile,
     expected_boot_failure: SerializedExpectedBootFailure | None,
     project: str,
-    *,
     target_kind: ResourceKind,
+    audit_args: dict[str, str],
     label: str | None = None,
 ) -> Run:
     now = datetime.now(UTC)
@@ -374,8 +381,8 @@ async def _insert_run(
             principal=ctx.principal,
             agent_session=ctx.agent_session,
             project=project,
-            investigation_id=targets.investigation_id,
-            system_id=targets.system_id,
+            investigation_id=investigation_id,
+            system_id=system_id,
             target_kind=target_kind,
             state=RunState.CREATED,
             build_profile=dump_build_profile(build_profile),
@@ -391,10 +398,7 @@ async def _insert_run(
             object_kind="runs",
             object_id=run.id,
             transition="->created",
-            args={
-                "investigation_id": str(targets.investigation_id),
-                "system_id": str(targets.system_id),
-            },
+            args=audit_args,
             project=project,
         ),
     )
@@ -502,14 +506,19 @@ async def _create_unbound(
             raise_config_error(object_id)
         if locked_inv.state not in INVESTIGATION_OPEN_FOR_RUN:
             raise_config_error(object_id, data={"current_status": locked_inv.state.value})
-        run = await _insert_unbound_run(
+        run = await _insert_created_run(
             conn,
             ctx,
-            investigation_id,
-            build_profile,
-            expected_boot_failure,
-            project,
-            target_kind,
+            investigation_id=investigation_id,
+            system_id=None,
+            build_profile=build_profile,
+            expected_boot_failure=expected_boot_failure,
+            project=project,
+            target_kind=target_kind,
+            audit_args={
+                "investigation_id": str(investigation_id),
+                "target_kind": target_kind.value,
+            },
             label=label,
         )
         await _flip_investigation_if_open(conn, ctx, locked_inv, investigation_id, project)
@@ -517,51 +526,3 @@ async def _create_unbound(
         if recorder is not None:
             await recorder(conn, result)
     return result
-
-
-async def _insert_unbound_run(
-    conn: AsyncConnection,
-    ctx: RequestContext,
-    investigation_id: UUID,
-    build_profile: BuildProfile,
-    expected_boot_failure: SerializedExpectedBootFailure | None,
-    project: str,
-    target_kind: ResourceKind,
-    *,
-    label: str | None = None,
-) -> Run:
-    now = datetime.now(UTC)
-    run = await RUNS.insert(
-        conn,
-        Run(
-            id=uuid4(),
-            created_at=now,
-            updated_at=now,
-            principal=ctx.principal,
-            agent_session=ctx.agent_session,
-            project=project,
-            investigation_id=investigation_id,
-            system_id=None,
-            target_kind=target_kind,
-            state=RunState.CREATED,
-            build_profile=dump_build_profile(build_profile),
-            expected_boot_failure=expected_boot_failure,
-            label=label,
-        ),
-    )
-    await audit.record(
-        conn,
-        ctx,
-        audit.AuditEvent(
-            tool="runs.create",
-            object_kind="runs",
-            object_id=run.id,
-            transition="->created",
-            args={
-                "investigation_id": str(investigation_id),
-                "target_kind": target_kind.value,
-            },
-            project=project,
-        ),
-    )
-    return run
