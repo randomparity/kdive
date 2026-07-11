@@ -17,7 +17,7 @@ import asyncio
 import contextlib
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from psycopg_pool import AsyncConnectionPool
@@ -79,6 +79,10 @@ class _Ctx:
         self.message = type("M", (), {"name": tool, "arguments": {"project": "proj"}})()
 
 
+def _pool(value: object) -> AsyncConnectionPool:
+    return cast("AsyncConnectionPool", value)
+
+
 def _returning(value: Any) -> Any:
     """Return an async callable that yields ``value`` when awaited."""
 
@@ -114,7 +118,7 @@ def test_meta_tools_contains_invoke_and_search() -> None:
 
 def _spy_usage() -> tuple[UsageTrackingMiddleware, list[Any]]:
     """UsageTrackingMiddleware with _record replaced by a spy."""
-    mw = UsageTrackingMiddleware(pool=object(), secret_registry=SecretRegistry())
+    mw = UsageTrackingMiddleware(pool=_pool(object()), secret_registry=SecretRegistry())
     recorded: list[Any] = []
 
     async def _record(ctx: Any, outcome: Any) -> None:
@@ -281,7 +285,7 @@ def test_denial_audit_invoke_skips_row_on_role_denied(
         calls.append(event)
 
     monkeypatch.setattr(da_mod.audit, "record_denial", _mock_record_denial)
-    mw = DenialAuditMiddleware(pool=_FakePool(), agent_session=lambda: "sess-1")
+    mw = DenialAuditMiddleware(pool=_pool(_FakePool()), agent_session=lambda: "sess-1")
 
     result = asyncio.run(mw.on_call_tool(_context("tools.invoke"), _raising(_role_denied())))
 
@@ -301,7 +305,7 @@ def test_denial_audit_non_meta_tool_still_writes_row(
         calls.append(event)
 
     monkeypatch.setattr(da_mod.audit, "record_denial", _mock_record_denial)
-    mw = DenialAuditMiddleware(pool=_FakePool(), agent_session=lambda: "sess-1")
+    mw = DenialAuditMiddleware(pool=_pool(_FakePool()), agent_session=lambda: "sess-1")
 
     result = asyncio.run(mw.on_call_tool(_context("control.force_crash"), _raising(_role_denied())))
 
@@ -423,18 +427,18 @@ def test_denial_equivalence_direct_vs_gateway() -> None:
         pass
 
     # --- Direct call ---
-    direct_mw = DenialAuditMiddleware(pool=object(), agent_session=lambda: None)
+    direct_mw = DenialAuditMiddleware(pool=_pool(object()), agent_session=lambda: None)
     direct_mw._record = _noop_record  # ty: ignore[invalid-assignment]
 
     direct_result = asyncio.run(direct_mw.on_call_tool(_context(inner_tool), _raising(denial)))
 
     # --- Gateway call ---
     # Inner DenialAuditMW converts the denial to an envelope.
-    inner_mw = DenialAuditMiddleware(pool=object(), agent_session=lambda: None)
+    inner_mw = DenialAuditMiddleware(pool=_pool(object()), agent_session=lambda: None)
     inner_mw._record = _noop_record  # ty: ignore[invalid-assignment]
 
     # Outer DenialAuditMW processes tools.invoke; it sees the envelope (no exception).
-    outer_mw = DenialAuditMiddleware(pool=object(), agent_session=lambda: None)
+    outer_mw = DenialAuditMiddleware(pool=_pool(object()), agent_session=lambda: None)
     outer_mw._record = _noop_record  # ty: ignore[invalid-assignment]
 
     async def _gateway() -> Any:

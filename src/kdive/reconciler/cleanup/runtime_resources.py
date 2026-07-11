@@ -28,7 +28,7 @@ import logging
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, AsyncCursor
 from psycopg.rows import dict_row
 
 from kdive.domain.catalog.resources import ManagedBy
@@ -152,7 +152,7 @@ async def _prune_or_cordon_runtime_resource(conn: AsyncConnection, row_id: UUID)
     return PruneOutcome(pruned=True, cordoned=False)
 
 
-async def _resource_has_live_allocation(cur: Any, row_id: UUID) -> bool:
+async def _resource_has_live_allocation(cur: AsyncCursor[dict[str, Any]], row_id: UUID) -> bool:
     """True when the resource backs a non-terminal allocation (the refuse-if-live predicate)."""
     await cur.execute(
         "SELECT 1 FROM allocations WHERE resource_id = %s AND state = ANY(%s) LIMIT 1",

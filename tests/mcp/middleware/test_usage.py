@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware import usage as usage_mod
@@ -55,8 +56,12 @@ def test_classify_error_for_other_category() -> None:
     assert UsageTrackingMiddleware._classify(result) is ToolOutcome.ERROR
 
 
+def _pool(value: object) -> AsyncConnectionPool:
+    return cast("AsyncConnectionPool", value)
+
+
 def _spy_middleware() -> tuple[UsageTrackingMiddleware, list[tuple[Any, ToolOutcome]]]:
-    mw = UsageTrackingMiddleware(pool=object(), secret_registry=SecretRegistry())
+    mw = UsageTrackingMiddleware(pool=_pool(object()), secret_registry=SecretRegistry())
     recorded: list[tuple[Any, ToolOutcome]] = []
 
     async def _record(ctx: Any, outcome: ToolOutcome) -> None:
@@ -155,7 +160,9 @@ def test_record_builds_usage_event_from_context(monkeypatch: pytest.MonkeyPatch)
     actor_ctxs: list[Any] = []
     ctx = _patch_record_boundary(monkeypatch, events, actor_ctxs)
     pool = _FakePool()
-    mw = UsageTrackingMiddleware(pool=pool, secret_registry=SecretRegistry(), acquire_timeout=2.0)
+    mw = UsageTrackingMiddleware(
+        pool=_pool(pool), secret_registry=SecretRegistry(), acquire_timeout=2.0
+    )
 
     asyncio.run(mw._record(_context(arguments={"project": "demo"}), ToolOutcome.OK))
 
@@ -182,7 +189,7 @@ def test_record_uses_question_mark_tool_when_message_has_no_name(
 ) -> None:
     events: list[Any] = []
     _patch_record_boundary(monkeypatch, events, [])
-    mw = UsageTrackingMiddleware(pool=_FakePool(), secret_registry=SecretRegistry())
+    mw = UsageTrackingMiddleware(pool=_pool(_FakePool()), secret_registry=SecretRegistry())
     context = SimpleNamespace(message=SimpleNamespace())  # message lacks `name`
 
     asyncio.run(mw._record(context, ToolOutcome.OK))
@@ -196,7 +203,7 @@ def test_record_default_acquire_timeout_is_one_second(monkeypatch: pytest.Monkey
     _patch_record_boundary(monkeypatch, events, [])
     pool = _FakePool()
     mw = UsageTrackingMiddleware(
-        pool=pool, secret_registry=SecretRegistry()
+        pool=_pool(pool), secret_registry=SecretRegistry()
     )  # no acquire_timeout override
 
     asyncio.run(mw._record(_context(), ToolOutcome.OK))
@@ -216,7 +223,7 @@ def test_record_swallows_failures_best_effort_and_warns(
         "warning",
         lambda *a, **k: warnings.append((a, k)),
     )
-    mw = UsageTrackingMiddleware(pool=_FakePool(), secret_registry=SecretRegistry())
+    mw = UsageTrackingMiddleware(pool=_pool(_FakePool()), secret_registry=SecretRegistry())
 
     # a failure inside _record must never propagate (best-effort recording)
     asyncio.run(mw._record(_context(name="runs.create"), ToolOutcome.OK))

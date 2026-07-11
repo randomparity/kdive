@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from fastmcp.server.middleware import Middleware
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware.shared import (
@@ -50,7 +51,11 @@ class UsageTrackingMiddleware(Middleware):
     """
 
     def __init__(
-        self, pool: Any, *, secret_registry: SecretRegistry, acquire_timeout: float = 1.0
+        self,
+        pool: AsyncConnectionPool,
+        *,
+        secret_registry: SecretRegistry,
+        acquire_timeout: float = 1.0,
     ) -> None:
         self._pool = pool
         self._acquire_timeout = acquire_timeout
