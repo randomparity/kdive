@@ -32,7 +32,16 @@ from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.accounting.reports import report_all_projects, report_granted_set
+from kdive.mcp.tools.accounting.reports import (
+    AccountingAllProjectsReportRequest,
+    AccountingGrantedSetReportRequest,
+)
+from kdive.mcp.tools.accounting.reports import (
+    report_all_projects as _report_all_projects,
+)
+from kdive.mcp.tools.accounting.reports import (
+    report_granted_set as _report_granted_set,
+)
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, Role
 from tests.mcp.json_data import data_str
 
@@ -171,6 +180,30 @@ def _total(resp: ToolResponse) -> dict[str, str]:
         "reconciled": data_str(resp, "total_reconciled"),
         "variance": data_str(resp, "total_variance"),
     }
+
+
+async def report_granted_set(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    **kwargs: object,
+) -> ToolResponse:
+    return await _report_granted_set(
+        pool,
+        ctx,
+        request=AccountingGrantedSetReportRequest.model_validate(kwargs),
+    )
+
+
+async def report_all_projects(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    **kwargs: object,
+) -> ToolResponse:
+    return await _report_all_projects(
+        pool,
+        ctx,
+        request=AccountingAllProjectsReportRequest.model_validate(kwargs),
+    )
 
 
 # ---- all-projects form ------------------------------------------------------------
