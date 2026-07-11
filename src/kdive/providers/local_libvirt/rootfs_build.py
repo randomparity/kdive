@@ -71,7 +71,7 @@ from kdive.images.rootfs_catalog import (
     RootfsSource,
     resolve_rootfs_entry,
 )
-from kdive.providers.local_libvirt.lifecycle.baseline_kernel import baseline_kernel_names
+from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import baseline_kernel_names
 from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
 
 _log = logging.getLogger(__name__)

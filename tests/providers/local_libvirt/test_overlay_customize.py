@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kdive.providers.local_libvirt.lifecycle.overlay_customize import (
+from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import (
     inject_authorized_key_argv,
 )
 

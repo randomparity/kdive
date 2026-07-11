@@ -19,8 +19,8 @@ from kdive.artifacts.storage import FetchedArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle import readiness as readiness_mod
-from kdive.providers.local_libvirt.lifecycle.guest_kernel_writer import (
+from kdive.providers.local_libvirt.lifecycle.boot import readiness as readiness_mod
+from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
     GuestKernelWriter,
     _kernel_dest,
     _RealGuestKernelWriter,
@@ -28,17 +28,17 @@ from kdive.providers.local_libvirt.lifecycle.guest_kernel_writer import (
     _verify_vmlinux_size,
     _vmlinux_dest,
 )
-from kdive.providers.local_libvirt.lifecycle.install import (
-    Fetch,
-    LocalLibvirtInstall,
-    _stage_object,
-)
-from kdive.providers.local_libvirt.lifecycle.kernel_bundle import repack_modules_subtree
-from kdive.providers.local_libvirt.lifecycle.readiness import (
+from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import repack_modules_subtree
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleVerdict,
     ReadinessResult,
     _verdict_to_result,
     classify_console,
+)
+from kdive.providers.local_libvirt.lifecycle.install import (
+    Fetch,
+    LocalLibvirtInstall,
+    _stage_object,
 )
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.runtime_paths import read_console_log

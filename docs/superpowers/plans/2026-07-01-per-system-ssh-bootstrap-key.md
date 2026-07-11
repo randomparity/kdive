@@ -438,7 +438,7 @@ def materialized_private_key(private_key: str) -> Iterator[Path]:
 ```python
 from __future__ import annotations
 
-from kdive.providers.local_libvirt.lifecycle.overlay_customize import (
+from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import (
     inject_authorized_key_argv,
 )
 
@@ -553,7 +553,7 @@ In `provisioning.py`, add the parameter and run customizers after `prepare_overl
 `_define_and_start`, only when the overlay was created:
 
 ```python
-from kdive.providers.local_libvirt.lifecycle.overlay_customize import OverlayCustomizer
+from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import OverlayCustomizer
 
 def provision(
     self,

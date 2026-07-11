@@ -35,20 +35,20 @@ from kdive.profiles.provisioning import (
     _UploadRootfs,
     validate_rootfs_reference,
 )
-from kdive.providers.local_libvirt.lifecycle.baseline_kernel import (
+from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import (
     BaselineKernel,
     ExtractBaselineKernel,
     _real_extract_baseline_kernel,
 )
-from kdive.providers.local_libvirt.lifecycle.materialize import (
+from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     CatalogFetch,
     MaterializableRootfsRef,
     RootfsMaterializationContext,
     RootfsUploadContext,
     materialize_rootfs_base,
 )
-from kdive.providers.local_libvirt.lifecycle.overlay_customize import OverlayCustomizer
-from kdive.providers.local_libvirt.lifecycle.rootfs_catalog_fetch import (
+from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import OverlayCustomizer
+from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_catalog_fetch import (
     rootfs_catalog_fetch_from_env,
 )
 from kdive.providers.local_libvirt.lifecycle.storage import (

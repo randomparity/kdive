@@ -39,8 +39,10 @@ from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.local_libvirt.lifecycle.control import LocalLibvirtControl
 from kdive.providers.local_libvirt.lifecycle.install import LocalLibvirtInstall
-from kdive.providers.local_libvirt.lifecycle.overlay_customize import authorized_key_customizer
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
+from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import (
+    authorized_key_customizer,
+)
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.local_libvirt.reaping import LibvirtInfraReaper
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve

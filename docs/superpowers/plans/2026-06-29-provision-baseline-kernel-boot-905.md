@@ -42,7 +42,7 @@ from __future__ import annotations
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle.baseline_kernel import select_kernel_and_initrd
+from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import select_kernel_and_initrd
 
 _V = "6.19.10-300.fc44.x86_64"
 
@@ -567,7 +567,7 @@ Expected: FAIL (`extract_baseline_kernel` kwarg unknown / baseline not rendered 
 
 Add imports:
 ```python
-from kdive.providers.local_libvirt.lifecycle.baseline_kernel import (
+from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import (
     BaselineKernel,
     ExtractBaselineKernel,
     _real_extract_baseline_kernel,

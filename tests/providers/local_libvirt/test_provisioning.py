@@ -23,10 +23,6 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle import provisioning as provisioning_module
 from kdive.providers.local_libvirt.lifecycle import storage as storage_module
 from kdive.providers.local_libvirt.lifecycle import xml as xml_module
-from kdive.providers.local_libvirt.lifecycle.baseline_kernel import BaselineKernel
-from kdive.providers.local_libvirt.lifecycle.materialize import (
-    RootfsMaterializationContext,
-)
 from kdive.providers.local_libvirt.lifecycle.provisioning import (
     LocalLibvirtProvisioning,
     ProvisioningFiles,
@@ -34,6 +30,10 @@ from kdive.providers.local_libvirt.lifecycle.provisioning import (
     domain_name_for,
     overlay_path,
     render_domain_xml,
+)
+from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
+from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
+    RootfsMaterializationContext,
 )
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.shared import libvirt_xml as libvirt_xml_contract

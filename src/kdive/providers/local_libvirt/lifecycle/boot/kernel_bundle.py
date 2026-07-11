@@ -7,7 +7,7 @@ import tarfile
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle.staged_write import write_staged_bytes
+from kdive.providers.local_libvirt.lifecycle.boot.staged_write import write_staged_bytes
 
 _KERNEL_BUNDLE_BOOT_MEMBER = "boot/vmlinuz"
 _MODULES_MEMBER_PREFIX = "lib/modules/"

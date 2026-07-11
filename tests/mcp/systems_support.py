@@ -36,7 +36,9 @@ from kdive.providers.core.runtime import (
     RootfsCapabilities,
 )
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
-from kdive.providers.local_libvirt.lifecycle.overlay_customize import authorized_key_customizer
+from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import (
+    authorized_key_customizer,
+)
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.ports.lifecycle import (
     DEBUG_TRANSPORT_KINDS,

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle.staged_write import write_staged_bytes
+from kdive.providers.local_libvirt.lifecycle.boot.staged_write import write_staged_bytes
 
 
 def test_write_staged_bytes_replaces_destination_without_leaving_part_file(tmp_path: Path) -> None:

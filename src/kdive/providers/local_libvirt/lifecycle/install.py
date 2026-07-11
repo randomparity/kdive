@@ -41,19 +41,19 @@ from kdive.artifacts.storage import FetchedArtifact
 from kdive.config.core_settings import INSTALL_STAGING
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle.guest_kernel_writer import (
+from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
     GuestKernelWriter,
     _RealGuestKernelWriter,
 )
-from kdive.providers.local_libvirt.lifecycle.kernel_bundle import (
+from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import (
     extract_boot_vmlinuz,
     repack_modules_subtree,
 )
-from kdive.providers.local_libvirt.lifecycle.readiness import (
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ReadinessResult,
     _real_readiness,
 )
-from kdive.providers.local_libvirt.lifecycle.staged_write import write_staged_bytes
+from kdive.providers.local_libvirt.lifecycle.boot.staged_write import write_staged_bytes
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports.lifecycle import InstallRequest

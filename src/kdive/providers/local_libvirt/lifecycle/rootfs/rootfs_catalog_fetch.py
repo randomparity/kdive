@@ -16,7 +16,7 @@ import kdive.config as config
 from kdive.components.references import CatalogComponentRef
 from kdive.config.core_settings import DATABASE_URL
 from kdive.images.fetch import fetch_registered_rootfs_sync
-from kdive.providers.local_libvirt.lifecycle.materialize import CatalogFetch
+from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import CatalogFetch
 from kdive.providers.local_libvirt.lifecycle.storage import ROOTFS_DIR
 from kdive.store.objectstore import object_store_from_env
 

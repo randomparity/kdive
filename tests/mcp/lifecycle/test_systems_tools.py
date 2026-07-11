@@ -40,7 +40,7 @@ from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardow
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.mcp.tools.lifecycle.systems.view import get_system
 from kdive.profiles.provisioning import RootfsSource
-from kdive.providers.local_libvirt.lifecycle.materialize import (
+from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     MaterializableRootfsRef,
     RootfsMaterializationContext,
     materialize_rootfs_base,
