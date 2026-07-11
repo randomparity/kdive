@@ -24,7 +24,11 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import DebugSession
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.debug import introspect as introspect_tools
+from kdive.mcp.tools.debug import introspect as introspect_registrar
+from kdive.mcp.tools.debug.introspection import common as introspect_common
+from kdive.mcp.tools.debug.introspection import live as introspect_live
+from kdive.mcp.tools.debug.introspection import offline as introspect_offline
+from kdive.mcp.tools.debug.introspection import registrar as introspect_tool_registrar
 from kdive.prereqs.system_bootstrap_key import ensure_system_bootstrap_key
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime, ProviderSupport
@@ -120,7 +124,7 @@ def test_from_vmcore_happy_path_returns_redacted_report(migrated_url: str) -> No
         async with _pool(migrated_url) as pool:
             run_id = await _built_run_with_core(pool)
             port = _FakeIntrospector()
-            resp = await introspect_tools.introspect_from_vmcore(
+            resp = await introspect_offline.introspect_from_vmcore(
                 pool, _ctx(), run_id=run_id, introspector=port
             )
         assert resp.status != "error"
@@ -140,7 +144,7 @@ def test_from_vmcore_surfaces_truncated_true(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _built_run_with_core(pool)
             port = _FakeIntrospector(output=_output(truncated=True))
-            resp = await introspect_tools.introspect_from_vmcore(
+            resp = await introspect_offline.introspect_from_vmcore(
                 pool, _ctx(), run_id=run_id, introspector=port
             )
         assert resp.status != "error"
@@ -157,7 +161,7 @@ def test_from_vmcore_passes_through_port_redacted_report(migrated_url: str) -> N
         async with _pool(migrated_url) as pool:
             run_id = await _built_run_with_core(pool)
             port = _FakeIntrospector(output=_output(comm="[REDACTED]"))
-            resp = await introspect_tools.introspect_from_vmcore(
+            resp = await introspect_offline.introspect_from_vmcore(
                 pool, _ctx(), run_id=run_id, introspector=port
             )
         assert resp.status != "error"
@@ -177,7 +181,7 @@ def test_from_vmcore_never_booted_reports_no_vmcore(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             sys_id = await seed_crashed_system(pool)
             run_id = await seed_run_on_system(pool, sys_id, debuginfo_ref=None, build_id=None)
-            resp = await introspect_tools.introspect_from_vmcore(
+            resp = await introspect_offline.introspect_from_vmcore(
                 pool, _ctx(), run_id=run_id, introspector=_FakeIntrospector()
             )
         assert resp.status == "error" and resp.error_category == "not_found"
@@ -195,7 +199,7 @@ def test_from_vmcore_core_present_null_debuginfo_is_no_debuginfo(migrated_url: s
             sys_id = await seed_crashed_system(pool)
             run_id = await seed_run_on_system(pool, sys_id, debuginfo_ref=None, build_id="deadbeef")
             await _seed_vmcore_row(pool, run_id)
-            resp = await introspect_tools.introspect_from_vmcore(
+            resp = await introspect_offline.introspect_from_vmcore(
                 pool, _ctx(), run_id=run_id, introspector=_FakeIntrospector()
             )
         assert resp.status == "error" and resp.error_category == "not_found"
@@ -213,7 +217,7 @@ def test_from_vmcore_no_build_step_is_not_found(migrated_url: str) -> None:
                 pool, sys_id, debuginfo_ref="k/runs/r/vmlinux", build_id=None
             )
             await _seed_vmcore_row(pool, run_id)
-            resp = await introspect_tools.introspect_from_vmcore(
+            resp = await introspect_offline.introspect_from_vmcore(
                 pool, _ctx(), run_id=run_id, introspector=_FakeIntrospector()
             )
         assert resp.status == "error" and resp.error_category == "not_found"
@@ -230,7 +234,7 @@ def test_from_vmcore_no_captured_core_is_not_found(migrated_url: str) -> None:
             run_id = await seed_run_on_system(
                 pool, sys_id, debuginfo_ref="k/runs/r/vmlinux", build_id="deadbeef"
             )
-            resp = await introspect_tools.introspect_from_vmcore(
+            resp = await introspect_offline.introspect_from_vmcore(
                 pool, _ctx(), run_id=run_id, introspector=_FakeIntrospector()
             )
         assert resp.status == "error" and resp.error_category == "not_found"
@@ -243,7 +247,7 @@ def test_from_vmcore_no_captured_core_is_not_found(migrated_url: str) -> None:
 def test_from_vmcore_malformed_run_id_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await introspect_tools.introspect_from_vmcore(
+            resp = await introspect_offline.introspect_from_vmcore(
                 pool, _ctx(), run_id="nope", introspector=_FakeIntrospector()
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
@@ -256,7 +260,7 @@ def test_from_vmcore_cross_project_is_not_found(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _built_run_with_core(pool)
-            resp = await introspect_tools.introspect_from_vmcore(
+            resp = await introspect_offline.introspect_from_vmcore(
                 pool, _ctx(projects=("other",)), run_id=run_id, introspector=_FakeIntrospector()
             )
         assert resp.status == "error" and resp.error_category == "not_found"
@@ -273,7 +277,7 @@ def test_from_vmcore_without_viewer_raises(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _built_run_with_core(pool)
             with pytest.raises(AuthorizationError):
-                await introspect_tools.introspect_from_vmcore(
+                await introspect_offline.introspect_from_vmcore(
                     pool, _ctx(None), run_id=run_id, introspector=_FakeIntrospector()
                 )
 
@@ -286,7 +290,7 @@ def test_from_vmcore_port_attach_failure_is_typed(migrated_url: str) -> None:
             run_id = await _built_run_with_core(pool)
             err = CategorizedError("drgn", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
             port = _FakeIntrospector(raises=err)
-            resp = await introspect_tools.introspect_from_vmcore(
+            resp = await introspect_offline.introspect_from_vmcore(
                 pool, _ctx(), run_id=run_id, introspector=port
             )
         assert resp.status == "error" and resp.error_category == "debug_attach_failure"
@@ -304,9 +308,9 @@ async def _call_registered_tool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> ToolResponse:
     """Register the introspect tools and invoke one through the FastMCP transport (wrapper path)."""
-    monkeypatch.setattr(introspect_tools, "current_context", lambda: ctx)
+    monkeypatch.setattr(introspect_tool_registrar, "current_context", lambda: ctx)
     app: FastMCP = FastMCP(name="t")
-    introspect_tools.register(app, pool, resolver=resolver, secret_registry=SecretRegistry())
+    introspect_registrar.register(app, pool, resolver=resolver, secret_registry=SecretRegistry())
     async with Client(app) as client:
         result = await client.call_tool(tool, arguments, raise_on_error=False)
     assert result.structured_content is not None
@@ -415,7 +419,9 @@ def test_register_adds_the_tool() -> None:
             ),
         )
         resolver = ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
-        introspect_tools.register(app, pool, resolver=resolver, secret_registry=SecretRegistry())
+        introspect_registrar.register(
+            app, pool, resolver=resolver, secret_registry=SecretRegistry()
+        )
         tools = await app.list_tools()
         names = {t.name for t in tools}
         assert "introspect.from_vmcore" in names
@@ -559,7 +565,7 @@ def test_run_live_routes_bare_domain_handle_to_introspector(migrated_url: str) -
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool, transport_handle="kdive-remote-1")
             port = _FakeLiveIntrospector()
-            resp = await introspect_tools.introspect_run(
+            resp = await introspect_live.introspect_run(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -598,7 +604,7 @@ def test_run_live_loads_and_materializes_the_per_system_bootstrap_key(migrated_u
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool)
             port = _RecordingIntrospector()
-            resp = await introspect_tools.introspect_run(
+            resp = await introspect_live.introspect_run(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -624,7 +630,7 @@ def test_run_live_no_bootstrap_key_is_configuration_error(migrated_url: str) -> 
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool, with_bootstrap_key=False)
             port = _FakeLiveIntrospector()
-            return await introspect_tools.introspect_run(
+            return await introspect_live.introspect_run(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -643,7 +649,7 @@ def test_run_live_happy_path_returns_redacted_report(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool)
             port = _FakeLiveIntrospector()
-            resp = await introspect_tools.introspect_run(
+            resp = await introspect_live.introspect_run(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -678,7 +684,7 @@ def test_run_tool_uses_already_resolved_live_session(
                 ),
             )
             resolver = _CountingResolver(runtime)
-            original_resolve = introspect_tools.resolve_live_drgn_session
+            original_resolve = introspect_live.resolve_live_drgn_session
             resolve_calls = 0
 
             async def counted_resolve(conn, ctx, session_id: str):
@@ -686,10 +692,10 @@ def test_run_tool_uses_already_resolved_live_session(
                 resolve_calls += 1
                 return await original_resolve(conn, ctx, session_id)
 
-            monkeypatch.setattr(introspect_tools, "current_context", lambda: _live_ctx())
-            monkeypatch.setattr(introspect_tools, "resolve_live_drgn_session", counted_resolve)
+            monkeypatch.setattr(introspect_tool_registrar, "current_context", lambda: _live_ctx())
+            monkeypatch.setattr(introspect_live, "resolve_live_drgn_session", counted_resolve)
             app: FastMCP = FastMCP(name="t")
-            introspect_tools.register(
+            introspect_registrar.register(
                 app, pool, resolver=resolver, secret_registry=SecretRegistry()
             )
             async with Client(app) as client:
@@ -716,7 +722,7 @@ def test_run_live_masks_planted_secret_in_response(migrated_url: str) -> None:
             session_id = await _seed_live_drgn_session(pool)
             # The port is the single redaction boundary; it returns the already-masked shape.
             port = _FakeLiveIntrospector(output=_output(comm="[REDACTED]"))
-            resp = await introspect_tools.introspect_run(
+            resp = await introspect_live.introspect_run(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -736,7 +742,7 @@ def test_run_live_marks_transcript_sensitive(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool)
-            resp = await introspect_tools.introspect_run(
+            resp = await introspect_live.introspect_run(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -755,7 +761,7 @@ def test_run_live_unknown_helper_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool)
-            resp = await introspect_tools.introspect_run(
+            resp = await introspect_live.introspect_run(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -772,7 +778,7 @@ def test_run_live_non_live_session_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool, state=DebugSessionState.DETACHED)
-            resp = await introspect_tools.introspect_run(
+            resp = await introspect_live.introspect_run(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -790,7 +796,7 @@ def test_run_live_non_drgn_live_session_is_config_error(migrated_url: str) -> No
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool, transport="gdbstub")
-            resp = await introspect_tools.introspect_run(
+            resp = await introspect_live.introspect_run(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -807,7 +813,7 @@ def test_run_live_cross_project_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool)
-            resp = await introspect_tools.introspect_run(
+            resp = await introspect_live.introspect_run(
                 pool,
                 _live_ctx(projects=("other",)),
                 session_id=session_id,
@@ -825,7 +831,7 @@ def test_run_live_without_operator_raises(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool)
             with pytest.raises(AuthorizationError):
-                await introspect_tools.introspect_run(
+                await introspect_live.introspect_run(
                     pool,
                     _live_ctx(Role.VIEWER),
                     session_id=session_id,
@@ -842,7 +848,7 @@ def test_run_live_port_attach_failure_is_typed(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool)
             err = CategorizedError("ssh dropped", category=ErrorCategory.TRANSPORT_FAILURE)
-            resp = await introspect_tools.introspect_run(
+            resp = await introspect_live.introspect_run(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -858,7 +864,7 @@ def test_run_live_port_attach_failure_is_typed(migrated_url: str) -> None:
 def test_run_live_malformed_session_id_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await introspect_tools.introspect_run(
+            resp = await introspect_live.introspect_run(
                 pool,
                 _live_ctx(),
                 session_id="nope",
@@ -880,7 +886,7 @@ def test_script_clamps_timeout_to_floor(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool)
             port = _FakeLiveIntrospector()
-            resp = await introspect_tools.introspect_script(
+            resp = await introspect_live.introspect_script(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -903,7 +909,7 @@ def test_script_writes_audit_row(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool)
-            resp = await introspect_tools.introspect_script(
+            resp = await introspect_live.introspect_script(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -925,7 +931,7 @@ def test_script_failure_writes_no_audit_row(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool, transport="gdbstub")
-            resp = await introspect_tools.introspect_script(
+            resp = await introspect_live.introspect_script(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -953,7 +959,7 @@ def test_script_clamps_timeout_to_ceiling(
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool)
             port = _FakeLiveIntrospector()
-            await introspect_tools.introspect_script(
+            await introspect_live.introspect_script(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -972,7 +978,7 @@ def test_script_threads_script_into_the_introspector(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool, transport_handle="kdive-remote-1")
             port = _FakeLiveIntrospector()
-            resp = await introspect_tools.introspect_script(
+            resp = await introspect_live.introspect_script(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -995,7 +1001,7 @@ def test_script_seam_error_surfaces_typed(migrated_url: str) -> None:
             session_id = await _seed_live_drgn_session(pool)
             boom = CategorizedError("drgn died", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
             port = _FakeLiveIntrospector(raises=boom)
-            resp = await introspect_tools.introspect_script(
+            resp = await introspect_live.introspect_script(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -1018,7 +1024,7 @@ def test_require_introspection_rejects_when_live_script_unadvertised() -> None:
             support=_support(frozenset({"offline-vmcore", "live"})),  # no live-script
         ),
     )
-    denied = introspect_tools._require_introspection("sess-1", runtime, "live-script")
+    denied = introspect_common._require_introspection("sess-1", runtime, "live-script")
     assert denied is not None
     assert denied.error_category == ErrorCategory.CONFIGURATION_ERROR
     assert denied.data["capability"] == "introspection:live-script"
@@ -1030,7 +1036,7 @@ def test_script_over_size_cap_is_configuration_error(migrated_url: str) -> None:
             session_id = await _seed_live_drgn_session(pool)
             port = _FakeLiveIntrospector()
             huge = "x" * (256 * 1024 + 1)
-            resp = await introspect_tools.introspect_script(
+            resp = await introspect_live.introspect_script(
                 pool,
                 _live_ctx(),
                 session_id=session_id,
@@ -1073,7 +1079,7 @@ def test_run_live_warns_missing_debuginfo_but_still_succeeds(migrated_url: str) 
             session_id = await _seed_live_drgn_session(pool, debuginfo_ref=None)
             port = _FakeLiveIntrospector()
             with _patch_effective_config(cfg):
-                return await introspect_tools.introspect_run(
+                return await introspect_live.introspect_run(
                     pool,
                     _live_ctx(),
                     session_id=session_id,
@@ -1099,7 +1105,7 @@ def test_script_live_warns_missing_debuginfo_but_still_succeeds(migrated_url: st
             session_id = await _seed_live_drgn_session(pool, debuginfo_ref=None)
             port = _FakeLiveIntrospector()
             with _patch_effective_config(cfg):
-                return await introspect_tools.introspect_script(
+                return await introspect_live.introspect_script(
                     pool,
                     _live_ctx(),
                     session_id=session_id,
@@ -1124,7 +1130,7 @@ def test_run_live_uploaded_vmlinux_suppresses_warning(migrated_url: str) -> None
             session_id = await _seed_live_drgn_session(pool)  # default debuginfo_ref set
             port = _FakeLiveIntrospector()
             with _patch_effective_config(KernelConfig(frozenset())):
-                return await introspect_tools.introspect_run(
+                return await introspect_live.introspect_run(
                     pool,
                     _live_ctx(),
                     session_id=session_id,
