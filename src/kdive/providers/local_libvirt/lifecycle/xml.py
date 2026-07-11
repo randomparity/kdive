@@ -88,45 +88,15 @@ def render_domain_xml(
     traits = arch_traits(profile.arch)
     machine = section.domain_xml_params.get("machine", traits.machine)
 
-    domain = ET.Element("domain", type="kvm")
-    ET.SubElement(domain, "name").text = domain_name_for(system_id)
-    ET.SubElement(domain, "uuid").text = str(system_id)
-    ET.SubElement(domain, "memory", unit="MiB").text = str(profile.memory_mb)
-    ET.SubElement(domain, "vcpu").text = str(profile.vcpu)
-    # Pin the guest CPU to the host's (ADR-0294, #956). The QEMU/KVM default model (``qemu64``)
-    # is x86-64-v1; EL9/RHEL-family glibc requires x86-64-v2, so an EL9 guest's ``ld.so`` aborts
-    # PID 1 ("Fatal glibc error: CPU does not support x86-64-v2") and the domain never reaches
-    # userspace — sshd is unreachable over the always-rendered forward (the #956 symptom). Debian's
-    # v1 baseline booted regardless, which masked this. host-passthrough gives the guest the host
-    # CPU (>= v2 on any modern KVM host) and matches the debug/introspection intent of a local VM.
-    ET.SubElement(domain, "cpu", mode="host-passthrough")
-    os_el = ET.SubElement(domain, "os")
-    ET.SubElement(os_el, "type", arch=profile.arch, machine=machine).text = "hvm"
-    baseline_cmdline = _BASELINE_CMDLINE_TEMPLATE.format(console=traits.console_device)
-    _append_direct_kernel(os_el, kernel_path, initrd_path, baseline_cmdline)
-    features = ET.SubElement(domain, "features")
-    # On x86 the guest's qemu_fw_cfg driver locates the fw_cfg device only via ACPI, so the
-    # VMCOREINFO note below is written only when ACPI is present; mirror remote (issue #708,
-    # ADR-0215).
-    ET.SubElement(features, "acpi")
-    # QEMU emits the VMCOREINFO note that drgn/crash need to locate the kernel in a host_dump
-    # core only when the domain advertises this feature; mirror remote's domain (issue #703).
-    ET.SubElement(features, "vmcoreinfo", state="on")
-    devices = ET.SubElement(domain, "devices")
-    disk = ET.SubElement(devices, "disk", type="file", device="disk")
-    ET.SubElement(disk, "driver", name="qemu", type="qcow2")
-    ET.SubElement(disk, "source", file=disk_path)
-    ET.SubElement(disk, "target", dev="vda", bus="virtio")
-    serial = ET.SubElement(devices, "serial", type="pty")
-    # append="off" (libvirt's default, pinned explicitly) makes virtlogd truncate the serial log
-    # on every power-cycle, so the file holds only the current boot and each Run's capture reads
-    # it whole — no cross-boot byte offset (ADR-0258, supersedes ADR-0241's local offset, #836).
-    ET.SubElement(serial, "log", file=str(console_log_path(system_id)), append="off")
-    ET.SubElement(serial, "target", port="0")
-    console = ET.SubElement(devices, "console", type="pty")
-    ET.SubElement(console, "target", type="serial", port="0")
-    metadata = ET.SubElement(domain, "metadata")
-    ET.SubElement(metadata, f"{{{KDIVE_METADATA_NS}}}system").text = str(system_id)
+    domain, devices = _build_baseline_domain(
+        system_id,
+        profile,
+        disk_path=disk_path,
+        machine=machine,
+        console_device=traits.console_device,
+        kernel_path=kernel_path,
+        initrd_path=initrd_path,
+    )
 
     if section.debug.preserve_on_crash:
         _append_preserve_on_crash(domain, devices)
@@ -141,6 +111,87 @@ def render_domain_xml(
     )
 
     return ET.tostring(domain, encoding="unicode")
+
+
+def _build_baseline_domain(
+    system_id: UUID,
+    profile: ProvisioningProfile,
+    *,
+    disk_path: str,
+    machine: str,
+    console_device: str,
+    kernel_path: Path | None,
+    initrd_path: Path | None,
+) -> tuple[ET.Element, ET.Element]:
+    """Build the always-present local-libvirt domain skeleton."""
+    domain = ET.Element("domain", type="kvm")
+    ET.SubElement(domain, "name").text = domain_name_for(system_id)
+    ET.SubElement(domain, "uuid").text = str(system_id)
+    ET.SubElement(domain, "memory", unit="MiB").text = str(profile.memory_mb)
+    ET.SubElement(domain, "vcpu").text = str(profile.vcpu)
+    _append_host_cpu(domain)
+    os_el = _append_os(domain, profile, machine=machine)
+    _append_direct_kernel(os_el, kernel_path, initrd_path, _baseline_cmdline(console_device))
+    _append_crash_capture_features(domain)
+    devices = ET.SubElement(domain, "devices")
+    _append_root_disk(devices, disk_path)
+    _append_serial_console(devices, system_id)
+    _append_metadata(domain, system_id)
+    return domain, devices
+
+
+def _append_host_cpu(domain: ET.Element) -> None:
+    """Pin the guest CPU to the host model (ADR-0294, #956)."""
+    # The QEMU/KVM default model (`qemu64`) is x86-64-v1; EL9/RHEL-family glibc requires
+    # x86-64-v2, so an EL9 guest's `ld.so` aborts PID 1 and the domain never reaches userspace.
+    ET.SubElement(domain, "cpu", mode="host-passthrough")
+
+
+def _append_os(domain: ET.Element, profile: ProvisioningProfile, *, machine: str) -> ET.Element:
+    """Append the libvirt OS section without boot artifacts."""
+    os_el = ET.SubElement(domain, "os")
+    ET.SubElement(os_el, "type", arch=profile.arch, machine=machine).text = "hvm"
+    return os_el
+
+
+def _baseline_cmdline(console_device: str) -> str:
+    return _BASELINE_CMDLINE_TEMPLATE.format(console=console_device)
+
+
+def _append_crash_capture_features(domain: ET.Element) -> None:
+    """Append ACPI and VMCOREINFO features needed for host_dump capture."""
+    features = ET.SubElement(domain, "features")
+    # On x86 the guest's qemu_fw_cfg driver locates the fw_cfg device only via ACPI, so the
+    # VMCOREINFO note below is written only when ACPI is present; mirror remote (issue #708,
+    # ADR-0215).
+    ET.SubElement(features, "acpi")
+    # QEMU emits the VMCOREINFO note that drgn/crash need to locate the kernel in a host_dump
+    # core only when the domain advertises this feature; mirror remote's domain (issue #703).
+    ET.SubElement(features, "vmcoreinfo", state="on")
+
+
+def _append_root_disk(devices: ET.Element, disk_path: str) -> None:
+    """Append the rootfs disk as the lone virtio disk."""
+    disk = ET.SubElement(devices, "disk", type="file", device="disk")
+    ET.SubElement(disk, "driver", name="qemu", type="qcow2")
+    ET.SubElement(disk, "source", file=disk_path)
+    ET.SubElement(disk, "target", dev="vda", bus="virtio")
+
+
+def _append_serial_console(devices: ET.Element, system_id: UUID) -> None:
+    """Append the serial console and per-System virtlogd log sink."""
+    serial = ET.SubElement(devices, "serial", type="pty")
+    # append="off" makes virtlogd truncate the serial log on every power-cycle, so the file holds
+    # only the current boot and each Run's capture reads it whole (ADR-0258, #836).
+    ET.SubElement(serial, "log", file=str(console_log_path(system_id)), append="off")
+    ET.SubElement(serial, "target", port="0")
+    console = ET.SubElement(devices, "console", type="pty")
+    ET.SubElement(console, "target", type="serial", port="0")
+
+
+def _append_metadata(domain: ET.Element, system_id: UUID) -> None:
+    metadata = ET.SubElement(domain, "metadata")
+    ET.SubElement(metadata, f"{{{KDIVE_METADATA_NS}}}system").text = str(system_id)
 
 
 def _append_direct_kernel(
