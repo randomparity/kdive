@@ -178,6 +178,37 @@ def test_get_malformed_id_is_error_envelope(migrated_url: str) -> None:
         assert resp.object_id == "not-a-uuid"
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None
+        assert "job_id" in resp.detail
+
+    asyncio.run(_run())
+
+
+def test_wait_malformed_id_is_invalid_uuid_envelope(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await jobs_tools.wait_job(pool, CTX, "not-a-uuid", timeout_s=0.0)
+        assert resp.object_id == "not-a-uuid"
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None
+        assert "job_id" in resp.detail
+
+    asyncio.run(_run())
+
+
+def test_cancel_malformed_id_is_invalid_uuid_envelope(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await jobs_tools.cancel_job(pool, CTX, "not-a-uuid")
+        assert resp.object_id == "not-a-uuid"
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None
+        assert "job_id" in resp.detail
 
     asyncio.run(_run())
 

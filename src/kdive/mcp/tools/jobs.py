@@ -163,7 +163,7 @@ async def get_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str) -
     """
     uid = _as_uuid(job_id)
     if uid is None:
-        return _error(job_id, ErrorCategory.CONFIGURATION_ERROR)
+        return _invalid_uuid_error("job_id", job_id)
     with bind_context(principal=ctx.principal, job_id=job_id):
         async with pool.connection() as conn:
             job = await JOBS.get(conn, uid)
@@ -196,7 +196,7 @@ async def wait_job(
     """
     uid = _as_uuid(job_id)
     if uid is None:
-        return _error(job_id, ErrorCategory.CONFIGURATION_ERROR)
+        return _invalid_uuid_error("job_id", job_id)
     if not math.isfinite(timeout_s):
         return _error(job_id, ErrorCategory.CONFIGURATION_ERROR)
     loop = asyncio.get_running_loop()
@@ -243,7 +243,7 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str
     """
     uid = _as_uuid(job_id)
     if uid is None:
-        return _error(job_id, ErrorCategory.CONFIGURATION_ERROR)
+        return _invalid_uuid_error("job_id", job_id)
     with bind_context(principal=ctx.principal, job_id=job_id):
         # Authorize before mutating: a job in an ungranted project must look absent and
         # never be canceled. The owning project never changes, so the read→update gap is
