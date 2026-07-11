@@ -10,10 +10,11 @@ from psycopg.rows import dict_row
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import SYSTEMS
-from kdive.domain.capacity.state import AllocationState, DebugSessionState, JobState, SystemState
+from kdive.domain.capacity.state import AllocationState, JobState, SystemState
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
+from kdive.jobs.handlers.control import detach_audit_event, detach_system_debug_sessions
 from kdive.jobs.payloads import SystemPayload
 from kdive.reconciler.repairs.allocations import SYSTEM_RECONCILER_PRINCIPAL
 from kdive.security import audit
@@ -135,38 +136,12 @@ async def repair_stalled_crashing_systems(conn: AsyncConnection) -> int:
 async def _detach_sessions_reconciler(conn: AsyncConnection, system: System) -> None:
     """Drive every non-terminal DebugSession of ``system`` to detached (reconciler principal).
 
-    Mirrors ``jobs.handlers.control.detach_sessions`` but audits under the system principal
-    (the reconciler has no request context).
+    Reuses ``detach_system_debug_sessions``'s transition SQL; audits under the system principal
+    (the reconciler has no request context) rather than under a job.
     """
-    async with conn.cursor() as cur:
-        await cur.execute(
-            "WITH targets AS ("
-            "    SELECT id, state FROM debug_sessions "
-            "    WHERE state IN (%s, %s) "
-            "      AND run_id IN (SELECT id FROM runs WHERE system_id = %s) "
-            "    FOR UPDATE"
-            ") "
-            "UPDATE debug_sessions s SET state = %s "
-            "FROM targets t WHERE s.id = t.id "
-            "RETURNING s.id, t.state",
-            (
-                DebugSessionState.ATTACH.value,
-                DebugSessionState.LIVE.value,
-                system.id,
-                DebugSessionState.DETACHED.value,
-            ),
-        )
-        rows = await cur.fetchall()
-    for session_id, old_state in rows:
+    for session_id, old_state in await detach_system_debug_sessions(conn, system):
         await audit.record_system(
             conn,
             principal=SYSTEM_RECONCILER_PRINCIPAL,
-            event=audit.AuditEvent(
-                tool="control.force_crash",
-                object_kind="debug_sessions",
-                object_id=session_id,
-                transition=f"{old_state}->detached",
-                args={"system_id": str(system.id)},
-                project=system.project,
-            ),
+            event=detach_audit_event(system, session_id, old_state),
         )

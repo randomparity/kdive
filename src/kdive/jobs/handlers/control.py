@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -104,12 +104,10 @@ async def power_handler(
     return str(system_id)
 
 
-class _CrashPrecheck(NamedTuple):
-    action: str  # "done" | "finalize" | "crash"
-    target: _ControlTarget | None
+_CrashAction = Literal["done", "finalize", "crash"]
 
 
-async def _force_crash_precheck(conn: AsyncConnection, system_id: UUID) -> _CrashPrecheck:
+async def _force_crash_precheck(conn: AsyncConnection, system_id: UUID) -> _CrashAction:
     """Classify a force_crash without transitioning, under the SYSTEM lock (ADR-0325).
 
     ``crash`` is the first attempt (READY): the caller resolves the controller, enters CRASHING,
@@ -126,12 +124,11 @@ async def _force_crash_precheck(conn: AsyncConnection, system_id: UUID) -> _Cras
                 details={"system_id": str(system_id)},
             )
         if system.state in TERMINAL_SYSTEM_STATES or system.state is SystemState.CRASHED:
-            return _CrashPrecheck("done", None)
-        target = _ControlTarget(_resolved_domain_name(system), system.project)
+            return "done"
         if system.state is SystemState.CRASHING:
-            return _CrashPrecheck("finalize", target)
+            return "finalize"
         if system.state is SystemState.READY:
-            return _CrashPrecheck("crash", target)
+            return "crash"
         raise CategorizedError(
             "force_crash requires a READY system",
             category=ErrorCategory.CONFIGURATION_ERROR,
@@ -168,12 +165,11 @@ async def force_crash_handler(
     propagates (the worker requeues) and is resolved evidence-first on retry / by the reconciler.
     """
     system_id = UUID(load_payload(job, SystemPayload).system_id)
-    precheck = await _force_crash_precheck(conn, system_id)
-    if precheck.action == "done":
+    action = await _force_crash_precheck(conn, system_id)
+    if action == "done":
         return str(system_id)
-    if precheck.action == "finalize":
-        assert precheck.target is not None  # precheck sets a target for the finalize branch
-        await _finalize_force_crash(conn, job, system_id, precheck.target.project)
+    if action == "finalize":
+        await _finalize_force_crash(conn, job, system_id)
         return str(system_id)
     # First attempt: resolve the controller while still READY (a failure here leaves READY),
     # then commit CRASHING as the last DB write before the NMI.
@@ -182,13 +178,11 @@ async def force_crash_handler(
     if target is None:
         return str(system_id)  # raced out of READY; nothing physical to do
     await asyncio.to_thread(control.force_crash, target.domain_name)
-    await _finalize_force_crash(conn, job, system_id, target.project)
+    await _finalize_force_crash(conn, job, system_id)
     return str(system_id)
 
 
-async def _finalize_force_crash(
-    conn: AsyncConnection, job: Job, system_id: UUID, project: str
-) -> None:
+async def _finalize_force_crash(conn: AsyncConnection, job: Job, system_id: UUID) -> None:
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
@@ -203,21 +197,27 @@ async def _finalize_force_crash(
             await SYSTEMS.update_state(conn, system_id, SystemState.CRASHED)
             await audit.record(
                 conn,
-                job_context_from_job(job, project),
+                job_context_from_job(job, system.project),
                 audit.AuditEvent(
                     tool="control.force_crash",
                     object_kind="systems",
                     object_id=system_id,
                     transition="crashing->crashed",
                     args={"system_id": str(system_id)},
-                    project=project,
+                    project=system.project,
                 ),
             )
         await detach_sessions(conn, job, system)
 
 
-async def detach_sessions(conn: AsyncConnection, job: Job, system: System) -> None:
-    """Drive every non-terminal DebugSession of ``system`` to detached."""
+async def detach_system_debug_sessions(
+    conn: AsyncConnection, system: System
+) -> list[tuple[UUID, str]]:
+    """Drive every non-terminal DebugSession of ``system`` to detached; return ``(id, old_state)``.
+
+    The transition SQL only — the caller audits the returned rows under its own principal
+    (`detach_sessions` for a job, the reconciler under the system principal).
+    """
     async with conn.cursor() as cur:
         await cur.execute(
             "WITH targets AS ("
@@ -236,19 +236,28 @@ async def detach_sessions(conn: AsyncConnection, job: Job, system: System) -> No
                 DebugSessionState.DETACHED.value,
             ),
         )
-        rows = await cur.fetchall()
-    for session_id, old_state in rows:
+        return await cur.fetchall()
+
+
+def detach_audit_event(system: System, session_id: UUID, old_state: str) -> audit.AuditEvent:
+    """The `<old_state>->detached` audit event for a force_crash session detach."""
+    return audit.AuditEvent(
+        tool="control.force_crash",
+        object_kind="debug_sessions",
+        object_id=session_id,
+        transition=f"{old_state}->detached",
+        args={"system_id": str(system.id)},
+        project=system.project,
+    )
+
+
+async def detach_sessions(conn: AsyncConnection, job: Job, system: System) -> None:
+    """Drive every non-terminal DebugSession of ``system`` to detached (audited under the job)."""
+    for session_id, old_state in await detach_system_debug_sessions(conn, system):
         await audit.record(
             conn,
             job_context_from_job(job, system.project),
-            audit.AuditEvent(
-                tool="control.force_crash",
-                object_kind="debug_sessions",
-                object_id=session_id,
-                transition=f"{old_state}->detached",
-                args={"system_id": str(system.id)},
-                project=system.project,
-            ),
+            detach_audit_event(system, session_id, old_state),
         )
 
 
