@@ -7,11 +7,11 @@ from typing import Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment
-from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
+from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
     MiRecord,
     register_values_by_number,
 )
-from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
+from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
     register_names as parsed_register_names,
 )
 from kdive.security.secrets.redaction import Redactor

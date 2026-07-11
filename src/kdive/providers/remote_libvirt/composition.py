@@ -74,9 +74,11 @@ from kdive.providers.remote_libvirt.resource_details import project_resource_det
 from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
 from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
-from kdive.providers.shared.debug_common.gdbmi.debuginfo import real_module_debuginfo_resolver
-from kdive.providers.shared.debug_common.gdbmi.engine import GdbMiEngine
-from kdive.providers.shared.debug_common.gdbmi.hostpolicy import allow_acl_remote
+from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
+from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
+    real_module_debuginfo_resolver,
+)
+from kdive.providers.shared.debug_common.gdbmi.policy.hostpolicy import allow_acl_remote
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env

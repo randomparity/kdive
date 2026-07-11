@@ -19,7 +19,7 @@ from kdive.mcp.tools.debug.operations.runtime import (
     run_engine_op_with_resolver,
 )
 from kdive.providers.ports.debug import GdbMiAttachment, GdbMiEngine
-from kdive.providers.shared.debug_common.gdbmi.engine import MAX_MEMORY_READ_BYTES
+from kdive.providers.shared.debug_common.gdbmi.core.engine import MAX_MEMORY_READ_BYTES
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver) -> None:

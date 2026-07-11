@@ -38,8 +38,8 @@ from kdive.mcp.tools.debug.operations.runtime import DebugEngineRuntime
 from kdive.providers.core.resolver import ProviderBinding
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.ports.debug import GdbMiAttachment
-from kdive.providers.shared.debug_common.gdbmi.debuginfo import ModuleDebuginfo
-from kdive.providers.shared.debug_common.gdbmi.engine import GdbMiEngine
+from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
+from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import ModuleDebuginfo
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.debug.test_debug_live_attach import _render_panicking_domain
 from tests.mcp.debug.test_debug_tools import (

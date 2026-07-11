@@ -7,7 +7,11 @@ from typing import Any, Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbBacktrace, GdbFrame, GdbMiAttachment
-from kdive.providers.shared.debug_common.gdbmi.mi_protocol import MiRecord, mi_int, stack_frames
+from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
+    MiRecord,
+    mi_int,
+    stack_frames,
+)
 from kdive.security.secrets.redaction import Redactor
 
 MAX_BACKTRACE_FRAMES = 64

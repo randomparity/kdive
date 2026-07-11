@@ -8,11 +8,11 @@ from typing import Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment, GdbModule, GdbModuleList
-from kdive.providers.shared.debug_common.gdbmi.debuginfo import (
+from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import MiRecord, evaluate_value
+from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
     ModuleDebuginfo,
     ModuleDebuginfoResolverSeam,
 )
-from kdive.providers.shared.debug_common.gdbmi.mi_protocol import MiRecord, evaluate_value
 from kdive.security.secrets.redaction import Redactor
 
 MAX_MODULES = 512

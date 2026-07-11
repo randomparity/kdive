@@ -28,7 +28,7 @@ from kdive.providers.ports.lifecycle import (
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
 from kdive.providers.remote_libvirt.connection.transport import remote_connection
 from kdive.providers.remote_libvirt.lifecycle.xml import recorded_ssh_port_strict
-from kdive.providers.shared.debug_common.gdbmi.hostpolicy import allow_acl_remote
+from kdive.providers.shared.debug_common.gdbmi.policy.hostpolicy import allow_acl_remote
 from kdive.providers.shared.debug_common.rsp import rsp_reachable
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env

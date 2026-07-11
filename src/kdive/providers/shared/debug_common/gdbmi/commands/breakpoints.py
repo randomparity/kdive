@@ -7,7 +7,7 @@ from typing import Any, Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbBreakpointRef, GdbMiAttachment
-from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
+from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
     MiRecord,
     breakpoint_rows,
     result_payload_dict,

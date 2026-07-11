@@ -7,7 +7,7 @@ from typing import Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment
-from kdive.providers.shared.debug_common.gdbmi.mi_protocol import MiRecord, evaluate_value
+from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import MiRecord, evaluate_value
 from kdive.security.secrets.redaction import Redactor
 
 _SYMBOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

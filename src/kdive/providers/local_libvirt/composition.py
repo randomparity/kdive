@@ -47,8 +47,10 @@ from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePoli
 from kdive.providers.local_libvirt.reaping import LibvirtInfraReaper
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
-from kdive.providers.shared.debug_common.gdbmi.debuginfo import real_module_debuginfo_resolver
-from kdive.providers.shared.debug_common.gdbmi.engine import GdbMiEngine
+from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
+from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
+    real_module_debuginfo_resolver,
+)
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 

@@ -22,24 +22,26 @@ from kdive.providers.ports.debug import (
     GdbModule,
     GdbStopRecord,
 )
-from kdive.providers.shared.debug_common.gdbmi import engine as gdbmi
-from kdive.providers.shared.debug_common.gdbmi.debuginfo import DebuginfoResolver
-from kdive.providers.shared.debug_common.gdbmi.disassembly import MAX_DISASSEMBLE_INSTRUCTIONS
-from kdive.providers.shared.debug_common.gdbmi.engine import (
+from kdive.providers.shared.debug_common.gdbmi.commands.disassembly import (
+    MAX_DISASSEMBLE_INSTRUCTIONS,
+)
+from kdive.providers.shared.debug_common.gdbmi.commands.stack import MAX_BACKTRACE_FRAMES
+from kdive.providers.shared.debug_common.gdbmi.core import engine as gdbmi
+from kdive.providers.shared.debug_common.gdbmi.core.engine import (
     MAX_MEMORY_READ_BYTES,
     GdbMiEngine,
     MiRecord,
     PygdbmiController,
     parse_mi_records,
 )
-from kdive.providers.shared.debug_common.gdbmi.execution import ExecutionControl
-from kdive.providers.shared.debug_common.gdbmi.mi_protocol import (
+from kdive.providers.shared.debug_common.gdbmi.core.execution import ExecutionControl
+from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
     disassembly_rows,
     evaluate_value,
     stack_frames,
 )
-from kdive.providers.shared.debug_common.gdbmi.stack import MAX_BACKTRACE_FRAMES
-from kdive.providers.shared.debug_common.gdbmi.transcript import append_transcript
+from kdive.providers.shared.debug_common.gdbmi.core.transcript import append_transcript
+from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import DebuginfoResolver
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -2316,7 +2318,7 @@ def test_module_build_id_preserves_memory_transport_failure(
 
 # --- load_module_symbols (#923, ADR-0278) ---------------------------------------------------
 
-from kdive.providers.shared.debug_common.gdbmi.debuginfo import ModuleDebuginfo  # noqa: E402
+from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import ModuleDebuginfo  # noqa: E402
 
 
 def _srcversion_cmd(ptr: str) -> str:
