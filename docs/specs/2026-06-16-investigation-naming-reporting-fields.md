@@ -12,10 +12,9 @@ issue's "Bugzilla ID / JIRA issue" examples are covered. Three things are not:
 
 1. There is no **free-form text field** — the issue's remaining concrete example.
 2. `title` cannot be **changed** after `investigations.open`.
-3. `investigations.get` returns only `{project, external_refs: <count>}`
-   (`src/kdive/mcp/tools/lifecycle/investigations.py`), hiding `title`, the refs, and
-   `last_run_at`; and there is **no `investigations.list`**, so a project's campaigns cannot be
-   enumerated for reporting.
+3. The original `investigations.get` response returned only `{project, external_refs: <count>}`,
+   hiding `title`, the refs, and `last_run_at`; and there was **no `investigations.list`**, so a
+   project's campaigns could not be enumerated for reporting.
 
 ## Decision (per ADR-0135)
 

@@ -14,18 +14,24 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
-from kdive.mcp.tools.lifecycle.investigations_handlers import (
-    _DESCRIPTION_MAX,
-    _TITLE_MAX,
+from kdive.mcp.tools.lifecycle.investigations.common import (
+    DESCRIPTION_MAX,
+    TITLE_MAX,
     ExternalRefInput,
     ExternalRefKey,
+)
+from kdive.mcp.tools.lifecycle.investigations.lifecycle import (
     close_investigation,
-    get_investigation,
-    link_external_ref,
-    list_investigations,
     open_investigation,
+)
+from kdive.mcp.tools.lifecycle.investigations.metadata import (
+    link_external_ref,
     set_investigation,
     unlink_external_ref,
+)
+from kdive.mcp.tools.lifecycle.investigations.read import (
+    get_investigation,
+    list_investigations,
 )
 
 
@@ -66,12 +72,12 @@ def _register_investigations_open(app: FastMCP, pool: AsyncConnectionPool) -> No
     )
     async def investigations_open(
         project: Annotated[str, Field(description="Project to create the Investigation under.")],
-        title: Annotated[str, Field(description=f"Human-readable title (1..={_TITLE_MAX} chars).")],
+        title: Annotated[str, Field(description=f"Human-readable title (1..={TITLE_MAX} chars).")],
         description: Annotated[
             str | None,
             Field(
                 description=(
-                    f"Optional free-form description for reporting (<={_DESCRIPTION_MAX} chars)."
+                    f"Optional free-form description for reporting (<={DESCRIPTION_MAX} chars)."
                 )
             ),
         ] = None,
@@ -170,14 +176,13 @@ def _register_investigations_set(app: FastMCP, pool: AsyncConnectionPool) -> Non
         investigation_id: Annotated[str, Field(description="The Investigation to edit.")],
         title: Annotated[
             str | None,
-            Field(description=f"New title (1..={_TITLE_MAX} chars); omit to leave unchanged."),
+            Field(description=f"New title (1..={TITLE_MAX} chars); omit to leave unchanged."),
         ] = None,
         description: Annotated[
             str | None,
             Field(
                 description=(
-                    f'New description (<={_DESCRIPTION_MAX}); "" clears it; '
-                    "omit to leave unchanged."
+                    f'New description (<={DESCRIPTION_MAX}); "" clears it; omit to leave unchanged.'
                 )
             ),
         ] = None,

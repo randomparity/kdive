@@ -67,7 +67,7 @@ behind `BindingErrorMiddleware`, whose per-tool conversions match only the
 it and the caller would get a raw `ValidationError` instead of the uniform envelope
 (the same hazard ADR-0247 and ADR-0259 call out). Validating in the service layer
 returns a clean `configuration_error`, matching the `investigations.title`
-length-check precedent (`investigations_handlers.py:65-78`).
+length-check precedent (`src/kdive/mcp/tools/lifecycle/investigations/common.py`).
 
 Rules for a supplied `label` (a single shared `validate_label` helper):
 
