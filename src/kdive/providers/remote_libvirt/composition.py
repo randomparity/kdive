@@ -91,9 +91,9 @@ RunningSystemsFactory = Callable[[AsyncConnectionPool], RunningSystems]
 
 
 def _component_sources() -> ComponentSourceCapabilities:
-    # Remote server build merges a kdump config fragment onto the tree's defconfig and applies
-    # an optional local patch on the worker (ADR-0081/0096). No rootfs/kernel/initrd: the remote
-    # target is a disk-image base OS, not a component-provisioned guest.
+    # Remote-libvirt accepts catalog/local kernel config inputs and local patch artifacts for
+    # uploaded-artifact workflows. No rootfs/kernel/initrd component source is accepted: the
+    # target boots from an operator-staged disk-image base OS.
     accepted: dict[ComponentKind, frozenset[ComponentSourceKind]] = {
         CONFIG_COMPONENT: frozenset({"catalog", "local"}),
         PATCH_COMPONENT: frozenset({"local"}),
