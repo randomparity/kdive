@@ -23,6 +23,7 @@ from kdive.jobs.payloads import (
     PowerPayload,
     ReprovisionPayload,
     SysRqPayload,
+    SystemPayload,
     dump_authorizing,
     dump_payload,
     load_payload,
@@ -171,6 +172,26 @@ def test_load_payload_rejects_unrelated_model_class_for_kind() -> None:
         PayloadValidationError, match="PowerPayload does not match build payload contract"
     ):
         load_payload(job, PowerPayload)
+
+
+def test_load_payload_rejects_superclass_model_for_kind() -> None:
+    now = datetime.now(UTC)
+    system_id = uuid4()
+    job = Job(
+        id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        kind=JobKind.REPROVISION,
+        payload={"system_id": str(system_id), "profile_digest": "abc123"},
+        state=JobState.QUEUED,
+        max_attempts=3,
+        authorizing={"principal": "alice", "agent_session": None, "project": "kernel-team"},
+        dedup_key="reprovision",
+    )
+    with pytest.raises(
+        PayloadValidationError, match="SystemPayload does not match reprovision payload contract"
+    ):
+        load_payload(job, SystemPayload)
 
 
 def test_validation_error_joins_nested_loc_with_dots() -> None:

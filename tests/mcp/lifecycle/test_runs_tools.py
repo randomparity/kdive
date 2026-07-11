@@ -2850,7 +2850,12 @@ def test_create_second_run_on_live_system_conflicts(migrated_url: str) -> None:
 
 from kdive.jobs import queue  # noqa: E402
 from kdive.jobs.models import HandlerRegistry  # noqa: E402
-from kdive.jobs.payloads import BuildPayload, InstallPayload, RunPayload  # noqa: E402
+from kdive.jobs.payloads import (  # noqa: E402
+    BuildPayload,
+    InstallPayload,
+    PayloadValidationError,
+    RunPayload,
+)
 
 
 async def _enqueue_build_job(pool: AsyncConnectionPool, run_id: str) -> Job:
@@ -5157,21 +5162,15 @@ def test_step_progress_reads_installed_cmdline(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_install_handler_accepts_composite_phase_job(migrated_url: str) -> None:
-    """The composite build_install_boot install phase passes a BUILD_INSTALL_BOOT-kind job.
-
-    Its run_only payload bakes cmdline at build (no install-time override), so the handler must
-    decode it and apply the build-ledger cmdline — regression for the InstallPayload dispatch that
-    load_payload(InstallPayload) would otherwise reject on the composite's differently-kinded job.
-    """
+def test_install_handler_rejects_retired_composite_phase_job(migrated_url: str) -> None:
+    """The retired build_install_boot kind no longer bypasses exact install payload decoding."""
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_succeeded_run(
                 pool, build_profile={**_VALID_BUILD, "cmdline": "dhash_entries=9"}
             )
-            # Exactly what composite._phase_job(job, RunPayload(run_id)) produces: kind carried
-            # from the composite job, payload a bare {run_id}.
+            # Historical composite rows carried the composite kind with a bare {run_id} payload.
             phase_job = Job(
                 id=uuid4(),
                 created_at=_DT,
@@ -5183,16 +5182,18 @@ def test_install_handler_accepts_composite_phase_job(migrated_url: str) -> None:
                 authorizing={"principal": "user-1", "agent_session": "s", "project": "proj"},
                 dedup_key=f"{run_id}:composite",
             )
-            installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(
-                    conn,
-                    phase_job,
-                    resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
-                )
-            # No override on the composite path: the build-ledger cmdline is applied and recorded.
-            assert installer.calls[0].cmdline == "console=ttyS0 root=/dev/vda dhash_entries=9"
-            assert await _install_step_cmdline(pool, run_id) == "dhash_entries=9"
+                with pytest.raises(
+                    PayloadValidationError,
+                    match="InstallPayload does not match build_install_boot payload contract",
+                ):
+                    await runs_handlers.install_handler(
+                        conn,
+                        phase_job,
+                        resolver=provider_resolver(
+                            installer=_FakeInstaller(), profile_policy=_LOCAL_POLICY
+                        ),
+                    )
 
     asyncio.run(_run())
 

@@ -321,7 +321,7 @@ def dump_payload(kind: JobKind, payload: PayloadModel | dict[str, Any]) -> dict[
 def load_payload[T: PayloadModel](job: Job, model_class: type[T]) -> T:
     """Decode ``job.payload`` as ``model_class`` after checking the job kind contract."""
     expected = _PAYLOAD_MODELS[job.kind]
-    if not issubclass(model_class, expected) and not issubclass(expected, model_class):
+    if model_class is not expected:
         raise PayloadValidationError(
             f"{model_class.__name__} does not match {job.kind.value} payload contract"
         )

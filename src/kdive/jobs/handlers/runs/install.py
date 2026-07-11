@@ -15,10 +15,10 @@ from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run, System
-from kdive.domain.operations.jobs import Job, JobKind
+from kdive.domain.operations.jobs import Job
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.runs.common import abandon_run_step_best_effort
-from kdive.jobs.payloads import InstallPayload, RunPayload, load_payload
+from kdive.jobs.payloads import InstallPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.kernel_config.gate import crash_capture_refusal
 from kdive.providers.core.resolver import ProviderResolver
@@ -59,11 +59,8 @@ async def install_handler(
 ) -> str | None:
     """Stage the built kernel for direct-kernel boot, recording the `install` step.
 
-    Serves two callers: a standalone ``JobKind.INSTALL`` job (which may carry a ``cmdline``
-    override, ADR-0299) and the composite ``build_install_boot`` install phase (a
-    ``JobKind.BUILD_INSTALL_BOOT`` job whose ``run_only`` payload bakes its cmdline at build, so it
-    carries no install-time override). The override is read only for a genuine ``INSTALL`` job;
-    ``load_payload`` cannot decode an ``InstallPayload`` from the composite's other-kinded job.
+    Accepts only ``JobKind.INSTALL`` payloads. The retired ``build_install_boot`` composite no
+    longer has a registered worker handler, so compatibility decoding stays out of this boundary.
     """
     payload = _install_payload_context(job)
     plan = await _resolve_install_plan(conn, payload, resolver)
@@ -76,17 +73,11 @@ async def install_handler(
 
 
 def _install_payload_context(job: Job) -> _InstallPayloadContext:
-    if job.kind is JobKind.INSTALL:
-        install_payload = load_payload(job, InstallPayload)
-        return _InstallPayloadContext(
-            run_id=UUID(install_payload.run_id),
-            override=install_payload.cmdline,
-            crashkernel=install_payload.crashkernel,
-        )
+    install_payload = load_payload(job, InstallPayload)
     return _InstallPayloadContext(
-        run_id=UUID(load_payload(job, RunPayload).run_id),
-        override=None,
-        crashkernel=None,
+        run_id=UUID(install_payload.run_id),
+        override=install_payload.cmdline,
+        crashkernel=install_payload.crashkernel,
     )
 
 
