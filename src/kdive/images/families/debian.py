@@ -64,14 +64,11 @@ type RunGuestfs = Callable[..., None]
 
 
 class DebianFamily:
-    """The debian-family (apt + kdump-tools) :class:`FamilyCustomizer`."""
-
     family = "debian"
     kdump_unit = "kdump-tools.service"
     guest_mac = "apparmor"
 
     def packages(self, kind: RootfsImageKind, distro: str, version: str) -> tuple[str, ...]:
-        """Return the apt package set for ``kind`` (``distro``/``version`` reserved for parity)."""
         del distro, version
         if kind == "build":
             return _DEBIAN_BUILD_PACKAGES
@@ -80,7 +77,6 @@ class DebianFamily:
     def capabilities(
         self, kind: RootfsImageKind, distro: str, version: str
     ) -> tuple[Capability, ...]:
-        """Return the tags this family bakes (distro/version unused, kept for parity)."""
         del distro, version
         mac = _mac_tag(self.guest_mac)
         if kind == "build":

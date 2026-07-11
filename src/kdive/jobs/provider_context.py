@@ -16,17 +16,14 @@ _provider_kind: ContextVar[str | None] = ContextVar("kdive_provider_kind", defau
 
 
 def set_provider_kind(value: str) -> None:
-    """Tag the current job with its provider kind (the ``provider`` label value)."""
     _provider_kind.set(value)
 
 
 def clear_provider_kind() -> None:
-    """Reset the tag (the worker calls this before each job dispatch)."""
     _provider_kind.set(None)
 
 
 def take_provider_kind() -> str | None:
-    """Return and clear the current job's provider kind (``None`` if untagged)."""
     value = _provider_kind.get()
     _provider_kind.set(None)
     return value
