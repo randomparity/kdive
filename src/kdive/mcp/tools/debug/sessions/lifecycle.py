@@ -250,9 +250,7 @@ class DebugSessionHandlers:
     ) -> None:
         self._connector_for_run = connector_for_run
         self._detach_resources = detach_resources
-        self._insert_session_locked = (
-            _insert_session_locked if insert_session_locked is None else insert_session_locked
-        )
+        self._insert_session_locked = insert_session_locked or _insert_session_locked
         self._secret_registry = secret_registry
         self._telemetry = telemetry or DebugSessionTelemetry.disabled()
 
