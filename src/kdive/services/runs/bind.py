@@ -5,10 +5,6 @@ the same System admission as the bound ``runs.create`` path — ready System, li
 single project, one-Run-per-System, optional reuse assertion — plus a kind-match contract: the
 System's resource kind must equal the Run's committed ``target_kind``. The write is an
 ``IS NULL`` compare-and-set, so a concurrent double-bind loses harmlessly.
-
-It reuses the System-admission helpers from :mod:`kdive.services.runs.admission` (the two
-boundaries share one lock order and one precondition set); the underscore imports are an
-intentional intra-package reuse, not a public-API dependency.
 """
 
 from __future__ import annotations
@@ -28,19 +24,19 @@ from kdive.log import bind_context
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
-from kdive.services.runs.admission import (
+from kdive.services.runs.admission import RunReuseRequirementInput
+from kdive.services.runs.host_admission import (
     RunCreateError,
-    RunReuseRequirementInput,
-    _assertion_block_response,
-    _config_failure,
-    _CreateTargets,
-    _parse_uuid,
-    _preconditions_block_response,
-    _raise_config,
-    _raise_from_error,
-    _raise_stale,
-    _resource_kind_for_system,
-    _stale_failure,
+    RunHostTargets,
+    check_host_preconditions,
+    check_reuse_assertion,
+    config_failure,
+    parse_uuid,
+    raise_config_error,
+    raise_from_categorized_error,
+    raise_stale_target,
+    resource_kind_for_system,
+    stale_failure,
 )
 from kdive.services.runs.states import ALLOC_HOSTABLE, RUN_BINDABLE, RUN_BUILD_TERMINAL
 
@@ -81,12 +77,12 @@ async def bind_run(
             Allocation is not live, the System's kind does not match the Run's ``target_kind``,
             the System already hosts a live Run, or a reuse assertion is unmet.
     """
-    run_id = _parse_uuid(request.run_id)
-    system_id = _parse_uuid(request.system_id)
+    run_id = parse_uuid(request.run_id)
+    system_id = parse_uuid(request.system_id)
     try:
         requirement = request.domain_reuse_requirement()
     except CategorizedError as exc:
-        _raise_from_error(request.run_id, exc)
+        raise_from_categorized_error(request.run_id, exc)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             targets, project = await _resolve_bind_targets(conn, ctx, run_id, system_id)
@@ -105,15 +101,15 @@ def _run_bindable_error(run: Run) -> RunCreateError | None:
             details={"reason": "run_already_bound"},
         )
     if run.state in RUN_BUILD_TERMINAL:
-        return _stale_failure(str(run.id), current_status=run.state.value)
+        return stale_failure(str(run.id), current_status=run.state.value)
     if run.state not in RUN_BINDABLE:
-        return _config_failure(str(run.id), data={"current_status": run.state.value})
+        return config_failure(str(run.id), data={"current_status": run.state.value})
     return None
 
 
 async def _resolve_bind_targets(
     conn: AsyncConnection, ctx: RequestContext, run_id: UUID, system_id: UUID
-) -> tuple[_CreateTargets, str]:
+) -> tuple[RunHostTargets, str]:
     """Pre-lock fetch + fast-fail; resolve the ALLOCATION lock key from the System.
 
     The Investigation is the Run's own; the Allocation id is read from the System so the locked
@@ -121,19 +117,19 @@ async def _resolve_bind_targets(
     """
     run = await RUNS.get(conn, run_id)
     if run is None or run.project not in ctx.projects:
-        _raise_config(str(run_id))
+        raise_config_error(str(run_id))
     require_role(ctx, run.project, Role.CONTRIBUTOR)
     blocked = _run_bindable_error(run)
     if blocked is not None:
         raise blocked
     system = await SYSTEMS.get(conn, system_id)
     if system is None or system.project not in ctx.projects or system.project != run.project:
-        _raise_config(str(system_id))
+        raise_config_error(str(system_id))
     alloc = await ALLOCATIONS.get(conn, system.allocation_id)
     if alloc is None or alloc.state not in ALLOC_HOSTABLE:
         current = alloc.state.value if alloc is not None else "missing"
-        _raise_stale(str(system_id), current_status=current)
-    targets = _CreateTargets(
+        raise_stale_target(str(system_id), current_status=current)
+    targets = RunHostTargets(
         investigation_id=run.investigation_id, system_id=system_id, allocation_id=alloc.id
     )
     return targets, run.project
@@ -143,7 +139,7 @@ async def _bind_locked(
     conn: AsyncConnection,
     ctx: RequestContext,
     run_id: UUID,
-    targets: _CreateTargets,
+    targets: RunHostTargets,
     *,
     project: str,
     requirement: ReuseRequirement,
@@ -159,17 +155,17 @@ async def _bind_locked(
     ):
         run = await RUNS.get(conn, run_id)
         if run is None:
-            _raise_config(str(run_id))
+            raise_config_error(str(run_id))
         blocked = _run_bindable_error(run)
         if blocked is not None:
             raise blocked
-        precond, ok = await _preconditions_block_response(conn, targets, project=project)
+        precond, ok = await check_host_preconditions(conn, targets, project=project)
         if precond is not None or ok is None:
-            raise precond or _config_failure(str(targets.system_id))
+            raise precond or config_failure(str(targets.system_id))
         system, alloc = ok
-        system_kind = await _resource_kind_for_system(conn, targets.system_id)
+        system_kind = await resource_kind_for_system(conn, targets.system_id)
         if system_kind != run.target_kind:
-            raise _config_failure(
+            raise config_failure(
                 str(run_id),
                 data={
                     "reason": "target_kind_mismatch",
@@ -177,7 +173,7 @@ async def _bind_locked(
                     "target_kind": run.target_kind.value,
                 },
             )
-        assertion = _assertion_block_response(system, alloc, requirement)
+        assertion = check_reuse_assertion(system, alloc, requirement)
         if assertion is not None:
             raise assertion
         if not await _bind_system(conn, run_id, targets.system_id):
@@ -206,7 +202,7 @@ async def _audit_bind(
     conn: AsyncConnection,
     ctx: RequestContext,
     run_id: UUID,
-    targets: _CreateTargets,
+    targets: RunHostTargets,
     project: str,
 ) -> None:
     await audit.record(

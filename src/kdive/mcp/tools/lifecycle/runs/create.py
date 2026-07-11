@@ -26,7 +26,6 @@ from kdive.services.idempotency.envelope import (
 )
 from kdive.services.runs.admission import (
     TARGET_KIND_VOCAB_REASONS,
-    RunCreateError,
     RunCreateResult,
     run_create_result_from_stored,
     stored_run_create_result,
@@ -34,6 +33,7 @@ from kdive.services.runs.admission import (
 from kdive.services.runs.admission import RunCreateRequest as RunCreateRequest
 from kdive.services.runs.admission import RunReuseRequirementInput as RunReuseRequirementInput
 from kdive.services.runs.admission import create_run as _create_run
+from kdive.services.runs.host_admission import RunCreateError
 
 _RUNS_CREATE_KIND = "runs.create"
 
