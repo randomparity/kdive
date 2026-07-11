@@ -11,6 +11,7 @@ from uuid import UUID
 
 import pytest
 from fastmcp import Client, FastMCP
+from fastmcp.tools.function_tool import FunctionTool
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
@@ -56,6 +57,21 @@ async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
 
 async def _open(pool: AsyncConnectionPool, ctx: RequestContext, **kw: Any):
     return await open_investigation(pool, ctx, **kw)
+
+
+def test_link_unlink_wrapper_docstrings_describe_external_refs() -> None:
+    app = FastMCP("investigations-docs")
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    inv_registered_tools.register(app, pool)
+
+    tools = {tool.name: tool for tool in cast(list[FunctionTool], asyncio.run(app.list_tools()))}
+
+    link = (tools["investigations.link"].description or "").lower()
+    unlink = (tools["investigations.unlink"].description or "").lower()
+    assert "external tracker ref" in link
+    assert "external tracker ref" in unlink
+    assert "run" not in link
+    assert "run" not in unlink
 
 
 def test_open_mints_investigation_and_audits(migrated_url: str) -> None:

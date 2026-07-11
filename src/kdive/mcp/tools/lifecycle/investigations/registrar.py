@@ -143,7 +143,7 @@ def _register_investigations_link(app: FastMCP, pool: AsyncConnectionPool) -> No
             Field(description="External ref to upsert, with tracker, id, and url."),
         ],
     ) -> ToolResponse:
-        """Link a run to an investigation."""
+        """Link an external tracker ref to an Investigation."""
         return await link_external_ref(pool, current_context(), investigation_id, ref)
 
 
@@ -162,7 +162,7 @@ def _register_investigations_unlink(app: FastMCP, pool: AsyncConnectionPool) -> 
             Field(description="Ref to remove; only tracker and id are used as the key."),
         ],
     ) -> ToolResponse:
-        """Unlink a run from an investigation."""
+        """Remove an external tracker ref from an Investigation."""
         return await unlink_external_ref(pool, current_context(), investigation_id, ref)
 
 
