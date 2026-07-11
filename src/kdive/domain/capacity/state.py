@@ -66,7 +66,7 @@ class SystemState(StrEnum):
     create-without-provision System be torn down without first advancing to
     ``provisioning``. ``force_crash`` cycles a ready System ``ready → crashing → crashed``: the
     ``crashing`` marker is committed before the physical NMI so the power path (which refuses any
-    non-``ready`` System) cannot reset the guest mid-crash (ADR-0325).
+    non-``ready`` System) cannot reset the guest mid-crash.
     """
 
     DEFINED = "defined"
