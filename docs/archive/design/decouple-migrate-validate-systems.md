@@ -1,7 +1,11 @@
 # Decouple `migrate()` + deploy-time `systems.toml` validation (#440)
 
+- **Archived:** the SQL-only migrate and validate-systems pieces remain relevant historical
+  context, but the `seed-build-configs` hook/CLI path was removed by
+  [ADR-0316](../../adr/0316-remove-server-build-lane.md) with the server-build lane and
+  build-config catalog.
 - **Issue:** [#440](https://github.com/randomparity/kdive/issues/440)
-- **ADR:** [ADR-0121](../adr/0121-decouple-migrate-validate-systems.md)
+- **ADR:** [ADR-0121](../../adr/0121-decouple-migrate-validate-systems.md)
 - **Status:** design
 - **Date:** 2026-06-15
 

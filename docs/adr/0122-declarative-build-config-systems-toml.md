@@ -15,7 +15,8 @@
   a declarative, file-authoritative `[[cost_class]]` block with a shared neutral validation
   rule and loud drift).
 - **Issue:** [#443](https://github.com/randomparity/kdive/issues/443).
-- **Spec:** [`../design/declarative-build-config-systems-toml.md`](../design/declarative-build-config-systems-toml.md).
+- **Spec:** archived at
+  [`../archive/design/declarative-build-config-systems-toml.md`](../archive/design/declarative-build-config-systems-toml.md).
 
 ## Context
 

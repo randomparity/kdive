@@ -257,6 +257,10 @@ These packages are related but not interchangeable:
 Provider build semantics, provider filenames, S3 upload mechanics, and MCP response shaping stay
 outside these data-owner packages unless the package above names that responsibility.
 
+Historical build-config catalog designs live under `docs/archive/design/`. They were superseded
+by [ADR-0316](../adr/0316-remove-server-build-lane.md); `kdive.build_configs`, `buildconfig.*`,
+and the build-config catalog are not part of the live architecture.
+
 ## MCP tool surface
 
 Atomic primitives mapped to planes. Every tool returns structured JSON with the

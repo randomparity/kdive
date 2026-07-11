@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.13 (`uv`, `ruff`, `ty`, `pytest`), argparse CLI (`src/kdive/__main__.py`), Helm chart (`deploy/helm/kdive`), `pytest`-driven `helm template` render tests.
 
-**Spec:** [`../../design/decouple-migrate-validate-systems.md`](../../design/decouple-migrate-validate-systems.md) · **ADR:** [`../../adr/0121-decouple-migrate-validate-systems.md`](../../adr/0121-decouple-migrate-validate-systems.md)
+**Spec:** [`../../archive/design/decouple-migrate-validate-systems.md`](../../archive/design/decouple-migrate-validate-systems.md) · **ADR:** [`../../adr/0121-decouple-migrate-validate-systems.md`](../../adr/0121-decouple-migrate-validate-systems.md)
 
 **Guardrails (run before every commit):** `just lint` · `just type` (whole tree) · the focused test for the task. Before the final push run the full `just test` plus `just docs-links docs-paths docs-check`. CI runs these recipes individually.
 

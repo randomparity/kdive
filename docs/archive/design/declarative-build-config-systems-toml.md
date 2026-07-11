@@ -1,7 +1,11 @@
 # Declarative `[[build_config]]` home in `systems.toml` (#443)
 
+- **Archived:** superseded by [ADR-0316](../../adr/0316-remove-server-build-lane.md), which
+  removed the server-build lane, `kdive.build_configs`, `buildconfig.*` tools, and the
+  build-config catalog. Current live ownership is described in
+  [top-level-design.md](../../design/top-level-design.md#artifact-and-catalog-package-ownership).
 - **Issue:** [#443](https://github.com/randomparity/kdive/issues/443)
-- **ADR:** [ADR-0122](../adr/0122-declarative-build-config-systems-toml.md)
+- **ADR:** [ADR-0122](../../adr/0122-declarative-build-config-systems-toml.md)
 - **Status:** Draft
 - **Date:** 2026-06-15
 

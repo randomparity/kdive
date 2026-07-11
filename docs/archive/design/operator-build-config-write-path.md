@@ -1,7 +1,11 @@
 # Operator write-path for build-config fragments
 
+- **Archived:** superseded by [ADR-0316](../../adr/0316-remove-server-build-lane.md), which
+  removed the server-build lane, `kdive.build_configs`, `buildconfig.*` tools, and the
+  build-config catalog. Current live ownership is described in
+  [top-level-design.md](../../design/top-level-design.md#artifact-and-catalog-package-ownership).
 - **Issue:** [#438](https://github.com/randomparity/kdive/issues/438)
-- **ADR:** [`../adr/0119-operator-build-config-write-path.md`](../adr/0119-operator-build-config-write-path.md)
+- **ADR:** [`../../adr/0119-operator-build-config-write-path.md`](../../adr/0119-operator-build-config-write-path.md)
 - **Status:** Draft
 
 ## Problem

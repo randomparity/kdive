@@ -120,7 +120,7 @@ modules). Each now has a direct unit test; per module:
   frames (deep `asyncio.run` stacks exceed `max_stack_depth`, so `mutate_only_covered_lines`
   records nothing) or only via PG-backed/cross-file tests. Examples:
   `services/allocation/admission/core.py`, `jobs/handlers/runs_*.py`,
-  `inventory/reconcile*.py`, `build_configs/{seed,catalog}.py`.
+  `inventory/reconcile*.py`.
 - **No mutable surface (≈8):** contract-only modules — `Protocol`s with `...` bodies, frozen
   dataclasses, bare Pydantic field declarations. mutmut generates nothing to mutate; the
   primary tests already pin field sets / frozenness / structural checks behaviorally.

@@ -192,8 +192,8 @@ aborts if **any** check fails, including the kdump-only `guestfs`/`drgn` one, so
 The reconciler's discovery already created a **grantable** local-libvirt resource (it carries the
 seeded `local` cost class, which is priced), so after Step 4 an `allocations.request` is granted.
 What `systems.toml` adds is the rest of the inventory the **lifecycle** needs: the **image** a
-System boots, the **kdump build-config**, and (optionally) a custom cost class. A fresh or broken
-file fails the reconcile pass with a `configuration_error`, so it is still worth getting right.
+System boots and (optionally) a custom cost class. A fresh or broken file fails the reconcile pass
+with a `configuration_error`, so it is still worth getting right.
 
 `systems.toml` is the single declarative source of truth for the inventory the app loads into the
 database (ADR-0112). Its default path is the per-user XDG location
@@ -202,21 +202,21 @@ to point elsewhere).
 
 Start from the minimal, local-only example —
 [`examples/systems-local-libvirt.toml`](examples/systems-local-libvirt.toml). It declares one
-image, one priced cost class for the `qemu:///system` host, and one kdump fragment; the full
-multi-provider reference is `systems.toml.example` at the repo root.
+image and one priced cost class for the `qemu:///system` host; the full multi-provider reference
+is `systems.toml.example` at the repo root.
 
 ```bash
 mkdir -p ~/.config/kdive
 cp docs/operating/providers/examples/systems-local-libvirt.toml ~/.config/kdive/systems.toml
 .venv/bin/python -m kdive reconcile-systems --check   # validate only (no DB/S3 writes); exits 0 when valid
-.venv/bin/python -m kdive reconcile-systems           # apply: creates the image, cost class, build config
+.venv/bin/python -m kdive reconcile-systems           # apply: creates the image and cost class
 ```
 
-`reconcile-systems` creates the image, the cost-class coefficient, and the build-config, and
-**binds** the discovered local-libvirt resource (matched by `host_uri`) to your declared `name`,
-`cost_class`, and `concurrent_allocation_cap`. The local-libvirt resource row itself is created and
-sized by discovery (Step 3), not by this file; if you reconcile before discovery has enumerated the
-host, the overlay logs a benign `no discovered local-libvirt host … overlay deferred` warning and
+`reconcile-systems` creates the image and cost-class coefficient, and **binds** the discovered
+local-libvirt resource (matched by `host_uri`) to your declared `name`, `cost_class`, and
+`concurrent_allocation_cap`. The local-libvirt resource row itself is created and sized by
+discovery (Step 3), not by this file; if you reconcile before discovery has enumerated the host,
+the overlay logs a benign `no discovered local-libvirt host … overlay deferred` warning and
 converges on the next reconciler pass.
 
 The image is declared with a **`staged-path`** source (ADR-0228): the source is the rootfs FILE on

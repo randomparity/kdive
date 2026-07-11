@@ -21,7 +21,7 @@ lives only on the `ProviderRuntime.platform_root_cmdline` field — `steps.py` n
 so there is one source of the default.
 
 Authoritative design: [ADR-0183](../../adr/0183-provider-aware-platform-root-cmdline.md),
-[spec](../../design/remote-boot-root-cmdline-and-xfs.md).
+[spec](../../archive/design/remote-boot-root-cmdline-and-xfs.md).
 
 ## Global Constraints
 

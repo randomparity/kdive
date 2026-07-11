@@ -132,16 +132,15 @@ a new config default is not dropped. As a backstop the chart renders
 no longer reintroduces that crash-loop — but `-f kdive-values.yaml` is the general fix for *any*
 future config-default drift, so prefer it.
 
-### Deploy-time Jobs: validate, migrate, seed (ADR-0121)
+### Deploy-time Jobs: validate and migrate
 
-A `helm upgrade` runs three single-responsibility Jobs, so each failure names exactly what broke
+A `helm upgrade` runs single-responsibility Jobs, so each failure names exactly what broke
 (a "migrate" failure is never a config or object-store fault):
 
 | Job | Hook phase | Fails when |
 |-----|-----------|------------|
 | `<release>-kdive-validate-systems` | `pre-install`/`pre-upgrade`, weight `-10` | the mounted `systems.toml` is malformed/invalid (fail-fast — aborts the upgrade before migrate) |
 | `<release>-kdive-migrate` | `pre-*` external / `post-*` bundled, weight `0` | a SQL schema migration actually fails |
-| `<release>-kdive-seed-build-configs` | `post-install`/`post-upgrade`, weight `10` | the object store is unreachable/misconfigured (runs after the app rolls out) |
 
 The validate Job renders only when `systems.configMapName` is set. Migrations are forward-only and
 must be backward-compatible (ADR-0015), so a rollback is image-only.
@@ -165,9 +164,7 @@ kubectl run kdive-validate --rm -i --restart=Never --image=<your kdive image> \
 running reconciler instead degrades (keep-last-good) on a bad file — different moments, by design
 (ADR-0121). **ConfigMap preconditions:** `systems.configMapName` must name an existing ConfigMap
 whose key equals `systems.fileName` (default `systems.toml`); a missing ConfigMap leaves the hook
-pod in `CreateContainerConfigError`. **Seed recovery:** if `seed-build-configs` fails, fix the
-object store, then re-run `helm upgrade` (re-fires the hook) or run `python -m kdive
-seed-build-configs` in a pod carrying the config ConfigMap env.
+pod in `CreateContainerConfigError`.
 
 Watch the rollout:
 
@@ -457,12 +454,12 @@ kubectl delete secret kdive-remote-tls -n <ns>               # if created in ste
 ```
 
 `helm uninstall` does **not** garbage-collect the chart's hook resources (the migrate /
-validate-systems / seed-build-configs hook Jobs, the `helm test` smoke pod, and the `systems.toml`
+validate-systems hook Jobs, the `helm test` smoke pod, and the `systems.toml`
 ConfigMap) — `before-hook-creation` only deletes a hook before the *next* install creates it, so
 completed hook objects linger after uninstall. Remove them:
 
 ```bash
-kubectl delete job kdive-kdive-migrate kdive-kdive-validate-systems kdive-kdive-seed-build-configs -n <ns>
+kubectl delete job kdive-kdive-migrate kdive-kdive-validate-systems -n <ns>
 kubectl delete pod kdive-kdive-smoke -n <ns>
 kubectl delete configmap kdive-systems -n <ns>
 ```

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.13, `uv`, `pytest`, `psycopg` (async), pydantic v2, Postgres advisory locks, S3-compatible object store. Source of truth for commands is the `justfile`.
 
-**Spec:** `docs/design/declarative-build-config-systems-toml.md` · **ADR:** `docs/adr/0122-declarative-build-config-systems-toml.md`
+**Spec:** `docs/archive/design/declarative-build-config-systems-toml.md` · **ADR:** `docs/adr/0122-declarative-build-config-systems-toml.md`
 
 **Project conventions every task must honor:**
 - Run guardrails before each commit: `just lint` (ruff check + format), `just type` (ty, whole tree), and the focused test(s). Zero warnings.

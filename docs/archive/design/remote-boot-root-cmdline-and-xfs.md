@@ -1,7 +1,13 @@
 # Remote boot: provider-aware `root=` cmdline + XFS root support (#587)
 
-Authoritative decision: [ADR-0183](../adr/0183-provider-aware-platform-root-cmdline.md). This spec is
-the falsifiable design + acceptance criteria the implementation must meet.
+- **Archived:** the build-config fragment changes in this design were superseded by
+  [ADR-0316](../../adr/0316-remove-server-build-lane.md), which removed
+  `kdive.build_configs` and the build-config catalog. Current image ownership and uploaded
+  kernel-config behavior are described in
+  [top-level-design.md](../../design/top-level-design.md#artifact-and-catalog-package-ownership).
+
+Authoritative decision: [ADR-0183](../../adr/0183-provider-aware-platform-root-cmdline.md). This
+spec is the falsifiable design + acceptance criteria the implementation must meet.
 
 ## Problem
 

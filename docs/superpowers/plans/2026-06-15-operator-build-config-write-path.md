@@ -6,7 +6,7 @@
 
 **Architecture:** One additive migration adds `source` (`seed`|`operator`) to `build_config_catalog`. The seed and the new tool both serialize per fragment name on a new `LockScope.BUILD_CONFIG` advisory lock; the seed's upsert is additionally DB-guarded (`WHERE source='seed'`). The tool reuses the existing reserved object key (in-place overwrite, no orphans) and the break-glass `platform_admin` + `platform_audit_log` pattern. `buildconfig.get` surfaces `source` for read-path observability.
 
-**Tech Stack:** Python 3.13, FastMCP, psycopg (async + sync), Postgres advisory locks, S3-compatible object store. Spec: `docs/design/operator-build-config-write-path.md`. ADR: `docs/adr/0119-operator-build-config-write-path.md`.
+**Tech Stack:** Python 3.13, FastMCP, psycopg (async + sync), Postgres advisory locks, S3-compatible object store. Spec: `docs/archive/design/operator-build-config-write-path.md`. ADR: `docs/adr/0119-operator-build-config-write-path.md`.
 
 **Guardrails (run before every commit):** `just lint`, `just type`, and the focused tests named per task. Run `just ci` once at the end. Conventional-commit subjects ≤72 chars, ending with `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
 
