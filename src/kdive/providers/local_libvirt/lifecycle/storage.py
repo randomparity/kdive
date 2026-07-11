@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-import subprocess  # noqa: S404 - qemu-img is invoked with a fixed argv, no shell
+import subprocess  # noqa: S404 - qemu-img uses fixed argv, no shell  # nosec B404
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,7 +57,7 @@ def _real_make_overlay(base: str, overlay: str) -> None:
             details=_overlay_error_details("create_overlay", overlay, tool=_QEMU_IMG),
         )
     try:
-        result = subprocess.run(  # noqa: S603 - resolved qemu-img; base/overlay are argv data
+        result = subprocess.run(  # noqa: S603 - qemu-img argv; paths are data  # nosec B603
             [qemu_img, "create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", base, overlay],
             capture_output=True,
             text=True,
@@ -128,7 +128,7 @@ def _run_qemu_img(
             details=_details(),
         )
     try:
-        result = subprocess.run(  # noqa: S603 - resolved qemu-img; argv is data, no shell
+        result = subprocess.run(  # noqa: S603 - qemu-img argv data, no shell  # nosec B603
             [qemu_img, *argv],
             capture_output=True,
             text=True,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import shutil
-import subprocess  # noqa: S404 - virsh domstate is invoked with a fixed argv, no shell
+import subprocess  # noqa: S404 - virsh domstate uses fixed argv, no shell  # nosec B404
 import time
 from enum import StrEnum
 from typing import NamedTuple
@@ -75,7 +75,7 @@ def _domain_exit_probe(domain_name: str) -> _DomainExitProbe:  # pragma: no cove
     if virsh is None:
         return _DomainExitProbe(False, "virsh executable not found")
     try:
-        proc = subprocess.run(  # noqa: S603 - resolved virsh; URI/domain are argv data, no shell
+        proc = subprocess.run(  # noqa: S603 - virsh argv; URI/domain are data  # nosec B603
             [virsh, "-c", uri, "domstate", domain_name],
             capture_output=True,
             text=True,

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import subprocess  # noqa: S404 - libguestfs tools invoked with fixed argv, no shell
+import subprocess  # noqa: S404 - libguestfs tools use fixed argv, no shell  # nosec B404
 from collections.abc import Callable
 from pathlib import Path
-from xml.etree.ElementTree import fromstring as _xml_fromstring
+from xml.etree.ElementTree import fromstring as _xml_fromstring  # noqa: S405  # nosec B405
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
@@ -33,7 +33,7 @@ def parse_virt_inspector_versions(xml: str) -> dict[str, str]:
     """
     if "<!DOCTYPE" in xml:
         raise ValueError("DOCTYPE is not allowed in virt-inspector output")
-    root = _xml_fromstring(xml)  # noqa: S314 - trusted virt-inspector output; DOCTYPE rejected above
+    root = _xml_fromstring(xml)  # noqa: S314 - DOCTYPE rejected above  # nosec B314
     versions: dict[str, str] = {}
     for app in root.iter("application"):
         name = app.findtext("name")
@@ -52,7 +52,7 @@ def inspect_package_versions(qcow2_path: Path) -> dict[str, str]:  # pragma: no 
     """
     argv = ["virt-inspector", "--no-icon", "-a", str(qcow2_path)]
     try:
-        result = subprocess.run(  # noqa: S603 - fixed argv; image path is a data arg
+        result = subprocess.run(  # noqa: S603 - fixed argv; image path is data  # nosec B603
             argv,
             capture_output=True,
             text=True,
@@ -101,7 +101,7 @@ def probe_makedumpfile_marker(qcow2_path: Path) -> str | None:  # pragma: no cov
     """
     argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "cat", MAKEDUMPFILE_MARKER_GUEST_PATH]
     try:
-        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; image path is a data arg
+        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
             argv,
             capture_output=True,
             text=True,
@@ -152,7 +152,7 @@ def probe_kernel_config(  # pragma: no cover - live_vm
     guest_path = f"/boot/config-{version}"
     argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "cat", guest_path]
     try:
-        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; image path is a data arg
+        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
             argv,
             capture_output=True,
             timeout=_GUESTFISH_TIMEOUT_S,
@@ -199,7 +199,7 @@ def probe_boot_entries(qcow2_path: Path) -> list[str] | None:  # pragma: no cove
     """
     argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "ls", "/boot"]
     try:
-        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; image path is a data arg
+        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
             argv,
             capture_output=True,
             text=True,
@@ -248,7 +248,7 @@ def probe_os_release(qcow2_path: Path) -> str | None:  # pragma: no cover - live
     for guest_path in ("/etc/os-release", "/usr/lib/os-release"):
         argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "cat", guest_path]
         try:
-            result = subprocess.run(  # noqa: S603 - fixed guestfish argv; image path is a data arg
+            result = subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
                 argv,
                 capture_output=True,
                 text=True,

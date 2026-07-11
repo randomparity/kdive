@@ -12,7 +12,7 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
-import subprocess
+import subprocess  # noqa: S404 - ssh-keygen uses fixed argv, no shell  # nosec B404
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -54,7 +54,7 @@ def _run_keygen(args: list[str]) -> None:
             category=ErrorCategory.MISSING_DEPENDENCY,
         )
     try:
-        completed = subprocess.run(  # noqa: S603 - fixed ssh-keygen argv, kdive-owned paths
+        completed = subprocess.run(  # noqa: S603 - fixed argv, kdive-owned paths  # nosec B603
             [executable, *args],
             capture_output=True,
             text=True,

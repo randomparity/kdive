@@ -9,7 +9,7 @@ agent's private key.
 
 from __future__ import annotations
 
-import subprocess  # noqa: S404 - fixed argv, no shell
+import subprocess  # noqa: S404 - ssh uses fixed argv, no shell  # nosec B404
 from collections.abc import Callable
 from uuid import UUID
 
@@ -116,7 +116,7 @@ def _raise_on_authorize_failure(proc: subprocess.CompletedProcess[str]) -> None:
 def _real_ssh_exec(argv: list[str], key: str) -> None:  # pragma: no cover - live_vm
     def run_once() -> subprocess.CompletedProcess[str]:
         try:
-            return subprocess.run(  # noqa: S603 - fixed argv, no shell; key is piped on stdin
+            return subprocess.run(  # noqa: S603 - fixed argv; key via stdin  # nosec B603
                 argv,
                 input=key,
                 text=True,

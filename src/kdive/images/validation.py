@@ -14,7 +14,7 @@ handler (#285) is its first consumer; the private-upload service (#286) reuses i
 
 from __future__ import annotations
 
-import subprocess  # noqa: S404 - guestfish invoked with fixed argv, no shell
+import subprocess  # noqa: S404 - guestfish uses fixed argv, no shell  # nosec B404
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -53,7 +53,7 @@ def _real_inspect(qcow2_path: Path, candidates: Sequence[str]) -> set[str]:
     commands = "\n".join(f"exists {path}" for path in candidates)
     argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i"]
     try:
-        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; image path is a data arg
+        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
             argv,
             input=commands + "\n",
             capture_output=True,

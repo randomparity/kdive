@@ -13,7 +13,7 @@ is `live_vm`-gated), while `fetch_object` and `read_build_id` stay `live_vm`-onl
 from __future__ import annotations
 
 import shutil
-import subprocess  # noqa: S404 - fixed argv only, no shell; the command batch goes via stdin
+import subprocess  # noqa: S404 - fixed argv, no shell; batch via stdin  # nosec B404
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -173,7 +173,7 @@ def _exec_crash(  # pragma: no cover - live_vm
     always released.
     """
     try:
-        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; the batch goes via stdin only
+        proc = subprocess.run(  # noqa: S603 - fixed argv; batch via stdin  # nosec B603
             argv,
             input=script.encode("utf-8"),
             timeout=_CRASH_TIMEOUT_S,

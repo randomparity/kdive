@@ -11,7 +11,7 @@ exposed for tests.
 from __future__ import annotations
 
 import shutil
-import subprocess
+import subprocess  # noqa: S404 - git commands use fixed argv, no shell  # nosec B404
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError
@@ -41,8 +41,8 @@ def _git(*args: str) -> str | None:
     if git is None:
         return None
     try:
-        result = subprocess.run(
-            [git, *args],  # noqa: S603  # fixed git executable; args are internal constants
+        result = subprocess.run(  # noqa: S603 - fixed git executable and args  # nosec B603
+            [git, *args],
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT,

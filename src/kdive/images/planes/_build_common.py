@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-import subprocess  # noqa: S404 - libguestfs tools invoked with fixed argv, no shell
+import subprocess  # noqa: S404 - libguestfs tools use fixed argv, no shell  # nosec B404
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -114,7 +114,7 @@ def run_guestfs_tool(
 ) -> None:
     """Run a fixed-argv libguestfs tool, mapping failures onto categorized errors."""
     try:
-        result = subprocess.run(  # noqa: S603 - fixed argv, no shell, trusted inputs
+        result = subprocess.run(  # noqa: S603 - fixed argv, no shell  # nosec B603
             argv,
             input=input_text,
             capture_output=True,

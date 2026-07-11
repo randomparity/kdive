@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import subprocess  # noqa: S404 - fixed argv only, no shell; helper name is validated
+import subprocess  # noqa: S404 - fixed ssh argv, no shell; helper validated  # nosec B404
 from collections.abc import Callable
 from typing import cast
 
@@ -223,7 +223,7 @@ def _exec_live_helper(argv: list[str]) -> dict[str, object]:  # pragma: no cover
 
     def run_once() -> subprocess.CompletedProcess[bytes]:
         try:
-            return subprocess.run(  # noqa: S603 - fixed argv, no shell; helper pre-validated
+            return subprocess.run(  # noqa: S603 - fixed argv; helper prevalidated  # nosec B603
                 argv,
                 timeout=_LIVE_INTROSPECT_SSH_TIMEOUT_S,
                 check=False,
@@ -285,7 +285,7 @@ def _exec_live_script(  # pragma: no cover - live_vm
 
     def run_once() -> subprocess.CompletedProcess[bytes]:
         try:
-            return subprocess.run(  # noqa: S603 - fixed argv, no shell; script via stdin only
+            return subprocess.run(  # noqa: S603 - fixed argv; script via stdin  # nosec B603
                 argv,
                 input=script.encode("utf-8"),
                 timeout=ssh_timeout_s,

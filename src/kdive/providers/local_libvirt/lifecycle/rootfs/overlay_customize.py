@@ -9,7 +9,7 @@ customizer here rather than adding parallel one-offs.
 from __future__ import annotations
 
 import shutil
-import subprocess
+import subprocess  # noqa: S404 - virt-customize uses fixed argv, no shell  # nosec B404
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -46,7 +46,7 @@ def _real_inject_authorized_key(  # pragma: no cover - live_vm
                 "virt-customize is not installed; cannot inject the per-System bootstrap key",
                 category=ErrorCategory.MISSING_DEPENDENCY,
             )
-        result = subprocess.run(  # noqa: S603 - fixed argv, kdive-owned paths
+        result = subprocess.run(  # noqa: S603 - fixed argv, kdive-owned paths  # nosec B603
             [executable, *inject_authorized_key_argv(overlay_path, str(pub))[1:]],
             capture_output=True,
             text=True,

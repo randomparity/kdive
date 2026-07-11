@@ -11,7 +11,7 @@ remote command's own non-zero exit (the connection already succeeded).
 
 from __future__ import annotations
 
-import subprocess
+import subprocess  # noqa: S404 - typed retry wrapper for fixed ssh argv callers  # nosec B404
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
