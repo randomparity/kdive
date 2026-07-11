@@ -19,7 +19,6 @@ from kdive.domain.capacity.state import InvestigationState
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.investigations import registrar as inv_registered_tools
-from kdive.mcp.tools.lifecycle.investigations import view as inv_view
 from kdive.mcp.tools.lifecycle.investigations.common import ExternalRefInput
 from kdive.mcp.tools.lifecycle.investigations.lifecycle import (
     close_investigation,
@@ -35,6 +34,7 @@ from kdive.mcp.tools.lifecycle.investigations.read import (
     list_investigations,
 )
 from kdive.security.authz.rbac import AuthorizationError, Role
+from kdive.services.investigations import view as inv_view
 from tests.db_waits import wait_until_any_backend_waiting
 
 
