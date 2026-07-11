@@ -346,6 +346,13 @@ def _provider_checks(contributions: Sequence[_EnabledDiagnosticContribution]) ->
     return [check for contribution in contributions for check in contribution.contribution.checks()]
 
 
+def _provider_egress_checks(contributions: Sequence[_EnabledDiagnosticContribution]) -> list[Check]:
+    checks: list[Check] = []
+    for contribution in contributions:
+        checks.extend(contribution.contribution.egress_checks())
+    return checks
+
+
 def _worker_vantage_mode(
     *,
     contributions: Sequence[_EnabledDiagnosticContribution],
@@ -414,27 +421,26 @@ def default_service_factory(
     worker-vantage checks keep the honest ``FEATURE_NOT_ENABLED`` substitution
     (``failure_category=not_implemented``, ADR-0139) instead of a fabricated verdict.
 
-    ``with_egress`` opts into the heavy mutating ``guest_egress`` probe, which provisions a
-    short-lived guest on the target provider. Its production probe-guest seam needs a bootable
-    image on that provider — on remote-libvirt that image is **operator-staged** until the
-    M2.4 image-lifecycle work makes it first-class (ADR-0091), so this default factory raises
-    a fail-fast configuration error rather than silently dropping the opt-in check; a
-    deployment that has staged the image wires a probe-guest-backed factory in its place.
+    ``with_egress`` opts into provider-owned heavy mutating ``guest_egress`` probes. A provider
+    contribution supplies those checks only when that deployment has a real probe-guest seam wired;
+    otherwise the opt-in fails fast instead of silently dropping the requested check.
 
     Raises:
-        CategorizedError: ``with_egress`` is requested but no probe-guest image/seam is wired
-            in this deployment (``CONFIGURATION_ERROR``).
+        CategorizedError: ``with_egress`` is requested but no enabled provider contribution
+            supplies an egress check in this deployment (``CONFIGURATION_ERROR``).
     """
-    if with_egress:
+    enabled_contributions = _enabled_provider_contributions(provider_contributions)
+    egress_checks = _provider_egress_checks(enabled_contributions) if with_egress else []
+    if with_egress and not egress_checks:
         raise CategorizedError(
-            "guest_egress (--with-egress) needs an operator-staged probe-guest image on the "
-            "target provider; none is wired in this deployment (ADR-0091, M2.4)",
+            "guest_egress (--with-egress) needs a provider contribution with a real "
+            "probe-guest seam; none is wired in this deployment (ADR-0091)",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    enabled_contributions = _enabled_provider_contributions(provider_contributions)
     checks: list[Check] = [
         _secret_ref_check(),
         *_provider_checks(enabled_contributions),
+        *egress_checks,
     ]
     worker_mode = _worker_vantage_mode(contributions=enabled_contributions, pool=pool)
     # When a dispatcher is wired it owns the worker-vantage outcome; otherwise FEATURE_NOT_ENABLED

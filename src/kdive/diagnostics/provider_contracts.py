@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from kdive.diagnostics.checks import Check
 
 
+def no_checks() -> tuple[Check, ...]:
+    """Default provider contribution hook for optional check families."""
+    return ()
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerVantageDescriptor:
     """A provider worker-vantage check that is declared but not runnable in this process."""
@@ -25,3 +30,4 @@ class DiagnosticProviderContribution:
     checks: Callable[[], Sequence[Check]]
     unavailable_worker_checks: Callable[[], Sequence[WorkerVantageDescriptor]]
     worker_checks: Callable[[], Sequence[Check]]
+    egress_checks: Callable[[], Sequence[Check]] = no_checks
