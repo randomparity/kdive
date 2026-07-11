@@ -12,7 +12,7 @@ op)`; it reads the role check from data and trusts the handler to resolve the
 `capability_scope` — because it was never populated in production (admission always wrote
 `{}`); the grant model is now role + profile opt-in, both satisfiable on the normal MCP
 path. A denial raises `DestructiveOpDenied` listing every missing check (the role check
-names the required role, e.g. `operator_role`), so an audit/log line shows the full reason.
+names the required role, e.g. `admin_role`), so an audit/log line shows the full reason.
 The gate never writes audit rows (it has no connection); a handler that catches
 `DestructiveOpDenied` audits the denied attempt with `transition=f"{op.kind}:denied"`.
 """
