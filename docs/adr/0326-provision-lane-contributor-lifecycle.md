@@ -68,20 +68,26 @@ require `contributor` and nothing more. `reprovision` drops the destructive gate
 `destructive_ops` opt-in, keeping its `READY`-only and no-live-run guards.
 `control.force_crash` is unchanged (`admin` + two-check gate + opt-in).**
 
-1. **Authz — two-place move.** Each tool moves `operator → contributor` in both the
-   exposure map (`mcp/exposure.py`, advisory discoverability) and the runtime handler gate
-   (the real boundary). The handler gate is `require_role` reached through
-   `_runtime_resolution.py` for the four `systems.*` tools (`registrar.py` `required_role`
-   kwargs) and through `_SYSTEM_UPLOAD.required_role` for the upload seam — the single field
-   that made `create_system_upload` operator while its `_create_upload`-sharing sibling
-   `create_run_upload` was already contributor.
+1. **Authz.** Each tool moves `operator → contributor` in the exposure map
+   (`mcp/exposure.py`, advisory discoverability) and in the runtime handler gate (the real
+   boundary). The provision lane is gated in two enforcing layers, both of which move: the
+   runtime-resolution wrapper (`registrar.py` `required_role` kwargs → `_runtime_resolution`
+   `require_role`, the MCP-transport path) and the admission service's own
+   `require_role(..., Role.OPERATOR)` at `admission.py:419` (`create_for_allocation`, for
+   `define`/`provision`) and `:621` (`provision_defined`) — the latter is defense-in-depth
+   and the only gate the handler-direct tests exercise. The upload seam moves via
+   `_SYSTEM_UPLOAD.required_role`, the single field that made `create_system_upload` operator
+   while its `_create_upload`-sharing sibling `create_run_upload` was already contributor.
 
 2. **Reprovision drops the gate.** `_reprovision_in_lock` removes the `DestructiveOp`
    construction, `assert_destructive_allowed`, and the denial/audit branch; `_reprovision_opt_in`
-   is deleted. The role check the gate carried is already provided by the registrar-layer
-   `require_role(CONTRIBUTOR)`; project ownership, `REPROVISIONING` dedup, `READY`-only,
-   no-live-run, and rootfs validation are retained. The `_docmeta.destructive()` annotation
-   is kept as an agent caution hint (re-stage interrupts the guest), orthogonal to authz.
+   is deleted. Because the gate carried the handler's only role check (the handler-direct path
+   bypasses the registrar wrapper), an explicit `require_role(ctx, system.project,
+   Role.CONTRIBUTOR)` replaces it in the handler — matching `power_system`'s single in-handler
+   `require_role` (ADR-0320). The registrar-layer gate (now contributor) still fronts the MCP
+   path; project ownership, `REPROVISIONING` dedup, `READY`-only, no-live-run, and rootfs
+   validation are retained. The `_docmeta.destructive()` annotation is kept as an agent caution
+   hint (re-stage interrupts the guest), orthogonal to authz.
 
 3. **Taxonomy — reprovision follows power out of the destructive family.** In
    `domain/operations/jobs.py`: `REPROVISION` leaves `DESTRUCTIVE_JOB_KINDS` (now

@@ -83,10 +83,20 @@ Flip `_OPERATOR → _CONTRIBUTOR` for the five entries:
 
 ### 2. Runtime handler gates (the real boundary)
 
+The provision lane is gated in **two layers**, both of which enforce the role and
+both of which must move — the runtime-resolution wrapper (the MCP-transport path)
+and the admission service (defense-in-depth, and the only gate the handler-direct
+unit tests exercise):
+
 - `registrar.py` — `define`/`provision`/`provision_defined`/`reprovision`
   `required_role=Role.OPERATOR → Role.CONTRIBUTOR` at the four
-  `with_runtime_for_*` call sites (L187/241/279/469). Enforcement stays in
+  `with_runtime_for_*` call sites (L187/241/279/469); enforced by
   `_runtime_resolution.py::_authorized_kind` → `require_role`.
+- `services/systems/admission.py` — the in-service `require_role(..., Role.OPERATOR)`
+  at **L419** (`create_for_allocation`, reached by `define` and `provision`) and
+  **L621** (`provision_defined`) → `Role.CONTRIBUTOR`. Missing these leaves a
+  contributor denied at admission even after the wrapper passes, and leaves every
+  handler-direct provision/define test red.
 - `artifacts` upload seam — `_SYSTEM_UPLOAD.required_role` (`uploads.py:374`)
   `Role.OPERATOR → Role.CONTRIBUTOR`. This is the single field that made
   `create_system_upload` operator while its `_create_upload`-sharing sibling
@@ -96,10 +106,12 @@ Flip `_OPERATOR → _CONTRIBUTOR` for the five entries:
 
 `_reprovision_in_lock` (`admin.py:161-168`) removes the `DestructiveOp`
 construction, the `assert_destructive_allowed` call, and the `DestructiveOpDenied`
-denial/audit branch; `_reprovision_opt_in` (`admin.py:197-199`) is deleted. The
-role check the removed gate provided is already carried by the registrar-layer
-`require_role(CONTRIBUTOR)` (reached via `with_runtime_for_system` →
-`_runtime_resolution._authorized_kind` on the sole path to `_reprovision_in_lock`);
+denial/audit branch; `_reprovision_opt_in` (`admin.py:197-199`) is deleted. The gate carried the
+handler's only role check (the handler-direct path bypasses the registrar wrapper),
+so — matching `power_system`'s single in-handler `require_role` (ADR-0320) — add
+`require_role(ctx, system.project, Role.CONTRIBUTOR)` in `_reprovision_in_lock`
+after the system/allocation resolution, where the gate stood. The registrar-layer
+`require_role` (`registrar.py:469`, now `CONTRIBUTOR`) still fronts the MCP path;
 project ownership, `REPROVISIONING` dedup, `READY`-only (`admin.py:176-177`),
 no-live-run, and rootfs validation are all retained.
 
