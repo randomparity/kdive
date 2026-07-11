@@ -5213,7 +5213,7 @@ def test_install_handler_rejects_retired_composite_phase_job(migrated_url: str) 
             async with pool.connection() as conn:
                 with pytest.raises(
                     PayloadValidationError,
-                    match="InstallPayload does not match build_install_boot payload contract",
+                    match="build_install_boot payload contract is retired",
                 ):
                     await runs_handlers.install_handler(
                         conn,

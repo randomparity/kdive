@@ -33,6 +33,7 @@ def test_provider_contribution_field_set() -> None:
         "checks",
         "unavailable_worker_checks",
         "worker_checks",
+        "egress_checks",
     }
 
 
