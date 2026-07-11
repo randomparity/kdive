@@ -134,6 +134,10 @@ type _DetachResourcesForSession = Callable[
 type _InsertSession = Callable[
     [AsyncConnection, RequestContext, _AttachRequest, TransportHandle], Awaitable[ToolResponse]
 ]
+type _PrepareAttachRequest = Callable[
+    [AsyncConnection, RequestContext, UUID, DebugTransportKind, UUID],
+    Awaitable[_AttachRequest | ToolResponse],
+]
 
 
 def _resolved_connector_for_run(resolver: ProviderResolver) -> _ConnectorForRun:
@@ -299,28 +303,15 @@ class DebugSessionHandlers:
             )
         transport_kind = cast(DebugTransportKind, transport)
         session_id = uuid4()
-        with bind_context(principal=ctx.principal):
-            async with pool.connection() as conn:
-                request = await self._prepare_attach_request(
-                    conn, ctx, uid, transport_kind, session_id
-                )
-            if isinstance(request, ToolResponse):
-                return request
-            opened = await _open_transport(request.connector, request.system, request.transport)
-            if isinstance(opened, ToolResponse):
-                return opened
-            async with pool.connection() as conn:
-                try:
-                    response = await self._insert_session_locked(
-                        conn,
-                        ctx,
-                        request,
-                        opened,
-                    )
-                except Exception:
-                    await _close(request.connector, str(opened))
-                    raise
-            return response
+        return await _attach_debug_session(
+            pool,
+            ctx,
+            run_id=uid,
+            transport=transport_kind,
+            session_id=session_id,
+            prepare_attach_request=self._prepare_attach_request,
+            insert_session_locked=self._insert_session_locked,
+        )
 
     async def _prepare_attach_request(
         self,
@@ -421,33 +412,80 @@ class DebugSessionHandlers:
         uid = _as_uuid(session_id)
         if uid is None:
             return _invalid_uuid_error("session_id", session_id)
-        with bind_context(principal=ctx.principal):
-            resources: _DetachResources
-            async with pool.connection() as conn:
-                resolved_session = await resolve_debug_session_context(
-                    conn, ctx, session_id, include_system=True
+        return await _end_debug_session(
+            pool,
+            ctx,
+            session_id=session_id,
+            uid=uid,
+            detach_resources=self._detach_resources,
+            telemetry=self._telemetry,
+        )
+
+
+async def _attach_debug_session(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    run_id: UUID,
+    transport: DebugTransportKind,
+    session_id: UUID,
+    prepare_attach_request: _PrepareAttachRequest,
+    insert_session_locked: _InsertSession,
+) -> ToolResponse:
+    """Prepare, open, and persist one debug transport attach."""
+    with bind_context(principal=ctx.principal):
+        async with pool.connection() as conn:
+            request = await prepare_attach_request(conn, ctx, run_id, transport, session_id)
+        if isinstance(request, ToolResponse):
+            return request
+        opened = await _open_transport(request.connector, request.system, request.transport)
+        if isinstance(opened, ToolResponse):
+            return opened
+        async with pool.connection() as conn:
+            try:
+                return await insert_session_locked(conn, ctx, request, opened)
+            except Exception:
+                await _close(request.connector, str(opened))
+                raise
+
+
+async def _end_debug_session(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    session_id: str,
+    uid: UUID,
+    detach_resources: _DetachResourcesForSession,
+    telemetry: DebugSessionTelemetry,
+) -> ToolResponse:
+    """Resolve, detach, reap runtime state, and record telemetry for one debug session."""
+    with bind_context(principal=ctx.principal):
+        resources: _DetachResources
+        async with pool.connection() as conn:
+            resolved_session = await resolve_debug_session_context(
+                conn, ctx, session_id, include_system=True
+            )
+            if isinstance(resolved_session, ToolResponse):
+                return resolved_session
+            if resolved_session.system_id is None:
+                return _config_error(
+                    session_id,
+                    detail="debug session has no associated System to detach from",
                 )
-                if isinstance(resolved_session, ToolResponse):
-                    return resolved_session
-                if resolved_session.system_id is None:
-                    return _config_error(
-                        session_id,
-                        detail="debug session has no associated System to detach from",
-                    )
-                resources_or_response = await self._detach_resources(conn, uid)
-                if isinstance(resources_or_response, ToolResponse):
-                    return resources_or_response
-                resources = resources_or_response
-                envelope = await _detach_locked(
-                    conn, ctx, uid, resolved_session.system_id, resources.connector
-                )
-            if resources.runtime is not None:
-                async with resources.runtime.lock_for(session_id):
-                    resources.runtime.reap(session_id)
-            seconds = (datetime.now(UTC) - resolved_session.session.created_at).total_seconds()
-            outcome = "ok" if envelope.status != "error" else "error"
-            self._telemetry.record(resolved_session.session.transport, outcome, seconds)
-            return envelope
+            resources_or_response = await detach_resources(conn, uid)
+            if isinstance(resources_or_response, ToolResponse):
+                return resources_or_response
+            resources = resources_or_response
+            envelope = await _detach_locked(
+                conn, ctx, uid, resolved_session.system_id, resources.connector
+            )
+        if resources.runtime is not None:
+            async with resources.runtime.lock_for(session_id):
+                resources.runtime.reap(session_id)
+        seconds = (datetime.now(UTC) - resolved_session.session.created_at).total_seconds()
+        outcome = "ok" if envelope.status != "error" else "error"
+        telemetry.record(resolved_session.session.transport, outcome, seconds)
+        return envelope
 
 
 async def _attach_preconditions(
