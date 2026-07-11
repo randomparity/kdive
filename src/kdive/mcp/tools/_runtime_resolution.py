@@ -14,7 +14,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools._common import as_uuid, config_error
+from kdive.mcp.tools._common import as_uuid, invalid_uuid_error
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security.authz.context import RequestContext
@@ -124,7 +124,7 @@ async def _with_runtime_for_object(
     try:
         runtime = await _runtime_for_object(pool, resolver, ctx, object_id, lookup)
     except _InvalidRuntimeObjectId:
-        return config_error(object_id)
+        return invalid_uuid_error(f"{lookup.object_kind}_id", object_id)
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(object_id, exc)
     return await runtime_callback(runtime)

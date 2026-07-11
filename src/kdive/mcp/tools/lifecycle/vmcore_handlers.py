@@ -25,6 +25,7 @@ from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import capability_unsupported as _capability_unsupported
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._idempotency import keyed_mutation
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_target_failure
@@ -220,7 +221,7 @@ async def _fetch_vmcore(
     """
     uid = _as_uuid(run_id)
     if uid is None:
-        return _config_error(run_id)
+        return _invalid_uuid_error("run_id", run_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             run = await RUNS.get(conn, uid)

@@ -10,11 +10,14 @@ from typing import Any, cast
 from uuid import UUID
 
 import pytest
+from fastmcp import Client, FastMCP
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import InvestigationState
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.lifecycle import investigations as inv_registered_tools
 from kdive.mcp.tools.lifecycle import investigations_handlers as inv_tools
 from kdive.mcp.tools.lifecycle import investigations_view as inv_view
 from kdive.security.authz.rbac import AuthorizationError, Role
@@ -872,6 +875,32 @@ def test_list_state_filter(migrated_url: str) -> None:
             await inv_tools.close_investigation(pool, _ctx(), opened.object_id)
             resp = await inv_tools.list_investigations(pool, _ctx(), state="open")
             assert {i.data["title"] for i in resp.items} == {"b"}
+
+    asyncio.run(scenario())
+
+
+def test_registered_list_request_filters_by_state(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            closed = await _open(pool, _ctx(), project="proj", title="closed")
+            await _open(pool, _ctx(), project="proj", title="open")
+            await inv_tools.close_investigation(pool, _ctx(), closed.object_id)
+            monkeypatch.setattr(inv_registered_tools, "current_context", _ctx)
+            app = FastMCP(name="investigations-wrapper-test")
+            inv_registered_tools.register(app, pool)
+            async with Client(app) as client:
+                result = await client.call_tool(
+                    "investigations.list",
+                    {"request": {"state": "open", "limit": 10}},
+                    raise_on_error=False,
+                )
+        assert result.structured_content is not None
+        resp = ToolResponse.model_validate(result.structured_content)
+        assert resp.status == "ok"
+        assert resp.data["count"] == 1
+        assert resp.items[0].data["title"] == "open"
 
     asyncio.run(scenario())
 

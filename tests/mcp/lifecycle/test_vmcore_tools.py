@@ -26,6 +26,7 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
+from kdive.mcp.tools.lifecycle import vmcore_handlers as vmcore_handler_tools
 from kdive.providers.ports.retrieve import (
     CaptureOutput,
     CrashOutput,
@@ -143,8 +144,8 @@ class _FakeCrash:
         )
 
 
-def _vmcore_handlers(crash: CrashPostmortem | None = None) -> vmcore_tools.VmcoreHandlers:
-    return vmcore_tools.VmcoreHandlers(
+def _vmcore_handlers(crash: CrashPostmortem | None = None) -> vmcore_handler_tools.VmcoreHandlers:
+    return vmcore_handler_tools.VmcoreHandlers(
         resolver=provider_resolver(
             crash_postmortem=crash or _FakeCrash(),
             supported_capture_methods=_TEST_CAPTURE_METHODS,
@@ -181,7 +182,7 @@ class _RaisingCrash:
 # --- vmcore.fetch tool ---------------------------------------------------------------------
 
 
-def _real_local_handlers() -> vmcore_tools.VmcoreHandlers:
+def _real_local_handlers() -> vmcore_handler_tools.VmcoreHandlers:
     """A VmcoreHandlers bound to the REAL local-libvirt runtime (descriptor narrowing applies).
 
     Unlike ``_vmcore_handlers``, this does not override ``supported_capture_methods`` — it uses
@@ -195,7 +196,7 @@ def _real_local_handlers() -> vmcore_tools.VmcoreHandlers:
     registry = SecretRegistry()
     runtime = build_local_runtime(secret_registry=registry)
     resolver = ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
-    return vmcore_tools.VmcoreHandlers(resolver=resolver, secret_registry=registry)
+    return vmcore_handler_tools.VmcoreHandlers(resolver=resolver, secret_registry=registry)
 
 
 async def _job_count(pool: AsyncConnectionPool) -> int:
@@ -469,6 +470,8 @@ def test_fetch_vmcore_malformed_uuid_is_config_error(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             resp = await _fetch_vmcore(pool, _ctx(), run_id="nope")
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None and "nope" in resp.detail
 
     asyncio.run(_run())
 
