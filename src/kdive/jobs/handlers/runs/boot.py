@@ -53,7 +53,13 @@ async def _run_boot_and_capture_outcome(
             and run.expected_boot_failure is not None
         ):
             artifact = await boot_evidence.capture_run_console(
-                conn, system_id, run.id, secret_registry, artifact_store, snapshotter, mark
+                conn,
+                system_id,
+                run.id,
+                secret_registry=secret_registry,
+                artifact_store=artifact_store,
+                snapshotter=snapshotter,
+                mark=mark,
             )
         matched_line = (
             boot_evidence.expected_crash_matched_line(run, artifact.data)
@@ -62,26 +68,38 @@ async def _run_boot_and_capture_outcome(
         )
         if artifact is not None and matched_line is not None:
             return await boot_evidence.record_expected_crash(
-                conn, job_ctx, run, system_id, profile_policy, artifact, matched_line
+                conn,
+                job_ctx,
+                run,
+                system_id=system_id,
+                profile_policy=profile_policy,
+                artifact=artifact,
+                matched_line=matched_line,
             )
         if exc.category is ErrorCategory.READINESS_FAILURE:
             crash = await boot_evidence.record_crash_halted_live(
                 conn,
                 job_ctx,
                 run,
-                system_id,
-                connector,
-                profile_policy,
-                secret_registry,
-                artifact_store,
-                snapshotter,
-                mark,
+                system_id=system_id,
+                connector=connector,
+                profile_policy=profile_policy,
+                secret_registry=secret_registry,
+                artifact_store=artifact_store,
+                snapshotter=snapshotter,
+                mark=mark,
             )
             if crash is not None:
                 return crash
         raise
     artifact = await boot_evidence.capture_run_console(
-        conn, system_id, run.id, secret_registry, artifact_store, snapshotter, mark
+        conn,
+        system_id,
+        run.id,
+        secret_registry=secret_registry,
+        artifact_store=artifact_store,
+        snapshotter=snapshotter,
+        mark=mark,
     )
     await boot_evidence.record_boot_audit(conn, job_ctx, run)
     return {
@@ -136,7 +154,13 @@ async def boot_handler(
         await abandon_run_step_best_effort(conn, run_id, "boot")
         try:
             await boot_evidence.capture_run_console(
-                conn, system_id, run_id, secret_registry, artifact_store, snapshotter, mark
+                conn,
+                system_id,
+                run_id,
+                secret_registry=secret_registry,
+                artifact_store=artifact_store,
+                snapshotter=snapshotter,
+                mark=mark,
             )
         finally:
             raise

@@ -355,13 +355,13 @@ def _record(
             cast(AsyncConnection, object()),
             cast(RequestContext, object()),
             cast(Run, _FakeRun(None)),
-            uuid4(),
-            cast(Connector, _Connector(raises=not reachable, category=failure_category)),
-            cast(ProfilePolicy, _Pol(gdbstub=gdbstub, host_dump=host_dump)),
-            cast(SecretRegistry, object()),
-            None,
-            None,  # console_snapshotter — local dispatch falls through to _capture_console_artifact
-            0,  # boot-window mark (ADR-0241); unused here since _capture_console_artifact is faked
+            system_id=uuid4(),
+            connector=cast(Connector, _Connector(raises=not reachable, category=failure_category)),
+            profile_policy=cast(ProfilePolicy, _Pol(gdbstub=gdbstub, host_dump=host_dump)),
+            secret_registry=cast(SecretRegistry, object()),
+            artifact_store=None,
+            snapshotter=None,
+            mark=0,
         )
 
     return asyncio.run(_run()), audits
@@ -452,10 +452,12 @@ def _record_expected(
             cast(AsyncConnection, object()),
             cast(RequestContext, object()),
             cast(Run, _FakeRun({"kind": "console_crash", "pattern": "panic"})),
-            uuid4(),
-            cast(ProfilePolicy, _Pol(gdbstub=gdbstub, host_dump=host_dump, kdump=kdump)),
-            artifact,
-            "Kernel panic - not syncing: matched line",
+            system_id=uuid4(),
+            profile_policy=cast(
+                ProfilePolicy, _Pol(gdbstub=gdbstub, host_dump=host_dump, kdump=kdump)
+            ),
+            artifact=artifact,
+            matched_line="Kernel panic - not syncing: matched line",
         )
 
     return asyncio.run(_run()), audits

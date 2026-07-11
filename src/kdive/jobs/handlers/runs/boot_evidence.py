@@ -103,6 +103,7 @@ async def capture_run_console(
     conn: AsyncConnection,
     system_id: UUID,
     run_id: UUID,
+    *,
     secret_registry: SecretRegistry,
     artifact_store: ObjectStore | None,
     snapshotter: ConsoleSnapshotter | None,
@@ -256,6 +257,7 @@ async def record_crash_halted_live(
     conn: AsyncConnection,
     job_ctx: RequestContext,
     run: Run,
+    *,
     system_id: UUID,
     connector: Connector,
     profile_policy: ProfilePolicy,
@@ -272,7 +274,13 @@ async def record_crash_halted_live(
     if not profile_policy.gdbstub_provisioned(profile):
         return None
     artifact = await capture_run_console(
-        conn, system_id, run.id, secret_registry, artifact_store, snapshotter, mark
+        conn,
+        system_id,
+        run.id,
+        secret_registry=secret_registry,
+        artifact_store=artifact_store,
+        snapshotter=snapshotter,
+        mark=mark,
     )
     if artifact is None or not artifact.data or not generic_panic_matches(artifact.data):
         return None
@@ -312,6 +320,7 @@ async def record_expected_crash(
     conn: AsyncConnection,
     job_ctx: RequestContext,
     run: Run,
+    *,
     system_id: UUID,
     profile_policy: ProfilePolicy,
     artifact: ConsoleArtifact,
