@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -28,7 +28,10 @@ if TYPE_CHECKING:
     from kdive.health.heartbeat import Heartbeat
     from kdive.health.probe import HealthProbe
     from kdive.observability.facade import Telemetry
+    from kdive.providers.assembly.composition import ProviderComposition
     from kdive.providers.core.resolver import ProviderResolver
+    from kdive.providers.infra.console_hosting import CollectorRegistry
+    from kdive.reconciler.loop import ReconcileConfig
     from kdive.security.secrets.secret_registry import SecretRegistry
     from kdive.store.objectstore import ObjectStore
 
@@ -102,7 +105,7 @@ async def run_reconciler_with_composition(
     heartbeat: Heartbeat,
     stop: asyncio.Event,
     telemetry: Telemetry,
-    provider_composition: Any,
+    provider_composition: ProviderComposition,
     upload_store: ObjectStore | None,
 ) -> None:
     from kdive.observability.console_telemetry import ConsoleTelemetry
@@ -134,13 +137,13 @@ async def run_reconciler_with_composition(
 
 
 def build_reconcile_config(
-    provider_composition: Any,
+    provider_composition: ProviderComposition,
     *,
     upload_store: ObjectStore | None,
-    console_registry: Any,
+    console_registry: CollectorRegistry | None,
     heartbeat: Heartbeat,
     telemetry: Telemetry,
-) -> Any:
+) -> ReconcileConfig:
     from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
     from kdive.reconciler.fleet import FleetTelemetry
     from kdive.reconciler.loop import ReconcileConfig
