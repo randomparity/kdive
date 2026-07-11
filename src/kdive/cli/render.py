@@ -19,13 +19,7 @@ def _cell(value: object) -> str:
 
 
 def render(rows: Sequence[Mapping[str, object]], *, columns: Sequence[str], as_json: bool) -> None:
-    """Render a list of rows as an aligned table, or as a stable JSON list.
-
-    Args:
-        rows: The records to display; each is projected onto ``columns``.
-        columns: The ordered column keys to show. Keys absent from a row render blank.
-        as_json: When ``True``, emit a JSON list of the projected rows instead of a table.
-    """
+    """Project rows onto ``columns`` and render them as stable JSON or an aligned table."""
     projected = [{c: row.get(c) for c in columns} for row in rows]
     if as_json:
         print(json.dumps(projected, indent=2, default=str))
@@ -44,10 +38,6 @@ def render_record(record: Mapping[str, object], *, as_json: bool) -> None:
 
     The single-record verbs (``describe``/``get``/``show``) return one record, not a row
     list. ``None`` values render as the empty string, matching :func:`render`.
-
-    Args:
-        record: The single record to display.
-        as_json: When ``True``, emit the record as a JSON object instead of key/value lines.
     """
     if as_json:
         print(json.dumps(dict(record), indent=2, default=str))
@@ -65,19 +55,12 @@ def render_report(
     total_columns: Sequence[str],
     as_json: bool,
 ) -> None:
-    """Render report rows as a table with a totals footer, or as ``{items, totals}`` JSON.
+    """Render report rows with a totals footer or as ``{"items": ..., "totals": ...}``.
 
     Both halves are projected onto their declared key sets so the scriptable contract is
     stable against server-side envelope additions: a ``totals`` key not in ``total_columns``
     never reaches the output, and a missing one renders blank (table) or ``null`` (JSON),
     matching :func:`render` / :func:`render_record`.
-
-    Args:
-        rows: The per-row records; each is projected onto ``columns``.
-        totals: The envelope totals; projected onto ``total_columns``.
-        columns: The ordered row column keys.
-        total_columns: The ordered totals keys.
-        as_json: When ``True``, emit one ``{"items": [...], "totals": {...}}`` object.
     """
     projected_totals = {c: totals.get(c) for c in total_columns}
     if as_json:

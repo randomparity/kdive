@@ -18,14 +18,7 @@ _CODES = {
 
 
 def exit_code_for_category(category: str) -> int:
-    """Map an error category to a stable nonzero exit code.
-
-    Args:
-        category: A kdive ``ErrorCategory`` value (e.g. ``"authorization_denied"``).
-
-    Returns:
-        The mapped exit code, or ``1`` (generic failure) for an unmapped category.
-    """
+    """Map an error category to a stable nonzero exit code, defaulting to generic failure."""
     return _CODES.get(category, 1)
 
 
@@ -36,12 +29,6 @@ def exit_code_for_envelope(envelope: object) -> int:
     (e.g. ``authorization_denied`` from a role gate), not by raising, so the exit code is
     derived from the envelope here. This is what makes a server-side denial observable as a
     distinct nonzero exit to a script or CI rather than an empty-looking success (ADR-0089).
-
-    Args:
-        envelope: The tool's structured response envelope (a mapping), or anything else.
-
-    Returns:
-        ``0`` when there is no string ``error_category``; otherwise that category's exit code.
     """
     if not isinstance(envelope, Mapping):
         return 0
