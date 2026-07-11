@@ -92,7 +92,11 @@ _CRASHED_HALTED_LIVE_DRGN_DETAIL = (
 _OCCUPIED_SQL: LiteralString = (
     "SELECT 1 FROM debug_sessions s "
     "JOIN runs r ON r.id = s.run_id "
-    "WHERE r.system_id = %s AND s.transport = %s AND s.state IN ('attach', 'live') LIMIT 1"
+    "WHERE r.system_id = %s AND s.transport = %s AND s.state = ANY(%s) LIMIT 1"
+)
+_OCCUPIED_STATES: tuple[str, ...] = (
+    DebugSessionState.ATTACH.value,
+    DebugSessionState.LIVE.value,
 )
 
 
@@ -193,7 +197,7 @@ async def _system_occupied(
     conn: AsyncConnection, system_id: UUID, transport: DebugTransportKind
 ) -> bool:
     async with conn.cursor() as cur:
-        await cur.execute(_OCCUPIED_SQL, (system_id, transport))
+        await cur.execute(_OCCUPIED_SQL, (system_id, transport, list(_OCCUPIED_STATES)))
         return await cur.fetchone() is not None
 
 

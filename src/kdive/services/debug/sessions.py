@@ -17,12 +17,11 @@ ACTIVE_SESSION_STATES: tuple[DebugSessionState, ...] = (
 )
 
 _ACTIVE_BY_RUN_SQL: LiteralString = (
-    "SELECT s.id FROM debug_sessions s "
-    "WHERE s.run_id = %s AND s.state IN ('attach', 'live') ORDER BY s.id"
+    "SELECT s.id FROM debug_sessions s WHERE s.run_id = %s AND s.state = ANY(%s) ORDER BY s.id"
 )
 _ACTIVE_BY_SYSTEM_SQL: LiteralString = (
     "SELECT s.id FROM debug_sessions s JOIN runs r ON r.id = s.run_id "
-    "WHERE r.system_id = %s AND s.state IN ('attach', 'live') ORDER BY s.id"
+    "WHERE r.system_id = %s AND s.state = ANY(%s) ORDER BY s.id"
 )
 
 
@@ -40,6 +39,6 @@ async def _active_session_ids(
     conn: AsyncConnection, query: LiteralString, value: UUID
 ) -> list[str]:
     async with conn.cursor() as cur:
-        await cur.execute(query, (value,))
+        await cur.execute(query, (value, [state.value for state in ACTIVE_SESSION_STATES]))
         rows = await cur.fetchall()
     return [str(row[0]) for row in rows]
