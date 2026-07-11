@@ -28,7 +28,9 @@ Removing `REPROVISION` from `DESTRUCTIVE_JOB_KINDS` makes `DestructiveOp(REPROVI
 - Modify: `src/kdive/domain/operations/jobs.py:39-76` (three frozensets + docstrings)
 - Modify: `src/kdive/mcp/tools/lifecycle/systems/admin.py` (remove gate machinery L161-168; add in-handler `require_role`; delete `_reprovision_opt_in` L197-199; drop unused gate imports L42 + `_REPROVISION` alias L51 if unused; **keep** `_audit_destructive_denied` L202 / `_authz_denied` — `teardown_system` L337-338 uses both)
 - Modify: `src/kdive/mcp/tools/lifecycle/systems/registrar.py:469` (reprovision wrapper `required_role`)
-- Test: `tests/mcp/jobs/test_jobs_tools.py` (cancel guard), `tests/services/systems/test_system_validation.py:181-206` (token validator), `tests/security/authz/test_gate.py:78,103,115` (reprovision gate constructs), `tests/mcp/lifecycle/test_systems_tools.py` (reprovision behavior + `_active_allocation_profile` fixture)
+- Test: `tests/mcp/jobs/test_jobs_tools.py` (cancel guard), `tests/services/systems/test_system_validation.py:181-221` (token validator), `tests/security/authz/test_gate.py:78,103,115` (reprovision gate constructs), `tests/mcp/lifecycle/test_systems_tools.py` (reprovision behavior + `_active_allocation_profile` fixture + the L1810/L2015 rootfs tests that hardcode the token), `tests/integration/test_m1_allocation_accounting.py:1009,1022,1106,1115` (provision/reprovision calls passing `destructive_ops=["reprovision"]`), `tests/profiles/test_provisioning.py:106-119` (model-level `destructive_opt_in(…, REPROVISION) is True`)
+
+Exhaustive token sweep: every test that hardcodes `destructive_ops=["reprovision"]` or `["force_crash", "reprovision"]` breaks once `OPT_IN_DESTRUCTIVE_JOB_KINDS` narrows (the token is rejected at `validate_profile_for_provider`, which runs on **both** the provision and reprovision paths, before the behavior each test names is exercised). All such sites must ship in this commit.
 
 **Interfaces:**
 - Produces: `DESTRUCTIVE_JOB_KINDS = {TEARDOWN, FORCE_CRASH}`; `OPT_IN_DESTRUCTIVE_JOB_KINDS = {FORCE_CRASH}`; `CONTRIBUTOR_CANCELABLE_JOB_KINDS` gains `PROVISION`, `REPROVISION`. `validation._VALID_DESTRUCTIVE_OP_VALUES` auto-narrows to `{"force_crash"}`. Reprovision handler enforces `require_role(ctx, system.project, Role.CONTRIBUTOR)`.
@@ -42,10 +44,13 @@ Removing `REPROVISION` from `DESTRUCTIVE_JOB_KINDS` makes `DestructiveOp(REPROVI
     - `test_reprovision_operator_may_invoke` (L1649): rename/repoint to a **contributor** actor (`_ctx(Role.CONTRIBUTOR)`) that still gets `queued`.
     - `test_reprovision_without_profile_opt_in_denied` (L1716): repurpose into "contributor with empty destructive_ops succeeds" (was: operator without opt-in → denied).
     - `test_reprovision_viewer_denied` (L1662) and `test_reprovision_viewer_denied_before_provider_rootfs_validation` (L1683): keep asserting a **viewer** is denied — now enforced by the new in-handler `require_role`; adjust the expectation to the shape `require_role` produces (raised `AuthorizationError`/`RoleDenied` vs the old `authorization_denied` envelope) to match how the handler surfaces it. Drop the `destructive_ops = ["reprovision"]` line at L1695.
+    - `test_reprovision_rejects_local_rootfs_outside_allowed_root_before_mutating_ready_system` (L1810) and `test_reprovision_rejects_upload_rootfs` (L2015): drop the `destructive_ops = ["reprovision"]` line so the rootfs-outside-root / upload-rootfs rejection each test names is actually reached (otherwise the token is rejected first and the test false-passes on the wrong `configuration_error`).
+  - `tests/integration/test_m1_allocation_accounting.py`: drop `destructive_ops=["reprovision"]` from the four `provisioning_profile(...)` calls (L1009/1022/1106/1115) — reprovision needs no opt-in now, and provision never did.
+  - `tests/profiles/test_provisioning.py:106-119`: these assert `destructive_opt_in(profile, JobKind.REPROVISION) is True` on a profile listing `"reprovision"`. The token is retired; repoint the example to `force_crash` (the live opt-in path) so the model test exercises a real op. (The `… is False` cases at L464/L729 stay — they test the negative and are unaffected.)
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/mcp/jobs/test_jobs_tools.py tests/services/systems/test_system_validation.py tests/security/authz/test_gate.py tests/mcp/lifecycle/test_systems_tools.py -q`
+Run: `uv run python -m pytest tests/mcp/jobs/test_jobs_tools.py tests/services/systems/test_system_validation.py tests/security/authz/test_gate.py tests/mcp/lifecycle/test_systems_tools.py tests/integration/test_m1_allocation_accounting.py tests/profiles/test_provisioning.py -q`
 Expected: FAIL.
 
 - [ ] **Step 3: Edit the taxonomy** — `domain/operations/jobs.py`: `DESTRUCTIVE_JOB_KINDS → frozenset({JobKind.TEARDOWN, JobKind.FORCE_CRASH})`; `OPT_IN_DESTRUCTIVE_JOB_KINDS → frozenset({JobKind.FORCE_CRASH})`; add `JobKind.PROVISION`, `JobKind.REPROVISION` to `CONTRIBUTOR_CANCELABLE_JOB_KINDS`. Update the three docstrings (reprovision is now contributor leaseholder lifecycle; opt-in governs only `force_crash`; cancelable set includes the provision lane).
@@ -54,13 +59,13 @@ Expected: FAIL.
 
 - [ ] **Step 5: Run to verify pass + lint/type**
 
-Run: `uv run python -m pytest tests/mcp/jobs/test_jobs_tools.py tests/services/systems/test_system_validation.py tests/security/authz/test_gate.py tests/mcp/lifecycle/test_systems_tools.py -q && just lint && just type`
+Run: `uv run python -m pytest tests/mcp/jobs/test_jobs_tools.py tests/services/systems/test_system_validation.py tests/security/authz/test_gate.py tests/mcp/lifecycle/test_systems_tools.py tests/integration/test_m1_allocation_accounting.py tests/profiles/test_provisioning.py -q && just lint && just type`
 Expected: PASS, no warnings.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/kdive/domain/operations/jobs.py src/kdive/mcp/tools/lifecycle/systems/admin.py src/kdive/mcp/tools/lifecycle/systems/registrar.py tests/mcp/jobs/test_jobs_tools.py tests/services/systems/test_system_validation.py tests/security/authz/test_gate.py tests/mcp/lifecycle/test_systems_tools.py
+git add src/kdive/domain/operations/jobs.py src/kdive/mcp/tools/lifecycle/systems/admin.py src/kdive/mcp/tools/lifecycle/systems/registrar.py tests/mcp/jobs/test_jobs_tools.py tests/services/systems/test_system_validation.py tests/security/authz/test_gate.py tests/mcp/lifecycle/test_systems_tools.py tests/integration/test_m1_allocation_accounting.py tests/profiles/test_provisioning.py
 git commit -m "feat(security): reprovision is contributor leaseholder lifecycle (#1081)"
 ```
 
@@ -104,10 +109,13 @@ git commit -m "feat(security): lower provision-lane + upload handler gates to co
 
 ---
 
-### Task 3: Exposure map — five tools become contributor-visible
+### Task 3: Exposure map + regenerated RBAC matrix
+
+The RBAC matrix (`docs/guide/safety-and-rbac.md`) is generated from `exposure.py`, and `test_committed_doc_is_in_sync` (`tests/scripts/test_gen_rbac_tool_matrix.py:80`) runs under `just test`. So the exposure flip and the regen **must ship in one commit** or the commit is red. The file also carries hand-written prose (outside the generated markers) that no generator fixes.
 
 **Files:**
-- Modify: `src/kdive/mcp/exposure.py` (L115, L219-222: `_OPERATOR → _CONTRIBUTOR`; and the stale jobs.cancel comment L173-174)
+- Modify: `src/kdive/mcp/exposure.py` (L115, L219-222: `_OPERATOR → _CONTRIBUTOR`; stale jobs.cancel comment L173-174)
+- Modify (generated + hand-written): `docs/guide/safety-and-rbac.md`
 - Test: `tests/mcp/core/test_exposure.py`
 
 **Interfaces:**
@@ -126,21 +134,27 @@ Expected: FAIL.
 
 - [ ] **Step 3: Flip the exposure constants + fix the comment** — `exposure.py`: `_OPERATOR → _CONTRIBUTOR` for `artifacts.create_system_upload` (L115), `systems.define` (L219), `systems.provision` (L220), `systems.provision_defined` (L221), `systems.reprovision` (L222). Leave `systems.provision` in `CORE_TOOLS`. Update the jobs.cancel comment at L173-174 — the handler no longer "keeps operator for the provision lane"; it keeps operator only for the remaining destructive/platform kinds.
 
-- [ ] **Step 4: Run to verify pass**
+- [ ] **Step 4: Regenerate the matrix + fix hand-written prose** — run `just rbac-matrix` (updates the generated table region so the five tools' rows show contributor). Then hand-edit the prose **outside** the generated markers in `docs/guide/safety-and-rbac.md`:
+  - The `operator` capabilities bullet (~L14) lists "define and provision systems … upload system rootfs (`artifacts.create_system_upload`)" — move these to the `contributor` capabilities description.
+  - The "### The two-check gate" section (~L198-205): it says `control.force_crash` **and** `systems.reprovision` pass through `assert_destructive_allowed` and "reprovision requires operator" — rewrite so the gate governs `force_crash` (admin) only.
 
-Run: `uv run python -m pytest tests/mcp/core/test_exposure.py -q`
-Expected: PASS.
+- [ ] **Step 5: Run to verify pass (incl. the in-sync gate)**
 
-- [ ] **Step 5: Commit**
+Run: `uv run python -m pytest tests/mcp/core/test_exposure.py tests/scripts/test_gen_rbac_tool_matrix.py -q && just rbac-matrix-check`
+Expected: PASS, in sync.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/kdive/mcp/exposure.py tests/mcp/core/test_exposure.py
+git add src/kdive/mcp/exposure.py tests/mcp/core/test_exposure.py docs/guide/safety-and-rbac.md
 git commit -m "feat(security): expose provision lane + reprovision to contributor (#1081)"
 ```
 
 ---
 
-### Task 4: Agent-facing contract + stale prose
+### Task 4: Agent-facing contract + stale prose + regenerated tool reference
+
+The wrapper docstrings render into `docs/guide/reference/systems.md` and `artifacts.md` (verified: they carry "Requires operator"/"Operator only"), and `just docs-check` runs under `just test`. So the docstring edits and `just docs` regen **must ship in one commit**.
 
 **Files:**
 - Modify: `src/kdive/mcp/tools/lifecycle/systems/registrar.py:167,221,265,450` (wrapper docstrings) and `:442` (reprovision `profile` Field)
@@ -148,6 +162,8 @@ git commit -m "feat(security): expose provision lane + reprovision to contributo
 - Modify: `src/kdive/mcp/tools/jobs.py` (`jobs_cancel` wrapper docstring ~L406-411 + module docstring ~L11-16)
 - Modify: `src/kdive/mcp/tools/lifecycle/systems/profile_examples.py:81` and `src/kdive/profiles/provisioning.py:116,165` (strike `reprovision` from `destructive_ops` advertisements)
 - Modify: `src/kdive/security/authz/gate.py` (module docstring L6-9 + `assert_destructive_allowed` docstring L70-71: drop "operator for reprovision" — the gate now governs `force_crash` only)
+- Modify (generated): `docs/guide/reference/systems.md`, `docs/guide/reference/artifacts.md`
+- Test: `tests/mcp/lifecycle/test_systems_profile_examples.py:155` (asserts `"reprovision" in note` — must drop that clause)
 
 **Interfaces:** text-only.
 
@@ -160,51 +176,38 @@ git commit -m "feat(security): expose provision lane + reprovision to contributo
 
 - [ ] **Step 2: Update jobs.cancel contract** — `mcp/tools/jobs.py`: move `provision`/`reprovision` out of the "requires operator" sentence in the `jobs_cancel` wrapper docstring and the module docstring; leave `teardown`/`force_crash` (+ platform/internal kinds) operator-only.
 
-- [ ] **Step 3: Strike reprovision from destructive_ops advertisements + gate prose**
+- [ ] **Step 3: Strike reprovision from destructive_ops advertisements + gate prose + fix the note test**
   - `profile_examples.py:81`: advertise `force_crash` only (leave `:79` "without reprovisioning").
   - `provisioning.py:116` and `:165`: name `force_crash` as the sole opt-in token (leave `:425` dedup-factor doc).
   - `gate.py:6-9` and `:70-71`: state the gate governs `force_crash` (admin) only; remove the reprovision-is-operator sentences.
+  - `tests/mcp/lifecycle/test_systems_profile_examples.py:155`: drop the `and "reprovision" in note` clause (assert only `"force_crash" in note`).
 
-- [ ] **Step 4: Run the contract/schema tests**
+- [ ] **Step 4: Regenerate the tool reference** — `just docs` (updates `docs/guide/reference/systems.md` + `artifacts.md` from the corrected docstrings).
 
-Run: `uv run python -m pytest tests/mcp/core/test_tool_docs.py tests/mcp/lifecycle/test_systems_profile_examples.py -q ; just lint && just type`
-Expected: PASS (`test_no_adr_leak` green; no lint/type warnings).
+- [ ] **Step 5: Run the contract/schema tests + the in-sync gate**
 
-- [ ] **Step 5: Commit**
+Run: `uv run python -m pytest tests/mcp/core/test_tool_docs.py tests/mcp/lifecycle/test_systems_profile_examples.py -q && just docs-check && just lint && just type`
+Expected: PASS (`test_no_adr_leak` green; in sync; no lint/type warnings).
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/kdive/mcp/tools/lifecycle/systems/registrar.py src/kdive/mcp/tools/catalog/artifacts/registrar.py src/kdive/mcp/tools/jobs.py src/kdive/mcp/tools/lifecycle/systems/profile_examples.py src/kdive/profiles/provisioning.py src/kdive/security/authz/gate.py
+git add src/kdive/mcp/tools/lifecycle/systems/registrar.py src/kdive/mcp/tools/catalog/artifacts/registrar.py src/kdive/mcp/tools/jobs.py src/kdive/mcp/tools/lifecycle/systems/profile_examples.py src/kdive/profiles/provisioning.py src/kdive/security/authz/gate.py tests/mcp/lifecycle/test_systems_profile_examples.py docs/guide/reference/systems.md docs/guide/reference/artifacts.md
 git commit -m "docs(security): update provision-lane agent-facing contract to contributor (#1081)"
 ```
 
 ---
 
-### Task 5: Regenerate generated docs
+### Task 5: Full guardrail sweep
 
-**Files:** `docs/guide/safety-and-rbac.md` (via `just rbac-matrix`), the agent tool reference (via `just docs`), any doc-resource snapshots the regen touches.
-
-- [ ] **Step 1: Regenerate** — `just rbac-matrix && just docs`
-- [ ] **Step 2: Verify the five tools show contributor** — inspect the `docs/guide/safety-and-rbac.md` diff.
-- [ ] **Step 3: Verify gates** — `just rbac-matrix-check && just docs-check` (both in-sync).
-- [ ] **Step 4: Commit**
-
-```bash
-git add docs/guide/safety-and-rbac.md docs/   # only regenerated files that changed
-git commit -m "docs(security): regenerate RBAC matrix + tool reference for #1081"
-```
-
----
-
-### Task 6: Full guardrail sweep
-
-- [ ] **Step 1: Run the full gate** — `just ci`. Expected: green.
-- [ ] **Step 2:** If red, fix and fold into the owning task's commit (or a `fix` commit), then re-run `just ci`. Watch for any additional test that hard-asserts the old operator classification (e.g. `test_rbac_platform.py`, `test_docmeta.py`, `test_gateway_projection.py`, profile-schema snapshots) — flip each to contributor and rerun.
+- [ ] **Step 1: Run the full gate** — `just ci`. Expected: green (Tasks 3 and 4 already regenerated their own doc outputs).
+- [ ] **Step 2:** If red, fix and fold into the owning task's commit (or a `fix` commit), then re-run `just ci`. Watch for any residual surface that hard-asserts the old operator classification or embeds the retired docstrings: `test_rbac_platform.py`, `test_docmeta.py`, `test_gateway_projection.py`, `tests/mcp/resources/test_doc_exposure.py`, profile-schema snapshots, and any committed doc-resource snapshot. Regenerate/flip and rerun until green.
 
 ---
 
 ## Self-Review
 
-- **Spec coverage:** Task 1 ↔ spec §3 (reprovision gate removal + in-handler require_role) & §4 (taxonomy) & §5 (validator) & the §4 test-flip; Task 2 ↔ §2 (both gate layers incl. admission.py:419/621); Task 3 ↔ §1 (exposure) + F5 jobs.cancel comment; Task 4 ↔ §6 (all agent-facing surfaces) + F5 gate.py prose; Task 5 ↔ §7. Success criteria 1↔Tasks 2/3, 2↔Task 1, 3↔Task 1, 4↔Task 1, 5↔untouched force_crash, 6↔Task 6.
-- **Ordering/bisectability:** Task 1 is atomic (taxonomy + admin.py + tests) so no commit is red; the `DESTRUCTIVE_JOB_KINDS` edit never lands separately from the `admin.py` `DestructiveOp` removal. Tasks 2 and 3 are independent (handler vs exposure) and each green alone. Task 4 (docstrings) precedes Task 5 (regen from corrected text).
+- **Spec coverage:** Task 1 ↔ spec §3 (reprovision gate removal + in-handler require_role) & §4 (taxonomy) & §5 (validator) & the §4 test-flip; Task 2 ↔ §2 (both gate layers incl. admission.py:419/621); Task 3 ↔ §1 (exposure) + F5 jobs.cancel comment + the generated matrix + hand-written prose; Task 4 ↔ §6 (all agent-facing surfaces) + F5 gate.py prose + the generated tool reference; Task 5 ↔ §7 sweep. Success criteria 1↔Tasks 2/3, 2↔Task 1, 3↔Task 1, 4↔Task 1, 5↔untouched force_crash, 6↔Task 5.
+- **Ordering/bisectability:** every task's commit leaves `just ci` green. Task 1 is atomic (taxonomy + admin.py + every `destructive_ops=["reprovision"]` test) so the `DESTRUCTIVE_JOB_KINDS` edit never lands apart from the `admin.py` `DestructiveOp` removal, and no token-rejection test is orphaned. Task 3 regenerates `safety-and-rbac.md` in the same commit as the `exposure.py` flip (the in-sync gate runs under `just test`); Task 4 regenerates the `reference/*.md` in the same commit as the docstring edits (`docs-check` runs under `just test`). Task 2 (handler gates) is independent of Task 3 (exposure) — each green alone, since no test cross-asserts exposure==handler-role.
 - **No migration:** every change is a role constant, a frozenset, or text.
 - **Rollback:** revert the branch; no data/external state touched.
