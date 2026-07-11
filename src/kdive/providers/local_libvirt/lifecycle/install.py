@@ -28,6 +28,7 @@ import contextlib
 import logging
 import xml.etree.ElementTree as ET  # noqa: S405 - constructs/edits self-owned domain XML only
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID
@@ -89,6 +90,13 @@ class _LibvirtConn(Protocol):
 type Connect = Callable[[], _LibvirtConn]
 type Fetch = Callable[[str, Path], None]
 type Readiness = Callable[[UUID], ReadinessResult]
+
+
+@dataclass(frozen=True, slots=True)
+class _StagedInstallArtifacts:
+    kernel_path: Path
+    initrd_path: Path | None
+    modules_injected: bool
 
 
 def _close(conn: _LibvirtConn) -> None:
@@ -176,32 +184,9 @@ class LocalLibvirtInstall:
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"op": "mkdir", "dest": str(staging_dir)},
             ) from exc
-        combined_tar = staging_dir / "kernel.tar.gz"
-        self._fetch_kernel(request.kernel_ref, combined_tar)
-        kernel_path = staging_dir / "kernel"
-        extract_boot_vmlinuz(combined_tar, kernel_path)
-        initrd_path: Path | None = None
-        if request.initrd_ref is not None:
-            initrd_path = staging_dir / "initrd"
-            self._fetch_initrd(request.initrd_ref, initrd_path)
-        modules_injected = False
-        modules_tar = staging_dir / "modules.tar.gz"
-        needs_modules = request.method is CaptureMethod.KDUMP or request.debuginfo_ref is not None
-        if needs_modules and repack_modules_subtree(combined_tar, modules_tar):
-            self._inject_built_modules(
-                request.system_id, modules_tar, kernel_path, request.debuginfo_ref, staging_dir
-            )
-            modules_injected = True
-        # The combined tar and the repacked modules tar are intermediates: boot/vmlinuz is already
-        # extracted to kernel_path (the <kernel> element) and the modules tree is injected in-guest,
-        # so neither is needed past this point. Reclaim them best-effort so the per-Run staging dir
-        # does not retain a redundant copy of the kernel bytes for the System's lifetime; a retried
-        # install re-fetches the combined tar (temp-then-rename), so removal is retry-safe.
-        for intermediate in (combined_tar, modules_tar):
-            with contextlib.suppress(OSError):
-                intermediate.unlink(missing_ok=True)
+        artifacts = self._stage_install_artifacts(request, staging_dir)
         kdump_env_absent = request.method is CaptureMethod.KDUMP and not (
-            modules_injected or initrd_path is not None
+            artifacts.modules_injected or artifacts.initrd_path is not None
         )
         if kdump_env_absent:
             raise CategorizedError(
@@ -213,7 +198,11 @@ class LocalLibvirtInstall:
         conn = self._open("for install")
         try:
             xml = self._render_direct_kernel_xml(
-                conn, domain_name, kernel_path, initrd_path, request.cmdline
+                conn,
+                domain_name,
+                artifacts.kernel_path,
+                artifacts.initrd_path,
+                request.cmdline,
             )
             try:
                 conn.defineXML(xml)
@@ -221,6 +210,55 @@ class LocalLibvirtInstall:
                 raise self._install_failure("redefining", domain_name) from exc
         finally:
             _close(conn)
+
+    def _stage_install_artifacts(
+        self, request: InstallRequest, staging_dir: Path
+    ) -> _StagedInstallArtifacts:
+        combined_tar = staging_dir / "kernel.tar.gz"
+        self._fetch_kernel(request.kernel_ref, combined_tar)
+        kernel_path = staging_dir / "kernel"
+        extract_boot_vmlinuz(combined_tar, kernel_path)
+        initrd_path = self._stage_initrd(request, staging_dir)
+        modules_tar = staging_dir / "modules.tar.gz"
+        modules_injected = self._inject_modules_if_needed(
+            request, staging_dir, combined_tar, modules_tar, kernel_path
+        )
+        self._delete_install_intermediates(combined_tar, modules_tar)
+        return _StagedInstallArtifacts(kernel_path, initrd_path, modules_injected)
+
+    def _stage_initrd(self, request: InstallRequest, staging_dir: Path) -> Path | None:
+        if request.initrd_ref is None:
+            return None
+        initrd_path = staging_dir / "initrd"
+        self._fetch_initrd(request.initrd_ref, initrd_path)
+        return initrd_path
+
+    def _inject_modules_if_needed(
+        self,
+        request: InstallRequest,
+        staging_dir: Path,
+        combined_tar: Path,
+        modules_tar: Path,
+        kernel_path: Path,
+    ) -> bool:
+        needs_modules = request.method is CaptureMethod.KDUMP or request.debuginfo_ref is not None
+        if not needs_modules or not repack_modules_subtree(combined_tar, modules_tar):
+            return False
+        self._inject_built_modules(
+            request.system_id, modules_tar, kernel_path, request.debuginfo_ref, staging_dir
+        )
+        return True
+
+    @staticmethod
+    def _delete_install_intermediates(combined_tar: Path, modules_tar: Path) -> None:
+        # The combined tar and the repacked modules tar are intermediates: boot/vmlinuz is already
+        # extracted for the <kernel> element and the modules tree is injected in-guest, so neither
+        # is needed past this point. Reclaim them best-effort so the per-Run staging dir does not
+        # retain a redundant copy of the kernel bytes for the System's lifetime; a retried install
+        # re-fetches the combined tar (temp-then-rename), so removal is retry-safe.
+        for intermediate in (combined_tar, modules_tar):
+            with contextlib.suppress(OSError):
+                intermediate.unlink(missing_ok=True)
 
     def _inject_built_modules(
         self,
