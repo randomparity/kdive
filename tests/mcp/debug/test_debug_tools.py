@@ -36,8 +36,8 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.debug import sessions as debug_tools
 from kdive.mcp.tools.debug.sessions import lifecycle as debug_lifecycle
+from kdive.mcp.tools.debug.sessions import lifecycle as debug_tools
 from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
 from kdive.prereqs.system_bootstrap_key import (
     ensure_system_bootstrap_key,

@@ -31,10 +31,8 @@ import kdive.mcp.tools.debug.operations.stack as ops_stack
 import kdive.mcp.tools.debug.operations.watchpoints as ops_watchpoints
 from kdive.domain.capacity.state import SystemState
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.debug import (
-    sessions as debug_tools,
-)
 from kdive.mcp.tools.debug.operations.runtime import DebugEngineRuntime
+from kdive.mcp.tools.debug.sessions import lifecycle as debug_tools
 from kdive.providers.core.resolver import ProviderBinding
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.ports.debug import GdbMiAttachment

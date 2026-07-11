@@ -45,8 +45,8 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.debug import sessions as debug_tools
 from kdive.mcp.tools.debug.operations.runtime import DebugEngineRuntime, run_engine_op_with_runtime
+from kdive.mcp.tools.debug.sessions import lifecycle as debug_tools
 from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
 from kdive.providers.core.runtime import DebugCapabilities, ProviderRuntime
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery

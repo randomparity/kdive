@@ -24,11 +24,10 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import DebugSession
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.debug import introspect as introspect_registrar
 from kdive.mcp.tools.debug.introspection import common as introspect_common
 from kdive.mcp.tools.debug.introspection import live as introspect_live
 from kdive.mcp.tools.debug.introspection import offline as introspect_offline
-from kdive.mcp.tools.debug.introspection import registrar as introspect_tool_registrar
+from kdive.mcp.tools.debug.introspection import registrar as introspect_registrar
 from kdive.prereqs.system_bootstrap_key import ensure_system_bootstrap_key
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime, ProviderSupport
@@ -308,7 +307,7 @@ async def _call_registered_tool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> ToolResponse:
     """Register the introspect tools and invoke one through the FastMCP transport (wrapper path)."""
-    monkeypatch.setattr(introspect_tool_registrar, "current_context", lambda: ctx)
+    monkeypatch.setattr(introspect_registrar, "current_context", lambda: ctx)
     app: FastMCP = FastMCP(name="t")
     introspect_registrar.register(app, pool, resolver=resolver, secret_registry=SecretRegistry())
     async with Client(app) as client:
@@ -692,7 +691,7 @@ def test_run_tool_uses_already_resolved_live_session(
                 resolve_calls += 1
                 return await original_resolve(conn, ctx, session_id)
 
-            monkeypatch.setattr(introspect_tool_registrar, "current_context", lambda: _live_ctx())
+            monkeypatch.setattr(introspect_registrar, "current_context", lambda: _live_ctx())
             monkeypatch.setattr(introspect_live, "resolve_live_drgn_session", counted_resolve)
             app: FastMCP = FastMCP(name="t")
             introspect_registrar.register(
