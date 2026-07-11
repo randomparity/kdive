@@ -249,7 +249,7 @@ These packages are related but not interchangeable:
 | `kdive.artifacts` | Artifact DTOs, keys, sensitivity, and upload metadata. |
 | `kdive.store` | Object-store clients and environment-backed store assembly. |
 | `kdive.build_artifacts` | Build-output result shapes and build-id validation. |
-| `kdive.build_configs` | Catalog-backed kernel config lookup and fetch ports. |
+| `kdive.kernel_config` | Uploaded kernel-config parsing, effective-config fetch, and feature requirement gates. |
 | `kdive.components` | Typed component refs and config-requirement validation. |
 | `kdive.images` / `kdive.inventory` | Image inventory, catalog reconcile, and TOML shape. |
 | `kdive.mcp.tools.catalog.artifacts` | Agent artifact tools and upload/download authz. |
