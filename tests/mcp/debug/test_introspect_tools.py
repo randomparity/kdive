@@ -25,6 +25,7 @@ from kdive.domain.lifecycle.records import DebugSession
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug.introspection import common as introspect_common
+from kdive.mcp.tools.debug.introspection import gate as introspect_gate
 from kdive.mcp.tools.debug.introspection import live as introspect_live
 from kdive.mcp.tools.debug.introspection import offline as introspect_offline
 from kdive.mcp.tools.debug.introspection import registrar as introspect_registrar
@@ -1161,7 +1162,7 @@ class _ProbeIntrospector(_FakeLiveIntrospector):
     """A live introspector whose runtime-probe ``run_script`` and the real seams are set
     independently, so a test can make the ADR-0329 probe fail while the helper/script succeeds.
 
-    The probe rides ``run_script`` with the fixed ``_RESOLUTION_PROBE_SCRIPT``; a caller script (the
+    The probe rides ``run_script`` with the fixed ``RESOLUTION_PROBE_SCRIPT``; a caller script (the
     ``introspect.script`` real op) also rides ``run_script``. They are told apart by the script text
     so probe and real-op outcomes never entangle.
     """
@@ -1192,7 +1193,7 @@ class _ProbeIntrospector(_FakeLiveIntrospector):
     def run_script(
         self, *, transport_handle: str, script: str, timeout_sec: float, key_path: str
     ) -> LiveScriptOutput:
-        if script == introspect_live._RESOLUTION_PROBE_SCRIPT:
+        if script == introspect_gate.RESOLUTION_PROBE_SCRIPT:
             self.probe_calls += 1
             if self._probe_raises is not None:
                 raise self._probe_raises

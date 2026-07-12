@@ -13,7 +13,7 @@ from psycopg_pool import AsyncConnectionPool
 import kdive.config as config
 from kdive.config.core_settings import LIVE_SCRIPT_MAX_TIMEOUT_SECONDS
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.kernel_config.gate import debuginfo_unloadable_warning, debuginfo_warning
+from kdive.kernel_config.gate import debuginfo_warning
 from kdive.log import bind_context
 from kdive.mcp.responses import ResponseData, ToolResponse
 from kdive.mcp.tools._common import config_error as _config_error
@@ -22,6 +22,7 @@ from kdive.mcp.tools.debug.introspection.common import (
     _LIVE_SCRIPT,
     _require_introspection,
 )
+from kdive.mcp.tools.debug.introspection.gate import augment_with_runtime_probe
 from kdive.mcp.tools.debug.sessions.context import resolve_debug_session_context
 from kdive.prereqs.system_bootstrap_key import (
     load_system_bootstrap_private_key,
@@ -47,12 +48,6 @@ _DEFAULT_SCRIPT_TIMEOUT = 30.0
 # rather than an opaque guest-agent ``input-data`` rejection (ADR-0240); drgn scripts are tiny, so
 # 256 KiB is generous and stays well under the qemu-guest-agent QMP input-data cap.
 _MAX_SCRIPT_BYTES = 256 * 1024
-# A drgn-live runtime resolution probe: a bare lookup of a stable kernel global. On a kernel whose
-# in-guest drgn cannot load debuginfo/BTF the lookup raises, the guest wrapper exits non-zero, and
-# run_script surfaces DEBUG_ATTACH_FAILURE — the signal that the session is blind even when the
-# uploaded .config advertised BTF (the static config check cannot see this).
-_RESOLUTION_PROBE_SCRIPT = "prog['init_task']\n"
-_PROBE_TIMEOUT_SEC = 10.0
 
 
 class LiveDrgnSession(NamedTuple):
@@ -147,7 +142,7 @@ async def _resolve_live_introspection_context(
             warning = await debuginfo_warning(
                 conn, resolved.run_id, has_uploaded_vmlinux=has_vmlinux
             )
-            warning = await _augment_with_runtime_probe(
+            warning = await augment_with_runtime_probe(
                 warning,
                 introspector=runtime.live_introspector,
                 transport_handle=resolved.transport_handle,
@@ -158,62 +153,6 @@ async def _resolve_live_introspection_context(
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(session_id, exc)
     return LiveDrgnContext(resolved, runtime, private_key)
-
-
-async def _augment_with_runtime_probe(
-    static_warning: dict[str, JsonValue] | None,
-    *,
-    introspector: LiveIntrospector,
-    transport_handle: str,
-    private_key: str,
-    has_uploaded_vmlinux: bool,
-) -> dict[str, JsonValue] | None:
-    """Add the runtime resolution signal to the static config warning (ADR-0329).
-
-    The static config check is authoritative when it already warns (no BTF advertised, no vmlinux)
-    or when a host vmlinux was uploaded (drgn resolves from it). Only when it is silent for a
-    vmlinux-less Run — BTF advertised, or no config uploaded — can the session still be blind at
-    runtime; probe it and return ``debuginfo_unloadable`` when resolution provably failed. The
-    extra round-trip is confined to exactly that gap.
-    """
-    if static_warning is not None or has_uploaded_vmlinux:
-        return static_warning
-    resolved = await _probe_symbol_resolution(
-        introspector, transport_handle=transport_handle, private_key=private_key
-    )
-    if resolved is False:
-        return debuginfo_unloadable_warning()
-    return static_warning
-
-
-async def _probe_symbol_resolution(
-    introspector: LiveIntrospector,
-    *,
-    transport_handle: str,
-    private_key: str,
-) -> bool | None:
-    """Probe whether in-guest drgn can resolve a stable kernel symbol at runtime (ADR-0329).
-
-    Runs a fixed one-line resolution probe over the existing ``run_script`` seam. Returns ``True``
-    when the probe resolves (drgn exited zero), ``False`` when drgn attached but could not resolve
-    the symbol (``DEBUG_ATTACH_FAILURE`` — the blind-session signal), and ``None`` when the probe
-    is indeterminate (a transport or other fault the real op will surface anyway). Fail-open: an
-    indeterminate probe adds no warning and never blocks the introspection.
-    """
-    try:
-        with materialized_private_key(private_key) as key_path:
-            await asyncio.to_thread(
-                introspector.run_script,
-                transport_handle=transport_handle,
-                script=_RESOLUTION_PROBE_SCRIPT,
-                timeout_sec=_PROBE_TIMEOUT_SEC,
-                key_path=str(key_path),
-            )
-    except CategorizedError as exc:
-        if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE:
-            return False
-        return None
-    return True
 
 
 def _session_config_error() -> CategorizedError:
