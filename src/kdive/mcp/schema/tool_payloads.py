@@ -133,8 +133,18 @@ class AllocationRequestPayload(SelectorPayload):
         return self
 
 
+_COST_CLASS_DESCRIPTION = (
+    "Hypothetical cost class to price against (default 'local'); selects the per-class "
+    "pricing coefficient. This is a what-if input, not the class you are billed under: "
+    "actual usage is billed under the persisted cost_class of the resource the allocation "
+    "books. To get an estimate that matches the bill, pass the cost_class of the resource "
+    "you intend to allocate on (read it from `catalog.resources`). An unknown class is a "
+    "configuration_error."
+)
+
+
 class EstimateRequestPayload(SelectorPayload):
     vcpus: int
     memory_gb: int
     window: Decimal = Field(gt=0, description=_WINDOW_DESCRIPTION, examples=[_WINDOW_EXAMPLE])
-    cost_class: str = _DEFAULT_COST_CLASS
+    cost_class: str = Field(default=_DEFAULT_COST_CLASS, description=_COST_CLASS_DESCRIPTION)
