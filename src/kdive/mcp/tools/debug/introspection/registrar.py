@@ -82,7 +82,12 @@ def register(
             ),
         ],
     ) -> ToolResponse:
-        """Run live drgn introspection over a live drgn-live DebugSession. Requires contributor."""
+        """Run live drgn introspection over a live drgn-live DebugSession. Requires contributor.
+
+        Returns `data.report` (the helper's output, keyed by helper name), `data.truncated`
+        (bool, whether the output was byte-capped), and `data.transcript_sensitivity`. If the
+        guest is missing debuginfo, `data.missing_debuginfo` is added as a non-fatal warning.
+        """
         return await introspect_run(
             pool,
             current_context(),
@@ -104,8 +109,11 @@ def register(
             Field(
                 description=(
                     "A drgn (Python) script run against the live guest kernel; `prog` is the live "
-                    "drgn.Program. Its stdout is returned (byte-capped). Each call is a fresh drgn "
-                    "process - put any multi-step work in one script."
+                    "drgn.Program, already bound as a global in the script's namespace - do not "
+                    "`from drgn import prog` (it will fail; there is no such importable name). "
+                    "Example: `for t in prog.threads(): print(t.pid)`. Its stdout is returned "
+                    "(byte-capped). Each call is a fresh drgn process - put any multi-step work "
+                    "in one script."
                 )
             ),
         ],
@@ -120,7 +128,12 @@ def register(
             ),
         ] = _DEFAULT_SCRIPT_TIMEOUT,
     ) -> ToolResponse:
-        """Run a caller drgn script over a live drgn-live DebugSession. Requires contributor."""
+        """Run a caller drgn script over a live drgn-live DebugSession. Requires contributor.
+
+        Returns `data.output` (the script's captured stdout, byte-capped), `data.truncated`
+        (bool, whether the output was byte-capped), and `data.transcript_sensitivity`. If the
+        guest is missing debuginfo, `data.missing_debuginfo` is added as a non-fatal warning.
+        """
         return await introspect_script(
             pool,
             current_context(),
