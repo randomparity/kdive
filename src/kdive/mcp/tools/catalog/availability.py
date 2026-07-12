@@ -78,6 +78,14 @@ class _ResourcesAvailabilityPayload(ToolPayload):
         default=None,
         description="Optional shape name; restricts the fitting computation to it.",
     )
+    include_devices: bool = Field(
+        default=False,
+        description=(
+            "Include the full free PCIe device list per host. Off by default: hosts report "
+            "only the free device count ('free_pcie'). Set true to also return 'free_devices' "
+            "(bdf/vendor/device/class) when a specific device must be picked."
+        ),
+    )
 
 
 class _HostAvailability(NamedTuple):
@@ -240,8 +248,14 @@ def _host_item(
     occupancy: int,
     free: list[PCIeDescriptor],
     shapes: list[SystemShape],
+    include_devices: bool,
 ) -> _HostAvailability:
-    """Build one per-host availability item (headroom, free PCIe, fitting shapes)."""
+    """Build one per-host availability item (headroom, free PCIe, fitting shapes).
+
+    ``free_pcie`` (the free device count) is always reported; the full ``free_devices``
+    descriptor list is included only when ``include_devices`` is set (summarize-by-default,
+    ADR-0332), so the unfiltered view stays cheap.
+    """
     cap = _resolve_cap(resource)
     ceiling = _size_ceiling(resource)
     has_ceiling = ceiling[0] is not None and ceiling[1] is not None
@@ -259,7 +273,6 @@ def _host_item(
             shape, schedulable=schedulable, headroom=headroom, free=free, ceiling=ceiling
         )
     ]
-    free_devices: list[JsonValue] = [_redact_descriptor(d) for d in free]
     fits_json: list[JsonValue] = list(fits)
     data: dict[str, JsonValue] = {
         "kind": resource.kind.value,
@@ -270,9 +283,10 @@ def _host_item(
         "in_use": occupancy,
         "headroom": headroom,
         "free_pcie": len(free),
-        "free_devices": free_devices,
         "fits": fits_json,
     }
+    if include_devices:
+        data["free_devices"] = [_redact_descriptor(d) for d in free]
     return _HostAvailability(ToolResponse.success(str(resource.id), "available", data=data), fits)
 
 
@@ -319,12 +333,15 @@ async def availability_tool(
     *,
     pcie: str | None,
     shape: str | None,
+    include_devices: bool = False,
 ) -> ToolResponse:
     """Report fleet availability: per-host headroom / free PCIe / fitting shapes + queue depth.
 
     Viewer (any authenticated context) sees global resources plus resources visible to one of the
     caller's projects. ``pcie`` narrows to hosts with a free matching device; ``shape``
-    restricts the fitting computation to one named shape. A malformed ``pcie`` spec or an
+    restricts the fitting computation to one named shape. Each host reports the free device
+    count (``free_pcie``); the full ``free_devices`` list is included only when
+    ``include_devices`` is set (ADR-0332 summarize-by-default). A malformed ``pcie`` spec or an
     unknown ``shape`` is a ``configuration_error``. The view is a point-in-time hint, not a
     reservation (ADR-0070).
     """
@@ -355,7 +372,11 @@ async def availability_tool(
             if not _passes_pcie_filter(free, pcie):
                 continue
             item = _host_item(
-                resource, occupancy=occupancy.get(resource.id, 0), free=free, shapes=shapes
+                resource,
+                occupancy=occupancy.get(resource.id, 0),
+                free=free,
+                shapes=shapes,
+                include_devices=include_devices,
             )
             items.append(item.response)
             global_fits.update(item.fits)
@@ -393,5 +414,9 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """
         payload = request or _ResourcesAvailabilityPayload()
         return await availability_tool(
-            pool, current_context(), pcie=payload.pcie, shape=payload.shape
+            pool,
+            current_context(),
+            pcie=payload.pcie,
+            shape=payload.shape,
+            include_devices=payload.include_devices,
         )

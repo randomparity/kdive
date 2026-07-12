@@ -18,6 +18,7 @@ A point-in-time hint, not a reservation; the admission path stays the authority.
 
 - `pcie` (`string (nullable)`, optional) — Optional PCIe match spec ('<4hex>:<4hex>' or 'class=' plus 2 or 4 hex); narrows to hosts with a free matching device.
 - `shape` (`string (nullable)`, optional) — Optional shape name; restricts the fitting computation to it.
+- `include_devices` (`boolean`, optional) — Include the full free PCIe device list per host. Off by default: hosts report only the free device count ('free_pcie'). Set true to also return 'free_devices' (bdf/vendor/device/class) when a specific device must be picked.
 
 ## `resources.cordon`
 
