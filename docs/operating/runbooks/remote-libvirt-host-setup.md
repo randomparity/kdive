@@ -247,6 +247,29 @@ The canonical install recipe, the exact argv/JSON contract each helper satisfies
 package prerequisites live in
 [`deploy/remote-libvirt-guest-helpers/README.md`](../../../deploy/remote-libvirt-guest-helpers/README.md).
 
+### 5b. Offer the image's kernel config (optional)
+
+The manual `sudo install` + `virsh pool-refresh` above stages the volume but records no
+`/boot/config-<ver>`, so the image reports `has_kernel_config: false` and an agent cannot fetch a
+known-good kernel-build starting point (ADR-0336). To capture it, stage the built qcow2 with
+`stage-volume` instead of the manual copy — it uploads the volume into the pool over `qemu+tls`
+**and** extracts `/boot/config` into the object store in one step:
+
+```bash
+# Declare the [[image]] (kind = "staged") in systems.toml and reconcile it FIRST — the catalog
+# row must exist (step 7), else stage-volume fails fast — then:
+python -m kdive stage-volume \
+  --provider remote-libvirt \
+  --image fedora-kdive-remote-base-43 \
+  --from "$HOME/fedora-kdive-remote-base-43.qcow2"
+```
+
+Requires `KDIVE_S3_*` (the config is stored in the object store, like a published image's). The
+config is captured only when `/boot` holds exactly one non-rescue kernel; otherwise the volume
+still stages with no offer. To refresh the offer after rebuilding the image, clear the row's
+`kernel_config_key` (`UPDATE image_catalog SET kernel_config_key = NULL WHERE …`) and re-run
+`stage-volume`.
+
 ## 6. gdbstub-port ACL
 
 The gdb-MI tier connects directly over TCP from the worker to the host's QEMU gdbstub port
