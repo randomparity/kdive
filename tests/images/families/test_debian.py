@@ -13,7 +13,10 @@ from pathlib import Path
 
 from kdive.images.families.base import CustomizeContext
 from kdive.images.families.debian import DebianFamily
-from kdive.images.planes._build_common import MAKEDUMPFILE_MARKER_GUEST_PATH
+from kdive.images.planes._build_common import (
+    DRGN_MARKER_GUEST_PATH,
+    MAKEDUMPFILE_MARKER_GUEST_PATH,
+)
 from kdive.images.rootfs.kinds import RootfsImageKind
 
 
@@ -45,6 +48,20 @@ def test_debug_argv_writes_makedumpfile_version_marker(tmp_path: Path) -> None:
 def test_build_argv_omits_makedumpfile_version_marker(tmp_path: Path) -> None:
     argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True, kind="build"))
     assert MAKEDUMPFILE_MARKER_GUEST_PATH not in " ".join(argv)
+
+
+def test_debug_argv_writes_drgn_version_marker(tmp_path: Path) -> None:
+    # python3-drgn is in the debug set, so the drgn-version marker is written (ADR-0334).
+    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True, kind="debug"))
+    joined = " ".join(argv)
+    assert DRGN_MARKER_GUEST_PATH in joined
+    assert "drgn --version" in joined
+
+
+def test_build_argv_omits_drgn_version_marker(tmp_path: Path) -> None:
+    # A build-host image installs no python3-drgn, so no drgn marker is written.
+    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True, kind="build"))
+    assert DRGN_MARKER_GUEST_PATH not in " ".join(argv)
 
 
 def test_family_identity_and_kdump_unit() -> None:

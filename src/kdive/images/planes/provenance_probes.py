@@ -14,11 +14,18 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 # plane and the family customizers share one definition without a families->build cycle.
 MAKEDUMPFILE_MARKER_GUEST_PATH = "/usr/lib/kdive/makedumpfile-version"
 
+# The in-guest marker file a debug build writes ``drgn --version`` into, read back into
+# ``provenance["drgn_version"]`` (ADR-0334, the build-time capture ADR-0328 deferred). Same
+# rationale as the makedumpfile marker: defined here so the build plane and the family customizers
+# share one path without a families->build cycle.
+DRGN_MARKER_GUEST_PATH = "/usr/lib/kdive/drgn-version"
+
 _VIRT_INSPECTOR_TIMEOUT_S = 5 * 60
 _GUESTFISH_TIMEOUT_S = 5 * 60
 
 type VersionInspectSeam = Callable[[Path], dict[str, str]]
 type MakedumpfileProbeSeam = Callable[[Path], str | None]
+type DrgnProbeSeam = Callable[[Path], str | None]
 type KernelConfigProbeSeam = Callable[[Path, str], bytes | None]
 type BootEntriesProbeSeam = Callable[[Path], list[str] | None]
 type OsReleaseProbeSeam = Callable[[Path], str | None]
@@ -126,6 +133,51 @@ def probe_makedumpfile_marker(qcow2_path: Path) -> str | None:  # pragma: no cov
 
 
 DEFAULT_MAKEDUMPFILE_PROBE: MakedumpfileProbeSeam = probe_makedumpfile_marker
+
+
+def probe_drgn_marker(qcow2_path: Path) -> str | None:  # pragma: no cover - live_vm
+    """Read the build-written ``drgn --version`` marker from ``qcow2_path``, read-only.
+
+    The debug build records the in-guest ``drgn --version`` banner into
+    :data:`DRGN_MARKER_GUEST_PATH`; this reads it back with a read-only ``guestfish`` ``cat`` so the
+    recorded version is the binary's own report — the operand of the ADR-0328 ``live_drgn``
+    capability signal, previously available only for curated catalog rows.
+
+    Returns:
+        The marker's stripped text, or ``None`` when the marker is absent/empty (a non-debug or
+        drgn-less image) — never raising for a missing marker.
+
+    Raises:
+        CategorizedError: ``MISSING_DEPENDENCY`` if ``guestfish`` is absent;
+            ``INFRASTRUCTURE_FAILURE`` on timeout.
+    """
+    argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "cat", DRGN_MARKER_GUEST_PATH]
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=_GUESTFISH_TIMEOUT_S,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise CategorizedError(
+            "guestfish is not installed; cannot read the drgn-version marker",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+            details={"tool": "guestfish"},
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise CategorizedError(
+            "guestfish exceeded its timeout reading the drgn-version marker",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"timeout_s": _GUESTFISH_TIMEOUT_S},
+        ) from exc
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+DEFAULT_DRGN_PROBE: DrgnProbeSeam = probe_drgn_marker
 
 
 def probe_kernel_config(  # pragma: no cover - live_vm

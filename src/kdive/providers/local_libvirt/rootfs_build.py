@@ -35,6 +35,7 @@ from pathlib import Path
 
 from kdive.domain.errors import CategorizedError
 from kdive.domain.platform.arch_traits import arch_traits
+from kdive.images.drgn_support import DrgnVersion
 from kdive.images.families import family_for
 from kdive.images.families._fedora_customize import (
     READINESS_MARKER as _READINESS_MARKER,
@@ -54,11 +55,13 @@ from kdive.images.planes._build_common import (
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildProvenance, RootfsBuildSpec
 from kdive.images.planes.provenance_probes import (
     DEFAULT_BOOT_ENTRIES_PROBE,
+    DEFAULT_DRGN_PROBE,
     DEFAULT_KERNEL_CONFIG_PROBE,
     DEFAULT_MAKEDUMPFILE_PROBE,
     DEFAULT_OS_RELEASE_PROBE,
     DEFAULT_VERSION_INSPECT,
     BootEntriesProbeSeam,
+    DrgnProbeSeam,
     KernelConfigProbeSeam,
     MakedumpfileProbeSeam,
     OsReleaseProbeSeam,
@@ -194,6 +197,7 @@ class RootfsBuildTools:
     family_for: FamilyResolver = family_for
     inspect_versions: VersionInspectSeam = DEFAULT_VERSION_INSPECT
     probe_makedumpfile: MakedumpfileProbeSeam = DEFAULT_MAKEDUMPFILE_PROBE
+    probe_drgn: DrgnProbeSeam = DEFAULT_DRGN_PROBE
     probe_boot_entries: BootEntriesProbeSeam = DEFAULT_BOOT_ENTRIES_PROBE
     probe_os_release: OsReleaseProbeSeam = DEFAULT_OS_RELEASE_PROBE
     probe_kernel_config: KernelConfigProbeSeam = DEFAULT_KERNEL_CONFIG_PROBE
@@ -264,6 +268,7 @@ class LocalLibvirtRootfsBuildPlane:
             installed = self._inspect_installed(scratch)
             package_versions = {n: installed[n] for n in spec.packages if n in installed}
             makedumpfile_version = self._capture_makedumpfile(scratch, installed)
+            drgn_version = self._capture_drgn(scratch, installed)
             boot_facts = self._capture_boot_facts(scratch)
             qcow2 = publish_qcow2(self._workspace, image_name=spec.name, scratch=staged)
         digest = digest_file(qcow2)
@@ -280,6 +285,7 @@ class LocalLibvirtRootfsBuildPlane:
                 guest_mac=family.guest_mac,
                 package_versions=package_versions,
                 makedumpfile_version=makedumpfile_version,
+                drgn_version=drgn_version,
                 boot_kernel_count=boot_facts.boot_kernel_count,
                 default_kernel_version=boot_facts.default_kernel_version,
                 os_release=self._capture_os_release(scratch),
@@ -325,6 +331,30 @@ class LocalLibvirtRootfsBuildPlane:
                 return str(MakedumpfileVersion.parse(candidate))
             except ValueError:
                 _log.warning("makedumpfile version %r did not parse; skipping", candidate)
+        return None
+
+    def _capture_drgn(self, scratch: Path, installed: dict[str, str]) -> str | None:
+        """The image's drgn version: the binary marker probe, else the package-version fallback.
+
+        Reads the build-written ``drgn --version`` marker (authoritative — the binary's own
+        report); if that yields nothing, falls back to the installed drgn package version (``drgn``
+        on rhel/fedora, ``python3-drgn`` on debian) from the full inspected map. Either source is
+        parsed to a canonical dotted version — the ADR-0328 ``live_drgn`` operand. Advisory like the
+        makedumpfile capture: any failure / unparseable / absent source degrades to ``None`` so the
+        build still publishes and ``live_drgn`` honestly reports ``unverified`` (ADR-0334).
+        """
+        try:
+            raw = self._tools.probe_drgn(scratch)
+        except CategorizedError:
+            _log.warning("drgn probe failed; trying package-version fallback", exc_info=True)
+            raw = None
+        for candidate in (raw, installed.get("drgn"), installed.get("python3-drgn")):
+            if not candidate:
+                continue
+            try:
+                return str(DrgnVersion.parse(candidate))
+            except ValueError:
+                _log.warning("drgn version %r did not parse; skipping", candidate)
         return None
 
     def _capture_os_release(self, scratch: Path) -> dict[str, str] | None:

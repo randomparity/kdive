@@ -24,6 +24,7 @@ from kdive.images.families._fedora_customize import (
     READINESS_MARKER,
     cloud_init_first_boot_args,
     drgn_helper_args,
+    drgn_version_marker_args,
     makedumpfile_version_marker_args,
 )
 from kdive.images.families.base import CustomizeContext, _mac_tag
@@ -111,6 +112,11 @@ class DebianFamily:
         if ctx.kind == "debug":
             argv += drgn_helper_args()
             argv += makedumpfile_version_marker_args()
+        # Record the shipped drgn version only when the introspection package is installed
+        # (``python3-drgn`` on debian), so the ``live_drgn`` signal resolves for this built image
+        # (ADR-0334); a build-host image with no drgn writes no marker.
+        if "python3-drgn" in ctx.packages:
+            argv += drgn_version_marker_args()
         argv += [
             "--upload",
             f"{ctx.readiness_unit_path}:/etc/systemd/system/{READINESS_MARKER}.service",

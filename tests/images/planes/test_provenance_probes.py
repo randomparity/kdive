@@ -112,6 +112,7 @@ type _PathProbe = Callable[[Path], object]
     "probe",
     [
         probes.probe_makedumpfile_marker,
+        probes.probe_drgn_marker,
         lambda path: probes.probe_kernel_config(path, "6.12.0"),
         probes.probe_boot_entries,
         probes.probe_os_release,
@@ -133,6 +134,7 @@ def test_guestfish_probes_missing_executable(
     "probe",
     [
         probes.probe_makedumpfile_marker,
+        probes.probe_drgn_marker,
         lambda path: probes.probe_kernel_config(path, "6.12.0"),
         probes.probe_boot_entries,
         probes.probe_os_release,
@@ -167,6 +169,25 @@ def test_probe_makedumpfile_marker_missing_and_success_outputs(
     _patch_run(monkeypatch, [result])
 
     assert probes.probe_makedumpfile_marker(Path("image.qcow2")) == expected
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (_completed(returncode=1), None),
+        (_completed(stdout=" \n"), None),
+        (_completed(stdout="drgn 0.0.31\n"), "drgn 0.0.31"),
+    ],
+)
+def test_probe_drgn_marker_missing_and_success_outputs(
+    result: subprocess.CompletedProcess[str | bytes],
+    expected: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _patch_run(monkeypatch, [result])
+
+    assert probes.probe_drgn_marker(Path("image.qcow2")) == expected
+    assert calls[0][0][-1] == probes.DRGN_MARKER_GUEST_PATH
 
 
 @pytest.mark.parametrize(
