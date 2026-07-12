@@ -105,13 +105,32 @@ boot image first.
 3. `artifacts.create_run_upload` — declare each artifact `{name, sha256 (base64), size_bytes}`
    and receive one upload item per artifact. Each item contains `refs.upload_url` and
    `data.required_headers`; objects over the single-PUT limit can be declared with `chunks`.
-4. PUT each object to its presigned URL, sending every header from `data.required_headers`.
+4. PUT each object to its presigned URL, sending **exactly** the headers in
+   `data.required_headers` and nothing else.
 5. `runs.complete_build` — finalize. The server validates every uploaded object (shape, magic,
    manifest `sha256`/`size_bytes`, and the `vmlinux` build-id) before the Run becomes
    installable.
 
 Each `artifacts.create_run_upload` call replaces the previous manifest for the Run. If you
 correct one artifact, redeclare every artifact that should remain part of the build.
+
+### Pitfall: extra headers break the signature
+
+The presigned URL is signed over a fixed header set. If your HTTP client injects a header
+that isn't in `data.required_headers` — most commonly a default `Content-Type` — the PUT
+fails with `403 SignatureDoesNotMatch`. `curl -d`/`--data-binary` is a common trap: it adds
+`Content-Type: application/x-www-form-urlencoded` and can mangle binary bodies. Use `curl -T`
+to upload the file, and explicitly clear `Content-Type` since it is never one of the
+`required_headers`:
+
+```bash
+curl -T kernel.tar.gz -H 'Content-Type:' \
+  -H 'x-amz-checksum-sha256: <b64>' -H 'x-amz-meta-sensitivity: sensitive' \
+  -H 'x-amz-meta-retention-class: build' "$UPLOAD_URL"
+```
+
+Replace the `x-amz-*` headers above with the exact set from `data.required_headers` for that
+upload item — the names and values are per-artifact.
 
 A mismatch between a declared `sha256`/`size_bytes` and the stored object is rejected
 (`uploaded artifact disagrees with its manifest`), so checksum the bytes you actually PUT.

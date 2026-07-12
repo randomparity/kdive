@@ -183,8 +183,11 @@ def _register_artifacts_create_run_upload(
         """Mint presigned PUTs for an external Run's build artifacts.
 
         Each upload item returns `refs.upload_url` plus `data.required_headers`; the client
-        must send every required header on the PUT. Each call replaces the Run upload manifest,
-        so corrections must redeclare every artifact that should remain part of the build.
+        must send exactly those headers on the PUT and nothing else — an HTTP client that
+        injects its own header (e.g. a default `Content-Type`) invalidates the signature and
+        the PUT fails with `403 SignatureDoesNotMatch`. Each call replaces the Run upload
+        manifest, so corrections must redeclare every artifact that should remain part of the
+        build.
         """
         return await artifact_uploads.create_run_upload(
             pool,
