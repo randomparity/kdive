@@ -18,6 +18,10 @@ Run offline drgn introspection over a Run's captured core; returns redacted repo
 
 Run live drgn introspection over a live drgn-live DebugSession. Requires contributor.
 
+Returns `data.report` (the helper's output, keyed by helper name), `data.truncated`
+(bool, whether the output was byte-capped), and `data.transcript_sensitivity`. If the
+guest is missing debuginfo, `data.missing_debuginfo` is added as a non-fatal warning.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `helper` | string | yes | In-tree drgn helper to run with operator-provided drgn: tasks, modules, or sysinfo. |
@@ -29,8 +33,12 @@ Run live drgn introspection over a live drgn-live DebugSession. Requires contrib
 
 Run a caller drgn script over a live drgn-live DebugSession. Requires contributor.
 
+Returns `data.output` (the script's captured stdout, byte-capped), `data.truncated`
+(bool, whether the output was byte-capped), and `data.transcript_sensitivity`. If the
+guest is missing debuginfo, `data.missing_debuginfo` is added as a non-fatal warning.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `script` | string | yes | A drgn (Python) script run against the live guest kernel; `prog` is the live drgn.Program. Its stdout is returned (byte-capped). Each call is a fresh drgn process - put any multi-step work in one script. |
+| `script` | string | yes | A drgn (Python) script run against the live guest kernel; `prog` is the live drgn.Program, already bound as a global in the script's namespace - do not `from drgn import prog` (it will fail; there is no such importable name). Example: `for t in prog.threads(): print(t.pid)`. Its stdout is returned (byte-capped). Each call is a fresh drgn process - put any multi-step work in one script. |
 | `session_id` | string | yes | A live drgn-live DebugSession. |
 | `timeout_sec` | number | no | In-guest execution bound (seconds); clamped to [1.0, operator ceiling]. Defaults to 30. A wedged script is recovered with debug.end_session. |
