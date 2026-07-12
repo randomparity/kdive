@@ -43,6 +43,7 @@ class _UploadVolume(Protocol):
 
 class _UploadPool(Protocol):
     def createXML(self, xml: str, flags: int = 0) -> _UploadVolume: ...  # noqa: N802
+    def storageVolLookupByName(self, name: str) -> _UploadVolume: ...  # noqa: N802
 
 
 class VolumeUploadConn(Protocol):
@@ -99,6 +100,17 @@ def upload_qcow2_volume(
         pool = conn.storagePoolLookupByName(pool_name)
     except libvirt.libvirtError as exc:
         raise _infra("looking up the storage pool", pool=pool_name) from exc
+    # Idempotent re-run: a volume already present is a prior successful upload (a failed upload
+    # deletes its partial volume), so skip the create+stream and let the caller re-attach the
+    # config. Only a genuinely-absent volume is created and streamed.
+    try:
+        pool.storageVolLookupByName(volume_name)
+    except libvirt.libvirtError as exc:
+        if exc.get_error_code() != libvirt.VIR_ERR_NO_STORAGE_VOL:
+            raise _infra("looking up the volume", pool=pool_name, volume=volume_name) from exc
+    else:
+        _log.info("volume %s already staged in pool %s; skipping upload", volume_name, pool_name)
+        return
     try:
         volume = pool.createXML(render_base_volume_xml(volume_name, capacity_bytes=capacity))
     except libvirt.libvirtError as exc:

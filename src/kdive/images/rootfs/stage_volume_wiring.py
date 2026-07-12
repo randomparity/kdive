@@ -93,17 +93,30 @@ def _upload_volume(config_: RemoteLibvirtConfig, volume: str, qcow2: Path) -> No
 
 
 def _attach_config(provider: str, name: str, arch: str, row_id: UUID, config_bytes: bytes) -> None:
-    """Upload the captured config and set the row's ``kernel_config_key`` (advisory step)."""
+    """Upload the captured config and set the row's ``kernel_config_key`` (advisory step).
+
+    Both the object store put and the DB update raise :class:`CategorizedError` so the orchestration
+    treats an attach miss as advisory (the volume already landed). A raw ``psycopg.Error`` is mapped
+    here so a transient DB blip after a successful upload does not crash the command — a re-run
+    (idempotent volume upload) re-attaches the offer.
+    """
     request = config_write_request(
         provider, name, arch, ImageVisibility.PUBLIC, None, config=config_bytes
     )
     object_store_from_env().put_artifact(request)
-    with psycopg.connect(config.require(DATABASE_URL)) as conn, conn.cursor() as cur:
-        cur.execute(
-            "UPDATE image_catalog SET kernel_config_key = %s WHERE id = %s",
-            (request.key(), row_id),
-        )
-        conn.commit()
+    try:
+        with psycopg.connect(config.require(DATABASE_URL)) as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE image_catalog SET kernel_config_key = %s WHERE id = %s",
+                (request.key(), row_id),
+            )
+            conn.commit()
+    except psycopg.Error as exc:
+        raise CategorizedError(
+            "stage-volume could not set kernel_config_key after uploading the config",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"image": f"{provider}/{name}/{arch}"},
+        ) from exc
 
 
 def build_stage_volume_deps(provider: str) -> StageVolumeDeps:

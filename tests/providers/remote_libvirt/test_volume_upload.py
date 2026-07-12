@@ -13,6 +13,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.volume_upload import (
     render_base_volume_xml,
     upload_qcow2_volume,
 )
+from tests.providers.remote_libvirt.conftest import libvirt_error
 
 
 def test_render_base_volume_xml_is_standalone_qcow2() -> None:
@@ -60,10 +61,18 @@ class _FakeVolume:
 
 
 class _FakePool:
-    def __init__(self, volume: _FakeVolume, *, create_fails: bool = False) -> None:
+    def __init__(
+        self, volume: _FakeVolume, *, create_fails: bool = False, volume_exists: bool = False
+    ) -> None:
         self._volume = volume
         self._create_fails = create_fails
+        self._volume_exists = volume_exists
         self.created_xml: str | None = None
+
+    def storageVolLookupByName(self, name: str) -> _FakeVolume:  # noqa: N802
+        if self._volume_exists:
+            return self._volume
+        raise libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL)
 
     def createXML(self, xml: str, flags: int = 0) -> _FakeVolume:  # noqa: N802
         if self._create_fails:
@@ -114,6 +123,19 @@ def test_upload_streams_bytes_and_finishes(tmp_path: Path) -> None:
     assert stream.sent == b"CONFIG-QCOW2"
     assert stream.finished
     assert not volume.deleted
+
+
+def test_upload_skips_when_volume_already_staged(tmp_path: Path) -> None:
+    """A re-run over an already-staged volume skips the create+stream (idempotent recovery)."""
+    volume, stream = _FakeVolume(), _FakeStream()
+    pool = _FakePool(volume, volume_exists=True)
+    conn = _FakeConn(pool, stream)
+
+    upload_qcow2_volume(conn, "images", "fedora-44.qcow2", _qcow2(tmp_path))
+
+    assert pool.created_xml is None  # nothing created
+    assert volume.upload_args is None  # nothing streamed
+    assert not stream.finished
 
 
 def test_upload_missing_pool_raises_infra(tmp_path: Path) -> None:
