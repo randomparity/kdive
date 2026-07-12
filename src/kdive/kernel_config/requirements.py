@@ -17,6 +17,7 @@ Clause = frozenset[str]
 
 CRASH_CAPTURE = "crash_capture"
 SYSRQ = "sysrq"
+ROOTFS_MOUNT = "rootfs_mount"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +45,7 @@ def _plain(*symbols: str) -> tuple[Clause, ...]:
 
 FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
     FeatureRequirement(
-        "rootfs_mount",
+        ROOTFS_MOUNT,
         "Mount the ext4 root filesystem direct-kernel boots from (root=/dev/vda, no initramfs).",
         _plain("EXT4_FS", "VIRTIO_BLK"),
     ),

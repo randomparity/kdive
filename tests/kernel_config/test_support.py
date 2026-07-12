@@ -1,6 +1,10 @@
 from kdive.kernel_config.parse import KernelConfig
-from kdive.kernel_config.requirements import CRASH_CAPTURE, feature_requirement
-from kdive.kernel_config.support import missing_symbols, unmet_clauses
+from kdive.kernel_config.requirements import CRASH_CAPTURE, ROOTFS_MOUNT, feature_requirement
+from kdive.kernel_config.support import (
+    missing_symbols,
+    unmet_advertised_clauses,
+    unmet_clauses,
+)
 
 _CRASH = feature_requirement(CRASH_CAPTURE)
 _FULL = frozenset(
@@ -37,3 +41,19 @@ def test_missing_both_kexec_syscalls_names_both():
     cfg = KernelConfig(_FULL - {"KEXEC"})  # neither KEXEC nor KEXEC_FILE
     unmet = unmet_clauses(cfg, _CRASH)
     assert missing_symbols(unmet) == ["KEXEC", "KEXEC_FILE"]
+
+
+_ROOTFS = feature_requirement(ROOTFS_MOUNT)
+
+
+def test_advertised_clauses_read_the_advertise_set_not_the_empty_gate():
+    # rootfs_mount has no gate_required, so unmet_clauses is always empty; the advisory path must
+    # read the advertised set instead.
+    cfg = KernelConfig(frozenset({"XFS_FS"}))
+    assert unmet_clauses(cfg, _ROOTFS) == ()
+    assert missing_symbols(unmet_advertised_clauses(cfg, _ROOTFS)) == ["EXT4_FS", "VIRTIO_BLK"]
+
+
+def test_advertised_clauses_satisfied_by_full_boot_set():
+    cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}))
+    assert unmet_advertised_clauses(cfg, _ROOTFS) == ()

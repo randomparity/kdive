@@ -1,9 +1,10 @@
-"""`effective_config` is accepted as an upload but never validated.
+"""`effective_config` is accepted as an upload and never rejected — but warns (ADR-0330).
 
-Spec 1 removes all kernel-config validation: an ``effective_config`` that the pre-Spec-1
-gate would have rejected (here, one missing every rootfs-mount symbol) must upload and let
-``runs.complete_build`` drive the Run to ``succeeded``. kdive stores the artifact but does
-not inspect a single ``CONFIG_*`` symbol.
+Spec 1 removed all kernel-config *validation*: a config that provably lacks the boot-required
+``rootfs_mount`` symbols must still upload and drive the Run to ``succeeded`` (kdive stores the
+artifact verbatim and rejects nothing). ADR-0330 adds one non-blocking signal on top: the success
+envelope now carries a ``data.missing_boot_config`` advisory naming the missing symbols, so a
+kernel that cannot mount its root filesystem is no longer *silently* completed.
 """
 
 from __future__ import annotations
@@ -11,7 +12,8 @@ from __future__ import annotations
 import asyncio
 import io
 import tarfile
-from typing import Any
+from typing import Any, cast
+from unittest.mock import patch
 
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
@@ -19,8 +21,13 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.artifacts.storage import HeadResult, PresignedUpload, PresignPutRequest
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
+from kdive.kernel_config.gate import MISSING_BOOT_CONFIG_REASON
+from kdive.kernel_config.parse import KernelConfig, parse_kernel_config
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
+    FEATURE_CONFIG_REQUIREMENTS_TOOL,
+)
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     ArtifactDeclaration,
 )
@@ -33,9 +40,19 @@ from tests.mcp.complete_build_support import pool as _pool
 from tests.mcp.complete_build_support import seed_run as _seed_run
 from tests.mcp.systems_support import provider_resolver
 
-# A config the old rootfs-mount gate would reject outright: none of SQUASHFS/OVERLAY_FS/
-# BLK_DEV_LOOP/XFS_FS are set. Spec 1 stores it verbatim and inspects nothing.
-_BAD_CONFIG = b"# CONFIG_SQUASHFS is not set\n# CONFIG_OVERLAY_FS is not set\n"
+# A real, non-degenerate config that still lacks the ext4 direct-kernel boot set: it enables an
+# unrelated symbol but neither EXT4_FS nor VIRTIO_BLK, so the advisory fires (fail-open only
+# suppresses on an absent/unreadable/degenerate config, not on this one).
+_BAD_CONFIG = b"CONFIG_XFS_FS=y\n# CONFIG_EXT4_FS is not set\n# CONFIG_VIRTIO_BLK is not set\n"
+
+
+def _patched_load(config: KernelConfig | None) -> Any:
+    async def _fake_load(
+        conn: Any, run_id: Any, *, store_factory: Any = None
+    ) -> KernelConfig | None:
+        return config
+
+    return patch("kdive.kernel_config.gate.load_effective_config", _fake_load)
 
 
 def _combined_kernel_tar() -> bytes:
@@ -160,7 +177,7 @@ def test_legacy_build_profile_uploads_and_completes(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_bad_effective_config_uploads_and_completes(migrated_url: str) -> None:
+def test_bad_effective_config_uploads_completes_and_warns(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_run(pool, {"schema_version": 1})
@@ -185,15 +202,61 @@ def test_bad_effective_config_uploads_and_completes(migrated_url: str) -> None:
                     config_key: HeadResult(len(_BAD_CONFIG), "cc", "e-c"),
                 },
             )
-            resp = await CompleteBuildHandlers(object_store_factory=lambda: store).complete_build(
-                pool, _ctx(), str(run_id), build_id=None, cmdline="x"
-            )
+            with _patched_load(parse_kernel_config(_BAD_CONFIG)):
+                resp = await CompleteBuildHandlers(
+                    object_store_factory=lambda: store
+                ).complete_build(pool, _ctx(), str(run_id), build_id=None, cmdline="x")
             keys = await _artifact_keys(pool, run_id)
             async with pool.connection() as conn:
                 run = await RUNS.get(conn, run_id)
 
+        # The upload is never rejected: the Run still reaches SUCCEEDED and the config is stored.
         assert resp.status == "succeeded", resp
         assert keys == {kernel_key, config_key}
         assert run is not None and run.state is RunState.SUCCEEDED
+        # ...but the success envelope now carries the non-blocking boot-config advisory.
+        warning = cast("dict[str, Any]", resp.data["missing_boot_config"])
+        assert warning["reason"] == MISSING_BOOT_CONFIG_REASON
+        assert warning["missing"] == ["EXT4_FS", "VIRTIO_BLK"]
+        assert resp.suggested_next_actions[0] == FEATURE_CONFIG_REQUIREMENTS_TOOL
+
+    asyncio.run(_run())
+
+
+def test_supported_effective_config_completes_without_warning(migrated_url: str) -> None:
+    good = b"CONFIG_EXT4_FS=y\nCONFIG_VIRTIO_BLK=y\n"
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, {"schema_version": 1})
+            responses = await _create_upload(
+                pool,
+                _ctx(),
+                run_id=str(run_id),
+                artifacts=[
+                    {"name": "kernel", "sha256": "ck", "size_bytes": len(_KERNEL_TAR)},
+                    {"name": "effective_config", "sha256": "cc", "size_bytes": len(good)},
+                ],
+                store=_UploadStore(),
+            )
+            assert {response.status for response in responses.items} == {"upload_ready"}
+
+            kernel_key = f"local/runs/{run_id}/kernel"
+            config_key = f"local/runs/{run_id}/effective_config"
+            store = _ValidationStore(
+                {kernel_key: _KERNEL_TAR, config_key: good},
+                {
+                    kernel_key: HeadResult(len(_KERNEL_TAR), "ck", "e-k"),
+                    config_key: HeadResult(len(good), "cc", "e-c"),
+                },
+            )
+            with _patched_load(parse_kernel_config(good)):
+                resp = await CompleteBuildHandlers(
+                    object_store_factory=lambda: store
+                ).complete_build(pool, _ctx(), str(run_id), build_id=None, cmdline="x")
+
+        assert resp.status == "succeeded", resp
+        assert "missing_boot_config" not in resp.data
+        assert resp.suggested_next_actions == ["runs.get"]
 
     asyncio.run(_run())
