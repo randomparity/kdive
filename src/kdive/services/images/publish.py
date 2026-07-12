@@ -174,6 +174,26 @@ def config_object_key(
     ).key()
 
 
+def config_write_request(
+    provider: str,
+    name: str,
+    arch: str,
+    visibility: ImageVisibility,
+    owner: str | None,
+    *,
+    config: bytes,
+) -> artifact_types.ArtifactWriteRequest:
+    """The object-store write request for an image's kernel ``.config`` (ADR-0336).
+
+    Carries ``config`` under the same key :func:`config_object_key` computes, so a caller can
+    ``store.put_artifact(config_write_request(...))`` and persist ``.key()`` as the row's
+    ``kernel_config_key`` — the uploaded object and the stored key are guaranteed to match.
+    """
+    return _object_write_request(
+        provider, name, arch, visibility, owner, data=config, suffix="config"
+    )
+
+
 def image_object_key(request: PublishRequest) -> str:
     """The object-store key for a catalog image, scoped to its visibility and owner.
 

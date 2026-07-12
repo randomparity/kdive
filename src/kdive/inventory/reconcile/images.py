@@ -38,9 +38,10 @@ from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.catalog.images import ImageState
 from kdive.domain.errors import CategorizedError
-from kdive.images.rootfs.staged_provenance import read_sidecar
+from kdive.images.rootfs.staged_provenance import read_config_sibling, read_sidecar
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import (
     BuildSource,
@@ -53,6 +54,7 @@ from kdive.inventory.model import (
 from kdive.inventory.reconcile.locks import inventory_pass_lock
 from kdive.inventory.reconcile.prune import prune_or_cordon_image
 from kdive.inventory.reconcile.records import CONFIG_MANAGED_BY, ReconcileDiff, ReconcileRecord
+from kdive.services.images.publish import config_write_request
 
 _log = logging.getLogger(__name__)
 
@@ -62,9 +64,17 @@ _REGISTERED = ImageState.REGISTERED.value
 
 @runtime_checkable
 class ImageHeadStore(Protocol):
-    """The narrow object-store port the image reconcile consumes (presence check only)."""
+    """The object-store port the image reconcile consumes.
+
+    ``head_present`` gates ``s3`` registration on object existence; ``put_artifact`` uploads a
+    staged image's captured kernel ``.config`` so the row can offer it (ADR-0336). The real
+    :class:`~kdive.store.objectstore.ObjectStore` satisfies both; the pass is never handed ``None``
+    (the CLI fails fast and the loop skips the pass when no store is configured).
+    """
 
     def head_present(self, key: str) -> bool: ...
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact: ...
 
 
 type _S3Head = Literal["not_s3", "no_digest", "present", "absent", "unreachable"]
@@ -172,7 +182,7 @@ async def _load_config_rows(
         await cur.execute(
             "SELECT id, provider, name, arch, format, root_device, visibility, capabilities, "
             "       object_key, digest, volume, path, provenance, provenance_attested, state, "
-            "       description "
+            "       description, kernel_config_key "
             "FROM image_catalog WHERE managed_by = %s",
             (CONFIG_MANAGED_BY,),
         )
@@ -203,13 +213,14 @@ async def _create_entry(
     """Insert a new config row, realizing it per its source kind."""
     head = await _resolve_s3_head(entry, None, store)
     provenance, attested = await _resolve_provenance(entry, None)
-    realized, warning = _realize(entry, None, head, provenance, attested)
+    kernel_config_key = await _resolve_kernel_config_key(entry, None, store)
+    realized, warning = _realize(entry, None, head, provenance, attested, kernel_config_key)
     await conn.execute(
         "INSERT INTO image_catalog "
         "(provider, name, arch, format, root_device, visibility, capabilities, "
         " object_key, volume, path, digest, provenance, provenance_attested, state, "
-        " managed_by, description) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        " managed_by, description, kernel_config_key) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             entry.provider,
             entry.name,
@@ -227,6 +238,7 @@ async def _create_entry(
             realized.state,
             CONFIG_MANAGED_BY,
             entry.description or None,
+            realized.kernel_config_key,
         ),
     )
     diff.created.append(_record(entry))
@@ -254,7 +266,8 @@ async def _update_entry(
     }
     head = await _resolve_s3_head(entry, row, store)
     provenance, attested = await _resolve_provenance(entry, row)
-    realized_image, warning = _realize(entry, row, head, provenance, attested)
+    kernel_config_key = await _resolve_kernel_config_key(entry, row, store)
+    realized_image, warning = _realize(entry, row, head, provenance, attested, kernel_config_key)
     realized = {
         "object_key": realized_image.object_key,
         "volume": realized_image.volume,
@@ -263,6 +276,7 @@ async def _update_entry(
         "provenance": realized_image.provenance,
         "provenance_attested": realized_image.provenance_attested,
         "state": realized_image.state,
+        "kernel_config_key": realized_image.kernel_config_key,
     }
 
     config_changed = any(row.get(k) != v for k, v in desired.items())
@@ -271,7 +285,8 @@ async def _update_entry(
         await conn.execute(
             "UPDATE image_catalog SET format = %s, root_device = %s, visibility = %s, "
             "capabilities = %s, object_key = %s, volume = %s, path = %s, digest = %s, "
-            "provenance = %s, provenance_attested = %s, state = %s, description = %s "
+            "provenance = %s, provenance_attested = %s, state = %s, description = %s, "
+            "kernel_config_key = %s "
             "WHERE id = %s",
             (
                 desired["format"],
@@ -286,6 +301,7 @@ async def _update_entry(
                 realized_image.provenance_attested,
                 realized_image.state,
                 desired["description"],
+                realized_image.kernel_config_key,
                 row["id"],
             ),
         )
@@ -305,6 +321,7 @@ class _RealizedImage:
     digest: str | None
     provenance: dict[str, object]
     provenance_attested: bool
+    kernel_config_key: str | None
 
 
 def _row_provenance(row: dict[str, object] | None) -> dict[str, object]:
@@ -354,12 +371,56 @@ async def _resolve_provenance(
     return existing
 
 
+async def _resolve_kernel_config_key(
+    entry: ImageEntry, row: dict[str, object] | None, store: ImageHeadStore
+) -> str | None:
+    """The ``kernel_config_key`` to persist for ``entry`` (ADR-0336).
+
+    One rule, applied to every source: **if the row already carries a key, preserve it; otherwise,
+    for a ``staged-path`` source with a ``<path>.config`` sibling, upload the captured config and
+    adopt its key.** So a ``build``/``s3`` key owned by :func:`publish_image` and a ``staged``
+    (volume) key owned by ``stage-volume`` are never clobbered (they take the preserve branch), and
+    a staged-path row is offered its config on first realization without re-uploading each pass (the
+    "key absent" gate).
+
+    The upload is advisory: a captured-but-unuploadable config (a store ``put`` failure) degrades to
+    no offer (``None``) and never fails the reconcile — the row simply carries no key until a later
+    pass succeeds. Only a genuinely-``None`` sibling (absent/oversize/unreadable) and a put failure
+    reach the ``None`` return; a present, uploadable config always yields its key.
+    """
+    existing = _opt_str(row, "kernel_config_key") if row is not None else None
+    if existing is not None:
+        return existing
+    source = entry.source
+    if not isinstance(source, StagedPathSource):
+        return None
+    config = await asyncio.to_thread(read_config_sibling, Path(source.path))
+    if config is None:
+        return None
+    # Config-managed images are ownerless (a staged-path source is validated public-only), so the
+    # key omits the owner segment: images/{provider}/{name}/{arch}.config.
+    request = config_write_request(
+        entry.provider, entry.name, entry.arch, entry.visibility, None, config=config
+    )
+    try:
+        await asyncio.to_thread(store.put_artifact, request)
+    except CategorizedError:
+        _log.warning(
+            "inventory: staged-path image %s config upload failed; offering no config this pass",
+            entry.name,
+            exc_info=True,
+        )
+        return None
+    return request.key()
+
+
 def _realize(
     entry: ImageEntry,
     row: dict[str, object] | None,
     head: _S3Head,
     provenance: dict[str, object],
     attested: bool,
+    kernel_config_key: str | None,
 ) -> tuple[_RealizedImage, str | None]:
     """Compute the :class:`_RealizedImage` and an optional warning for an entry.
 
@@ -368,14 +429,17 @@ def _realize(
     so the runtime-owned object_key/digest/state are preserved (invariant 1). A ``staged-path``
     source seeds ``registered`` with ``path`` set and the others NULL (ADR-0228); it is declared,
     not probed — resolution at provision time is the gate. ``provenance``/``attested`` are resolved
-    by :func:`_resolve_provenance` and carried onto the row unchanged.
+    by :func:`_resolve_provenance` and ``kernel_config_key`` by :func:`_resolve_kernel_config_key`;
+    both are carried onto the row unchanged (the resolvers own the preserve-vs-replace decision).
     """
     source = entry.source
 
     def _built(
         state: str, object_key: str | None, volume: str | None, path: str | None, digest: str | None
     ) -> _RealizedImage:
-        return _RealizedImage(state, object_key, volume, path, digest, provenance, attested)
+        return _RealizedImage(
+            state, object_key, volume, path, digest, provenance, attested, kernel_config_key
+        )
 
     if isinstance(source, StagedPathSource):
         return _built(_REGISTERED, None, None, source.path, None), None

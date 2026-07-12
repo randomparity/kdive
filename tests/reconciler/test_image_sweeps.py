@@ -28,6 +28,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.reconciler.cleanup.images import (
     ImageMtime,
 )
@@ -72,6 +73,16 @@ class _FakeImageStore:
 
     def delete(self, key: str) -> None:
         self.deleted.append(key)
+
+    def put_artifact(
+        self, request: ArtifactWriteRequest
+    ) -> StoredArtifact:  # pragma: no cover - sweeps never upload
+        return StoredArtifact(
+            key=request.key(),
+            etag="etag",
+            sensitivity=request.sensitivity,
+            retention_class=request.retention_class,
+        )
 
 
 async def _insert_image_row(

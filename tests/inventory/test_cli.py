@@ -16,6 +16,7 @@ import pytest
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.cli import reconcile_systems
 
@@ -23,11 +24,23 @@ from kdive.inventory.cli import reconcile_systems
 # resolved by pytest at call time — no import here (avoids the F811 fixture-shadow).
 
 
+def _fake_put(request: ArtifactWriteRequest) -> StoredArtifact:
+    return StoredArtifact(
+        key=request.key(),
+        etag="etag",
+        sensitivity=request.sensitivity,
+        retention_class=request.retention_class,
+    )
+
+
 class _FakeImageStore:
     """A narrow head-only object-store stand-in for the reconcile pass."""
 
     def head_present(self, key: str) -> bool:
         return False
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        return _fake_put(request)
 
 
 _STAGED_IMAGE = (
@@ -116,6 +129,9 @@ def test_reconcile_systems_store_unreachable_propagates(migrated_url: str, tmp_p
     class _UnreachableStore:
         def head_present(self, key: str) -> bool:
             raise CategorizedError("store down", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+        def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+            return _fake_put(request)
 
     async def _run() -> None:
         path = tmp_path / "systems.toml"
