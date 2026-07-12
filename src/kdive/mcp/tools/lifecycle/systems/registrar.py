@@ -307,13 +307,21 @@ def _register_systems_ssh_info(
             str, Field(description="The ready System to return SSH coordinates for.")
         ],
     ) -> ToolResponse:
-        """Return SSH connection coordinates (user, host, port, jump_host) for a ready System.
+        """Return SSH coordinates (user, host, port, jump_host, host_scope) for a ready System.
 
         Available on any ready System whose provider exposes an SSH forward: local-libvirt always,
         and remote-libvirt only when the host is configured for SSH parity. Reports
         ``ssh_not_provisioned`` when there is no forward. For a remote System the endpoint is read
         live from the host, so an unreachable host surfaces as a transport failure rather than a
         cached value.
+
+        ``host_scope`` is a locality signal for ``host``/``port``. ``worker_loopback`` means the
+        coordinates are the worker host's own loopback — reachable only from a caller co-located
+        with the worker, or via a populated ``jump_host`` — so a remote agent must not dial its
+        own ``127.0.0.1`` expecting to reach the guest. ``jump_host`` is ``null`` for
+        ``worker_loopback`` today (single-host deployment; the agent is co-located with the
+        worker). A future ``routable`` scope will populate ``jump_host`` as ``{host, port,
+        user}`` for ``ssh -J <jump_host> ...``, without a contract change.
         """
         return await _ssh_info(pool, current_context(), system_id, resolver=resolver)
 
