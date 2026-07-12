@@ -41,6 +41,7 @@ from psycopg.types.json import Jsonb
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.catalog.images import ImageState
 from kdive.domain.errors import CategorizedError
+from kdive.images.cataloging.object_keys import config_write_request
 from kdive.images.rootfs.staged_provenance import read_config_sibling, read_sidecar
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import (
@@ -54,7 +55,6 @@ from kdive.inventory.model import (
 from kdive.inventory.reconcile.locks import inventory_pass_lock
 from kdive.inventory.reconcile.prune import prune_or_cordon_image
 from kdive.inventory.reconcile.records import CONFIG_MANAGED_BY, ReconcileDiff, ReconcileRecord
-from kdive.services.images.publish import config_write_request
 
 _log = logging.getLogger(__name__)
 

@@ -17,6 +17,7 @@ import kdive.config as config
 from kdive.config.core_settings import DATABASE_URL
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.cataloging.object_keys import config_write_request
 from kdive.images.rootfs.stage_volume import (
     StageVolumeDeps,
     _TargetRow,
@@ -36,7 +37,6 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.volume_upload import (
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import secret_backend_from_env
-from kdive.services.images.publish import config_write_request
 from kdive.store.objectstore import object_store_from_env
 
 

@@ -35,14 +35,12 @@ from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 
 from kdive.artifacts import storage as artifact_types
-from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.image_format import ImageFormat
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.cataloging.object_keys import config_object_key, object_write_request
 
 _log = logging.getLogger(__name__)
-
-_RETENTION_CLASS = "image"
 
 
 class ImageObjectStore(Protocol):
@@ -101,54 +99,11 @@ class PublishRequest:
             raise ValueError("expires_at must be set iff visibility is private")
 
 
-def _owner_kind_segment(provider: str, visibility: ImageVisibility, owner: str | None) -> str:
-    """The ``owner_kind`` key segment, owner-scoped for a private image.
-
-    A public image keys its provider directly (``{provider}``); a private image folds the owning
-    project into the segment (``{provider}__{owner}``) so two projects' private images of the same
-    ``(provider, name, arch)`` never collide on one object. The ``__`` separator is illegal in a
-    provider/project name, so the segment stays unambiguous and slash-free (``artifact_key``
-    rejects slashes in a component).
-    """
-    if visibility is ImageVisibility.PRIVATE and owner is not None:
-        return f"{provider}__{owner}"
-    return provider
-
-
-def _object_write_request(
-    provider: str,
-    name: str,
-    arch: str,
-    visibility: ImageVisibility,
-    owner: str | None,
-    *,
-    data: bytes,
-    suffix: str,
-) -> artifact_types.ArtifactWriteRequest:
-    """An image-tenant write request scoped to the given visibility/owner, named by ``suffix``.
-
-    The single source of the image object layout: the qcow2 (``suffix="qcow2"``) and its
-    kernel-config sibling (``suffix="config"``) share the same tenant/owner-scoped prefix and differ
-    only in the object-name suffix. Both :func:`image_object_key`/:func:`config_object_key` and the
-    data-carrying writes route through this, so a key computed from plain identity fields is
-    byte-identical to the key the publish write produced.
-    """
-    return artifact_types.ArtifactWriteRequest(
-        tenant="images",
-        owner_kind=_owner_kind_segment(provider, visibility, owner),
-        owner_id=name,
-        name=f"{arch}.{suffix}",
-        data=data,
-        sensitivity=Sensitivity.REDACTED,
-        retention_class=_RETENTION_CLASS,
-    )
-
-
 def _write_request(
     request: PublishRequest, data: bytes, *, suffix: str
 ) -> artifact_types.ArtifactWriteRequest:
-    """A write request for ``request`` (delegates to :func:`_object_write_request`)."""
-    return _object_write_request(
+    """A write request for ``request`` (delegates to the shared image object-key layout)."""
+    return object_write_request(
         request.provider,
         request.name,
         request.arch,
@@ -156,41 +111,6 @@ def _write_request(
         request.owner,
         data=data,
         suffix=suffix,
-    )
-
-
-def config_object_key(
-    provider: str, name: str, arch: str, visibility: ImageVisibility, owner: str | None
-) -> str:
-    """The object-store key for an image's ``/boot/config-<ver>`` sibling, from identity fields.
-
-    The single source of the ``.config`` key (ADR-0317/0336): reconcile and ``stage-volume``
-    compute it from a catalog row's identity, without a :class:`PublishRequest`, and get a key
-    byte-identical to the one the publish path writes and the fetch path presigns. Staged images are
-    public, so their key omits the owner segment: ``images/{provider}/{name}/{arch}.config``.
-    """
-    return _object_write_request(
-        provider, name, arch, visibility, owner, data=b"", suffix="config"
-    ).key()
-
-
-def config_write_request(
-    provider: str,
-    name: str,
-    arch: str,
-    visibility: ImageVisibility,
-    owner: str | None,
-    *,
-    config: bytes,
-) -> artifact_types.ArtifactWriteRequest:
-    """The object-store write request for an image's kernel ``.config`` (ADR-0336).
-
-    Carries ``config`` under the same key :func:`config_object_key` computes, so a caller can
-    ``store.put_artifact(config_write_request(...))`` and persist ``.key()`` as the row's
-    ``kernel_config_key`` — the uploaded object and the stored key are guaranteed to match.
-    """
-    return _object_write_request(
-        provider, name, arch, visibility, owner, data=config, suffix="config"
     )
 
 

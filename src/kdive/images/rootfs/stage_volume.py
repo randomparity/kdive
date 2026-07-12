@@ -34,11 +34,9 @@ from kdive.images.planes.provenance_probes import (
     BootEntriesProbeSeam,
     KernelConfigProbeSeam,
 )
-from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import baseline_kernel_names
+from kdive.images.rootfs.baseline import VMLINUZ_PREFIX, baseline_kernel_names
 
 _log = logging.getLogger(__name__)
-
-_VMLINUZ_PREFIX = "vmlinuz-"
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +79,7 @@ def capture_kernel_config(
     kernels = baseline_kernel_names(entries)
     if len(kernels) != 1:
         return None
-    version = kernels[0][len(_VMLINUZ_PREFIX) :]
+    version = kernels[0][len(VMLINUZ_PREFIX) :]
     try:
         return kernel_config_probe(qcow2, version)
     except CategorizedError:
