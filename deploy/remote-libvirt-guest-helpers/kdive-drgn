@@ -15,16 +15,31 @@
 #
 #   run-script [timeout_sec]
 #             Read a drgn script from STDIN (never argv, so the single-program allowlist is
-#             unchanged), stage it to a temp file, and run `timeout <timeout_sec> drgn -k -q`.
-#             stdout is the script's output, byte-capped + platform-secret-redacted worker-side.
+#             unchanged), stage it to a temp file, and run
+#             `timeout <timeout_sec> drgn -k -s /sys/kernel/btf/vmlinux -q` (the `-s` flag is
+#             omitted when that path does not exist). stdout is the script's output, byte-capped +
+#             platform-secret-redacted worker-side.
 #
 # Each prints ONE JSON object that the worker passes verbatim to
 # debug_common.introspect.assemble_report as the matching section, so the shape MUST match the
 # worker-side helper_tasks/helper_modules/helper_sysinfo producers. drgn runs against the LIVE
-# kernel (-k: /proc/kcore + the running kernel's debuginfo). A non-zero exit (drgn cannot attach,
-# e.g. missing kernel debuginfo) is the worker's DEBUG_ATTACH_FAILURE; undecodable stdout is its
+# kernel (-k: /proc/kcore + the running kernel's debuginfo, explicitly loaded from
+# /sys/kernel/btf/vmlinux when present — see below). A non-zero exit (drgn cannot attach, e.g.
+# missing kernel debuginfo) is the worker's DEBUG_ATTACH_FAILURE; undecodable stdout is its
 # INFRASTRUCTURE_FAILURE.
 set -euo pipefail
+
+# Explicitly point drgn at the running kernel's BTF when present, mirroring the offline path's
+# explicit load_debug_info() (src/kdive/providers/shared/debug_common/drgn_program.py). Bare
+# `drgn -k` relies on version-sensitive auto-load and silently resolves nothing on guest drgn
+# builds that predate reliable BTF auto-detection (BBR F1 / issue #1090). `-s` is omitted (drgn
+# falls back to its own default debug-info search) when the BTF file is absent.
+# KDIVE_BTF_PATH is a test-only override; production guests always resolve the real BTF path.
+btf_path="${KDIVE_BTF_PATH:-/sys/kernel/btf/vmlinux}"
+drgn_args=(-k)
+if [[ -r "$btf_path" ]]; then
+  drgn_args+=(-s "$btf_path")
+fi
 
 helper="${1:-}"
 case "$helper" in
@@ -38,7 +53,7 @@ run-script)
   user_script="$(mktemp)"
   trap 'rm -f "$user_script"' EXIT
   cat >"$user_script" # read the drgn script from stdin
-  exec timeout "$timeout_sec" drgn -k -q "$user_script"
+  exec timeout "$timeout_sec" drgn "${drgn_args[@]}" -q "$user_script"
   ;;
 *)
   echo "kdive-drgn: unknown helper: ${helper:-<none>} (expected tasks|modules|sysinfo|run-script)" >&2
@@ -155,4 +170,4 @@ json.dump(_HELPERS[sys.argv[1]](), sys.stdout)
 sys.stdout.write("\n")
 PY
 
-exec drgn -k -q "$script" "$helper"
+exec drgn "${drgn_args[@]}" -q "$script" "$helper"

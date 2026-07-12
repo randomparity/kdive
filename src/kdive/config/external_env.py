@@ -396,6 +396,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "kdive",
         "grub menu title the `kdive-install-kernel` helper assigns the kdive boot slot.",
     ),
+    ExternalEnvVar(
+        "KDIVE_BTF_PATH",
+        "guest",
+        "/sys/kernel/btf/vmlinux",
+        "BTF path the `kdive-drgn` helper passes to `drgn -s` when readable, so live symbol/type "
+        "resolution does not depend on the guest drgn build's BTF auto-load (BBR F1, #1090); "
+        "test-only override, unset on production guests.",
+    ),
 )
 
 
