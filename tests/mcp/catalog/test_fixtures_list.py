@@ -7,7 +7,8 @@ public catalog rows. Coverage:
 
 * it flattens each public catalog row into ``{provider, name, arch}``;
 * an empty catalog yields an empty list (no crash);
-* a private (owner-scoped) image is NOT surfaced — only the public baseline is.
+* a private (owner-scoped) image is NOT surfaced — only the public baseline is;
+* it is keyset-paginated over ``(provider, name, arch)`` like ``images.list`` (#1104).
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.tools.catalog import fixtures
-from tests.mcp.json_data import data_sequence, json_mapping
+from tests.mcp.json_data import data_bool, data_sequence, json_mapping
 
 
 @asynccontextmanager
@@ -147,5 +148,60 @@ def test_private_image_is_not_surfaced(migrated_url: str) -> None:
         names = {row["name"] for row in rows}
         assert "pub" in names
         assert "priv" not in names, "a private image is never a baseline fixture"
+
+    asyncio.run(_run())
+
+
+def test_list_paginates_with_natural_key_cursor(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                for i in range(5):
+                    await _insert_image(
+                        conn,
+                        provider="local-libvirt",
+                        name=f"fixture-{i}",
+                        visibility="public",
+                        owner=None,
+                    )
+            seen: set[str] = set()
+            cursor: str | None = None
+            for _ in range(10):
+                page = await fixtures.list_fixtures(pool, limit=2, cursor=cursor)
+                rows = [json_mapping(row) for row in data_sequence(page, "fixtures")]
+                seen |= {str(row["name"]) for row in rows}
+                if not data_bool(page, "truncated"):
+                    break
+                nxt = page.data["next_cursor"]
+                assert isinstance(nxt, str)
+                cursor = nxt
+        assert seen == {f"fixture-{i}" for i in range(5)}
+
+    asyncio.run(_run())
+
+
+def test_list_no_truncation_at_exactly_limit(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _insert_image(
+                    conn, provider="local-libvirt", name="a", visibility="public", owner=None
+                )
+                await _insert_image(
+                    conn, provider="local-libvirt", name="b", visibility="public", owner=None
+                )
+            resp = await fixtures.list_fixtures(pool, limit=2)
+        assert resp.data["truncated"] is False
+        assert resp.data["next_cursor"] is None
+
+    asyncio.run(_run())
+
+
+def test_list_malformed_cursor_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await fixtures.list_fixtures(pool, cursor="!!!")
+        assert resp.status == "error"
+        assert resp.data["reason"] == "invalid_cursor"
 
     asyncio.run(_run())
