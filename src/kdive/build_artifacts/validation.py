@@ -188,8 +188,10 @@ EXTERNAL_BUILD_CONTRACTS: Mapping[str, ArtifactContract] = {
             max_bytes=EFFECTIVE_CONFIG_MAX_BYTES,
         ),
         notes=(
-            "Optional and never validated: kdive stores the .config verbatim but does not inspect "
-            "or check any Kconfig symbol.",
+            "Optional and never rejected: kdive stores the .config verbatim and completing a build "
+            "never fails over it. If you upload one, kdive does read it to emit a non-blocking "
+            "advisory when it provably lacks the symbols needed to mount the root filesystem and "
+            "boot (root=/dev/vda ext4 on virtio-blk); see artifacts.feature_config_requirements.",
         ),
     ),
 }

@@ -82,7 +82,9 @@ def test_run_item_states_the_unified_provider_neutral_contract() -> None:
     effective = run["contracts"]["effective_config"]
     assert effective["requirement"] == "optional"
     assert effective["format"]["max_bytes"] == EFFECTIVE_CONFIG_MAX_BYTES
-    assert "never validated" in " ".join(effective["notes"])
+    notes = " ".join(effective["notes"])
+    assert "never rejected" in notes  # stored verbatim; completion never fails over it
+    assert "advisory" in notes  # ...but a boot-config advisory is emitted
 
 
 def test_system_rootfs_contract_is_minimal() -> None:

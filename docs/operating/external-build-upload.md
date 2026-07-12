@@ -16,9 +16,13 @@ error. Each rule below names the rejection it prevents.
 **The kernel config is yours to choose.** Because you build the kernel locally, you decide
 which Kconfig symbols are enabled before you upload — a debug kernel is one you built with the
 debug options turned on. The validator constrains only the artifacts' **structure** (bzImage
-magic, gzip layout, a `lib/modules` member); it never inspects or constrains your `.config`.
-There is no allowed-config allowlist and no required-symbol check: enable what the
-investigation needs.
+magic, gzip layout, a `lib/modules` member); it never rejects a build over your `.config`.
+There is no allowed-config allowlist and no required-symbol gate: enable what the
+investigation needs. One non-blocking exception: if you upload an `effective_config` that
+provably lacks the symbols needed to mount the root filesystem and boot (`EXT4_FS` and
+`VIRTIO_BLK` — root is `/dev/vda` ext4 on virtio-blk), `runs.complete_build` still succeeds but
+returns a `data.missing_boot_config` advisory naming the missing symbols, so a kernel that
+cannot boot is not silently accepted.
 
 A useful debug set to start from:
 
@@ -102,7 +106,7 @@ boot image first.
 | Name | When to upload | Notes |
 |---|---|---|
 | `vmlinux` | to enable kernel-debugging / DWARF introspection | the uncompressed kernel ELF with debug info. If you upload it you **must** declare a `build_id` in `runs.complete_build`, and it must match the ELF's GNU build-id note, or the upload is rejected. |
-| `effective_config` | to record the `.config` you built with | the kernel `.config` used for the build, ≤ 1 MiB. Stored for provenance; never validated against a symbol list. |
+| `effective_config` | to record the `.config` you built with | the kernel `.config` used for the build, ≤ 1 MiB. Stored for provenance; never rejected, but if it provably lacks the boot-required symbols (`EXT4_FS`, `VIRTIO_BLK`) `runs.complete_build` returns a non-blocking `missing_boot_config` advisory. |
 | `initrd` | when booting needs a specific initramfs | the initial ramdisk image. |
 
 ## The upload flow
