@@ -25,6 +25,7 @@ from kdive.domain.catalog.images import Capability
 
 PROVENANCE_BOOT_KERNEL_COUNT = "boot_kernel_count"
 PROVENANCE_DEFAULT_KERNEL_VERSION = "default_kernel_version"
+PROVENANCE_DRGN_VERSION = "drgn_version"
 PROVENANCE_MAKEDUMPFILE_VERSION = "makedumpfile_version"
 PROVENANCE_OS_RELEASE = "os_release"
 

@@ -281,6 +281,45 @@ def test_describe_exposes_capability_signals_with_kdump(migrated_url: str) -> No
     asyncio.run(_run())
 
 
+def test_describe_exposes_live_drgn_signal(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            capable = await _insert(
+                pool,
+                name="drgn-new",
+                visibility="public",
+                owner=None,
+                capabilities=_DEBUG_CAPS,
+                provenance='{"drgn_version": "0.0.33"}',
+            )
+            incapable = await _insert(
+                pool,
+                name="drgn-old",
+                visibility="public",
+                owner=None,
+                capabilities=_DEBUG_CAPS,
+                provenance='{"drgn_version": "0.0.22"}',
+            )
+            capable_resp = await catalog_images.describe_image(pool, _ctx(), capable)
+            incapable_resp = await catalog_images.describe_image(pool, _ctx(), incapable)
+        for resp, status in ((capable_resp, "capable"), (incapable_resp, "incapable")):
+            signals = resp.data["capability_signals"]
+            assert isinstance(signals, dict)
+            block = signals["live_drgn"]
+            assert isinstance(block, dict)
+            assert set(block) == {
+                "drgn_version",
+                "capability",
+                "min_drgn_required",
+                "note",
+                "basis",
+            }
+            assert block["capability"] == status
+            assert block["basis"] == "build_verified"
+
+    asyncio.run(_run())
+
+
 def test_describe_kdump_block_capable_for_default_basis(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

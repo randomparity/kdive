@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.drgn_support import live_drgn_capability
 from kdive.images.kdump_support import DEFAULT_KERNEL_BASIS, kdump_capability
 from kdive.images.rootfs.catalog import (
     CloudImageSource,
@@ -34,6 +35,24 @@ _EXPECTED_MAKEDUMPFILE: dict[str, str] = {
     "centos-stream-kdive-ready-9": "1.7.6",
     "debian-kdive-ready-12": "1.7.2",
     "debian-kdive-ready-13": "1.7.6",
+}
+
+# The curated build-time drgn version per release (verified against distro package indexes
+# 2026-07-12). drgn ships unpinned from distro repos (rhel: EPEL, debian: python3-drgn), so this is
+# the per-image operand of the computed live-drgn-introspection predicate (ADR-0328): it must match
+# the structured ``drgn_version`` field in rootfs_catalog.toml. The capability is computed
+# (drgn_support) against the 0.0.31 BTF-capability threshold, not stored.
+_EXPECTED_DRGN: dict[str, str] = {
+    "fedora-kdive-ready-43": "0.1.0",
+    "fedora-kdive-ready-44": "0.0.33",
+    "fedora-kdive-ready-44-ppc64le": "0.0.33",
+    "rocky-kdive-ready-8": "0.0.32",
+    "rocky-kdive-ready-9": "0.0.33",
+    "rocky-kdive-ready-10": "0.0.33",
+    "centos-stream-kdive-ready-9": "0.0.33",
+    "centos-stream-kdive-ready-10": "0.0.33",
+    "debian-kdive-ready-12": "0.0.22",
+    "debian-kdive-ready-13": "0.0.31",
 }
 
 
@@ -101,6 +120,21 @@ def test_catalog_makedumpfile_versions_match_snapshot() -> None:
         assert cat[name].makedumpfile_version == version, name
 
 
+def test_catalog_drgn_versions_match_snapshot() -> None:
+    cat = load_rootfs_catalog()
+    for name, version in _EXPECTED_DRGN.items():
+        assert cat[name].drgn_version == version, name
+
+
+def test_only_below_threshold_rows_are_live_drgn_incapable() -> None:
+    """Guard: only rows shipping drgn < the 0.0.31 BTF threshold compute ``incapable``."""
+    cat = load_rootfs_catalog()
+    for name in _EXPECTED_DRGN:
+        cap = live_drgn_capability(drgn_version=cat[name].drgn_version, drgn_tooling=True)
+        expected = "incapable" if name == "debian-kdive-ready-12" else "capable"
+        assert cap.status == expected, name
+
+
 _CAPABLE_ROWS = {"fedora-kdive-ready-44", "fedora-kdive-ready-44-ppc64le"}
 
 
@@ -135,6 +169,27 @@ source = { kind = "virt-builder", template = "fedora-44" }
         load_rootfs_catalog(path=path)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details["field"] == "makedumpfile_version"
+
+
+def test_missing_drgn_version_is_config_error(tmp_path: Path) -> None:
+    path = _write_catalog(
+        tmp_path,
+        """
+[[image]]
+name = "no-drgn"
+distro = "fedora"
+version = "44"
+family = "rhel"
+arch = "x86_64"
+kind = "debug"
+makedumpfile_version = "1.7.9"
+source = { kind = "virt-builder", template = "fedora-44" }
+""",
+    )
+    with pytest.raises(CategorizedError) as exc:
+        load_rootfs_catalog(path=path)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["field"] == "drgn_version"
 
 
 def test_virt_builder_and_cloud_image_sources_parse() -> None:
@@ -244,6 +299,7 @@ family = "rhel"
 arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.8"
+drgn_version = "0.1.0"
 source = { kind = "virt-builder", template = "fedora-43" }
 
 [[image]]
@@ -254,6 +310,7 @@ family = "rhel"
 arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.9"
+drgn_version = "0.0.33"
 source = { kind = "virt-builder", template = "fedora-44" }
 """,
     )
