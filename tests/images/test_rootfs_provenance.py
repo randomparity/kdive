@@ -6,6 +6,7 @@ from kdive.domain.catalog.images import Capability
 from kdive.images.planes.base import (
     PROVENANCE_BOOT_KERNEL_COUNT,
     PROVENANCE_DEFAULT_KERNEL_VERSION,
+    PROVENANCE_DRGN_VERSION,
     PROVENANCE_MAKEDUMPFILE_VERSION,
     PROVENANCE_OS_RELEASE,
     RootfsBuildProvenance,
@@ -35,6 +36,7 @@ def test_local_provenance_serializes_optional_operands_and_keeps_zero_count() ->
         guest_mac="selinux-permissive",
         package_versions={"drgn": "0.0.28"},
         makedumpfile_version="1.7.9",
+        drgn_version="0.0.31",
         boot_kernel_count=0,
         default_kernel_version="",
         os_release={"id": "fedora", "version_id": "43"},
@@ -44,9 +46,29 @@ def test_local_provenance_serializes_optional_operands_and_keeps_zero_count() ->
     assert provenance["packages"] == ["openssh-server", "drgn"]
     assert provenance["capabilities"] == ["agent", "kdump"]
     assert provenance[PROVENANCE_MAKEDUMPFILE_VERSION] == "1.7.9"
+    assert provenance[PROVENANCE_DRGN_VERSION] == "0.0.31"
     assert provenance[PROVENANCE_BOOT_KERNEL_COUNT] == 0
     assert PROVENANCE_DEFAULT_KERNEL_VERSION not in provenance
     assert provenance[PROVENANCE_OS_RELEASE] == {"id": "fedora", "version_id": "43"}
+
+
+def test_local_provenance_omits_drgn_version_when_absent() -> None:
+    provenance = RootfsBuildProvenance.local_libvirt(
+        _spec(),
+        source_image_digest="virt-builder:fedora-43",
+        image_size="6G",
+        readiness_marker="kdive-ready",
+        layout="whole-disk-ext4-qcow2",
+        guest_mac="selinux-permissive",
+        package_versions={},
+        makedumpfile_version=None,
+        drgn_version=None,
+        boot_kernel_count=None,
+        default_kernel_version=None,
+        os_release=None,
+    ).to_dict()
+
+    assert PROVENANCE_DRGN_VERSION not in provenance
 
 
 def test_remote_provenance_omits_absent_optional_operands() -> None:

@@ -16,7 +16,10 @@ from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families.base import CustomizeContext
-from kdive.images.planes.provenance_probes import MAKEDUMPFILE_MARKER_GUEST_PATH
+from kdive.images.planes.provenance_probes import (
+    DRGN_MARKER_GUEST_PATH,
+    MAKEDUMPFILE_MARKER_GUEST_PATH,
+)
 
 # Today's debug/guest rootfs: the in-target crash + introspection toolchain. ``keyutils`` provides
 # ``keyctl``, which Fedora ``kdumpctl`` invokes building the crash environment (ADR-0213, #688).
@@ -249,6 +252,27 @@ def makedumpfile_version_marker_args() -> list[str]:
         "{ command -v makedumpfile >/dev/null 2>&1 && makedumpfile -v "
         "|| /usr/sbin/makedumpfile -v ; } "
         f"> {MAKEDUMPFILE_MARKER_GUEST_PATH} 2>/dev/null || true",
+    ]
+
+
+def drgn_version_marker_args() -> list[str]:
+    """virt-customize fragment recording ``drgn --version`` to a guest marker file.
+
+    Read back at build time into ``provenance["drgn_version"]`` (ADR-0334), the per-image operand
+    of the computed ``live_drgn`` capability predicate (ADR-0328) — the same marker/probe pipeline
+    ``makedumpfile_version`` uses. ``drgn --version`` prints ``drgn X.Y.Z``. Family-neutral: the
+    drgn CLI lives at ``/usr/bin/drgn`` on every debug image (``drgn`` on rhel, ``python3-drgn`` on
+    debian). Best-effort: the command never fails the build (``|| true``); an image without drgn
+    (or with it off ``PATH``) leaves an empty marker, which the probe treats as "absent". ``PATH``
+    is tried first, then the canonical ``/usr/bin`` location, so a run-command shell with a thin
+    ``PATH`` still populates the marker.
+    """
+    return [
+        "--run-command",
+        "mkdir -p /usr/lib/kdive && "
+        "{ command -v drgn >/dev/null 2>&1 && drgn --version "
+        "|| /usr/bin/drgn --version ; } "
+        f"> {DRGN_MARKER_GUEST_PATH} 2>/dev/null || true",
     ]
 
 

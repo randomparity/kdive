@@ -14,7 +14,10 @@ from pathlib import Path
 
 from kdive.images.families.base import CustomizeContext
 from kdive.images.families.rhel import RhelFamily
-from kdive.images.planes._build_common import MAKEDUMPFILE_MARKER_GUEST_PATH
+from kdive.images.planes._build_common import (
+    DRGN_MARKER_GUEST_PATH,
+    MAKEDUMPFILE_MARKER_GUEST_PATH,
+)
 
 
 def _ctx(
@@ -82,6 +85,20 @@ def test_build_argv_omits_makedumpfile_version_marker(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path, is_cloud_image=True)
     build_ctx = replace(ctx, kind="build", packages=RhelFamily().packages("build", "fedora", "44"))
     assert MAKEDUMPFILE_MARKER_GUEST_PATH not in " ".join(RhelFamily().customize_argv(build_ctx))
+
+
+def test_debug_argv_writes_drgn_version_marker(tmp_path: Path) -> None:
+    # drgn is in every rhel/fedora debug set, so the drgn-version marker is written (ADR-0334).
+    argv = RhelFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
+    joined = " ".join(argv)
+    assert DRGN_MARKER_GUEST_PATH in joined
+    assert "drgn --version" in joined
+
+
+def test_build_argv_omits_drgn_version_marker(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path, is_cloud_image=True)
+    build_ctx = replace(ctx, kind="build", packages=RhelFamily().packages("build", "fedora", "44"))
+    assert DRGN_MARKER_GUEST_PATH not in " ".join(RhelFamily().customize_argv(build_ctx))
 
 
 def test_sshd_enable_is_coupled_to_the_debug_kind(tmp_path: Path) -> None:

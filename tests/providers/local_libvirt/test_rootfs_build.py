@@ -22,6 +22,7 @@ from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.families.rhel import RhelFamily
 from kdive.images.planes._build_common import (
     BootEntriesProbeSeam,
+    DrgnProbeSeam,
     KernelConfigProbeSeam,
     MakedumpfileProbeSeam,
     OsReleaseProbeSeam,
@@ -139,6 +140,10 @@ def _no_makedumpfile(_qcow2: Path) -> str | None:
     return None
 
 
+def _no_drgn(_qcow2: Path) -> str | None:
+    return None
+
+
 def _no_boot_entries(_qcow2: Path) -> list[str] | None:
     # Hermetic default: no listing, so the default build path omits boot_kernel_count and never
     # shells out to the real guestfish probe (ADR-0295).
@@ -163,6 +168,7 @@ def _tools(
     probe_boot_entries: BootEntriesProbeSeam = _no_boot_entries,
     probe_os_release: OsReleaseProbeSeam = _no_os_release,
     probe_kernel_config: KernelConfigProbeSeam = _no_kernel_config,
+    probe_drgn: DrgnProbeSeam = _no_drgn,
 ) -> RootfsBuildTools:
     return RootfsBuildTools(
         acquire_base=rec.acquire_base,
@@ -171,6 +177,7 @@ def _tools(
         family_for=rec.family_for,
         inspect_versions=inspect_versions,
         probe_makedumpfile=probe_makedumpfile,
+        probe_drgn=probe_drgn,
         probe_boot_entries=probe_boot_entries,
         probe_os_release=probe_os_release,
         probe_kernel_config=probe_kernel_config,
@@ -186,6 +193,7 @@ def _plane(
     probe_boot_entries: BootEntriesProbeSeam = _no_boot_entries,
     probe_os_release: OsReleaseProbeSeam = _no_os_release,
     probe_kernel_config: KernelConfigProbeSeam = _no_kernel_config,
+    probe_drgn: DrgnProbeSeam = _no_drgn,
 ) -> LocalLibvirtRootfsBuildPlane:
     return LocalLibvirtRootfsBuildPlane(
         workspace=tmp_path / "work",
@@ -196,6 +204,7 @@ def _plane(
             probe_boot_entries=probe_boot_entries,
             probe_os_release=probe_os_release,
             probe_kernel_config=probe_kernel_config,
+            probe_drgn=probe_drgn,
         ),
     )
 
@@ -391,6 +400,57 @@ def test_provenance_omits_makedumpfile_version_on_unparseable_probe(tmp_path: Pa
     rec = _Recorder()
     out = _plane(tmp_path, rec, probe_makedumpfile=lambda _q: "garbage output").build(_spec())
     assert "makedumpfile_version" not in out.provenance
+
+
+def test_provenance_records_drgn_version_from_probe(tmp_path: Path) -> None:
+    rec = _Recorder()
+    out = _plane(tmp_path, rec, probe_drgn=lambda _q: "drgn 0.0.31").build(_spec())
+    assert out.provenance["drgn_version"] == "0.0.31"
+
+
+def test_provenance_drgn_falls_back_to_package_versions(tmp_path: Path) -> None:
+    # The marker is empty; the installed drgn package version is the fallback (Fedora/EL: drgn).
+    rec = _Recorder()
+    out = _plane(
+        tmp_path,
+        rec,
+        inspect_versions=lambda _q: {"drgn": "0.0.28"},
+        probe_drgn=_no_drgn,
+    ).build(_spec())
+    assert out.provenance["drgn_version"] == "0.0.28"
+
+
+def test_provenance_drgn_falls_back_to_python3_drgn_package(tmp_path: Path) -> None:
+    # Debian ships drgn as python3-drgn; the fallback consults that name too.
+    rec = _Recorder()
+    out = _plane(
+        tmp_path,
+        rec,
+        inspect_versions=lambda _q: {"python3-drgn": "0.0.22"},
+        probe_drgn=_no_drgn,
+    ).build(_spec())
+    assert out.provenance["drgn_version"] == "0.0.22"
+
+
+def test_provenance_omits_drgn_version_when_both_empty(tmp_path: Path) -> None:
+    rec = _Recorder()
+    out = _plane(tmp_path, rec).build(_spec())
+    assert "drgn_version" not in out.provenance
+
+
+def test_provenance_omits_drgn_version_on_probe_error(tmp_path: Path) -> None:
+    def _boom(_q: Path) -> str | None:
+        raise CategorizedError("no tool", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    rec = _Recorder()
+    out = _plane(tmp_path, rec, probe_drgn=_boom).build(_spec())
+    assert "drgn_version" not in out.provenance
+
+
+def test_provenance_omits_drgn_version_on_unparseable_probe(tmp_path: Path) -> None:
+    rec = _Recorder()
+    out = _plane(tmp_path, rec, probe_drgn=lambda _q: "no version here").build(_spec())
+    assert "drgn_version" not in out.provenance
 
 
 _ONE_KERNEL = ["vmlinuz-6.19.10-300.fc44.x86_64", "initramfs-6.19.10-300.fc44.x86_64.img"]

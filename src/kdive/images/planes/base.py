@@ -78,6 +78,7 @@ class RootfsBuildProvenance:
     guest_access_seam: str | None = None
     package_versions: dict[str, str] = field(default_factory=dict)
     makedumpfile_version: str | None = None
+    drgn_version: str | None = None
     boot_kernel_count: int | None = None
     default_kernel_version: str | None = None
     os_release: dict[str, str] | None = None
@@ -94,6 +95,7 @@ class RootfsBuildProvenance:
         guest_mac: str,
         package_versions: dict[str, str],
         makedumpfile_version: str | None,
+        drgn_version: str | None,
         boot_kernel_count: int | None,
         default_kernel_version: str | None,
         os_release: dict[str, str] | None,
@@ -113,6 +115,7 @@ class RootfsBuildProvenance:
             guest_mac=guest_mac,
             package_versions=package_versions,
             makedumpfile_version=makedumpfile_version,
+            drgn_version=drgn_version,
             boot_kernel_count=boot_kernel_count,
             default_kernel_version=default_kernel_version,
             os_release=os_release,
@@ -163,6 +166,7 @@ class RootfsBuildProvenance:
         if self.package_versions:
             record["package_versions"] = dict(self.package_versions)
         self._put_if_present(record, PROVENANCE_MAKEDUMPFILE_VERSION, self.makedumpfile_version)
+        self._put_if_present(record, PROVENANCE_DRGN_VERSION, self.drgn_version)
         if self.boot_kernel_count is not None:
             record[PROVENANCE_BOOT_KERNEL_COUNT] = self.boot_kernel_count
         self._put_if_present(record, PROVENANCE_DEFAULT_KERNEL_VERSION, self.default_kernel_version)

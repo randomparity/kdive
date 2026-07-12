@@ -11,11 +11,15 @@ from kdive.images.families._fedora_customize import (
     NOCLOUD_SEED_DIR,
     SEED_MACHINE_ID,
     cloud_init_first_boot_args,
+    drgn_version_marker_args,
     makedumpfile_version_marker_args,
     readiness_unit,
 )
 from kdive.images.families.base import CustomizeContext
-from kdive.images.planes._build_common import MAKEDUMPFILE_MARKER_GUEST_PATH
+from kdive.images.planes._build_common import (
+    DRGN_MARKER_GUEST_PATH,
+    MAKEDUMPFILE_MARKER_GUEST_PATH,
+)
 
 
 def test_makedumpfile_marker_args_writes_version_file() -> None:
@@ -24,6 +28,14 @@ def test_makedumpfile_marker_args_writes_version_file() -> None:
     assert "--run-command" in argv
     assert MAKEDUMPFILE_MARKER_GUEST_PATH in joined
     assert "makedumpfile -v" in joined
+
+
+def test_drgn_marker_args_writes_version_file() -> None:
+    argv = drgn_version_marker_args()
+    joined = " ".join(argv)
+    assert "--run-command" in argv
+    assert DRGN_MARKER_GUEST_PATH in joined
+    assert "drgn --version" in joined
 
 
 def _after_targets(unit: str) -> list[str]:
