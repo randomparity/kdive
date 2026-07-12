@@ -96,7 +96,10 @@ def _row_envelope(entry: ImageCatalogEntry) -> ToolResponse:
 
     Carries the build-fact ``capabilities`` tags, a compact verified ``os`` identity, and the
     operator-attested ``description`` so an agent can compare images on merit in one call rather
-    than an N+1 ``images.describe`` fan-out (ADR-0311).
+    than an N+1 ``images.describe`` fan-out (ADR-0311). ``has_kernel_config`` advertises whether the
+    image offers a downloadable ``/boot/config-<ver>`` (ADR-0331) so an agent skips a dead
+    ``images.kernel_config`` call on an image that has none — derived from whether the row carries a
+    stored config, without exposing the withheld object key (ADR-0317).
     """
     return ToolResponse.success(
         str(entry.id),
@@ -112,6 +115,7 @@ def _row_envelope(entry: ImageCatalogEntry) -> ToolResponse:
             "capabilities": [cap.value for cap in entry.capabilities],
             "os": _compact_os(entry.provenance),
             "default_kernel_version": default_kernel_version(entry.provenance),
+            "has_kernel_config": entry.kernel_config_key is not None,
             "description": entry.description or "",
         },
     )
@@ -192,7 +196,10 @@ def _describe_envelope(entry: ImageCatalogEntry, basis: KernelVersion) -> ToolRe
     ``provenance_attested`` is true when the provenance is an operator declaration (an ``s3``
     image's ``[image.attested]`` operands, ADR-0323) rather than a KDIVE-verified fact; the same
     distinction appears per-signal as ``capability_signals[*].basis`` (``operator_attested`` vs
-    ``build_verified``) on any signal whose operand is present. ``expires_at`` is an ISO-8601 string
+    ``build_verified``) on any signal whose operand is present. ``has_kernel_config`` advertises
+    whether the image offers a downloadable ``/boot/config-<ver>`` (ADR-0331, derived from the
+    withheld config object key of ADR-0317) so a reader can skip a dead ``images.kernel_config``
+    call. ``expires_at`` is an ISO-8601 string
     when set (a ``datetime`` is not a ``JsonValue``), ``""`` otherwise.
     """
     return ToolResponse.success(
@@ -211,6 +218,7 @@ def _describe_envelope(entry: ImageCatalogEntry, basis: KernelVersion) -> ToolRe
             "capabilities": [cap.value for cap in entry.capabilities],
             "os": _compact_os(entry.provenance),
             "default_kernel_version": default_kernel_version(entry.provenance),
+            "has_kernel_config": entry.kernel_config_key is not None,
             "description": entry.description or "",
             "provenance": entry.provenance,
             "provenance_attested": entry.provenance_attested,
@@ -276,11 +284,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """List visible image catalog entries across publish states.
 
         Each row carries the build-fact ``data.capabilities``, a compact verified ``data.os``
-        identity, and ``data.default_kernel_version`` (the kernel the image ships and boots by
-        default, ``""`` when unknown) so an agent can compare images on merit — distro, version,
-        default kernel — in one call. The publish state appears as the item envelope ``status`` and
-        as ``data.state``. Keyset-paginated: when ``data.truncated`` is true, pass
-        ``data.next_cursor`` back as ``request.cursor`` for the next page.
+        identity, ``data.default_kernel_version`` (the kernel the image ships and boots by
+        default, ``""`` when unknown), and ``data.has_kernel_config`` (``true`` when the image
+        offers a downloadable ``/boot/config-<ver>`` starting point, ``false`` when it has none —
+        do not call ``images.kernel_config`` on a ``false`` row) so an agent can compare images on
+        merit — distro, version, default kernel — in one call. The publish state appears as the item
+        envelope ``status`` and as ``data.state``. Keyset-paginated: when ``data.truncated`` is
+        true, pass ``data.next_cursor`` back as ``request.cursor`` for the next page.
         """
         payload = request or _ImagesListPayload()
         return await list_images(
@@ -307,8 +317,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """Return full detail for one catalog image visible to the caller.
 
         Includes boot layout, digest, capabilities, scope, publish state,
-        ``data.default_kernel_version`` (the image's default kernel, ``""`` when unknown), build
-        ``provenance`` (with captured
+        ``data.default_kernel_version`` (the image's default kernel, ``""`` when unknown),
+        ``data.has_kernel_config`` (``true`` when the image offers a downloadable
+        ``/boot/config-<ver>`` starting point — call ``images.kernel_config`` only when ``true``),
+        build ``provenance`` (with captured
         ``package_versions``/``makedumpfile_version``/``boot_kernel_count`` when present), and
         computed ``data.capability_signals`` (each signal keyed by name): ``kdump``
         (the capability for ``target_kernel``, kernel basis disclosed), ``direct_kernel``
