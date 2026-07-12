@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, LiteralString, cast
 from uuid import UUID, uuid4
@@ -46,6 +46,7 @@ from kdive.mcp.tools._common import capability_unsupported as _capability_unsupp
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
+from kdive.mcp.tools.debug.introspection.gate import augment_with_runtime_probe
 from kdive.mcp.tools.debug.sessions.context import resolve_debug_session_context
 from kdive.mcp.tools.lifecycle.vmcore.view import CONSOLE_CRASH_GUIDANCE
 from kdive.observability.debug_session_telemetry import (
@@ -65,6 +66,7 @@ from kdive.providers.ports.lifecycle import (
     Connector,
     DebugTransportKind,
 )
+from kdive.providers.ports.retrieve import LiveIntrospector
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -105,6 +107,29 @@ class _AttachResources:
     profile_policy: ProfilePolicy
     supported_debug_transports: frozenset[DebugTransportKind]
     provider: str
+    live_introspector: LiveIntrospector
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeProbe:
+    """Inputs for the post-open drgn-live runtime debuginfo probe (ADR-0335).
+
+    Present only when a runtime probe can still change the verdict: a drgn-live attach whose static
+    config check is silent (BTF advertised, or no config) and whose Run uploaded no host vmlinux.
+    The probe runs after the transport opens because the transport handle does not exist where the
+    static warning is computed (:meth:`DebugSessionHandlers._prepare_attach_request`).
+    """
+
+    system_id: UUID
+    introspector: LiveIntrospector
+
+
+@dataclass(frozen=True, slots=True)
+class _AttachPlan:
+    """A prepared attach plus the optional post-open runtime probe (ADR-0335)."""
+
+    request: debug_lifecycle.AttachRequest
+    probe: _RuntimeProbe | None = None
 
 
 type _ConnectorForRun = Callable[[AsyncConnection, Run], Awaitable[_AttachResources | ToolResponse]]
@@ -117,7 +142,11 @@ type _InsertSession = Callable[
 ]
 type _PrepareAttachRequest = Callable[
     [AsyncConnection, RequestContext, UUID, DebugTransportKind, UUID],
-    Awaitable[debug_lifecycle.AttachRequest | ToolResponse],
+    Awaitable[_AttachPlan | ToolResponse],
+]
+type _AugmentAfterOpen = Callable[
+    [AsyncConnectionPool, _AttachPlan, TransportHandle],
+    Awaitable[debug_lifecycle.AttachRequest],
 ]
 
 
@@ -132,6 +161,7 @@ def _resolved_connector_for_run(resolver: ProviderResolver) -> _ConnectorForRun:
             profile_policy=runtime.profile_policy,
             supported_debug_transports=runtime.support.debug_transports,
             provider=runtime.support.component_sources.provider,
+            live_introspector=runtime.live_introspector,
         )
 
     return connector_for_run
@@ -287,6 +317,7 @@ class DebugSessionHandlers:
             transport=transport_kind,
             session_id=session_id,
             prepare_attach_request=self._prepare_attach_request,
+            augment_after_open=self._augment_after_open,
             insert_session_locked=self._insert_session_locked,
         )
 
@@ -297,7 +328,7 @@ class DebugSessionHandlers:
         run_id: UUID,
         transport: DebugTransportKind,
         session_id: UUID,
-    ) -> debug_lifecycle.AttachRequest | ToolResponse:
+    ) -> _AttachPlan | ToolResponse:
         run = await RUNS.get(conn, run_id)
         if run is None or run.project not in ctx.projects:
             return _config_error(str(run_id))
@@ -319,7 +350,7 @@ class DebugSessionHandlers:
         if isinstance(seeded, ToolResponse):
             return seeded
         missing = await self._debuginfo_warning(conn, run, transport)
-        return debug_lifecycle.AttachRequest(
+        request = debug_lifecycle.AttachRequest(
             run=run,
             system=system,
             session_id=session_id,
@@ -327,6 +358,52 @@ class DebugSessionHandlers:
             connector=resources.connector,
             missing_debuginfo=missing,
         )
+        probe = _runtime_probe(run, system, transport, missing, resources.live_introspector)
+        return _AttachPlan(request=request, probe=probe)
+
+    async def _augment_after_open(
+        self,
+        pool: AsyncConnectionPool,
+        plan: _AttachPlan,
+        handle: TransportHandle,
+    ) -> debug_lifecycle.AttachRequest:
+        """Fold the runtime debuginfo probe into the attach warning once the transport is open.
+
+        The static warning is computed before the transport exists; ADR-0335 recomputes it here,
+        over the just-opened attach transport, so ``debug.start_session(drgn-live)`` on a blind
+        guest carries a ``debuginfo_unloadable`` warning **before** any ``introspect`` call. Runs
+        outside the per-System lock (like ``_open_transport``) and is fully fail-open — a missing
+        bootstrap key or an indeterminate probe leaves the static warning unchanged and never blocks
+        the attach.
+        """
+        probe = plan.probe
+        if probe is None:
+            return plan.request
+        private_key = await self._probe_private_key(pool, probe.system_id)
+        if private_key is None:
+            return plan.request
+        warning = await augment_with_runtime_probe(
+            plan.request.missing_debuginfo,
+            introspector=probe.introspector,
+            transport_handle=str(handle),
+            private_key=private_key,
+            has_uploaded_vmlinux=False,
+        )
+        return replace(plan.request, missing_debuginfo=warning)
+
+    async def _probe_private_key(self, pool: AsyncConnectionPool, system_id: UUID) -> str | None:
+        """Load the per-System bootstrap key for the runtime probe; fail open (``None``) if absent.
+
+        A drgn-live realization that does not ride the loopback SSH forward (guest-agent) never
+        seeds a key, so its absence is expected: the probe is skipped and the static warning stands.
+        """
+        try:
+            async with pool.connection() as conn:
+                return await load_system_bootstrap_private_key(
+                    conn, system_id, secret_registry=self._secret_registry
+                )
+        except CategorizedError:
+            return None
 
     async def _debuginfo_warning(
         self, conn: AsyncConnection, run: Run, transport: DebugTransportKind
@@ -399,6 +476,24 @@ class DebugSessionHandlers:
         )
 
 
+def _runtime_probe(
+    run: Run,
+    system: System,
+    transport: DebugTransportKind,
+    static_warning: dict[str, JsonValue] | None,
+    introspector: LiveIntrospector,
+) -> _RuntimeProbe | None:
+    """Build the post-open runtime probe only when it can still change the verdict (ADR-0335).
+
+    Confined to the gap the static config check cannot cover: a drgn-live attach whose static
+    warning is silent (BTF advertised, or no config) and whose Run uploaded no host vmlinux. gdbstub
+    (symbolizes host-side), a Run that already warns, or an uploaded vmlinux pay nothing new.
+    """
+    if transport != _DRGN_LIVE or static_warning is not None or run.debuginfo_ref is not None:
+        return None
+    return _RuntimeProbe(system_id=system.id, introspector=introspector)
+
+
 async def _attach_debug_session(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
@@ -407,17 +502,21 @@ async def _attach_debug_session(
     transport: DebugTransportKind,
     session_id: UUID,
     prepare_attach_request: _PrepareAttachRequest,
+    augment_after_open: _AugmentAfterOpen,
     insert_session_locked: _InsertSession,
 ) -> ToolResponse:
-    """Prepare, open, and persist one debug transport attach."""
+    """Prepare, open, augment the debuginfo warning, and persist one debug transport attach."""
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
-            request = await prepare_attach_request(conn, ctx, run_id, transport, session_id)
-        if isinstance(request, ToolResponse):
-            return request
-        opened = await _open_transport(request.connector, request.system, request.transport)
+            plan = await prepare_attach_request(conn, ctx, run_id, transport, session_id)
+        if isinstance(plan, ToolResponse):
+            return plan
+        opened = await _open_transport(
+            plan.request.connector, plan.request.system, plan.request.transport
+        )
         if isinstance(opened, ToolResponse):
             return opened
+        request = await augment_after_open(pool, plan, opened)
         async with pool.connection() as conn:
             try:
                 return await insert_session_locked(conn, ctx, request, opened)

@@ -51,6 +51,22 @@ from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 TEST_DT = datetime(2026, 1, 1, tzinfo=UTC)
 TEST_PROFILE_POLICY = LocalLibvirtProfilePolicy()
+
+
+class _ResolvingLiveIntrospector:
+    """A benign live-introspector default whose ADR-0335 runtime probe always resolves.
+
+    The default drgn-live attach and introspect tests should not trip the runtime resolution probe,
+    so ``run_script`` returns instead of raising ``DEBUG_ATTACH_FAILURE``; a test that exercises the
+    probe passes its own ``live_introspector`` to :func:`provider_resolver`.
+    """
+
+    def run_script(
+        self, *, transport_handle: str, script: str, timeout_sec: float, key_path: str
+    ) -> None:
+        del transport_handle, script, timeout_sec, key_path
+
+
 TEST_COMPONENT_SOURCES = ComponentSourceCapabilities(
     provider="test-provider",
     accepted_component_sources={
@@ -116,6 +132,7 @@ def provider_resolver(
     retriever: object | None = None,
     crash_postmortem: object | None = None,
     vmcore_introspector: object | None = None,
+    live_introspector: object | None = None,
     supported_capture_methods: frozenset[CaptureMethod] | None = None,
     supported_debug_transports: frozenset[DebugTransportKind] | None = None,
     supported_introspection: frozenset[IntrospectionMode] | None = None,
@@ -155,7 +172,10 @@ def provider_resolver(
         vmcore_introspector=cast(
             Any, vmcore_introspector if vmcore_introspector is not None else unused_port
         ),
-        live_introspector=unused_port,
+        live_introspector=cast(
+            Any,
+            live_introspector if live_introspector is not None else _ResolvingLiveIntrospector(),
+        ),
         support=ProviderSupport(
             component_sources=TEST_COMPONENT_SOURCES,
             capture_methods=(
