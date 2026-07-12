@@ -41,6 +41,13 @@ BTF from `/sys/kernel/btf`, so a defconfig kernel without it resolves nothing. D
 host-side DWARF introspection (offline `introspect.from_vmcore` and gdb), build with
 `CONFIG_DEBUG_INFO_DWARF5=y` and also upload `vmlinux`. A drgn-live session or introspect over a
 kernel with neither BTF nor an uploaded `vmlinux` returns a non-fatal `missing_debuginfo` warning.
+
+`CONFIG_DEBUG_INFO_BTF=y` in the `.config` is necessary but not sufficient: BTF-only drgn-live
+introspection also depends on the guest image's drgn build being able to load that BTF at runtime
+(older in-guest drgn versions can fail to load a newer kernel's BTF). When the config advertises
+BTF but the in-guest drgn cannot actually resolve symbols, `introspect.run` / `introspect.script`
+return a non-fatal `debuginfo_unloadable` warning naming the likely cause; remediate by booting a
+BTF-capable guest image with a newer drgn, or by uploading a matching `vmlinux`.
 See `artifacts.feature_config_requirements` for the per-feature `CONFIG_*` manifest.
 
 ## The `kernel` artifact: one combined gzip tar
