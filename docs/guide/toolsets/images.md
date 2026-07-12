@@ -20,6 +20,9 @@ types, and return schema, read each tool's own description.
     built image itself. Use it to match the target distro/release.
   - `default_kernel_version` — the kernel the image ships and boots by default (`""` when
     unknown). Use it to know what version you are starting from before building your own.
+  - `has_kernel_config` — `true` when the image offers a downloadable `/boot/config-<ver>`
+    starting point, `false` when it has none. Check it before calling `images.kernel_config`:
+    a `false` row has no config to fetch, so that call would fail.
   - `description` — an optional operator-attested hint about what an image is for. Advisory
     context only, never a capability guarantee — verify with the signals below.
   Do not just reuse the image named in a `systems.profile_examples` example: that one is picked
@@ -46,8 +49,9 @@ types, and return schema, read each tool's own description.
   (an operator claim kdive did not verify, also flagged by `provenance_attested`).
 - `images.kernel_config` — a short-lived download URL for the image's own `/boot/config-<ver>`.
   Use it as a **known-good starting `.config`** when you build a kernel locally: it already
-  boots this image. kdive never validates the config you build from it. An image with no
-  offered config returns `kernel_config_unavailable`.
+  boots this image. kdive never validates the config you build from it. Call it only for an image
+  whose `has_kernel_config` is `true`; an image with no offered config returns
+  `kernel_config_unavailable`.
 
 ## debug vs build images
 
