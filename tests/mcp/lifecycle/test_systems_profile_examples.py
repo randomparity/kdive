@@ -280,6 +280,7 @@ def test_local_example_discloses_declaration_order_pick_when_many(tmp_path: Path
     rootfs = _profile_of(data)["provider"]["local-libvirt"]["rootfs"]
     assert rootfs["name"] == "fedora-first"  # first-declared
     assert data["description"] == "RHEL-family debug host, my SLES crash setup"
+    _assert_kernel_trap_disclosed(note)
 
 
 def test_local_example_names_only_image_when_one(tmp_path: Path) -> None:
@@ -288,9 +289,22 @@ def test_local_example_names_only_image_when_one(tmp_path: Path) -> None:
     assert doc is not None
     data = _examples(doc)["local-libvirt"]
     assert data["available_images"] == 1
-    assert "only public" in data["selection_note"]
-    assert "images.list" not in data["selection_note"]  # no choice to steer toward
+    note = data["selection_note"]
+    assert "only public" in note
+    assert "images.list" not in note  # no choice to steer toward
     assert data["description"] == ""  # this image has no operator description
+    _assert_kernel_trap_disclosed(note)
+
+
+def _assert_kernel_trap_disclosed(note: str) -> None:
+    # #1097 (BBR F6): the example's boot_method is direct-kernel with no baseline_kernel, but the
+    # chosen image may be direct_kernel: not_provisionable (2+ kernels) — name the trap inline
+    # rather than leaving it only in toolsets-images.md, so a caller who never reads the guide
+    # still learns to check capability_signals before copying the example into a provision call.
+    assert "not_provisionable" in note
+    assert "capability_signals" in note
+    assert "baseline_kernel" in note
+    assert "images.describe" in note
 
 
 def test_local_example_placeholder_note_has_no_list_steer_when_zero(tmp_path: Path) -> None:
