@@ -9,7 +9,12 @@ from uuid import uuid4
 
 from psycopg import AsyncConnection
 
-from kdive.kernel_config.gate import MISSING_DEBUGINFO_REASON, debuginfo_warning
+from kdive.kernel_config.gate import (
+    DEBUGINFO_UNLOADABLE_REASON,
+    MISSING_DEBUGINFO_REASON,
+    debuginfo_unloadable_warning,
+    debuginfo_warning,
+)
 from kdive.kernel_config.parse import KernelConfig
 
 _RUN_ID = uuid4()
@@ -72,3 +77,13 @@ def test_config_lacking_btf_warns_and_names_btf():
     assert warning["reason"] == MISSING_DEBUGINFO_REASON
     assert warning["missing"] == ["DEBUG_INFO_BTF"]
     assert "vmlinux" in warning["remediation"]
+
+
+def test_unloadable_warning_is_distinct_reason_naming_btf():
+    # The runtime-probe payload (ADR-0329) is a distinct reason from the static gate, but shares the
+    # {reason, missing, remediation} shape and keys on the same BTF symbol.
+    warning = debuginfo_unloadable_warning()
+    assert warning["reason"] == DEBUGINFO_UNLOADABLE_REASON
+    assert warning["reason"] != MISSING_DEBUGINFO_REASON
+    assert warning["missing"] == ["DEBUG_INFO_BTF"]
+    assert "vmlinux" in cast(str, warning["remediation"])

@@ -38,6 +38,16 @@ _DEBUGINFO_REMEDIATION = (
     "matching vmlinux, so drgn can resolve symbols (see artifacts.feature_config_requirements)"
 )
 
+# The static config check above proves BTF is *advertised*, not that the running guest's drgn can
+# load it. A drgn-live runtime symbol probe can still find the session blind (guest drgn cannot load
+# the kernel's BTF); this is the distinct reason it emits, keyed on the same BTF symbol.
+DEBUGINFO_UNLOADABLE_REASON = "debuginfo_unloadable"
+_DEBUGINFO_UNLOADABLE_REMEDIATION = (
+    "the in-guest drgn could not load the running kernel's BTF even though the config advertised "
+    "it (a known limitation of some guest drgn builds); boot a BTF-capable guest image with a "
+    "newer drgn, or upload a matching vmlinux (see artifacts.feature_config_requirements)"
+)
+
 
 async def crash_capture_refusal(conn: AsyncConnection, run_id: UUID) -> dict[str, JsonValue] | None:
     """Refusal ``details`` if the Run's uploaded config lacks crash-capture symbols, else ``None``.
@@ -78,4 +88,20 @@ async def debuginfo_warning(
         "reason": MISSING_DEBUGINFO_REASON,
         "missing": [_BTF_SYMBOL],
         "remediation": _DEBUGINFO_REMEDIATION,
+    }
+
+
+def debuginfo_unloadable_warning() -> dict[str, JsonValue]:
+    """The runtime-probe ``debuginfo_unloadable`` warning payload (extends the static gate above).
+
+    Emitted by the drgn-live introspect seams when a runtime symbol probe proves the in-guest drgn
+    cannot resolve a stable kernel symbol, even though the static config check was silent (BTF
+    advertised, or no config uploaded) and no host ``vmlinux`` was uploaded — the F1 case the
+    ``.config``-based check cannot see. Names ``DEBUG_INFO_BTF`` and points at the same
+    remediations, so a client keying on the ``{reason, missing, remediation}`` shape is unaffected.
+    """
+    return {
+        "reason": DEBUGINFO_UNLOADABLE_REASON,
+        "missing": [_BTF_SYMBOL],
+        "remediation": _DEBUGINFO_UNLOADABLE_REMEDIATION,
     }
