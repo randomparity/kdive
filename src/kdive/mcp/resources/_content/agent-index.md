@@ -26,9 +26,10 @@ the first tool to call.
 4. **Build** — upload a prebuilt kernel with `runs.create` on the external lane, then
    `runs.complete_build`. See the runs guide.
 5. **Install and boot** — `runs.install` then `runs.boot`.
-6. **Reproduce in the guest** — `systems.authorize_ssh_key`, then drive the reproducer over
-   SSH (compile in-guest or cross-compile and `scp`, then run or stress it). This is where
-   most investigation time goes; see the reproduce-and-capture loop below.
+6. **Reproduce in the guest** — `systems.authorize_ssh_key`, then `jobs.wait` until it
+   succeeds, then drive the reproducer over SSH (compile in-guest or cross-compile and `scp`,
+   then run or stress it). This is where most investigation time goes; see the
+   reproduce-and-capture loop below.
 7. **Observe evidence** — `runs.get` for status and console access, `artifacts.list` and
    `artifacts.get` for logs and other files.
 8. **Debug live** — `debug.start_session`, then breakpoints, memory, and stack tools; or
@@ -43,9 +44,9 @@ Long steps (provision, build, install, boot, capture) return a job handle; poll 
 
 ## The guest is yours — you have root
 
-Once a system is ready, authorize your public key with `systems.authorize_ssh_key` and you
-have **root SSH into the guest** — kdive never holds the private key. From there the guest is
-yours to shape:
+Once a system is ready, authorize your public key with `systems.authorize_ssh_key` and poll
+`jobs.wait` until it succeeds; only then do you have **root SSH into the guest** — kdive never
+holds the private key. From there the guest is yours to shape:
 
 - **The guest package manager is yours.** Install whatever the investigation needs at
   runtime — `apt install trace-cmd`, a compiler toolchain, `stress-ng`, `bpftrace`. Do not
@@ -62,7 +63,7 @@ yours to shape:
 ## The reproduce-and-capture loop
 
 Most real investigation time is spent here, not in the setup stages. After
-`systems.authorize_ssh_key`:
+`systems.authorize_ssh_key` succeeds (poll `jobs.wait`):
 
 1. **Get the reproducer into the guest.** Compile it in-guest with the toolchain you
    installed, or cross-compile on the host and `scp` the binary in.
