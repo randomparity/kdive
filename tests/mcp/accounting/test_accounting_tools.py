@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from kdive.mcp.auth import AuthError, RequestContext
 from kdive.mcp.schema.tool_payloads import EstimateRequestPayload
-from kdive.mcp.tools.accounting.estimate import estimate
+from kdive.mcp.tools.accounting.estimate import _configuration_failure, estimate
 from kdive.security.authz.rbac import AuthorizationError, Role
 
 
@@ -98,8 +98,41 @@ def test_estimate_unknown_cost_class_is_config_error(migrated_url: str) -> None:
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.suggested_next_actions == ["accounting.estimate"]
+        # The failure names the rejected field so a caller can act, not an opaque error.
+        assert resp.data["cost_class"] == "cloud"
+        assert "cost_class" in (resp.detail or "")
 
     asyncio.run(_run())
+
+
+def test_estimate_cost_class_field_documents_hypothetical() -> None:
+    # The agent-facing schema must state cost_class is a hypothetical, not the billed class.
+    description = EstimateRequestPayload.model_fields["cost_class"].description
+    assert description is not None
+    assert "billed" in description
+    assert "catalog.resources" in description
+
+
+def test_configuration_failure_names_validation_fields() -> None:
+    try:
+        EstimateRequestPayload.model_validate({"memory_gb": 1, "window": 1, "cost_class": "local"})
+        raise AssertionError("expected ValidationError for the missing vcpus field")
+    except ValidationError as exc:
+        resp = _configuration_failure(exc)
+    assert resp.status == "error"
+    assert resp.error_category == "configuration_error"
+    assert resp.suggested_next_actions == ["accounting.estimate"]
+    rejected = resp.data["rejected_fields"]
+    assert isinstance(rejected, list)
+    assert "vcpus" in rejected
+    assert "vcpus" in (resp.detail or "")
+
+
+def test_configuration_failure_surfaces_plain_value_error_detail() -> None:
+    resp = _configuration_failure(ValueError("malformed selector"))
+    assert resp.error_category == "configuration_error"
+    assert resp.detail == "malformed selector"
+    assert "rejected_fields" not in resp.data
 
 
 def test_estimate_payload_model_rejects_malformed_shape() -> None:
