@@ -254,6 +254,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `KDIVE_BTF_PATH` | `/sys/kernel/btf/vmlinux` | BTF path the `kdive-drgn` helper passes to `drgn -s` when readable, so live symbol/type resolution does not depend on the guest drgn build's BTF auto-load (BBR F1, #1090); test-only override, unset on production guests. |
 | `KDIVE_DMESG_CAP_BYTES` | `1048576` | Byte cap on the inline dmesg `kdive-capture-vmcore` emits (default 1 MiB). |
 | `KDIVE_TITLE` | `kdive` | grub menu title the `kdive-install-kernel` helper assigns the kdive boot slot. |
 | `KDIVE_VMCORE_PATH` | `/var/crash/*/vmcore` | Override the vmcore path `kdive-capture-vmcore` reads (default: the kdump-utils path). |
