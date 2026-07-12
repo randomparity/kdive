@@ -47,3 +47,27 @@ def test_unknown_feature_raises():
 
     with pytest.raises(KeyError):
         feature_requirement("does_not_exist")
+
+
+def test_rootfs_mount_matches_the_real_direct_kernel_ext4_boot():
+    # #1094: rootfs_mount used to advertise a squashfs+overlay boot path that does not exist
+    # anywhere in the tree. The real boot (ADR-0030) is a whole-disk ext4 qcow2 mounted
+    # direct-kernel via root=/dev/vda (a virtio-blk device) with no initramfs, so the manifest
+    # must ask for EXT4_FS + VIRTIO_BLK and nothing squashfs/overlay-related.
+    feat = feature_requirement("rootfs_mount")
+    symbols = {s for clause in feat.advertised for s in clause}
+    assert symbols == {"EXT4_FS", "VIRTIO_BLK"}
+    for stale in ("SQUASHFS", "SQUASHFS_ZSTD", "OVERLAY_FS", "BLK_DEV_LOOP", "XFS_FS"):
+        assert stale not in symbols
+    assert "squashfs" not in feat.summary.lower()
+    assert "overlay" not in feat.summary.lower()
+
+
+def test_virtio_blk_is_filed_under_rootfs_mount_not_serial_console():
+    # The root-disk driver requirement was previously misfiled under serial_console.
+    rootfs = feature_requirement("rootfs_mount")
+    serial = feature_requirement("serial_console")
+    rootfs_symbols = {s for clause in rootfs.advertised for s in clause}
+    serial_symbols = {s for clause in serial.advertised for s in clause}
+    assert "VIRTIO_BLK" in rootfs_symbols
+    assert "VIRTIO_BLK" not in serial_symbols
