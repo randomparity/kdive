@@ -273,10 +273,46 @@ def test_pcie_label_is_redacted(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool)
             await _set_pcie(pool, res_id, [_X710])
-            resp = await availability_tools.availability_tool(pool, CTX, pcie=None, shape=None)
+            resp = await availability_tools.availability_tool(
+                pool, CTX, pcie=None, shape=None, include_devices=True
+            )
         item = _host_item(resp, res_id)
         serialized = item.model_dump_json()
         assert "secret-host-label" not in serialized
+
+    asyncio.run(_run())
+
+
+def test_free_devices_omitted_by_default(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+            await _set_pcie(pool, res_id, [_X710, _GPU])
+            resp = await availability_tools.availability_tool(pool, CTX, pcie=None, shape=None)
+        item = _host_item(resp, res_id)
+        # Summarize-by-default (ADR-0332): the count stays, the full list is dropped.
+        assert item.data["free_pcie"] == 2
+        assert "free_devices" not in item.data
+
+    asyncio.run(_run())
+
+
+def test_include_devices_returns_full_redacted_list(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+            await _set_pcie(pool, res_id, [_X710, _GPU])
+            resp = await availability_tools.availability_tool(
+                pool, CTX, pcie=None, shape=None, include_devices=True
+            )
+        item = _host_item(resp, res_id)
+        devices = data_sequence(item, "free_devices")
+        assert item.data["free_pcie"] == 2
+        assert len(devices) == 2
+        bdfs = {json_mapping(dev)["bdf"] for dev in devices}
+        assert bdfs == {_X710["bdf"], _GPU["bdf"]}
+        # Portable identity only — the untrusted host label is never returned.
+        assert all("label" not in json_mapping(dev) for dev in devices)
 
     asyncio.run(_run())
 
