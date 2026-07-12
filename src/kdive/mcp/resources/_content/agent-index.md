@@ -22,9 +22,15 @@ the first tool to call.
 1. **Orient** — `investigations.open` to group the runs of one investigation.
 2. **Acquire capacity** — `allocations.request`, then `allocations.wait` until granted.
 3. **Define and provision a system** — `images.describe` to pick a base image and check its
-   capabilities first, then `systems.define` and `systems.provision`. See the images guide.
-4. **Build** — upload a prebuilt kernel with `runs.create` on the external lane, then
-   `runs.complete_build`. See the runs guide.
+   capabilities first. Then take one of two lanes: `systems.provision` directly (profile
+   inline, no rootfs-upload window), or `systems.define` followed by
+   `systems.provision_defined` (opens a rootfs-upload window between the two calls). See the
+   images guide.
+4. **Build** — `runs.create` on the external lane, then declare and upload the prebuilt
+   kernel with `artifacts.expected_uploads` to see what is required, `artifacts.create_run_upload`
+   per artifact to get a presigned PUT URL, and the presigned PUT itself; once every expected
+   artifact is uploaded, call `runs.complete_build`. See the runs guide and the
+   [build lane](../operating/external-build-upload.md).
 5. **Install and boot** — `runs.install` then `runs.boot`.
 6. **Reproduce in the guest** — `systems.authorize_ssh_key`, then `jobs.wait` until it
    succeeds, then drive the reproducer over SSH (compile in-guest or cross-compile and `scp`,
@@ -55,8 +61,6 @@ holds the private key. From there the guest is yours to shape:
   **local-libvirt**, installs need the operator to have enabled guest egress first (no
   outbound network by default); see the systems guide's "Reaching the guest over SSH"
   section if `dnf`/`apt install` can't resolve a host.
-- **Mind disk headroom.** Installing toolchains, building reproducers, and capturing traces
-  all consume guest disk; size the shape for the work or clean up as you go.
 - **Mind disk headroom.** Installing toolchains, building reproducers, and capturing traces
   all consume guest disk; size the shape for the work or clean up as you go.
 
