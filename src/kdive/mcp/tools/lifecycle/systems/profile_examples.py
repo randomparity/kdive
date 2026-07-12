@@ -243,12 +243,20 @@ def _public_image(doc: InventoryDoc | None, provider: str) -> ImageEntry | None:
     return images[0] if images else None
 
 
+_KERNEL_TRAP_NOTE = (
+    "This example's boot_method is direct-kernel with no baseline_kernel set, but the chosen image "
+    "may be direct_kernel: not_provisionable (2+ kernels in /boot, fail-closed at provision). Call "
+    "images.describe on it and check capability_signals.direct_kernel first: if it reads "
+    "not_provisionable, add a provider.local-libvirt.baseline_kernel hint naming one of its "
+    "candidates, or pick a provisionable image instead."
+)
+
 _SELECTION_NOTE_MANY = (
     "Chosen by declaration order (the first-declared public local-libvirt image); it is one of "
     "{count} public images. Call images.list / images.describe to choose deliberately by "
-    "capabilities, os, and description."
+    "capabilities, os, and description. " + _KERNEL_TRAP_NOTE
 )
-_SELECTION_NOTE_ONE = "The only public local-libvirt image in this inventory."
+_SELECTION_NOTE_ONE = "The only public local-libvirt image in this inventory. " + _KERNEL_TRAP_NOTE
 _SELECTION_NOTE_NONE = (
     "No public local-libvirt image is declared; this example uses a placeholder rootfs. Declare an "
     "[[image]] (or replace the rootfs path) before provisioning."
