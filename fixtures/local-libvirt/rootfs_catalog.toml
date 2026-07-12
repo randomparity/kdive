@@ -11,6 +11,17 @@
 # kdump_core_incomplete remediation at vmcore.fetch (host_dump still works). EL8/EL9 ship
 # makedumpfile bundled in kexec-tools (no standalone package); the snapshot records the bundled
 # binary's version. Not live upstream truth.
+#
+# drgn_version: the curated build-time drgn version this release's repos install, verified against
+# distro package indexes (2026-07-12) and guarded by tests/images/test_rootfs_catalog.py. drgn is
+# installed unpinned from the distro repos (rhel: EPEL, debian: python3-drgn), so the version
+# tracks each release's current repo and varies sharply by family. It is the per-image operand of
+# the computed live-drgn-introspection predicate (kdive.images.drgn_support, ADR-0328): an agent
+# reads whether the image's drgn can introspect a booted kernel from the guest's own in-guest BTF
+# (>= the 0.0.31 BTF-capability threshold) via images.describe, before burning an allocation. A row
+# below the threshold computes `incapable` (e.g. debian-kdive-ready-12 on bookworm's 0.0.22). Fedora
+# 43 currently carries a newer stable drgn (0.1.0) than Fedora 44 (0.0.33, with 0.1.0 still in
+# updates-testing) — the repos, not a typo. Not live upstream truth.
 
 [[image]]
 name = "fedora-kdive-ready-43"
@@ -20,6 +31,7 @@ family = "rhel"
 arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.8"  # < 1.7.9; the #817 regression reference
+drgn_version = "0.1.0"  # Fedora 43 stable (0.1.0-1.fc43)
 source = { kind = "virt-builder", template = "fedora-43" }
 
 [[image]]
@@ -30,6 +42,7 @@ family = "rhel"
 arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.9"  # the kdump-capable default for a v7.0 kernel
+drgn_version = "0.0.33"  # Fedora 44 stable (0.0.33-3.fc44)
 source = { kind = "cloud-image", url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2", sha256 = "28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f" }  # pragma: allowlist secret
 
 [[image]]
@@ -40,6 +53,7 @@ family = "rhel"
 arch = "x86_64"
 kind = "build"
 makedumpfile_version = "1.7.9"  # irrelevant to build hosts, but required by the schema
+drgn_version = "0.0.33"  # irrelevant to build hosts, but required by the schema
 source = { kind = "cloud-image", url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2", sha256 = "28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f" }  # pragma: allowlist secret
 
 # ppc64le (POWER) row (fedora-secondary tree — Fedora publishes ppc64le as a secondary arch).
@@ -54,6 +68,7 @@ family = "rhel"
 arch = "ppc64le"
 kind = "debug"
 makedumpfile_version = "1.7.9"  # Fedora 44 ships the same makedumpfile across arches
+drgn_version = "0.0.33"  # Fedora 44 ships the same drgn across arches
 source = { kind = "cloud-image", url = "https://dl.fedoraproject.org/pub/fedora-secondary/releases/44/Cloud/ppc64le/images/Fedora-Cloud-Base-Generic-44-1.7.ppc64le.qcow2", sha256 = "3bea270eba46cdedf3c6c71b20c6ffb03b54131631497a27ff826a497c1dfac6" }  # pragma: allowlist secret
 
 [[image]]
@@ -64,6 +79,7 @@ family = "rhel"
 arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.2"  # bundled in kexec-tools 2.0.26
+drgn_version = "0.0.32"  # EPEL 8 (0.0.32-1.el8)
 source = { kind = "cloud-image", url = "https://dl.rockylinux.org/pub/rocky/8/images/x86_64/Rocky-8-GenericCloud-Base-8.10-20240528.0.x86_64.qcow2", sha256 = "e56066c58606191e96184de9a9183a3af33c59bcbd8740d8b10ca054a7a89c14" }  # pragma: allowlist secret
 
 [[image]]
@@ -74,6 +90,7 @@ family = "rhel"
 arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.6"  # bundled in kexec-tools 2.0.29
+drgn_version = "0.0.33"  # EPEL 9 (python-drgn 0.0.33-2.el9)
 source = { kind = "cloud-image", url = "https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base-9.8-20260525.0.x86_64.qcow2", sha256 = "92c206cc6f790c61583247eefe87890f8828420662c17cacf247cec78ab4eec8" }  # pragma: allowlist secret
 
 [[image]]
@@ -84,6 +101,7 @@ family = "rhel"
 arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.8"  # separate pkg, el10
+drgn_version = "0.0.33"  # EPEL 10 (python-drgn 0.0.33-1.el10)
 source = { kind = "cloud-image", url = "https://dl.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-GenericCloud-Base-10.2-20260525.0.x86_64.qcow2", sha256 = "9fc9e9ff16888bb68ac39b0392e25c9c92684d50c85f1cce6ab549363bbc4b48" }  # pragma: allowlist secret
 
 [[image]]
@@ -94,6 +112,7 @@ family = "rhel"
 arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.6"  # bundled in kexec-tools 2.0.29
+drgn_version = "0.0.33"  # EPEL 9 (python-drgn 0.0.33-2.el9)
 source = { kind = "cloud-image", url = "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-20260622.0.x86_64.qcow2", sha256 = "ed8421c7ce25d0e21cbeb561c906f52b2eed2a99aa3df88ec7616773ae1ebd1a" }  # pragma: allowlist secret
 
 [[image]]
@@ -104,6 +123,7 @@ family = "rhel"
 arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.8"  # separate pkg, el10
+drgn_version = "0.0.33"  # EPEL 10 (python-drgn 0.0.33-1.el10)
 source = { kind = "cloud-image", url = "https://cloud.centos.org/centos/10-stream/x86_64/images/CentOS-Stream-GenericCloud-10-20260622.0.x86_64.qcow2", sha256 = "508a48761d1a28c98046256e8f77b0ea34d751791a5629bb216743ef98526d0b" }  # pragma: allowlist secret
 
 # Debian-family entries (Debian 12 bookworm + 13 trixie, ADR-0251 / #824), built via
@@ -118,6 +138,7 @@ family = "debian"
 arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.2"  # bookworm
+drgn_version = "0.0.22"  # bookworm (python3-drgn 0.0.22-1); < 0.0.31 -> live_drgn incapable
 source = { kind = "cloud-image", url = "https://cloud.debian.org/images/cloud/bookworm/20260615-2510/debian-12-genericcloud-amd64-20260615-2510.qcow2", sha256 = "59f936c9f8f9b467585c126661370c14ccfffe824928a066da282788cc3d330c" }  # pragma: allowlist secret
 
 [[image]]
@@ -128,4 +149,5 @@ family = "debian"
 arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.6"  # trixie
+drgn_version = "0.0.31"  # trixie (python3-drgn 0.0.31-1); at the BTF-capability threshold
 source = { kind = "cloud-image", url = "https://cloud.debian.org/images/cloud/trixie/20260623-2518/debian-13-genericcloud-amd64-20260623-2518.qcow2", sha256 = "e32d03ec8f05b0b3a4c16e8cc0a5424efa78514141a60a2656623cf422cc6416" }  # pragma: allowlist secret

@@ -172,10 +172,12 @@ def _capability_signals(entry: ImageCatalogEntry, basis: KernelVersion) -> dict[
     """The computed capability signals for ``entry`` against ``basis`` (ADR-0286/0295).
 
     Iterates the registered signals, keying each rendered block by signal name: ``kdump`` (the
-    makedumpfile-vs-target-kernel capability) and ``direct_kernel`` (whether the image's ``/boot``
+    makedumpfile-vs-target-kernel capability), ``direct_kernel`` (whether the image's ``/boot``
     holds exactly one non-rescue kernel, so a direct-kernel provision can select a baseline
-    unambiguously). Each signal reads a build-recorded provenance operand and degrades to a
-    non-confident status when the operand is absent, so a reader never raises on image data.
+    unambiguously), and ``live_drgn`` (whether the shipped drgn can introspect a booted kernel from
+    the guest's own in-guest BTF). Each signal reads a build-recorded provenance operand and
+    degrades to a non-confident status when the operand is absent, so a reader never raises on
+    image data.
     """
     return {sig.name: sig.render(entry, basis) for sig in REGISTERED_SIGNALS}
 
@@ -185,7 +187,8 @@ def _describe_envelope(entry: ImageCatalogEntry, basis: KernelVersion) -> ToolRe
 
     Surfaces ``provenance`` verbatim (build metadata, no secret values), the boot layout, digest,
     capabilities, scope, publish state, and the computed ``capability_signals`` block (each signal
-    keyed by name, computed for ``basis``; the signals are ``kdump`` and ``direct_kernel``).
+    keyed by name, computed for ``basis``; the signals are ``kdump``, ``direct_kernel``, and
+    ``live_drgn``).
     ``provenance_attested`` is true when the provenance is an operator declaration (an ``s3``
     image's ``[image.attested]`` operands, ADR-0323) rather than a KDIVE-verified fact; the same
     distinction appears per-signal as ``capability_signals[*].basis`` (``operator_attested`` vs
@@ -308,10 +311,14 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         ``provenance`` (with captured
         ``package_versions``/``makedumpfile_version``/``boot_kernel_count`` when present), and
         computed ``data.capability_signals`` (each signal keyed by name): ``kdump``
-        (the capability for ``target_kernel``, kernel basis disclosed) and ``direct_kernel``
+        (the capability for ``target_kernel``, kernel basis disclosed), ``direct_kernel``
         (``status`` ``provisionable`` when ``/boot`` holds exactly one non-rescue kernel, else
         ``not_provisionable``/``unverified`` — read it before a direct-kernel provision so a
-        multi-kernel image does not burn an allocation on a fail-closed selection). A signal reads
+        multi-kernel image does not burn an allocation on a fail-closed selection), and
+        ``live_drgn`` (``capability`` ``capable`` when the shipped drgn is new enough to introspect
+        a booted kernel from the guest's own in-guest BTF, else ``incapable``/``unverified`` — read
+        it before provisioning for live introspection so an image whose drgn cannot see the kernel
+        does not burn an allocation). A signal reads
         ``unverified`` whenever its operand was never recorded — the normal, honest state for an
         externally-baked image the operator has not attested and KDIVE has not built. When the
         operand *is* present, ``basis`` discloses its evidence: ``build_verified`` (recorded by a

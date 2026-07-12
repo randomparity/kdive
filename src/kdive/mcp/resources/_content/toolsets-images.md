@@ -26,12 +26,16 @@ types, and return schema, read each tool's own description.
   by declaration order, and the example's `selection_note`/`available_images` say so.
 - `images.describe` — the full detail for one image: boot layout, `package_versions`, `os`,
   `description`, and the computed `capability_signals`. **Call this before `systems.provision`.**
-  Two signals matter most:
+  Three signals matter most:
   - `kdump` — whether the image can capture a vmcore for a target kernel (the crash-triage
     path depends on it).
   - `direct_kernel` — `provisionable` only when `/boot` holds exactly one non-rescue kernel;
     a multi-kernel image reads `not_provisionable`, so a direct-kernel provision would fail
     closed. Read it first so a multi-kernel image does not waste an allocation.
+  - `live_drgn` — `capable` only when the image's shipped drgn is new enough to introspect a
+    booted kernel from the guest's own in-guest BTF (`/sys/kernel/btf`); an image on an older
+    drgn reads `incapable`. Read it before provisioning for live introspection so an image whose
+    drgn cannot see the kernel does not waste an allocation.
 
   A signal reads `unverified` when its operand was never recorded — the **normal, honest state**
   for an externally-baked (`s3`) or operator-staged image that no one has characterized. It is not

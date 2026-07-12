@@ -51,6 +51,12 @@ class RootfsCatalogEntry:
             ADR-0253). A snapshot, not live upstream truth; the actual built version is recorded in
             the published image's ``provenance["makedumpfile_version"]``. The kdump capability for a
             given target kernel is *computed* from this, not stored as a kernel-relative bit.
+        drgn_version: The curated build-time drgn version this release's repos install (e.g.
+            ``"0.0.31"``), verified against distro package indexes — the per-image operand of the
+            computed live-drgn-introspection predicate (:mod:`kdive.images.drgn_support`, ADR-0328).
+            drgn is installed unpinned from distro repos, so the version varies sharply by image
+            family; a snapshot, not live upstream truth. The live-introspection capability is
+            *computed* from this against the BTF-capability threshold, not stored as a bit.
     """
 
     name: str
@@ -61,6 +67,7 @@ class RootfsCatalogEntry:
     kind: RootfsImageKind
     source: RootfsSource
     makedumpfile_version: str
+    drgn_version: str
 
 
 def _catalog_error(message: str, field: str) -> CategorizedError:
@@ -110,6 +117,7 @@ def _parse_entry(row: dict[str, Any]) -> RootfsCatalogEntry:
         kind=_require_rootfs_kind(row),
         source=_parse_source(row.get("source")),
         makedumpfile_version=_require_str(row, "makedumpfile_version"),
+        drgn_version=_require_str(row, "drgn_version"),
     )
 
 

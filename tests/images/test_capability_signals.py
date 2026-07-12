@@ -8,6 +8,7 @@ from kdive.images.cataloging.capability_signals import (
     REGISTERED_SIGNALS,
     render_direct_kernel_signal,
     render_kdump_signal,
+    render_live_drgn_signal,
 )
 from kdive.images.kdump_support import DEFAULT_KERNEL_BASIS
 
@@ -154,3 +155,47 @@ def test_kdump_signal_basis_build_verified_when_present_and_not_attested() -> No
 def test_kdump_signal_absent_operand_has_no_basis() -> None:
     block = render_kdump_signal(_entry([Capability.KDUMP], {}), DEFAULT_KERNEL_BASIS)
     assert "basis" not in block
+
+
+def test_live_drgn_registered_and_off_the_planned_list() -> None:
+    assert "live_drgn" in {s.name for s in REGISTERED_SIGNALS}
+    assert "live_drgn" not in {p.name for p in PLANNED_SIGNALS}
+
+
+def test_live_drgn_capable_with_recent_version_and_tooling() -> None:
+    block = render_live_drgn_signal(
+        _entry([Capability.DRGN], {"drgn_version": "0.0.33"}), DEFAULT_KERNEL_BASIS
+    )
+    assert set(block) == {"drgn_version", "capability", "min_drgn_required", "note", "basis"}
+    assert block["capability"] == "capable"
+    assert block["drgn_version"] == "0.0.33"
+    assert block["min_drgn_required"] == "0.0.31"
+    assert block["basis"] == "build_verified"
+
+
+def test_live_drgn_incapable_with_old_version() -> None:
+    block = render_live_drgn_signal(
+        _entry([Capability.DRGN], {"drgn_version": "0.0.22"}), DEFAULT_KERNEL_BASIS
+    )
+    assert block["capability"] == "incapable"
+    assert block["note"]  # an actionable note pointing at the threshold
+
+
+def test_live_drgn_not_applicable_without_tooling() -> None:
+    block = render_live_drgn_signal(_entry([], {"drgn_version": "0.0.33"}), DEFAULT_KERNEL_BASIS)
+    assert block["capability"] == "not_applicable"
+
+
+def test_live_drgn_degrades_to_unverified_when_operand_absent() -> None:
+    block = render_live_drgn_signal(_entry([Capability.DRGN], {}), DEFAULT_KERNEL_BASIS)
+    assert block["capability"] == "unverified"
+    assert block["drgn_version"] == ""
+    assert "basis" not in block
+
+
+def test_live_drgn_operator_attested_basis() -> None:
+    block = render_live_drgn_signal(
+        _entry([Capability.DRGN], {"drgn_version": "0.0.33"}, attested=True), DEFAULT_KERNEL_BASIS
+    )
+    assert block["capability"] == "capable"
+    assert block["basis"] == "operator_attested"

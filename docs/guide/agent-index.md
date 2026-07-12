@@ -92,8 +92,9 @@ Several choices are bound at `systems.provision` and expensive to change — alt
 means `systems.reprovision`, which rebuilds and reboots the system. Run down this list before
 your first provision so every irreversible choice is made up front:
 
-- **Base image** — pick it with `images.describe` and check its `kdump` and `direct_kernel`
-  `capability_signals` first (see the images guide). A wrong image can burn the allocation. An
+- **Base image** — pick it with `images.describe` and check its `kdump`, `direct_kernel`, and
+  `live_drgn` `capability_signals` first (see the images guide). A wrong image can burn the
+  allocation. An
   `unverified` signal is normal for an externally-baked or operator-staged image no one has
   characterized — not a defect; the check becomes actionable once the image is published or the
   operator attests it (`basis` then reads `build_verified` or `operator_attested`).

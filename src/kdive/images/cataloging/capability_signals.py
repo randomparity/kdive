@@ -13,9 +13,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from kdive.domain.catalog.images import Capability, ImageCatalogEntry
+from kdive.images.drgn_support import live_drgn_capability
 from kdive.images.kdump_support import KernelVersion, kdump_capability
 from kdive.images.planes.base import (
     PROVENANCE_BOOT_KERNEL_COUNT,
+    PROVENANCE_DRGN_VERSION,
     PROVENANCE_MAKEDUMPFILE_VERSION,
 )
 from kdive.serialization import JsonValue
@@ -130,8 +132,46 @@ DIRECT_KERNEL_SIGNAL = CapabilitySignal(
     name="direct_kernel", operand_keys=("boot_kernel_count",), render=render_direct_kernel_signal
 )
 
+
+def render_live_drgn_signal(
+    entry: ImageCatalogEntry, _target_kernel: KernelVersion
+) -> dict[str, JsonValue]:
+    """The live-introspection capability block for ``entry`` (operand-driven).
+
+    Reads the build-recorded ``provenance["drgn_version"]`` (``None`` when absent or not a string)
+    and whether the image carries the ``drgn`` tooling tag, then computes whether the shipped drgn
+    can introspect a booted kernel from the guest's own in-guest BTF without uploaded debuginfo. The
+    answer is a static image property (BTF lives in the running guest, not a target-kernel matrix),
+    so ``_target_kernel`` is accepted for the uniform signal signature and ignored. A reader never
+    raises on image data — a missing or unparseable stored version degrades to ``unverified``.
+    """
+    raw = entry.provenance.get(PROVENANCE_DRGN_VERSION)
+    has_operand = isinstance(raw, str) and bool(raw)
+    cap = live_drgn_capability(
+        drgn_version=raw if has_operand else None,
+        drgn_tooling=Capability.DRGN in entry.capabilities,
+    )
+    block: dict[str, JsonValue] = {
+        "drgn_version": raw if isinstance(raw, str) else "",
+        "capability": cap.status,
+        "min_drgn_required": cap.min_drgn_required,
+        "note": cap.note,
+    }
+    if has_operand:
+        block["basis"] = _provenance_basis(entry)
+    return block
+
+
+LIVE_DRGN_SIGNAL = CapabilitySignal(
+    name="live_drgn", operand_keys=("drgn_version",), render=render_live_drgn_signal
+)
+
 #: The computed signals an agent reads from ``images.describe`` ``data.capability_signals``.
-REGISTERED_SIGNALS: tuple[CapabilitySignal, ...] = (KDUMP_SIGNAL, DIRECT_KERNEL_SIGNAL)
+REGISTERED_SIGNALS: tuple[CapabilitySignal, ...] = (
+    KDUMP_SIGNAL,
+    DIRECT_KERNEL_SIGNAL,
+    LIVE_DRGN_SIGNAL,
+)
 
 #: The signals the metadata audit named that are not honestly computable yet — each blocked on a
 #: build operand that does not exist until its tracking issue lands. Documented, guarded to stay
@@ -142,19 +182,17 @@ PLANNED_SIGNALS: tuple[PlannedSignal, ...] = (
         "#952",
         "SysRq availability can report false success; needs a build-recorded operand",
     ),
-    PlannedSignal(
-        "live_drgn",
-        "#762/#697",
-        "drgn liveness depends on provider introspection and a drgn-capable guest image",
-    ),
 )
 
 __all__ = [
     "DIRECT_KERNEL_SIGNAL",
+    "KDUMP_SIGNAL",
+    "LIVE_DRGN_SIGNAL",
     "PLANNED_SIGNALS",
     "REGISTERED_SIGNALS",
     "CapabilitySignal",
     "PlannedSignal",
     "render_direct_kernel_signal",
     "render_kdump_signal",
+    "render_live_drgn_signal",
 ]
