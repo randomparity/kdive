@@ -372,7 +372,13 @@ def _register_systems_authorize_ssh_key(
             Field(description="The agent SSH public key to authorize in the guest root account."),
         ],
     ) -> ToolResponse:
-        """Authorize an agent SSH public key in a ready System's guest root account."""
+        """Authorize an agent SSH public key in a ready System's guest root account.
+
+        Enqueues a worker job and returns a job handle; poll ``jobs.wait`` until it is
+        ``succeeded`` before connecting — the key is not installed, and SSH will not
+        authenticate with it, until the job completes. Once the job succeeds, use
+        ``systems.ssh_info`` for the connection coordinates.
+        """
         return await _authorize_ssh_key(
             pool, current_context(), system_id, public_key, resolver=resolver
         )
