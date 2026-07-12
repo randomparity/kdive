@@ -32,7 +32,8 @@ the first tool to call.
 7. **Observe evidence** — `runs.get` for status and console access, `artifacts.list` and
    `artifacts.get` for logs and other files.
 8. **Debug live** — `debug.start_session`, then breakpoints, memory, and stack tools; or
-   `introspect.run` for non-halting drgn introspection. See the debug and introspect guides.
+   `debug.start_session(transport="drgn-live")` followed by `introspect.run`/`introspect.script`
+   for non-halting drgn introspection against that session. See the debug and introspect guides.
 9. **Triage a crash** — induce one deliberately with `control.force_crash` if needed, then
    `vmcore.fetch` and `postmortem.triage`. See the control and postmortem guides.
 10. **Release** — `allocations.release` when done.
@@ -108,9 +109,12 @@ your first provision so every irreversible choice is made up front:
 - **`debug.preserve_on_crash: true`** — set it to hold a crashed guest (vCPUs stopped) for
   post-panic inspection.
 
-Live drgn introspection (`introspect.run`) needs **no** provisioning knob — it works on any
-ready local system (the SSH forward is rendered on every domain), and its only requirement is a
-drgn-capable guest image. The two debug knobs are detailed next.
+Live drgn introspection (`introspect.run`/`introspect.script`) needs **no** provisioning knob —
+any ready local system can attach (the SSH forward is rendered on every domain), and the only
+image requirement is a drgn-capable guest. But it is not provision-free at call time: both tools
+take a `session_id` and only resolve against a live **drgn-live** `DebugSession`, so you must
+first open one with `debug.start_session(transport="drgn-live")`. The two debug knobs above are
+detailed next.
 
 ## Provisioning for debugging and live introspection
 
@@ -125,10 +129,14 @@ and reboots the system (an expensive cycle). Decide these before you provision:
   stopped) instead of destroying it, so you can attach and inspect the halted kernel after
   a panic.
 
-Live drgn introspection (`introspect.run`) is **not** provision-bound: the SSH forward is
-rendered on every domain and the drgn-over-SSH transport authenticates with the per-System
-bootstrap key, so a ready local system needs no credential knob. Its only requirement is a
-drgn-capable guest image (`introspect.run` reports `missing_dependency` if drgn is absent).
+Live drgn introspection (`introspect.run`/`introspect.script`) is **not** provision-bound: the
+SSH forward is rendered on every domain and the drgn-over-SSH transport authenticates with the
+per-System bootstrap key, so a ready local system needs no credential knob. Its only image
+requirement is a drgn-capable guest (`introspect.run` reports `missing_dependency` if drgn is
+absent). It does, however, require a live session: call
+`debug.start_session(transport="drgn-live")` first and pass the returned `session_id` to
+`introspect.run`/`introspect.script` — a successful drgn-live attach suggests both as next
+actions. Use `debug.end_session` to release the session when you're done.
 
 These flags default off, so a plain profile provisions a system you can build, boot, and
 observe on but not live-debug. `systems.profile_examples` returns starting-point profiles;

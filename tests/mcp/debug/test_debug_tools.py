@@ -948,7 +948,12 @@ def test_start_session_drgn_live_warns_when_config_lacks_debuginfo(migrated_url:
         warning = cast(dict[str, Any], resp.data["missing_debuginfo"])
         assert warning["reason"] == "missing_debuginfo"
         assert "DEBUG_INFO_BTF" in cast(list[str], warning["missing"])
-        assert "artifacts.feature_config_requirements" in resp.suggested_next_actions
+        assert resp.suggested_next_actions == [
+            "artifacts.feature_config_requirements",
+            "introspect.run",
+            "introspect.script",
+            "debug.end_session",
+        ]
 
     asyncio.run(_run())
 
@@ -973,7 +978,11 @@ def test_start_session_drgn_live_no_warning_when_config_has_debuginfo(migrated_u
                 )
         assert resp.status == "live"
         assert "missing_debuginfo" not in resp.data
-        assert resp.suggested_next_actions == ["debug.end_session"]
+        assert resp.suggested_next_actions == [
+            "introspect.run",
+            "introspect.script",
+            "debug.end_session",
+        ]
 
     asyncio.run(_run())
 
