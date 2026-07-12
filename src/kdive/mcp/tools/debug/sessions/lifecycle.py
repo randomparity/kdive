@@ -532,7 +532,7 @@ async def _insert_session_locked(
 ) -> ToolResponse:
     """Persist an admitted session and render the transport-neutral service result."""
     result = await debug_lifecycle.insert_session_locked(conn, ctx, request, handle)
-    return _render_attach_result(result)
+    return _render_attach_result(result, transport=request.transport)
 
 
 async def _detach_locked(
@@ -553,14 +553,19 @@ async def _close(connector: Connector, handle: str | None) -> None:
 
 def _render_attach_result(
     result: debug_lifecycle.AttachAdmitted | debug_lifecycle.DebugSessionRejected,
+    *,
+    transport: DebugTransportKind,
 ) -> ToolResponse:
     if isinstance(result, debug_lifecycle.DebugSessionRejected):
         return _render_rejection(result)
     data: dict[str, JsonValue] = {"project": result.project}
-    actions = ["debug.end_session"]
+    actions = []
     if result.missing_debuginfo is not None:
         data["missing_debuginfo"] = result.missing_debuginfo
-        actions = ["artifacts.feature_config_requirements", "debug.end_session"]
+        actions.append("artifacts.feature_config_requirements")
+    if transport == _DRGN_LIVE:
+        actions.extend(["introspect.run", "introspect.script"])
+    actions.append("debug.end_session")
     return ToolResponse.success(
         str(result.session_id),
         "live",
