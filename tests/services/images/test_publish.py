@@ -106,6 +106,33 @@ def _qcow2_source(tmp_path: Path) -> Path:
     return src
 
 
+def test_config_object_key_matches_kernel_config_object_key_public() -> None:
+    """The plain-args helper produces the byte-identical key the request wrapper does (public)."""
+    from kdive.services.images.publish import config_object_key
+
+    assert config_object_key(
+        _PUBLIC_REQUEST.provider,
+        _PUBLIC_REQUEST.name,
+        _PUBLIC_REQUEST.arch,
+        _PUBLIC_REQUEST.visibility,
+        _PUBLIC_REQUEST.owner,
+    ) == kernel_config_object_key(_PUBLIC_REQUEST)
+
+
+def test_config_object_key_matches_kernel_config_object_key_private() -> None:
+    """Owner-scoped private key stays identical across the helper and the request wrapper."""
+    from kdive.services.images.publish import config_object_key
+
+    request = replace(
+        _PUBLIC_REQUEST, visibility=ImageVisibility.PRIVATE, owner="proj", expires_at=_DT
+    )
+    key = config_object_key(
+        request.provider, request.name, request.arch, request.visibility, request.owner
+    )
+    assert key == kernel_config_object_key(request)
+    assert "local-libvirt__proj" in key
+
+
 def test_publish_request_rejects_scope_fields_that_do_not_match_visibility() -> None:
     with pytest.raises(ValueError, match="owner must be set iff visibility is private"):
         replace(_PUBLIC_REQUEST, visibility=ImageVisibility.PRIVATE, expires_at=_DT)
