@@ -113,20 +113,23 @@ async def _insert_characterized(
     capabilities: list[str],
     provenance: dict[str, object],
     description: str | None,
+    kernel_config_key: str | None = None,
 ) -> None:
     async with pool.connection() as conn:
         await conn.execute(
             "INSERT INTO image_catalog "
             "(provider, name, arch, format, root_device, object_key, digest, visibility, owner, "
-            " state, pending_since, capabilities, provenance, description) "
+            " state, pending_since, capabilities, provenance, description, kernel_config_key) "
             "VALUES ('local-libvirt', %(name)s, 'x86_64', 'qcow2', '/dev/vda', %(key)s, "
-            " 'sha256:abc', 'public', NULL, 'registered', now(), %(caps)s, %(prov)s, %(desc)s)",
+            " 'sha256:abc', 'public', NULL, 'registered', now(), %(caps)s, %(prov)s, %(desc)s, "
+            " %(config_key)s)",
             {
                 "name": name,
                 "key": f"images/local-libvirt/{name}/x86_64.qcow2",
                 "caps": capabilities,
                 "prov": Jsonb(provenance),
                 "desc": description,
+                "config_key": kernel_config_key,
             },
         )
 
@@ -317,6 +320,29 @@ def test_list_row_carries_capabilities_os_description(migrated_url: str) -> None
         assert data["os"] == {"id": "fedora", "version_id": "43"}
         assert data["default_kernel_version"] == "6.19.10-300.fc44.x86_64"
         assert data["description"] == "RHEL-family debug host"
+
+    asyncio.run(_run())
+
+
+def test_list_row_advertises_has_kernel_config(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert_characterized(
+                pool,
+                name="with-config",
+                capabilities=[],
+                provenance={},
+                description=None,
+                kernel_config_key="images/local-libvirt/with-config/x86_64.config",
+            )
+            await _insert_characterized(
+                pool, name="no-config", capabilities=[], provenance={}, description=None
+            )
+            resp = await catalog_images.list_images(pool, _ctx())
+        assert _item(resp, "with-config").data["has_kernel_config"] is True
+        assert _item(resp, "no-config").data["has_kernel_config"] is False
+        # the internal object key never reaches the list surface (ADR-0317)
+        assert "images/local-libvirt/with-config/x86_64.config" not in str(resp.model_dump())
 
     asyncio.run(_run())
 

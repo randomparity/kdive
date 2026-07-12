@@ -35,8 +35,10 @@ Delete an image catalog entry.
 Return full detail for one catalog image visible to the caller.
 
 Includes boot layout, digest, capabilities, scope, publish state,
-``data.default_kernel_version`` (the image's default kernel, ``""`` when unknown), build
-``provenance`` (with captured
+``data.default_kernel_version`` (the image's default kernel, ``""`` when unknown),
+``data.has_kernel_config`` (``true`` when the image offers a downloadable
+``/boot/config-<ver>`` starting point — call ``images.kernel_config`` only when ``true``),
+build ``provenance`` (with captured
 ``package_versions``/``makedumpfile_version``/``boot_kernel_count`` when present), and
 computed ``data.capability_signals`` (each signal keyed by name): ``kdump``
 (the capability for ``target_kernel``, kernel basis disclosed), ``direct_kernel``
@@ -95,11 +97,13 @@ image, or one whose ``/boot`` lacked a single kernel/config) returns a
 List visible image catalog entries across publish states.
 
 Each row carries the build-fact ``data.capabilities``, a compact verified ``data.os``
-identity, and ``data.default_kernel_version`` (the kernel the image ships and boots by
-default, ``""`` when unknown) so an agent can compare images on merit — distro, version,
-default kernel — in one call. The publish state appears as the item envelope ``status`` and
-as ``data.state``. Keyset-paginated: when ``data.truncated`` is true, pass
-``data.next_cursor`` back as ``request.cursor`` for the next page.
+identity, ``data.default_kernel_version`` (the kernel the image ships and boots by
+default, ``""`` when unknown), and ``data.has_kernel_config`` (``true`` when the image
+offers a downloadable ``/boot/config-<ver>`` starting point, ``false`` when it has none —
+do not call ``images.kernel_config`` on a ``false`` row) so an agent can compare images on
+merit — distro, version, default kernel — in one call. The publish state appears as the item
+envelope ``status`` and as ``data.state``. Keyset-paginated: when ``data.truncated`` is
+true, pass ``data.next_cursor`` back as ``request.cursor`` for the next page.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

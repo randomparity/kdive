@@ -45,10 +45,8 @@ def _plain(*symbols: str) -> tuple[Clause, ...]:
 FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
     FeatureRequirement(
         "rootfs_mount",
-        "Mount the kdive squashfs+overlay rootfs the guest boots from.",
-        _plain(
-            "SQUASHFS", "SQUASHFS_ZSTD", "OVERLAY_FS", "BLK_DEV_LOOP", "XFS_FS", "XFS_POSIX_ACL"
-        ),
+        "Mount the ext4 root filesystem direct-kernel boots from (root=/dev/vda, no initramfs).",
+        _plain("EXT4_FS", "VIRTIO_BLK"),
     ),
     FeatureRequirement(
         CRASH_CAPTURE,
@@ -102,7 +100,7 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
     FeatureRequirement(
         "serial_console",
         "Serial console + virtio devices the local-libvirt profile expects.",
-        _plain("SERIAL_8250_CONSOLE", "VIRTIO_BLK", "VIRTIO_PCI"),
+        _plain("SERIAL_8250_CONSOLE", "VIRTIO_PCI"),
     ),
 )
 

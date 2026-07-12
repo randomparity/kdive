@@ -52,6 +52,7 @@ async def _insert(
     provenance: str = "{}",
     provenance_attested: bool = False,
     description: str | None = None,
+    kernel_config_key: str | None = None,
 ) -> str:
     key = None if state == "defined" else f"images/local-libvirt/{name}/x86_64.qcow2"
     digest = None if state == "defined" else "sha256:abc"
@@ -60,12 +61,12 @@ async def _insert(
             "INSERT INTO image_catalog "
             "(provider, name, arch, format, root_device, object_key, digest, capabilities, "
             " provenance, provenance_attested, visibility, owner, expires_at, state, "
-            " pending_since, description) "
+            " pending_since, description, kernel_config_key) "
             "VALUES ('local-libvirt', %(name)s, 'x86_64', 'qcow2', '/dev/vda', %(key)s, "
             " %(digest)s, %(capabilities)s, %(provenance)s::jsonb, %(attested)s, %(vis)s, "
             " %(owner)s, "
             " CASE WHEN %(vis)s = 'private' THEN now() + interval '1 hour' ELSE NULL END, "
-            " %(state)s, now(), %(description)s) RETURNING id",
+            " %(state)s, now(), %(description)s, %(kernel_config_key)s) RETURNING id",
             {
                 "name": name,
                 "key": key,
@@ -77,6 +78,7 @@ async def _insert(
                 "owner": owner,
                 "state": state,
                 "description": description,
+                "kernel_config_key": kernel_config_key,
             },
         )
         row = await cur.fetchone()
@@ -142,6 +144,28 @@ def test_describe_reports_default_kernel_version(migrated_url: str) -> None:
             absent = await catalog_images.describe_image(pool, _ctx(), image_id=without)
         assert present.data["default_kernel_version"] == "6.19.10-300.fc44.x86_64"
         assert absent.data["default_kernel_version"] == ""
+
+    asyncio.run(_run())
+
+
+def test_describe_advertises_has_kernel_config(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            offered = await _insert(
+                pool,
+                name="with-config",
+                visibility="public",
+                owner=None,
+                kernel_config_key="images/local-libvirt/with-config/x86_64.config",
+            )
+            none = await _insert(pool, name="no-config", visibility="public", owner=None)
+            with_config = await catalog_images.describe_image(pool, _ctx(), offered)
+            without = await catalog_images.describe_image(pool, _ctx(), none)
+        assert with_config.data["has_kernel_config"] is True
+        assert without.data["has_kernel_config"] is False
+        # the internal object key stays withheld from the agent surface (ADR-0317)
+        assert "kernel_config_key" not in with_config.data
+        assert "images/local-libvirt/with-config/x86_64.config" not in str(with_config.model_dump())
 
     asyncio.run(_run())
 
