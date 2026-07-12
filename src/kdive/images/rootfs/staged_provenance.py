@@ -33,6 +33,11 @@ SIDECAR_SCHEMA = "kdive.staged-provenance.v1"
 #: this; the cap is a defense against an oversized on-disk file reaching the row / agent response.
 _SIDECAR_MAX_BYTES = 64 * 1024
 
+#: Upper bound on a captured ``.config`` sibling. A ``/boot/config-<ver>`` is ~250 KiB; cap
+#: generously so a legitimate config always passes while a runaway on-disk file is still rejected
+#: before it lands in memory (ADR-0336).
+_CONFIG_MAX_BYTES = 4 * 1024 * 1024
+
 
 def sidecar_path(qcow2: Path) -> Path:
     """The sidecar path for ``qcow2``: ``<qcow2-path>.provenance.json``.
@@ -111,5 +116,60 @@ def _read_bounded(path: Path) -> bytes | None:
         _log.warning(
             "staged-provenance sidecar %s exceeds %d bytes; ignoring", path, _SIDECAR_MAX_BYTES
         )
+        return None
+    return data
+
+
+def config_sibling_path(qcow2: Path) -> Path:
+    """The kernel-config sibling path for ``qcow2``: ``<qcow2-path>.config`` (ADR-0336).
+
+    Like :func:`sidecar_path`, the suffix is appended (not substituted) so the sibling is bound to a
+    specific qcow2 filename. Carries the build's captured ``/boot/config-<ver>`` bytes for the
+    reconcile to read and upload.
+    """
+    return Path(f"{qcow2}.config")
+
+
+def write_config_sibling(qcow2: Path, *, config: bytes) -> None:
+    """Atomically write the captured kernel ``config`` bytes to ``qcow2``'s ``.config`` sibling.
+
+    Writes to a temp file in the destination directory and ``os.replace``\\ s it onto the sibling
+    path, so a concurrent reader never sees a partial file — the same durability the provenance
+    sidecar uses.
+
+    Raises:
+        OSError: The temporary write or the rename failed. The caller decides whether to degrade
+            (``build-fs`` treats a sibling-write failure as advisory and does not fail the build).
+    """
+    target = config_sibling_path(qcow2)
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=".config-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(config)
+        os.replace(tmp_name, target)
+    except OSError:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+
+
+def read_config_sibling(qcow2: Path) -> bytes | None:
+    """Return ``qcow2``'s ``.config`` sibling bytes, or ``None`` if there is no usable sibling.
+
+    A usable sibling is present, readable, and at most :data:`_CONFIG_MAX_BYTES`. Anything else —
+    absent, unreadable, or over-cap — returns ``None`` and never raises (an absent sibling is
+    silent; an unreadable or oversized one is logged at warning). The reconcile treats ``None`` as
+    "no config captured" and preserves the row's existing offer.
+    """
+    path = config_sibling_path(qcow2)
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(_CONFIG_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        _log.warning("kernel-config sibling %s could not be read; ignoring", path)
+        return None
+    if len(data) > _CONFIG_MAX_BYTES:
+        _log.warning("kernel-config sibling %s exceeds %d bytes; ignoring", path, _CONFIG_MAX_BYTES)
         return None
     return data

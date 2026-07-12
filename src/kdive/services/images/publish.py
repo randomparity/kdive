@@ -35,14 +35,12 @@ from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 
 from kdive.artifacts import storage as artifact_types
-from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.image_format import ImageFormat
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.cataloging.object_keys import config_object_key, object_write_request
 
 _log = logging.getLogger(__name__)
-
-_RETENTION_CLASS = "image"
 
 
 class ImageObjectStore(Protocol):
@@ -101,36 +99,18 @@ class PublishRequest:
             raise ValueError("expires_at must be set iff visibility is private")
 
 
-def _object_owner_kind(request: PublishRequest) -> str:
-    """The ``owner_kind`` key segment, owner-scoped for a private image.
-
-    A public image keys its provider directly (``{provider}``); a private image folds the owning
-    project into the segment (``{provider}__{owner}``) so two projects' private images of the same
-    ``(provider, name, arch)`` never collide on one object. The ``__`` separator is illegal in a
-    provider/project name, so the segment stays unambiguous and slash-free (``artifact_key``
-    rejects slashes in a component).
-    """
-    if request.visibility is ImageVisibility.PRIVATE and request.owner is not None:
-        return f"{request.provider}__{request.owner}"
-    return request.provider
-
-
 def _write_request(
     request: PublishRequest, data: bytes, *, suffix: str
 ) -> artifact_types.ArtifactWriteRequest:
-    """An image-tenant write request scoped to the request's visibility/owner, named by ``suffix``.
-
-    The qcow2 (``suffix="qcow2"``) and its kernel-config sibling (``suffix="config"``) share the
-    same tenant/owner-scoped prefix and differ only in the object-name suffix.
-    """
-    return artifact_types.ArtifactWriteRequest(
-        tenant="images",
-        owner_kind=_object_owner_kind(request),
-        owner_id=request.name,
-        name=f"{request.arch}.{suffix}",
+    """A write request for ``request`` (delegates to the shared image object-key layout)."""
+    return object_write_request(
+        request.provider,
+        request.name,
+        request.arch,
+        request.visibility,
+        request.owner,
         data=data,
-        sensitivity=Sensitivity.REDACTED,
-        retention_class=_RETENTION_CLASS,
+        suffix=suffix,
     )
 
 
@@ -151,9 +131,11 @@ def kernel_config_object_key(request: PublishRequest) -> str:
 
     Same tenant/owner scoping as :func:`image_object_key`; the ``.config`` suffix distinguishes it
     from the ``{arch}.qcow2`` object. Persisted on the row's ``kernel_config_key`` when a config is
-    offered, ``None`` otherwise.
+    offered, ``None`` otherwise. Delegates to :func:`config_object_key` (the single key source).
     """
-    return _write_request(request, b"", suffix="config").key()
+    return config_object_key(
+        request.provider, request.name, request.arch, request.visibility, request.owner
+    )
 
 
 async def _adopt_or_insert_pending(

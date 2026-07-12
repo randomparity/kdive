@@ -38,7 +38,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts.storage import ObjectListing
+from kdive.artifacts.storage import ArtifactWriteRequest, ObjectListing, StoredArtifact
 from kdive.domain.catalog.images import ImageCatalogEntry
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.cataloging.capability_signals import render_direct_kernel_signal
@@ -71,10 +71,18 @@ class _FakeImageStore:
     records ``delete`` calls — reconcile must never append to it (prune is row-delete-only).
     """
 
-    def __init__(self, present: set[str] | None = None, *, unreachable: bool = False) -> None:
+    def __init__(
+        self,
+        present: set[str] | None = None,
+        *,
+        unreachable: bool = False,
+        put_fails: bool = False,
+    ) -> None:
         self._present = set(present or ())
         self._unreachable = unreachable
+        self._put_fails = put_fails
         self.deleted: list[str] = []
+        self.put: dict[str, bytes] = {}
 
     def head_present(self, key: str) -> bool:
         if self._unreachable:
@@ -91,6 +99,22 @@ class _FakeImageStore:
 
     def delete(self, key: str) -> None:  # pragma: no cover - asserted never called
         self.deleted.append(key)
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        if self._put_fails:
+            raise CategorizedError(
+                "object store put failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        key = request.key()
+        self.put[key] = request.data
+        self._present.add(key)
+        return StoredArtifact(
+            key=key,
+            etag="etag",
+            sensitivity=request.sensitivity,
+            retention_class=request.retention_class,
+        )
 
 
 def _write_toml(tmp_path: Path, body: str) -> Path:
@@ -128,13 +152,14 @@ async def _insert_registered_build_row(
     managed_by: str = "config",
     visibility: str = "public",
     owner: str | None = None,
+    kernel_config_key: str | None = None,
 ) -> UUID:
     """Insert a build-realized ``registered`` row (object_key + digest set)."""
     cur = await conn.execute(
         "INSERT INTO image_catalog "
         "(provider, name, arch, format, root_device, object_key, digest, visibility, owner, "
-        " state, managed_by, expires_at) "
-        "VALUES (%s, %s, %s, 'qcow2', '/dev/vda', %s, %s, %s, %s, 'registered', %s, %s) "
+        " state, managed_by, expires_at, kernel_config_key) "
+        "VALUES (%s, %s, %s, 'qcow2', '/dev/vda', %s, %s, %s, %s, 'registered', %s, %s, %s) "
         "RETURNING id",
         (
             provider,
@@ -146,6 +171,7 @@ async def _insert_registered_build_row(
             owner,
             managed_by,
             None if visibility == "public" else "now() + interval '1 day'",
+            kernel_config_key,
         ),
     )
     row = await cur.fetchone()
@@ -365,6 +391,160 @@ def test_staged_path_image_seeds_registered_with_path(migrated_url: str, tmp_pat
         assert row["managed_by"] == "config"
         assert "local-rootfs" in {c.name for c in diff.created}
         assert store.deleted == []
+
+    asyncio.run(_run())
+
+
+def _staged_path_config_toml(qcow2: Path) -> str:
+    return (
+        "schema_version = 2\n"
+        "[[image]]\n"
+        'provider = "local-libvirt"\n'
+        'name = "cfg-rootfs"\n'
+        'arch = "x86_64"\n'
+        'format = "qcow2"\n'
+        'root_device = "/dev/vda"\n'
+        'visibility = "public"\n'
+        "[image.source]\n"
+        'kind = "staged-path"\n'
+        f'path = "{qcow2}"\n'
+    )
+
+
+def _expected_config_key() -> str:
+    from kdive.domain.catalog.images import ImageVisibility
+    from kdive.services.images.publish import config_object_key
+
+    return config_object_key("local-libvirt", "cfg-rootfs", "x86_64", ImageVisibility.PUBLIC, None)
+
+
+def test_staged_path_uploads_config_sibling_and_sets_key(migrated_url: str, tmp_path: Path) -> None:
+    """A staged-path .config sibling is uploaded and its key persisted (ADR-0336)."""
+
+    async def _run() -> None:
+        qcow2 = tmp_path / "cfg-rootfs.qcow2"
+        (tmp_path / "cfg-rootfs.qcow2.config").write_bytes(b"CONFIG_DEBUG_INFO_BTF=y\n")
+        doc = load_inventory(_write_toml(tmp_path, _staged_path_config_toml(qcow2)))
+        store = _FakeImageStore()
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await reconcile_images(conn, doc, store)
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "cfg-rootfs")
+        key = _expected_config_key()
+        assert row["kernel_config_key"] == key
+        assert store.put[key] == b"CONFIG_DEBUG_INFO_BTF=y\n"
+
+    asyncio.run(_run())
+
+
+def test_staged_path_without_sibling_leaves_key_null(migrated_url: str, tmp_path: Path) -> None:
+    """No .config sibling means no offer (kernel_config_key stays NULL), no upload attempted."""
+
+    async def _run() -> None:
+        qcow2 = tmp_path / "cfg-rootfs.qcow2"
+        doc = load_inventory(_write_toml(tmp_path, _staged_path_config_toml(qcow2)))
+        store = _FakeImageStore()
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await reconcile_images(conn, doc, store)
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "cfg-rootfs")
+        assert row["kernel_config_key"] is None
+        assert store.put == {}
+
+    asyncio.run(_run())
+
+
+def test_staged_path_config_key_not_reuploaded_once_set(migrated_url: str, tmp_path: Path) -> None:
+    """The 'key absent' gate: a second reconcile with the sibling present does not re-upload."""
+
+    async def _run() -> None:
+        qcow2 = tmp_path / "cfg-rootfs.qcow2"
+        (tmp_path / "cfg-rootfs.qcow2.config").write_bytes(b"CONFIG_X=y\n")
+        doc = load_inventory(_write_toml(tmp_path, _staged_path_config_toml(qcow2)))
+        store = _FakeImageStore()
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await reconcile_images(conn, doc, store)
+            store.put.clear()  # first pass uploaded; a second must not
+            second = await reconcile_images(conn, doc, store)
+        assert store.put == {}
+        assert not second.updated  # key unchanged -> no redundant UPDATE
+
+    asyncio.run(_run())
+
+
+def test_staged_path_config_upload_failure_degrades_to_no_offer(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    """A put failure is advisory: reconcile succeeds and the row simply offers no config."""
+
+    async def _run() -> None:
+        qcow2 = tmp_path / "cfg-rootfs.qcow2"
+        (tmp_path / "cfg-rootfs.qcow2.config").write_bytes(b"CONFIG_X=y\n")
+        doc = load_inventory(_write_toml(tmp_path, _staged_path_config_toml(qcow2)))
+        store = _FakeImageStore(put_fails=True)
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await reconcile_images(conn, doc, store)  # must not raise
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "cfg-rootfs")
+        assert row["kernel_config_key"] is None
+
+    asyncio.run(_run())
+
+
+def test_reconcile_preserves_publish_owned_kernel_config_key(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    """Finding #1 regression: a publish_image-owned key survives reconcile, never NULLed."""
+
+    async def _run() -> None:
+        published_key = "images/local-libvirt/built/x86_64.config"
+        async with await _connect(migrated_url) as seed:
+            await _insert_registered_build_row(
+                seed,
+                name="built",
+                object_key="images/local-libvirt/built/x86_64.qcow2",
+                digest="sha256:dead",
+                kernel_config_key=published_key,
+            )
+        doc = load_inventory(
+            _write_toml(
+                tmp_path,
+                "schema_version = 2\n"
+                "[[image]]\n"
+                'provider = "local-libvirt"\n'
+                'name = "built"\n'
+                'arch = "x86_64"\n'
+                'format = "qcow2"\n'
+                'root_device = "/dev/vda"\n'
+                'visibility = "public"\n'
+                "[image.source]\n"
+                'kind = "build"\n'
+                'base = "fedora-43"\n',
+            )
+        )
+        store = _FakeImageStore()
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await reconcile_images(conn, doc, store)
+            await reconcile_images(conn, doc, store)  # a second pass must also preserve it
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "built")
+        assert row["kernel_config_key"] == published_key
+        assert store.put == {}  # a build row never triggers a config upload
 
     asyncio.run(_run())
 

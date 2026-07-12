@@ -15,7 +15,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildPlane, RootfsBuildSpec
 from kdive.images.rootfs.kinds import RootfsImageKind
 from kdive.images.rootfs.specs import catalog_rootfs_build
-from kdive.images.rootfs.staged_provenance import write_sidecar
+from kdive.images.rootfs.staged_provenance import write_config_sibling, write_sidecar
 from kdive.providers.assembly.composition import build_local_rootfs_build_plane
 
 _log = logging.getLogger(__name__)
@@ -134,6 +134,7 @@ def run_build_fs(args: argparse.Namespace) -> None:
     dest = Path(params.dest).resolve()
     _publish_rootfs(output, dest)
     _write_provenance_sidecar(dest, output)
+    _write_config_sibling(dest, output)
     _log.info(
         "built %s rootfs %s digest=%s; set KDIVE_GUEST_IMAGE to this path",
         params.kind,
@@ -155,6 +156,23 @@ def _write_provenance_sidecar(dest: Path, output: RootfsBuildOutput) -> None:
         write_sidecar(dest, provenance=output.provenance)
     except OSError, TypeError, ValueError:
         _log.warning("could not write provenance sidecar for %s; skipping", dest, exc_info=True)
+
+
+def _write_config_sibling(dest: Path, output: RootfsBuildOutput) -> None:
+    """Record the build's captured kernel config beside the qcow2 for the reconcile (ADR-0336).
+
+    Advisory, like the provenance sidecar: when the build captured a ``/boot/config-<ver>``
+    (``output.kernel_config`` is not ``None``), write it to ``<dest>.config`` so the staged-path
+    reconcile can offer it. A ``None`` config (no single baseline kernel / no config / probe
+    failure) writes nothing, and a write failure is logged and swallowed — the row simply offers no
+    config, exactly as today.
+    """
+    if output.kernel_config is None:
+        return
+    try:
+        write_config_sibling(dest, config=output.kernel_config)
+    except OSError:
+        _log.warning("could not write kernel-config sibling for %s; skipping", dest, exc_info=True)
 
 
 def _kind_for_capabilities(capabilities: tuple[Capability, ...]) -> RootfsImageKind:

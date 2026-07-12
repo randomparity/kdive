@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import pytest
@@ -231,3 +232,90 @@ def test_build_fs_non_serializable_provenance_is_advisory(
         run_build_fs(args)  # does not raise
     assert dest.exists()  # the qcow2 was still published
     assert any("sidecar" in r.getMessage() for r in caplog.records)
+
+
+def _patch_plane_config(
+    monkeypatch: pytest.MonkeyPatch, produced: Path, kernel_config: bytes | None
+) -> None:
+    """Patch the plane to produce ``produced`` carrying ``kernel_config``."""
+
+    class _FakePlane:
+        def build(self, spec: RootfsBuildSpec) -> RootfsBuildOutput:
+            return RootfsBuildOutput(
+                qcow2_path=produced,
+                digest="sha256:abc",
+                provenance={},
+                kernel_config=kernel_config,
+            )
+
+    monkeypatch.setattr(
+        "kdive.images.rootfs.command._build_local_rootfs_plane",
+        lambda _workspace: _FakePlane(),
+    )
+
+
+def _build_fs_args(tmp_path: Path, dest: Path) -> argparse.Namespace:
+    return build_parser().parse_args(
+        [
+            "build-fs",
+            "--image",
+            "fedora-kdive-ready-44",
+            "--workspace",
+            str(tmp_path / "ws"),
+            "--dest",
+            str(dest),
+        ]
+    )
+
+
+def test_build_fs_writes_config_sibling_when_captured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`build-fs` writes the captured kernel config to a `.config` sibling (ADR-0336)."""
+    from kdive.images.rootfs.staged_provenance import config_sibling_path
+
+    produced = tmp_path / "plane" / "img.qcow2"
+    produced.parent.mkdir(parents=True)
+    produced.write_bytes(b"image-bytes")
+    config = b"CONFIG_DEBUG_INFO_BTF=y\n"
+    _patch_plane_config(monkeypatch, produced, config)
+    dest = tmp_path / "out.qcow2"
+    run_build_fs(_build_fs_args(tmp_path, dest))
+    assert config_sibling_path(dest).read_bytes() == config
+
+
+def test_build_fs_writes_no_config_sibling_when_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `None` captured config writes no sibling (no single kernel / no config / probe miss)."""
+    from kdive.images.rootfs.staged_provenance import config_sibling_path
+
+    produced = tmp_path / "plane" / "img.qcow2"
+    produced.parent.mkdir(parents=True)
+    produced.write_bytes(b"image-bytes")
+    _patch_plane_config(monkeypatch, produced, None)
+    dest = tmp_path / "out.qcow2"
+    run_build_fs(_build_fs_args(tmp_path, dest))
+    assert not config_sibling_path(dest).exists()
+
+
+def test_build_fs_config_sibling_write_failure_is_advisory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A config-sibling write failure warns and does not fail the build."""
+    import logging
+
+    produced = tmp_path / "plane" / "img.qcow2"
+    produced.parent.mkdir(parents=True)
+    produced.write_bytes(b"image-bytes")
+    _patch_plane_config(monkeypatch, produced, b"CONFIG_X=y\n")
+    dest = tmp_path / "out.qcow2"
+
+    def _boom(_qcow2: Path, *, config: bytes) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("kdive.images.rootfs.command.write_config_sibling", _boom)
+    with caplog.at_level(logging.WARNING):
+        run_build_fs(_build_fs_args(tmp_path, dest))  # does not raise
+    assert dest.exists()
+    assert any("kernel-config sibling" in r.getMessage() for r in caplog.records)

@@ -22,7 +22,8 @@ import logging
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.errors import ErrorCategory
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory_optional
 from kdive.inventory.model import InventoryDoc
@@ -53,11 +54,19 @@ class _AbsentImageStore:
 
     Every HEAD reports absent, so an ``s3`` image stays ``defined`` + warns (exactly the
     store-down degrade the engine already tolerates), while ``staged`` images and resources
-    reconcile normally — the inventory pass needs no S3 to do most of its work.
+    reconcile normally — the inventory pass needs no S3 to do most of its work. A kernel-config
+    upload (ADR-0336) has no store to write to, so ``put_artifact`` raises the categorized failure
+    the reconcile treats as advisory: the staged image still reconciles, just with no config offer.
     """
 
     def head_present(self, key: str) -> bool:  # noqa: ARG002 - protocol param name, unused
         return False
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:  # noqa: ARG002
+        raise CategorizedError(
+            "no object store configured; cannot upload the image kernel config",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
 
 
 async def reconcile_systems(

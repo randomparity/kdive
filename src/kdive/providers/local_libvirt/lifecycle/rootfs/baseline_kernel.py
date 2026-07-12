@@ -16,8 +16,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.rootfs.baseline import VMLINUZ_PREFIX as _VMLINUZ_PREFIX
+from kdive.images.rootfs.baseline import baseline_kernel_names
 
-_VMLINUZ_PREFIX = "vmlinuz-"
+__all__ = ["baseline_kernel_names"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,19 +36,6 @@ type ExtractBaselineKernel = Callable[[Path, Path, str | None], BaselineKernel]
 The third argument is the optional ``baseline_kernel`` hint (ADR-0310) that disambiguates a
 multi-kernel ``/boot``; ``None`` keeps fail-closed selection.
 """
-
-
-def baseline_kernel_names(boot_entries: list[str]) -> list[str]:
-    """The non-rescue ``vmlinuz-<ver>`` basenames in a ``/boot`` listing — the baseline candidates.
-
-    Accepts full paths or bare basenames (each is reduced to its basename). Non-``vmlinuz`` entries
-    and rescue images are excluded. This is the single classifier both the fail-closed provision
-    selection (:func:`select_kernel_and_initrd`) and the build-time ``boot_kernel_count`` capture
-    use, so the recorded count predicts the provision-time selection outcome: exactly one candidate
-    is the only provisionable case (ADR-0272/0295).
-    """
-    names = [os.path.basename(entry) for entry in boot_entries]
-    return [n for n in names if n.startswith(_VMLINUZ_PREFIX) and "rescue" not in n]
 
 
 def select_kernel_and_initrd(

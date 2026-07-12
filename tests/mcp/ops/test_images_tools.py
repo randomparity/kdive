@@ -32,6 +32,7 @@ from fastmcp import FastMCP
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.config.core_settings import IMAGE_PRIVATE_LIFETIME_MAX
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
@@ -75,6 +76,16 @@ class _FakeImageStore:
 
     def delete(self, key: str) -> None:
         self.deleted.append(key)
+
+    def put_artifact(
+        self, request: ArtifactWriteRequest
+    ) -> StoredArtifact:  # pragma: no cover - sweeps never upload
+        return StoredArtifact(
+            key=request.key(),
+            etag="etag",
+            sensitivity=request.sensitivity,
+            retention_class=request.retention_class,
+        )
 
 
 class _UnusedUploadStore:
