@@ -11,14 +11,19 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.repositories import RUNS
 from kdive.domain.errors import CategorizedError
 from kdive.domain.external_provenance import external_source_provenance
+from kdive.kernel_config.gate import rootfs_mount_warning
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools.catalog.artifacts.expected_uploads import EXPECTED_UPLOADS_TOOL
+from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
+    FEATURE_CONFIG_REQUIREMENTS_TOOL,
+)
 from kdive.mcp.tools.catalog.artifacts.uploads import CREATE_RUN_UPLOAD_TOOL
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.serialization import JsonValue
 from kdive.services.runs.complete_build import (
     CompleteBuildConfigurationError,
     CompleteBuildFinalizer,
@@ -94,7 +99,7 @@ class CompleteBuildHandlers:
 
         recorded = await _existing_build_result(conn, uid)
         if recorded is not None:
-            return _complete_envelope(uid, recorded)
+            return await self._success_envelope(conn, uid, recorded)
 
         service = CompleteBuildFinalizer(
             validate_complete_build=self.validate_complete_build,
@@ -119,12 +124,26 @@ class CompleteBuildHandlers:
             )
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(run_id, exc)
-        return _complete_envelope(uid, result)
+        return await self._success_envelope(conn, uid, result)
+
+    async def _success_envelope(
+        self, conn: AsyncConnection, uid: UUID, result: BuildStepResult
+    ) -> ToolResponse:
+        """Build the success envelope, attaching the pre-boot config warning when it fires."""
+        warning = await rootfs_mount_warning(conn, uid)
+        return _complete_envelope(uid, result, warning)
 
 
-def _complete_envelope(run_id: UUID, result: BuildStepResult) -> ToolResponse:
+def _complete_envelope(
+    run_id: UUID, result: BuildStepResult, warning: dict[str, JsonValue] | None = None
+) -> ToolResponse:
+    data: dict[str, JsonValue] = {}
+    actions = ["runs.get"]
+    if warning is not None:
+        data["missing_boot_config"] = warning
+        actions = [FEATURE_CONFIG_REQUIREMENTS_TOOL, "runs.get"]
     return ToolResponse.success(
-        str(run_id), "succeeded", suggested_next_actions=["runs.get"], refs=result.refs()
+        str(run_id), "succeeded", suggested_next_actions=actions, refs=result.refs(), data=data
     )
 
 

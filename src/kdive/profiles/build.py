@@ -11,8 +11,10 @@ The model is ``frozen`` (an immutable request input) and rejects unknown fields.
 out of the error details, so a profile that references secret or guest-derived material cannot
 leak it. Constructing the model directly bypasses this mapping and is a caller error.
 
-kdive never inspects or validates the uploaded kernel ``.config``: no config-correctness
-requirement is checked here or downstream.
+kdive never *rejects* a build over the uploaded kernel ``.config``: no config-correctness
+requirement is enforced here or downstream. ``runs.complete_build`` does read an uploaded
+``effective_config`` to emit a non-blocking ``missing_boot_config`` advisory (ADR-0330), but the
+completion always succeeds.
 """
 
 from __future__ import annotations

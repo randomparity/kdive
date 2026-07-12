@@ -9,7 +9,12 @@ from uuid import uuid4
 
 from psycopg import AsyncConnection
 
-from kdive.kernel_config.gate import MISSING_DEBUGINFO_REASON, debuginfo_warning
+from kdive.kernel_config.gate import (
+    MISSING_BOOT_CONFIG_REASON,
+    MISSING_DEBUGINFO_REASON,
+    debuginfo_warning,
+    rootfs_mount_warning,
+)
 from kdive.kernel_config.parse import KernelConfig
 
 _RUN_ID = uuid4()
@@ -72,3 +77,38 @@ def test_config_lacking_btf_warns_and_names_btf():
     assert warning["reason"] == MISSING_DEBUGINFO_REASON
     assert warning["missing"] == ["DEBUG_INFO_BTF"]
     assert "vmlinux" in warning["remediation"]
+
+
+def _rootfs_call(config: KernelConfig | None) -> dict[str, Any] | None:
+    async def _run() -> dict[str, Any] | None:
+        with _patched_load(config):
+            return await rootfs_mount_warning(_CONN, _RUN_ID)
+
+    return asyncio.run(_run())
+
+
+def test_rootfs_absent_config_fails_open_to_no_warning():
+    assert _rootfs_call(None) is None
+
+
+def test_rootfs_full_boot_set_produces_no_warning():
+    cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}))
+    assert _rootfs_call(cfg) is None
+
+
+def test_rootfs_missing_one_symbol_warns_and_names_it():
+    # A real, non-degenerate config missing only VIRTIO_BLK still warns (each advertise clause
+    # is required; it is not an OR-group across EXT4_FS/VIRTIO_BLK).
+    cfg = KernelConfig(frozenset({"EXT4_FS"}))
+    warning = _rootfs_call(cfg)
+    assert warning is not None
+    assert warning["reason"] == MISSING_BOOT_CONFIG_REASON
+    assert warning["missing"] == ["VIRTIO_BLK"]
+
+
+def test_rootfs_missing_both_symbols_names_both():
+    cfg = KernelConfig(frozenset({"XFS_FS"}))  # non-degenerate, but neither boot symbol
+    warning = _rootfs_call(cfg)
+    assert warning is not None
+    assert warning["missing"] == ["EXT4_FS", "VIRTIO_BLK"]
+    assert "mount" in warning["remediation"]
