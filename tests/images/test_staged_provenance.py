@@ -8,8 +8,11 @@ from pathlib import Path
 
 from kdive.images.rootfs.staged_provenance import (
     SIDECAR_SCHEMA,
+    config_sibling_path,
+    read_config_sibling,
     read_sidecar,
     sidecar_path,
+    write_config_sibling,
     write_sidecar,
 )
 
@@ -111,3 +114,47 @@ def test_over_cap_sidecar_rejected_without_full_read(tmp_path: Path) -> None:
     padding = "x" * (128 * 1024)
     _write_raw(qcow2, json.dumps({"schema": SIDECAR_SCHEMA, "provenance": {"pad": padding}}))
     assert read_sidecar(qcow2) is None
+
+
+def test_config_sibling_path_appends_suffix_without_dropping_qcow2() -> None:
+    qcow2 = Path("/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2")
+    assert config_sibling_path(qcow2) == Path(
+        "/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2.config"
+    )
+
+
+def test_config_sibling_round_trip(tmp_path: Path) -> None:
+    """Written config bytes read back verbatim."""
+    qcow2 = tmp_path / "image.qcow2"
+    config = b"CONFIG_KASAN=y\nCONFIG_DEBUG_INFO_BTF=y\n"
+    write_config_sibling(qcow2, config=config)
+    assert read_config_sibling(qcow2) == config
+
+
+def test_read_config_sibling_absent_returns_none(tmp_path: Path) -> None:
+    assert read_config_sibling(tmp_path / "image.qcow2") is None
+
+
+def test_read_config_sibling_over_cap_returns_none(tmp_path: Path, caplog: object) -> None:
+    """A sibling larger than the cap degrades to None via a bounded read."""
+    import pytest  # noqa: PLC0415
+
+    from kdive.images.rootfs.staged_provenance import _CONFIG_MAX_BYTES
+
+    assert isinstance(caplog, pytest.LogCaptureFixture)
+    qcow2 = tmp_path / "image.qcow2"
+    config_sibling_path(qcow2).write_bytes(b"x" * (_CONFIG_MAX_BYTES + 1))
+    with caplog.at_level(logging.WARNING):
+        assert read_config_sibling(qcow2) is None
+    assert "exceeds" in caplog.text
+
+
+def test_read_config_sibling_unreadable_returns_none(tmp_path: Path, caplog: object) -> None:
+    """A directory at the sibling path (unreadable as a file) degrades to None, not a raise."""
+    import pytest  # noqa: PLC0415
+
+    assert isinstance(caplog, pytest.LogCaptureFixture)
+    qcow2 = tmp_path / "image.qcow2"
+    config_sibling_path(qcow2).mkdir()
+    with caplog.at_level(logging.WARNING):
+        assert read_config_sibling(qcow2) is None
