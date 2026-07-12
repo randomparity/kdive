@@ -24,6 +24,7 @@ from kdive.config.core_settings import (
 )
 from kdive.db.pool import create_pool
 from kdive.images.rootfs.command import add_build_fs_parser, run_build_fs
+from kdive.images.rootfs.stage_volume import add_stage_volume_parser, run_stage_volume
 from kdive.processes.reconciler import (
     optional_reconciler_object_store as _optional_reconciler_object_store,
 )
@@ -185,6 +186,13 @@ def _handle_build_fs(
     run_build_fs(args)
 
 
+def _handle_stage_volume(
+    args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
+) -> None:
+    del secret_registry, telemetry
+    run_stage_volume(args)
+
+
 def _add_reconcile_systems_arguments(parser: argparse.ArgumentParser) -> None:
     from pathlib import Path
 
@@ -262,6 +270,12 @@ _COMMANDS: tuple[_Command, ...] = (
         "build a local-libvirt filesystem image (debug guest or build host)",
         _handle_build_fs,
         custom_register=add_build_fs_parser,
+    ),
+    _Command(
+        "stage-volume",
+        "upload a built qcow2 to a remote-libvirt pool and capture its kernel config",
+        _handle_stage_volume,
+        custom_register=add_stage_volume_parser,
     ),
     _Command(
         "reconcile-systems",
