@@ -35,6 +35,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.debug.introspection import gate as introspect_gate
 from kdive.mcp.tools.debug.sessions import lifecycle as debug_lifecycle
 from kdive.mcp.tools.debug.sessions import lifecycle as debug_tools
 from kdive.mcp.tools.lifecycle.vmcore.view import CONSOLE_CRASH_GUIDANCE
@@ -56,6 +57,7 @@ from kdive.providers.ports.lifecycle import (
     TransportHandleData,
     TransportHandleKind,
 )
+from kdive.providers.ports.retrieve import LiveScriptOutput
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -152,11 +154,16 @@ def _handlers(
     runtime: Any | None = None,
     secret_registry: SecretRegistry | None = None,
     profile_policy: ProfilePolicy = _PROFILE_POLICY,
+    live_introspector: Any | None = None,
 ) -> debug_tools.DebugSessionHandlers:
     registry = secret_registry if secret_registry is not None else SecretRegistry()
     runtime_resolver = None if runtime is None else _FixedDebugRuntimeResolver(runtime)
     return debug_tools.DebugSessionHandlers.from_resolver(
-        provider_resolver(connector=connector, profile_policy=profile_policy),
+        provider_resolver(
+            connector=connector,
+            profile_policy=profile_policy,
+            live_introspector=live_introspector,
+        ),
         runtime_resolver=cast(Any, runtime_resolver),
         secret_registry=registry,
     )
@@ -171,11 +178,13 @@ async def _start_session(
     connector: _FakeConnector,
     secret_registry: SecretRegistry | None = None,
     profile_policy: ProfilePolicy = _PROFILE_POLICY,
+    live_introspector: Any | None = None,
 ):
     return await _handlers(
         connector,
         secret_registry=secret_registry,
         profile_policy=profile_policy,
+        live_introspector=live_introspector,
     ).start_session(pool, ctx, run_id=run_id, transport=transport)
 
 
@@ -1038,6 +1047,215 @@ def test_start_session_gdbstub_never_warns_missing_debuginfo(migrated_url: str) 
         assert "missing_debuginfo" not in resp.data
 
     asyncio.run(_run())
+
+
+# --- debug.start_session(drgn-live) runtime debuginfo probe (ADR-0335, #1128) --------------------
+
+
+def _btf_config() -> Any:
+    """A config that advertises BTF, so the static gate is silent and the runtime probe decides."""
+    from kdive.kernel_config.parse import KernelConfig
+
+    return KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"}))
+
+
+def _attach_failure(message: str = "guest drgn could not resolve symbols") -> CategorizedError:
+    return CategorizedError(message, category=ErrorCategory.DEBUG_ATTACH_FAILURE)
+
+
+class _AttachProbeIntrospector:
+    """A live introspector whose ADR-0335 attach-seam runtime probe is independently controllable.
+
+    The probe rides ``run_script`` with the fixed ``RESOLUTION_PROBE_SCRIPT``; ``probe_calls``
+    counts how often it ran so a gating test can assert the probe was skipped.
+    """
+
+    def __init__(self, *, probe_raises: CategorizedError | None = None) -> None:
+        self._probe_raises = probe_raises
+        self.probe_calls = 0
+
+    def run_script(
+        self, *, transport_handle: str, script: str, timeout_sec: float, key_path: str
+    ) -> LiveScriptOutput:
+        del transport_handle, timeout_sec, key_path
+        if script == introspect_gate.RESOLUTION_PROBE_SCRIPT:
+            self.probe_calls += 1
+            if self._probe_raises is not None:
+                raise self._probe_raises
+        return LiveScriptOutput(output="ok", truncated=False)
+
+
+def test_start_session_drgn_live_blind_guest_warns_debuginfo_unloadable(migrated_url: str) -> None:
+    # ADR-0335 F1 at attach: BTF advertised in config (static gate silent) but the guest drgn cannot
+    # resolve at runtime. The attach stays `live` (non-fatal) but carries a debuginfo_unloadable
+    # warning BEFORE any introspect call, with the feature-config next action.
+    async def _run() -> tuple[ToolResponse, _AttachProbeIntrospector]:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
+            run_id = await _seed_run(pool, sys_id)  # no debuginfo_ref
+            port = _AttachProbeIntrospector(probe_raises=_attach_failure())
+            with _patch_effective_config(_btf_config()):
+                resp = await _start_session(
+                    pool,
+                    _ctx(),
+                    run_id=run_id,
+                    transport="drgn-live",
+                    connector=_OrderRecordingConnector([]),
+                    live_introspector=port,
+                )
+            return resp, port
+
+    resp, port = asyncio.run(_run())
+    assert resp.status == "live"  # non-fatal
+    warning = cast(dict[str, Any], resp.data["missing_debuginfo"])
+    assert warning["reason"] == "debuginfo_unloadable"
+    assert "DEBUG_INFO_BTF" in cast(list[str], warning["missing"])
+    assert port.probe_calls == 1
+    assert resp.suggested_next_actions == [
+        "artifacts.feature_config_requirements",
+        "introspect.run",
+        "introspect.script",
+        "debug.end_session",
+    ]
+
+
+def test_start_session_drgn_live_probe_success_adds_no_warning(migrated_url: str) -> None:
+    # The probe resolves (run_script returns) -> BTF loads at runtime -> attach carries no warning.
+    async def _run() -> tuple[ToolResponse, _AttachProbeIntrospector]:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
+            run_id = await _seed_run(pool, sys_id)
+            port = _AttachProbeIntrospector()
+            with _patch_effective_config(_btf_config()):
+                resp = await _start_session(
+                    pool,
+                    _ctx(),
+                    run_id=run_id,
+                    transport="drgn-live",
+                    connector=_OrderRecordingConnector([]),
+                    live_introspector=port,
+                )
+            return resp, port
+
+    resp, port = asyncio.run(_run())
+    assert resp.status == "live"
+    assert "missing_debuginfo" not in resp.data
+    assert port.probe_calls == 1
+
+
+def test_start_session_drgn_live_indeterminate_probe_adds_no_warning(migrated_url: str) -> None:
+    # A probe that fails on a transport fault (not DEBUG_ATTACH_FAILURE) is indeterminate: fail
+    # open, add no warning, and never block the attach (mirrors probe_symbol_resolution semantics).
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
+            run_id = await _seed_run(pool, sys_id)
+            transport_fault = CategorizedError(
+                "ssh dropped", category=ErrorCategory.TRANSPORT_FAILURE
+            )
+            port = _AttachProbeIntrospector(probe_raises=transport_fault)
+            with _patch_effective_config(_btf_config()):
+                return await _start_session(
+                    pool,
+                    _ctx(),
+                    run_id=run_id,
+                    transport="drgn-live",
+                    connector=_OrderRecordingConnector([]),
+                    live_introspector=port,
+                )
+
+    resp = asyncio.run(_run())
+    assert resp.status == "live"
+    assert "missing_debuginfo" not in resp.data
+
+
+def test_start_session_drgn_live_static_warning_skips_runtime_probe(migrated_url: str) -> None:
+    # When the static config check already warns (no BTF advertised, no vmlinux), the runtime probe
+    # is not run: the cheap signal wins and no attach-time round-trip is paid.
+    from kdive.kernel_config.parse import KernelConfig
+
+    async def _run() -> tuple[ToolResponse, _AttachProbeIntrospector]:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
+            run_id = await _seed_run(pool, sys_id)
+            port = _AttachProbeIntrospector(probe_raises=_attach_failure())
+            with _patch_effective_config(KernelConfig(frozenset({"DEBUG_INFO"}))):  # no BTF
+                resp = await _start_session(
+                    pool,
+                    _ctx(),
+                    run_id=run_id,
+                    transport="drgn-live",
+                    connector=_OrderRecordingConnector([]),
+                    live_introspector=port,
+                )
+            return resp, port
+
+    resp, port = asyncio.run(_run())
+    assert resp.status == "live"
+    assert cast(dict[str, Any], resp.data["missing_debuginfo"])["reason"] == "missing_debuginfo"
+    assert port.probe_calls == 0
+
+
+def test_start_session_drgn_live_uploaded_vmlinux_skips_runtime_probe(migrated_url: str) -> None:
+    # An uploaded vmlinux suppresses both signals: drgn resolves from it, so the probe never runs.
+    from kdive.kernel_config.parse import KernelConfig
+
+    async def _run() -> tuple[ToolResponse, _AttachProbeIntrospector]:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
+            run_id = await _seed_run(pool, sys_id)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE runs SET debuginfo_ref = %s WHERE id = %s",
+                    ("k/runs/r/vmlinux", UUID(run_id)),
+                )
+            port = _AttachProbeIntrospector(probe_raises=_attach_failure())
+            with _patch_effective_config(KernelConfig(frozenset())):
+                resp = await _start_session(
+                    pool,
+                    _ctx(),
+                    run_id=run_id,
+                    transport="drgn-live",
+                    connector=_OrderRecordingConnector([]),
+                    live_introspector=port,
+                )
+            return resp, port
+
+    resp, port = asyncio.run(_run())
+    assert resp.status == "live"
+    assert "missing_debuginfo" not in resp.data
+    assert port.probe_calls == 0
+
+
+def test_start_session_gdbstub_never_runs_runtime_probe(migrated_url: str) -> None:
+    # gdbstub symbolizes host-side, so the drgn-live runtime probe never fires for it even when the
+    # static gate would be silent.
+    async def _run() -> tuple[ToolResponse, _AttachProbeIntrospector]:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_run(pool, sys_id)
+            port = _AttachProbeIntrospector(probe_raises=_attach_failure())
+            with _patch_effective_config(_btf_config()):
+                resp = await _start_session(
+                    pool,
+                    _ctx(),
+                    run_id=run_id,
+                    transport="gdbstub",
+                    connector=_OrderRecordingConnector([]),
+                    live_introspector=port,
+                )
+            return resp, port
+
+    resp, port = asyncio.run(_run())
+    assert resp.status == "live"
+    assert "missing_debuginfo" not in resp.data
+    assert port.probe_calls == 0
 
 
 def test_start_session_drgn_live_seeds_bootstrap_key_before_opening_transport(
