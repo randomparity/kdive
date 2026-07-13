@@ -49,6 +49,17 @@ by the same one resolution site. The branch logic is **one shared helper**, not 
 
 - **Empty `guest_arches`** (host not re-discovered since ADR-0338): fail **open** to
   `("kvm", None)` — today's legacy x86-KVM path, matching the ADR-0339 admission fail-open.
+  This fail-open is **arch-agnostic**: a foreign-arch profile on a not-yet-rediscovered host
+  also renders the legacy `<domain type="kvm">` (with the arch's `arch_traits` machine/cpu), so
+  a `ppc64le`-on-empty-caps-`x86_64`-host provision fails at libvirt define with an opaque
+  `PROVISIONING_FAILURE` — **not** the clean `CONFIGURATION_ERROR` the non-empty arch-absent arm
+  gives. This asymmetry is accepted, not fixed: (a) empty `guest_arches` is a transient
+  pre-rediscovery migration state that ADR-0338/0339 close on re-discovery; (b) the provider
+  cannot fail closed on empty without either diverging from admission's deliberate ADR-0339
+  empty-caps fail-open (the drift the shared resolver exists to prevent) or reopening that ADR;
+  and (c) the impact is a bounded failed provision — no wrong boot, no capacity/data loss — and
+  is no worse than the pre-ADR-0340 behavior. Pinned by
+  `test_provision_empty_caps_foreign_arch_fails_open_to_legacy_kvm`.
 - **Non-empty `guest_arches` missing `profile.arch`**: fail **closed** with
   `CONFIGURATION_ERROR` naming the supported set. Because ADR-0340 re-resolves from **live**
   caps at provision while admission validated the **persisted** capability_view at mint, a

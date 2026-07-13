@@ -826,6 +826,23 @@ def test_provision_empty_guest_arches_renders_legacy_kvm_domain() -> None:
     assert root.find("devices/emulator") is None
 
 
+def test_provision_empty_caps_foreign_arch_fails_open_to_legacy_kvm() -> None:
+    # Accepted edge (ADR-0340): empty guest_arches fails OPEN arch-agnostically, matching
+    # ADR-0339 admission. On a not-yet-rediscovered host a foreign-arch profile therefore renders
+    # the legacy <domain type="kvm"> — which libvirt then rejects on a mismatched host, a bounded
+    # opaque PROVISIONING_FAILURE, not the clean CONFIGURATION_ERROR of the non-empty arch-absent
+    # arm. The provider does NOT fail closed on empty: that would diverge from admission's
+    # deliberate ADR-0339 empty-caps fail-open, the exact drift the shared resolver prevents. The
+    # arch stays correct on the empty host only after re-discovery (ADR-0338), which this state
+    # predates.
+    conn = _ProvConn()  # host-only caps -> empty guest_arches
+    _prov(conn).provision(_SYS, _arch_profile("ppc64le"))
+    root = _safe_fromstring(conn.recorded_xml[0])
+    assert root.get("type") == "kvm"  # fail-open legacy path, regardless of the foreign arch
+    os_type = root.find("os/type")
+    assert os_type is not None and os_type.get("machine") == "pseries"  # arch_traits still applies
+
+
 def test_provision_native_x86_forwards_kvm_and_drops_emulator() -> None:
     # A host advertising x86_64 (kvm, non-null emulator): the provider forwards
     # ("kvm", "/usr/bin/qemu-system-x86_64"), and the renderer drops <emulator> because
