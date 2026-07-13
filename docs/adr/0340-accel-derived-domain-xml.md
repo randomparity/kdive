@@ -82,8 +82,17 @@ domain cannot boot without a binary).
 **CPU element.** Routed through `arch_traits`. A new `kvm_cpu_mode` field gives
 `host-passthrough` for x86_64 (unchanged, ADR-0294) and `host-model` for ppc64le/pseries.
 KVM domains emit `<cpu mode="{kvm_cpu_mode}">`; **TCG domains emit no `<cpu>` element** —
-QEMU's per-machine default model is correct, and pinning a model would couple us to QEMU
-versions.
+pinning a model would couple us to QEMU versions (the issue and epic scope mandate this).
+
+*Known limit (reconciling ADR-0294).* Omitting `<cpu>` leans on QEMU's per-machine default,
+which is **not** unconditionally sufficient: ADR-0294 (carried at `xml.py:145-146`) documents
+that the x86 default `qemu64` is x86-64-v1 while EL9 glibc needs x86-64-v2, so an x86_64 EL9
+guest under TCG would SIGILL PID 1; the pseries TCG default vs. EL9 ppc64le's POWER9/ISA-3.0
+baseline is QEMU-version-dependent and unverified here. This is deliberately deferred, not
+denied: x86_64-under-TCG is only reachable on the gated POWER host, and the ppc64le-under-TCG
+cell's first live boot is #1144, which is where a render-clean-but-never-boots domain is
+caught. The interim risk is named in the spec's interim-window note. The KVM path is
+unaffected (it keeps the ADR-0294 `host-passthrough`/`host-model` modes).
 
 **ACPI features.** The `<features><acpi/><vmcoreinfo/></features>` block becomes x86-only,
 gated by a new `arch_traits` flag (`emit_acpi_features`: `True` for x86_64, `False` for
@@ -127,8 +136,12 @@ flagged cannot occur here.
 - **Always emit `<emulator>`, including for native x86-KVM.** Rejected: it changes
   x86_64-under-KVM output, violating the byte-identical acceptance criterion, for no benefit
   — libvirt's default binary is already correct for the native host arch.
-- **Pin a `<cpu>` model for TCG domains.** Rejected: QEMU's per-machine default is correct
-  and a pinned model couples the domain to specific QEMU versions.
+- **Pin a `<cpu>` model for TCG domains.** Rejected here because the issue/epic scope mandates
+  no `<cpu>` for TCG and a pinned model couples the domain to specific QEMU versions. The
+  counter-risk (QEMU's default may sit below the EL9 rootfs ISA baseline — the ADR-0294
+  x86-64-v2 case) is real but is caught at the #1144 live boot rather than guessed at now; if
+  #1144 shows the default is too low, a per-arch minimum TCG model in `arch_traits` is the
+  follow-up. Not silently assumed correct — see "CPU element → Known limit."
 - **Store a resolved `domain_type` on `GuestArch` / the System row.** Rejected: it is a pure
   function of `accel`, so storing it adds a second definition to keep in sync (the exact
   drift the #1140 review warned about) for no gain.

@@ -113,6 +113,20 @@ No job-handler or cross-provider change.
 
 `arch_traits` gains two fields: `kvm_cpu_mode: str` and `emit_acpi_features: bool`.
 
+**No `<cpu>` for TCG — and its known limit.** The issue and epic scope explicitly mandate no
+`<cpu>` element for TCG (pinning a model couples us to QEMU versions), so this PR renders that
+way. But "QEMU's per-machine default is correct" is **not** unconditionally true, and this PR
+does not claim it is: ADR-0294 (still carried at `xml.py:145-146`) documents that QEMU's
+default x86 model `qemu64` is x86-64-v1 while EL9/RHEL glibc requires x86-64-v2 — a wrong
+model makes `ld.so` SIGILL PID 1 before userspace. Under TCG the pc/q35 default stays
+`qemu64`, so an **x86_64 EL9 rootfs under TCG** would hit that same fault; and whether the
+default pseries TCG CPU meets EL9 ppc64le's POWER9/ISA-3.0 baseline is QEMU-version-dependent
+and **unverified** here. This is tolerable because (a) x86_64-under-TCG is only reachable on
+the gated POWER host (on the x86 host x86_64 resolves to KVM), and (b) the primary
+ppc64le-under-TCG cell gets its first live boot in #1144, which is where a domain that renders
+cleanly but never reaches userspace is caught. The risk is named in the interim-window note
+below rather than papered over. See ADR-0340 "Alternatives → Pin a `<cpu>` for TCG."
+
 A TCG domain (`accel != "kvm"`) with `emulator is None` raises `CONFIGURATION_ERROR` — a TCG
 domain cannot boot without a binary. (`parse_guest_arches` never yields a TCG entry without
 an emulator, so this is a defensive guard, not a normal path.)
@@ -177,11 +191,19 @@ Additional guards:
 - Unit-test only; live TCG boot proof is epic issue 5 (#1144).
 
 **Interim window (sequencing).** After this PR a foreign-arch profile (ppc64le on the x86
-host) passes admission (#1141, merged) **and** renders a correct TCG pseries domain that
-libvirt will start — but two epic pieces are not yet landed: TCG-scaled readiness deadlines
-(#1143) and pseries crash-capture features (#1149). So an operator provisioning a ppc64le
-System in the window between this PR and #1143 should expect the System to boot slowly under
-TCG and may hit the x86-KVM-tuned readiness deadline (surfacing as a provision/boot timeout);
-and a host_dump/kdump workload on ppc64le will produce no VMCOREINFO until #1149. This PR does
-**not** gate foreign-arch provisioning — the epic sequences #1143 immediately after — but the
-limitation is called out here so it is not mistaken for a defect in this change.
+host) passes admission (#1141, merged) **and** renders a TCG pseries domain; libvirt
+define/start and first boot are proven in #1144 (this PR asserts rendered XML only, not
+define/start). Three epic pieces are not yet landed: TCG-scaled readiness deadlines (#1143),
+pseries crash-capture features (#1149), and the live TCG boot proof (#1144). So an operator
+provisioning a ppc64le System in the window between this PR and #1143 should expect:
+
+- the System boots slowly under TCG and may hit the x86-KVM-tuned readiness deadline
+  (surfacing as a provision/boot timeout) until #1143;
+- a host_dump/kdump workload on ppc64le produces no VMCOREINFO until #1149;
+- an EL9 guest under TCG may SIGILL in `ld.so` if QEMU's default CPU is below the rootfs ISA
+  baseline (x86-64-v2 for x86_64, POWER9 for ppc64le) — see the "No `<cpu>` for TCG" note
+  above; to be proven or corrected in #1144.
+
+This PR does **not** gate foreign-arch provisioning — the epic sequences #1143/#1144
+immediately after — but the limitations are called out here so they are not mistaken for a
+defect in this change.
