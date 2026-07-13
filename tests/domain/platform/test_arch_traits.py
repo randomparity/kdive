@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.platform.arch_traits import arch_traits
+from kdive.domain.platform.arch_traits import _TRAITS, SUPPORTED_ARCHES, arch_traits
 
 
 def test_x86_64_traits_are_q35_ttys0_pinned() -> None:
@@ -22,6 +22,14 @@ def test_ppc64le_traits_are_pseries_hvc0_unpinned() -> None:
     assert traits.machine == "pseries"
     assert traits.console_device == "hvc0"
     assert traits.pin_nic_slot is False
+
+
+def test_supported_arches_is_the_traits_keys() -> None:
+    # Discovery filters advertised guest arches to this set; it must stay in lockstep with the
+    # provisioning table so adding an arch is one _TRAITS row, and it is exactly the two arches
+    # kdive provisions today (a drift guard for a future addition).
+    assert frozenset(_TRAITS) == SUPPORTED_ARCHES
+    assert {"x86_64", "ppc64le"} == SUPPORTED_ARCHES
 
 
 def test_unknown_arch_is_a_configuration_error_not_a_silent_x86_default() -> None:
