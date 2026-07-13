@@ -647,6 +647,12 @@ class _ProvDomain:
         return 0
 
 
+# Host-only capabilities (no <guest> blocks) → parse_guest_arches returns {} → the provider's
+# accel/emulator resolution fails open to ("kvm", None), the legacy x86-KVM path. This is the
+# default so every existing provision test renders exactly as before (ADR-0340).
+_CAPS_HOST_ONLY = "<capabilities><host><cpu><arch>x86_64</arch></cpu></host></capabilities>"
+
+
 @dataclass
 class _ProvConn:
     defined: dict[str, _ProvDomain] = field(default_factory=dict)
@@ -654,6 +660,13 @@ class _ProvConn:
     lookup_error: int | None = None  # raised by lookupByName (e.g. NO_DOMAIN)
     closed: int = 0
     recorded_xml: list[str] = field(default_factory=list)  # each defineXML payload, in order
+    caps_xml: str = _CAPS_HOST_ONLY  # getCapabilities() payload; default → empty guest_arches
+    caps_error: int | None = None  # libvirt error code getCapabilities raises, if set
+
+    def getCapabilities(self) -> str:  # noqa: N802 - mirrors the libvirt binding name
+        if self.caps_error is not None:
+            raise libvirt_error(self.caps_error)
+        return self.caps_xml
 
     def defineXML(self, xml: str) -> _ProvDomain:
         if self.define_error is not None:
@@ -777,9 +790,84 @@ def test_provision_defines_and_starts_returns_name() -> None:
     name = _prov(conn).provision(_SYS, _profile())
     assert name == "kdive-11111111-1111-1111-1111-111111111111"
     assert conn.defined[name].created is True
-    # Two connections, both closed (no leak): the always-on SSH-port reuse lookup (ADR-0281)
-    # opens one, define/start opens the other.
-    assert conn.closed == 2
+    # Three connections, all closed (no leak): the accel/emulator capabilities resolution at the
+    # top of provision (ADR-0340) opens one, the always-on SSH-port reuse lookup (ADR-0281)
+    # opens one, define/start opens the third.
+    assert conn.closed == 3
+
+
+# Capabilities fixtures mirroring the #1140 live ground truth: an x86_64 host advertises
+# x86_64 (kvm) and ppc64le (tcg, /usr/bin/qemu-system-ppc64).
+_CAPS_X86_KVM_PPC_TCG = (
+    "<capabilities><host><cpu><arch>x86_64</arch></cpu></host>"
+    "<guest><os_type>hvm</os_type><arch name='x86_64'>"
+    "<emulator>/usr/bin/qemu-system-x86_64</emulator>"
+    "<domain type='qemu'/><domain type='kvm'/></arch></guest>"
+    "<guest><os_type>hvm</os_type><arch name='ppc64le'>"
+    "<emulator>/usr/bin/qemu-system-ppc64</emulator>"
+    "<domain type='qemu'/></arch></guest></capabilities>"
+)
+# A host advertising ONLY x86_64 (non-empty guest_arches, but missing ppc64le).
+_CAPS_X86_ONLY = (
+    "<capabilities><host><cpu><arch>x86_64</arch></cpu></host>"
+    "<guest><os_type>hvm</os_type><arch name='x86_64'>"
+    "<emulator>/usr/bin/qemu-system-x86_64</emulator>"
+    "<domain type='qemu'/><domain type='kvm'/></arch></guest></capabilities>"
+)
+
+
+def test_provision_empty_guest_arches_renders_legacy_kvm_domain() -> None:
+    # Fail-open: a host not re-discovered since ADR-0338 (host-only caps) renders the legacy
+    # x86-KVM domain with no <emulator> (ADR-0340).
+    conn = _ProvConn()  # default host-only caps
+    _prov(conn).provision(_SYS, _profile())
+    root = _safe_fromstring(conn.recorded_xml[0])
+    assert root.get("type") == "kvm"
+    assert root.find("devices/emulator") is None
+
+
+def test_provision_native_x86_forwards_kvm_and_drops_emulator() -> None:
+    # A host advertising x86_64 (kvm, non-null emulator): the provider forwards
+    # ("kvm", "/usr/bin/qemu-system-x86_64"), and the renderer drops <emulator> because
+    # accel == "kvm" — NOT because emulator is None (ADR-0340).
+    conn = _ProvConn(caps_xml=_CAPS_X86_KVM_PPC_TCG)
+    _prov(conn).provision(_SYS, _profile())
+    root = _safe_fromstring(conn.recorded_xml[0])
+    assert root.get("type") == "kvm"
+    assert root.find("devices/emulator") is None
+
+
+def test_provision_foreign_ppc64le_renders_tcg_domain_with_discovered_emulator() -> None:
+    # A ppc64le profile on the x86_64 host resolves ("tcg", "/usr/bin/qemu-system-ppc64") and
+    # renders a qemu-type pseries domain carrying the discovered emulator (ADR-0340).
+    conn = _ProvConn(caps_xml=_CAPS_X86_KVM_PPC_TCG)
+    _prov(conn).provision(_SYS, _arch_profile("ppc64le"))
+    root = _safe_fromstring(conn.recorded_xml[0])
+    assert root.get("type") == "qemu"
+    emu = root.find("devices/emulator")
+    assert emu is not None and emu.text == "/usr/bin/qemu-system-ppc64"
+
+
+def test_provision_arch_absent_from_nonempty_caps_is_configuration_error() -> None:
+    # TOCTOU guard: a ppc64le System admitted while the host advertised ppc64le, provisioned
+    # after the host lost qemu-system-ppc64 (caps now advertise only x86_64), fails CLOSED with
+    # CONFIGURATION_ERROR — never a silent incoherent kvm domain (ADR-0340). No domain defined.
+    conn = _ProvConn(caps_xml=_CAPS_X86_ONLY)
+    with pytest.raises(CategorizedError) as exc:
+        _prov(conn).provision(_SYS, _arch_profile("ppc64le"))
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert conn.recorded_xml == []
+
+
+def test_provision_capabilities_read_fault_is_infrastructure_failure() -> None:
+    # A libvirt fault reading capabilities is an unhealthy host, not a licence to guess a
+    # domain type: raise INFRASTRUCTURE_FAILURE (grouped with the other pre-define reads),
+    # never a silent kvm domain (ADR-0340).
+    conn = _ProvConn(caps_error=libvirt.VIR_ERR_INTERNAL_ERROR)
+    with pytest.raises(CategorizedError) as exc:
+        _prov(conn).provision(_SYS, _arch_profile("ppc64le"))
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert conn.recorded_xml == []
 
 
 def test_provision_default_renders_restrict_on() -> None:
@@ -932,8 +1020,8 @@ def test_provision_real_create_failure_undefines_domain() -> None:
         _prov(conn).provision(_SYS, _profile())
     assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
     assert dom.undefined is True  # the defined-but-unstarted domain was cleaned up
-    # SSH-port reuse lookup + define/start, both closed (ADR-0281).
-    assert conn.closed == 2
+    # capabilities resolution (ADR-0340) + SSH-port reuse lookup + define/start, all closed.
+    assert conn.closed == 3
 
 
 def test_provision_already_running_domain_does_not_undefine() -> None:
@@ -1026,7 +1114,8 @@ def test_provision_gdbstub_malformed_recorded_xml_is_infrastructure_failure() ->
         _prov_with_port(conn, free_port=fail_free_port).provision(_SYS, _gdb_profile())
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert caught.value.details == {"domain": name}
-    assert conn.closed == 1
+    # capabilities resolution (ADR-0340) + the gdbstub-port read that raised, both closed.
+    assert conn.closed == 2
 
 
 def test_provision_already_running_domain_is_idempotent() -> None:
@@ -1037,8 +1126,8 @@ def test_provision_already_running_domain_is_idempotent() -> None:
         defined={name: _ProvDomain(name, create_error=libvirt.VIR_ERR_OPERATION_INVALID)}
     )
     assert _prov(conn).provision(_SYS, _profile()) == name  # no raise
-    # SSH-port reuse lookup + define/start, both closed (ADR-0281).
-    assert conn.closed == 2
+    # capabilities resolution (ADR-0340) + SSH-port reuse lookup + define/start, all closed.
+    assert conn.closed == 3
 
 
 # --- drgn-live SSH port allocation (ADR-0218 §3) -------------------------------------------
@@ -1100,7 +1189,8 @@ def test_provision_ssh_malformed_recorded_xml_is_infrastructure_failure() -> Non
         _prov_with_port(conn, free_port=fail_free_port).provision(_SYS, _ssh_profile())
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert caught.value.details == {"domain": name}
-    assert conn.closed == 1
+    # capabilities resolution (ADR-0340) + the SSH-port read that raised, both closed.
+    assert conn.closed == 2
 
 
 def test_provision_gdbstub_and_ssh_allocate_both_ports() -> None:
@@ -1631,8 +1721,9 @@ def test_provision_failure_still_closes_connection() -> None:
     conn = _ProvConn(define_error=libvirt.VIR_ERR_INTERNAL_ERROR)
     with pytest.raises(CategorizedError):
         _prov(conn).provision(_SYS, _profile())
-    # SSH-port reuse lookup + the failed define, both closed even on a libvirt failure (ADR-0281).
-    assert conn.closed == 2
+    # capabilities resolution (ADR-0340) + SSH-port reuse lookup + the failed define, all closed
+    # even on a libvirt failure.
+    assert conn.closed == 3
 
 
 def test_teardown_absent_domain_closes_connection() -> None:

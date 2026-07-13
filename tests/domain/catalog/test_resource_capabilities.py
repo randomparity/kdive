@@ -201,6 +201,28 @@ def test_resolve_accel_emulator_fails_open_on_empty_map() -> None:
     assert resolve_accel_emulator({}, "x86_64") is None
 
 
+def test_guest_arches_round_trips_parser_output_unchanged() -> None:
+    # #1140 follow-up guard: a full-shape parse_guest_arches output must survive the reader
+    # unchanged. #1142 deliberately does NOT extend GuestArch (domain type is derived from
+    # accel, not stored), so parser and reader stay in sync; if a future field is added to one
+    # side but not the other, this fails rather than silently dropping it.
+    from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
+    from kdive.providers.shared.libvirt_xml import parse_guest_arches
+
+    caps_xml = (
+        "<capabilities><host><cpu><arch>x86_64</arch></cpu></host>"
+        "<guest><os_type>hvm</os_type><arch name='x86_64'>"
+        "<emulator>/usr/bin/qemu-system-x86_64</emulator>"
+        "<domain type='qemu'/><domain type='kvm'/></arch></guest>"
+        "<guest><os_type>hvm</os_type><arch name='ppc64le'>"
+        "<emulator>/usr/bin/qemu-system-ppc64</emulator>"
+        "<domain type='qemu'/></arch></guest></capabilities>"
+    )
+    parsed = parse_guest_arches(caps_xml, SUPPORTED_ARCHES)
+    read_back = ResourceCapabilities.from_mapping({GUEST_ARCHES_KEY: parsed}).guest_arches()
+    assert read_back == parsed
+
+
 def test_resolve_accel_emulator_fails_closed_naming_supported_set() -> None:
     ppc_only: dict[str, GuestArch] = {
         "ppc64le": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-ppc64"}
