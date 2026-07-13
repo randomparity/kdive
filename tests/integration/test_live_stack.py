@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -67,6 +68,11 @@ _ARTIFACT_NAME = "accounting-report.json"
 # Per-family *-kdive-ready rootfs images for the SSH-reachability proof (#956, ADR-0294). Each is a
 # distinct artifact; a host with only one family's image proves that family and skips the other.
 _FAMILY_IMAGE_ENV = {"debian": "KDIVE_GUEST_IMAGE_DEBIAN", "rhel": "KDIVE_GUEST_IMAGE_RHEL"}
+# The ppc64le rootfs for the live TCG boot proof (#1144, epic #1139): a Fedora ppc64le image
+# published under rootfs/local/. Distinct from the x86_64 family images — it boots under TCG
+# emulation on the x86_64 host (qemu-system-ppc64), so it also gates on that emulator being present.
+_PPC64LE_IMAGE_ENV = "KDIVE_GUEST_IMAGE_PPC64LE"
+_PPC64LE_EMULATOR = "qemu-system-ppc64"
 # A throwaway ed25519 public key (public half only; KDIVE never needs the private key to append it).
 # Fixed is fine: authorize_ssh_key dedups on the key fingerprint, so a re-run is idempotent.
 _REACHABILITY_PUBKEY = (
@@ -226,6 +232,25 @@ def test_provision_profile_disk_gb_equals_allocation_request(
         reconcile_profile_sizing(over_asking, snapshot)
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert caught.value.details["field"] == "disk_gb"
+
+
+def test_ppc64le_provision_profile_disk_gb_equals_allocation_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ppc64le reachability profile obeys the same disk-equality invariant, at arch=ppc64le.
+
+    The live proof (#1144) is ``live_stack``-gated, so this non-gated companion keeps a CI
+    assertion on the new ppc64le factory: its ``disk_gb`` equals the allocation constant (ADR-0205)
+    and its ``arch`` is ``ppc64le`` (the field that routes provisioning through the pseries traits).
+    """
+    monkeypatch.setenv(_KERNEL_TREE_ENV, "/nonexistent/kernel-src")
+    profile = _ppc64le_reachability_provision_profile("/nonexistent/fedora-ppc64le.qcow2")
+    assert profile["arch"] == "ppc64le"
+    assert profile["disk_gb"] == LOCAL_ALLOCATION_DISK_GB
+
+    snapshot = AllocationSizing(vcpu=2, memory_mb=2048, disk_gb=LOCAL_ALLOCATION_DISK_GB)
+    reconciled = reconcile_profile_sizing(profile, snapshot)
+    assert reconciled["disk_gb"] == LOCAL_ALLOCATION_DISK_GB
 
 
 # --- RBAC negative: the raised path (no real system needed) ----------------------------------
@@ -747,6 +772,157 @@ def test_family_guest_is_ssh_reachable_over_the_wire(family: str) -> None:
                     # A *succeeded* drain is the reachability proof: a non-succeeded drain raises a
                     # SpinePhaseError naming this family + the job's error_category.
                     await drain_job(op, f"{family}:authorize_ssh_key", env.object_id)
+            finally:
+                if allocation_id:
+                    await scalar(op, "allocations.release", allocation_id=allocation_id)
+
+    asyncio.run(_run())
+
+
+# --- ppc64le live TCG boot proof (#1144, epic #1139) ---------------------------------------
+
+
+def _ppc64le_reachability_preflight() -> tuple[OidcIssuer, str, str, str]:
+    """Resolve issuer + stack + db + the ppc64le image, or skip with the exact fix.
+
+    Adds the ppc64le emulator gate to the reachability preflight idiom: a host without
+    ``qemu-system-ppc64`` cannot boot a pseries guest under TCG, so it skips this proof cleanly
+    rather than erroring at define-time.
+    """
+    if shutil.which(_PPC64LE_EMULATOR) is None:
+        pytest.skip(
+            f"{_PPC64LE_EMULATOR} not on PATH; a ppc64le guest boots under TCG emulation on the "
+            "x86_64 host — install qemu-system-ppc (the pseries emulator)"
+        )
+    image = os.environ.get(_PPC64LE_IMAGE_ENV)
+    if not image or not Path(image).exists():
+        pytest.skip(
+            f"{_PPC64LE_IMAGE_ENV} unset or points at a missing file; publish the Fedora ppc64le "
+            "rootfs (see docs/design/2026-07-13-ppc64le-fixture-live-proof-1144.md §4) and set "
+            f"{_PPC64LE_IMAGE_ENV} to its path"
+        )
+    tree = os.environ.get(_KERNEL_TREE_ENV)
+    if not tree or not Path(tree).exists():
+        pytest.skip(
+            f"{_KERNEL_TREE_ENV} unset or missing; run the fetch-kernel-tree fixture script"
+        )
+    db_url = os.environ.get(_DATABASE_URL_ENV)
+    if not db_url:
+        pytest.skip(f"{_DATABASE_URL_ENV} unset; bring up the stack (see the live-stack runbook)")
+    issuer = require_issuer()  # skips if the OIDC issuer is unset/unreachable
+    base_url = require_stack()  # skips if KDIVE_STACK_BASE_URL is unset
+    return issuer, base_url, db_url, image
+
+
+def _ppc64le_reachability_provision_profile(image: str) -> dict[str, object]:
+    """A direct-kernel ppc64le profile for the TCG boot proof.
+
+    Mirrors ``_reachability_provision_profile`` but ``arch = "ppc64le"``, so admission persists
+    ``accel = "tcg"`` (ADR-0339), the provisioner renders a pseries/qemu/emulator domain
+    (ADR-0340), and the boot handler applies the TCG-scaled deadline (ADR-0341).
+    ``kernel_source_ref`` is a required-but-unread ``direct-kernel`` token (provision boots its own
+    ppc64le kernel, ADR-0272; the ref feeds the build/install lane), so the x86_64 kernel tree is a
+    valid arch-opaque value here — the booted kernel is genuinely ppc64le.
+    """
+    return {
+        "schema_version": 1,
+        "arch": "ppc64le",
+        "vcpu": 2,
+        "memory_mb": 2048,
+        "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+        "boot_method": "direct-kernel",
+        "kernel_source_ref": os.environ[_KERNEL_TREE_ENV],
+        "provider": {
+            "local-libvirt": {
+                "rootfs": {"kind": "local", "path": image},
+                "crashkernel": "512M",
+            }
+        },
+    }
+
+
+@pytest.mark.live_stack
+def test_ppc64le_guest_is_ssh_reachable_over_the_wire() -> None:
+    """Prove a Fedora ppc64le guest boots end-to-end under TCG on the x86_64 host (#1144).
+
+    allocate → provision (``arch=ppc64le``: admission persists ``accel=tcg``, ADR-0339; the
+    provisioner renders a pseries/qemu/emulator domain, ADR-0340; the boot handler applies the
+    TCG-scaled deadline, ADR-0341) → the rootfs's own baseline ppc64le kernel direct-boots under
+    QEMU/SLOF (ADR-0272) and reaches ``ready`` — which means the ``kdive-ready`` marker landed on
+    the configured console (``hvc0``/spapr-vty, not ``ttyS0``) → ``systems.ssh_info`` returns a
+    ``worker_loopback`` endpoint → ``authorize_ssh_key`` drains *succeeded* (the load-bearing SSH
+    reachability proof). Retires PR #1070's unverified ``pin_nic_slot=False`` / ``hvc0`` pseries
+    defaults.
+
+    Vehicle note: ``live_stack`` is the repo's only end-to-end provision→boot path; this is a
+    live-VM-class proof under TCG. The distinct ``live_vm``/``live_vm_tcg`` marker split is
+    epic issue 15's scope, not here. Self-cleans (release) on exit.
+    """
+    issuer, base_url, db_url, image = _ppc64le_reachability_preflight()
+    operator_token = _token(issuer, role="operator")
+
+    async def _run() -> None:
+        op = LiveStackClient.over_http(base_url, operator_token)
+        allocation_id = ""
+        async with op:
+            await seed_metering(db_url, _PROJECT)
+            try:
+                async with phase("ppc64le:allocate"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "allocations.request",
+                            project=_PROJECT,
+                            request={
+                                "vcpus": 2,
+                                "memory_gb": 2,
+                                "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+                                "resource": {"mode": "kind"},
+                            },
+                        ),
+                        "ppc64le:allocate",
+                    )
+                    allocation_id = env.object_id
+                async with phase("ppc64le:provision"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "systems.provision",
+                            allocation_id=allocation_id,
+                            profile=_ppc64le_reachability_provision_profile(image),
+                        ),
+                        "ppc64le:provision",
+                    )
+                    system_id = data_str(env, "system_id")
+                    await await_system_state(op, "ppc64le:provision", system_id, "ready")
+                async with phase("ppc64le:systems_get"):
+                    got = ok(
+                        await scalar(op, "systems.get", system_id=system_id),
+                        "ppc64le:systems_get",
+                    )
+                    # The persisted accel is the recorded TCG fact the deadline scaling keyed off.
+                    assert data_str(got, "accel") == "tcg", f"expected accel=tcg: {got!r}"
+                async with phase("ppc64le:ssh_info"):
+                    info = ok(
+                        await scalar(op, "systems.ssh_info", system_id=system_id),
+                        "ppc64le:ssh_info",
+                    )
+                    ssh = data_mapping(info, "ssh")
+                    assert ssh["host_scope"] == "worker_loopback", f"unexpected ssh_info: {ssh!r}"
+                    assert ssh["host"] and isinstance(ssh["port"], int), (
+                        f"ssh_info returned no endpoint on a ready System: {ssh!r}"
+                    )
+                async with phase("ppc64le:authorize_ssh_key"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "systems.authorize_ssh_key",
+                            system_id=system_id,
+                            public_key=_REACHABILITY_PUBKEY,
+                        ),
+                        "ppc64le:authorize_ssh_key",
+                    )
+                    await drain_job(op, "ppc64le:authorize_ssh_key", env.object_id)
             finally:
                 if allocation_id:
                     await scalar(op, "allocations.release", allocation_id=allocation_id)
