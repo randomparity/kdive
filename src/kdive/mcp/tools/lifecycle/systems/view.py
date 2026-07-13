@@ -68,6 +68,8 @@ def system_envelope(
         "allocation_id": str(system.allocation_id),
         "shape": system.shape,
         "label": system.label,
+        # Host-derived accelerator resolved at admission (ADR-0339); null when not host-derived.
+        "accel": system.accel,
         "created_at": iso(system.created_at),
         "updated_at": iso(system.updated_at),
         **provisioning_profile_summary(system.provisioning_profile),

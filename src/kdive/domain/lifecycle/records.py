@@ -76,6 +76,10 @@ class System(DomainModel, Attribution):
     #: Optional client-supplied human handle, set at mint (ADR-0264, #867). Validated by
     #: `validate_label` before persistence; echoed in the systems read envelopes.
     label: str | None = None
+    #: Host-derived accelerator (`kvm`/`tcg`) resolved from the bound Resource's advertised
+    #: `guest_arches` at admission (ADR-0339). NULL when the resource advertises none — not
+    #: host-derived; downstream consumers must treat NULL as "unknown", never crash on it.
+    accel: str | None = None
 
 
 class Investigation(DomainModel, Attribution):
