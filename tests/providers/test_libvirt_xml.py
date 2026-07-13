@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import xml.etree.ElementTree as ET
+
+import pytest
 
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
@@ -164,6 +167,25 @@ def test_parse_guest_arches_returns_empty_for_malformed_or_defused_xml() -> None
         "<capabilities>&boom;</capabilities>"
     )
     assert parse_guest_arches(xxe, _SUPPORTED) == {}
+
+
+def test_parse_guest_arches_logs_a_warning_on_a_parse_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A parse failure must be distinguishable from a legitimately-empty host (no foreign binary):
+    # log a warning so an operator can tell 'parser choked' from 'no guest arches advertised'.
+    caplog.set_level(logging.WARNING, logger="kdive.providers.shared.libvirt_xml")
+    assert parse_guest_arches("<capabilities", _SUPPORTED) == {}
+    assert any(
+        record.exc_info is not None and "guest arches" in record.message.lower()
+        for record in caplog.records
+    )
+
+
+def test_parse_guest_arches_does_not_log_for_a_well_formed_empty_host() -> None:
+    # A host that simply advertises no guest blocks is the normal auto-discover case, not an error.
+    caplog_marker = "<capabilities><host><cpu><arch>x86_64</arch></cpu></host></capabilities>"
+    assert parse_guest_arches(caplog_marker, _SUPPORTED) == {}
 
 
 def test_parse_guest_arches_first_occurrence_of_a_duplicate_arch_wins() -> None:

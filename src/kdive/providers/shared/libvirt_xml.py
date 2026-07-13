@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import xml.etree.ElementTree as ET
 from collections.abc import Collection
 
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
+
+_log = logging.getLogger(__name__)
 
 KDIVE_METADATA_NS = "https://kdive.dev/libvirt/1"
 QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
@@ -58,7 +61,8 @@ def parse_guest_arches(caps_xml: str, supported: Collection[str]) -> dict[str, d
     ``supported`` is injected (the kdive-provisionable arch set,
     :data:`kdive.domain.platform.arch_traits.SUPPORTED_ARCHES`) so this shared helper keeps no
     dependency on ``domain``. Parsed with ``defusedxml`` (the XML crosses the libvirtd trust
-    boundary): a malformed or attack document returns ``{}`` so discovery never crashes, mirroring
+    boundary): a malformed or attack document is logged at warning and returns ``{}`` so discovery
+    never crashes (the log separates a parse fault from a legitimately-empty host), mirroring
     :func:`parse_capabilities_arch`. On a duplicate ``<arch name>`` (not seen in practice) the
     first occurrence wins.
 
@@ -70,6 +74,9 @@ def parse_guest_arches(caps_xml: str, supported: Collection[str]) -> dict[str, d
     try:
         root: ET.Element = _safe_fromstring(caps_xml)
     except (ET.ParseError, DefusedXmlException) as _exc:
+        # An empty result is otherwise ambiguous — a legitimately-empty host (no foreign qemu
+        # binary) looks the same as a parse fault. Log so an operator can tell them apart.
+        _log.warning("could not parse libvirt capabilities for guest arches", exc_info=True)
         return {}
     result: dict[str, dict[str, str]] = {}
     for guest in root.findall("./guest"):
