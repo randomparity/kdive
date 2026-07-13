@@ -135,17 +135,26 @@ real host, so it is synthetic: the real ppc64le guest block plus a
     Calling `getCapabilities()` once (instead of twice) is a minor cleanup that
     keeps a single source; acceptable and preferred.
 - **Test:** in `tests/providers/local_libvirt/test_discovery.py`:
-  - `list_resources` on the default `FakeLibvirtConn` (its caps XML has only
-    `<host><cpu><arch>x86_64`) advertises `guest_arches == {}` **or** update the
-    fake's default caps to include a minimal x86_64 `<guest>` block so it advertises
-    `{"x86_64": …}`. Prefer: add a helper/fixture caps XML with guest blocks and a
-    test asserting `caps[GUEST_ARCHES_KEY]` contains the expected arches; keep a
-    case for the arch-only caps → `{}` (degradation).
-  - Do **not** weaken the existing `test_list_resources_advertises_host_capabilities`
-    — extend it or add a sibling.
+  - Add a **new** named caps fixture constant (e.g. `_CAPS_XML_WITH_GUESTS`) with an
+    x86_64 `<guest>` block, and a test that constructs
+    `FakeLibvirtConn(caps_xml=_CAPS_XML_WITH_GUESTS)` and asserts
+    `caps[GUEST_ARCHES_KEY]` contains the expected arch(es). Do **not** change the
+    shared `FakeLibvirtConn` default `caps_xml` in `fakes.py` — that fake is used by
+    discovery *and* MCP tests, and a new default key would ripple into any test that
+    asserts on the full capabilities mapping.
+  - Keep a case for the arch-only default caps → `guest_arches == {}` (degradation),
+    and do **not** weaken the existing
+    `test_list_resources_advertises_host_capabilities` — extend it or add a sibling.
 - **Acceptance:** discovery advertises `guest_arches` derived from the connection's
   caps XML; a caps XML with no guest blocks yields `{}` and does not break the other
-  advertised keys.
+  advertised keys. `guest_arches` reaches the persisted row via the **same
+  capability-agnostic inventory writeback** that already carries `pcie_devices`,
+  `vcpus`, and `disk_gb` verbatim. Verified: `providers/core/resource_registration.py`
+  writes `Jsonb(resource.capabilities)` as a **whole blob** on both INSERT and
+  UPDATE (no per-key allowlist), and `inventory/reconcile/resources.py`
+  `_overlay_one_local` preserves `**row.capabilities` (merging only the allocation
+  cap). So no new end-to-end test is required — the writeback does not filter
+  capability keys.
 - **Guardrails:** `just lint type`, then `tests/providers/local_libvirt/`.
 
 ## Task 5 — Full guardrails + PR
