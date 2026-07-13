@@ -10,7 +10,7 @@ from psycopg import AsyncConnection
 
 from kdive.db.idempotency import claim_run_step, complete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import RUNS
+from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.lifecycle.run_steps import BOOT_OUTCOME_READY, BootStepResult
@@ -33,6 +33,17 @@ from kdive.serialization import JsonValue
 from kdive.store.objectstore import ObjectStore, object_store_from_env
 
 
+async def _resolve_system_accel(conn: AsyncConnection, system_id: UUID) -> str | None:
+    """Read the System's persisted accelerator for boot-deadline scaling (ADR-0341, #1143).
+
+    A vanished System yields ``None`` — the TCG-safe (scaled) boot window — rather than
+    crashing the boot; the accelerator is a hint, and ``None`` degrades to the generous
+    deadline (`tcg_deadline_multiplier`).
+    """
+    system = await SYSTEMS.get(conn, system_id)
+    return system.accel if system is not None else None
+
+
 async def _run_boot_and_capture_outcome(
     conn: AsyncConnection,
     job_ctx: RequestContext,
@@ -44,10 +55,12 @@ async def _run_boot_and_capture_outcome(
     artifact_store: ObjectStore,
     snapshotter: ConsoleSnapshotter | None,
     mark: int,
+    *,
+    accel: str | None,
 ) -> BootStepResult:
     system_id = run.require_system_id()
     try:
-        await asyncio.to_thread(booter.boot, system_id)
+        await asyncio.to_thread(booter.boot, system_id, accel=accel)
     except CategorizedError as exc:
         artifact = None
         if (
@@ -141,6 +154,7 @@ async def boot_handler(
     snapshotter = None if binding.runtime.console is None else binding.runtime.console.snapshotter
     system_id = run.require_system_id()
     mark = await boot_evidence.mark_boot_window(system_id, snapshotter)
+    accel = await _resolve_system_accel(conn, system_id)
 
     try:
         result = await _run_boot_and_capture_outcome(
@@ -154,6 +168,7 @@ async def boot_handler(
             artifact_store,
             snapshotter,
             mark,
+            accel=accel,
         )
     except CategorizedError:
         await abandon_run_step_best_effort(conn, run_id, "boot")

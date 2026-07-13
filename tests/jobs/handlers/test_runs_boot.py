@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from typing import cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from psycopg import AsyncConnection
@@ -27,7 +27,7 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.ports.lifecycle import Connector
+from kdive.providers.ports.lifecycle import Booter, Connector
 from kdive.security.artifacts.artifact_search import (
     ArtifactSearchInputError,
     search_text,
@@ -626,3 +626,84 @@ def test_local_capture_excludes_prior_boot_panic_via_truncation(tmp_path, monkey
 
     assert redacted_b == b"[run B] booted clean READY\n"
     assert not boot_evidence.generic_panic_matches(redacted_b)
+
+
+# --- accel threading for TCG deadline scaling (ADR-0341, #1143) ------------------------------
+
+
+@dataclass
+class _FakeSystemAccel:
+    accel: str | None
+
+
+class _SpyBooter:
+    """Booter that records the accel it was called with (the fact under test)."""
+
+    def __init__(self) -> None:
+        self.accel_seen: object = "UNSET"
+
+    def boot(self, system_id: UUID, *, accel: str | None = None) -> None:
+        del system_id
+        self.accel_seen = accel
+
+
+class _AccelRun:
+    """Minimal Run carrying just what _run_boot_and_capture_outcome reads on the ready path."""
+
+    def __init__(self, system_id: UUID) -> None:
+        self._system_id = system_id
+        self.id = uuid4()
+        self.expected_boot_failure: object = None
+
+    def require_system_id(self) -> UUID:
+        return self._system_id
+
+
+def test_resolve_system_accel_returns_persisted(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _get(_conn: object, _sid: object) -> _FakeSystemAccel:
+        return _FakeSystemAccel("tcg")
+
+    monkeypatch.setattr(runs_boot.SYSTEMS, "get", _get)
+    got = asyncio.run(runs_boot._resolve_system_accel(cast(AsyncConnection, object()), uuid4()))
+    assert got == "tcg"
+
+
+def test_resolve_system_accel_none_when_system_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A vanished System must not crash the boot; it degrades to None → the safe (scaled) window.
+    async def _get(_conn: object, _sid: object) -> None:
+        return None
+
+    monkeypatch.setattr(runs_boot.SYSTEMS, "get", _get)
+    got = asyncio.run(runs_boot._resolve_system_accel(cast(AsyncConnection, object()), uuid4()))
+    assert got is None
+
+
+def test_boot_and_capture_forwards_accel_to_booter(monkeypatch: pytest.MonkeyPatch) -> None:
+    spy = _SpyBooter()
+
+    async def _cap(*_a: object, **_k: object) -> None:
+        return None
+
+    async def _audit(*_a: object, **_k: object) -> None:
+        return None
+
+    monkeypatch.setattr(boot_evidence, "capture_run_console", _cap)
+    monkeypatch.setattr(boot_evidence, "record_boot_audit", _audit)
+
+    result = asyncio.run(
+        runs_boot._run_boot_and_capture_outcome(
+            cast(AsyncConnection, object()),
+            cast(RequestContext, object()),
+            cast(Run, _AccelRun(uuid4())),
+            cast(Booter, spy),
+            cast(Connector, object()),
+            cast(ProfilePolicy, object()),
+            cast(SecretRegistry, object()),
+            cast(ObjectStore, object()),
+            None,
+            0,
+            accel="tcg",
+        )
+    )
+    assert spy.accel_seen == "tcg"
+    assert result["boot_outcome"] == "ready"

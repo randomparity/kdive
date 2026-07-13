@@ -12,5 +12,6 @@ class FaultInjectInstall:
         del request
         return None
 
-    def boot(self, system_id: UUID) -> None:
+    def boot(self, system_id: UUID, *, accel: str | None = None) -> None:
+        del system_id, accel
         return None

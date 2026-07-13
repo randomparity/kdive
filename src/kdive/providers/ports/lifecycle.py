@@ -166,8 +166,15 @@ class Installer(Protocol):
 class Booter(Protocol):
     """Boot port: power-cycle the domain and confirm run-readiness."""
 
-    def boot(self, system_id: UUID) -> None:
+    def boot(self, system_id: UUID, *, accel: str | None = None) -> None:
         """Boot a System after installation and confirm run-readiness.
+
+        ``accel`` is the System's persisted accelerator (``"kvm"`` / ``"tcg"`` / ``None``,
+        ADR-0339). The local-libvirt booter scales its boot-readiness window by it (ADR-0341):
+        KVM is unscaled, while TCG and an unknown/``None`` accelerator get the generous
+        (scaled) window so an over-optimistic classification degrades to a slow-but-correct
+        boot rather than a spurious timeout. Other providers accept and ignore it. The default
+        ``None`` yields the safe (scaled) window for any caller that omits it.
 
         Raises:
             CategorizedError: ``INSTALL_FAILURE`` for provider boot faults,

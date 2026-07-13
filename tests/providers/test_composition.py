@@ -137,7 +137,8 @@ class _InstallProvider:
     def install(self, request: InstallRequest) -> None:
         self.installed = request
 
-    def boot(self, system_id: UUID) -> None:
+    def boot(self, system_id: UUID, *, accel: str | None = None) -> None:
+        del accel
         self.booted = system_id
 
 
