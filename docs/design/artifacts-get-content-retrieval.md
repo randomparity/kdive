@@ -61,9 +61,10 @@ matching `search_text`'s return scale) and routes anything larger to the URI:
 The metadata envelope (`available`, `refs.object`) is the contract `artifacts.get`
 already honors and must not regress. The content/URI enrichment is best-effort:
 
-- store factory raises (`CONFIGURATION_ERROR` — S3 unconfigured): return the
-  metadata envelope with `data["content_unavailable"] = "store_unconfigured"`,
-  no `download_uri`, no `content`.
+- store factory raises (`CategorizedError`): return the metadata envelope with
+  `data["content_unavailable"] = "store_error"`, no `download_uri`, no `content`.
+  (S3 is a required backend since ADR-0337, so the `store_unconfigured` sentinel
+  was collapsed into the generic `store_error` reason.)
 - `head`/`get_artifact`/`presign_get` raises `CategorizedError`: return the
   metadata envelope with `data["content_unavailable"] = "store_error"`, no
   `download_uri`, no `content`.
@@ -110,7 +111,7 @@ Handler-level, injected store seam (mirrors the `search_text` tests):
 - `head().sensitivity != REDACTED` at a redacted row's key (object/row drift):
   `configuration_error`, URI never minted, body never fetched — for both an
   inline-eligible and an oversized object (the pre-URI redaction gate).
-- store factory raises: metadata envelope + `content_unavailable: store_unconfigured`,
+- store factory raises: metadata envelope + `content_unavailable: store_error`,
   no URI.
 - `head`/`presign_get` raises: metadata envelope + `content_unavailable: store_error`.
 - sensitive / quarantined / cross-project id: unchanged `not_found` behavior
