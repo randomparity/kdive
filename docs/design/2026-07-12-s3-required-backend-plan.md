@@ -68,12 +68,14 @@ dead `if store is None` branch. (4) Docs + comment rewording.
   `parse` that raises `ValueError` on a whitespace-only value.
 
 - [ ] **Step 1: Write the failing tests.** In the config-validate test module, add
-  three cases asserting `config.validate("server")` (and one for `worker`) raises
-  `CategorizedError` with `CONFIGURATION_ERROR` naming `KDIVE_S3_ENDPOINT_URL` /
-  `KDIVE_S3_BUCKET` when, respectively: (a) the vars are absent, (b)
-  `KDIVE_S3_ENDPOINT_URL=""`, (c) `KDIVE_S3_ENDPOINT_URL="   "`. Use the existing
-  test's env-override fixture pattern (grep the module for how it sets a
-  `config.env_snapshot`/monkeypatches env).
+  cases asserting `config.validate(<process>)` raises `CategorizedError` with
+  `CONFIGURATION_ERROR` naming `KDIVE_S3_ENDPOINT_URL` / `KDIVE_S3_BUCKET` when,
+  respectively: (a) the vars are absent, (b) `KDIVE_S3_ENDPOINT_URL=""`, (c)
+  `KDIVE_S3_ENDPOINT_URL="   "`. Cover **all three store-user processes** named in
+  success criterion 1 — parametrize over `"server"`, `"worker"`, `"reconciler"`
+  (at minimum the absent variant for each, plus the empty/blank variants on one).
+  Use the existing test's env-override fixture pattern (grep the module for how it
+  sets a `config.env_snapshot`/monkeypatches env).
 
 - [ ] **Step 2: Run to verify they fail.**
   `uv run python -m pytest tests/config -k s3 -q` → FAIL (validate passes today).
@@ -108,9 +110,14 @@ CLI so the store is never `None`. Consumers keep their `Optional` params for now
 
 **Files:**
 - Modify: `src/kdive/store/assembly.py`
+- Modify: `src/kdive/mcp/assembly/tool_registration.py` (reads the removed fields at ~:105,106,117,185)
+- Modify: `src/kdive/jobs/assembly.py` (reads the removed fields at ~:67,85,99,125,152 — see step 2 for the Task-3 interleaving)
 - Modify: `src/kdive/processes/reconciler.py`
 - Modify: `src/kdive/__main__.py` (`_handle_reconcile_systems`, import at ~:29)
 - Test: `tests/store/`, `tests/reconciler/test_main.py`, `tests/mcp/ops/test_reconcile_now.py`, `tests/processes/test_worker.py`, **`tests/mcp/core/test_app.py`**
+
+> Note: `mcp/assembly/app.py` only *calls* `build_object_store_assembly()` (~:66);
+> it does not read the removed fields, so it needs no edit.
 
 **Interfaces:**
 - Produces: `ObjectStoreAssembly` with a single non-optional store field (see
@@ -155,10 +162,15 @@ def build_object_store_assembly(
     )
 ```
 
-  Update `mcp/assembly/app.py`, `mcp/assembly/tool_registration.py`, and
-  `jobs/assembly.py` call sites that read `optional_upload_store`/
-  `optional_image_store`/`optional_ops_image_store`/`required_image_build_store` to
-  read `assembly.store` (keep their local param types `Optional` for now).
+  Update the `mcp/assembly/tool_registration.py` and `jobs/assembly.py` call
+  sites that read `optional_upload_store`/`optional_image_store`/
+  `optional_ops_image_store`/`required_image_build_store` to read `assembly.store`
+  (keep their local param types `Optional` for now). **Interleaving:**
+  `jobs/assembly.py:152` currently does `isinstance(store, CategorizedError)` and
+  falls back to `_unconfigured_image_build_handler`; in Task 2 rewire its read to
+  `assembly.store` but leave that (now-dead) `isinstance` branch and the stub in
+  place — Task 3 deletes them and drops the then-unused `CategorizedError` import
+  (ruff F401).
 
 - [ ] **Step 3: Rewrite `processes/reconciler.py`.** Remove
   `optional_reconciler_object_store` and its `s3_env_is_absent` use; build the
@@ -166,9 +178,11 @@ def build_object_store_assembly(
   `ReconcileConfig(upload_store=store, image_store=store)`.
 
 - [ ] **Step 4: Rewrite `__main__.py` `_handle_reconcile_systems`.** Drop the
-  `optional_reconciler_object_store` import; call `object_store_from_env()` inside
-  a `try/except CategorizedError` that prints the error message and returns a
-  non-zero exit code (preserve the friendly-failure UX):
+  `optional_reconciler_object_store` import; add `import sys` and import
+  `CategorizedError` (from `kdive.domain.errors`) if not already in scope. Call
+  `object_store_from_env()` inside a `try/except CategorizedError` that prints the
+  error message and returns a non-zero exit code (preserve the friendly-failure
+  UX; match the module's existing `print` style):
 
 ```python
 try:
@@ -197,8 +211,9 @@ except CategorizedError as error:
   unconfigured-store config error (in both `tests/jobs/test_worker_main.py` and
   `tests/mcp/core/test_app.py`).
 - [ ] **Step 2: Delete `_unconfigured_image_build_handler`** and the
-  `CategorizedError` branch in `_image_build_handler_registrar`; register the real
-  image-build handler unconditionally with `assembly.store`.
+  `isinstance(store, CategorizedError)` branch in `_image_build_handler_registrar`;
+  register the real image-build handler unconditionally with `assembly.store`.
+  Drop the now-unused `CategorizedError` import from `jobs/assembly.py` (ruff F401).
 - [ ] **Step 3: Run** `just type` and `uv run python -m pytest tests/jobs -q`.
 - [ ] **Step 4: Commit.**
   `git commit -m "refactor: always register image-build handler (#1133)"`
@@ -246,8 +261,14 @@ from `jobs/assembly.py`, which now passes non-`None`).
 - [ ] **Step 2: Drop `| None` on `ReconcileConfig.image_store` / `upload_store`**
   keeping their existing structural protocol types — `image_store: ImageSweepStore`
   and `upload_store: UploadStore` (loop.py:216-217), **not** `ObjectStore` (the
-  pass functions consume the protocols). Delete the four inventory-pass and four
-  GC-pass `is None` gates so the passes are always scheduled.
+  pass functions consume the protocols). Delete the eight `is None` gates so the
+  passes are always scheduled: **four `image_store` gates** — one inventory pass
+  (`_reconcile_inventory_repair` ~:245) plus three image-catalog sweeps
+  (`_leaked_images_repair` ~:254, `_dangling_images_repair` ~:263,
+  `_expired_private_images_repair` ~:272) — and **four `upload_store` GC gates**
+  (`_abandoned_uploads_repair` ~:281, `_report_artifacts_gc_repair` ~:290,
+  `_investigation_artifacts_gc_repair` ~:299, `_expired_build_artifacts_gc_repair`
+  ~:310).
 - [ ] **Step 3: Run** `just type` and
   `uv run python -m pytest tests/reconciler tests/integration/test_reconcile_inventory.py -q`.
 - [ ] **Step 4: Commit.**
