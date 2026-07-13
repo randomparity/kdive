@@ -68,6 +68,7 @@ def test_valid_catalog_reports_profiles(tmp_path: Path) -> None:
     rows = [json_mapping(r) for r in data_sequence(resp, "profiles")]
     triples = {(r["provider"], r["name"], r["arch"]) for r in rows}
     assert ("local-libvirt", "console-ready_x86_64", "x86_64") in triples
+    assert ("local-libvirt", "console-ready_ppc64le", "ppc64le") in triples
     assert data_str(resp, "path") == str(dest)
     # On success the verb points the operator at the listing of the same catalog.
     assert resp.suggested_next_actions == ["fixtures.list"]

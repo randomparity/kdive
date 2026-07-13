@@ -1,0 +1,3 @@
+provider: local-libvirt
+name: console-ready_ppc64le
+arch: ppc64le

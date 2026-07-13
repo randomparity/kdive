@@ -11,3 +11,4 @@ storage:
 rootfs: []
 profiles:
   - profiles/console-ready_x86_64.yaml
+  - profiles/console-ready_ppc64le.yaml
