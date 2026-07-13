@@ -167,6 +167,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0064",
         "0065",
         "0066",
+        "0067",
     ]
     assert second == []
 
@@ -608,6 +609,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0064",
         "0065",
         "0066",
+        "0067",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -953,6 +955,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0064",
         "0065",
         "0066",
+        "0067",
     ]
 
 
@@ -1409,6 +1412,15 @@ def test_migration_0066_adds_job_dispatch_lane(pg_conn: psycopg.Connection) -> N
             "VALUES ('install', '', '{}', 'queued', 3, "
             '\'{"principal":"p","project":"proj"}\', \'dk-blank-lane\')'
         )
+
+
+def test_migration_0067_adds_system_accel(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    cols = _columns(pg_conn, "systems")
+    assert cols.get("accel") == "text"
+    # Nullable, no default: a System minted without a resolved accelerator records NULL (ADR-0339).
+    nullable = _nullable(pg_conn, "systems")
+    assert nullable.get("accel") == "YES"
 
 
 def _apply_through(conn: psycopg.Connection, last_version: str) -> None:

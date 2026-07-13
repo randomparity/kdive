@@ -220,6 +220,10 @@ def _register_systems_provision(
         System already failed, retrying does not mint a new one — release this Allocation and
         request a fresh one (`allocations.release`, then `allocations.request`) for a fresh
         System. Requires contributor on the Allocation's project.
+
+        A profile whose `arch` the backing host cannot boot is rejected `configuration_error`
+        at admission — before any capacity is committed — naming the arches the host supports;
+        pick one of those or an allocation on a host that offers the arch you need.
         """
         ctx = current_context()
         try:
@@ -290,7 +294,12 @@ def _register_systems_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def systems_get(
         system_id: Annotated[str, Field(description="The System to render.")],
     ) -> ToolResponse:
-        """Return a System the caller can view."""
+        """Return a System the caller can view.
+
+        ``data.accel`` is the host-derived accelerator resolved at admission — ``kvm`` (native)
+        or ``tcg`` (foreign-arch emulation) — or ``null`` when the backing host advertised no
+        guest-arch capability. Expect a ``tcg`` System to boot and run substantially slower.
+        """
         return await _get_system(pool, current_context(), system_id)
 
 

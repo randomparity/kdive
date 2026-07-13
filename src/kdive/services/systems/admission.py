@@ -27,7 +27,7 @@ import kdive.config as config
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.config.core_settings import PROVISION_PREMUTATION_TIMEOUT_S
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ALLOCATIONS, SYSTEMS
+from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, IllegalTransition, JobState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
@@ -51,6 +51,7 @@ from kdive.serialization import safe_error_details
 from kdive.services.idempotency.envelope import StoredResult
 from kdive.services.systems.validation import (
     RootfsValidator,
+    resolve_accel,
     validate_profile_for_provider,
     validate_rootfs_for_provider,
 )
@@ -250,6 +251,25 @@ def _stored_profile_for(
     parsed = ProvisioningProfile.parse(profile)
     require_concrete_sizing(parsed)
     return parsed
+
+
+async def _resolve_new_system_accel(
+    conn: AsyncConnection, resource_id: UUID | None, arch: str
+) -> str | None:
+    """Validate ``arch`` against the bound Resource and resolve its accelerator (ADR-0339).
+
+    Loads the Resource named by the granted Allocation and delegates to
+    :func:`resolve_accel`. Returns ``None`` (fail-open, no accel) when there is no bound
+    Resource or its capabilities advertise no ``guest_arches``; raises ``CONFIGURATION_ERROR``
+    when the Resource advertises guest arches but not ``arch``. Called at System mint only,
+    before the ``granted -> active`` flip, so a rejection consumes no capacity.
+    """
+    if resource_id is None:
+        return None
+    resource = await RESOURCES.get(conn, resource_id)
+    if resource is None:
+        return None
+    return resolve_accel(resource.capability_view.guest_arches(), arch)
 
 
 @dataclass(frozen=True, slots=True)
@@ -762,6 +782,7 @@ async def _insert_system_and_activate(
     state: SystemState,
     tool: str,
     transition: str,
+    accel: str | None,
     label: str | None = None,
 ) -> System:
     now = datetime.now(UTC)  # placeholder; the DB sets created_at/updated_at
@@ -779,6 +800,7 @@ async def _insert_system_and_activate(
             provisioning_profile=dump_profile(profile),
             shape=alloc.shape,
             label=label,
+            accel=accel,
         ),
     )
     await audit.record(
@@ -819,6 +841,12 @@ async def _insert_defined_system(
     timeout: PreMutationTimeout,
     label: str | None = None,
 ) -> AdmissionResult:
+    # Validate arch + resolve accel before the granted->active flip (ADR-0339): a mis-arch
+    # rejection writes no System and leaves the allocation granted (all-or-nothing).
+    try:
+        accel = await _resolve_new_system_accel(conn, alloc.resource_id, profile.arch)
+    except CategorizedError as exc:
+        return _failure_from_error(alloc.id, exc)
     blocked = await _new_system_allowed(conn, alloc, profile, profile_policy, rootfs_validator)
     if blocked is not None:
         return blocked
@@ -831,6 +859,7 @@ async def _insert_defined_system(
         state=SystemState.DEFINED,
         tool="systems.define",
         transition="->defined",
+        accel=accel,
         label=label,
     )
     return DefinedSystemAdmitted(system)
@@ -848,6 +877,9 @@ async def _insert_provisioning_system(
 ) -> AdmissionResult:
     try:
         reject_rootfs_upload_without_window(profile_policy, profile)
+        # Validate arch + resolve accel before the granted->active flip (ADR-0339): a mis-arch
+        # rejection writes no System and leaves the allocation granted (all-or-nothing).
+        accel = await _resolve_new_system_accel(conn, alloc.resource_id, profile.arch)
     except CategorizedError as exc:
         return _failure_from_error(alloc.id, exc)
     blocked = await _new_system_allowed(conn, alloc, profile, profile_policy, rootfs_validator)
@@ -862,6 +894,7 @@ async def _insert_provisioning_system(
         state=SystemState.PROVISIONING,
         tool="systems.provision",
         transition="->provisioning",
+        accel=accel,
         label=label,
     )
     return await _enqueue_provision_job(

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from kdive.components.references import ROOTFS_COMPONENT
 from kdive.components.validation import (
     ComponentSourceCapabilities,
     reject_unsupported_component_source,
 )
+from kdive.domain.catalog.resource_capabilities import GuestArch
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import OPT_IN_DESTRUCTIVE_JOB_KINDS
 from kdive.profiles.provider_policy import ProfilePolicy
@@ -44,6 +45,39 @@ def _reject_unknown_destructive_ops(profile: ProvisioningProfile) -> None:
                 "valid_destructive_ops": sorted(_VALID_DESTRUCTIVE_OP_VALUES),
             },
         )
+
+
+def resolve_accel(guest_arches: Mapping[str, GuestArch], arch: str) -> str | None:
+    """Validate ``arch`` against a resource's guest arches and resolve its accelerator (ADR-0339).
+
+    ``guest_arches`` is what :meth:`ResourceCapabilities.guest_arches` returns for the bound
+    Resource — ``{arch: {"accel", "emulator"}}`` filtered to the kdive-provisionable set (ADR-0338).
+
+    Returns:
+        The advertised accelerator name (``kvm``/``tcg``) for ``arch``, or ``None`` when the
+        resource advertises **no** guest arches — remote-libvirt, fault-inject, or a host not
+        re-discovered since ADR-0338. That fail-open case skips the check and records no accel,
+        preserving pre-ADR-0339 behavior.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when ``guest_arches`` is non-empty and does not
+            advertise ``arch``. The message names the supported set — the same fail-fast rule as
+            ``arch_traits()``, never a silent x86 fallback.
+    """
+    if not guest_arches:
+        return None
+    entry = guest_arches.get(arch)
+    if entry is None:
+        supported = sorted(guest_arches)
+        raise CategorizedError(
+            f"resource does not support guest architecture {arch!r}; supported: "
+            f"{', '.join(supported)}",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            # `accepted_values` is the ADR-0224 reserved key that survives `safe_error_details`
+            # and reaches the agent as a structured finite set; a custom key's list is dropped.
+            details={"requested_arch": arch, "accepted_values": supported},
+        )
+    return entry["accel"]
 
 
 def validate_profile_for_provider(

@@ -106,6 +106,10 @@ See [`systems.profile_examples`](systems.md#systemsprofile_examples) for a ready
 
 Return a System the caller can view.
 
+``data.accel`` is the host-derived accelerator resolved at admission — ``kvm`` (native)
+or ``tcg`` (foreign-arch emulation) — or ``null`` when the backing host advertised no
+guest-arch capability. Expect a ``tcg`` System to boot and run substantially slower.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `system_id` | string | yes | The System to render. |
@@ -148,6 +152,10 @@ must be uploaded before provisioning. One System per Allocation: if this Allocat
 System already failed, retrying does not mint a new one — release this Allocation and
 request a fresh one (`allocations.release`, then `allocations.request`) for a fresh
 System. Requires contributor on the Allocation's project.
+
+A profile whose `arch` the backing host cannot boot is rejected `configuration_error`
+at admission — before any capacity is committed — naming the arches the host supports;
+pick one of those or an allocation on a host that offers the arch you need.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

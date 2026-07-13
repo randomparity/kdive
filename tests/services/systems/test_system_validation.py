@@ -11,12 +11,14 @@ import pytest
 
 from kdive.components.references import ROOTFS_COMPONENT, ComponentSourceKind
 from kdive.components.validation import ComponentSourceCapabilities
+from kdive.domain.catalog.resource_capabilities import GuestArch
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.services.systems.validation import (
     _reject_unknown_destructive_ops,
+    resolve_accel,
     validate_profile_for_provider,
     validate_rootfs_for_provider,
 )
@@ -245,3 +247,51 @@ def test_validate_rootfs_for_provider_skips_providers_without_rootfs() -> None:
 
     asyncio.run(validate_rootfs_for_provider(profile, _FAULT_POLICY, fail_on_call))
     validate_profile_for_provider(profile, _FAULT_POLICY, _capabilities())
+
+
+# guest_arches mappings as ResourceCapabilities.guest_arches() returns them (ADR-0338/0339).
+_X86_HOST: dict[str, GuestArch] = {
+    "x86_64": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-x86_64"},
+    "ppc64le": {"accel": "tcg", "emulator": "/usr/bin/qemu-system-ppc64"},
+}
+_PPC_HOST: dict[str, GuestArch] = {
+    "x86_64": {"accel": "tcg", "emulator": "/usr/bin/qemu-system-x86_64"},
+    "ppc64le": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-ppc64"},
+}
+
+
+@pytest.mark.parametrize(
+    ("guest_arches", "arch", "expected_accel"),
+    [
+        (_X86_HOST, "x86_64", "kvm"),
+        (_X86_HOST, "ppc64le", "tcg"),
+        (_PPC_HOST, "ppc64le", "kvm"),
+        (_PPC_HOST, "x86_64", "tcg"),
+    ],
+)
+def test_resolve_accel_returns_advertised_accelerator(
+    guest_arches: dict[str, GuestArch], arch: str, expected_accel: str
+) -> None:
+    assert resolve_accel(guest_arches, arch) == expected_accel
+
+
+@pytest.mark.parametrize("arch", ["x86_64", "ppc64le"])
+def test_resolve_accel_fails_open_on_empty_guest_arches(arch: str) -> None:
+    # A resource advertising no guest arches (remote-libvirt / fault-inject / a host not
+    # re-discovered since ADR-0338) skips the check and records no accelerator.
+    assert resolve_accel({}, arch) is None
+
+
+def test_resolve_accel_rejects_unadvertised_arch_naming_supported_set() -> None:
+    ppc_only: dict[str, GuestArch] = {
+        "ppc64le": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-ppc64"}
+    }
+
+    with pytest.raises(CategorizedError) as exc_info:
+        resolve_accel(ppc_only, "x86_64")
+
+    exc = exc_info.value
+    assert exc.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "x86_64" in str(exc)
+    assert "ppc64le" in str(exc)  # the supported set is named in the message
+    assert exc.details == {"requested_arch": "x86_64", "accepted_values": ["ppc64le"]}
