@@ -179,8 +179,10 @@ class ResourceCapabilities:
         hand-edited row never crashes a consumer. Returns ``{}`` when the key is absent or is not
         a mapping; keeps only entries that are a dict with string ``accel`` and ``emulator``, and
         returns each as a bare :class:`GuestArch` (extra keys dropped). Does not validate the
-        ``accel`` value domain — the issue-3 consumer maps it to a domain type and fails closed on
-        an unexpected value.
+        ``accel`` value domain — the renderer (ADR-0340) maps ``kvm`` to a KVM domain and treats
+        any other value as TCG (``qemu``), a total mapping that is safe because
+        :func:`~kdive.providers.shared.libvirt_xml.parse_guest_arches` only ever emits
+        ``kvm``/``tcg``.
         """
         raw = self._values.get(GUEST_ARCHES_KEY)
         if not isinstance(raw, Mapping):

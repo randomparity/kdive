@@ -144,20 +144,23 @@ def _build_baseline_domain(
     the x86-only ``<features>`` block, and the TCG ``<emulator>`` are all arch/accel-resolved
     through ``traits`` — see the per-element helpers.
     """
-    domain = ET.Element("domain", type=("kvm" if accel == "kvm" else "qemu"))
+    # Decode the accelerator once: KVM vs TCG drives the domain type, the <cpu> element, and
+    # whether <emulator> is emitted (ADR-0340).
+    is_kvm = accel == "kvm"
+    domain = ET.Element("domain", type="kvm" if is_kvm else "qemu")
     ET.SubElement(domain, "name").text = domain_name_for(system_id)
     ET.SubElement(domain, "uuid").text = str(system_id)
     ET.SubElement(domain, "memory", unit="MiB").text = str(profile.memory_mb)
     ET.SubElement(domain, "vcpu").text = str(profile.vcpu)
     # <cpu> stays here (after <vcpu>, before <os>) so the x86-KVM domain is byte-identical to
     # the pre-ADR-0340 output; a TCG domain emits nothing and <os> follows <vcpu> directly.
-    _append_guest_cpu(domain, accel=accel, kvm_cpu_mode=traits.kvm_cpu_mode)
+    _append_guest_cpu(domain, is_kvm=is_kvm, kvm_cpu_mode=traits.kvm_cpu_mode)
     os_el = _append_os(domain, profile, machine=machine)
     _append_direct_kernel(os_el, kernel_path, initrd_path, _baseline_cmdline(traits.console_device))
     if traits.emit_acpi_features:
         _append_crash_capture_features(domain)
     devices = ET.SubElement(domain, "devices")
-    if accel != "kvm":
+    if not is_kvm:
         _append_emulator(devices, emulator)
     _append_root_disk(devices, disk_path)
     _append_serial_console(devices, system_id)
@@ -165,7 +168,7 @@ def _build_baseline_domain(
     return domain, devices
 
 
-def _append_guest_cpu(domain: ET.Element, *, accel: str, kvm_cpu_mode: str) -> None:
+def _append_guest_cpu(domain: ET.Element, *, is_kvm: bool, kvm_cpu_mode: str) -> None:
     """Pin the guest CPU per arch under KVM; emit nothing for TCG (ADR-0340, ADR-0294, #956).
 
     Under KVM the mode is the arch-resolved ``kvm_cpu_mode``: ``host-passthrough`` on x86 and
@@ -177,7 +180,7 @@ def _append_guest_cpu(domain: ET.Element, *, accel: str, kvm_cpu_mode: str) -> N
     would couple the domain to specific QEMU versions. Whether that default meets the guest's
     ISA baseline (x86-64-v2 / POWER9) is proven at the #1144 live boot, not asserted here.
     """
-    if accel != "kvm":
+    if not is_kvm:
         return
     ET.SubElement(domain, "cpu", mode=kvm_cpu_mode)
 
