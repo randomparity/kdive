@@ -49,20 +49,38 @@ admission layer both validates and resolves:
    `arch_traits()` — never a silent x86 fallback).
 4. otherwise → the advertised `accel` string for `arch`.
 
-**Enforcement points.** The helper is called at the System-mint point of both
-admission lanes — `_insert_provisioning_system` (`systems.provision`) and
-`_insert_defined_system` (`systems.define`) — and the resolved accel is threaded
-into `_insert_system_and_activate`, which persists it on the inserted row. The
-`provision_defined` lane (`defined → provisioning`) calls the helper again for its
-**validation** side effect — re-checking the arch against the *current*
-`guest_arches` so a host that lost the arch between `define` and
-`provision_defined` is rejected before the real provision job — but does not
-re-persist the accel (the value committed at `define` is authoritative).
+**Enforcement point: System mint only.** The helper is called at the System-mint
+point of both admission lanes — `_insert_provisioning_system` (`systems.provision`)
+and `_insert_defined_system` (`systems.define`) — **before** `_new_system_allowed`
+and the `_insert_system_and_activate` insert that flips the allocation
+`granted → active`. A rejection therefore writes no System, enqueues no job, and
+leaves the allocation `granted` (the all-or-nothing rule), exactly like the
+existing pre-insert quota/rootfs rejections. On success the resolved accel is
+threaded into `_insert_system_and_activate`, which persists it on the inserted row.
+
+The `provision_defined` lane (`defined → provisioning`) does **not** re-validate
+the arch: the System's arch was validated and its accel committed at `define`, and
+re-validating there would consume no capacity but could newly reject a System whose
+allocation is already `active`, stranding it in `defined` with no recovery action
+(the `CONFIGURATION_ERROR` flows through `_failure_from_error`, which sets no
+`AdmissionRecovery`). The rare case of a host that loses the arch between `define`
+and `provision_defined` is left to the existing worker-failure path: the provision
+job fails, the System reaches `failed`, and `_failed_system_retry_failure` already
+surfaces actionable `RECYCLE_ALLOCATION` guidance. Earlier rejection is not worth a
+new recovery-less stuck state for a mid-lane host change.
+
+**Accel value domain.** The persisted accel is the advertised string from
+`guest_arches` as-is (`guest_arches()` guarantees it is a `str`, not that it is in
+`{kvm, tcg}`); `systems.get` surfaces it verbatim. Domain enforcement is issue 3's
+concern — its accel→libvirt-domain-type mapper must fail closed on an unexpected
+value (ADR-0338), and, per the nullability decision below, must also handle a NULL
+accel (default or fail closed, never crash).
 
 **Surfacing.** `systems.get` returns `accel` via the shared `system_envelope`
-(so `systems.list` carries it too); the `systems.get` and `systems.provision`
-wrapper docstrings — the agent-facing contract — document the field and the
-admission-time arch rejection in the same PR.
+(so `systems.list` carries it too), alongside the `arch` the summary already
+surfaces; the `systems.get` and `systems.provision` wrapper docstrings — the
+agent-facing contract — document the field and the admission-time arch rejection
+in the same PR.
 
 ## Consequences
 
@@ -76,8 +94,13 @@ admission-time arch rejection in the same PR.
   as today and record `accel = NULL`. Downstream consumers must treat NULL as "not
   host-derived" and fall back to their prior behavior.
 - A host whose `guest_arches` changes between `define` and `provision_defined`
-  keeps its `define`-time accel (still re-validated for arch *support*, just not
-  re-resolved). This window is short and re-discovery mid-lane is rare.
+  keeps its `define`-time accel and is not re-validated at `provision_defined`; a
+  now-unsupported arch fails in the worker and recovers via the existing
+  `failed → RECYCLE_ALLOCATION` path. This window is short and re-discovery
+  mid-lane is rare.
+- Downstream accel consumers (issues 3, 4, cost, tests) must handle a NULL accel
+  (resource advertised none) as well as an unexpected non-`{kvm,tcg}` string; this
+  ADR records the fact, issue 3's mapper enforces the domain.
 
 ## Rejected alternatives
 
@@ -90,11 +113,14 @@ admission-time arch rejection in the same PR.
   Fail-closing would regress all of them to a hard reject. Gating enforcement on
   the capability actually being advertised mirrors `disk_ceiling()` returning
   `None` to mean "unbounded."
-- **Re-resolve and re-persist the accel at `provision_defined`.** Rejected: the
-  repository has no generic single-column update path (only `update_state`), and
-  the accel is a stable function of `(guest_arches, arch)`; adding a write path for
-  a negligible re-discovery window is scope the value does not justify. The lane
-  still re-validates arch support, which is free.
+- **Re-validate arch (and/or re-resolve accel) at `provision_defined`.** Rejected:
+  the System's allocation is already `active` by then, so a fresh
+  `CONFIGURATION_ERROR` strands it in `defined` with no `AdmissionRecovery`
+  next-action — a recovery-less stuck state strictly worse than the status quo it
+  would replace. The rare mid-lane host change is handled by the worker-failure →
+  `RECYCLE_ALLOCATION` path, which already gives actionable recovery. Re-persisting
+  the accel would additionally need a generic single-column repo write the codebase
+  does not have (only `update_state`), for a negligible re-discovery window.
 - **A non-nullable `accel` with a default** (e.g. `"kvm"`). Rejected: fabricates a
   host fact for resources that never advertised one. NULL honestly encodes
   "unknown / not host-derived."
