@@ -7,7 +7,17 @@ from collections.abc import Mapping
 import pytest
 
 from kdive.config import Registry, Setting
-from kdive.config.core_settings import S3_BUCKET, S3_ENDPOINT_URL, S3_REGION
+from kdive.config.core_settings import (
+    DATABASE_URL,
+    OIDC_AUDIENCE,
+    OIDC_ISSUER,
+    OIDC_JWKS_URI,
+    S3_BUCKET,
+    S3_ENDPOINT_URL,
+    S3_REGION,
+    SETTINGS,
+    _always,
+)
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 
@@ -102,3 +112,45 @@ def test_s3_bucket_whitespace_only_is_rejected() -> None:
         reg.validate("worker")
     assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert ei.value.details["variable"] == S3_BUCKET.name
+
+
+# The always-required string settings that share the S3 empty-vs-absent gap (#1137):
+# a present-but-blank value must fail at config.validate(), not later at pool/token time.
+_ALWAYS_REQUIRED_STRINGS = [DATABASE_URL, OIDC_JWKS_URI, OIDC_ISSUER, OIDC_AUDIENCE]
+
+
+@pytest.mark.parametrize("setting", _ALWAYS_REQUIRED_STRINGS, ids=lambda s: s.name)
+def test_always_required_string_absent_is_rejected(setting: Setting[str]) -> None:
+    reg = Registry([setting])
+    reg.load({})
+    with pytest.raises(CategorizedError) as ei:
+        reg.validate("server")
+    assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert ei.value.details["missing"] == [setting.name]
+
+
+@pytest.mark.parametrize("setting", _ALWAYS_REQUIRED_STRINGS, ids=lambda s: s.name)
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_always_required_string_blank_is_rejected(setting: Setting[str], blank: str) -> None:
+    reg = Registry([setting])
+    reg.load({setting.name: blank})
+    with pytest.raises(CategorizedError) as ei:
+        reg.validate("server")
+    assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert ei.value.details["variable"] == setting.name
+
+
+@pytest.mark.parametrize(
+    "setting", [s for s in SETTINGS if s.required_when is _always], ids=lambda s: s.name
+)
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_always_required_settings_reject_blank(setting: Setting[str], blank: str) -> None:
+    """Invariant guard: every always-required setting's parser must reject a blank value.
+
+    A future ``required_when=_always`` string setting declared with a blank-accepting
+    parser would silently reintroduce the empty-vs-absent gap #1133/#1137 closed. This
+    asserts the invariant directly (parser rejects blank) rather than the ``_nonempty``
+    identity, so it holds for any equivalently strict parser.
+    """
+    with pytest.raises(ValueError):
+        setting.parse(blank)
