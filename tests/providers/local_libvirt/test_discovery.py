@@ -8,7 +8,11 @@ import libvirt
 import pytest
 
 from kdive.domain.capacity.state import ResourceStatus
-from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY, DISK_GB_KEY
+from kdive.domain.catalog.resource_capabilities import (
+    CONCURRENT_ALLOCATION_CAP_KEY,
+    DISK_GB_KEY,
+    GUEST_ARCHES_KEY,
+)
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.pcie import PCIE_DEVICES_KEY
@@ -26,6 +30,24 @@ def _discovery(conn: FakeLibvirtConn, *, cap: int = 2) -> LocalLibvirtDiscovery:
     return LocalLibvirtDiscovery(
         host_uri="qemu:///system", connect=lambda: conn, concurrent_allocation_cap=cap
     )
+
+
+# An x86_64 host that can also boot ppc64le under TCG. The default FakeLibvirtConn caps XML has no
+# <guest> blocks (so it exercises the empty-degradation path); this fixture is passed explicitly so
+# the shared fake's default is left untouched.
+_CAPS_XML_WITH_GUESTS = (
+    "<capabilities><host><cpu><arch>x86_64</arch></cpu></host>"
+    "<guest><os_type>hvm</os_type><arch name='x86_64'>"
+    "<emulator>/usr/bin/qemu-system-x86_64</emulator>"
+    "<domain type='qemu'/><domain type='kvm'/></arch></guest>"
+    "<guest><os_type>hvm</os_type><arch name='ppc64le'>"
+    "<emulator>/usr/bin/qemu-system-ppc64</emulator>"
+    "<domain type='qemu'/></arch></guest>"
+    "<guest><os_type>hvm</os_type><arch name='s390x'>"
+    "<emulator>/usr/bin/qemu-system-s390x</emulator>"
+    "<domain type='qemu'/></arch></guest>"
+    "</capabilities>"
+)
 
 
 def test_list_resources_advertises_host_capabilities() -> None:
@@ -66,6 +88,25 @@ def test_disk_ceiling_unstattable_is_infrastructure_failure(
     with pytest.raises(CategorizedError) as exc:
         _discovery(FakeLibvirtConn()).list_resources()
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_list_resources_advertises_guest_arches_filtered_to_supported() -> None:
+    conn = FakeLibvirtConn(caps_xml=_CAPS_XML_WITH_GUESTS)
+    caps = _discovery(conn).list_resources()[0]["capabilities"]
+    # s390x is bootable but not kdive-provisionable, so it is dropped; native x86_64 -> kvm,
+    # foreign ppc64le -> tcg.
+    assert caps[GUEST_ARCHES_KEY] == {
+        "x86_64": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-x86_64"},
+        "ppc64le": {"accel": "tcg", "emulator": "/usr/bin/qemu-system-ppc64"},
+    }
+
+
+def test_list_resources_guest_arches_empty_when_no_guest_blocks() -> None:
+    # The default fake caps XML has only <host><cpu><arch>; a host advertising no <guest> blocks
+    # yields an empty mapping and does not break the other advertised capabilities.
+    caps = _discovery(FakeLibvirtConn()).list_resources()[0]["capabilities"]
+    assert caps[GUEST_ARCHES_KEY] == {}
+    assert caps["arch"] == "x86_64"
 
 
 def test_list_resources_arch_unknown_when_absent() -> None:

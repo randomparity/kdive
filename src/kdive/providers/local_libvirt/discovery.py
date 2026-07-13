@@ -21,16 +21,22 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 import kdive.config as config
 from kdive.domain.capacity.state import ResourceStatus
 from kdive.domain.catalog.discovery import ResourceRecord
-from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY, DISK_GB_KEY
+from kdive.domain.catalog.resource_capabilities import (
+    CONCURRENT_ALLOCATION_CAP_KEY,
+    DISK_GB_KEY,
+    GUEST_ARCHES_KEY,
+)
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeDescriptor
+from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
 from kdive.providers.local_libvirt.lifecycle.storage import ROOTFS_DIR
 from kdive.providers.local_libvirt.settings import LIBVIRT_ALLOCATION_CAP, LIBVIRT_URI
 from kdive.providers.ports.handles import OwnedInfra
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
     parse_capabilities_arch,
+    parse_guest_arches,
     parse_metadata_system_id,
 )
 from kdive.providers.shared.runtime_paths import system_id_from_domain_name
@@ -181,8 +187,10 @@ class LocalLibvirtDiscovery:
         """Return one `ResourceRecord` for the host (discovery-time id = ``host_uri``)."""
         conn = self._connect()
         info = conn.getInfo()
+        caps_xml = conn.getCapabilities()
         capabilities: dict[str, Any] = {
-            "arch": parse_capabilities_arch(conn.getCapabilities()),
+            "arch": parse_capabilities_arch(caps_xml),
+            GUEST_ARCHES_KEY: parse_guest_arches(caps_xml, SUPPORTED_ARCHES),
             "vcpus": int(info[2]),
             "memory_mb": int(info[1]),
             DISK_GB_KEY: _host_disk_ceiling_gb(),
