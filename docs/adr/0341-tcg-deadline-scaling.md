@@ -79,7 +79,7 @@ does not slow host-native tools. The following are therefore left unscaled, by d
 | `lifecycle/boot/readiness.py` `_DOMSTATE_PROBE_TIMEOUT` | `virsh domstate` (10s) | A host libvirt query; fast regardless of guest accel. |
 | `lifecycle/connect.py` `_SSH_PROBE_TIMEOUT_S` | per-attempt TCP connect (2s) | Host-network-bound once the guest's sshd listens; slow guest start is absorbed by the boot-window retries, not this per-attempt budget. Not on the boot-readiness path (readiness tails the console, it does not SSH). |
 | `lifecycle/storage.py` `_QEMU_IMG_TIMEOUT_S` | qemu-img overlay create (5m) | Host-native tool; no guest execution. |
-| `lifecycle/rootfs/overlay_customize.py` `_VIRT_CUSTOMIZE_TIMEOUT_S`; `rootfs_build.py` (`SLOW_BUILD_TOOL_TIMEOUT_S`) | virt-customize / build tools (5m / 30m) | Native-arch host tooling (the design routes foreign-arch customization through a firstboot boot, not virt-customize). Its boot, when added (#1152, epic issue 8), reuses `tcg_deadline_multiplier`. |
+| `lifecycle/rootfs/overlay_customize.py` `_VIRT_CUSTOMIZE_TIMEOUT_S`; `rootfs_build.py` (`SLOW_BUILD_TOOL_TIMEOUT_S`) | virt-customize / build tools (5m / 30m) | Native-arch host tooling (the design routes foreign-arch customization through a firstboot boot, not virt-customize). Its boot, when added (#1147, epic issue 8), reuses `tcg_deadline_multiplier`. |
 
 Scaling a host-native timeout by 10× would not cause spurious timeouts, but it would mask a
 genuinely hung host tool behind a 10×-wider window — so leaving them unscaled is the
@@ -112,7 +112,7 @@ setting.
   boot path — the audit table's "does not scale" rows carry no hidden guest-execution wait.
 - The `Booter` port carries a System-model fact (`accel`), not a provider-specific one, so
   every implementation's signature widens by one ignorable kwarg.
-- The multiplier function is the single seam #1152's customization boot reuses, so the
+- The multiplier function is the single seam #1147's customization boot reuses, so the
   "one multiplier, not scattered constants" property holds as the epic adds TCG boot sites.
 
 ## Alternatives considered
