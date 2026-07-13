@@ -55,7 +55,7 @@ from kdive.reconciler.inventory import InventoryReconcilePass, _cwd_inventory_sh
 from kdive.reconciler.loop import ReconcileConfig, reconcile_once
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
-from tests.reconcile_helpers import make_reconcile_config
+from tests.reconcile_helpers import make_reconcile_config, null_image_store
 
 # `migrated_url` is provided as a fixture by tests/integration/conftest.py (re-exported from
 # tests.db.conftest), resolved by pytest at call time — no import (avoids the F811 shadow).
@@ -2068,7 +2068,7 @@ def test_on_demand_reconcile_systems_also_prices(
             platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}),
         )
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
-            resp = await rs.reconcile_systems(pool, ctx, image_store=None)
+            resp = await rs.reconcile_systems(pool, ctx, image_store=null_image_store())
             assert resp.status == "ok"
             assert await _coeff_row(pool, "premium") == Decimal("4.0")
 

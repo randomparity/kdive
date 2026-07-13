@@ -38,6 +38,11 @@ class _NullUploadStore:
         return None
 
 
+def null_image_store() -> ImageSweepStore:
+    """An inert ``ImageSweepStore`` for inventory-pass tests with no s3 images."""
+    return cast(ImageSweepStore, _NullImageStore())
+
+
 def make_reconcile_config(**overrides: Any) -> ReconcileConfig:
     """Build a ``ReconcileConfig`` with inert default stores for store-agnostic tests."""
     defaults: dict[str, Any] = {
