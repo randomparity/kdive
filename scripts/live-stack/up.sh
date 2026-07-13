@@ -83,26 +83,6 @@ if ! bash "${here}/apply-migrations.sh"; then
   exit 1
 fi
 
-banner "inventory reconcile (register images + upload kernel-config siblings to S3)"
-# The reconciler daemon reconciles systems.toml on its loop, but run it once synchronously here so a
-# completed up.sh GUARANTEES the catalog is fully populated — every declared image registered and
-# every on-disk `<name>.config` sibling uploaded with `kernel_config_key` set (ADR-0336) — rather
-# than leaving the configs to appear on a later daemon pass. Runs as the invoking user (before the
-# sudo/libvirt steps) so it reads the user's systems.toml and env. Needs only Postgres + S3, both
-# ready now (the backend `up -d` blocks until minio-init created the bucket). A staged-path source
-# is declarative, so this never fails on a not-yet-built qcow2; a genuine DB/S3/schema error does
-# fail the bring-up, because a green up.sh must mean the configs are actually available. An absent
-# systems.toml is the normal pre-config state — skip it.
-systems_toml="${KDIVE_SYSTEMS_TOML:-${HOME}/.config/kdive/systems.toml}"
-if [[ -f "$systems_toml" ]]; then
-  "$py" -m kdive reconcile-systems || {
-    echo "inventory reconcile failed; the catalog may be missing images or kernel configs" >&2
-    exit 1
-  }
-else
-  echo "no systems.toml at ${systems_toml}; skipping inventory reconcile (no images declared yet)"
-fi
-
 if [[ "$skip_libvirt" != "1" ]]; then
   banner "libvirt"
   # The provider uses user-mode SLIRP networking (no libvirt network), so only virtqemud is
@@ -130,6 +110,22 @@ fi
 
 banner "host processes"
 restart_host_processes
+
+banner "inventory reconcile (register images + upload kernel-config siblings to S3)"
+# The reconciler daemon reconciles systems.toml on its loop, but run it once synchronously here so a
+# completed up.sh GUARANTEES the catalog is fully populated — every declared image registered and
+# every on-disk `<name>.config` sibling uploaded with `kernel_config_key` set (ADR-0336) — rather
+# than leaving the configs to appear on a later daemon pass. Runs as the invoking user, after the
+# daemons start: the synchronous pass and the daemon's own pass are both `reconcile_images`, which
+# takes per-row `FOR UPDATE` locks, so concurrent passes serialize safely. Placed after the stack is
+# up so a transient reconcile error surfaces (non-zero exit = configs not guaranteed) without tearing
+# down a running stack the daemon would otherwise reconcile on its next loop. The CLI resolves the
+# inventory path itself (`KDIVE_SYSTEMS_TOML`, else the XDG default) and no-ops on an absent file, so
+# no path is recomputed here — a fresh host with no systems.toml is a clean exit-0 pass.
+"$py" -m kdive reconcile-systems || {
+  echo "inventory reconcile failed; the catalog may be missing images or kernel configs" >&2
+  exit 1
+}
 
 banner "status"
 "${here}/status.sh"
