@@ -61,7 +61,7 @@ def _always(env: Mapping[str, str]) -> bool:
 
 DATABASE_URL = Setting(
     name="KDIVE_DATABASE_URL",
-    parse=_str,
+    parse=_nonempty,
     group="database",
     processes=RUNNABLE,
     required_when=_always,
@@ -98,7 +98,7 @@ LOG_LEVEL = Setting(
 
 OIDC_JWKS_URI = Setting(
     name="KDIVE_OIDC_JWKS_URI",
-    parse=_str,
+    parse=_nonempty,
     group="oidc",
     processes=_SERVER,
     required_when=_always,
@@ -107,7 +107,7 @@ OIDC_JWKS_URI = Setting(
 )
 OIDC_ISSUER = Setting(
     name="KDIVE_OIDC_ISSUER",
-    parse=_str,
+    parse=_nonempty,
     group="oidc",
     processes=_SERVER,
     required_when=_always,
@@ -116,7 +116,7 @@ OIDC_ISSUER = Setting(
 )
 OIDC_AUDIENCE = Setting(
     name="KDIVE_OIDC_AUDIENCE",
-    parse=_str,
+    parse=_nonempty,
     group="oidc",
     processes=_SERVER,
     required_when=_always,
