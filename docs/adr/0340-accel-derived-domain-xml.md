@@ -1,6 +1,6 @@
 # ADR 0340 — Accelerator-derived domain type, emulator, and per-arch CPU in the local-libvirt domain XML
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-07-13
 - **Issue:** #1142
 - **Epic:** #1139 (full ppc64le support)
