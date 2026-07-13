@@ -24,8 +24,12 @@ report ready.
 The result is a latent contradiction: config validation says S3 is optional, the
 health probe says it is mandatory. A no-S3 deployment passes `config.validate()`
 then silently never becomes ready — the worst failure shape (looks configured,
-is not). The only surfaces that genuinely run today without S3 are the one-shot
-`reconcile-systems` CLI and the local-libvirt staged-path provision seam.
+is not). The only surfaces that genuinely run store-free today are the
+in-process reconcile pass (the `reconcile-systems` MCP tool substitutes an
+`_AbsentImageStore` when `image_store is None`) and the local-libvirt
+staged-path provision seam. The `reconcile-systems` **CLI** already
+hard-requires S3 — it exits non-zero with a friendly message when the store is
+absent, so it does not run without one.
 
 Every new agent-facing byte-egress feature pays a recurring tax: it must either
 build a parallel local-egress mechanism or degrade in no-S3 mode. #1132 (the
@@ -55,14 +59,21 @@ decision to do the removal now rather than as a separate follow-up.
 
 ## Approach
 
-### 1. Make S3 required at config validation (fail fast)
+### 1. Make S3 required at config validation (fail fast on absent *and* empty)
 
 `KDIVE_S3_ENDPOINT_URL` and `KDIVE_S3_BUCKET` gain `required_when=_always`
-(`config/core_settings.py`). `KDIVE_S3_REGION` keeps its `us-east-1` default, so
-it is never "missing" and needs no change. `config.validate()` for the
-`server`/`worker`/`reconciler` processes now fails with an actionable error when
-S3 is unset — moving the failure from the silent readiness-probe hang to the
-earliest possible point.
+**and** a non-empty `parse` (`config/core_settings.py`). `required_when=_always`
+alone is insufficient: the registry's presence check is
+`s.name in env or s.default is not None` (`config/registry.py:164`), so a
+present-but-empty `KDIVE_S3_ENDPOINT_URL=""` counts as "present" and passes
+validation, yet `object_store_from_env` rejects it (`if not endpoint_url: raise`).
+The Helm configmap renders `KDIVE_S3_ENDPOINT_URL` unconditionally
+(`configmap.yaml:36`), empty on the external-backend path with no override — the
+exact present-but-empty vector. A non-empty parse (raising `ValueError` on a blank
+value) makes `config.validate()` reject empty via its malformed-value path, so
+both absent and empty fail fast at the earliest point rather than at the silent
+readiness-probe hang. `KDIVE_S3_REGION` keeps its `us-east-1` default and `_str`
+parse (it is never "missing" and `object_store_from_env` falls back on blank).
 
 ### 2. Collapse the optional-store assembly
 
@@ -83,7 +94,8 @@ dead:
   `_S3_OPTIONAL_ENV_NAMES`, and the `RequiredObjectStore` alias are removed.
 - The duplicate absence policy in `processes/reconciler.py`
   (`optional_reconciler_object_store`) is removed; the reconciler requires the
-  store.
+  store. This function is also imported and called by the `reconcile-systems`
+  CLI (`__main__.py:29,225`), so `__main__.py` must change too (see step 5).
 
 ### 3. Remove the `if store is None` degradation branches
 
@@ -123,20 +135,28 @@ not "no S3"), the `retrieve.py` lazy-init of a *required* store, and
 
 ### 5. `reconcile-systems` CLI keeps a clean error
 
-The one-shot CLI currently exits cleanly when the store is `None`. Post-removal
-it relies on `config.validate()` / `object_store_from_env` to fail fast; the CLI
-keeps a `CategorizedError` catch that prints the actionable message and exits
-non-zero. This is error handling, not no-S3 tolerance.
+The one-shot CLI (`__main__.py` `_handle_reconcile_systems`) currently calls the
+removed `optional_reconciler_object_store` and exits cleanly when the store is
+`None`. Rewrite it to call `object_store_from_env()` directly and catch
+`CategorizedError`, printing the actionable message and exiting non-zero, and
+drop the `optional_reconciler_object_store` import (`__main__.py:29`). This is
+error handling, not no-S3 tolerance — with S3 required, `config.validate()` /
+`object_store_from_env` are the fail-fast gate.
 
 ### 6. Docs
 
 - Add ADR-0337 and its README index row.
 - Operator docs (`docs/operating/*`) already list S3 among required backends;
   make the requirement explicit and remove any "optional" framing.
-- The Helm chart defaults `KDIVE_S3_ENDPOINT_URL` to `""` (`values.yaml:32`) — a
-  latent unconfigured default. Point it at the bundled demo MinIO service (or
-  otherwise ensure a chart install has a working endpoint) so making S3 required
-  does not break the demo deploy.
+- **No Helm chart change is needed.** The demo path already derives a working
+  endpoint: `kdive.s3Endpoint` (`_helpers.tpl:37-49`) returns
+  `http://<fullname>-minio:9000` when `bundledBackends` is set with no override,
+  so making S3 required does not break the demo deploy. The empty
+  `KDIVE_S3_ENDPOINT_URL` default (`values.yaml:32`) is the external-backend
+  path's intentional operator-supplied value; aliasing it to the demo service
+  would inject a nonexistent in-cluster reference into production installs. With
+  the step-1 non-empty rejection, an external install that omits the endpoint
+  fails fast at `config.validate()` — the desired behavior.
 - Reword the "no-S3 lane" *code comments* in `rootfs_catalog_fetch.py` and
   `images/rootfs/fetch.py` to "staged-path avoids the object store". Accepted
   ADRs (0228, 0336) are append-only and are superseded, not edited, by 0337.
@@ -144,13 +164,19 @@ non-zero. This is error handling, not no-S3 tolerance.
 ## Success criteria (falsifiable)
 
 1. `config.validate()` for `server`/`worker`/`reconciler` fails with a
-   `configuration_error` naming `KDIVE_S3_ENDPOINT_URL`/`KDIVE_S3_BUCKET` when
-   they are unset (new test).
-2. `grep -rn "optional_object_store\|s3_env_is_absent\|_AbsentImageStore\|
-   optional_reconciler_object_store\|_unconfigured_image_build_handler"
-   src/` returns nothing.
+   `configuration_error` naming `KDIVE_S3_ENDPOINT_URL`/`KDIVE_S3_BUCKET` both
+   when they are **unset** and when they are **present-but-empty** (`=""`) — two
+   new test cases.
+2. `rg -n 'optional_object_store|s3_env_is_absent|_AbsentImageStore|optional_reconciler_object_store|_unconfigured_image_build_handler' src/ tests/`
+   returns nothing (scope includes `tests/`, where the removed symbols are
+   referenced by unit tests that must be updated).
 3. The `ObjectStoreAssembly` store field(s) and every handler/reconciler store
    parameter are typed `ObjectStore`, not `ObjectStore | None`; `ty check` passes.
+   (Caveat: the retained `request_time_store_factory` and the retained
+   `try/except CategorizedError` read sites are not narrowed by the type change,
+   so those specific kept sites are audited manually against the class-(a) list —
+   the compiler backstop does not cover factory-derived or exception-wrapped
+   access.)
 4. Staged-path rootfs resolution still succeeds with the store never touched
    (existing `test_sync_fetch_staged_path_returns_validated_path_without_store`
    still passes, its "no-S3" naming reworded).
@@ -165,8 +191,10 @@ non-zero. This is error handling, not no-S3 tolerance.
 - **Missed live-only branch.** A store-`None` branch reachable only in
   `live_vm`/`live_stack` (skipped in CI) could break. Mitigation: the audit
   enumerated all sites; the grep in criterion 2 is the backstop; the type change
-  to non-optional forces the compiler to surface any remaining `is None` reader.
-- **Helm demo breakage.** Making S3 required with an empty endpoint default would
-  break a fresh chart install. Mitigation: step 6 sets a working default/endpoint.
+  to non-optional forces the compiler to surface most remaining `is None`
+  readers. It does **not** cover factory-derived (`request_time_store_factory`)
+  or `try/except`-wrapped access — those retained sites are audited by hand.
+- **Present-but-empty S3 config.** Covered by the step-1 non-empty parse; a
+  criterion-1 test exercises the `=""` case, not only the unset case.
 - **`reconcile-systems` UX regression.** Losing the friendly "set KDIVE_S3_*"
   message. Mitigation: keep the CLI's `CategorizedError` catch (step 5).

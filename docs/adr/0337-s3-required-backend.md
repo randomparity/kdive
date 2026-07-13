@@ -30,8 +30,11 @@ Two facts make that lane a liability rather than a feature:
 The result is a latent contradiction: config validation says S3 is optional, the
 health probe says it is mandatory. A no-S3 deployment passes `config.validate()`
 then silently never becomes ready — a "looks configured, is not" failure. The
-only surfaces that genuinely run today without S3 are the one-shot
-`reconcile-systems` CLI and the local-libvirt staged-path provision seam.
+only surfaces that genuinely run store-free today are the in-process reconcile
+pass (the `reconcile-systems` MCP tool substitutes an `_AbsentImageStore` when
+`image_store is None`) and the local-libvirt staged-path provision seam. The
+`reconcile-systems` **CLI** already hard-requires S3 (it exits non-zero when the
+store is absent).
 
 The no-S3 lane also imposes a recurring tax: each new agent-facing byte-egress
 feature must either build a parallel local-egress mechanism or degrade without
@@ -46,11 +49,17 @@ supported. Config validation and the readiness probe are made to agree, and the
 no-S3 accommodation branches are removed so the object store is non-optional end
 to end.
 
-1. **Fail fast at config validation.** `KDIVE_S3_ENDPOINT_URL` and
-   `KDIVE_S3_BUCKET` become `required_when=_always` for the
-   `server`/`worker`/`reconciler` processes. `KDIVE_S3_REGION` keeps its
-   `us-east-1` default (never missing). The failure moves from the silent
-   readiness hang to `config.validate()`.
+1. **Fail fast at config validation on absent *and* empty.**
+   `KDIVE_S3_ENDPOINT_URL` and `KDIVE_S3_BUCKET` become `required_when=_always`
+   **and** gain a non-empty `parse` for the `server`/`worker`/`reconciler`
+   processes. `required_when` alone is insufficient: the registry keys presence on
+   the env var existing, not on a non-blank value (`config/registry.py:164`), so a
+   present-but-empty `KDIVE_S3_ENDPOINT_URL=""` — which the Helm configmap renders
+   on the external path — would pass validation yet be rejected by
+   `object_store_from_env`. The non-empty parse closes that gap via the
+   malformed-value path. `KDIVE_S3_REGION` keeps its `us-east-1` default (never
+   missing). The failure moves from the silent readiness hang to
+   `config.validate()`.
 
 2. **Collapse the optional-store assembly.** `store/assembly.py` returns a
    non-optional `ObjectStore`. `optional_object_store`, `s3_env_is_absent`,
@@ -84,9 +93,11 @@ to end.
    (a live store *outage* still degrades gracefully; only the *unconfigured* case
    is removed).
 
-6. **Documentation.** Operator docs state S3 as required; the Helm chart no longer
-   ships an empty `KDIVE_S3_ENDPOINT_URL` default that would break under the new
-   requirement; ADRs 0228/0336 are superseded in part (append-only — not edited).
+6. **Documentation.** Operator docs state S3 as required. No Helm chart change is
+   needed: the demo path already derives a working endpoint via `kdive.s3Endpoint`
+   (`_helpers.tpl`), and the empty external-path default is the intentional
+   operator-supplied value that now fails fast (step 1) when omitted. ADRs
+   0228/0336 are superseded in part (append-only — not edited).
 
 ## Consequences
 
@@ -111,7 +122,7 @@ to end.
   probe conditional on S3 being configured). Preserves a mode no shipped
   deployment uses, keeps the recurring byte-egress tax, and leaves the object
   store optional-typed so every new feature must re-handle `None`. Rejected: the
-  lane's cost is ongoing and its only live users (reconcile-systems CLI,
+  lane's cost is ongoing and its only live users (the in-process reconcile pass,
   staged-path) do not need it — staged-path is store-free by design, not by mode.
 - **Ratify in the ADR now, defer all code removal to follow-ups** (the issue's
   original framing). Leaves a ratified-but-unenforced limbo where the "optional"
