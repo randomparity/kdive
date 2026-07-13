@@ -24,15 +24,20 @@ dead `if store is None` branch. (4) Docs + comment rewording.
 
 ## Global Constraints
 
-- **Green per commit.** Run **whole-tree** `just type` and `just test` before
-  every commit (not a path-scoped subset). `just type` type-checks the whole tree
-  including `tests/` (justfile deliberately unscoped), and a removed dataclass
-  field/attr surfaces as a `ty` error in *any* test module that still uses it — so
-  a scoped test run can mask a red `just type`. The commit order below is designed
-  so each step is independently green: narrowing the store *source* to
-  non-optional first (Task 2) is safe because a non-`None` `ObjectStore` is
-  assignable to a still-`Optional` consumer param; then each consumer narrows +
-  deletes its dead branch (Tasks 3–10) with all callers already passing non-`None`.
+- **Green per commit — the pre-commit gate is `just lint && just type && just test`,
+  whole-tree** (not a path-scoped subset). CI runs these recipes *individually*, so
+  all three must pass at every commit. `just lint` (`ruff check` + `ruff format
+  --check`) catches orphaned imports (F401) that removing a symbol leaves behind —
+  neither `ty` nor the removed-symbol grep flags an unused import. `just type`
+  type-checks the whole tree including `tests/`, so a removed dataclass field/attr
+  surfaces as a `ty` error in *any* test module that still uses it. The scoped
+  `uv run python -m pytest <paths>` commands shown inside each task are a fast
+  inner-loop convenience only; the pre-commit gate is the whole-tree trio above.
+  The commit order below is designed so each step is independently green: narrowing
+  the store *source* to non-optional first (Task 2) is safe because a non-`None`
+  `ObjectStore` is assignable to a still-`Optional` consumer param; then each
+  consumer narrows + deletes its dead branch (Tasks 3–10) with all callers already
+  passing non-`None`.
 - **`ty` does NOT catch dead `if store is None` branches.** Narrowing a param to
   `ObjectStore` and forgetting to delete its `if store is None` block leaves a
   dead branch that `ty` reports as clean (verified against ty 0.0.53) and the
@@ -165,7 +170,12 @@ def build_object_store_assembly(
   Update the `mcp/assembly/tool_registration.py` and `jobs/assembly.py` call
   sites that read `optional_upload_store`/`optional_image_store`/
   `optional_ops_image_store`/`required_image_build_store` to read `assembly.store`
-  (keep their local param types `Optional` for now). **Interleaving:**
+  (keep their local param types `Optional` for now). **Delete the now-orphaned
+  imports (ruff F401)** the symbol removal leaves: in `store/assembly.py` —
+  `config`, `S3_BUCKET`, `S3_ENDPOINT_URL`, `S3_REGION`, `CategorizedError`; in
+  `processes/reconciler.py` — `S3_ENDPOINT_URL`, `S3_BUCKET`, `S3_REGION` (and
+  `CategorizedError` if step 4 puts the CLI catch in `__main__.py`, not here).
+  **Interleaving:**
   `jobs/assembly.py:152` currently does `isinstance(store, CategorizedError)` and
   falls back to `_unconfigured_image_build_handler`; in Task 2 rewire its read to
   `assembly.store` but leave that (now-dead) `isinstance` branch and the stub in
@@ -192,9 +202,9 @@ except CategorizedError as error:
     return 1
 ```
 
-- [ ] **Step 5: Run guardrails.** `just type` and
-  `uv run python -m pytest tests/store tests/reconciler tests/processes tests/mcp/ops -q`
-  → green.
+- [ ] **Step 5: Run the pre-commit gate.** Inner loop:
+  `uv run python -m pytest tests/store tests/reconciler tests/processes tests/mcp/ops tests/mcp/core -q`.
+  Then the whole-tree gate: `just lint && just type && just test` → all green.
 
 - [ ] **Step 6: Commit.**
   `git commit -m "refactor: object store is non-optional at the source (#1133)"`
@@ -272,16 +282,21 @@ whole-tree `just type`/`just test` green.
   stores by default (a `unittest.mock.create_autospec(UploadStore)` /
   `ImageSweepStore`, or the existing test fakes) so store-unrelated passes stay
   isolated. This replaces the deleted zero-arg default.
-- [ ] **Step 2: Update tests first.** (a) Remove
-  `test_loop_inventory_pass_absent_when_no_image_store`
-  (`tests/integration/test_reconcile_inventory.py`) and the `# default config: no
-  image store` call at :1066 (rewrite to pass a config without an image store via
-  the helper, or delete if it only asserted the skip). (b) Replace every bare
-  `reconcile_once(pool, reaper)` / `reconcile_once(pool, NullReaper())` call (the
-  ~13 sites listed in the Files test set) with
-  `reconcile_once(pool, reaper, config=make_reconcile_config())`. (c) Replace every
-  store-free `ReconcileConfig(...)` construction with `make_reconcile_config(...)`.
-  Keep the s3-unreachable / no-digest degrade tests (store-*outage*, store present).
+- [ ] **Step 2: Update tests first.** (a) Delete
+  `test_loop_inventory_pass_absent_when_no_image_store` and the `# default config:
+  no image store` call at `test_reconcile_inventory.py:1066` — both assert only the
+  now-removed skip (image_store is required, so "config without an image store" is
+  no longer constructible). (b) Replace every bare `reconcile_once(pool, reaper)` /
+  `reconcile_once(pool, NullReaper())` call (the ~13 sites listed in the Files test
+  set) with `reconcile_once(pool, reaper, config=make_reconcile_config())`. (c)
+  Replace every store-free `ReconcileConfig(...)` construction with
+  `make_reconcile_config(...)`. (d) Convert **partial-store** constructions that
+  supply only one store — specifically `_config_with_inventory_spec()` at
+  `test_reconcile_inventory.py:988` (`ReconcileConfig(image_store=...)`, used by
+  the surviving tests at :1002,:1017,:1045,:1083,:2058) — to
+  `make_reconcile_config(image_store=...)` so the required `upload_store` is
+  supplied by the helper default. Keep the s3-unreachable / no-digest degrade tests
+  (store-*outage*, store present).
 - [ ] **Step 3: Make the fields required.** In `loop.py`: add `kw_only=True` to
   the `@dataclass(frozen=True, slots=True)` decorator; change
   `upload_store: UploadStore | None = None` → `upload_store: UploadStore` and
