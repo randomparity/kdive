@@ -24,6 +24,22 @@ def test_ppc64le_traits_are_pseries_hvc0_unpinned() -> None:
     assert traits.pin_nic_slot is False
 
 
+def test_x86_64_kvm_cpu_mode_and_acpi_features() -> None:
+    # x86 KVM keeps host-passthrough (ADR-0294: qemu64 is x86-64-v1 and EL9 needs v2) and the
+    # ACPI/VMCOREINFO features are an x86 firmware assumption (ADR-0340).
+    traits = arch_traits("x86_64")
+    assert traits.kvm_cpu_mode == "host-passthrough"
+    assert traits.emit_acpi_features is True
+
+
+def test_ppc64le_kvm_cpu_mode_and_no_acpi_features() -> None:
+    # pseries KVM uses host-model, and the x86 ACPI/VMCOREINFO block is not rendered — pseries
+    # crash-capture is proven in the kdump sub-issue (#1149), not guessed here (ADR-0340).
+    traits = arch_traits("ppc64le")
+    assert traits.kvm_cpu_mode == "host-model"
+    assert traits.emit_acpi_features is False
+
+
 def test_supported_arches_is_the_traits_keys() -> None:
     # Discovery filters advertised guest arches to this set; it must stay in lockstep with the
     # provisioning table so adding an arch is one _TRAITS row, and it is exactly the two arches

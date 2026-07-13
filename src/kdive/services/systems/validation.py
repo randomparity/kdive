@@ -10,7 +10,7 @@ from kdive.components.validation import (
     ComponentSourceCapabilities,
     reject_unsupported_component_source,
 )
-from kdive.domain.catalog.resource_capabilities import GuestArch
+from kdive.domain.catalog.resource_capabilities import GuestArch, resolve_accel_emulator
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import OPT_IN_DESTRUCTIVE_JOB_KINDS
 from kdive.profiles.provider_policy import ProfilePolicy
@@ -50,6 +50,10 @@ def _reject_unknown_destructive_ops(profile: ProvisioningProfile) -> None:
 def resolve_accel(guest_arches: Mapping[str, GuestArch], arch: str) -> str | None:
     """Validate ``arch`` against a resource's guest arches and resolve its accelerator (ADR-0339).
 
+    A thin wrapper over :func:`resolve_accel_emulator` (the one branch definition shared with the
+    local-libvirt provisioner, ADR-0340) that keeps admission's accel-only ``str | None``
+    contract: the emulator is dropped here and only the provisioner's renderer consumes it.
+
     ``guest_arches`` is what :meth:`ResourceCapabilities.guest_arches` returns for the bound
     Resource — ``{arch: {"accel", "emulator"}}`` filtered to the kdive-provisionable set (ADR-0338).
 
@@ -64,20 +68,8 @@ def resolve_accel(guest_arches: Mapping[str, GuestArch], arch: str) -> str | Non
             advertise ``arch``. The message names the supported set — the same fail-fast rule as
             ``arch_traits()``, never a silent x86 fallback.
     """
-    if not guest_arches:
-        return None
-    entry = guest_arches.get(arch)
-    if entry is None:
-        supported = sorted(guest_arches)
-        raise CategorizedError(
-            f"resource does not support guest architecture {arch!r}; supported: "
-            f"{', '.join(supported)}",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            # `accepted_values` is the ADR-0224 reserved key that survives `safe_error_details`
-            # and reaches the agent as a structured finite set; a custom key's list is dropped.
-            details={"requested_arch": arch, "accepted_values": supported},
-        )
-    return entry["accel"]
+    resolved = resolve_accel_emulator(guest_arches, arch)
+    return resolved[0] if resolved is not None else None
 
 
 def validate_profile_for_provider(

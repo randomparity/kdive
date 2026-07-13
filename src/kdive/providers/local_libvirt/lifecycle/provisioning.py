@@ -31,7 +31,13 @@ from kdive.components.references import (
     CatalogComponentRef,
     LocalComponentRef,
 )
+from kdive.domain.catalog.resource_capabilities import (
+    GUEST_ARCHES_KEY,
+    ResourceCapabilities,
+    resolve_accel_emulator,
+)
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
 from kdive.profiles.provisioning import (
     ProvisioningProfile,
     RootfsSource,
@@ -63,6 +69,7 @@ from kdive.providers.local_libvirt.lifecycle.storage import (
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.shared.libvirt_xml import (
+    parse_guest_arches,
     recorded_gdb_port_from_root,
     recorded_ssh_port_from_root,
 )
@@ -91,6 +98,7 @@ class _LibvirtDomain(Protocol):
 class _LibvirtConn(Protocol):
     def defineXML(self, xml: str) -> _LibvirtDomain: ...
     def lookupByName(self, name: str) -> _LibvirtDomain: ...
+    def getCapabilities(self) -> str: ...
     def close(self) -> int: ...
 
 
@@ -248,6 +256,10 @@ class LocalLibvirtProvisioning:
         """
         del bootstrap_pubkey  # local injects pre-boot via overlay_customizers (ADR-0291)
         section = profile.provider.local_libvirt
+        # Resolve accel/emulator from live capabilities BEFORE creating any artifact (ADR-0340):
+        # a fail-closed arch drift or a caps-read fault rejects with zero overlay/baseline and
+        # skips the expensive rootfs materialization for a System that cannot be provisioned.
+        accel, emulator = self._resolve_guest_arch(profile.arch)
         base = self._materialize_rootfs(section.rootfs, system_id, profile.arch)
         baseline = self._prepare_baseline_kernel(system_id, base, section.baseline_kernel)
         overlay = self._files.prepare_overlay(system_id, base=base, disk_gb=profile.disk_gb)
@@ -273,6 +285,8 @@ class LocalLibvirtProvisioning:
             kernel_path=baseline.kernel,
             initrd_path=baseline.initrd,
             guest_egress=self._guest_egress,
+            accel=accel,
+            emulator=emulator,
         )
         try:
             if overlay.created:
@@ -339,6 +353,42 @@ class LocalLibvirtProvisioning:
             raise self._infra("reading the recorded gdbstub port", name) from exc
         finally:
             _close(conn)
+
+    def _resolve_guest_arch(self, arch: str) -> tuple[str, str | None]:
+        """Resolve ``(accel, emulator)`` for ``arch`` from live libvirt capabilities (ADR-0340).
+
+        Reads ``getCapabilities`` and reuses the shared :func:`resolve_accel_emulator` branch
+        (the one admission uses), so the provider and admission cannot drift:
+
+        - empty ``guest_arches`` (this host not re-discovered since ADR-0338) → fail **open** to
+          ``("kvm", None)``, today's legacy x86-KVM path;
+        - non-empty but ``arch`` absent (the host lost the arch's qemu binary after admission
+          validated it) → fail **closed** with ``CONFIGURATION_ERROR`` naming the supported set;
+        - a ``getCapabilities`` / connection ``libvirtError`` → ``INFRASTRUCTURE_FAILURE``,
+          grouping this read with the other pre-define host-state reads (``_recorded_ssh_port`` /
+          ``_recorded_gdb_port``) rather than the mutating define/start.
+
+        Raises:
+            CategorizedError: ``INFRASTRUCTURE_FAILURE`` for a libvirt fault reading capabilities;
+                ``CONFIGURATION_ERROR`` when the host advertises guest arches but not ``arch``.
+        """
+        try:
+            conn = self._connect()
+        except libvirt.libvirtError as exc:
+            raise self._infra("connecting to libvirt to read capabilities of", "") from exc
+        try:
+            caps_xml = conn.getCapabilities()
+        except libvirt.libvirtError as exc:
+            raise self._infra("reading capabilities of", "") from exc
+        finally:
+            _close(conn)
+        # Route the raw parser output through the typed reader (as admission does), so both
+        # resolution sites feed resolve_accel_emulator the same GuestArch shape (ADR-0338/0340).
+        guest_arches = ResourceCapabilities.from_mapping(
+            {GUEST_ARCHES_KEY: parse_guest_arches(caps_xml, SUPPORTED_ARCHES)}
+        ).guest_arches()
+        resolved = resolve_accel_emulator(guest_arches, arch)
+        return resolved if resolved is not None else ("kvm", None)
 
     def _ssh_port_for(self, system_id: UUID) -> int:
         """Reuse the System's recorded forwarded SSH port if its domain already records one; else a

@@ -84,16 +84,21 @@ def _render(
     disk_path: str = _DISK,
     kernel_path: Path | None = _KERNEL,
     ssh_port: int | None = 40022,
+    accel: str = "kvm",
+    emulator: str | None = None,
 ) -> str:
     # ssh_port defaults to a valid port: the SSH forward is now rendered on every domain
     # (ADR-0281), so a render without one raises. Tests that care about the forward pass an
-    # explicit value; the rest accept this default.
+    # explicit value; the rest accept this default. accel/emulator default to the legacy
+    # x86-KVM path ("kvm", None) so unrelated render tests stay byte-identical (ADR-0340).
     return render_domain_xml(
         system_id,
         profile or _profile(),
         disk_path=disk_path,
         kernel_path=kernel_path,
         ssh_port=ssh_port,
+        accel=accel,
+        emulator=emulator,
     )
 
 
@@ -136,6 +141,114 @@ def test_render_carries_name_memory_vcpu_machine_and_rootfs() -> None:
     source = root.find("devices/disk/source")
     assert source is not None
     assert source.get("file") == "/var/lib/kdive/rootfs/fedora-40.qcow2"
+
+
+# Captured from the pre-ADR-0340 renderer (the x86_64-under-KVM domain). The byte-identity ACs
+# pin the current output so a child-reordering or emulator-gate regression is caught; do NOT
+# regenerate this from the edited renderer, which would make the assertion vacuous.
+_X86_KVM_GOLDEN = (
+    '<domain xmlns:kdive="https://kdive.dev/libvirt/1" '
+    'xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0" type="kvm">'
+    "<name>kdive-11111111-1111-1111-1111-111111111111</name>"
+    "<uuid>11111111-1111-1111-1111-111111111111</uuid>"
+    '<memory unit="MiB">4096</memory><vcpu>4</vcpu><cpu mode="host-passthrough" />'
+    '<os><type arch="x86_64" machine="pc-q35-9.0">hvm</type>'
+    "<kernel>/var/lib/kdive/rootfs/11111111-1111-1111-1111-111111111111-baseline/kernel</kernel>"
+    "<cmdline>root=/dev/vda console=ttyS0 rw</cmdline></os>"
+    '<features><acpi /><vmcoreinfo state="on" /></features>'
+    '<devices><disk type="file" device="disk"><driver name="qemu" type="qcow2" />'
+    '<source file="/var/lib/kdive/rootfs/fedora-40.qcow2" />'
+    '<target dev="vda" bus="virtio" /></disk><serial type="pty">'
+    '<log file="/var/lib/kdive/console/11111111-1111-1111-1111-111111111111.log" append="off" />'
+    '<target port="0" /></serial><console type="pty"><target type="serial" port="0" /></console>'
+    "</devices><metadata>"
+    "<kdive:system>11111111-1111-1111-1111-111111111111</kdive:system></metadata>"
+    '<qemu:commandline><qemu:arg value="-netdev" />'
+    '<qemu:arg value="user,id=kdivessh,restrict=on,hostfwd=tcp:127.0.0.1:40022-:22" />'
+    '<qemu:arg value="-device" />'
+    '<qemu:arg value="virtio-net-pci,netdev=kdivessh,addr=0x10" /></qemu:commandline></domain>'
+)
+
+
+def _arch_profile(arch: str, *, machine: str | None = None) -> ProvisioningProfile:
+    data = copy.deepcopy(_VALID)
+    data["arch"] = arch
+    section = data["provider"]["local-libvirt"]
+    if machine is None:
+        section.pop("domain_xml_params", None)  # fall back to the arch_traits default machine
+    else:
+        section["domain_xml_params"] = {"machine": machine}
+    return ProvisioningProfile.parse(data)
+
+
+def test_render_x86_kvm_byte_identical_with_defaults() -> None:
+    # AC#3: the ("kvm", None) empty-map fail-open path is byte-identical to the pre-ADR-0340 output.
+    assert _render() == _X86_KVM_GOLDEN
+
+
+def test_render_x86_kvm_drops_native_emulator_by_accel_not_none() -> None:
+    # AC#3: the REAL deployed native input is ("kvm", "/usr/bin/qemu-system-x86_64"), not
+    # ("kvm", None). The <emulator> is dropped because accel == "kvm"; a regression gating on
+    # `emulator is not None` would emit it and fail this byte-identity check.
+    assert _render(accel="kvm", emulator="/usr/bin/qemu-system-x86_64") == _X86_KVM_GOLDEN
+
+
+@pytest.mark.parametrize(
+    ("arch", "accel", "emulator", "exp_type", "exp_machine", "exp_cpu_mode", "exp_features"),
+    [
+        ("x86_64", "kvm", "/usr/bin/qemu-system-x86_64", "kvm", "q35", "host-passthrough", True),
+        ("x86_64", "tcg", "/usr/bin/qemu-system-x86_64", "qemu", "q35", None, True),
+        ("ppc64le", "kvm", "/usr/bin/qemu-system-ppc64", "kvm", "pseries", "host-model", False),
+        ("ppc64le", "tcg", "/usr/bin/qemu-system-ppc64", "qemu", "pseries", None, False),
+    ],
+)
+def test_render_domain_by_arch_and_accel(
+    arch: str,
+    accel: str,
+    emulator: str,
+    exp_type: str,
+    exp_machine: str,
+    exp_cpu_mode: str | None,
+    exp_features: bool,
+) -> None:
+    # AC#1: all four (arch x accel) cells — domain type, emulator presence/path, machine,
+    # <cpu> presence/mode, and the x86-only <features> block (ADR-0340).
+    root = _safe_fromstring(_render(profile=_arch_profile(arch), accel=accel, emulator=emulator))
+    assert root.get("type") == exp_type
+    os_type = root.find("os/type")
+    assert os_type is not None and os_type.get("machine") == exp_machine
+    cpu = root.find("cpu")
+    if exp_cpu_mode is None:
+        assert cpu is None  # TCG omits <cpu>
+    else:
+        assert cpu is not None and cpu.get("mode") == exp_cpu_mode
+    emu = root.find("devices/emulator")
+    if accel == "kvm":
+        assert emu is None  # native KVM relies on libvirt's default binary
+    else:
+        assert emu is not None and emu.text == emulator
+    assert (root.find("features") is not None) is exp_features
+
+
+def test_render_machine_override_wins_for_ppc64le() -> None:
+    # AC#2: an explicit domain_xml_params["machine"] still overrides the arch_traits default.
+    root = _safe_fromstring(
+        _render(
+            profile=_arch_profile("ppc64le", machine="pseries-8.2"),
+            accel="tcg",
+            emulator="/usr/bin/qemu-system-ppc64",
+        )
+    )
+    os_type = root.find("os/type")
+    assert os_type is not None and os_type.get("machine") == "pseries-8.2"
+
+
+def test_render_tcg_without_emulator_is_configuration_error() -> None:
+    # A TCG domain cannot boot without a binary; fail fast rather than emit a domain libvirt
+    # would start under the wrong (host-arch) default emulator.
+    with pytest.raises(CategorizedError) as exc:
+        _render(accel="tcg", emulator=None)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
 def test_render_pins_host_passthrough_cpu_for_el9_baseline() -> None:
@@ -534,6 +647,12 @@ class _ProvDomain:
         return 0
 
 
+# Host-only capabilities (no <guest> blocks) → parse_guest_arches returns {} → the provider's
+# accel/emulator resolution fails open to ("kvm", None), the legacy x86-KVM path. This is the
+# default so every existing provision test renders exactly as before (ADR-0340).
+_CAPS_HOST_ONLY = "<capabilities><host><cpu><arch>x86_64</arch></cpu></host></capabilities>"
+
+
 @dataclass
 class _ProvConn:
     defined: dict[str, _ProvDomain] = field(default_factory=dict)
@@ -541,6 +660,13 @@ class _ProvConn:
     lookup_error: int | None = None  # raised by lookupByName (e.g. NO_DOMAIN)
     closed: int = 0
     recorded_xml: list[str] = field(default_factory=list)  # each defineXML payload, in order
+    caps_xml: str = _CAPS_HOST_ONLY  # getCapabilities() payload; default → empty guest_arches
+    caps_error: int | None = None  # libvirt error code getCapabilities raises, if set
+
+    def getCapabilities(self) -> str:  # noqa: N802 - mirrors the libvirt binding name
+        if self.caps_error is not None:
+            raise libvirt_error(self.caps_error)
+        return self.caps_xml
 
     def defineXML(self, xml: str) -> _ProvDomain:
         if self.define_error is not None:
@@ -664,9 +790,101 @@ def test_provision_defines_and_starts_returns_name() -> None:
     name = _prov(conn).provision(_SYS, _profile())
     assert name == "kdive-11111111-1111-1111-1111-111111111111"
     assert conn.defined[name].created is True
-    # Two connections, both closed (no leak): the always-on SSH-port reuse lookup (ADR-0281)
-    # opens one, define/start opens the other.
-    assert conn.closed == 2
+    # Three connections, all closed (no leak): the accel/emulator capabilities resolution at the
+    # top of provision (ADR-0340) opens one, the always-on SSH-port reuse lookup (ADR-0281)
+    # opens one, define/start opens the third.
+    assert conn.closed == 3
+
+
+# Capabilities fixtures mirroring the #1140 live ground truth: an x86_64 host advertises
+# x86_64 (kvm) and ppc64le (tcg, /usr/bin/qemu-system-ppc64).
+_CAPS_X86_KVM_PPC_TCG = (
+    "<capabilities><host><cpu><arch>x86_64</arch></cpu></host>"
+    "<guest><os_type>hvm</os_type><arch name='x86_64'>"
+    "<emulator>/usr/bin/qemu-system-x86_64</emulator>"
+    "<domain type='qemu'/><domain type='kvm'/></arch></guest>"
+    "<guest><os_type>hvm</os_type><arch name='ppc64le'>"
+    "<emulator>/usr/bin/qemu-system-ppc64</emulator>"
+    "<domain type='qemu'/></arch></guest></capabilities>"
+)
+# A host advertising ONLY x86_64 (non-empty guest_arches, but missing ppc64le).
+_CAPS_X86_ONLY = (
+    "<capabilities><host><cpu><arch>x86_64</arch></cpu></host>"
+    "<guest><os_type>hvm</os_type><arch name='x86_64'>"
+    "<emulator>/usr/bin/qemu-system-x86_64</emulator>"
+    "<domain type='qemu'/><domain type='kvm'/></arch></guest></capabilities>"
+)
+
+
+def test_provision_empty_guest_arches_renders_legacy_kvm_domain() -> None:
+    # Fail-open: a host not re-discovered since ADR-0338 (host-only caps) renders the legacy
+    # x86-KVM domain with no <emulator> (ADR-0340).
+    conn = _ProvConn()  # default host-only caps
+    _prov(conn).provision(_SYS, _profile())
+    root = _safe_fromstring(conn.recorded_xml[0])
+    assert root.get("type") == "kvm"
+    assert root.find("devices/emulator") is None
+
+
+def test_provision_empty_caps_foreign_arch_fails_open_to_legacy_kvm() -> None:
+    # Accepted edge (ADR-0340): empty guest_arches fails OPEN arch-agnostically, matching
+    # ADR-0339 admission. On a not-yet-rediscovered host a foreign-arch profile therefore renders
+    # the legacy <domain type="kvm"> — which libvirt then rejects on a mismatched host, a bounded
+    # opaque PROVISIONING_FAILURE, not the clean CONFIGURATION_ERROR of the non-empty arch-absent
+    # arm. The provider does NOT fail closed on empty: that would diverge from admission's
+    # deliberate ADR-0339 empty-caps fail-open, the exact drift the shared resolver prevents. The
+    # arch stays correct on the empty host only after re-discovery (ADR-0338), which this state
+    # predates.
+    conn = _ProvConn()  # host-only caps -> empty guest_arches
+    _prov(conn).provision(_SYS, _arch_profile("ppc64le"))
+    root = _safe_fromstring(conn.recorded_xml[0])
+    assert root.get("type") == "kvm"  # fail-open legacy path, regardless of the foreign arch
+    os_type = root.find("os/type")
+    assert os_type is not None and os_type.get("machine") == "pseries"  # arch_traits still applies
+
+
+def test_provision_native_x86_forwards_kvm_and_drops_emulator() -> None:
+    # A host advertising x86_64 (kvm, non-null emulator): the provider forwards
+    # ("kvm", "/usr/bin/qemu-system-x86_64"), and the renderer drops <emulator> because
+    # accel == "kvm" — NOT because emulator is None (ADR-0340).
+    conn = _ProvConn(caps_xml=_CAPS_X86_KVM_PPC_TCG)
+    _prov(conn).provision(_SYS, _profile())
+    root = _safe_fromstring(conn.recorded_xml[0])
+    assert root.get("type") == "kvm"
+    assert root.find("devices/emulator") is None
+
+
+def test_provision_foreign_ppc64le_renders_tcg_domain_with_discovered_emulator() -> None:
+    # A ppc64le profile on the x86_64 host resolves ("tcg", "/usr/bin/qemu-system-ppc64") and
+    # renders a qemu-type pseries domain carrying the discovered emulator (ADR-0340).
+    conn = _ProvConn(caps_xml=_CAPS_X86_KVM_PPC_TCG)
+    _prov(conn).provision(_SYS, _arch_profile("ppc64le"))
+    root = _safe_fromstring(conn.recorded_xml[0])
+    assert root.get("type") == "qemu"
+    emu = root.find("devices/emulator")
+    assert emu is not None and emu.text == "/usr/bin/qemu-system-ppc64"
+
+
+def test_provision_arch_absent_from_nonempty_caps_is_configuration_error() -> None:
+    # TOCTOU guard: a ppc64le System admitted while the host advertised ppc64le, provisioned
+    # after the host lost qemu-system-ppc64 (caps now advertise only x86_64), fails CLOSED with
+    # CONFIGURATION_ERROR — never a silent incoherent kvm domain (ADR-0340). No domain defined.
+    conn = _ProvConn(caps_xml=_CAPS_X86_ONLY)
+    with pytest.raises(CategorizedError) as exc:
+        _prov(conn).provision(_SYS, _arch_profile("ppc64le"))
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert conn.recorded_xml == []
+
+
+def test_provision_capabilities_read_fault_is_infrastructure_failure() -> None:
+    # A libvirt fault reading capabilities is an unhealthy host, not a licence to guess a
+    # domain type: raise INFRASTRUCTURE_FAILURE (grouped with the other pre-define reads),
+    # never a silent kvm domain (ADR-0340).
+    conn = _ProvConn(caps_error=libvirt.VIR_ERR_INTERNAL_ERROR)
+    with pytest.raises(CategorizedError) as exc:
+        _prov(conn).provision(_SYS, _arch_profile("ppc64le"))
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert conn.recorded_xml == []
 
 
 def test_provision_default_renders_restrict_on() -> None:
@@ -819,8 +1037,8 @@ def test_provision_real_create_failure_undefines_domain() -> None:
         _prov(conn).provision(_SYS, _profile())
     assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
     assert dom.undefined is True  # the defined-but-unstarted domain was cleaned up
-    # SSH-port reuse lookup + define/start, both closed (ADR-0281).
-    assert conn.closed == 2
+    # capabilities resolution (ADR-0340) + SSH-port reuse lookup + define/start, all closed.
+    assert conn.closed == 3
 
 
 def test_provision_already_running_domain_does_not_undefine() -> None:
@@ -913,7 +1131,8 @@ def test_provision_gdbstub_malformed_recorded_xml_is_infrastructure_failure() ->
         _prov_with_port(conn, free_port=fail_free_port).provision(_SYS, _gdb_profile())
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert caught.value.details == {"domain": name}
-    assert conn.closed == 1
+    # capabilities resolution (ADR-0340) + the gdbstub-port read that raised, both closed.
+    assert conn.closed == 2
 
 
 def test_provision_already_running_domain_is_idempotent() -> None:
@@ -924,8 +1143,8 @@ def test_provision_already_running_domain_is_idempotent() -> None:
         defined={name: _ProvDomain(name, create_error=libvirt.VIR_ERR_OPERATION_INVALID)}
     )
     assert _prov(conn).provision(_SYS, _profile()) == name  # no raise
-    # SSH-port reuse lookup + define/start, both closed (ADR-0281).
-    assert conn.closed == 2
+    # capabilities resolution (ADR-0340) + SSH-port reuse lookup + define/start, all closed.
+    assert conn.closed == 3
 
 
 # --- drgn-live SSH port allocation (ADR-0218 §3) -------------------------------------------
@@ -987,7 +1206,8 @@ def test_provision_ssh_malformed_recorded_xml_is_infrastructure_failure() -> Non
         _prov_with_port(conn, free_port=fail_free_port).provision(_SYS, _ssh_profile())
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert caught.value.details == {"domain": name}
-    assert conn.closed == 1
+    # capabilities resolution (ADR-0340) + the SSH-port read that raised, both closed.
+    assert conn.closed == 2
 
 
 def test_provision_gdbstub_and_ssh_allocate_both_ports() -> None:
@@ -1518,8 +1738,9 @@ def test_provision_failure_still_closes_connection() -> None:
     conn = _ProvConn(define_error=libvirt.VIR_ERR_INTERNAL_ERROR)
     with pytest.raises(CategorizedError):
         _prov(conn).provision(_SYS, _profile())
-    # SSH-port reuse lookup + the failed define, both closed even on a libvirt failure (ADR-0281).
-    assert conn.closed == 2
+    # capabilities resolution (ADR-0340) + SSH-port reuse lookup + the failed define, all closed
+    # even on a libvirt failure.
+    assert conn.closed == 3
 
 
 def test_teardown_absent_domain_closes_connection() -> None:

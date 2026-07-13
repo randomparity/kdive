@@ -11,7 +11,7 @@ import pytest
 
 from kdive.components.references import ROOTFS_COMPONENT, ComponentSourceKind
 from kdive.components.validation import ComponentSourceCapabilities
-from kdive.domain.catalog.resource_capabilities import GuestArch
+from kdive.domain.catalog.resource_capabilities import GuestArch, resolve_accel_emulator
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
@@ -295,3 +295,39 @@ def test_resolve_accel_rejects_unadvertised_arch_naming_supported_set() -> None:
     assert "x86_64" in str(exc)
     assert "ppc64le" in str(exc)  # the supported set is named in the message
     assert exc.details == {"requested_arch": "x86_64", "accepted_values": ["ppc64le"]}
+
+
+@pytest.mark.parametrize(
+    ("guest_arches", "arch"),
+    [
+        ({}, "x86_64"),  # empty -> both fail open
+        (_X86_HOST, "x86_64"),  # present -> both resolve
+        (_X86_HOST, "ppc64le"),  # present -> both resolve
+        (_X86_HOST, "s390x"),  # absent -> both fail closed
+    ],
+)
+def test_resolve_accel_and_resolve_accel_emulator_agree(
+    guest_arches: dict[str, GuestArch], arch: str
+) -> None:
+    # Bind the two resolution sites (admission's resolve_accel and the provider's
+    # resolve_accel_emulator) so a future change to one cannot silently diverge the other:
+    # they must agree on which of the three branches (open / resolved / raise) fires.
+    accel_raised = None
+    pair_raised = None
+    accel_result = None
+    pair_result = None
+    try:
+        accel_result = resolve_accel(guest_arches, arch)
+    except CategorizedError as exc:
+        accel_raised = exc.category
+    try:
+        pair_result = resolve_accel_emulator(guest_arches, arch)
+    except CategorizedError as exc:
+        pair_raised = exc.category
+
+    assert accel_raised == pair_raised
+    if accel_raised is None:
+        # resolve_accel returns the accel (or None); resolve_accel_emulator returns (accel, _)
+        # or None. The accel component must match.
+        pair_accel = pair_result[0] if pair_result is not None else None
+        assert accel_result == pair_accel

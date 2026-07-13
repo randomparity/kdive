@@ -30,6 +30,50 @@ class GuestArch(TypedDict):
     emulator: str
 
 
+def resolve_accel_emulator(
+    guest_arches: Mapping[str, GuestArch], arch: str
+) -> tuple[str, str] | None:
+    """Validate ``arch`` against a resource's guest arches; resolve its ``(accel, emulator)``.
+
+    The single branch definition shared by Systems admission (ADR-0339,
+    ``services/systems/validation.py:resolve_accel``) and the local-libvirt provisioner
+    (ADR-0340), so the two resolution sites cannot drift: admission validated the persisted
+    capability_view at mint, the provisioner re-resolves live capabilities at provision, and
+    both must fail open / closed identically.
+
+    Args:
+        guest_arches: ``{arch: {"accel", "emulator"}}`` as
+            :meth:`ResourceCapabilities.guest_arches` returns, filtered to the
+            kdive-provisionable set (ADR-0338).
+        arch: The profile architecture to resolve.
+
+    Returns:
+        ``(accel, emulator)`` for ``arch``, or ``None`` when the resource advertises **no**
+        guest arches — remote-libvirt, fault-inject, or a host not re-discovered since
+        ADR-0338. That fail-open case lets the caller substitute its own default
+        (admission records no accel; the provisioner renders the legacy x86-KVM domain).
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when ``guest_arches`` is non-empty and does
+            not advertise ``arch``. The message names the supported set — the same fail-fast
+            rule as ``arch_traits()``, never a silent x86 fallback.
+    """
+    if not guest_arches:
+        return None
+    entry = guest_arches.get(arch)
+    if entry is None:
+        supported = sorted(guest_arches)
+        raise CategorizedError(
+            f"resource does not support guest architecture {arch!r}; supported: "
+            f"{', '.join(supported)}",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            # `accepted_values` is the ADR-0224 reserved key that survives `safe_error_details`
+            # and reaches the agent as a structured finite set; a custom key's list is dropped.
+            details={"requested_arch": arch, "accepted_values": supported},
+        )
+    return entry["accel"], entry["emulator"]
+
+
 # Billable size ceilings the discovery provider advertises and admission's ≤ resource-caps
 # check reads (ADR-0007 §2). A selector may not exceed these.
 VCPUS_KEY = "vcpus"
@@ -135,8 +179,10 @@ class ResourceCapabilities:
         hand-edited row never crashes a consumer. Returns ``{}`` when the key is absent or is not
         a mapping; keeps only entries that are a dict with string ``accel`` and ``emulator``, and
         returns each as a bare :class:`GuestArch` (extra keys dropped). Does not validate the
-        ``accel`` value domain — the issue-3 consumer maps it to a domain type and fails closed on
-        an unexpected value.
+        ``accel`` value domain — the renderer (ADR-0340) maps ``kvm`` to a KVM domain and treats
+        any other value as TCG (``qemu``), a total mapping that is safe because
+        :func:`~kdive.providers.shared.libvirt_xml.parse_guest_arches` only ever emits
+        ``kvm``/``tcg``.
         """
         raw = self._values.get(GUEST_ARCHES_KEY)
         if not isinstance(raw, Mapping):
