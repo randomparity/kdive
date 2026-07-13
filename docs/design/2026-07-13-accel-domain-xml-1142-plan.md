@@ -143,7 +143,11 @@ detectable — do **not** snapshot after touching `xml.py`, which would make the
 
 **Code:** in `src/kdive/providers/local_libvirt/lifecycle/xml.py`:
 - `render_domain_xml` signature gains `accel: str = "kvm"`, `emulator: str | None = None`
-  (keyword). Thread both into `_build_baseline_domain`.
+  (keyword). It already resolves `traits = arch_traits(profile.arch)` (xml.py:88). Thread
+  `accel`, `emulator`, and the needed `traits` fields (`traits.kvm_cpu_mode`,
+  `traits.emit_acpi_features`) into `_build_baseline_domain` and down to the cpu/features
+  helpers — the current `_build_baseline_domain` receives only `console_device`, so the two new
+  trait fields (and `accel`/`emulator`) must be passed explicitly to reach the emission sites.
 - `_build_baseline_domain`: `domain = ET.Element("domain", type=("kvm" if accel == "kvm" else
   "qemu"))`. **Keep the `<cpu>` element in its current position — emitted BEFORE `_append_os`
   (xml.py:132, where `_append_host_cpu` runs today).** ElementTree serializes in insertion
@@ -193,6 +197,13 @@ with the #1140 hand-written caps XML:
 - **arch absent** (non-empty caps missing the profile arch) → provision raises
   `CONFIGURATION_ERROR` (does **not** define a domain).
 - **getCapabilities raises `libvirt.libvirtError`** → provision raises `INFRASTRUCTURE_FAILURE`.
+  `FakeLibvirtConn.getCapabilities` returns `self.caps_xml` unconditionally and has **no**
+  error hook, so this case needs a small **additive, backward-compatible** extension to the
+  shared fake: add a `caps_error: int | None = None` field and, at the top of
+  `getCapabilities`, `if self.caps_error is not None: raise libvirt_error(self.caps_error)` —
+  mirroring the existing `define_error` (fakes.py:158, 180-181). Default `None` leaves every
+  reusing suite unaffected. (Alternatively write just this one case against a purpose-built
+  local fake.)
 
 **Code:** in `src/kdive/providers/local_libvirt/lifecycle/provisioning.py`:
 - Add `getCapabilities(self) -> str: ...` to the narrow `_LibvirtConn` Protocol (the real gap;
