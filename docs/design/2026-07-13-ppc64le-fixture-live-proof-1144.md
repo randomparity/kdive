@@ -90,15 +90,34 @@ acquire base → `virt-customize` (package-install: kernel-debuginfo, kdump, the
 The proof scaffold keeps the arch-safe steps and replaces only the unsafe one:
 
 1. Acquire the Fedora ppc64le GenericCloud qcow2 (the catalog row's sha256-pinned source).
-2. **Skip** the package-installing `virt-customize` step. **Replace** it with file-level
-   injection (libguestfs/guestfish — no guest-code execution) of only what boot+SSH need: the
-   `readiness_unit(kdump_unit, console_device="hvc0")` systemd unit (a pure standalone render,
-   `_fedora_customize.py:129`) plus its enable symlink. It `ExecStart`s
-   `echo kdive-ready > /dev/hvc0` and needs only systemd + `/bin/sh`, both present in the cloud
-   image — no package install.
+2. **Skip** the package-installing parts of the `virt-customize` step (kernel-debuginfo, kdump,
+   drgn, keyutils — the debug/kdump toolchain, none of which boot+SSH needs). **Replay** only the
+   **file-writable subset** of the Fedora/rhel customizer via libguestfs/guestfish (file ops,
+   no guest-code execution), reusing the existing fragments so the scaffold cannot drift from
+   the product:
+   - the **cloud-init first-boot artifacts** (`cloud_init_first_boot_args`, ADR-0288): the kdive
+     `cloud.cfg.d` drop-in (network + NoCloud pin + `disable_root: false`), the NoCloud
+     seed (`meta-data`/`user-data`), `machine-id`, and the delete-equivalents of its two
+     `--run-command`s (strip any network-disabling drop-in; remove `cloud-init.disabled`). This
+     is **load-bearing**, not optional: the readiness unit orders `After=network-online.target`,
+     which only fires once cloud-init brings the NIC up — without the drop-in the guest never
+     reaches `ready`;
+   - the **SELinux relabel-on-boot** (`rhel.py:34`): the tar→ext4 repack drops SELinux xattrs
+     and Fedora cloud ships enforcing, so `/etc/selinux/config` must be set `SELINUX=permissive`
+     and `/.autorelabel` created — else the first enforcing boot mass-denies and never comes up;
+   - the `readiness_unit(kdump_unit, console_device="hvc0")` systemd unit
+     (`_fedora_customize.py:129`) + its `multi-user.target.wants` enable symlink; it `ExecStart`s
+     `echo kdive-ready > /dev/hvc0`;
+   - `FSTAB` (`/dev/vda / ext4`).
+   All of the above are `--upload`/`--write`/`--mkdir`/`rm` file operations — arch-safe. Only the
+   package installs are skipped. The per-System SSH key is still injected at provision (below).
 3. Run the standard `repack_whole_disk_ext4` to produce the bootloader-less whole-disk ext4
    qcow2 the direct-kernel path requires.
 4. Publish as `rootfs/local/fedora-kdive-ready-44-ppc64le.qcow2` so the seed row resolves.
+
+The recipe is expected to iterate against the first real boot (systematic-debugging): a boot
+that stalls before `ready` or is SSH-unreachable points at a missing file-writable customizer
+fragment, which is added arch-safely — never a package install under emulation (that is #8).
 
 The **per-System SSH key is injected at provision**, not in the scaffold: the existing overlay
 customizer runs `virt-customize --ssh-inject` (`overlay_customize.py:24`), a libguestfs

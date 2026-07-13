@@ -146,12 +146,13 @@ factory even though the boot itself is `live_stack`-gated.
   `KDIVE_PPC64LE_READY_IMAGE` env, and a `_reachability_preflight`-style skip that also skips
   when `qemu-system-ppc64` is absent (`shutil.which`).
 - Add `_ppc64le_reachability_provision_profile(image)` mirroring
-  `_reachability_provision_profile` but `arch = "ppc64le"`. **Open question to resolve in
-  build:** the x86 factory sets `kernel_source_ref` from `_KERNEL_TREE_ENV` though the baseline
-  kernel boots (not the referenced tree). Confirm whether `kernel_source_ref` is a
-  used-for-boot field or a schema-only requirement; if schema-only, the ppc64le factory may
-  reuse/omit it (a ppc64le System must **not** boot an x86 kernel). If it is used, the proof
-  needs a ppc64le kernel tree — flag and decide before running Task 4.
+  `_reachability_provision_profile` but `arch = "ppc64le"`. **Resolved:** `kernel_source_ref` is
+  required by the `direct-kernel` profile validator (`provisioning.py:310`) but the provision
+  step **boots the rootfs's own baseline kernel and never reads it** (it is the
+  kernel-under-test source for the build/install lane, `baseline_kernel` docstring). It is an
+  arch-opaque validation token, so the ppc64le factory reuses the existing `_KERNEL_TREE_ENV`
+  value — **no ppc64le kernel tree is needed**, and the baseline boot is a genuine ppc64le
+  kernel (the rootfs's own), not an x86 one.
 - Add `test_ppc64le_guest_is_ssh_reachable_over_the_wire` (or extend the `parametrize` to
   include `ppc64le` if the profile/image plumbing generalizes cleanly): allocate → provision
   the `console-ready_ppc64le`/`fedora-kdive-ready-44-ppc64le` pairing → `await_system_state(...,
@@ -168,13 +169,25 @@ rootfs. `just ci` green.
 **Not TDD — an out-of-band live run on this x86_64 host.** Produces the AC's documented boot.
 
 **Steps (each captured verbatim in the proof record for reproducibility):**
-1. **Scaffold the rootfs** (spec §4, arch-safe): acquire the sha256-pinned Fedora ppc64le
-   GenericCloud qcow2; file-inject the `readiness_unit(kdump_unit, "hvc0")` systemd unit + its
-   enable symlink via `guestfish`/libguestfs (no guest-code execution); run
-   `virt-make-fs`/`virt-tar-out` `repack_whole_disk_ext4` to the ADR-0272 bootloader-less
-   whole-disk ext4 layout; publish as `/var/lib/kdive/rootfs/local/fedora-kdive-ready-44-ppc64le.qcow2`.
-2. **Bring up the stack** (`just stack-up` / the live-stack runbook), reconcile the ppc64le seed
-   row, and export the ppc64le image env var the Task-3 test reads.
+1. **Scaffold the rootfs** (spec §4, arch-safe — reuse the family customizer's file fragments so
+   the scaffold cannot drift from the product): acquire the sha256-pinned Fedora ppc64le
+   GenericCloud qcow2; via `guestfish`/libguestfs (file ops only, no guest-code execution) apply
+   the **file-writable subset** of the Fedora/rhel customizer — the `cloud_init_first_boot_args`
+   drop-in + NoCloud seed + `machine-id` + net-disable-drop-in removal (ADR-0288, load-bearing:
+   `network-online.target` gates the readiness marker), the SELinux `SELINUX=permissive` +
+   `/.autorelabel` relabel-on-boot (`rhel.py:34`, mandatory after the xattr-dropping repack),
+   the `readiness_unit(kdump_unit, "hvc0")` unit + enable symlink, and `FSTAB` — **skipping** the
+   package installs (kernel-debuginfo/kdump/drgn/keyutils, not needed for boot+SSH). Then run
+   `repack_whole_disk_ext4` to the ADR-0272 bootloader-less whole-disk ext4 layout; publish as
+   `/var/lib/kdive/rootfs/local/fedora-kdive-ready-44-ppc64le.qcow2`. Expect to iterate the recipe
+   against the first boot (a pre-`ready` stall or SSH-unreachable guest points at a missing
+   file-writable fragment; add it arch-safely — never a package install under emulation, which is
+   #8). The per-System SSH key rides the existing provision-time `--ssh-inject` (arch-safe).
+2. **Bring up the stack** (`just stack-up` / the live-stack runbook) and export the ppc64le image
+   env var (the published qcow2 path) the Task-3 test reads. The reachability profile points at
+   the local qcow2 directly (`rootfs: {kind: local, path: image}`, mirroring the x86 harness), so
+   the proof does **not** depend on reconciling Task 2's `image_catalog` seed row — that row is a
+   separate operator-template deliverable validated by Task 2's parse test.
 3. **Run the proof:** `just test-live-stack` filtered to the ppc64le reachability test (allow the
    full TCG-scaled deadline; a ppc64le TCG boot is ~10× an x86 KVM boot).
 4. **Capture** the console tail (showing the `hvc0` `kdive-ready` marker), the resolved
