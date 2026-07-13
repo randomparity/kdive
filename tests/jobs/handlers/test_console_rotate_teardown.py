@@ -160,7 +160,7 @@ async def _rotate(pool: AsyncConnectionPool, store: _FakeStore, system_id: UUID)
         )
 
 
-async def _teardown(pool: AsyncConnectionPool, store: _FakeStore | None, system_id: UUID) -> str:
+async def _teardown(pool: AsyncConnectionPool, store: _FakeStore, system_id: UUID) -> str:
     prov = _Provisioner()
     resolver = provider_resolver(provisioner=prov)
     async with pool.connection() as conn:
@@ -168,7 +168,7 @@ async def _teardown(pool: AsyncConnectionPool, store: _FakeStore | None, system_
             conn,
             _teardown_job(system_id),
             resolver=resolver,
-            artifact_store=None if store is None else cast(ObjectStore, store),
+            artifact_store=cast(ObjectStore, store),
         )
     assert prov.torn_down, "domain must still be reaped"
     return cast(str, result)
