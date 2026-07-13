@@ -102,8 +102,8 @@ def _reconcile_tools_registrar(
     def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         ports = ops_reconcile_tools.ReconcileRepairPorts(
             reaper=reaper,
-            upload_store=object_stores.optional_upload_store,
-            image_store=object_stores.optional_image_store,
+            upload_store=object_stores.store,
+            image_store=object_stores.store,
             dump_volume_reaper=dump_volume_reaper,
         )
         ops_reconcile_tools.register(app, pool, ports=ports)
@@ -113,9 +113,7 @@ def _reconcile_tools_registrar(
 
 def _reconcile_systems_tools_registrar(object_stores: ObjectStoreAssembly) -> PlaneRegistrar:
     def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
-        ops_reconcile_systems_tools.register(
-            app, pool, image_store=object_stores.optional_image_store
-        )
+        ops_reconcile_systems_tools.register(app, pool, image_store=object_stores.store)
 
     return _register
 
@@ -182,7 +180,7 @@ def _diagnostics_tools_registrar() -> PlaneRegistrar:
 
 def _ops_images_tools_registrar(object_stores: ObjectStoreAssembly) -> PlaneRegistrar:
     def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
-        store = object_stores.optional_ops_image_store
+        store = object_stores.store
         ops_images_tools.register(app, pool, image_store=store, upload_store=store)
 
     return _register

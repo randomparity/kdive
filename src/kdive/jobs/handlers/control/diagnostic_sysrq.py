@@ -246,7 +246,7 @@ async def diagnostic_sysrq_handler(
     *,
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
-    artifact_store: ObjectStore | None,
+    artifact_store: ObjectStore,
 ) -> str | None:
     """Inject one allowlisted SysRq and store the redacted console dump; return its artifact id.
 
@@ -256,15 +256,6 @@ async def diagnostic_sysrq_handler(
     ``kind=diagnostic_sysrq`` surfaces a silently-broken mechanism (guest lacks the keyboard
     driver, or ``kernel.sysrq`` restricts the requested operation, ADR-0292).
     """
-    if artifact_store is None:
-        raise CategorizedError(
-            "object storage is not configured; cannot capture SysRq console output",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={
-                "reason": "object_store_unavailable",
-                "remediation": "configure the worker's KDIVE_S3_* object store",
-            },
-        )
     payload = load_payload(job, SysRqPayload)
     system_id = UUID(payload.system_id)
     command = payload.command
@@ -320,7 +311,7 @@ def register_handlers(
     *,
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
-    artifact_store: ObjectStore | None,
+    artifact_store: ObjectStore,
 ) -> None:
     """Bind the ``diagnostic_sysrq`` job handler with its provider, redaction, and store deps."""
     registry.register(

@@ -7,6 +7,7 @@ from collections.abc import Mapping
 import pytest
 
 from kdive.config import Registry, Setting
+from kdive.config.core_settings import S3_BUCKET, S3_ENDPOINT_URL, S3_REGION
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 
@@ -70,3 +71,34 @@ def test_validate_surfaces_a_malformed_value_for_the_role() -> None:
         reg.validate("server")
     assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert ei.value.details["variable"] == "KDIVE_HTTP_PORT"
+
+
+_S3_SETTINGS = [S3_ENDPOINT_URL, S3_BUCKET, S3_REGION]
+
+
+@pytest.mark.parametrize("process", ["server", "worker", "reconciler"])
+def test_s3_settings_required_when_absent(process: str) -> None:
+    reg = Registry(_S3_SETTINGS)
+    reg.load({})  # no KDIVE_S3_* configured (region has a default)
+    with pytest.raises(CategorizedError) as ei:
+        reg.validate(process)
+    assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert ei.value.details["missing"] == [S3_ENDPOINT_URL.name, S3_BUCKET.name]
+
+
+def test_s3_endpoint_empty_string_is_rejected() -> None:
+    reg = Registry(_S3_SETTINGS)
+    reg.load({S3_ENDPOINT_URL.name: "", S3_BUCKET.name: "kdive"})
+    with pytest.raises(CategorizedError) as ei:
+        reg.validate("server")
+    assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert ei.value.details["variable"] == S3_ENDPOINT_URL.name
+
+
+def test_s3_bucket_whitespace_only_is_rejected() -> None:
+    reg = Registry(_S3_SETTINGS)
+    reg.load({S3_ENDPOINT_URL.name: "http://minio:9000", S3_BUCKET.name: "   "})
+    with pytest.raises(CategorizedError) as ei:
+        reg.validate("worker")
+    assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert ei.value.details["variable"] == S3_BUCKET.name

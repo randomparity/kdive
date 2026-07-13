@@ -208,17 +208,13 @@ async def console_rotate_handler(
     job: Job,
     *,
     secret_registry: SecretRegistry,
-    artifact_store: ObjectStore | None,
+    artifact_store: ObjectStore,
 ) -> str | None:
     """Rotate a System's growing console into redacted gzip part artifacts (best-effort).
 
     Seals parts under the per-System lock, then advances the sidecar cursor after the part rows
-    commit. A console log the worker cannot read degrades to "register no parts"; a missing object
-    store is a no-op.
+    commit. A console log the worker cannot read degrades to "register no parts".
     """
-    if artifact_store is None:
-        _log.warning("object storage is not configured; skipping console rotation")
-        return None
     payload = load_payload(job, ConsoleRotatePayload)
     system_id = UUID(payload.system_id)
     boot_id = payload.boot_id
@@ -235,7 +231,7 @@ def register_handlers(
     registry: HandlerRegistry,
     *,
     secret_registry: SecretRegistry,
-    artifact_store: ObjectStore | None,
+    artifact_store: ObjectStore,
 ) -> None:
     """Bind the ``console_rotate`` job handler with its redaction and object-store deps."""
     registry.register(

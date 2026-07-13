@@ -41,7 +41,7 @@ from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.objectstore import ObjectStore, artifact_key
+from kdive.store.objectstore import ObjectStore, artifact_key, object_store_from_env
 
 _log = logging.getLogger(__name__)
 
@@ -132,17 +132,11 @@ async def _commit_uploaded_rootfs(
     system: System,
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
-    artifact_store: ObjectStore | None,
+    artifact_store: ObjectStore,
 ) -> None:
     """Commit the write-once artifacts row for an 'upload'-kind rootfs (ADR-0048 §6)."""
     if not rootfs_upload_window_allowed(profile_policy, profile):
         return
-    if artifact_store is None:
-        raise CategorizedError(
-            "object storage is not configured; cannot commit uploaded rootfs",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"system_id": str(system.id), "artifact": "rootfs"},
-        )
     key = artifact_key("local", "systems", str(system.id), "rootfs")
     head = await asyncio.to_thread(artifact_store.head, key)
     if head is None:
@@ -164,7 +158,7 @@ async def _finalize_provision_ready(
     system: System,
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
-    artifact_store: ObjectStore | None,
+    artifact_store: ObjectStore,
 ) -> None:
     await _commit_uploaded_rootfs(conn, system, profile, profile_policy, artifact_store)
     await open_billing_interval(conn, system.allocation_id)
@@ -224,7 +218,7 @@ async def _commit_provision_result(
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
     domain_name: str,
-    artifact_store: ObjectStore | None,
+    artifact_store: ObjectStore,
 ) -> SystemState | None:
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
         current = await _locked_system_state(conn, system.id)
@@ -359,6 +353,7 @@ async def provision_handler(
             )
         return str(system_id)
     secret_registry = secret_registry or SecretRegistry()
+    artifact_store = artifact_store or object_store_from_env()
 
     async def _commit(
         conn: AsyncConnection,
@@ -474,6 +469,7 @@ async def teardown_handler(
 ) -> str | None:
     """Destroy the domain, reclaim console artifacts, and drive the System ``-> torn_down``."""
     system_id = UUID(load_payload(job, SystemPayload).system_id)
+    artifact_store = artifact_store or object_store_from_env()
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
@@ -499,20 +495,18 @@ async def teardown_handler(
     await asyncio.to_thread(provisioner.teardown, domain_name)
     # The bootstrap key (ADR-0289, #963) is System-owned like the console/sysrq artifacts, but its
     # deletion is not best-effort: a stale row after teardown wrongly reports a System as
-    # SSH-reachable, so it runs unconditionally (unlike the artifact_store-gated reclaim below) and
-    # is not swallowed by the best-effort try/except.
+    # SSH-reachable, so it is not swallowed by the best-effort try/except that guards the reclaim.
     async with conn.transaction():
         await delete_system_bootstrap_key(conn, system_id)
-    if artifact_store is not None:
-        try:
-            await _reclaim_console_artifacts(conn, artifact_store, system_id)
-            await _reclaim_sysrq_artifacts(conn, artifact_store, system_id)
-        except Exception:  # noqa: BLE001 - reclaim is best-effort; teardown must still succeed
-            _log.warning(
-                "best-effort System-artifact reclaim for system %s failed",
-                system_id,
-                exc_info=True,
-            )
+    try:
+        await _reclaim_console_artifacts(conn, artifact_store, system_id)
+        await _reclaim_sysrq_artifacts(conn, artifact_store, system_id)
+    except Exception:  # noqa: BLE001 - reclaim is best-effort; teardown must still succeed
+        _log.warning(
+            "best-effort System-artifact reclaim for system %s failed",
+            system_id,
+            exc_info=True,
+        )
     return str(system_id)
 
 

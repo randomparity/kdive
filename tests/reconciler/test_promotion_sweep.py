@@ -41,6 +41,7 @@ from kdive.security.audit import args_digest
 from kdive.services.allocation.admission.core import AllocationRequest, admit
 from kdive.services.allocation.promotion import promote_pending, reap_queue_timeouts
 from tests.db_waits import wait_until_any_backend_waiting
+from tests.reconcile_helpers import make_reconcile_config
 from tests.reconciler.conftest import connect, run_repair
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -693,7 +694,7 @@ def test_aged_but_placeable_is_promoted_not_reaped(migrated_url: str) -> None:
             report = await loop.reconcile_once(
                 pool,
                 NullReaper(),
-                config=loop.ReconcileConfig(queue_max_wait=timedelta(hours=24)),
+                config=make_reconcile_config(queue_max_wait=timedelta(hours=24)),
             )
         assert report.promoted_allocations == 1
         assert report.queue_timeouts == 0

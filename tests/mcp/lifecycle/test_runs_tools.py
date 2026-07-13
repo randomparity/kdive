@@ -4475,6 +4475,7 @@ def test_register_handlers_binds_install_and_boot() -> None:
                 profile_policy=_LOCAL_POLICY,
             ),
             secret_registry=SecretRegistry(),
+            artifact_store=cast(Any, object()),
         ),
     )
     assert registry.get(JobKind.INSTALL) is not None

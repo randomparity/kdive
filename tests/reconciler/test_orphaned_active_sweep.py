@@ -34,6 +34,7 @@ from kdive.reconciler.repairs import allocations as allocation_repairs
 from kdive.services.accounting import ledger as accounting
 from kdive.services.allocation.admission.core import AllocationRequest, admit
 from tests.db_waits import wait_until_any_backend_waiting
+from tests.reconcile_helpers import make_reconcile_config
 from tests.reconciler.conftest import connect, run_repair
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -414,7 +415,7 @@ def test_reconcile_once_reports_counter_and_frees_slot_same_pass(migrated_url: s
             leaked = await _seed_leaked_active_on(seed, resource)
             queued = await _enqueue_request(seed, resource)
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            report = await loop.reconcile_once(pool, NullReaper())
+            report = await loop.reconcile_once(pool, NullReaper(), config=make_reconcile_config())
         assert report.reaped_active_allocations == 1
         assert report.promoted_allocations == 1
         async with await connect(migrated_url) as check:

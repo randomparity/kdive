@@ -15,4 +15,4 @@ class RunHandlerPorts:
 
     resolver: ProviderResolver
     secret_registry: SecretRegistry
-    artifact_store: ObjectStore | None = None
+    artifact_store: ObjectStore

@@ -55,6 +55,7 @@ from kdive.reconciler.inventory import InventoryReconcilePass, _cwd_inventory_sh
 from kdive.reconciler.loop import ReconcileConfig, reconcile_once
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
+from tests.reconcile_helpers import make_reconcile_config, null_image_store
 
 # `migrated_url` is provided as a fixture by tests/integration/conftest.py (re-exported from
 # tests.db.conftest), resolved by pytest at call time — no import (avoids the F811 shadow).
@@ -985,7 +986,7 @@ def _config_with_inventory_spec() -> ReconcileConfig:
     ``image_store`` is set (mirroring the image-sweep specs), so the fault-isolation tests
     must hand one in for the ``reconcile_inventory`` pass to run at all.
     """
-    return ReconcileConfig(image_store=_FakeImageStore())
+    return make_reconcile_config(image_store=_FakeImageStore())
 
 
 def test_loop_inventory_pass_is_fault_isolated(
@@ -1049,22 +1050,6 @@ def test_loop_inventory_pass_reconciles_a_present_file(
             row = await _one(check, "loop-base")
         assert row["state"] == "registered"
         assert row["managed_by"] == "config"
-
-    asyncio.run(_run())
-
-
-def test_loop_inventory_pass_absent_when_no_image_store(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    # With no image store the inventory pass cannot run (it needs the store to HEAD s3
-    # objects), so even a malformed file is a no-op for the loop — the spec is simply absent.
-    async def _run() -> None:
-        bad = tmp_path / "systems.toml"
-        bad.write_text("schema_version = 2\n[[image]\n")
-        monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(bad))
-        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            report = await reconcile_once(pool, NullReaper())  # default config: no image store
-        assert "reconcile_inventory" not in report.failures
 
     asyncio.run(_run())
 
@@ -2083,7 +2068,7 @@ def test_on_demand_reconcile_systems_also_prices(
             platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}),
         )
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
-            resp = await rs.reconcile_systems(pool, ctx, image_store=None)
+            resp = await rs.reconcile_systems(pool, ctx, image_store=null_image_store())
             assert resp.status == "ok"
             assert await _coeff_row(pool, "premium") == Decimal("4.0")
 

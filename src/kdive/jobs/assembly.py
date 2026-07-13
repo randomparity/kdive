@@ -6,17 +6,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from opentelemetry import metrics
-from psycopg import AsyncConnection
 
-from kdive.domain.errors import CategorizedError
-from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers import image_build, systems
 from kdive.jobs.handlers.artifacts import vmcore
 from kdive.jobs.handlers.console import console_rotate
 from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
 from kdive.jobs.handlers.control import control
 from kdive.jobs.handlers.runs import registrar as runs
-from kdive.jobs.models import HandlerRegistry, JobHandler
+from kdive.jobs.models import HandlerRegistry
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -64,7 +61,7 @@ def _system_handlers_registrar(
             registry,
             resolver=resolver,
             secret_registry=secret_registry,
-            artifact_store=object_stores.optional_upload_store,
+            artifact_store=object_stores.store,
         )
 
     return _register
@@ -82,7 +79,7 @@ def _run_handlers_registrar(
             ports=runs.RunHandlerPorts(
                 resolver=resolver,
                 secret_registry=secret_registry,
-                artifact_store=object_stores.optional_upload_store,
+                artifact_store=object_stores.store,
             ),
         )
 
@@ -96,7 +93,7 @@ def _console_rotate_handler_registrar(
         console_rotate.register_handlers(
             registry,
             secret_registry=secret_registry,
-            artifact_store=object_stores.optional_upload_store,
+            artifact_store=object_stores.store,
         )
 
     return _register
@@ -122,7 +119,7 @@ def _diagnostic_sysrq_handler_registrar(
             registry,
             resolver=resolver,
             secret_registry=secret_registry,
-            artifact_store=object_stores.optional_upload_store,
+            artifact_store=object_stores.store,
         )
 
     return _register
@@ -149,28 +146,13 @@ def _image_build_handler_registrar(
     *, resolver: ProviderResolver, object_stores: ObjectStoreAssembly
 ) -> HandlerRegistrar:
     def _register(registry: HandlerRegistry) -> None:
-        store = object_stores.required_image_build_store
-        if isinstance(store, CategorizedError):
-            registry.register(JobKind.IMAGE_BUILD, _unconfigured_image_build_handler(store))
-            return
         image_build.register_handlers(
             registry,
             resolver=resolver,
-            store=store,
+            store=object_stores.store,
         )
 
     return _register
-
-
-def _unconfigured_image_build_handler(
-    error: CategorizedError,
-) -> JobHandler:
-    async def _handler(_conn: AsyncConnection, _job: Job) -> str | None:
-        raise CategorizedError(
-            str(error), category=error.category, details=error.details
-        ) from error
-
-    return _handler
 
 
 def build_handler_registrars(assembly: WorkerHandlerAssembly) -> tuple[HandlerRegistrar, ...]:

@@ -20,11 +20,9 @@ from kdive.jobs.payloads import ImageBuildPayload
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools.ops.images._common import (
     DELETE_TOOL,
     EXTEND_TOOL,
-    PRUNE_OBJECT_ID,
     PRUNE_TOOL,
     UPLOAD_TOOL,
 )
@@ -61,8 +59,8 @@ def register(
     app: FastMCP,
     pool: AsyncConnectionPool,
     *,
-    image_store: ImageSweepStore | None,
-    upload_store: UploadObjectStore | None = None,
+    image_store: ImageSweepStore,
+    upload_store: UploadObjectStore,
 ) -> None:
     """Register the ``images.*`` operator/admin tools on ``app``, bound to ``pool``."""
     _register_images_build(app, pool)
@@ -98,7 +96,7 @@ def _register_images_publish(app: FastMCP, pool: AsyncConnectionPool) -> None:
 
 
 def _register_images_upload(
-    app: FastMCP, pool: AsyncConnectionPool, upload_store: UploadObjectStore | None
+    app: FastMCP, pool: AsyncConnectionPool, upload_store: UploadObjectStore
 ) -> None:
     @app.tool(name=UPLOAD_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def images_upload(
@@ -123,7 +121,7 @@ def _register_images_delete(app: FastMCP, pool: AsyncConnectionPool) -> None:
 
 
 def _register_images_prune_expired(
-    app: FastMCP, pool: AsyncConnectionPool, image_store: ImageSweepStore | None
+    app: FastMCP, pool: AsyncConnectionPool, image_store: ImageSweepStore
 ) -> None:
     @app.tool(name=PRUNE_TOOL, annotations=_docmeta.destructive(), meta={"maturity": "implemented"})
     async def images_prune_expired(
@@ -132,8 +130,6 @@ def _register_images_prune_expired(
         ],
     ) -> ToolResponse:
         """Prune expired image catalog entries."""
-        if image_store is None:
-            return _config_error(PRUNE_OBJECT_ID)
         return await prune_expired(pool, current_context(), reason=reason, image_store=image_store)
 
 

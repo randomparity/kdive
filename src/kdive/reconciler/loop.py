@@ -206,15 +206,19 @@ class ReconcileReport:
         )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ReconcileConfig:
-    """Optional reconciler ports and timing values."""
+    """Reconciler ports and timing values.
 
+    ``kw_only`` lets ``upload_store``/``image_store`` be required (S3 is a required backend,
+    ADR-0337) without reordering the defaulted fields.
+    """
+
+    upload_store: UploadStore
+    image_store: ImageSweepStore
     resetter: TransportResetter = _NULL_RESETTER
     dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER
     resource_probe: ResourceProbe | None = None
-    upload_store: UploadStore | None = None
-    image_store: ImageSweepStore | None = None
     console_registry: CollectorRegistry | None = None
     interval: timedelta = DEFAULT_INTERVAL
     debug_session_stale_after: timedelta = DEFAULT_DEBUG_SESSION_STALE_AFTER
@@ -235,82 +239,57 @@ class ReconcileConfig:
     debug_session_telemetry: DebugSessionTelemetry = field(default=_NULL_DEBUG_SESSION_TELEMETRY)
 
 
-_DEFAULT_RECONCILE_CONFIG = ReconcileConfig()
-
-
 def _reconcile_inventory_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
-    image_store = config.image_store
-    if image_store is None:
-        return None
-    return _INVENTORY_PASS.make_repair(image_store)
+    return _INVENTORY_PASS.make_repair(config.image_store)
 
 
 def _leaked_images_repair(
     _reaper: InfraReaper, config: ReconcileConfig, image_publish_grace: timedelta
 ) -> _RepairFn | None:
-    image_store = config.image_store
-    if image_store is None:
-        return None
-    return lambda conn: _repair_leaked_images(conn, image_store, image_publish_grace)
+    return lambda conn: _repair_leaked_images(conn, config.image_store, image_publish_grace)
 
 
 def _dangling_images_repair(
     _reaper: InfraReaper, config: ReconcileConfig, image_publish_grace: timedelta
 ) -> _RepairFn | None:
-    image_store = config.image_store
-    if image_store is None:
-        return None
-    return lambda conn: _repair_dangling_images(conn, image_store, image_publish_grace)
+    return lambda conn: _repair_dangling_images(conn, config.image_store, image_publish_grace)
 
 
 def _expired_private_images_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
-    image_store = config.image_store
-    if image_store is None:
-        return None
-    return lambda conn: _repair_expired_private_images(conn, image_store)
+    return lambda conn: _repair_expired_private_images(conn, config.image_store)
 
 
 def _abandoned_uploads_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
-    upload_store = config.upload_store
-    if upload_store is None:
-        return None
-    return lambda conn: _repair_abandoned_uploads(conn, upload_store)
+    return lambda conn: _repair_abandoned_uploads(conn, config.upload_store)
 
 
 def _report_artifacts_gc_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
-    upload_store = config.upload_store
-    if upload_store is None:
-        return None
-    return lambda conn: _gc_report_artifacts(conn, upload_store, config.report_artifact_retention)
+    return lambda conn: _gc_report_artifacts(
+        conn, config.upload_store, config.report_artifact_retention
+    )
 
 
 def _investigation_artifacts_gc_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
-    upload_store = config.upload_store
-    if upload_store is None:
-        return None
     return lambda conn: _gc_investigation_artifacts(
-        conn, upload_store, config.investigation_cleanup_grace
+        conn, config.upload_store, config.investigation_cleanup_grace
     )
 
 
 def _expired_build_artifacts_gc_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
-    upload_store = config.upload_store
-    if upload_store is None:
-        return None
     return lambda conn: _gc_expired_build_artifacts(
-        conn, upload_store, config.build_artifact_retention
+        conn, config.upload_store, config.build_artifact_retention
     )
 
 
@@ -451,7 +430,7 @@ async def reconcile_once(
     pool: AsyncConnectionPool,
     reaper: InfraReaper,
     *,
-    config: ReconcileConfig = _DEFAULT_RECONCILE_CONFIG,
+    config: ReconcileConfig,
 ) -> ReconcileReport:
     """Run the repairs once, each isolated, each on a fresh pooled connection.
 
@@ -514,7 +493,7 @@ class Reconciler:
         pool: AsyncConnectionPool,
         reaper: InfraReaper,
         *,
-        config: ReconcileConfig = _DEFAULT_RECONCILE_CONFIG,
+        config: ReconcileConfig,
     ) -> None:
         self._pool = pool
         self._reaper = reaper

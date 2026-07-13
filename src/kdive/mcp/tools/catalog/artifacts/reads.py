@@ -349,7 +349,7 @@ async def _load_redacted_plaintext(
     try:
         store = store_factory()
     except CategorizedError:
-        return _LoadedBody(None, None, {"content_unavailable": "store_unconfigured"}, False)
+        return _LoadedBody(None, None, {"content_unavailable": "store_error"}, False)
     ttl = config.require(ARTIFACT_DOWNLOAD_TTL_SECONDS)
     try:
         head = await asyncio.to_thread(store.head, key)

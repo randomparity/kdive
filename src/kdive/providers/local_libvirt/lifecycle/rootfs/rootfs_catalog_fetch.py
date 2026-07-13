@@ -32,8 +32,10 @@ def rootfs_catalog_fetch_from_env(allowed_roots: list[Path]) -> CatalogFetch:
     and owns no async pool). Resolves the registered **public** image of ``arch`` and branches: a
     staged-path row validates its host path against ``allowed_roots`` (**no object store touched**);
     an s3 row builds the object store lazily, downloads + digest-verifies + caches under
-    ``_CACHE_DIR``. Passing ``object_store_from_env`` as a factory keeps staged-path provisioning
-    working when no object storage is configured (the no-S3 lane).
+    ``_CACHE_DIR``. ``object_store_from_env`` is passed as a factory so it is constructed only on
+    the s3 branch — staged-path resolves from a host-local file and never touches the object store,
+    a cost optimization that avoids round-tripping a multi-GB rootfs through S3 (ADR-0228,
+    ADR-0337). S3 itself is a required backend (ADR-0337).
     """
 
     def _fetch(ref: CatalogComponentRef, arch: str) -> Path:

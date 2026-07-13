@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -394,6 +395,11 @@ def render_index(docs: list[ToolDoc]) -> str:
 
 
 def _registry_tools() -> list[Any]:
+    # Offline schema extraction: the app is built purely to read tool schemas (the pool never
+    # connects). S3 is a required backend (ADR-0337), so provide a dummy endpoint — constructing
+    # the boto3 client is offline and never reached.
+    os.environ.setdefault("KDIVE_S3_ENDPOINT_URL", "http://minio.invalid:9000")
+    os.environ.setdefault("KDIVE_S3_BUCKET", "kdive-docs")
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     kp = RSAKeyPair.generate()
     verifier = JWTVerifier(public_key=kp.public_key, issuer="https://gen.local", audience="kdive")

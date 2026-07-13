@@ -123,7 +123,7 @@ def _job(system_id: UUID, command: str) -> Job:
 
 async def _run(
     pool: AsyncConnectionPool,
-    store: _FakeStore | None,
+    store: _FakeStore,
     control: _FakeControl,
     job: Job,
     *,
@@ -136,7 +136,7 @@ async def _run(
             job,
             resolver=resolver,
             secret_registry=secret_registry or SecretRegistry(),
-            artifact_store=cast(ObjectStore, store) if store is not None else None,
+            artifact_store=cast(ObjectStore, store),
         )
 
 
@@ -303,24 +303,3 @@ def test_system_not_ready_fails_system_changed_state(
         asyncio.run(_go())
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert excinfo.value.details["reason"] == "system_changed_state"
-
-
-def test_missing_object_store_fails_configuration_error(
-    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
-    log = tmp_path / "console.log"
-    log.write_bytes(b"boot\n")
-    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
-    control = _FakeControl(log, b"dump\n")
-
-    async def _go() -> None:
-        async with _pool(migrated_url) as pool:
-            await pool.open()
-            system_id = await _seed_ready_system(pool, SystemState.READY)
-            await _run(pool, None, control, _job(system_id, "show_memory"))
-
-    with pytest.raises(CategorizedError) as excinfo:
-        asyncio.run(_go())
-    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert excinfo.value.details["reason"] == "object_store_unavailable"

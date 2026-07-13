@@ -81,6 +81,10 @@ def test_unset_endpoint_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     validate_guest_routable_endpoint()  # does not raise
 
 
-def test_blank_endpoint_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_blank_endpoint_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    # S3 is a required backend (ADR-0337): a blank endpoint is a config error, no
+    # longer a no-op. The non-empty parse rejects it when the preflight reads it.
     monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", "")
-    validate_guest_routable_endpoint()  # does not raise
+    with pytest.raises(CategorizedError) as ei:
+        validate_guest_routable_endpoint()
+    assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR

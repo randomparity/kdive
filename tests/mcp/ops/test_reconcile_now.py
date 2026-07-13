@@ -23,18 +23,16 @@ import pytest
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 
-import kdive.config as config
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import AllocationState, SystemState
-from kdive.domain.errors import CategorizedError
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.ops.reconcile import reconcile as ops_reconcile
 from kdive.providers.infra.reaping import NullReaper
-from kdive.reconciler.loop import ALL_REPAIR_KINDS, ReconcileConfig, reconcile_once
+from kdive.reconciler.loop import ALL_REPAIR_KINDS, reconcile_once
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
-from kdive.store.assembly import optional_object_store
 from tests.db_waits import wait_until_any_backend_waiting
+from tests.reconcile_helpers import make_reconcile_config
 from tests.reconciler.conftest import connect, seed_system
 
 
@@ -52,7 +50,10 @@ _OPERATOR = frozenset({PlatformRole.PLATFORM_OPERATOR})
 
 
 def _ports() -> ops_reconcile.ReconcileRepairPorts:
-    return ops_reconcile.ReconcileRepairPorts(reaper=NullReaper(), upload_store=None)
+    cfg = make_reconcile_config()
+    return ops_reconcile.ReconcileRepairPorts(
+        reaper=NullReaper(), upload_store=cfg.upload_store, image_store=cfg.image_store
+    )
 
 
 @asynccontextmanager
@@ -277,7 +278,7 @@ def test_concurrent_on_demand_and_periodic_pass_enqueue_one_teardown(migrated_ur
             on_demand = ops_reconcile.reconcile_now(
                 pool, _ctx(platform_roles=_OPERATOR), ports=_ports()
             )
-            periodic = reconcile_once(pool, NullReaper(), config=ReconcileConfig())
+            periodic = reconcile_once(pool, NullReaper(), config=make_reconcile_config())
             results = await asyncio.gather(on_demand, periodic)
         assert results[0].status == "ok"
         assert await _teardown_job_count(migrated_url) == 1
@@ -336,22 +337,3 @@ def test_register_forwards_repair_ports_to_handler(monkeypatch: pytest.MonkeyPat
         assert captured == {"pool": pool, "ctx": ctx, "ports": ports}
 
     asyncio.run(_run())
-
-
-@pytest.mark.usefixtures("migrated_url")
-def test_register_resolves_upload_store_off_without_s3_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Mirrors the periodic loop: no KDIVE_S3_* env -> the upload reaper stays off (None),
-    # rather than raising, so the on-demand pass repairs the same set as the periodic one.
-    monkeypatch.delenv("KDIVE_S3_ENDPOINT_URL", raising=False)
-    monkeypatch.delenv("KDIVE_S3_BUCKET", raising=False)
-    assert optional_object_store() is None
-
-
-@pytest.mark.usefixtures("migrated_url")
-def test_register_reraises_partial_s3_config() -> None:
-    try:
-        config.load({"KDIVE_S3_ENDPOINT_URL": "http://localhost:9000"})
-        with pytest.raises(CategorizedError):
-            optional_object_store()
-    finally:
-        config.reset()

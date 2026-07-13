@@ -219,9 +219,6 @@ def test_ops_images_registration_uses_standard_register_entrypoint(
     store = object()
     captured: dict[str, object] = {}
 
-    def _store_from_env() -> object:
-        return store
-
     def _register(
         registered_app: FastMCP,
         registered_pool: AsyncConnectionPool,
@@ -235,13 +232,7 @@ def test_ops_images_registration_uses_standard_register_entrypoint(
         captured["upload_store"] = upload_store
 
     monkeypatch.setattr(tool_module.ops_images_tools, "register", _register)
-    object_stores = ObjectStoreAssembly(
-        optional_upload_store=cast(Any, store),
-        optional_image_store=cast(Any, store),
-        optional_ops_image_store=cast(Any, store),
-        required_image_build_store=cast(Any, store),
-        request_time_store_factory=cast(Any, _store_from_env),
-    )
+    object_stores = ObjectStoreAssembly(store=cast(Any, store))
 
     tool_module._ops_images_tools_registrar(object_stores)(app, pool)
 
@@ -323,47 +314,8 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
     assert captured["secret_registry"] is caller_registry
     object_stores = captured["object_stores"]
     assert isinstance(object_stores, ObjectStoreAssembly)
-    assert object_stores.optional_upload_store is None
-    assert object_stores.optional_image_store is None
-    assert object_stores.optional_ops_image_store is None
-    assert isinstance(object_stores.required_image_build_store, CategorizedError)
-
-
-def test_image_build_handler_preserves_store_config_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    registry = HandlerRegistry()
-    error = CategorizedError(
-        "missing image store",
-        category=ErrorCategory.CONFIGURATION_ERROR,
-        details={"setting": "KDIVE_S3_ENDPOINT"},
-    )
-
-    def _raise_store() -> object:
-        raise error
-
-    object_stores = ObjectStoreAssembly(
-        optional_upload_store=None,
-        optional_image_store=None,
-        optional_ops_image_store=None,
-        required_image_build_store=error,
-        request_time_store_factory=cast(Any, _raise_store),
-    )
-    register = handler_module._image_build_handler_registrar(
-        resolver=cast(Any, None), object_stores=object_stores
-    )
-    register(registry)
-    handler = registry.get(JobKind.IMAGE_BUILD)
-    assert handler is not None
-
-    async def _run() -> None:
-        with pytest.raises(CategorizedError) as caught:
-            await handler(cast(Any, None), cast(Any, None))
-        assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
-        assert caught.value.details == {"setting": "KDIVE_S3_ENDPOINT"}
-        assert caught.value.__cause__ is error
-
-    asyncio.run(_run())
+    # S3 is a required backend (ADR-0337): the assembly carries one non-optional store.
+    assert object_stores.store is not None
 
 
 def test_core_tools_subset_of_registry() -> None:

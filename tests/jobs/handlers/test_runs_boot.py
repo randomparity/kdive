@@ -360,7 +360,7 @@ def _record(
             connector=cast(Connector, _Connector(raises=not reachable, category=failure_category)),
             profile_policy=cast(ProfilePolicy, _Pol(gdbstub=gdbstub, host_dump=host_dump)),
             secret_registry=cast(SecretRegistry, object()),
-            artifact_store=None,
+            artifact_store=cast(ObjectStore, object()),
             snapshotter=None,
             mark=0,
         )

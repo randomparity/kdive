@@ -36,6 +36,7 @@ from kdive.reconciler import loop
 from kdive.security import audit
 from kdive.services.allocation.admission.core import AllocationRequest, admit
 from kdive.services.allocation.release import release_with_backstops
+from tests.reconcile_helpers import make_reconcile_config
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 CTX = RequestContext(principal="alice", agent_session="s", projects=("proj",))
@@ -150,7 +151,9 @@ def test_expiry_sweep_frees_the_claim(migrated_url: str) -> None:
                 "UPDATE allocations SET lease_expiry = now() - interval '1 hour' WHERE id = %s",
                 (alloc_id,),
             )
-            reclaimed = await loop.reconcile_once(pool, NullReaper())
+            reclaimed = await loop.reconcile_once(
+                pool, NullReaper(), config=make_reconcile_config()
+            )
             assert reclaimed.expired_allocations == 1
             stored = await ALLOCATIONS.get(conn, alloc_id)
             assert stored is not None and stored.state is AllocationState.EXPIRED
@@ -230,7 +233,7 @@ def test_orphaned_nonterminal_allocation_is_reaped_freeing_the_claim(migrated_ur
                     pcie_claim=[PCIeClaim(bdf="0000:3b:00.0", vendor_id="8086", device_id="1572")],
                 ),
             )
-            report = await loop.reconcile_once(pool, NullReaper())
+            report = await loop.reconcile_once(pool, NullReaper(), config=make_reconcile_config())
             assert report.expired_allocations == 1
             stored = await ALLOCATIONS.get(conn, alloc.id)
             assert stored is not None and stored.state is AllocationState.EXPIRED

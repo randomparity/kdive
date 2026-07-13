@@ -195,8 +195,9 @@ def fetch_registered_rootfs_sync(
     - a **staged-path** row resolves to its ``path`` validated against ``allowed_roots``
       (``validate_local_component_path`` re-checks absolute-ness, existence, containment incl.
       symlink escape, regular-file, and readability) — **no object store, no cache, no digest**;
-      ``store_factory`` is never called, so a staged-path provision works with no object storage
-      configured (the no-S3 lane).
+      ``store_factory`` is never called, because staged-path resolves from a host-local file and
+      never touches the object store — a cost optimization that avoids round-tripping a multi-GB
+      rootfs through S3 (S3 is a required backend, ADR-0337).
     - an **s3** row builds the store via ``store_factory``, downloads ``object_key``, verifies its
       sha256 against ``digest``, and caches it under a digest-keyed file in ``cache_dir``.
 

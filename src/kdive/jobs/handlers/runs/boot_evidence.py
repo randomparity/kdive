@@ -76,11 +76,9 @@ async def _capture_console_artifact(
     system_id: UUID,
     run_id: UUID,
     secret_registry: SecretRegistry,
-    artifact_store: ObjectStore | None,
+    artifact_store: ObjectStore,
 ) -> ConsoleArtifact | None:
     try:
-        if artifact_store is None:
-            return None
         redacted = await read_redacted_console(system_id, secret_registry)
         if redacted is None:
             return None
@@ -110,7 +108,7 @@ async def capture_run_console(
     run_id: UUID,
     *,
     secret_registry: SecretRegistry,
-    artifact_store: ObjectStore | None,
+    artifact_store: ObjectStore,
     snapshotter: ConsoleSnapshotter | None,
     mark: int,
 ) -> ConsoleArtifact | None:
@@ -267,7 +265,7 @@ async def record_crash_halted_live(
     connector: Connector,
     profile_policy: ProfilePolicy,
     secret_registry: SecretRegistry,
-    artifact_store: ObjectStore | None,
+    artifact_store: ObjectStore,
     snapshotter: ConsoleSnapshotter | None,
     mark: int,
 ) -> BootStepResult | None:

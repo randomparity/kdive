@@ -28,6 +28,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.mcp.tools.ops.reconcile import reconcile_systems as ops_reconcile_systems
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
+from tests.reconcile_helpers import null_image_store
 
 _TOOL = "ops.reconcile_systems"
 
@@ -98,7 +99,7 @@ def test_reconcile_systems_runs_inventory_and_audits_diff(
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await ops_reconcile_systems.reconcile_systems(
-                pool, _ctx(platform_roles=_ADMIN), image_store=None
+                pool, _ctx(platform_roles=_ADMIN), image_store=null_image_store()
             )
         assert resp.status == "ok"
         assert resp.data["created"] == 1
@@ -129,7 +130,7 @@ def test_reconcile_systems_audits_prunes_for_attribution(
         )
         async with _pool(migrated_url) as pool:
             await ops_reconcile_systems.reconcile_systems(
-                pool, _ctx(platform_roles=_ADMIN), image_store=None
+                pool, _ctx(platform_roles=_ADMIN), image_store=null_image_store()
             )
             # Now drop the instance from the file and reconcile again -> it is pruned.
             monkeypatch.setenv(
@@ -137,7 +138,7 @@ def test_reconcile_systems_audits_prunes_for_attribution(
                 str(_write_systems_toml(tmp_path, "schema_version = 2\n")),
             )
             resp = await ops_reconcile_systems.reconcile_systems(
-                pool, _ctx(platform_roles=_ADMIN), image_store=None
+                pool, _ctx(platform_roles=_ADMIN), image_store=null_image_store()
             )
         assert resp.status == "ok"
         assert resp.data["pruned"] == 1
@@ -159,7 +160,7 @@ def test_operator_is_denied_reconcile_systems(
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await ops_reconcile_systems.reconcile_systems(
-                pool, _ctx(platform_roles=_OPERATOR), image_store=None
+                pool, _ctx(platform_roles=_OPERATOR), image_store=null_image_store()
             )
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
@@ -182,7 +183,7 @@ def test_operator_denial_is_audited(
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await ops_reconcile_systems.reconcile_systems(
-                pool, _ctx(platform_roles=_OPERATOR), image_store=None
+                pool, _ctx(platform_roles=_OPERATOR), image_store=null_image_store()
             )
         assert resp.status == "error"
         rows = await _audit_rows(migrated_url)
@@ -200,7 +201,9 @@ def test_project_only_non_admin_is_denied_and_writes_no_audit_row(
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await ops_reconcile_systems.reconcile_systems(pool, _ctx(), image_store=None)
+            resp = await ops_reconcile_systems.reconcile_systems(
+                pool, _ctx(), image_store=null_image_store()
+            )
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
         # A project-only denial is the routine non-grant case and is NOT recorded.
@@ -219,7 +222,7 @@ def test_absent_default_systems_toml_is_quiet_no_op(
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await ops_reconcile_systems.reconcile_systems(
-                pool, _ctx(platform_roles=_ADMIN), image_store=None
+                pool, _ctx(platform_roles=_ADMIN), image_store=null_image_store()
             )
         assert resp.status == "ok"
         assert resp.data["created"] == 0

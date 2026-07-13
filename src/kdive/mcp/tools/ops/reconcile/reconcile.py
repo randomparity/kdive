@@ -57,8 +57,8 @@ class ReconcileRepairPorts:
     """Repair dependencies used by one on-demand reconcile pass."""
 
     reaper: InfraReaper
-    upload_store: UploadStore | None
-    image_store: ImageSweepStore | None = None
+    upload_store: UploadStore
+    image_store: ImageSweepStore
     dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER
 
 
