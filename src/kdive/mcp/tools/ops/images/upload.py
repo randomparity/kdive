@@ -53,14 +53,14 @@ def _default_expiry(now: datetime) -> datetime:
 async def upload(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    store: UploadObjectStore | None,
+    store: UploadObjectStore,
     request: ImageUploadRequest,
 ) -> ToolResponse:
     """Register a quarantined upload as a project-private image. Requires ``operator`` on it.
 
     Gates ``operator`` on ``project`` first (a member-over-reach or cross-project caller is
-    denied and audited before the store is read, so authz is evaluated even when no object store
-    is configured), then delegates to :func:`register_private_upload`. The service enforces the
+    denied and audited before the store is read), then delegates to
+    :func:`register_private_upload`. The service enforces the
     per-project quota fail-closed under the project lock, validates the guest contract, and
     publishes through the row-first two-write. ``lifetime_seconds`` defaults to the configured
     private-image lifetime when absent, then the service clamps it to the ceiling.
@@ -75,8 +75,6 @@ async def upload(
             return denied(request.name, UPLOAD_TOOL)
         except AuthorizationError:
             return denied(request.name, UPLOAD_TOOL)
-        if store is None:
-            return _config_error(request.name)
         if request.quarantine_key.startswith(PUBLISHED_IMAGE_PREFIX):
             return _config_error(
                 request.name, data={"reason": "quarantine_key in published prefix"}

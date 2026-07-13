@@ -511,15 +511,15 @@ def test_delete_declines_a_referenced_image(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_upload_unprivileged_denied_audited_even_without_store(migrated_url: str) -> None:
-    # The authz boundary is evaluated before the store-availability check, so an
-    # unprivileged caller is denied and audited even on an S3-less deployment.
+def test_upload_unprivileged_denied_audited_before_store(migrated_url: str) -> None:
+    # The authz boundary is evaluated before the store is touched, so an unprivileged
+    # caller is denied and audited without any store call.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await _UPLOAD_MODULE.upload(
                 pool,
                 _member_ctx(role=Role.VIEWER),
-                None,
+                cast(UploadObjectStore, _UnusedUploadStore()),
                 _UPLOAD_MODULE.ImageUploadRequest(
                     project=_TARGET_PROJECT,
                     name="custom",
@@ -542,7 +542,7 @@ def test_upload_cross_project_denied_without_project_audit(migrated_url: str) ->
             resp = await _UPLOAD_MODULE.upload(
                 pool,
                 _member_ctx(project="tenant-y", role=Role.OPERATOR),
-                None,
+                cast(UploadObjectStore, _UnusedUploadStore()),
                 _UPLOAD_MODULE.ImageUploadRequest(
                     project=_TARGET_PROJECT,
                     name="custom",
@@ -551,26 +551,6 @@ def test_upload_cross_project_denied_without_project_audit(migrated_url: str) ->
                 ),
             )
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
-        assert await _audit_log_rows(migrated_url) == []
-
-    asyncio.run(_run())
-
-
-def test_upload_operator_without_store_is_configuration_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await image_upload.upload(
-                pool,
-                _member_ctx(role=Role.OPERATOR),
-                None,
-                image_upload.ImageUploadRequest(
-                    project=_TARGET_PROJECT,
-                    name="custom",
-                    arch="x86_64",
-                    quarantine_key="quarantine/abc",
-                ),
-            )
-        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
         assert await _audit_log_rows(migrated_url) == []
 
     asyncio.run(_run())
