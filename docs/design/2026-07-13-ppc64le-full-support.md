@@ -87,9 +87,11 @@ remainder.
 - Foreign-arch builds use a customization boot: family customization is rendered as a
   one-shot firstboot unit and injected file-level via libguestfs (file operations are
   arch-safe; only executing guest code is not). kdive boots the image once under TCG
-  through its own provisioning machinery, waits for a completion marker on the console
-  under the TCG-scaled deadline, powers off, and seals. Failures surface the console
-  tail through the normal evidence path.
+  through its own provisioning machinery — the existing bootloader-less baseline-kernel
+  direct boot (ADR-0272), so no bootloader or firmware work exists anywhere in this
+  epic — waits for a completion marker on the console under the TCG-scaled deadline,
+  powers off, and seals. Failures surface the console tail through the normal evidence
+  path.
 - Family customizers (`images/families/_fedora_customize.py`, `rhel.py`) refactor their
   customization into a form renderable as either virt-customize argv or a firstboot
   script, so per-family logic exists once.
@@ -129,10 +131,13 @@ remainder.
 
 ### Debug plane
 
-- gdb: QEMU's gdbstub speaks the guest arch, so `debug/gdbmi.py` must select a
-  multiarch-capable gdb (`gdb-multiarch` on distros that split it) and set the target
-  architecture explicitly when guest ≠ host. Doctor gains the prerequisite check.
-- drgn supports ppc64le vmcore and live targets; the work is verification plus
+- gdb: register handling in the shared gdb/MI layer is already dynamic (names resolved
+  via `-data-list-register-names`, not hardcoded x86). What remains is host-side binary
+  selection — a multiarch-capable gdb (`gdb-multiarch` on distros that split it) when
+  guest ≠ host — plus a doctor check for the prerequisite.
+- drgn's live path runs in-guest over SSH (`debug/live_introspect.py`) and is
+  arch-neutral by construction; the vmcore-analysis path is the cross-arch
+  verification target. drgn supports ppc64le targets, so the work is verification plus
   arch-parameterized tests, not new machinery.
 - Console and sysrq paths are already arch-clean via arch traits.
 
