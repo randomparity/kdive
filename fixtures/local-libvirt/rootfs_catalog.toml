@@ -34,6 +34,24 @@ makedumpfile_version = "1.7.8"  # < 1.7.9; the #817 regression reference
 drgn_version = "0.1.0"  # Fedora 43 stable (0.1.0-1.fc43)
 source = { kind = "virt-builder", template = "fedora-43" }
 
+# The cloud-image sibling of the virt-builder entry above. Same Fedora 43 release, but built from
+# the sha256-pinned GenericCloud base (a minimal, single-kernel image) instead of a virt-builder
+# template (which ships the compose kernel plus a later update -> a multi-kernel /boot that cannot
+# offer an unambiguous baseline kernel config, ADR-0336). Use this one to provision or to get a
+# downloadable starting kernel config; the virt-builder entry stays as the lone base-source
+# regression reference.
+[[image]]
+name = "fedora-kdive-ready-43-cloud"
+distro = "fedora"
+version = "43"
+family = "rhel"
+arch = "x86_64"
+kind = "debug"
+makedumpfile_version = "1.7.8"  # < 1.7.9; matches the Fedora 43 repos (same as the sibling entry)
+drgn_version = "0.2.0"  # Fedora 43 repos as of the cloud build (0.2.0); the virt-builder sibling
+                        # was built earlier and shipped 0.1.0 — both are >= the 0.0.31 BTF threshold
+source = { kind = "cloud-image", url = "https://download.fedoraproject.org/pub/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-43-1.6.x86_64.qcow2", sha256 = "846574c8a97cd2d8dc1f231062d73107cc85cbbbda56335e264a46e3a6c8ab2f" }  # pragma: allowlist secret
+
 [[image]]
 name = "fedora-kdive-ready-44"
 distro = "fedora"
