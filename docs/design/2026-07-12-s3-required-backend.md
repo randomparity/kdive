@@ -175,7 +175,9 @@ error handling, not no-S3 tolerance — with S3 required, `config.validate()` /
    only forces removal of `ObjectStore | None` declarations and cannot catch a
    lingering sentinel, alias, or helper.
 3. The `ObjectStoreAssembly` store field(s) and every handler/reconciler store
-   parameter are typed `ObjectStore`, not `ObjectStore | None`; `ty check` passes.
+   parameter are non-optional — `ObjectStore` (or the non-optional `UploadStore`/
+   `ImageSweepStore` protocol for the `ReconcileConfig` aggregate), not
+   `X | None`; `ty check` passes.
    (Caveat: `ty` surfaces removed *fields/attributes*
    (`unresolved-attribute`/`unknown-argument`) but does **not** flag a dead
    `if store is None` guard left on a narrowed param — verified against ty 0.0.53.

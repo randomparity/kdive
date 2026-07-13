@@ -250,29 +250,64 @@ from `jobs/assembly.py`, which now passes non-`None`).
 
 ### Task 5: Narrow the reconciler loop passes (`reconciler/loop.py`)
 
-**Files:**
-- Modify: `src/kdive/reconciler/loop.py` (~:245-310 — the `config.image_store is None` / `config.upload_store is None` pass gates; `ReconcileConfig` at ~:216-217)
-- Test: `tests/integration/test_reconcile_inventory.py`, `tests/reconciler/`
+Make the reconciler store fields **required** (operator decision: full removal,
+not narrow-at-entry). This is the largest task — the store fields feed an
+aggregate (`ReconcileConfig`) whose zero-arg default cascades to ~13 store-free
+test call sites. Use `kw_only=True` (avoids reordering 22 fields) and a shared
+test helper (keeps the churn mechanical). **All edits land in one commit** to keep
+whole-tree `just type`/`just test` green.
 
-- [ ] **Step 1: Update tests.** Remove
-  `test_loop_inventory_pass_absent_when_no_image_store`; keep the s3-unreachable /
-  no-digest degrade tests (those are store-*outage*, not no-S3 — the store is
-  present but returns bad HEADs).
-- [ ] **Step 2: Drop `| None` on `ReconcileConfig.image_store` / `upload_store`**
-  keeping their existing structural protocol types — `image_store: ImageSweepStore`
-  and `upload_store: UploadStore` (loop.py:216-217), **not** `ObjectStore` (the
-  pass functions consume the protocols). Delete the eight `is None` gates so the
-  passes are always scheduled: **four `image_store` gates** — one inventory pass
-  (`_reconcile_inventory_repair` ~:245) plus three image-catalog sweeps
-  (`_leaked_images_repair` ~:254, `_dangling_images_repair` ~:263,
-  `_expired_private_images_repair` ~:272) — and **four `upload_store` GC gates**
-  (`_abandoned_uploads_repair` ~:281, `_report_artifacts_gc_repair` ~:290,
-  `_investigation_artifacts_gc_repair` ~:299, `_expired_build_artifacts_gc_repair`
-  ~:310).
-- [ ] **Step 3: Run** `just type` and
-  `uv run python -m pytest tests/reconciler tests/integration/test_reconcile_inventory.py -q`.
-- [ ] **Step 4: Commit.**
-  `git commit -m "refactor: reconciler passes require the object store (#1133)"`
+**Files:**
+- Modify: `src/kdive/reconciler/loop.py` (`ReconcileConfig` :209-217; the eight pass gates :245-310; `_DEFAULT_RECONCILE_CONFIG` :238; `reconcile_once` config default :454; the `Reconciler.__init__` config default :517)
+- Modify: `src/kdive/mcp/tools/ops/reconcile/reconcile.py` (`ReconcileRepairPorts.upload_store`/`image_store` :60-61 — drop `| None`; :98-99 feed)
+- Modify: `src/kdive/processes/reconciler.py` (`run_reconciler_with_composition` `upload_store` param :109; `build_reconcile_config` `upload_store` param :142 — `ObjectStore | None` → `ObjectStore`)
+- Test: `tests/reconciler/{test_loop,test_loop_telemetry,test_promotion_sweep,test_runtime_resource_reaping,test_orphaned_active_sweep,test_expiry_sweep}.py`, `tests/services/test_pcie_claim_release.py`, `tests/integration/{test_reconcile_inventory,test_m1_allocation_accounting}.py`, `tests/mcp/ops/test_reconcile_now.py`
+
+**Interfaces:**
+- Produces: `ReconcileConfig(*, upload_store: UploadStore, image_store: ImageSweepStore, ...)` — the two stores now required kw args. `_DEFAULT_RECONCILE_CONFIG` removed; `reconcile_once`/`Reconciler.__init__` take `config` with no default.
+
+- [ ] **Step 1: Add a shared test helper.** In the reconciler test package's
+  `conftest.py` (or a shared `tests/reconciler/_helpers.py` imported where needed),
+  add `make_reconcile_config(**overrides) -> ReconcileConfig` that supplies fake
+  stores by default (a `unittest.mock.create_autospec(UploadStore)` /
+  `ImageSweepStore`, or the existing test fakes) so store-unrelated passes stay
+  isolated. This replaces the deleted zero-arg default.
+- [ ] **Step 2: Update tests first.** (a) Remove
+  `test_loop_inventory_pass_absent_when_no_image_store`
+  (`tests/integration/test_reconcile_inventory.py`) and the `# default config: no
+  image store` call at :1066 (rewrite to pass a config without an image store via
+  the helper, or delete if it only asserted the skip). (b) Replace every bare
+  `reconcile_once(pool, reaper)` / `reconcile_once(pool, NullReaper())` call (the
+  ~13 sites listed in the Files test set) with
+  `reconcile_once(pool, reaper, config=make_reconcile_config())`. (c) Replace every
+  store-free `ReconcileConfig(...)` construction with `make_reconcile_config(...)`.
+  Keep the s3-unreachable / no-digest degrade tests (store-*outage*, store present).
+- [ ] **Step 3: Make the fields required.** In `loop.py`: add `kw_only=True` to
+  the `@dataclass(frozen=True, slots=True)` decorator; change
+  `upload_store: UploadStore | None = None` → `upload_store: UploadStore` and
+  `image_store: ImageSweepStore | None = None` → `image_store: ImageSweepStore`;
+  delete `_DEFAULT_RECONCILE_CONFIG` and drop the `= _DEFAULT_RECONCILE_CONFIG`
+  default on `reconcile_once` (:454) and `Reconciler.__init__` (:517), making
+  `config` a required kw arg.
+- [ ] **Step 4: Delete the eight gates.** In each pass function delete the
+  `if <store> is None: return None` block, using `config.image_store` /
+  `config.upload_store` directly: **four `image_store`** —
+  `_reconcile_inventory_repair` (:245), `_leaked_images_repair` (:254),
+  `_dangling_images_repair` (:263), `_expired_private_images_repair` (:272); **four
+  `upload_store`** — `_abandoned_uploads_repair` (:281), `_report_artifacts_gc_repair`
+  (:290), `_investigation_artifacts_gc_repair` (:299),
+  `_expired_build_artifacts_gc_repair` (:310).
+- [ ] **Step 5: Narrow the feeders.** In `reconcile.py` drop `| None` on
+  `ReconcileRepairPorts.upload_store` (:60) and `image_store` (:61); trace the
+  `reconcile_now` ports plumbing that supplies them and narrow those to
+  non-optional too (confirm `ObjectStore` satisfies `UploadStore`/`ImageSweepStore`
+  — it does; the pass functions already consume it). In `processes/reconciler.py`
+  narrow `run_reconciler_with_composition`'s `upload_store` (:109) and
+  `build_reconcile_config`'s `upload_store` (:142) from `ObjectStore | None` to
+  `ObjectStore`.
+- [ ] **Step 6: Run whole-tree** `just type` and `just test` → green.
+- [ ] **Step 7: Commit.**
+  `git commit -m "refactor: reconciler config requires the object store (#1133)"`
 
 ---
 
