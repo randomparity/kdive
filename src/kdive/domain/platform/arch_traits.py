@@ -44,6 +44,11 @@ _TRAITS: dict[str, ArchTraits] = {
     "ppc64le": ArchTraits(machine="pseries", console_device="hvc0", pin_nic_slot=False),
 }
 
+# The arches kdive can provision (one per ``_TRAITS`` row). Local-libvirt discovery filters the
+# guest arches it advertises to this set (ADR-0338), so a host that can boot an arch kdive does
+# not yet support does not advertise it as schedulable.
+SUPPORTED_ARCHES: frozenset[str] = frozenset(_TRAITS)
+
 
 def arch_traits(arch: str) -> ArchTraits:
     """Resolve the platform traits for a profile architecture.
