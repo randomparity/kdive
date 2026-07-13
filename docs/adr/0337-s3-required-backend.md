@@ -56,8 +56,8 @@ to end.
    the env var existing, not on a non-blank value (`config/registry.py:164`), so a
    present-but-empty `KDIVE_S3_ENDPOINT_URL=""` — which the Helm configmap renders
    on the external path — would pass validation yet be rejected by
-   `object_store_from_env`. The non-empty parse closes that gap via the
-   malformed-value path. `KDIVE_S3_REGION` keeps its `us-east-1` default (never
+   `object_store_from_env`. The non-empty parse (strip-then-reject-blank, so
+   whitespace-only is caught too) closes that gap via the malformed-value path. `KDIVE_S3_REGION` keeps its `us-east-1` default (never
    missing). The failure moves from the silent readiness hang to
    `config.validate()`.
 

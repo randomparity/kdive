@@ -69,10 +69,11 @@ present-but-empty `KDIVE_S3_ENDPOINT_URL=""` counts as "present" and passes
 validation, yet `object_store_from_env` rejects it (`if not endpoint_url: raise`).
 The Helm configmap renders `KDIVE_S3_ENDPOINT_URL` unconditionally
 (`configmap.yaml:36`), empty on the external-backend path with no override — the
-exact present-but-empty vector. A non-empty parse (raising `ValueError` on a blank
-value) makes `config.validate()` reject empty via its malformed-value path, so
-both absent and empty fail fast at the earliest point rather than at the silent
-readiness-probe hang. `KDIVE_S3_REGION` keeps its `us-east-1` default and `_str`
+exact present-but-empty vector. A non-empty parse (strip
+whitespace, then raise `ValueError` on a blank result) makes `config.validate()`
+reject empty **and whitespace-only** values via its malformed-value path, so
+absent, empty, and blank all fail fast at the earliest point rather than at the
+silent readiness-probe hang. `KDIVE_S3_REGION` keeps its `us-east-1` default and `_str`
 parse (it is never "missing" and `object_store_from_env` falls back on blank).
 
 ### 2. Collapse the optional-store assembly
@@ -164,12 +165,15 @@ error handling, not no-S3 tolerance — with S3 required, `config.validate()` /
 ## Success criteria (falsifiable)
 
 1. `config.validate()` for `server`/`worker`/`reconciler` fails with a
-   `configuration_error` naming `KDIVE_S3_ENDPOINT_URL`/`KDIVE_S3_BUCKET` both
-   when they are **unset** and when they are **present-but-empty** (`=""`) — two
-   new test cases.
-2. `rg -n 'optional_object_store|s3_env_is_absent|_AbsentImageStore|optional_reconciler_object_store|_unconfigured_image_build_handler' src/ tests/`
-   returns nothing (scope includes `tests/`, where the removed symbols are
-   referenced by unit tests that must be updated).
+   `configuration_error` naming `KDIVE_S3_ENDPOINT_URL`/`KDIVE_S3_BUCKET` when
+   they are **unset**, **present-but-empty** (`=""`), and **whitespace-only**
+   (`="  "`) — three new test cases.
+2. `rg -n 'optional_object_store|s3_env_is_absent|_AbsentImageStore|optional_reconciler_object_store|_unconfigured_image_build_handler|store_unconfigured|RequiredObjectStore|_S3_OPTIONAL_ENV_NAMES|_required_store_error|optional_upload_store|optional_image_store|optional_ops_image_store' src/ tests/`
+   returns nothing — the full set of deleted symbols (not only the five headline
+   ones), scoped to `tests/` too where they are referenced by unit tests that
+   must be updated. This grep is the removal backstop; criterion 3 (type check)
+   only forces removal of `ObjectStore | None` declarations and cannot catch a
+   lingering sentinel, alias, or helper.
 3. The `ObjectStoreAssembly` store field(s) and every handler/reconciler store
    parameter are typed `ObjectStore`, not `ObjectStore | None`; `ty check` passes.
    (Caveat: the retained `request_time_store_factory` and the retained
@@ -194,7 +198,8 @@ error handling, not no-S3 tolerance — with S3 required, `config.validate()` /
   to non-optional forces the compiler to surface most remaining `is None`
   readers. It does **not** cover factory-derived (`request_time_store_factory`)
   or `try/except`-wrapped access — those retained sites are audited by hand.
-- **Present-but-empty S3 config.** Covered by the step-1 non-empty parse; a
-  criterion-1 test exercises the `=""` case, not only the unset case.
+- **Present-but-empty / whitespace-only S3 config.** Covered by the step-1
+  strip-then-reject parse; criterion-1 tests exercise the `=""` and `="  "` cases,
+  not only the unset case.
 - **`reconcile-systems` UX regression.** Losing the friendly "set KDIVE_S3_*"
   message. Mitigation: keep the CLI's `CategorizedError` catch (step 5).
