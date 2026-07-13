@@ -209,7 +209,7 @@ class RemoteLibvirtInstall:
                 },
             )
 
-    def boot(self, system_id: UUID) -> None:
+    def boot(self, system_id: UUID, *, accel: str | None = None) -> None:
         """Reboot into the installed kernel and confirm a fresh boot by boot_id change.
 
         Reads the guest's pre-reboot boot_id, runs the helper's atomic select-``kdive``-slot +
@@ -222,6 +222,7 @@ class RemoteLibvirtInstall:
                 before the reboot; ``BOOT_TIMEOUT`` when no fresh boot_id appears within the boot
                 window (a panic/hang manifests as the agent never reconnecting).
         """
+        del accel  # remote-libvirt is KVM (accel=NULL); TCG scaling is local-only (ADR-0341)
         config = self._config_factory()
         agent_exec = self._agent_exec(self._boot_timeout_s)
         with self._connection(config) as conn:

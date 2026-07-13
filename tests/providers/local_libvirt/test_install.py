@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tarfile
 import xml.etree.ElementTree as ET  # noqa: S405 - parses only self-rendered, trusted test XML
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from uuid import UUID
 import libvirt
 import pytest
 
+import kdive.config as config
 from kdive.artifacts.storage import FetchedArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -42,6 +44,7 @@ from kdive.providers.local_libvirt.lifecycle.install import (
     LocalLibvirtInstall,
     _stage_object,
 )
+from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLIER
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.runtime_paths import read_console_log
 from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
@@ -111,8 +114,10 @@ class _Readiness:
     answered: bool = True
     ok: bool = True
     probe_error: str | None = None
+    calls: int = 0
 
     def readiness(self, system_id: UUID) -> ReadinessResult:
+        self.calls += 1
         return ReadinessResult(answered=self.answered, ok=self.ok, probe_error=self.probe_error)
 
 
@@ -1371,3 +1376,63 @@ def test_crash_fixture_classifies_crashed() -> None:
 def test_clean_fixture_classifies_ready() -> None:
     data = (_FIXTURES / "console_clean_ready.log").read_bytes()
     assert classify_console(data) == "ready"
+
+
+# --- TCG boot-window scaling (ADR-0341, #1143) ----------------------------------------------
+#
+# The booter is built with boot_window_polls=3 (see _install). An always-not-answered readiness
+# seam drives the loop to BOOT_TIMEOUT, so the number of readiness probes is the effective
+# window. KVM is unscaled (3 probes); TCG/None scale by KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER.
+
+
+@pytest.fixture
+def _tcg_multiplier_5() -> Iterator[None]:
+    config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "5.0"})
+    yield
+    config.reset()
+
+
+def _boot_expecting_timeout(inst: LocalLibvirtInstall, accel: str | None) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        inst.boot(_SYS, accel=accel)
+    assert caught.value.category is ErrorCategory.BOOT_TIMEOUT
+
+
+def test_kvm_boot_window_is_unscaled(tmp_path: Path, _tcg_multiplier_5: None) -> None:
+    domain = _domain()
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    seam = _Readiness(answered=False)
+    inst = _install(conn=conn, seam=seam, staging_root=tmp_path)
+    _boot_expecting_timeout(inst, "kvm")
+    assert seam.calls == 3  # ceil(3 * 1.0) — KVM never scales
+
+
+def test_tcg_boot_window_scaled_by_multiplier(tmp_path: Path, _tcg_multiplier_5: None) -> None:
+    domain = _domain()
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    seam = _Readiness(answered=False)
+    inst = _install(conn=conn, seam=seam, staging_root=tmp_path)
+    _boot_expecting_timeout(inst, "tcg")
+    assert seam.calls == 15  # ceil(3 * 5.0)
+
+
+def test_unknown_accel_boot_window_is_scaled(tmp_path: Path, _tcg_multiplier_5: None) -> None:
+    # TCG-safe fallback: an unrecorded (None) accel gets the generous scaled window.
+    domain = _domain()
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    seam = _Readiness(answered=False)
+    inst = _install(conn=conn, seam=seam, staging_root=tmp_path)
+    _boot_expecting_timeout(inst, None)
+    assert seam.calls == 15  # ceil(3 * 5.0)
+
+
+def test_default_boot_accel_is_none_scaled(tmp_path: Path, _tcg_multiplier_5: None) -> None:
+    # A caller that omits accel entirely gets the safe (scaled) window, not the KVM window.
+    domain = _domain()
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    seam = _Readiness(answered=False)
+    inst = _install(conn=conn, seam=seam, staging_root=tmp_path)
+    with pytest.raises(CategorizedError) as caught:
+        inst.boot(_SYS)
+    assert caught.value.category is ErrorCategory.BOOT_TIMEOUT
+    assert seam.calls == 15

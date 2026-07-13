@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import xml.etree.ElementTree as ET  # noqa: S405 - constructs/edits self-owned domain XML only
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -55,6 +56,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     _real_readiness,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.staged_write import write_staged_bytes
+from kdive.providers.local_libvirt.lifecycle.deadlines import tcg_deadline_multiplier
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports.lifecycle import InstallRequest
@@ -143,8 +145,14 @@ class LocalLibvirtBooter:
         self._readiness = readiness
         self._boot_window_polls = boot_window_polls
 
-    def boot(self, system_id: UUID) -> None:
+    def boot(self, system_id: UUID, *, accel: str | None = None) -> None:
         """Power-cycle the domain into the staged kernel and confirm run-readiness.
+
+        ``accel`` is the System's persisted accelerator (ADR-0339). The boot-readiness window
+        is scaled by ``tcg_deadline_multiplier(accel)`` (ADR-0341): a KVM guest keeps the base
+        window, while a TCG or unknown/``None`` accelerator gets the generous scaled window so
+        a slow emulated boot is not timed out spuriously. The window is a ceiling, not a fixed
+        wait — a fast boot still returns the instant the readiness marker appears.
 
         Raises:
             CategorizedError: ``INSTALL_FAILURE`` if the domain is absent or libvirt cannot
@@ -158,7 +166,8 @@ class LocalLibvirtBooter:
             self._power_cycle(domain, domain_name)
         finally:
             _close(conn)
-        self._await_ready(system_id)
+        polls = math.ceil(self._boot_window_polls * tcg_deadline_multiplier(accel))
+        self._await_ready(system_id, polls)
 
     def force_off_if_active(self, system_id: UUID) -> None:
         """Destroy the System's domain if it is running before a rw overlay mount."""
@@ -190,9 +199,9 @@ class LocalLibvirtBooter:
         except libvirt.libvirtError as exc:
             raise _install_failure("power-cycling", domain_name) from exc
 
-    def _await_ready(self, system_id: UUID) -> None:
+    def _await_ready(self, system_id: UUID, polls: int) -> None:
         first_probe_error: str | None = None
-        for _ in range(self._boot_window_polls):
+        for _ in range(polls):
             result = self._readiness(system_id)
             if first_probe_error is None and result.probe_error is not None:
                 first_probe_error = result.probe_error
@@ -521,8 +530,8 @@ class LocalLibvirtInstall:
     def install(self, request: InstallRequest) -> None:
         self._installer.install(request)
 
-    def boot(self, system_id: UUID) -> None:
-        self._booter.boot(system_id)
+    def boot(self, system_id: UUID, *, accel: str | None = None) -> None:
+        self._booter.boot(system_id, accel=accel)
 
 
 class _ObjectReader(Protocol):

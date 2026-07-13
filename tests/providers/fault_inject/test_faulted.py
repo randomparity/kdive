@@ -91,12 +91,14 @@ class _SpyInstallInner:
     def __init__(self) -> None:
         self.install_calls: list[InstallRequest] = []
         self.boot_calls: list[UUID] = []
+        self.boot_accel: list[str | None] = []
 
     def install(self, request: InstallRequest) -> None:
         self.install_calls.append(request)
 
-    def boot(self, system_id: UUID) -> None:
+    def boot(self, system_id: UUID, *, accel: str | None = None) -> None:
         self.boot_calls.append(system_id)
+        self.boot_accel.append(accel)
 
 
 def _provision(
@@ -358,7 +360,8 @@ def test_boot_threads_exact_args_to_engine_and_inner() -> None:
         sleep_s=_noop_sleep,
     )
 
-    wrapper.boot(_SYSTEM)
+    wrapper.boot(_SYSTEM, accel="tcg")
 
     assert inner.boot_calls == [_SYSTEM]
+    assert inner.boot_accel == ["tcg"]  # accel is forwarded to the inner booter (ADR-0341)
     assert engine.calls == [{"system_id": _SYSTEM, "plane": FaultPlane.BOOT, "attempt": 9}]

@@ -132,9 +132,9 @@ class FaultedInstall:
         self._draw(request.system_id, FaultPlane.INSTALL)
         self._inner.install(request)
 
-    def boot(self, system_id: UUID) -> None:
+    def boot(self, system_id: UUID, *, accel: str | None = None) -> None:
         self._draw(system_id, FaultPlane.BOOT)
-        self._inner.boot(system_id)
+        self._inner.boot(system_id, accel=accel)
 
     def _draw(self, system_id: UUID, plane: FaultPlane) -> None:
         decision = self._engine.decide(

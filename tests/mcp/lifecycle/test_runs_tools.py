@@ -2948,7 +2948,8 @@ class _FakeBooter:
         self._error = error
         self._on_boot = on_boot
 
-    def boot(self, system_id: UUID) -> None:
+    def boot(self, system_id: UUID, *, accel: str | None = None) -> None:
+        del accel
         self.calls.append(system_id)
         if self._on_boot is not None:
             self._on_boot(system_id)
