@@ -32,16 +32,37 @@ class ArchTraits:
             PCI address. The q35 PCIe root complex needs it (``addr=0x10``) to avoid colliding
             with libvirt's own auto-assigned slots; the pseries spapr-pci-host-bridge assigns
             addresses itself, so a pinned slot is left off there.
+        kvm_cpu_mode: The ``<cpu mode=…>`` a **KVM** domain pins (ADR-0340). ``host-passthrough``
+            on x86 (ADR-0294: the QEMU default ``qemu64`` is x86-64-v1 but EL9 glibc requires
+            x86-64-v2, so a wrong model aborts PID 1); ``host-model`` on pseries. A TCG domain
+            emits no ``<cpu>`` (the renderer omits it), so this field applies only under KVM.
+        emit_acpi_features: Whether the domain emits the x86 ``<features><acpi/><vmcoreinfo/>``
+            block (ADR-0340). ``True`` on x86; ``False`` on pseries, whose fw_cfg/VMCOREINFO
+            crash-capture behavior is proven in the kdump sub-issue, not rendered here.
     """
 
     machine: str
     console_device: str
     pin_nic_slot: bool
+    kvm_cpu_mode: str
+    emit_acpi_features: bool
 
 
 _TRAITS: dict[str, ArchTraits] = {
-    "x86_64": ArchTraits(machine="q35", console_device="ttyS0", pin_nic_slot=True),
-    "ppc64le": ArchTraits(machine="pseries", console_device="hvc0", pin_nic_slot=False),
+    "x86_64": ArchTraits(
+        machine="q35",
+        console_device="ttyS0",
+        pin_nic_slot=True,
+        kvm_cpu_mode="host-passthrough",
+        emit_acpi_features=True,
+    ),
+    "ppc64le": ArchTraits(
+        machine="pseries",
+        console_device="hvc0",
+        pin_nic_slot=False,
+        kvm_cpu_mode="host-model",
+        emit_acpi_features=False,
+    ),
 }
 
 # The arches kdive can provision (one per ``_TRAITS`` row). Local-libvirt discovery filters the
