@@ -28,6 +28,7 @@ _EXPECTED_MAKEDUMPFILE: dict[str, str] = {
     "fedora-kdive-ready-44": "1.7.9",
     "fedora-kdive-ready-44-ppc64le": "1.7.9",
     "fedora-kdive-ready-43": "1.7.8",
+    "fedora-kdive-ready-43-cloud": "1.7.8",
     "rocky-kdive-ready-10": "1.7.8",
     "rocky-kdive-ready-9": "1.7.6",
     "rocky-kdive-ready-8": "1.7.2",
@@ -44,6 +45,7 @@ _EXPECTED_MAKEDUMPFILE: dict[str, str] = {
 # (drgn_support) against the 0.0.31 BTF-capability threshold, not stored.
 _EXPECTED_DRGN: dict[str, str] = {
     "fedora-kdive-ready-43": "0.1.0",
+    "fedora-kdive-ready-43-cloud": "0.2.0",
     "fedora-kdive-ready-44": "0.0.33",
     "fedora-kdive-ready-44-ppc64le": "0.0.33",
     "rocky-kdive-ready-8": "0.0.32",
@@ -106,8 +108,8 @@ def test_loads_the_ppc64le_entry() -> None:
 def test_cloud_image_entries_are_sha256_pinned() -> None:
     cat = load_rootfs_catalog()
     for name in _EXPECTED_MAKEDUMPFILE:
-        if name.startswith("fedora-kdive-ready-43"):
-            continue  # the lone virt-builder regression reference
+        if name == "fedora-kdive-ready-43":
+            continue  # the lone virt-builder regression reference (its -cloud sibling is pinned)
         src = cat[name].source
         assert isinstance(src, CloudImageSource), name
         assert src.url.endswith(".qcow2"), name
@@ -199,6 +201,20 @@ def test_virt_builder_and_cloud_image_sources_parse() -> None:
     assert isinstance(f44, CloudImageSource)
     assert f44.url.endswith(".qcow2")
     assert len(f44.sha256) == 64
+
+
+def test_fedora_43_has_both_a_virt_builder_and_a_cloud_image_entry() -> None:
+    """The two Fedora 43 entries coexist: the virt-builder reference and its cloud sibling.
+
+    The cloud entry (ADR-0336) is built from a single-kernel GenericCloud base so it can offer an
+    unambiguous baseline kernel config, which the multi-kernel virt-builder image cannot.
+    """
+    cat = load_rootfs_catalog()
+    assert isinstance(cat["fedora-kdive-ready-43"].source, VirtBuilderSource)
+    cloud = cat["fedora-kdive-ready-43-cloud"].source
+    assert isinstance(cloud, CloudImageSource)
+    assert "Fedora-Cloud-Base-Generic-43" in cloud.url
+    assert len(cloud.sha256) == 64
 
 
 def test_resolve_unknown_name_is_config_error() -> None:

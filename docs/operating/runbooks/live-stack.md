@@ -184,7 +184,10 @@ scripts/live-stack/up.sh
 ```
 
 `up.sh` is idempotent and also ensures the backends and libvirt are up; for a no-VM, no-sudo
-API-only loop use `KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-libvirt`.
+API-only loop use `KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-libvirt`. It also runs
+one synchronous `reconcile-systems` pass before starting the host processes, so a completed `up.sh`
+guarantees the catalog is populated and every on-disk `<name>.config` sibling is uploaded with
+`kernel_config_key` set (ADR-0336) — rather than waiting for the reconciler daemon's next loop.
 
 Installed package — migrate and seed on the host, then run the app tier from the compose
 reference ([`deploy/compose/README.md`](../../../deploy/compose/README.md)):
