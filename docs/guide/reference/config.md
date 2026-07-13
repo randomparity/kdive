@@ -133,8 +133,8 @@
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
-| `KDIVE_S3_BUCKET` | reconciler, server, worker | — | no | Bucket holding vmcores, transcripts, and uploads. |
-| `KDIVE_S3_ENDPOINT_URL` | reconciler, server, worker | — | no | S3-compatible endpoint URL for bulk artifacts. |
+| `KDIVE_S3_BUCKET` | reconciler, server, worker | — | yes | Bucket holding vmcores, transcripts, and uploads (required, ADR-0337). |
+| `KDIVE_S3_ENDPOINT_URL` | reconciler, server, worker | — | yes | S3-compatible endpoint URL for bulk artifacts (required, ADR-0337). |
 | `KDIVE_S3_REGION` | reconciler, server, worker | `us-east-1` | no | Region for the object-store client. |
 
 ## oidc

@@ -5,6 +5,11 @@ one-shot, on top of operator-provided backends (Postgres, an S3-compatible objec
 and an OIDC issuer). This page covers where the code comes from, what the host needs, and
 the three ways to run it.
 
+The S3-compatible object store is a **required** backend (ADR-0337): it is load-bearing for
+vmcore retrieval, debuginfo staging, console parts, and artifact egress.
+`server`/`worker`/`reconciler` fail startup validation with an actionable
+`configuration_error` when `KDIVE_S3_ENDPOINT_URL` or `KDIVE_S3_BUCKET` is unset or blank.
+
 ## Install paths
 
 ### From source
