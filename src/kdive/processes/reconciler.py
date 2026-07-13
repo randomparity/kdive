@@ -101,7 +101,7 @@ async def run_reconciler_with_composition(
     stop: asyncio.Event,
     telemetry: Telemetry,
     provider_composition: ProviderComposition,
-    upload_store: ObjectStore | None,
+    upload_store: ObjectStore,
 ) -> None:
     from kdive.observability.console_telemetry import ConsoleTelemetry
     from kdive.reconciler.loop import Reconciler
@@ -134,7 +134,7 @@ async def run_reconciler_with_composition(
 def build_reconcile_config(
     provider_composition: ProviderComposition,
     *,
-    upload_store: ObjectStore | None,
+    upload_store: ObjectStore,
     console_registry: CollectorRegistry | None,
     heartbeat: Heartbeat,
     telemetry: Telemetry,

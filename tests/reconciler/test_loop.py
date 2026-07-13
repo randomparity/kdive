@@ -22,7 +22,6 @@ from kdive.reconciler.cleanup.gc import (
 )
 from kdive.reconciler.cleanup.provider_reaping import repair_leaked_domains
 from kdive.reconciler.loop import (
-    ReconcileConfig,
     Reconciler,
     ReconcileReport,
     reconcile_once,
@@ -30,6 +29,7 @@ from kdive.reconciler.loop import (
 from kdive.reconciler.repairs.debug_sessions import repair_dead_sessions
 from kdive.reconciler.repairs.jobs import repair_abandoned_jobs
 from kdive.reconciler.repairs.systems import repair_orphaned_systems
+from tests.reconcile_helpers import make_reconcile_config
 from tests.reconciler.conftest import (
     FakeReaper,
     FakeResetter,
@@ -654,7 +654,7 @@ def test_reconcile_once_counts_a_mixed_pass(migrated_url: str) -> None:
             )  # dead session
         reaper = FakeReaper(_FakeDomain(name="vm-leak", system_id=uuid4()))
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            report = await reconcile_once(pool, reaper)
+            report = await reconcile_once(pool, reaper, config=make_reconcile_config())
         assert report == ReconcileReport(
             expired_allocations=0,
             orphaned_systems=1,
@@ -688,7 +688,7 @@ def test_reconcile_once_isolates_a_failing_repair(
 
         monkeypatch.setattr(loop, "_repair_abandoned_jobs", _boom)
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            report = await reconcile_once(pool, NullReaper())
+            report = await reconcile_once(pool, NullReaper(), config=make_reconcile_config())
         assert report.dead_sessions == 1  # other repairs still ran
         assert report.failures == ("abandoned_jobs",)
 
@@ -714,7 +714,7 @@ def test_reconciler_run_survives_a_failing_pass(monkeypatch: pytest.MonkeyPatch)
         reconciler = Reconciler(
             pool,
             NullReaper(),
-            config=ReconcileConfig(interval=timedelta(milliseconds=5)),
+            config=make_reconcile_config(interval=timedelta(milliseconds=5)),
         )
         await asyncio.wait_for(reconciler.run(stop), timeout=2.0)
         assert calls == 2  # raised once, retried, then stopped
@@ -738,7 +738,7 @@ def test_reconciler_run_wakes_promptly_when_stopped_during_interval(
         reconciler = Reconciler(
             pool,
             NullReaper(),
-            config=ReconcileConfig(interval=timedelta(seconds=30)),
+            config=make_reconcile_config(interval=timedelta(seconds=30)),
         )
         task = asyncio.create_task(reconciler.run(stop))
         await asyncio.wait_for(first_pass_done.wait(), timeout=1.0)
@@ -779,7 +779,7 @@ def test_reconciler_heartbeat_ticks_during_long_pass(monkeypatch: pytest.MonkeyP
         reconciler = Reconciler(
             pool,
             NullReaper(),
-            config=ReconcileConfig(
+            config=make_reconcile_config(
                 interval=timedelta(seconds=30),
                 heartbeat=heartbeat,
                 heartbeat_tick=timedelta(seconds=1),
@@ -1061,7 +1061,7 @@ def test_all_repair_kinds_matches_a_fully_populated_plan() -> None:
     The repairs counter labels ``repair_kind`` with the ``_RepairSpec.name`` strings, so the
     declared bound must stay in lock-step with the plan or the cardinality guard drifts.
     """
-    config = ReconcileConfig(
+    config = make_reconcile_config(
         upload_store=cast(loop.UploadStore, object()),
         image_store=cast(loop.ImageSweepStore, object()),
         console_registry=cast(loop.CollectorRegistry, object()),

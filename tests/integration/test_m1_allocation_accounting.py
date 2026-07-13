@@ -85,6 +85,7 @@ from tests.mcp.systems_support import (
 from tests.mcp.systems_support import (
     provider_resolver as _provider_resolver,
 )
+from tests.reconcile_helpers import make_reconcile_config
 
 WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
 
@@ -746,7 +747,7 @@ def test_c4_idle_lease_expiry_sweeps_and_credits(migrated_url: str) -> None:
     async def _run() -> None:
         async with open_pool(migrated_url) as pool:
             alloc_id, system_id = await _seed_expired_active_alloc_with_system(pool)
-            report = await loop.reconcile_once(pool, NullReaper())
+            report = await loop.reconcile_once(pool, NullReaper(), config=make_reconcile_config())
             assert report.expired_allocations == 1
             assert report.orphaned_systems == 1  # the now-expired allocation orphaned its System
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -830,7 +831,7 @@ def test_c4_abandoned_job_fails_run_lease_expired(migrated_url: str) -> None:
                         f"{run.id}:build",
                     ),
                 )
-            await loop.reconcile_once(pool, NullReaper())
+            await loop.reconcile_once(pool, NullReaper(), config=make_reconcile_config())
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
                     "SELECT state, failure_category FROM runs WHERE id = %s", (run.id,)

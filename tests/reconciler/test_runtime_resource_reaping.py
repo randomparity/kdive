@@ -25,6 +25,7 @@ from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import loop
 from kdive.reconciler.cleanup.runtime_resources import reap_expired_runtime_resources
 from kdive.reconciler.loop import reconcile_once
+from tests.reconcile_helpers import make_reconcile_config
 from tests.reconciler.conftest import connect, run_repair
 
 
@@ -337,7 +338,7 @@ def test_reap_spec_present_in_plan_without_probe() -> None:
 
     plan = loop._repair_plan(
         reaper=NullReaper(),
-        config=loop.ReconcileConfig(),
+        config=make_reconcile_config(),
         image_publish_grace=timedelta(minutes=5),
     )
     names = [spec.name for spec in plan]
@@ -359,7 +360,7 @@ def test_reconcile_once_reports_reaped_runtime_resources(migrated_url: str) -> N
             await _seed_resource(seed, managed_by="runtime", lease_seconds=-60)
 
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            report = await reconcile_once(pool, NullReaper())
+            report = await reconcile_once(pool, NullReaper(), config=make_reconcile_config())
 
         assert report.reaped_runtime_resources == 1
 

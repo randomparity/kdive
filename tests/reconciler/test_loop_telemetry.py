@@ -23,8 +23,9 @@ from opentelemetry.trace import SpanKind, StatusCode
 from kdive.health.heartbeat import Heartbeat
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import loop as reconciler_loop
-from kdive.reconciler.loop import ReconcileConfig, Reconciler, ReconcileReport
+from kdive.reconciler.loop import Reconciler, ReconcileReport
 from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
+from tests.reconcile_helpers import make_reconcile_config
 
 
 def _empty_report() -> ReconcileReport:
@@ -280,7 +281,7 @@ def test_background_ticker_keeps_livez_live_across_a_long_pass(
         reconciler = Reconciler(
             pool=_FakePool(),  # ty: ignore[invalid-argument-type]
             reaper=NullReaper(),
-            config=ReconcileConfig(
+            config=make_reconcile_config(
                 interval=timedelta(milliseconds=1),
                 heartbeat=hb,
                 heartbeat_tick=timedelta(seconds=1),
@@ -369,7 +370,7 @@ def _run_one_pass(
     reconciler = Reconciler(
         pool=_NoConnPool(),  # ty: ignore[invalid-argument-type]
         reaper=NullReaper(),
-        config=ReconcileConfig(
+        config=make_reconcile_config(
             interval=timedelta(seconds=0),
             telemetry=cast(ReconcilerTelemetry, telemetry),
         ),
@@ -435,7 +436,7 @@ def test_pass_loop_marks_span_error_when_run_once_raises(
     reconciler = Reconciler(
         pool=_NoConnPool(),  # ty: ignore[invalid-argument-type]
         reaper=NullReaper(),
-        config=ReconcileConfig(
+        config=make_reconcile_config(
             interval=timedelta(seconds=0),
             telemetry=cast(ReconcilerTelemetry, telemetry),
         ),
@@ -463,7 +464,7 @@ def test_reconciler_keeps_real_telemetry_doubles_when_config_omits_them() -> Non
     reconciler = Reconciler(
         pool=_FakePool(),  # ty: ignore[invalid-argument-type]
         reaper=NullReaper(),
-        config=ReconcileConfig(),
+        config=make_reconcile_config(),
     )
     # `or`-default must yield a usable object (not None / not the falsy short-circuit).
     assert reconciler._fleet_telemetry is not None
@@ -474,7 +475,7 @@ def test_run_once_forwards_pool_reaper_and_config(monkeypatch: pytest.MonkeyPatc
     """run_once passes the reconciler's own pool, reaper, and config to reconcile_once."""
     pool = _FakePool()
     reaper = NullReaper()
-    cfg = ReconcileConfig(interval=timedelta(seconds=7))
+    cfg = make_reconcile_config(interval=timedelta(seconds=7))
     reconciler = Reconciler(
         pool=pool,  # ty: ignore[invalid-argument-type]
         reaper=reaper,
@@ -516,7 +517,7 @@ def test_run_cancels_heartbeat_ticker_on_exit(monkeypatch: pytest.MonkeyPatch) -
         reconciler = Reconciler(
             pool=_FakePool(),  # ty: ignore[invalid-argument-type]
             reaper=NullReaper(),
-            config=ReconcileConfig(
+            config=make_reconcile_config(
                 interval=timedelta(seconds=0),
                 heartbeat=cast(Heartbeat, _CountingHeartbeat()),
                 heartbeat_tick=timedelta(seconds=60),
@@ -556,7 +557,7 @@ def test_pass_loop_resets_next_due_so_steady_state_lag_stays_small(
     reconciler = Reconciler(
         pool=_NoConnPool(),  # ty: ignore[invalid-argument-type]
         reaper=NullReaper(),
-        config=ReconcileConfig(
+        config=make_reconcile_config(
             interval=timedelta(seconds=interval),
             telemetry=cast(ReconcilerTelemetry, telemetry),
         ),
@@ -595,7 +596,7 @@ def test_pass_loop_refreshes_snapshots_each_pass(monkeypatch: pytest.MonkeyPatch
     reconciler = Reconciler(
         pool=_NoConnPool(),  # ty: ignore[invalid-argument-type]
         reaper=NullReaper(),
-        config=ReconcileConfig(
+        config=make_reconcile_config(
             interval=timedelta(seconds=0),
             telemetry=cast(ReconcilerTelemetry, telemetry),
         ),
@@ -637,7 +638,7 @@ def test_pass_loop_swallows_snapshot_read_failure_and_completes(
     reconciler = Reconciler(
         pool=_NoConnPool(),  # ty: ignore[invalid-argument-type]
         reaper=NullReaper(),
-        config=ReconcileConfig(
+        config=make_reconcile_config(
             interval=timedelta(seconds=0),
             telemetry=cast(ReconcilerTelemetry, telemetry),
         ),

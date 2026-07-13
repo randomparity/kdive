@@ -30,6 +30,7 @@ from kdive.reconciler.cleanup.gc import gc_idempotency_keys
 from kdive.reconciler.repairs import allocations as allocation_repairs
 from kdive.services.accounting import ledger as accounting
 from tests.db_waits import wait_until_any_backend_waiting
+from tests.reconcile_helpers import make_reconcile_config
 from tests.reconciler.conftest import connect, run_repair
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -156,7 +157,7 @@ def test_sweep_orphans_system_for_teardown_in_one_pass(migrated_url: str) -> Non
             alloc_id = await _seed_expired_alloc(seed, state=AllocationState.ACTIVE)
             system_id = await _seed_system_for(seed, alloc_id)
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            report = await loop.reconcile_once(pool, NullReaper())
+            report = await loop.reconcile_once(pool, NullReaper(), config=make_reconcile_config())
         assert report.expired_allocations == 1
         assert report.orphaned_systems == 1  # the now-expired allocation orphaned its System
         async with await connect(migrated_url) as check:
@@ -280,7 +281,7 @@ def test_reconcile_once_reports_gc_count(migrated_url: str) -> None:
                 "now() - interval '99 days')"
             )
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            report = await loop.reconcile_once(pool, NullReaper())
+            report = await loop.reconcile_once(pool, NullReaper(), config=make_reconcile_config())
         assert report.idempotency_keys_gc_count == 1
 
     asyncio.run(_run())
