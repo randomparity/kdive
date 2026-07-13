@@ -104,9 +104,11 @@ to end.
 - Config validation and the readiness probe finally agree: a misconfigured
   deployment fails at `config.validate()` with a message naming the missing S3
   settings, instead of passing validation and silently never becoming ready.
-- The object store is a non-`None` `ObjectStore` end to end; the type change
-  forces the compiler/`ty` to surface any remaining `is None` reader, so a missed
-  branch is a type error, not a latent runtime path.
+- The object store is a non-`None` `ObjectStore` end to end. The type change
+  surfaces any reader of a *removed field/attribute* as a `ty` error
+  (`unresolved-attribute`/`unknown-argument`), but `ty` does **not** flag a dead
+  `if store is None` guard left on a narrowed param; a residual-`is None` grep over
+  the touched trees is the backstop for those (plan Task 11).
 - New byte-egress features may assume an object store exists — no parallel
   local-egress mechanism, no no-S3 degrade. #1132's offer path is unblocked.
 - Staged-path provisioning is unaffected: it never touched the store and still

@@ -176,11 +176,12 @@ error handling, not no-S3 tolerance — with S3 required, `config.validate()` /
    lingering sentinel, alias, or helper.
 3. The `ObjectStoreAssembly` store field(s) and every handler/reconciler store
    parameter are typed `ObjectStore`, not `ObjectStore | None`; `ty check` passes.
-   (Caveat: the retained `request_time_store_factory` and the retained
-   `try/except CategorizedError` read sites are not narrowed by the type change,
-   so those specific kept sites are audited manually against the class-(a) list —
-   the compiler backstop does not cover factory-derived or exception-wrapped
-   access.)
+   (Caveat: `ty` surfaces removed *fields/attributes*
+   (`unresolved-attribute`/`unknown-argument`) but does **not** flag a dead
+   `if store is None` guard left on a narrowed param — verified against ty 0.0.53.
+   Deleting each branch is manual discipline; the plan's Task 11 residual-`is None`
+   grep is the real backstop for leftover dead guards, alongside the removed-symbol
+   grep in criterion 2.)
 4. Staged-path rootfs resolution still succeeds with the store never touched
    (existing `test_sync_fetch_staged_path_returns_validated_path_without_store`
    still passes, its "no-S3" naming reworded).
@@ -192,12 +193,13 @@ error handling, not no-S3 tolerance — with S3 required, `config.validate()` /
 
 ## Risks
 
-- **Missed live-only branch.** A store-`None` branch reachable only in
-  `live_vm`/`live_stack` (skipped in CI) could break. Mitigation: the audit
-  enumerated all sites; the grep in criterion 2 is the backstop; the type change
-  to non-optional forces the compiler to surface most remaining `is None`
-  readers. It does **not** cover factory-derived (`request_time_store_factory`)
-  or `try/except`-wrapped access — those retained sites are audited by hand.
+- **Missed / leftover-dead branch.** A store-`None` branch reachable only in
+  `live_vm`/`live_stack` (skipped in CI), or a dead `if store is None` guard left
+  behind after narrowing a param, could survive. `ty` does **not** flag such a
+  dead guard, and the removed-symbol grep (criterion 2) does not match a generic
+  `is None`. Mitigation: the audit enumerated all sites; the plan's Task 11 runs a
+  residual-`is None` grep over the touched trees and eyeballs each hit against the
+  deliberately-kept class-(b)/(c) list; branch deletion is per-task discipline.
 - **Present-but-empty / whitespace-only S3 config.** Covered by the step-1
   strip-then-reject parse; criterion-1 tests exercise the `=""` and `="  "` cases,
   not only the unset case.

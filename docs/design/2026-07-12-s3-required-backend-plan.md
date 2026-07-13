@@ -24,12 +24,22 @@ dead `if store is None` branch. (4) Docs + comment rewording.
 
 ## Global Constraints
 
-- **Green per commit.** `just type` and `just test` must pass at every commit.
-  The commit order below is designed so each step is independently green:
-  narrowing the store *source* to non-optional first (Task 2) is safe because a
-  non-`None` `ObjectStore` is assignable to a still-`Optional` consumer param;
-  then each consumer narrows + deletes its dead branch (Tasks 3–10) with all
-  callers already passing non-`None`.
+- **Green per commit.** Run **whole-tree** `just type` and `just test` before
+  every commit (not a path-scoped subset). `just type` type-checks the whole tree
+  including `tests/` (justfile deliberately unscoped), and a removed dataclass
+  field/attr surfaces as a `ty` error in *any* test module that still uses it — so
+  a scoped test run can mask a red `just type`. The commit order below is designed
+  so each step is independently green: narrowing the store *source* to
+  non-optional first (Task 2) is safe because a non-`None` `ObjectStore` is
+  assignable to a still-`Optional` consumer param; then each consumer narrows +
+  deletes its dead branch (Tasks 3–10) with all callers already passing non-`None`.
+- **`ty` does NOT catch dead `if store is None` branches.** Narrowing a param to
+  `ObjectStore` and forgetting to delete its `if store is None` block leaves a
+  dead branch that `ty` reports as clean (verified against ty 0.0.53) and the
+  symbol grep below does not match. Deleting each branch is manual discipline;
+  Task 11 adds a residual-`is None` grep as the real backstop. The type change
+  surfaces removed *fields/attributes* (`unresolved-attribute`/`unknown-argument`),
+  not dead guards on a narrowed param.
 - **Keep class-(b) and class-(c) sites.** Do NOT touch: staged-path store-free
   resolution (`images/rootfs/fetch.py` `staged-path` branch,
   `providers/local_libvirt/lifecycle/rootfs/rootfs_catalog_fetch.py`) — reword its
@@ -100,7 +110,7 @@ CLI so the store is never `None`. Consumers keep their `Optional` params for now
 - Modify: `src/kdive/store/assembly.py`
 - Modify: `src/kdive/processes/reconciler.py`
 - Modify: `src/kdive/__main__.py` (`_handle_reconcile_systems`, import at ~:29)
-- Test: `tests/store/`, `tests/reconciler/test_main.py`, `tests/mcp/ops/test_reconcile_now.py`, `tests/processes/test_worker.py`
+- Test: `tests/store/`, `tests/reconciler/test_main.py`, `tests/mcp/ops/test_reconcile_now.py`, `tests/processes/test_worker.py`, **`tests/mcp/core/test_app.py`**
 
 **Interfaces:**
 - Produces: `ObjectStoreAssembly` with a single non-optional store field (see
@@ -112,6 +122,14 @@ CLI so the store is never `None`. Consumers keep their `Optional` params for now
   gone) and keep `test_register_reraises_partial_s3_config` as a "requires S3" case
   (partial/blank config raises). Update any `tests/store` / `tests/reconciler` /
   `tests/processes` assertions that expect a `None` store or the removed helpers.
+  In **`tests/mcp/core/test_app.py`**: rewrite the two `ObjectStoreAssembly(...)`
+  constructions (~:238, ~:345) to the collapsed `store=`/`request_time_store_factory=`
+  field set; fix the attribute reads `object_stores.optional_*_store` /
+  `required_image_build_store` (~:326-329) to `object_stores.store`; delete
+  `test_object_store_assembly_preserves_configured_store_error` (~:257-275) and the
+  `None`-field assertions in
+  `test_build_handler_registry_derives_worker_ports_from_one_composition`
+  (~:293-329). (The image-build config-error arm at ~:332-364 is removed in Task 3.)
 
 - [ ] **Step 2: Rewrite `store/assembly.py`.** Remove `optional_object_store`,
   `s3_env_is_absent`, `_required_store_error`, `_S3_OPTIONAL_ENV_NAMES`, and the
@@ -173,10 +191,11 @@ except CategorizedError as error:
 
 **Files:**
 - Modify: `src/kdive/jobs/assembly.py` (`_image_build_handler_registrar`, `_unconfigured_image_build_handler`)
-- Test: `tests/jobs/test_worker_main.py` (and any test asserting the stub)
+- Test: `tests/jobs/test_worker_main.py`, **`tests/mcp/core/test_app.py`** (`test_image_build_handler_preserves_store_config_error` and the arm at ~:332-364)
 
 - [ ] **Step 1: Update/remove tests** that assert an IMAGE_BUILD job fails with the
-  unconfigured-store config error.
+  unconfigured-store config error (in both `tests/jobs/test_worker_main.py` and
+  `tests/mcp/core/test_app.py`).
 - [ ] **Step 2: Delete `_unconfigured_image_build_handler`** and the
   `CategorizedError` branch in `_image_build_handler_registrar`; register the real
   image-build handler unconditionally with `assembly.store`.
@@ -217,17 +236,18 @@ from `jobs/assembly.py`, which now passes non-`None`).
 ### Task 5: Narrow the reconciler loop passes (`reconciler/loop.py`)
 
 **Files:**
-- Modify: `src/kdive/reconciler/loop.py` (~:245-310 — the `config.image_store is None` / `config.upload_store is None` pass gates)
-- Modify: `src/kdive/reconciler/*` `ReconcileConfig` definition (narrow `image_store`/`upload_store` to `ObjectStore`)
+- Modify: `src/kdive/reconciler/loop.py` (~:245-310 — the `config.image_store is None` / `config.upload_store is None` pass gates; `ReconcileConfig` at ~:216-217)
 - Test: `tests/integration/test_reconcile_inventory.py`, `tests/reconciler/`
 
 - [ ] **Step 1: Update tests.** Remove
   `test_loop_inventory_pass_absent_when_no_image_store`; keep the s3-unreachable /
   no-digest degrade tests (those are store-*outage*, not no-S3 — the store is
   present but returns bad HEADs).
-- [ ] **Step 2: Narrow `ReconcileConfig.image_store`/`upload_store`** to
-  `ObjectStore` and delete the four inventory-pass and four GC-pass `is None`
-  gates so the passes are always scheduled.
+- [ ] **Step 2: Drop `| None` on `ReconcileConfig.image_store` / `upload_store`**
+  keeping their existing structural protocol types — `image_store: ImageSweepStore`
+  and `upload_store: UploadStore` (loop.py:216-217), **not** `ObjectStore` (the
+  pass functions consume the protocols). Delete the four inventory-pass and four
+  GC-pass `is None` gates so the passes are always scheduled.
 - [ ] **Step 3: Run** `just type` and
   `uv run python -m pytest tests/reconciler tests/integration/test_reconcile_inventory.py -q`.
 - [ ] **Step 4: Commit.**
@@ -333,6 +353,12 @@ from `jobs/assembly.py`, which now passes non-`None`).
 
 - [ ] **Step 1: Run the removal backstop grep** (Global Constraints) → expect no
   output. If any symbol remains, remove it and re-run.
+- [ ] **Step 1b: Run the residual-branch grep** over the touched trees and eyeball
+  each hit against the kept class-(b)/(c) list (staged-path, complete_build chunked
+  gating, retrieve lazy-init, materialize guard, kernel_config fail-open):
+  `rg -n 'store is (not )?None|artifact_store is (not )?None|image_store is (not )?None|upload_store is (not )?None' src/kdive/jobs src/kdive/reconciler src/kdive/mcp/tools/ops src/kdive/mcp/tools/catalog/artifacts`
+  Every remaining hit must be a deliberately-kept class-(b)/(c) site; delete any
+  leftover class-(a) dead guard.
 - [ ] **Step 2: Run** `just ci` → all recipes green.
 - [ ] **Step 3: Commit** any lint/format fixups if needed (`git commit -m "chore:
   guardrail fixups (#1133)"`), otherwise nothing to do.
