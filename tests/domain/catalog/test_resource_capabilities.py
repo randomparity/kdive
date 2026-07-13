@@ -13,7 +13,9 @@ from kdive.domain.catalog.resource_capabilities import (
     MEMORY_MB_KEY,
     PCIE_DEVICES_KEY,
     VCPUS_KEY,
+    GuestArch,
     ResourceCapabilities,
+    resolve_accel_emulator,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
@@ -175,6 +177,43 @@ def test_guest_arches_key_not_in_extras() -> None:
 
     assert GUEST_ARCHES_KEY not in caps.extras()
     assert caps.extras() == {"other": 1}
+
+
+_X86_KVM: dict[str, GuestArch] = {
+    "x86_64": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-x86_64"},
+    "ppc64le": {"accel": "tcg", "emulator": "/usr/bin/qemu-system-ppc64"},
+}
+
+
+def test_resolve_accel_emulator_returns_pair_for_advertised_arch() -> None:
+    assert resolve_accel_emulator(_X86_KVM, "x86_64") == (
+        "kvm",
+        "/usr/bin/qemu-system-x86_64",
+    )
+    assert resolve_accel_emulator(_X86_KVM, "ppc64le") == (
+        "tcg",
+        "/usr/bin/qemu-system-ppc64",
+    )
+
+
+def test_resolve_accel_emulator_fails_open_on_empty_map() -> None:
+    # Empty map -> None so the caller can substitute its legacy default (matches ADR-0339).
+    assert resolve_accel_emulator({}, "x86_64") is None
+
+
+def test_resolve_accel_emulator_fails_closed_naming_supported_set() -> None:
+    ppc_only: dict[str, GuestArch] = {
+        "ppc64le": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-ppc64"}
+    }
+
+    with pytest.raises(CategorizedError) as exc_info:
+        resolve_accel_emulator(ppc_only, "x86_64")
+
+    exc = exc_info.value
+    assert exc.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "x86_64" in str(exc)
+    assert "ppc64le" in str(exc)  # the supported set is named in the message
+    assert exc.details == {"requested_arch": "x86_64", "accepted_values": ["ppc64le"]}
 
 
 def test_resource_capabilities_filters_malformed_pcie_descriptors() -> None:
