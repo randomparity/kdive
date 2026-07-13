@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
+from collections.abc import Collection
 
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
@@ -38,6 +39,52 @@ def parse_capabilities_arch(caps_xml: str) -> str:
     except (ET.ParseError, DefusedXmlException) as _exc:
         return "unknown"
     return root.findtext("./host/cpu/arch") or "unknown"
+
+
+def parse_guest_arches(caps_xml: str, supported: Collection[str]) -> dict[str, dict[str, str]]:
+    """Derive the bootable guest arches a host advertises, filtered to ``supported`` (ADR-0338).
+
+    Reads the libvirt capabilities ``<guest>`` blocks and, per bootable ``hvm`` guest arch in
+    ``supported``, records the accelerator and emulator libvirt reports for it:
+
+    - ``accel`` is ``"kvm"`` when the arch offers a ``<domain type='kvm'>`` (libvirt advertises a
+      KVM domain only when KVM can accelerate that guest arch on this host, so the advertisement
+      is the authoritative signal), else ``"tcg"``.
+    - ``emulator`` is the arch-level ``<emulator>`` path. A per-``<domain>`` ``<emulator>``
+      override (a Xen-era feature) is not handled — kdive is QEMU-only and every real QEMU
+      capabilities document places the element at ``<arch>`` level. An arch with no ``<emulator>``
+      text is skipped (kdive cannot boot a guest without knowing the binary).
+
+    ``supported`` is injected (the kdive-provisionable arch set,
+    :data:`kdive.domain.platform.arch_traits.SUPPORTED_ARCHES`) so this shared helper keeps no
+    dependency on ``domain``. Parsed with ``defusedxml`` (the XML crosses the libvirtd trust
+    boundary): a malformed or attack document returns ``{}`` so discovery never crashes, mirroring
+    :func:`parse_capabilities_arch`. On a duplicate ``<arch name>`` (not seen in practice) the
+    first occurrence wins.
+
+    Returns:
+        ``{arch: {"accel": "kvm"|"tcg", "emulator": path}}`` — a plain JSON-shaped mapping (the
+        typed :class:`~kdive.domain.catalog.resource_capabilities.GuestArch` read side reads it
+        back).
+    """
+    try:
+        root: ET.Element = _safe_fromstring(caps_xml)
+    except (ET.ParseError, DefusedXmlException) as _exc:
+        return {}
+    result: dict[str, dict[str, str]] = {}
+    for guest in root.findall("./guest"):
+        if guest.findtext("os_type") != "hvm":
+            continue
+        for arch in guest.findall("arch"):
+            name = arch.get("name")
+            if name is None or name not in supported or name in result:
+                continue
+            emulator = (arch.findtext("emulator") or "").strip()
+            if not emulator:
+                continue
+            accel = "kvm" if arch.find("domain[@type='kvm']") is not None else "tcg"
+            result[name] = {"accel": accel, "emulator": emulator}
+    return result
 
 
 def parse_metadata_system_id(meta_xml: str) -> str | None:

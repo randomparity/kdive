@@ -8,10 +8,50 @@ from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
     QEMU_NS,
     parse_capabilities_arch,
+    parse_guest_arches,
     parse_metadata_system_id,
     recorded_gdb_port,
     recorded_ssh_port,
     register_kdive_namespace,
+)
+
+_SUPPORTED = frozenset({"x86_64", "ppc64le"})
+
+
+def _guest(
+    arch: str, emulator: str | None, domains: tuple[str, ...], *, os_type: str = "hvm"
+) -> str:
+    domain_xml = "".join(f"<domain type='{d}'/>" for d in domains)
+    emulator_xml = f"<emulator>{emulator}</emulator>" if emulator is not None else ""
+    return (
+        f"<guest><os_type>{os_type}</os_type>"
+        f"<arch name='{arch}'><wordsize>64</wordsize>{emulator_xml}"
+        f"<machine maxCpus='255'>somemachine</machine>{domain_xml}</arch></guest>"
+    )
+
+
+def _caps(host_arch: str, guests: str) -> str:
+    return f"<capabilities><host><cpu><arch>{host_arch}</arch></cpu></host>{guests}</capabilities>"
+
+
+# The x86_64 dev host with qemu-system-ppc installed, verified live: six guest arches, only the
+# native x86_64 carrying a kvm domain; ppc64le is TCG-only via /usr/bin/qemu-system-ppc64.
+_X86_HOST_CAPS = _caps(
+    "x86_64",
+    _guest("i686", "/usr/bin/qemu-system-i386", ("qemu", "kvm"))
+    + _guest("ppc", "/usr/bin/qemu-system-ppc", ("qemu",))
+    + _guest("ppc64", "/usr/bin/qemu-system-ppc64", ("qemu",))
+    + _guest("ppc64le", "/usr/bin/qemu-system-ppc64", ("qemu",))
+    + _guest("s390x", "/usr/bin/qemu-system-s390x", ("qemu",))
+    + _guest("x86_64", "/usr/bin/qemu-system-x86_64", ("qemu", "kvm")),
+)
+
+# The real POWER10 host, verified live: /dev/kvm present but no kvm domain for any arch, so the
+# native ppc64le falls back to tcg. Note the distinct emulator binary (qemu-system-ppc64le).
+_PPC_HOST_CAPS = _caps(
+    "ppc64le",
+    _guest("ppc64le", "/usr/bin/qemu-system-ppc64le", ("qemu",))
+    + _guest("x86_64", "/usr/bin/qemu-system-x86_64", ("qemu",)),
 )
 
 _GDB_DOMAIN = (
@@ -52,6 +92,89 @@ def test_parse_capabilities_arch_returns_unknown_for_missing_or_malformed() -> N
 def test_parse_capabilities_arch_returns_unknown_for_defused_xml_exception() -> None:
     xml = "<!DOCTYPE x [<!ENTITY boom SYSTEM 'file:///etc/passwd'>]><capabilities>&boom;</capabilities>"
     assert parse_capabilities_arch(xml) == "unknown"
+
+
+def test_parse_guest_arches_x86_host_filters_to_supported_with_native_kvm() -> None:
+    # Six libvirt arches filtered to the two kdive supports; native x86_64 has a kvm domain -> kvm;
+    # foreign ppc64le is TCG-only. i686 (has a kvm domain but unsupported), ppc, ppc64-BE, s390x
+    # are dropped.
+    assert parse_guest_arches(_X86_HOST_CAPS, _SUPPORTED) == {
+        "x86_64": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-x86_64"},
+        "ppc64le": {"accel": "tcg", "emulator": "/usr/bin/qemu-system-ppc64"},
+    }
+
+
+def test_parse_guest_arches_x86_host_without_ppc_binary_is_x86_only() -> None:
+    caps = _caps("x86_64", _guest("x86_64", "/usr/bin/qemu-system-x86_64", ("qemu", "kvm")))
+    assert parse_guest_arches(caps, _SUPPORTED) == {
+        "x86_64": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-x86_64"}
+    }
+
+
+def test_parse_guest_arches_ppc_host_no_kvm_domain_is_all_tcg() -> None:
+    # Real POWER10 host: KVM present but no kvm domain advertised, so the native ppc64le is tcg.
+    assert parse_guest_arches(_PPC_HOST_CAPS, _SUPPORTED) == {
+        "ppc64le": {"accel": "tcg", "emulator": "/usr/bin/qemu-system-ppc64le"},
+        "x86_64": {"accel": "tcg", "emulator": "/usr/bin/qemu-system-x86_64"},
+    }
+
+
+def test_parse_guest_arches_synthetic_kvm_hv_ppc_host_is_kvm() -> None:
+    # Synthetic (no real KVM-HV POWER host available): the ppc64le arch gains a kvm domain.
+    caps = _caps(
+        "ppc64le",
+        _guest("ppc64le", "/usr/bin/qemu-system-ppc64le", ("qemu", "kvm"))
+        + _guest("x86_64", "/usr/bin/qemu-system-x86_64", ("qemu",)),
+    )
+    assert parse_guest_arches(caps, _SUPPORTED) == {
+        "ppc64le": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-ppc64le"},
+        "x86_64": {"accel": "tcg", "emulator": "/usr/bin/qemu-system-x86_64"},
+    }
+
+
+def test_parse_guest_arches_skips_non_hvm_os_type() -> None:
+    caps = _caps(
+        "x86_64", _guest("x86_64", "/usr/bin/qemu-system-x86_64", ("qemu",), os_type="xen")
+    )
+    assert parse_guest_arches(caps, _SUPPORTED) == {}
+
+
+def test_parse_guest_arches_skips_arch_without_emulator() -> None:
+    # A supported arch with a missing or empty <emulator> is not bootable -> dropped.
+    missing = _caps("x86_64", _guest("x86_64", None, ("qemu",)))
+    empty = _caps(
+        "x86_64",
+        "<guest><os_type>hvm</os_type><arch name='x86_64'><emulator></emulator>"
+        "<domain type='qemu'/></arch></guest>",
+    )
+    assert parse_guest_arches(missing, _SUPPORTED) == {}
+    assert parse_guest_arches(empty, _SUPPORTED) == {}
+
+
+def test_parse_guest_arches_filter_narrows_to_supplied_set() -> None:
+    assert parse_guest_arches(_X86_HOST_CAPS, frozenset({"x86_64"})) == {
+        "x86_64": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-x86_64"}
+    }
+
+
+def test_parse_guest_arches_returns_empty_for_malformed_or_defused_xml() -> None:
+    assert parse_guest_arches("<capabilities", _SUPPORTED) == {}
+    xxe = (
+        "<!DOCTYPE x [<!ENTITY boom SYSTEM 'file:///etc/passwd'>]>"
+        "<capabilities>&boom;</capabilities>"
+    )
+    assert parse_guest_arches(xxe, _SUPPORTED) == {}
+
+
+def test_parse_guest_arches_first_occurrence_of_a_duplicate_arch_wins() -> None:
+    caps = _caps(
+        "x86_64",
+        _guest("x86_64", "/usr/bin/qemu-system-x86_64", ("qemu", "kvm"))
+        + _guest("x86_64", "/opt/other/qemu-system-x86_64", ("qemu",)),
+    )
+    assert parse_guest_arches(caps, _SUPPORTED) == {
+        "x86_64": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-x86_64"}
+    }
 
 
 def test_parse_metadata_system_id_trims_text_and_rejects_empty_or_malformed() -> None:
