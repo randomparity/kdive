@@ -236,24 +236,44 @@ Each handler narrows its store param to `ObjectStore` and deletes its
 `if store is None` branch. Group into one commit (all are job handlers reached
 from `jobs/assembly.py`, which now passes non-`None`).
 
-**Files:**
-- Modify: `src/kdive/jobs/handlers/systems.py` (`_commit_uploaded_rootfs` ~:140-145; teardown reclaim ~:506-515)
-- Modify: `src/kdive/jobs/handlers/control/diagnostic_sysrq.py` (~:259-267)
-- Modify: `src/kdive/jobs/handlers/runs/boot_evidence.py` (`_capture_console_artifact` ~:80-88)
-- Modify: `src/kdive/jobs/handlers/console/console_rotate.py` (`console_rotate_handler` ~:219-221)
-- Test: the mirrored test modules under `tests/jobs/handlers/`
+> **Narrow the whole chain, not just the leaf.** `artifact_store` propagates
+> through multi-level call chains (leaf handler ← wrapper ← `register_handlers` ←
+> `RunHandlerPorts.artifact_store` ← the assembly feed). Passing an `ObjectStore |
+> None` into a narrowed `ObjectStore` param is a hard `ty` error, so narrowing a
+> leaf forces narrowing **every caller/wrapper up to the non-optional assembly
+> feed**, dropping any `= None` defaults along the way. Removing a leaf's
+> `if artifact_store is None` guard is itself a `ty` error unless the param is
+> narrowed (e.g. `boot_evidence.py` already passes `artifact_store` into a
+> non-optional `_store_console_artifact`). Discover each chain with
+> `rg -n artifact_store src/kdive/jobs/handlers` and follow every call edge upward.
 
-- [ ] **Step 1: Update tests.** Delete the no-S3 cases
+**Files:**
+- Modify: `src/kdive/jobs/handlers/systems.py` — `_commit_uploaded_rootfs` (~:135), and its callers `_finalize_provision_ready` (~:167), `_commit_provision_result` (~:227), `provision_handler` (~:340, drop `=None`), `teardown_handler` (~:473) + teardown reclaim guard (~:506), `register_handlers` (~:524, drop `=None`)
+- Modify: `src/kdive/jobs/handlers/control/diagnostic_sysrq.py` — handler (~:249) and `register_handlers` (~:323)
+- Modify: `src/kdive/jobs/handlers/runs/boot_evidence.py` — `_capture_console_artifact` (~:74-88), `capture_run_console` (~:113), `record_crash_halted_live` (~:270)
+- Modify: `src/kdive/jobs/handlers/runs/boot.py` — `_run_boot_and_capture_outcome` (~:44), `boot_handler` (~:122, drop `=None`)
+- Modify: `src/kdive/jobs/handlers/runs/ports.py` — `RunHandlerPorts.artifact_store` (~:18, drop `| None` + `=None`)
+- Modify: `src/kdive/jobs/handlers/console/console_rotate.py` — handler (~:211) and `register_handlers` (~:238)
+- Test: the mirrored test modules under `tests/jobs/handlers/` (and `tests/jobs/handlers/runs/`)
+
+- [ ] **Step 1: Discover the chains.** `rg -n 'artifact_store' src/kdive/jobs/handlers`
+  and trace each leaf up to the `jobs/assembly.py` feed so no intermediate param is
+  missed.
+- [ ] **Step 2: Update tests.** Delete the no-S3 cases
   (`_commit_uploaded_rootfs` raise-on-None, teardown skip-reclaim, sysrq
   raise-on-None, boot-evidence skip-capture, console-rotate no-op) in the mirrored
   test files. Keep the store-present behavior tests.
-- [ ] **Step 2: Narrow + delete branches.** In each site: change the param/attr
-  type from `ObjectStore | None` to `ObjectStore` and remove the `if ... is None:`
-  raise/skip/no-op block, dedenting the store-present body. For the teardown
-  reclaim, always reclaim (remove the `if artifact_store is not None` guard).
-- [ ] **Step 3: Run** `just type` and
-  `uv run python -m pytest tests/jobs/handlers -q`.
-- [ ] **Step 4: Commit.**
+- [ ] **Step 3: Narrow + delete branches.** For each chain: change every
+  `artifact_store: ObjectStore | None` (leaf, wrappers, `register_handlers`,
+  `RunHandlerPorts`) to `ObjectStore`, dropping `= None` defaults; remove the
+  `if artifact_store is None:` raise/skip/no-op block, dedenting the store-present
+  body; for the teardown reclaim, always reclaim (remove the
+  `if artifact_store is not None` guard).
+- [ ] **Step 4: Run the pre-commit gate.** Inner loop:
+  `uv run python -m pytest tests/jobs/handlers -q`; then whole-tree
+  `just lint && just type && just test` → green (whole-tree `ty` confirms no
+  remaining `None`-feeding caller anywhere in the chain).
+- [ ] **Step 5: Commit.**
   `git commit -m "refactor: job handlers require the object store (#1133)"`
 
 ---
