@@ -41,9 +41,15 @@ not in it. The stored mapping therefore means exactly "arches this host can boot
 full six would promise `s390x`/`i686`/`ppc`/`ppc64`-BE capability that no profile
 arch maps to and that `arch_traits()` fails fast on.
 
-**Accelerator rule:** `accel = "kvm"` iff the arch equals the host arch **and** the
-arch offers a `<domain type='kvm'>`; else `"tcg"`. A native arch with no `/dev/kvm`
-(no KVM domain) falls back to `tcg`. The stored value is the accelerator *name*
+**Accelerator rule:** `accel = "kvm"` iff the arch offers a `<domain type='kvm'>`;
+else `"tcg"`. libvirt advertises a KVM domain for an arch only when KVM can
+actually accelerate that guest arch on this host, so the domain advertisement is
+the authoritative KVM-availability signal — it already encodes host-nativeness. A
+native arch with no `/dev/kvm` carries no KVM domain and falls back to `tcg`
+(verified on the POWER10 host: `/dev/kvm` present but no `ppc64le` KVM domain →
+`tcg`). This supersedes the epic sketch's exact host-arch string compare, which
+would wrongly downgrade a same-family arch libvirt *can* accelerate (e.g. i686 on
+x86_64) to `tcg`. The stored value is the accelerator *name*
 (`kvm`/`tcg`), not the libvirt domain type (`kvm`/`qemu`) — the name is the
 scheduling-facing fact (issue 2 persists it on the System, issue 4 scales TCG
 deadlines off it); the domain-type mapping is issue 3's rendering concern.

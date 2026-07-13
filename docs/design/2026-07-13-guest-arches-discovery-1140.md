@@ -91,7 +91,10 @@ Findings that shape the design:
 
 `accel` is the accelerator *name* (`kvm` / `tcg`), not the libvirt domain type
 (`kvm` / `qemu`). The name→domain-type mapping is issue 3's concern; here we
-record the fact.
+record the fact. The reader validates entry *shape* (string `accel`/`emulator`)
+but not the `accel` *value* domain: this parser is the only writer and only emits
+`kvm`/`tcg`, so value validation is deferred to issue 3's consumer, which maps the
+accel to a domain type and can fail-closed on an unexpected value.
 
 ### Parser (`providers/shared/libvirt_xml.py`)
 
@@ -99,18 +102,21 @@ record the fact.
 
 1. Parse `caps_xml` with `defusedxml` (crosses the libvirtd trust boundary, like
    the other parsers here). On a parse error return `{}` — never crash discovery.
-2. Read the host arch from `./host/cpu/arch` (empty string if absent).
-3. For each `<guest>` with `os_type == "hvm"`, for each `<arch name=X>`:
+2. For each `<guest>` with `os_type == "hvm"`, for each `<arch name=X>`:
    - Skip `X` unless `X in supported` (the kdive-provisionable set, injected by
      the caller so this module keeps no dependency on `domain/`).
    - Skip if the arch has no `<emulator>` text (can't boot without knowing the
      binary; a defensive skip, not seen on real QEMU hosts where the element is
      always present).
-   - `accel = "kvm"` iff `X == host_arch` **and** the arch offers a
-     `<domain type='kvm'>`; else `"tcg"`. Native-but-no-KVM (no `/dev/kvm`) falls
-     back to `tcg`.
+   - `accel = "kvm"` iff the arch offers a `<domain type='kvm'>`; else `"tcg"`.
+     libvirt advertises a KVM domain for an arch **only** when KVM can actually
+     accelerate that guest arch on this host, so the domain advertisement is the
+     authoritative KVM-availability signal — it already encodes host-nativeness
+     (and correctly yields `kvm` for a same-family arch libvirt can accelerate,
+     which an exact host-arch string compare would wrongly downgrade to `tcg`).
+     A native arch with no `/dev/kvm` carries no KVM domain and falls back to `tcg`.
    - `emulator` = the arch-level `<emulator>` text.
-4. On duplicate `<arch name=X>` across `<guest>` blocks (not seen in practice),
+3. On duplicate `<arch name=X>` across `<guest>` blocks (not seen in practice),
    first wins; deterministic.
 
 Injecting `supported` (rather than importing `arch_traits`) keeps `libvirt_xml`
@@ -167,10 +173,14 @@ already stubs `getCapabilities()`.
     ppc64le: tcg/…-ppc64}`; the six-arch real fixture is filtered to the two
     supported arches (`s390x`, `i686`, `ppc`, big-endian `ppc64` dropped).
   - x86_64 host **without** the ppc64 binary: `{x86_64: kvm/…}` only.
-  - ppc64le host with KVM-HV (grounded on the real POWER10 host when reachable,
-    else the symmetric fixture): `{ppc64le: kvm/…-ppc64, x86_64: tcg/…-x86_64}`.
-  - Native arch with **no** `<domain type='kvm'>` → `accel == "tcg"` (no-/dev/kvm
-    fallback).
+  - ppc64le host, native arch with **no** KVM domain (verbatim from the real
+    POWER10 host): `{ppc64le: tcg//usr/bin/qemu-system-ppc64le, x86_64:
+    tcg//usr/bin/qemu-system-x86_64}` — this is the real "native falls back to
+    `tcg` when the KVM domain is absent" case.
+  - ppc64le host **with** KVM-HV — a **synthetic** fixture (no real KVM-HV POWER
+    host is available; the POWER10 host advertises no KVM domain). Take the real
+    ppc64le guest block and add a `<domain type='kvm'/>`:
+    `{ppc64le: kvm//usr/bin/qemu-system-ppc64le, x86_64: tcg//usr/bin/qemu-system-x86_64}`.
   - Arch with no `<emulator>` element → skipped.
   - `os_type != "hvm"` guest block → skipped.
   - Malformed XML and the XXE/defused-entity document → `{}`.
