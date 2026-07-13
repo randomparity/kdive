@@ -1,0 +1,172 @@
+# S3 object storage as a required backend (retire the no-S3 lane)
+
+- **Issue:** #1133
+- **ADR:** [0337](../adr/0337-s3-required-backend.md)
+- **Status:** Draft
+- **Date:** 2026-07-12
+
+## Problem
+
+kdive treats an S3-compatible object store as *optional*: the `KDIVE_S3_*`
+settings carry no `required_when`, so `config.validate()` passes without them
+(`config/core_settings.py:120-141`). A whole family of code paths branches on
+"is the object store configured?" and degrades, skips, or fails when it is not —
+the "no-S3 lane". Yet every shipped deployment already provisions one
+(`docker-compose.yml`, `deploy/helm/kdive/`, `scripts/live-stack`), object
+storage is load-bearing for vmcore retrieval, debuginfo staging, console parts,
+and artifact egress, and the readiness probe (`health/server_checks.py:41-47`,
+`health/worker_checks.py:39-45`) *already* hard-requires it: both server and
+worker unconditionally add a `minio` check that calls `object_store_factory().
+ping()`. In a no-S3 deployment `object_store_from_env()` raises a
+`configuration_error`, so those checks fail and the long-running processes never
+report ready.
+
+The result is a latent contradiction: config validation says S3 is optional, the
+health probe says it is mandatory. A no-S3 deployment passes `config.validate()`
+then silently never becomes ready — the worst failure shape (looks configured,
+is not). The only surfaces that genuinely run today without S3 are the one-shot
+`reconcile-systems` CLI and the local-libvirt staged-path provision seam.
+
+Every new agent-facing byte-egress feature pays a recurring tax: it must either
+build a parallel local-egress mechanism or degrade in no-S3 mode. #1132 (the
+kernel-config offer) is the immediate example — its clean delivery is a presigned
+S3 URL, and an inline/DB fallback purely for no-S3 is over-engineering.
+
+## Goal
+
+Ratify S3 as a required, assumed backend; make config validation and the health
+probe agree; and remove the no-S3 accommodation branches so new features can
+assume an object store exists. This PR both **ratifies** (ADR + operator docs)
+and **implements** (config change + branch removal), per the issue owner's
+decision to do the removal now rather than as a separate follow-up.
+
+## Non-goals
+
+- **The staged-path store-free resolution is kept.** ADR-0228's `staged-path`
+  (and remote `staged` volume) rootfs resolve from a host-local file with no
+  object store touched. That is a *cost optimization* — do not round-trip a
+  multi-GB rootfs through S3 — not a no-S3 deployment mode. It survives; only its
+  "no-S3 lane" *wording* changes to "staged-path avoids the object store". The
+  factory is only ever invoked on the `s3` branch, which with S3 mandated always
+  resolves.
+- **No new object-store feature.** No presigned-URL, retention, or egress
+  behavior changes.
+- **No new migration.** This is config + wiring + doc; no schema change.
+
+## Approach
+
+### 1. Make S3 required at config validation (fail fast)
+
+`KDIVE_S3_ENDPOINT_URL` and `KDIVE_S3_BUCKET` gain `required_when=_always`
+(`config/core_settings.py`). `KDIVE_S3_REGION` keeps its `us-east-1` default, so
+it is never "missing" and needs no change. `config.validate()` for the
+`server`/`worker`/`reconciler` processes now fails with an actionable error when
+S3 is unset — moving the failure from the silent readiness-probe hang to the
+earliest possible point.
+
+### 2. Collapse the optional-store assembly
+
+`store/assembly.py` currently returns `ObjectStore | None` and encodes the
+absence-vs-partial policy (`optional_object_store`, `s3_env_is_absent`,
+`_required_store_error`, `RequiredObjectStore`). With S3 required these become
+dead:
+
+- `build_object_store_assembly` constructs the store once (raising via
+  `object_store_from_env` if — impossibly, post-validation — unconfigured).
+- The `ObjectStoreAssembly` fields become non-`None` `ObjectStore`. The three
+  role fields (`optional_upload_store`, `optional_image_store`,
+  `optional_ops_image_store`) always referenced the same object; they collapse to
+  a single non-optional store field. `required_image_build_store` drops its
+  `CategorizedError` arm. `request_time_store_factory` stays (request-time lazy
+  construction is unaffected).
+- `optional_object_store`, `s3_env_is_absent`, `_required_store_error`,
+  `_S3_OPTIONAL_ENV_NAMES`, and the `RequiredObjectStore` alias are removed.
+- The duplicate absence policy in `processes/reconciler.py`
+  (`optional_reconciler_object_store`) is removed; the reconciler requires the
+  store.
+
+### 3. Remove the `if store is None` degradation branches
+
+Every branch classified `(a)` in the #1133 audit (a pure no-S3 accommodation)
+is removed so the store type is non-optional end to end:
+
+| site | today's no-S3 behavior | after |
+|------|------------------------|-------|
+| `jobs/assembly.py` `_unconfigured_image_build_handler` | deferred config-error stub | image-build handler always registered with a real store |
+| `jobs/handlers/systems.py` `_commit_uploaded_rootfs` | raise config_error | store always present |
+| `jobs/handlers/systems.py` teardown reclaim | skip reclaim | always reclaim |
+| `jobs/handlers/control/diagnostic_sysrq.py` | raise config_error | store always present |
+| `jobs/handlers/runs/boot_evidence.py` | skip capture (return None) | always capture |
+| `jobs/handlers/console/console_rotate.py` | no-op + warn | store always present |
+| `reconciler/loop.py` inventory/gc pass gates | pass not scheduled | passes always scheduled |
+| `mcp/tools/ops/images/upload.py` | `_config_error` | store always present |
+| `mcp/tools/ops/images/registrar.py` prune | `_config_error` | store always present |
+| `mcp/tools/ops/reconcile/reconcile_systems.py` `_AbsentImageStore` | no-op fallback | store always present |
+| `mcp/tools/catalog/artifacts/reads.py` `store_unconfigured` degrade | `content_unavailable` | removed (see below) |
+
+### 4. Keep genuine error handling; distinguish it from no-S3 tolerance
+
+Some sites wrap store access in `try/except CategorizedError` to survive
+*transient* store faults, not to support no-S3. These are **kept** but tightened
+so they no longer encode "unconfigured":
+
+- `kernel_config/fetch.py` `load_effective_config` — fail-open advisory read;
+  kept (defends the vmcore/install-arming gate against transient store errors).
+- `mcp/tools/catalog/artifacts/reads.py` / `kernel_config.py` / `raw_fetch.py` —
+  keep infra-error handling for a live store outage; drop the `store_unconfigured`
+  sentinel that only encoded the no-S3 case.
+
+Sites classified `(c)` (not no-S3 accommodations at all) are **untouched**:
+`services/runs/complete_build.py` chunked-store gating (`None` means "no chunks",
+not "no S3"), the `retrieve.py` lazy-init of a *required* store, and
+`providers/local_libvirt/lifecycle/rootfs/materialize.py`'s unwired-lane guard.
+
+### 5. `reconcile-systems` CLI keeps a clean error
+
+The one-shot CLI currently exits cleanly when the store is `None`. Post-removal
+it relies on `config.validate()` / `object_store_from_env` to fail fast; the CLI
+keeps a `CategorizedError` catch that prints the actionable message and exits
+non-zero. This is error handling, not no-S3 tolerance.
+
+### 6. Docs
+
+- Add ADR-0337 and its README index row.
+- Operator docs (`docs/operating/*`) already list S3 among required backends;
+  make the requirement explicit and remove any "optional" framing.
+- The Helm chart defaults `KDIVE_S3_ENDPOINT_URL` to `""` (`values.yaml:32`) — a
+  latent unconfigured default. Point it at the bundled demo MinIO service (or
+  otherwise ensure a chart install has a working endpoint) so making S3 required
+  does not break the demo deploy.
+- Reword the "no-S3 lane" *code comments* in `rootfs_catalog_fetch.py` and
+  `images/rootfs/fetch.py` to "staged-path avoids the object store". Accepted
+  ADRs (0228, 0336) are append-only and are superseded, not edited, by 0337.
+
+## Success criteria (falsifiable)
+
+1. `config.validate()` for `server`/`worker`/`reconciler` fails with a
+   `configuration_error` naming `KDIVE_S3_ENDPOINT_URL`/`KDIVE_S3_BUCKET` when
+   they are unset (new test).
+2. `grep -rn "optional_object_store\|s3_env_is_absent\|_AbsentImageStore\|
+   optional_reconciler_object_store\|_unconfigured_image_build_handler"
+   src/` returns nothing.
+3. The `ObjectStoreAssembly` store field(s) and every handler/reconciler store
+   parameter are typed `ObjectStore`, not `ObjectStore | None`; `ty check` passes.
+4. Staged-path rootfs resolution still succeeds with the store never touched
+   (existing `test_sync_fetch_staged_path_returns_validated_path_without_store`
+   still passes, its "no-S3" naming reworded).
+5. A live store *outage* (not "unconfigured") still degrades `artifacts.get`/
+   `find` to a content-unavailable envelope without a false `match_found`
+   (retained-behavior test kept).
+6. `just ci` is green (lint, type, lint-shell, lint-workflows, check-mermaid,
+   test), including the doc-style guard on the new ADR/spec.
+
+## Risks
+
+- **Missed live-only branch.** A store-`None` branch reachable only in
+  `live_vm`/`live_stack` (skipped in CI) could break. Mitigation: the audit
+  enumerated all sites; the grep in criterion 2 is the backstop; the type change
+  to non-optional forces the compiler to surface any remaining `is None` reader.
+- **Helm demo breakage.** Making S3 required with an empty endpoint default would
+  break a fresh chart install. Mitigation: step 6 sets a working default/endpoint.
+- **`reconcile-systems` UX regression.** Losing the friendly "set KDIVE_S3_*"
+  message. Mitigation: keep the CLI's `CategorizedError` catch (step 5).
