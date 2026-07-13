@@ -199,6 +199,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_EL9_REACHABILITY_URI` | — | libvirt qemu+tls connection URI for the EL9 host-model CPU reachability live test (#975, ADR-0297). |
 | `KDIVE_GUEST_IMAGE` | — | Path to the operator-built local-libvirt guest rootfs qcow2 the live_stack spine boots; unset → the live_stack suite skips. |
 | `KDIVE_GUEST_IMAGE_DEBIAN` | — | Path to a debian-family *-kdive-ready qcow2 for the per-family SSH-reachability live_stack test (#956, ADR-0294); unset → the debian parameter of that test skips. |
+| `KDIVE_GUEST_IMAGE_PPC64LE` | — | Path to a Fedora ppc64le kdive-ready qcow2 for the live TCG boot proof live_stack test (#1144, epic #1139); unset (or no qemu-system-ppc64) → that test skips. |
 | `KDIVE_GUEST_IMAGE_RHEL` | — | Path to a rhel-family (rocky/centos/fedora) *-kdive-ready qcow2 for the per-family SSH-reachability live_stack test (#956, ADR-0294); unset → the rhel parameter skips. |
 | `KDIVE_IMAGE` | — | Container image ref under test for the image smoke test; unset → the smoke test skips. |
 | `KDIVE_LIVE_SSH_TARGET` | — | SSH target gating the criterion-5 live_stack tier; unset → the live_stack suite skips. |
