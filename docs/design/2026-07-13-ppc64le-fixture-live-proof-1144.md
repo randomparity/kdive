@@ -66,31 +66,64 @@ block (`boot_kernel_count = 1`, `makedumpfile_version = "1.7.9"`). This is examp
 inventory (the shipped seed), not a migration; `image_catalog` rows come from the operator's
 `systems.toml` at reconcile time.
 
-### 3. Rootfs preparation for the proof (arch-safe file-injection)
+### 3. What the proof actually proves: pseries baseline direct-kernel boot
+
+A local-libvirt domain is **always** direct-kernel (`xml.py:54`): provision extracts the
+rootfs's own `/boot/vmlinuz-<ver>` baseline kernel + initramfs and renders a `<kernel>` `<os>`
+(ADR-0272), because the rootfs is a no-partition-table, bootloader-less whole-disk ext4 qcow2
+that firmware alone cannot boot. On ppc64le the extracted `vmlinuz-<ver>` is an **ELF
+`vmlinux`** (powerpc has no bzImage), so the proof's load-bearing claim is: **QEMU/SLOF
+`-kernel`-boots the extracted ppc64le ELF kernel under a pseries-TCG domain, and it reaches
+userspace on the Fedora 44 POWER9/ISA-3.0 baseline.** `xml.py:181` explicitly defers the ISA
+baseline proof to this issue. This is distinct from #7, which proves the *uploaded* combined
+kernel tar's `<kernel>` boot; #1144 proves the *baseline* (provision) `<kernel>` boot. If SLOF
+will not `-kernel`-boot the extracted ELF (or SIGILLs on the ISA baseline), that is the first
+"pseries surprise" (§6), not a defect to work around silently.
+
+### 4. Rootfs preparation for the proof (arch-safe scaffold)
 
 #8 (cross-arch package-installing customization boot) comes **after** this issue, so the full
-`build-fs` foreign-arch path does not exist yet. The proof therefore prepares a bootable
-"ready" ppc64le rootfs using only **arch-neutral** operations (design §Image pipeline: "file
-operations are arch-safe; only executing guest code is not"):
+`build-fs` foreign-arch path does not exist yet. The build pipeline (`rootfs_build.py:242`) is:
+acquire base → `virt-customize` (package-install: kernel-debuginfo, kdump, the readiness unit —
+**guest-code-executing, foreign-arch-unsafe**) → `repack_whole_disk_ext4`
+(`virt-tar-out` + `virt-make-fs`, **arch-safe file operations** producing the ADR-0272 layout).
+The proof scaffold keeps the arch-safe steps and replaces only the unsafe one:
 
-- Start from the raw Fedora ppc64le GenericCloud qcow2 (the catalog row's pinned source).
-- Inject the readiness marker unit + its script **file-level** via libguestfs (no guest-code
-  execution). The readiness unit is the same one `_fedora_customize.py` renders; it writes the
-  marker to `/dev/hvc0` on ppc64le (console device from `arch_traits`).
-- Inject the per-System SSH bootstrap key / cloud-init for SSH reachability (arch-neutral).
-- Publish the qcow2 as `rootfs/local/fedora-kdive-ready-44-ppc64le.qcow2` so the seed row
-  resolves.
+1. Acquire the Fedora ppc64le GenericCloud qcow2 (the catalog row's sha256-pinned source).
+2. **Skip** the package-installing `virt-customize` step. **Replace** it with file-level
+   injection (libguestfs/guestfish — no guest-code execution) of only what boot+SSH need: the
+   `readiness_unit(kdump_unit, console_device="hvc0")` systemd unit (a pure standalone render,
+   `_fedora_customize.py:129`) plus its enable symlink. It `ExecStart`s
+   `echo kdive-ready > /dev/hvc0` and needs only systemd + `/bin/sh`, both present in the cloud
+   image — no package install.
+3. Run the standard `repack_whole_disk_ext4` to produce the bootloader-less whole-disk ext4
+   qcow2 the direct-kernel path requires.
+4. Publish as `rootfs/local/fedora-kdive-ready-44-ppc64le.qcow2` so the seed row resolves.
+
+The **per-System SSH key is injected at provision**, not in the scaffold: the existing overlay
+customizer runs `virt-customize --ssh-inject` (`overlay_customize.py:24`), a libguestfs
+**file write** to `/root/.ssh/authorized_keys` that is arch-safe (no guest execution) and works
+unchanged for a foreign-arch overlay. So SSH reachability rides the existing arch-neutral
+provision path; the scaffold only bakes the readiness unit.
 
 This is a proof scaffold, not the product image path — #8 replaces it with the real
-customization boot. The scaffold steps are captured in the proof record (§5) so the run is
+customization boot. Every scaffold step is captured in the proof record (§5) so the run is
 reproducible.
 
-### 4. Live proof (`live_vm`)
+### 5. Live proof — through the real spine (`live_vm`)
 
-A `live_vm`-marked test provisions and boots the ppc64le row end-to-end on the x86_64 host and
-asserts:
+The proof must drive the **admission → job → worker → provider** spine, not the provider
+directly, because the persisted-accel path is exactly what gates the boot:
 
-- the System reaches `ready` under the TCG-scaled deadline;
+- admission (ADR-0339) validates `ppc64le ∈ guest_arches` and persists `systems.accel = "tcg"`;
+- the boot handler (ADR-0341) reads `system.accel` and applies the TCG-scaled deadline — without
+  which the slow TCG boot times out. A provider-direct test with an injected accel would bypass
+  both and prove neither.
+
+So it is a `live_vm`-marked **integration** test against disposable Postgres + the published
+rootfs, asserting:
+
+- the System reaches `ready` under the TCG-scaled deadline (`accel="tcg"` a persisted fact);
 - the readiness marker is observed on `hvc0` (spapr-vty console), **not** `ttyS0`;
 - SSH is reachable to the booted guest (`ssh_reachable` probe, #972).
 
@@ -99,13 +132,17 @@ Marker choice: reuse the existing **`live_vm`** marker. The design assigns a dis
 The test skips cleanly when the host lacks `qemu-system-ppc64` / the published rootfs, matching
 the existing `live_vm` gating.
 
-### 5. Documented proof record
+### 6. Documented proof record
 
 Record the actual run (console tail showing the `hvc0` marker, `ssh_reachable` result, the
 resolved `accel="tcg"` + emulator, and the rootfs-prep steps) in a markdown proof note under
-`docs/design/` (sibling to this spec). This is the AC's "documented live TCG boot".
+`docs/design/` (sibling to this spec). This is the AC's "documented live TCG boot". The record
+also notes that the seed row's `[image.attested]` operands (`makedumpfile_version = "1.7.9"`)
+describe the eventual **#8-built** image, not the file-injection scaffold (which installs no
+makedumpfile) — so the proof asserts only boot + SSH, never a kdump capability, and the
+mismatch cannot be read as a false kdump claim.
 
-### 6. Retiring the PR #1070 unverified defaults
+### 7. Retiring the PR #1070 unverified defaults
 
 The boot is a **falsification** step, not a rubber stamp. After the run:
 
@@ -145,9 +182,12 @@ The boot is a **falsification** step, not a rubber stamp. After the run:
 ## Scope / non-goals
 
 - No migration, no schema change (the seed row is example inventory; the fixture is file/embedded).
-- No `build-fs` foreign-arch customization boot (#8) — the proof uses arch-safe file-injection.
-- No uploaded-kernel boot / kernel-artifact contract (#6/#7) — the proof boots the rootfs's own
-  baseline kernel (ADR-0272 direct boot).
+- No `build-fs` foreign-arch package-installing customization boot (#8) — the proof scaffold
+  keeps build-fs's arch-safe repack and replaces only the customize step with file-injection (§4).
+- No uploaded-kernel boot / kernel-artifact contract (#6/#7). The proof boots the rootfs's own
+  **baseline** kernel via the shared ADR-0272 direct-`<kernel>` path (§3); #7 separately proves
+  the *uploaded* combined-tar boot. Proving the baseline `<kernel>` boot on pseries here does
+  not depend on #6/#7 — it is the same renderer with a different kernel source.
 - No new `live_vm_tcg` marker (#15); reuse `live_vm`.
 - No kdump/fadump/gdb/drgn proof on ppc64le (issues 9/11/12) — boot + SSH only.
 - No catalog parity for other families (#13).
