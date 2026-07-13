@@ -25,9 +25,6 @@ from kdive.config.core_settings import (
 from kdive.db.pool import create_pool
 from kdive.images.rootfs.command import add_build_fs_parser, run_build_fs
 from kdive.images.rootfs.stage_volume import add_stage_volume_parser, run_stage_volume
-from kdive.processes.reconciler import (
-    optional_reconciler_object_store as _optional_reconciler_object_store,
-)
 from kdive.processes.reconciler import run_reconciler as _run_reconciler
 from kdive.processes.server import run_server as _run_server
 from kdive.processes.worker import run_worker as _run_worker
@@ -220,14 +217,13 @@ def _handle_reconcile_systems(
     if args.check:
         raise SystemExit(validate_systems(args.path))
 
+    from kdive.domain.errors import CategorizedError
     from kdive.store.objectstore import object_store_from_env
 
-    store = _optional_reconciler_object_store(object_store_from_env)
-    if store is None:
-        raise SystemExit(
-            "reconcile-systems requires an object store; set KDIVE_S3_ENDPOINT_URL / "
-            "KDIVE_S3_BUCKET / KDIVE_S3_REGION (the pass HEADs s3 image objects)."
-        )
+    try:
+        store = object_store_from_env()
+    except CategorizedError as error:
+        raise SystemExit(str(error)) from error
     pool = create_pool(min_size=1)
 
     async def _run() -> int:

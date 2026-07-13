@@ -23,17 +23,14 @@ import pytest
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 
-import kdive.config as config
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import AllocationState, SystemState
-from kdive.domain.errors import CategorizedError
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.ops.reconcile import reconcile as ops_reconcile
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler.loop import ALL_REPAIR_KINDS, ReconcileConfig, reconcile_once
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
-from kdive.store.assembly import optional_object_store
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.reconciler.conftest import connect, seed_system
 
@@ -336,22 +333,3 @@ def test_register_forwards_repair_ports_to_handler(monkeypatch: pytest.MonkeyPat
         assert captured == {"pool": pool, "ctx": ctx, "ports": ports}
 
     asyncio.run(_run())
-
-
-@pytest.mark.usefixtures("migrated_url")
-def test_register_resolves_upload_store_off_without_s3_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Mirrors the periodic loop: no KDIVE_S3_* env -> the upload reaper stays off (None),
-    # rather than raising, so the on-demand pass repairs the same set as the periodic one.
-    monkeypatch.delenv("KDIVE_S3_ENDPOINT_URL", raising=False)
-    monkeypatch.delenv("KDIVE_S3_BUCKET", raising=False)
-    assert optional_object_store() is None
-
-
-@pytest.mark.usefixtures("migrated_url")
-def test_register_reraises_partial_s3_config() -> None:
-    try:
-        config.load({"KDIVE_S3_ENDPOINT_URL": "http://localhost:9000"})
-        with pytest.raises(CategorizedError):
-            optional_object_store()
-    finally:
-        config.reset()

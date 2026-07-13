@@ -15,12 +15,8 @@ from kdive.config.core_settings import (
     BUILD_ARTIFACT_RETENTION_DAYS,
     INVESTIGATION_CLEANUP_GRACE_DAYS,
     REPORT_ARTIFACT_RETENTION_DAYS,
-    S3_BUCKET,
-    S3_ENDPOINT_URL,
-    S3_REGION,
 )
 from kdive.db.pool import create_pool
-from kdive.domain.errors import CategorizedError
 from kdive.processes.runtime import cancel, install_stop, run_process_runtime
 from kdive.providers.infra.console_hosting import start_console_hosting
 
@@ -39,7 +35,6 @@ RECONCILER_HEARTBEAT_STALE_SECONDS = 90.0
 PROVIDER_DISCOVERY_TIMEOUT_SECONDS = 30.0
 
 _log = logging.getLogger(__name__)
-_S3_OPTIONAL_ENV_NAMES = frozenset({S3_ENDPOINT_URL.name, S3_BUCKET.name, S3_REGION.name})
 
 
 async def run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
@@ -83,7 +78,7 @@ async def run_reconciler_body(
     from kdive.providers.assembly.composition import ProviderComposition
     from kdive.store.objectstore import object_store_from_env
 
-    upload_store = optional_reconciler_object_store(object_store_from_env)
+    upload_store = object_store_from_env()
     provider_composition = ProviderComposition(secret_registry=secret_registry)
     provider_resolver = provider_composition.build_provider_resolver()
     discovery_task = asyncio.create_task(register_provider_resources(pool, provider_resolver))
@@ -171,23 +166,6 @@ def build_reconcile_config(
         admission_metrics=AdmissionMetrics(meter=meter),
         debug_session_telemetry=DebugSessionTelemetry(meter=meter),
     )
-
-
-def optional_reconciler_object_store(
-    store_factory: Callable[[], ObjectStore],
-) -> ObjectStore | None:
-    """Return the object store, or ``None`` only when S3 is wholly unconfigured."""
-    try:
-        return store_factory()
-    except CategorizedError:
-        if s3_env_is_absent():
-            return None
-        raise
-
-
-def s3_env_is_absent() -> bool:
-    env = config.env_snapshot()
-    return _S3_OPTIONAL_ENV_NAMES.isdisjoint(env)
 
 
 def reconciler_probe(
