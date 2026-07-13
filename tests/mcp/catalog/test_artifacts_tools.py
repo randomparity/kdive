@@ -612,8 +612,8 @@ def test_artifacts_get_oversized_honors_head_redaction_gate(migrated_url: str) -
     asyncio.run(_run())
 
 
-def test_artifacts_get_degrades_when_store_unconfigured(migrated_url: str) -> None:
-    error = CategorizedError("S3 unset", category=ErrorCategory.CONFIGURATION_ERROR)
+def test_artifacts_get_degrades_when_store_factory_errors(migrated_url: str) -> None:
+    error = CategorizedError("store unavailable", category=ErrorCategory.CONFIGURATION_ERROR)
 
     def _raise_store() -> _SearchStore:
         raise error
@@ -627,7 +627,7 @@ def test_artifacts_get_degrades_when_store_unconfigured(migrated_url: str) -> No
         assert resp.refs["object"]
         assert "download_uri" not in resp.refs
         assert "content" not in resp.data
-        assert data_str(resp, "content_unavailable") == "store_unconfigured"
+        assert data_str(resp, "content_unavailable") == "store_error"
 
     asyncio.run(_run())
 
