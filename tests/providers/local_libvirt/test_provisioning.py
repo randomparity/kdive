@@ -84,16 +84,21 @@ def _render(
     disk_path: str = _DISK,
     kernel_path: Path | None = _KERNEL,
     ssh_port: int | None = 40022,
+    accel: str = "kvm",
+    emulator: str | None = None,
 ) -> str:
     # ssh_port defaults to a valid port: the SSH forward is now rendered on every domain
     # (ADR-0281), so a render without one raises. Tests that care about the forward pass an
-    # explicit value; the rest accept this default.
+    # explicit value; the rest accept this default. accel/emulator default to the legacy
+    # x86-KVM path ("kvm", None) so unrelated render tests stay byte-identical (ADR-0340).
     return render_domain_xml(
         system_id,
         profile or _profile(),
         disk_path=disk_path,
         kernel_path=kernel_path,
         ssh_port=ssh_port,
+        accel=accel,
+        emulator=emulator,
     )
 
 
@@ -136,6 +141,114 @@ def test_render_carries_name_memory_vcpu_machine_and_rootfs() -> None:
     source = root.find("devices/disk/source")
     assert source is not None
     assert source.get("file") == "/var/lib/kdive/rootfs/fedora-40.qcow2"
+
+
+# Captured from the pre-ADR-0340 renderer (the x86_64-under-KVM domain). The byte-identity ACs
+# pin the current output so a child-reordering or emulator-gate regression is caught; do NOT
+# regenerate this from the edited renderer, which would make the assertion vacuous.
+_X86_KVM_GOLDEN = (
+    '<domain xmlns:kdive="https://kdive.dev/libvirt/1" '
+    'xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0" type="kvm">'
+    "<name>kdive-11111111-1111-1111-1111-111111111111</name>"
+    "<uuid>11111111-1111-1111-1111-111111111111</uuid>"
+    '<memory unit="MiB">4096</memory><vcpu>4</vcpu><cpu mode="host-passthrough" />'
+    '<os><type arch="x86_64" machine="pc-q35-9.0">hvm</type>'
+    "<kernel>/var/lib/kdive/rootfs/11111111-1111-1111-1111-111111111111-baseline/kernel</kernel>"
+    "<cmdline>root=/dev/vda console=ttyS0 rw</cmdline></os>"
+    '<features><acpi /><vmcoreinfo state="on" /></features>'
+    '<devices><disk type="file" device="disk"><driver name="qemu" type="qcow2" />'
+    '<source file="/var/lib/kdive/rootfs/fedora-40.qcow2" />'
+    '<target dev="vda" bus="virtio" /></disk><serial type="pty">'
+    '<log file="/var/lib/kdive/console/11111111-1111-1111-1111-111111111111.log" append="off" />'
+    '<target port="0" /></serial><console type="pty"><target type="serial" port="0" /></console>'
+    "</devices><metadata>"
+    "<kdive:system>11111111-1111-1111-1111-111111111111</kdive:system></metadata>"
+    '<qemu:commandline><qemu:arg value="-netdev" />'
+    '<qemu:arg value="user,id=kdivessh,restrict=on,hostfwd=tcp:127.0.0.1:40022-:22" />'
+    '<qemu:arg value="-device" />'
+    '<qemu:arg value="virtio-net-pci,netdev=kdivessh,addr=0x10" /></qemu:commandline></domain>'
+)
+
+
+def _arch_profile(arch: str, *, machine: str | None = None) -> ProvisioningProfile:
+    data = copy.deepcopy(_VALID)
+    data["arch"] = arch
+    section = data["provider"]["local-libvirt"]
+    if machine is None:
+        section.pop("domain_xml_params", None)  # fall back to the arch_traits default machine
+    else:
+        section["domain_xml_params"] = {"machine": machine}
+    return ProvisioningProfile.parse(data)
+
+
+def test_render_x86_kvm_byte_identical_with_defaults() -> None:
+    # AC#3: the ("kvm", None) empty-map fail-open path is byte-identical to the pre-ADR-0340 output.
+    assert _render() == _X86_KVM_GOLDEN
+
+
+def test_render_x86_kvm_drops_native_emulator_by_accel_not_none() -> None:
+    # AC#3: the REAL deployed native input is ("kvm", "/usr/bin/qemu-system-x86_64"), not
+    # ("kvm", None). The <emulator> is dropped because accel == "kvm"; a regression gating on
+    # `emulator is not None` would emit it and fail this byte-identity check.
+    assert _render(accel="kvm", emulator="/usr/bin/qemu-system-x86_64") == _X86_KVM_GOLDEN
+
+
+@pytest.mark.parametrize(
+    ("arch", "accel", "emulator", "exp_type", "exp_machine", "exp_cpu_mode", "exp_features"),
+    [
+        ("x86_64", "kvm", "/usr/bin/qemu-system-x86_64", "kvm", "q35", "host-passthrough", True),
+        ("x86_64", "tcg", "/usr/bin/qemu-system-x86_64", "qemu", "q35", None, True),
+        ("ppc64le", "kvm", "/usr/bin/qemu-system-ppc64", "kvm", "pseries", "host-model", False),
+        ("ppc64le", "tcg", "/usr/bin/qemu-system-ppc64", "qemu", "pseries", None, False),
+    ],
+)
+def test_render_domain_by_arch_and_accel(
+    arch: str,
+    accel: str,
+    emulator: str,
+    exp_type: str,
+    exp_machine: str,
+    exp_cpu_mode: str | None,
+    exp_features: bool,
+) -> None:
+    # AC#1: all four (arch x accel) cells — domain type, emulator presence/path, machine,
+    # <cpu> presence/mode, and the x86-only <features> block (ADR-0340).
+    root = _safe_fromstring(_render(profile=_arch_profile(arch), accel=accel, emulator=emulator))
+    assert root.get("type") == exp_type
+    os_type = root.find("os/type")
+    assert os_type is not None and os_type.get("machine") == exp_machine
+    cpu = root.find("cpu")
+    if exp_cpu_mode is None:
+        assert cpu is None  # TCG omits <cpu>
+    else:
+        assert cpu is not None and cpu.get("mode") == exp_cpu_mode
+    emu = root.find("devices/emulator")
+    if accel == "kvm":
+        assert emu is None  # native KVM relies on libvirt's default binary
+    else:
+        assert emu is not None and emu.text == emulator
+    assert (root.find("features") is not None) is exp_features
+
+
+def test_render_machine_override_wins_for_ppc64le() -> None:
+    # AC#2: an explicit domain_xml_params["machine"] still overrides the arch_traits default.
+    root = _safe_fromstring(
+        _render(
+            profile=_arch_profile("ppc64le", machine="pseries-8.2"),
+            accel="tcg",
+            emulator="/usr/bin/qemu-system-ppc64",
+        )
+    )
+    os_type = root.find("os/type")
+    assert os_type is not None and os_type.get("machine") == "pseries-8.2"
+
+
+def test_render_tcg_without_emulator_is_configuration_error() -> None:
+    # A TCG domain cannot boot without a binary; fail fast rather than emit a domain libvirt
+    # would start under the wrong (host-arch) default emulator.
+    with pytest.raises(CategorizedError) as exc:
+        _render(accel="tcg", emulator=None)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
 def test_render_pins_host_passthrough_cpu_for_el9_baseline() -> None:

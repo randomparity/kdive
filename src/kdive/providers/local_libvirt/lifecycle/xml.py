@@ -7,7 +7,7 @@ from pathlib import Path
 from uuid import UUID
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.platform.arch_traits import arch_traits
+from kdive.domain.platform.arch_traits import ArchTraits, arch_traits
 from kdive.profiles.provisioning import ProvisioningProfile, require_concrete_sizing
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.shared.libvirt_xml import (
@@ -46,6 +46,8 @@ def render_domain_xml(
     kernel_path: Path | None = None,
     initrd_path: Path | None = None,
     guest_egress: bool = False,
+    accel: str = "kvm",
+    emulator: str | None = None,
 ) -> str:
     """Render the tagged libvirt domain XML for a System (ADR-0025 §3, ADR-0272).
 
@@ -77,9 +79,18 @@ def render_domain_xml(
     ``systems.toml`` at provision, never from the request); the renderer only consumes the resolved
     boolean.
 
+    ``accel``/``emulator`` (ADR-0340) are the resolved accelerator and emulator path for the
+    profile arch, from the provisioner's live-capabilities resolution. ``accel`` sets
+    ``<domain type>`` (``kvm`` / ``qemu``-TCG) and the ``<cpu>`` element (``host-passthrough``
+    x86 / ``host-model`` pseries under KVM; **omitted** under TCG). ``emulator`` is emitted as
+    ``<emulator>`` **only** for TCG domains — native KVM relies on libvirt's default binary, so
+    an x86_64-under-KVM domain is byte-identical to the pre-ADR-0340 output. The defaults
+    ``("kvm", None)`` are exactly that legacy path. A TCG domain requires an ``emulator``.
+
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` for an invalid profile, a gdbstub-flagged
-            profile rendered without ``gdb_port``, or any domain rendered without ``ssh_port``.
+            profile rendered without ``gdb_port``, any domain rendered without ``ssh_port``, or a
+            TCG domain (``accel != "kvm"``) rendered without an ``emulator``.
     """
     _ensure_namespaces_registered()
     _PROFILE_POLICY.validate_profile(profile)
@@ -93,7 +104,9 @@ def render_domain_xml(
         profile,
         disk_path=disk_path,
         machine=machine,
-        console_device=traits.console_device,
+        traits=traits,
+        accel=accel,
+        emulator=emulator,
         kernel_path=kernel_path,
         initrd_path=initrd_path,
     )
@@ -119,32 +132,74 @@ def _build_baseline_domain(
     *,
     disk_path: str,
     machine: str,
-    console_device: str,
+    traits: ArchTraits,
+    accel: str,
+    emulator: str | None,
     kernel_path: Path | None,
     initrd_path: Path | None,
 ) -> tuple[ET.Element, ET.Element]:
-    """Build the always-present local-libvirt domain skeleton."""
-    domain = ET.Element("domain", type="kvm")
+    """Build the always-present local-libvirt domain skeleton (ADR-0340).
+
+    ``<domain type>`` is ``kvm`` under KVM and ``qemu`` (TCG) otherwise. The ``<cpu>`` element,
+    the x86-only ``<features>`` block, and the TCG ``<emulator>`` are all arch/accel-resolved
+    through ``traits`` — see the per-element helpers.
+    """
+    domain = ET.Element("domain", type=("kvm" if accel == "kvm" else "qemu"))
     ET.SubElement(domain, "name").text = domain_name_for(system_id)
     ET.SubElement(domain, "uuid").text = str(system_id)
     ET.SubElement(domain, "memory", unit="MiB").text = str(profile.memory_mb)
     ET.SubElement(domain, "vcpu").text = str(profile.vcpu)
-    _append_host_cpu(domain)
+    # <cpu> stays here (after <vcpu>, before <os>) so the x86-KVM domain is byte-identical to
+    # the pre-ADR-0340 output; a TCG domain emits nothing and <os> follows <vcpu> directly.
+    _append_guest_cpu(domain, accel=accel, kvm_cpu_mode=traits.kvm_cpu_mode)
     os_el = _append_os(domain, profile, machine=machine)
-    _append_direct_kernel(os_el, kernel_path, initrd_path, _baseline_cmdline(console_device))
-    _append_crash_capture_features(domain)
+    _append_direct_kernel(os_el, kernel_path, initrd_path, _baseline_cmdline(traits.console_device))
+    if traits.emit_acpi_features:
+        _append_crash_capture_features(domain)
     devices = ET.SubElement(domain, "devices")
+    if accel != "kvm":
+        _append_emulator(devices, emulator)
     _append_root_disk(devices, disk_path)
     _append_serial_console(devices, system_id)
     _append_metadata(domain, system_id)
     return domain, devices
 
 
-def _append_host_cpu(domain: ET.Element) -> None:
-    """Pin the guest CPU to the host model (ADR-0294, #956)."""
-    # The QEMU/KVM default model (`qemu64`) is x86-64-v1; EL9/RHEL-family glibc requires
-    # x86-64-v2, so an EL9 guest's `ld.so` aborts PID 1 and the domain never reaches userspace.
-    ET.SubElement(domain, "cpu", mode="host-passthrough")
+def _append_guest_cpu(domain: ET.Element, *, accel: str, kvm_cpu_mode: str) -> None:
+    """Pin the guest CPU per arch under KVM; emit nothing for TCG (ADR-0340, ADR-0294, #956).
+
+    Under KVM the mode is the arch-resolved ``kvm_cpu_mode``: ``host-passthrough`` on x86 and
+    ``host-model`` on pseries. The x86 case is load-bearing (ADR-0294) — the QEMU/KVM default
+    model ``qemu64`` is x86-64-v1 while EL9/RHEL-family glibc requires x86-64-v2, so a wrong
+    model makes an EL9 guest's ``ld.so`` abort PID 1 and the domain never reaches userspace.
+
+    A **TCG** domain emits no ``<cpu>``: QEMU's per-machine default is used, and pinning a model
+    would couple the domain to specific QEMU versions. Whether that default meets the guest's
+    ISA baseline (x86-64-v2 / POWER9) is proven at the #1144 live boot, not asserted here.
+    """
+    if accel != "kvm":
+        return
+    ET.SubElement(domain, "cpu", mode=kvm_cpu_mode)
+
+
+def _append_emulator(devices: ET.Element, emulator: str | None) -> None:
+    """Emit ``<emulator>`` for a TCG/foreign-arch domain from the discovered path (ADR-0340).
+
+    Native KVM omits it (libvirt's default binary is correct for the host arch); a TCG domain
+    needs the discovered ``qemu-system-<arch>`` because libvirt's default
+    (``qemu-system-<host-arch>``) cannot run a foreign guest.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when no emulator is known — a TCG domain
+            cannot boot without a binary. Discovery never advertises a TCG arch without one, so
+            this is a defensive guard, not a normal path.
+    """
+    if emulator is None:
+        raise CategorizedError(
+            "a TCG (foreign-arch) local-libvirt domain requires a discovered emulator path",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    ET.SubElement(devices, "emulator").text = emulator
 
 
 def _append_os(domain: ET.Element, profile: ProvisioningProfile, *, machine: str) -> ET.Element:
