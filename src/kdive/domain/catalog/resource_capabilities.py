@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
@@ -16,6 +16,19 @@ if TYPE_CHECKING:
 
 CONCURRENT_ALLOCATION_CAP_KEY = "concurrent_allocation_cap"
 PCIE_DEVICES_KEY = "pcie_devices"
+
+# The bootable guest arches a host advertises, each with its accelerator (``kvm``/``tcg``) and
+# emulator path (ADR-0338). Populated by local-libvirt discovery from the libvirt capabilities
+# ``<guest>`` blocks; admission validates a profile arch against this set.
+GUEST_ARCHES_KEY = "guest_arches"
+
+
+class GuestArch(TypedDict):
+    """One bootable guest arch's accelerator and emulator, as advertised by discovery."""
+
+    accel: str
+    emulator: str
+
 
 # Billable size ceilings the discovery provider advertises and admission's ≤ resource-caps
 # check reads (ADR-0007 §2). A selector may not exceed these.
@@ -29,7 +42,15 @@ DISK_GB_KEY = "disk_gb"
 
 _DESCRIPTOR_FIELDS = ("bdf", "vendor_id", "device_id", "class_code", "label")
 _KNOWN_KEYS = frozenset(
-    {CONCURRENT_ALLOCATION_CAP_KEY, DISK_GB_KEY, MEMORY_MB_KEY, PCIE_DEVICES_KEY, VCPUS_KEY, "arch"}
+    {
+        CONCURRENT_ALLOCATION_CAP_KEY,
+        DISK_GB_KEY,
+        GUEST_ARCHES_KEY,
+        MEMORY_MB_KEY,
+        PCIE_DEVICES_KEY,
+        VCPUS_KEY,
+        "arch",
+    }
 )
 
 
@@ -106,6 +127,29 @@ class ResourceCapabilities:
         so a local host is always bounded.
         """
         return _non_negative_int(self._values.get(DISK_GB_KEY))
+
+    def guest_arches(self) -> dict[str, GuestArch]:
+        """The bootable guest arches this host advertises, dropping malformed entries (ADR-0338).
+
+        Defensive over the persisted JSON (mirrors :meth:`pcie_descriptors`): a stale or
+        hand-edited row never crashes a consumer. Returns ``{}`` when the key is absent or is not
+        a mapping; keeps only entries that are a dict with string ``accel`` and ``emulator``, and
+        returns each as a bare :class:`GuestArch` (extra keys dropped). Does not validate the
+        ``accel`` value domain — the issue-3 consumer maps it to a domain type and fails closed on
+        an unexpected value.
+        """
+        raw = self._values.get(GUEST_ARCHES_KEY)
+        if not isinstance(raw, Mapping):
+            return {}
+        arches: dict[str, GuestArch] = {}
+        for arch, entry in raw.items():
+            if not isinstance(entry, Mapping):
+                continue
+            accel = entry.get("accel")
+            emulator = entry.get("emulator")
+            if isinstance(accel, str) and isinstance(emulator, str):
+                arches[arch] = {"accel": accel, "emulator": emulator}
+        return arches
 
     def pcie_descriptors(self) -> list[PCIeDescriptor]:
         raw = self._values.get(PCIE_DEVICES_KEY)

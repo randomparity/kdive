@@ -9,6 +9,7 @@ import pytest
 from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     DISK_GB_KEY,
+    GUEST_ARCHES_KEY,
     MEMORY_MB_KEY,
     PCIE_DEVICES_KEY,
     VCPUS_KEY,
@@ -123,6 +124,57 @@ def test_require_size_ceiling_reports_vcpus_when_only_vcpus_invalid() -> None:
         caps.require_size_ceiling(resource_id=uuid4(), resource_name="host-b")
 
     assert exc.value.details["key"] == VCPUS_KEY
+
+
+def test_guest_arches_reads_well_formed_mapping() -> None:
+    caps = ResourceCapabilities.from_mapping(
+        {
+            GUEST_ARCHES_KEY: {
+                "x86_64": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-x86_64"},
+                "ppc64le": {"accel": "tcg", "emulator": "/usr/bin/qemu-system-ppc64"},
+            }
+        }
+    )
+
+    assert caps.guest_arches() == {
+        "x86_64": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-x86_64"},
+        "ppc64le": {"accel": "tcg", "emulator": "/usr/bin/qemu-system-ppc64"},
+    }
+
+
+def test_guest_arches_empty_when_absent() -> None:
+    assert ResourceCapabilities.from_mapping({VCPUS_KEY: 8}).guest_arches() == {}
+
+
+@pytest.mark.parametrize("bad", [None, "x86_64", [], 3])
+def test_guest_arches_empty_when_value_is_not_a_mapping(bad: object) -> None:
+    assert ResourceCapabilities.from_mapping({GUEST_ARCHES_KEY: bad}).guest_arches() == {}
+
+
+def test_guest_arches_drops_malformed_entries() -> None:
+    # A stale or hand-edited row must never crash a consumer: only entries that are a dict with
+    # string accel/emulator survive; the extra key is dropped from the returned GuestArch.
+    caps = ResourceCapabilities.from_mapping(
+        {
+            GUEST_ARCHES_KEY: {
+                "x86_64": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-x86_64", "x": 1},
+                "ppc64le": "not-a-dict",
+                "s390x": {"accel": 7, "emulator": "/usr/bin/qemu-system-s390x"},
+                "riscv64": {"emulator": "/usr/bin/qemu-system-riscv64"},
+            }
+        }
+    )
+
+    assert caps.guest_arches() == {
+        "x86_64": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-x86_64"}
+    }
+
+
+def test_guest_arches_key_not_in_extras() -> None:
+    caps = ResourceCapabilities.from_mapping({GUEST_ARCHES_KEY: {}, "other": 1})
+
+    assert GUEST_ARCHES_KEY not in caps.extras()
+    assert caps.extras() == {"other": 1}
 
 
 def test_resource_capabilities_filters_malformed_pcie_descriptors() -> None:
