@@ -41,8 +41,11 @@ them per architecture × accelerator.
 `profile.arch` from live libvirt capabilities (`conn.getCapabilities()` +
 `parse_guest_arches(caps, SUPPORTED_ARCHES)`) inside `provision()`, and passes `accel` and
 `emulator` to `render_domain_xml`. `reprovision` delegates to `provision`, so it is covered
-by the same one resolution site. The resolution **mirrors admission's rule**
-(`services/systems/validation.py:resolve_accel`) so the two sites cannot diverge:
+by the same one resolution site. The branch logic is **one shared helper**, not two copies:
+`resolve_accel_emulator(guest_arches, arch) -> tuple[str, str] | None` in
+`domain/catalog/resource_capabilities.py`, called by both the provider and admission's
+`resolve_accel` (re-expressed as a thin wrapper that drops the emulator and keeps its
+`str | None` contract). A parity test binds the two entry points. The three outcomes:
 
 - **Empty `guest_arches`** (host not re-discovered since ADR-0338): fail **open** to
   `("kvm", None)` — today's legacy x86-KVM path, matching the ADR-0339 admission fail-open.
@@ -54,10 +57,16 @@ by the same one resolution site. The resolution **mirrors admission's rule**
   `<domain type="kvm">` for a pseries guest that fails to start with an opaque libvirt error.
   We raise the same clean error admission raises instead. (`dict.get(arch)` returns `None`
   for both the empty and the arch-absent case; only the empty case may fail open.)
-- **`conn.getCapabilities()` / connection `libvirtError`**: raise `INFRASTRUCTURE_FAILURE` —
-  the same local RPC discovery makes; a fault means an unhealthy host, not a licence to guess
-  a domain type. The provider's narrow `_LibvirtConn` Protocol gains
-  `getCapabilities(self) -> str`.
+- **`conn.getCapabilities()` / connection `libvirtError`**: raise `INFRASTRUCTURE_FAILURE`,
+  grouping the caps read with the provider's other pre-define host-state reads
+  (`_recorded_ssh_port` / `_recorded_gdb_port`, both `INFRASTRUCTURE_FAILURE`) rather than the
+  mutating `_define_and_start` action (`PROVISIONING_FAILURE`). The provider's narrow
+  `_LibvirtConn` Protocol gains `getCapabilities(self) -> str`.
+
+The fail-closed arm is deliberate even on a provision **retry**: the handler only calls
+`provision()` while `state == PROVISIONING`, and a retry raises here only if the host
+genuinely lost the arch mid-provision — failing the unsupportable foreign System closed is
+correct, not a regression of the idempotent-retry contract.
 
 No change to the provider-agnostic job handler and no change to the remote-libvirt or
 fault-inject providers.
