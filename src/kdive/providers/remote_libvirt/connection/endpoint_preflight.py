@@ -8,9 +8,10 @@ the presigned URL is minted, with an actionable ``configuration_error`` naming t
 of letting the downstream in-guest curl fail with no hint at the real cause.
 
 It does no DNS resolution: only the literal ``localhost`` name and literal loopback IPs
-(``127.0.0.0/8``, ``::1``) are rejected, so the check is deterministic and side-effect-free. An
-*unset* endpoint is owned by ``object_store_from_env`` (which already fails naming the same var);
-this preflight no-ops on a blank value so the two checks don't double-report.
+(``127.0.0.0/8``, ``::1``) are rejected, so the check is deterministic and side-effect-free. A
+blank endpoint is rejected earlier at ``config.validate`` (S3 is a required backend, ADR-0337);
+an *unset* endpoint is owned by ``object_store_from_env`` (which fails naming the same var), so
+this preflight no-ops on an unset value and does not double-report.
 """
 
 from __future__ import annotations
@@ -53,8 +54,9 @@ def validate_guest_routable_endpoint() -> None:
         CategorizedError: ``CONFIGURATION_ERROR`` when ``KDIVE_S3_ENDPOINT_URL`` resolves to a
             loopback host (``localhost``, ``127.0.0.0/8``, ``::1``). ``details`` carries
             ``env_var``, ``next_action`` (a literal remediation naming the var), and the offending
-            ``configured_endpoint``. A blank/unset endpoint is a no-op here (owned by
-            ``object_store_from_env``).
+            ``configured_endpoint``. An unset endpoint is a no-op here (owned by
+            ``object_store_from_env``); a blank endpoint is rejected earlier at
+            ``config.validate`` (ADR-0337).
     """
     endpoint = config.get(S3_ENDPOINT_URL)
     if not endpoint:

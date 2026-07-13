@@ -34,6 +34,13 @@ def _str(raw: str) -> str:
     return raw
 
 
+def _nonempty(raw: str) -> str:
+    value = raw.strip()
+    if not value:
+        raise ValueError("must not be blank")
+    return value
+
+
 def _ratio(raw: str) -> float:
     value = float(raw)
     if not 0.0 <= value <= 1.0:
@@ -119,17 +126,21 @@ OIDC_AUDIENCE = Setting(
 
 S3_ENDPOINT_URL = Setting(
     name="KDIVE_S3_ENDPOINT_URL",
-    parse=_str,
+    parse=_nonempty,
     group="objectstore",
     processes=_STORE_USERS,
-    help="S3-compatible endpoint URL for bulk artifacts.",
+    required_when=_always,
+    help="S3-compatible endpoint URL for bulk artifacts (required, ADR-0337).",
+    suggest="an S3-compatible endpoint URL, e.g. http://minio:9000",
 )
 S3_BUCKET = Setting(
     name="KDIVE_S3_BUCKET",
-    parse=_str,
+    parse=_nonempty,
     group="objectstore",
     processes=_STORE_USERS,
-    help="Bucket holding vmcores, transcripts, and uploads.",
+    required_when=_always,
+    help="Bucket holding vmcores, transcripts, and uploads (required, ADR-0337).",
+    suggest="a bucket name, e.g. kdive",
 )
 S3_REGION = Setting(
     name="KDIVE_S3_REGION",
