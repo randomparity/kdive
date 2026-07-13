@@ -248,53 +248,48 @@ def _reconcile_inventory_repair(
 def _leaked_images_repair(
     _reaper: InfraReaper, config: ReconcileConfig, image_publish_grace: timedelta
 ) -> _RepairFn | None:
-    image_store = config.image_store
-    return lambda conn: _repair_leaked_images(conn, image_store, image_publish_grace)
+    return lambda conn: _repair_leaked_images(conn, config.image_store, image_publish_grace)
 
 
 def _dangling_images_repair(
     _reaper: InfraReaper, config: ReconcileConfig, image_publish_grace: timedelta
 ) -> _RepairFn | None:
-    image_store = config.image_store
-    return lambda conn: _repair_dangling_images(conn, image_store, image_publish_grace)
+    return lambda conn: _repair_dangling_images(conn, config.image_store, image_publish_grace)
 
 
 def _expired_private_images_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
-    image_store = config.image_store
-    return lambda conn: _repair_expired_private_images(conn, image_store)
+    return lambda conn: _repair_expired_private_images(conn, config.image_store)
 
 
 def _abandoned_uploads_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
-    upload_store = config.upload_store
-    return lambda conn: _repair_abandoned_uploads(conn, upload_store)
+    return lambda conn: _repair_abandoned_uploads(conn, config.upload_store)
 
 
 def _report_artifacts_gc_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
-    upload_store = config.upload_store
-    return lambda conn: _gc_report_artifacts(conn, upload_store, config.report_artifact_retention)
+    return lambda conn: _gc_report_artifacts(
+        conn, config.upload_store, config.report_artifact_retention
+    )
 
 
 def _investigation_artifacts_gc_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
-    upload_store = config.upload_store
     return lambda conn: _gc_investigation_artifacts(
-        conn, upload_store, config.investigation_cleanup_grace
+        conn, config.upload_store, config.investigation_cleanup_grace
     )
 
 
 def _expired_build_artifacts_gc_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
-    upload_store = config.upload_store
     return lambda conn: _gc_expired_build_artifacts(
-        conn, upload_store, config.build_artifact_retention
+        conn, config.upload_store, config.build_artifact_retention
     )
 
 

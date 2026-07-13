@@ -15,7 +15,6 @@ class ObjectStoreAssembly:
     """The process object store, assembled once for app and worker wiring."""
 
     store: ObjectStore
-    request_time_store_factory: ObjectStoreFactory
 
 
 def build_object_store_assembly(
@@ -26,10 +25,6 @@ def build_object_store_assembly(
     S3 is a required backend (ADR-0337): ``object_store_from_env`` raises a
     ``configuration_error`` when it is unconfigured, and ``config.validate`` already
     rejects that at startup, so ``store`` is always a live :class:`ObjectStore`.
-    ``request_time_store_factory`` is retained for request-time lazy construction.
     """
     store_factory = store_factory or object_store_from_env
-    return ObjectStoreAssembly(
-        store=store_factory(),
-        request_time_store_factory=store_factory,
-    )
+    return ObjectStoreAssembly(store=store_factory())

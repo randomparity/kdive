@@ -87,9 +87,8 @@ async def reconcile_systems(
                 ErrorCategory.AUTHORIZATION_DENIED,
                 suggested_next_actions=[_RECONCILE_TOOL],
             )
-        store: ImageHeadStore = image_store
         try:
-            diff = await _run_pass(pool, store)
+            diff = await _run_pass(pool, image_store)
         except InventoryError as exc:
             _log.warning("ops.reconcile_systems: systems.toml is malformed: %s", exc)
             return _categorized_failure(exc)

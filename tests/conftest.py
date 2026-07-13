@@ -35,8 +35,10 @@ import kdive.config as config
 # configuration must exist at the process level too — not only via the function-scoped
 # ``s3_backend_env`` fixture. ``setdefault`` yields to a real ``KDIVE_S3_*`` in the
 # developer's shell. Constructing the boto3 client is offline and never connects.
-os.environ.setdefault("KDIVE_S3_ENDPOINT_URL", "http://minio.test:9000")
-os.environ.setdefault("KDIVE_S3_BUCKET", "kdive-test")
+_DUMMY_S3_ENDPOINT_URL = "http://minio.test:9000"
+_DUMMY_S3_BUCKET = "kdive-test"
+os.environ.setdefault("KDIVE_S3_ENDPOINT_URL", _DUMMY_S3_ENDPOINT_URL)
+os.environ.setdefault("KDIVE_S3_BUCKET", _DUMMY_S3_BUCKET)
 
 
 @pytest.fixture(autouse=True)
@@ -47,8 +49,8 @@ def sandbox_systems_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 @pytest.fixture(autouse=True)
 def s3_backend_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", "http://minio.test:9000")
-    monkeypatch.setenv("KDIVE_S3_BUCKET", "kdive-test")
+    monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", _DUMMY_S3_ENDPOINT_URL)
+    monkeypatch.setenv("KDIVE_S3_BUCKET", _DUMMY_S3_BUCKET)
 
 
 @pytest.fixture(autouse=True)

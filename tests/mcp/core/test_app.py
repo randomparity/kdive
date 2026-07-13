@@ -219,9 +219,6 @@ def test_ops_images_registration_uses_standard_register_entrypoint(
     store = object()
     captured: dict[str, object] = {}
 
-    def _store_from_env() -> object:
-        return store
-
     def _register(
         registered_app: FastMCP,
         registered_pool: AsyncConnectionPool,
@@ -235,10 +232,7 @@ def test_ops_images_registration_uses_standard_register_entrypoint(
         captured["upload_store"] = upload_store
 
     monkeypatch.setattr(tool_module.ops_images_tools, "register", _register)
-    object_stores = ObjectStoreAssembly(
-        store=cast(Any, store),
-        request_time_store_factory=cast(Any, _store_from_env),
-    )
+    object_stores = ObjectStoreAssembly(store=cast(Any, store))
 
     tool_module._ops_images_tools_registrar(object_stores)(app, pool)
 

@@ -68,8 +68,8 @@ class ImageHeadStore(Protocol):
 
     ``head_present`` gates ``s3`` registration on object existence; ``put_artifact`` uploads a
     staged image's captured kernel ``.config`` so the row can offer it (ADR-0336). The real
-    :class:`~kdive.store.objectstore.ObjectStore` satisfies both; the pass is never handed ``None``
-    (the CLI fails fast and the loop skips the pass when no store is configured).
+    :class:`~kdive.store.objectstore.ObjectStore` satisfies both; S3 is a required backend
+    (ADR-0337), so the pass always has a live store.
     """
 
     def head_present(self, key: str) -> bool: ...
