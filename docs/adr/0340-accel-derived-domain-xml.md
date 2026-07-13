@@ -41,10 +41,26 @@ them per architecture × accelerator.
 `profile.arch` from live libvirt capabilities (`conn.getCapabilities()` +
 `parse_guest_arches(caps, SUPPORTED_ARCHES)`) inside `provision()`, and passes `accel` and
 `emulator` to `render_domain_xml`. `reprovision` delegates to `provision`, so it is covered
-by the same one resolution site. When the arch is not advertised (empty `guest_arches` — a
-host not re-discovered since ADR-0338, matching the ADR-0339 fail-open case), it falls back
-to `("kvm", None)`, i.e. today's legacy path. No change to the provider-agnostic job
-handler and no change to the remote-libvirt or fault-inject providers.
+by the same one resolution site. The resolution **mirrors admission's rule**
+(`services/systems/validation.py:resolve_accel`) so the two sites cannot diverge:
+
+- **Empty `guest_arches`** (host not re-discovered since ADR-0338): fail **open** to
+  `("kvm", None)` — today's legacy x86-KVM path, matching the ADR-0339 admission fail-open.
+- **Non-empty `guest_arches` missing `profile.arch`**: fail **closed** with
+  `CONFIGURATION_ERROR` naming the supported set. Because ADR-0340 re-resolves from **live**
+  caps at provision while admission validated the **persisted** capability_view at mint, a
+  host that lost its foreign-qemu binary after a foreign System passed admission would make
+  `dict.get()` return `None`; failing open there would render an incoherent
+  `<domain type="kvm">` for a pseries guest that fails to start with an opaque libvirt error.
+  We raise the same clean error admission raises instead. (`dict.get(arch)` returns `None`
+  for both the empty and the arch-absent case; only the empty case may fail open.)
+- **`conn.getCapabilities()` / connection `libvirtError`**: raise `INFRASTRUCTURE_FAILURE` —
+  the same local RPC discovery makes; a fault means an unhealthy host, not a licence to guess
+  a domain type. The provider's narrow `_LibvirtConn` Protocol gains
+  `getCapabilities(self) -> str`.
+
+No change to the provider-agnostic job handler and no change to the remote-libvirt or
+fault-inject providers.
 
 **Domain type.** `<domain type="kvm">` when `accel == "kvm"`, else `<domain type="qemu">`.
 

@@ -34,19 +34,43 @@ CPU/feature set.
 ### Sourcing (ADR-0340)
 
 The local-libvirt provisioner resolves `{accel, emulator}` for `profile.arch` inside
-`provision()` from live capabilities:
+`provision()` from live capabilities. It **mirrors admission's fail-open/fail-closed rule**
+(`services/systems/validation.py:resolve_accel`) exactly, so the two resolution sites cannot
+diverge:
 
 ```
-caps = conn.getCapabilities()
-entry = parse_guest_arches(caps, SUPPORTED_ARCHES).get(profile.arch)
-accel, emulator = (entry["accel"], entry["emulator"]) if entry else ("kvm", None)
+caps = conn.getCapabilities()                       # libvirtError -> INFRASTRUCTURE_FAILURE
+guest_arches = parse_guest_arches(caps, SUPPORTED_ARCHES)
+if not guest_arches:                                # empty map -> fail OPEN (legacy path)
+    return ("kvm", None)
+entry = guest_arches.get(profile.arch)
+if entry is None:                                   # non-empty but arch absent -> fail CLOSED
+    raise CONFIGURATION_ERROR(... supported = sorted(guest_arches) ...)
+return (entry["accel"], entry["emulator"])
 ```
 
-`reprovision` delegates to `provision`, so this is the single resolution site. The fail-open
-`("kvm", None)` is reached only when `guest_arches` is empty (host not re-discovered), which
-is exactly the ADR-0339 admission fail-open case — so no arch that admission would have
-rejected reaches here with a non-empty `guest_arches`. No job-handler or cross-provider
-change.
+`reprovision` delegates to `provision`, so this is the single resolution site. Two failure
+modes are explicit:
+
+- **Empty `guest_arches`** (host not re-discovered since ADR-0338 — remote/fault-inject have
+  none, but this provider is local-libvirt so it is the "not yet re-discovered" case): fail
+  **open** to `("kvm", None)`, i.e. today's legacy x86-KVM path. This matches ADR-0339
+  admission, which skips the arch check on an empty map.
+- **Non-empty `guest_arches` missing `profile.arch`**: fail **closed** with
+  `CONFIGURATION_ERROR` naming the supported set. This is the TOCTOU guard: ADR-0340
+  re-resolves from **live** caps at provision while admission validated the **persisted**
+  capability_view at mint, so if the host's foreign-qemu binary was removed after a foreign
+  System passed admission, `.get()` returns `None` and we must **not** silently render an
+  incoherent `<domain type="kvm">` for a pseries guest — we raise the same clean, actionable
+  error admission would have. (`resolve_accel` fails closed here; the provider must too.)
+- **`conn.getCapabilities()` / connection `libvirtError`**: raise `INFRASTRUCTURE_FAILURE`.
+  Reading local capabilities is the same cheap RPC discovery makes; a fault means an
+  unhealthy host, not a licence to guess a domain type. `parse_guest_arches` already returns
+  `{}` on malformed XML (→ the empty-map fail-open), so only a genuine RPC/connection fault
+  reaches this arm. `_LibvirtConn` (the provider's narrow Protocol) gains
+  `getCapabilities(self) -> str`.
+
+No job-handler or cross-provider change.
 
 ### Renderer (`render_domain_xml` gains `accel: str = "kvm"`, `emulator: str | None = None`)
 
@@ -87,9 +111,14 @@ Host on which each is reachable in this epic, and the rendered facts:
    ppc64le-arch assertion.
 3. x86_64-under-KVM output byte-identical to today. → assert the current golden string is
    unchanged when `render_domain_xml` is called with the `("kvm", None)` defaults.
-4. Provider resolves `{accel, emulator}` from live capabilities and forwards them; fail-open
-   `("kvm", None)` on empty `guest_arches`. → provisioning unit test with a fake
-   `getCapabilities`.
+4. Provider resolves `{accel, emulator}` from live capabilities and forwards them, mirroring
+   admission's rule. Three provisioning unit tests with a fake `getCapabilities`:
+   - **empty `guest_arches`** → fail **open** `("kvm", None)`, legacy x86-KVM domain;
+   - **non-empty but missing `profile.arch`** (foreign-arch drift) → **`CONFIGURATION_ERROR`**
+     naming the supported set (asserts the provider does *not* render a kvm domain — the guard
+     that distinguishes the two `.get()`-returns-`None` cases so they can never be conflated);
+   - **`getCapabilities()` raises `libvirtError`** for a foreign arch → **`INFRASTRUCTURE_FAILURE`**,
+     not a silent kvm domain.
 
 Additional guard (from the #1140 review follow-up): a `parse_guest_arches` output round-trips
 through `ResourceCapabilities.guest_arches()` unchanged, so a future field added on one side
