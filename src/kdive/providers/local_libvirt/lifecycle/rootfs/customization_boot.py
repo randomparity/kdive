@@ -38,6 +38,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes._build_common import run_guestfs_tool
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import _domain_exit_probe
 from kdive.providers.local_libvirt.lifecycle.deadlines import tcg_deadline_multiplier
+from kdive.providers.local_libvirt.lifecycle.storage import _prepare_console_log
 from kdive.providers.local_libvirt.settings import (
     LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S,
     LIBVIRT_URI,
@@ -133,6 +134,7 @@ class CustomizationBootSeams:
     libguestfs/qemu/network. :meth:`from_env` wires the live implementations.
     """
 
+    prepare_console: Callable[[UUID], None]
     open_conn: Callable[[], _Conn]
     create_transient: Callable[[_Conn, str], _Domain]
     read_console: Callable[[UUID], bytes]
@@ -146,13 +148,18 @@ class CustomizationBootSeams:
 
         The connection is opened once and returned to the caller, which holds it open for the
         whole boot: closing it triggers ``VIR_DOMAIN_START_AUTODESTROY`` cleanup, so an
-        opened/closed-per-poll connection would reap the domain mid-customization. The console
-        read is the completion handshake; under a non-root ``qemu:///system`` worker it raises
-        ``CONFIGURATION_ERROR`` on the first poll (ADR-0223), which the caller propagates. The
-        settled probe is the crashed-aware domstate probe (shut off *or* crashed).
+        opened/closed-per-poll connection would reap the domain mid-customization.
+        ``prepare_console`` creates the console-log directory and worker-owned ``0644`` file
+        *before* the domain starts, exactly as the System provision path does
+        (``storage._prepare_console_log``): with the serial ``<log append="off">`` virtlogd
+        truncates that existing worker-owned file in place, so a **non-root** ``qemu:///system``
+        worker can still read the completion handshake back (the ADR-0223 mitigation) and the
+        ``/var/lib/kdive/console`` directory is guaranteed to exist on a never-provisioned build
+        host. The settled probe is the crashed-aware domstate probe (shut off *or* crashed).
         """
         uri = config.require(LIBVIRT_URI)
         return cls(
+            prepare_console=lambda bid: _prepare_console_log(console_log_path(bid)),
             open_conn=lambda: libvirt.open(uri),
             create_transient=lambda conn, xml: conn.createXML(
                 xml, libvirt.VIR_DOMAIN_START_AUTODESTROY
@@ -192,6 +199,7 @@ def run_customization_boot(
             (also with the tail) when the window is exhausted; and it lets a console-read
             ``CONFIGURATION_ERROR`` (the ADR-0223 readability wall) propagate.
     """
+    seams.prepare_console(build_id)
     conn = seams.open_conn()
     domain: _Domain | None = None
     try:

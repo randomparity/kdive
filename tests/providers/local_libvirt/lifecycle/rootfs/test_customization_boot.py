@@ -94,12 +94,18 @@ class FakeConn:
         return 0
 
 
+def _record_create(events: list[str]) -> FakeDomain:
+    events.append("create")
+    return FakeDomain(events)
+
+
 def _seams(*, read: bytes, settled: bool, polls: int = 10) -> CustomizationBootSeams:
     """Seams whose console read is constant and settled/poll-budget are fixed."""
     events: list[str] = []
     return CustomizationBootSeams(
+        prepare_console=lambda _bid: events.append("prepare"),
         open_conn=lambda: FakeConn(events),
-        create_transient=lambda _c, _x: FakeDomain(events),
+        create_transient=lambda _c, _x: _record_create(events),
         read_console=lambda _bid: read,
         domain_settled=lambda _bid: settled,
         sleep=lambda _s: None,
@@ -117,6 +123,7 @@ def _seams_custom(
 ) -> CustomizationBootSeams:
     """Seams with a caller-supplied console read and a fixed transient domain."""
     return CustomizationBootSeams(
+        prepare_console=lambda _bid: None,
         open_conn=lambda: FakeConn(domain.events),
         create_transient=lambda _c, _x: domain,
         read_console=read_console,
@@ -131,8 +138,9 @@ def test_success_seals_and_holds_conn_open_until_end():
     conn = FakeConn(events)
     reads = iter([b"booting...\n", b"booting...\nkdive-customize-ok\n"])
     seams = CustomizationBootSeams(
+        prepare_console=lambda _bid: events.append("prepare"),
         open_conn=lambda: conn,
-        create_transient=lambda _c, _x: FakeDomain(events),
+        create_transient=lambda _c, _x: _record_create(events),
         read_console=lambda _bid: next(reads),
         domain_settled=lambda _bid: False,
         sleep=lambda _s: events.append("sleep"),
@@ -140,6 +148,9 @@ def test_success_seals_and_holds_conn_open_until_end():
     )
     run_customization_boot(BID, "<domain/>", accel="tcg", seams=seams)
     assert conn.closed_after_force_off is True  # conn not closed before force-off
+    # ADR-0223: the console log is prepared (worker-owned 0644) BEFORE the domain is created,
+    # so virtlogd truncates the existing readable file in place and a non-root worker can read it.
+    assert events.index("prepare") < events.index("create")
 
 
 def test_fail_marker_raises_provisioning_failure_with_tail():

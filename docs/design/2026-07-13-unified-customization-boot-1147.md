@@ -309,11 +309,14 @@ the customized `staged` image, before publish:
   to bring the network up on the first customization boot. rhel catalog rows are cloud images,
   so this affects nothing shipped; a non-cloud network bring-up (e.g. an injected
   systemd-networkd unit) is a follow-up if a virt-builder row is ever added.
-- **Console readability is a hard build-path precondition (ADR-0223).** The completion handshake
-  reads the serial `<log>`, which a non-root worker under `qemu:///system` cannot read
-  (virtlogd `root:0600`). Unlike provisioning (where it only degrades evidence), the build fails
-  outright, so build-fs requires the worker to run as root, use `qemu:///session`, or hold
-  virtlogd group read. A `build-fs` preflight fails fast with that remediation before the boot.
+- **Console readability (ADR-0223) — handled like provisioning, not a precondition.** The
+  completion handshake reads the serial `<log>`. The build path **pre-touches** the console log
+  (worker-owned `0644`, `mkdir -p`) before starting the domain, exactly as the System provision
+  path does (`storage._prepare_console_log`): with `<log append="off">` virtlogd truncates the
+  existing worker-owned file in place, so a **non-root** `qemu:///system` worker reads it back
+  fine — the customization boot works on the same deployments provisioning works on, with no
+  "run as root" requirement, and the `/var/lib/kdive/console` dir is guaranteed to exist on a
+  never-provisioned build host.
 - **Network-disable bases** are unsupported on the boot path: the base must be cloud-init-enabled
   with no `network:{config:disabled}` drop-in. The injected `99-kdive.cfg` is the primary network
   config and `/etc/cloud/cloud-init.disabled` is removed offline pre-boot; shipped Fedora rows
