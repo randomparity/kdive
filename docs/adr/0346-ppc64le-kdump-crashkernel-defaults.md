@@ -124,6 +124,12 @@ Residual risk is bounded and accepted for this issue:
 - `depmod -b <tmpdir>` needs no elevated privilege; it only reads the temp tree and writes its
   index files there. The worker runs as root for pre-existing reasons (libvirt, libguestfs,
   staging under `/var/lib/kdive`), so this path inherits root but does not *require* it.
+- The one attacker-influenced token reaching the root `depmod` argument (and the guest
+  `/lib/modules/<version>` paths) — the kernel release parsed from the tar's
+  `lib/modules/<version>/` member — is format-validated at the parse site (`_validate_release`:
+  leading alphanumeric, then `[A-Za-z0-9._+-]`, bounded length), so a `depmod` option like `-n`, a
+  path fragment, whitespace, or a shell metacharacter is rejected `CONFIGURATION_ERROR` rather than
+  passed on (subprocess also uses list args, so there is no shell in any case).
 
 **Deferred hardening (not done here):** running the extraction + `depmod` as a dropped-privilege
 user would shrink the exposure to non-root. That is a worker-wide privilege-model change (the

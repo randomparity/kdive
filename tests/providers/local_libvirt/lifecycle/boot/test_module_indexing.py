@@ -76,6 +76,22 @@ def test_index_modules_tar_skips_unsafe_build_symlink(tmp_path: Path) -> None:
     assert f"lib/modules/{_VERSION}/modules.dep" in names
 
 
+def test_validate_release_accepts_a_real_ppc64le_release() -> None:
+    assert gkw._validate_release("6.19.10-300.fc44.ppc64le") == "6.19.10-300.fc44.ppc64le"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["-n", "..", "a;b", "a b", "/etc/passwd", "foo/../bar", "", "x" * 200, "$(id)"],
+)
+def test_validate_release_rejects_hostile_names(bad: str) -> None:
+    # The release is parsed from a semi-trusted tar and reaches a root depmod arg + guest paths, so
+    # a depmod option (-n), a path fragment, whitespace, or a shell metachar is rejected (#1148).
+    with pytest.raises(CategorizedError) as exc:
+        gkw._validate_release(bad)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
 def test_index_modules_tar_rejects_a_traversal_link(tmp_path: Path) -> None:
     # A path-traversal symlink (escaping the destination) is hostile — a real module tree never has
     # one — so it is rejected (CONFIGURATION_ERROR), not silently skipped like an absolute

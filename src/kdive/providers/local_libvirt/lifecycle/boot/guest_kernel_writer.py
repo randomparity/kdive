@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 import subprocess
 import tarfile
 import tempfile
@@ -13,6 +14,30 @@ from typing import Protocol, cast
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 _log = logging.getLogger(__name__)
+
+# A kernel release (uname -r), e.g. 6.19.10-300.fc44.ppc64le: leading alnum then alnum/./_/+/-,
+# bounded length. Validated because this token is parsed from a semi-trusted uploaded tar and then
+# reaches a root host `depmod -b <tmp> <version>` arg and the guest `/lib/modules/<version>` paths;
+# rejecting a leading '-' or a shell/path-hostile char closes that at the source (#1148 review).
+_RELEASE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}")
+
+
+def _validate_release(version: str) -> str:
+    """Return ``version`` iff it is a well-formed kernel release, else raise a config error.
+
+    The release is parsed from the uploaded modules tar's ``lib/modules/<version>/`` path and flows
+    into a root host ``depmod`` argument and guest paths, so an ill-formed value (a ``depmod``
+    option like ``-n``, a path fragment, whitespace, a shell metacharacter) is rejected here rather
+    than passed on.
+    """
+    if not _RELEASE_RE.fullmatch(version):
+        raise CategorizedError(
+            "modules tarball kernel version is not a valid release string",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"version": version[:64]},
+        )
+    return version
+
 
 _MODULES_ROOT = "/lib/modules"
 _BOOT_ROOT = "/boot"
@@ -362,7 +387,7 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
                     if normalized.startswith(prefix):
                         version = normalized[len(prefix) :].split("/", 1)[0]
                         if version:
-                            return version
+                            return _validate_release(version)
         except (OSError, tarfile.TarError) as exc:
             raise _RealGuestKernelWriter._io_failure(
                 "reading the modules tarball version", overlay, exc
