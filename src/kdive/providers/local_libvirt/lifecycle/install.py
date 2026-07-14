@@ -7,7 +7,7 @@ domain (`kdive-{system_id}`, minted by the provisioning plane, ADR-0025):
   (and optionally an initrd) to a **per-Run** host-local path
   (`{staging_root}/{system_id}/{run_id}/{kernel[,initrd]}`) via a temp-then-rename fetch.
   The kdump capture prerequisite check fires only for `method=CaptureMethod.KDUMP`; non-kdump
-  boots skip it. When `initrd_ref` is ``None`` (e.g. a bzImage with embedded initramfs) no
+  boots skip it. When `initrd_ref` is ``None`` (e.g. an embedded-initramfs kernel) no
   initrd is fetched and no `<initrd>` element is emitted. `defineXML`s the domain with a
   direct-kernel `<os>` (`<kernel>`/[`<initrd>`]/`<cmdline>`). The `<os>` is built with
   `xml.etree.ElementTree` (no string interpolation), so a `cmdline` value cannot inject XML.
@@ -256,8 +256,8 @@ class LocalLibvirtInstaller:
         install fetches it, extracts ``boot/vmlinuz`` host-side to ``staging/kernel`` for the
         direct-kernel ``<kernel>`` element, and — when the boot is kdump or carries debuginfo —
         repacks the tar's ``lib/modules/`` subtree and feeds it to the libguestfs injector. The
-        initrd fetch and ``<initrd>`` element are omitted when ``initrd_ref`` is ``None`` (e.g. a
-        bzImage with an embedded initramfs). The kdump preflight is gated on
+        initrd fetch and ``<initrd>`` element are omitted when ``initrd_ref`` is ``None`` (e.g. an
+        embedded-initramfs kernel). The kdump preflight is gated on
         ``method == CaptureMethod.KDUMP`` — non-kdump boots do not require kdump prerequisites.
 
         Raises:

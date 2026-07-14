@@ -56,6 +56,15 @@ _INITRD_REF = "local/runs/22222222-2222-2222-2222-222222222222/initrd"
 _CMDLINE = "console=ttyS0 crashkernel=256M"
 _MODULES_VERSION = "6.9.0"
 
+# Arch-varying boot members for the byte-agnostic install path (#1146). x86 is the default so
+# every existing test stays byte-identical; ppc64le is an ELF64-LE header pinned to EM_PPC64 at
+# offset 0x12 (the shape a validated ppc64le upload carries, ADR-0343) + an arch-suffixed version.
+_X86_BOOT_MEMBER = b"bzImage-bytes"
+_PPC64LE_BOOT_MEMBER = (
+    b"\x7fELF\x02\x01" + b"\x00" * 12 + (21).to_bytes(2, "little") + b"ppc64le-vm"
+)
+_PPC64LE_MODULES_VERSION = "6.19.10-300.fc44.ppc64le"
+
 
 def _tar_add(tar: tarfile.TarFile, name: str, data: bytes) -> None:
     info = tarfile.TarInfo(name)
@@ -64,12 +73,19 @@ def _tar_add(tar: tarfile.TarFile, name: str, data: bytes) -> None:
 
 
 def _combined_kernel_tar_bytes(
-    *, with_modules: bool = True, version: str = _MODULES_VERSION
+    *,
+    with_modules: bool = True,
+    version: str = _MODULES_VERSION,
+    boot_bytes: bytes = _X86_BOOT_MEMBER,
 ) -> bytes:
-    """The unified `kernel` artifact: gzip tar of boot/vmlinuz + (optionally) lib/modules/<ver>/."""
+    """The unified `kernel` artifact: gzip tar of boot/vmlinuz + (optionally) lib/modules/<ver>/.
+
+    ``boot_bytes`` is the raw ``boot/vmlinuz`` payload — a bzImage blob by default, or an ELF for a
+    ppc64le bundle (#1146). Extraction is byte-agnostic, so the payload is opaque to the tar shape.
+    """
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        _tar_add(tar, "boot/vmlinuz", b"bzImage-bytes")
+        _tar_add(tar, "boot/vmlinuz", boot_bytes)
         if with_modules:
             _tar_add(tar, f"lib/modules/{version}/modules.dep", b"")
             _tar_add(tar, f"lib/modules/{version}/kernel/drivers/virtio_blk.ko", b"module-bytes")
@@ -97,11 +113,17 @@ class _Fetch:
     calls: list[tuple[str, Path]] = field(default_factory=list)
     fail: bool = False
     with_modules: bool = True
+    boot_bytes: bytes = _X86_BOOT_MEMBER
+    version: str = _MODULES_VERSION
 
     def __call__(self, ref: str, dest: Path) -> None:
         self.calls.append((ref, dest))
         tmp = dest.with_suffix(dest.suffix + ".part")
-        tmp.write_bytes(_combined_kernel_tar_bytes(with_modules=self.with_modules))
+        tmp.write_bytes(
+            _combined_kernel_tar_bytes(
+                with_modules=self.with_modules, version=self.version, boot_bytes=self.boot_bytes
+            )
+        )
         if self.fail:
             raise CategorizedError("synthetic fetch failure", category=ErrorCategory.STALE_HANDLE)
         tmp.rename(dest)
@@ -135,6 +157,7 @@ class _FakeKernelWriter:
     kernel_image: Path | None = None
     modules_tar: Path | None = None
     modules_tar_existed: bool = False
+    modules_version: str | None = None
     vmlinux: Path | None = None
 
     def inject(
@@ -144,6 +167,9 @@ class _FakeKernelWriter:
         self.kernel_image = kernel_image
         self.modules_tar = modules_tar
         self.modules_tar_existed = modules_tar.exists()  # captured before install reclaims it
+        if self.modules_tar_existed:
+            # Reuse the production parser the real writer keys depmod off, so the fake cannot drift.
+            self.modules_version = _RealGuestKernelWriter._read_release(modules_tar, "overlay")
         self.vmlinux = vmlinux
         if self.fail:
             raise CategorizedError(
@@ -515,6 +541,50 @@ def test_install_kdump_with_debuginfo_fetches_and_stages_vmlinux(tmp_path: Path)
     assert writer.vmlinux == tmp_path / str(_SYS) / str(_RUN) / "vmlinux"
     # force-off precedes the debuginfo fetch which precedes the inject.
     assert events.index("destroy") < events.index("fetch") < events.index("inject")
+
+
+@pytest.mark.parametrize(
+    ("boot_member", "version", "cmdline"),
+    [
+        (_X86_BOOT_MEMBER, _MODULES_VERSION, "console=ttyS0 root=/dev/vda crashkernel=256M"),
+        (
+            _PPC64LE_BOOT_MEMBER,
+            _PPC64LE_MODULES_VERSION,
+            "console=hvc0 root=/dev/vda crashkernel=512M",
+        ),
+    ],
+    ids=["x86_64", "ppc64le"],
+)
+def test_install_stages_the_bundle_through_inject_and_render(
+    boot_member: bytes, version: str, cmdline: str, tmp_path: Path
+) -> None:
+    # #1146: the install path is byte-agnostic — a ppc64le ELF boot/vmlinuz and a .ppc64le module
+    # version flow through extract → repack → inject → <os> render exactly like an x86 bzImage.
+    # This asserts the ORCHESTRATION (which bytes land where, the rendered <os>) with the fake
+    # writer; the real writer's in-guest depmod on a ppc64le overlay (libguestfs cross-arch) is a
+    # live-only question proven in the #1146 live_stack proof, not here.
+    events: list[str] = []
+    conn = _conn_with_existing(events=events)
+    writer = _FakeKernelWriter(events)
+    fetch = _Fetch(boot_bytes=boot_member, version=version)
+    inst = _install(conn=conn, fetch=fetch, staging_root=tmp_path, kernel_writer=writer)
+
+    inst.install(_request(method=CaptureMethod.KDUMP, cmdline=cmdline, initrd_ref=_INITRD_REF))
+
+    # The staged <kernel> file is the boot member verbatim — extraction reads no magic.
+    assert writer.injected
+    assert writer.kernel_image is not None
+    assert writer.kernel_image.read_bytes() == boot_member
+    # The repacked modules tar carries the version verbatim (the .ppc64le suffix is preserved).
+    assert writer.modules_version == version
+    # Render: <kernel>/<initrd> at the per-Run staged path, <cmdline> passed through unchanged.
+    domain = ET.fromstring(conn.defined_xml[0])  # noqa: S314 - self-rendered, trusted
+    os_el = domain.find("os")
+    assert os_el is not None
+    kernel, initrd, cmdline_el = os_el.find("kernel"), os_el.find("initrd"), os_el.find("cmdline")
+    assert kernel is not None and kernel.text is not None and f"{_SYS}/{_RUN}" in kernel.text
+    assert initrd is not None and initrd.text is not None and f"{_SYS}/{_RUN}" in initrd.text
+    assert cmdline_el is not None and cmdline_el.text == cmdline
 
 
 def test_install_host_dump_with_debuginfo_injects_vmlinux(tmp_path: Path) -> None:
