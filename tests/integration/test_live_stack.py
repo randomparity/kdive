@@ -29,6 +29,7 @@ import asyncio
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -73,6 +74,12 @@ _FAMILY_IMAGE_ENV = {"debian": "KDIVE_GUEST_IMAGE_DEBIAN", "rhel": "KDIVE_GUEST_
 # emulation on the x86_64 host (qemu-system-ppc64), so it also gates on that emulator being present.
 _PPC64LE_IMAGE_ENV = "KDIVE_GUEST_IMAGE_PPC64LE"
 _PPC64LE_EMULATOR = "qemu-system-ppc64"
+# A Fedora ppc64le guest under TCG boots far slower than a native KVM guest — the first boot
+# runs the SELinux relabel and reboots, then the second boot brings up cloud-init networking and
+# sshd (~several minutes wall-clock on the x86_64 host). Poll the reachability probe under a
+# generous deadline rather than the fast KVM-tuned authorize_ssh_key pre-flight (#1144).
+_PPC64LE_REACHABLE_DEADLINE_S = 900.0
+_PPC64LE_REACHABLE_POLL_S = 20.0
 # A throwaway ed25519 public key (public half only; KDIVE never needs the private key to append it).
 # Fixed is fine: authorize_ssh_key dedups on the key fingerprint, so a re-run is idempotent.
 _REACHABILITY_PUBKEY = (
@@ -847,12 +854,18 @@ def test_ppc64le_guest_is_ssh_reachable_over_the_wire() -> None:
 
     allocate → provision (``arch=ppc64le``: admission persists ``accel=tcg``, ADR-0339; the
     provisioner renders a pseries/qemu/emulator domain, ADR-0340; the boot handler applies the
-    TCG-scaled deadline, ADR-0341) → the rootfs's own baseline ppc64le kernel direct-boots under
-    QEMU/SLOF (ADR-0272) and reaches ``ready`` — which means the ``kdive-ready`` marker landed on
-    the configured console (``hvc0``/spapr-vty, not ``ttyS0``) → ``systems.ssh_info`` returns a
-    ``worker_loopback`` endpoint → ``authorize_ssh_key`` drains *succeeded* (the load-bearing SSH
-    reachability proof). Retires PR #1070's unverified ``pin_nic_slot=False`` / ``hvc0`` pseries
-    defaults.
+    TCG-scaled deadline, ADR-0341, and direct-kernel-boots the rootfs's own baseline ppc64le
+    kernel under QEMU/SLOF, ADR-0272) → the System reaches ``ready`` (the domain is defined+started;
+    the baseline boot is optimistic, ADR-0272) → poll ``systems.check_ssh_reachable`` until the
+    guest answers an SSH banner. That reachable verdict is the load-bearing proof: it means the
+    ppc64le kernel booted to userspace under TCG (no ISA/CPU fault), the virtio NIC leased its DHCP
+    address without a pinned PCI slot (retiring PR #1070's ``pin_nic_slot=False``), and sshd is up.
+
+    The ``kdive-ready`` marker on ``hvc0`` (spapr-vty, retiring PR #1070's ``console_device``) is
+    proven separately in the committed boot-console record
+    (``docs/design/2026-07-13-ppc64le-tcg-boot-proof-record-1144.md``): reaching ``ready`` here is
+    optimistic (ADR-0272 provision does not await the console marker), so this test asserts SSH
+    reachability, not the marker.
 
     Vehicle note: ``live_stack`` is the repo's only end-to-end provision→boot path; this is a
     live-VM-class proof under TCG. The distinct ``live_vm``/``live_vm_tcg`` marker split is
@@ -912,17 +925,28 @@ def test_ppc64le_guest_is_ssh_reachable_over_the_wire() -> None:
                     assert ssh["host"] and isinstance(ssh["port"], int), (
                         f"ssh_info returned no endpoint on a ready System: {ssh!r}"
                     )
-                async with phase("ppc64le:authorize_ssh_key"):
-                    env = ok(
-                        await scalar(
-                            op,
-                            "systems.authorize_ssh_key",
-                            system_id=system_id,
-                            public_key=_REACHABILITY_PUBKEY,
-                        ),
-                        "ppc64le:authorize_ssh_key",
-                    )
-                    await drain_job(op, "ppc64le:authorize_ssh_key", env.object_id)
+                async with phase("ppc64le:await_ssh_reachable"):
+                    # A reachable verdict is the load-bearing proof: an SSH banner from the guest
+                    # means the ppc64le kernel booted end-to-end under TCG, the virtio NIC leased
+                    # its DHCP address without a pinned PCI slot (pin_nic_slot=False), and sshd is
+                    # up. authorize_ssh_key's pre-flight fails a not-yet-booted guest terminally, so
+                    # the slow TCG boot is spanned by polling the read-only reachability probe
+                    # (which succeeds whether reachable or not, carrying the verdict inline) under a
+                    # generous deadline.
+                    deadline = time.monotonic() + _PPC64LE_REACHABLE_DEADLINE_S
+                    while True:
+                        probe = ok(
+                            await scalar(op, "systems.check_ssh_reachable", system_id=system_id),
+                            "ppc64le:await_ssh_reachable",
+                        )
+                        done = await drain_job(op, "ppc64le:await_ssh_reachable", probe.object_id)
+                        verdict = json.loads(done.refs["result"])
+                        if verdict.get("reachable"):
+                            break
+                        assert time.monotonic() < deadline, (
+                            f"guest never became SSH-reachable under TCG: {verdict.get('detail')!r}"
+                        )
+                        await asyncio.sleep(_PPC64LE_REACHABLE_POLL_S)
             finally:
                 if allocation_id:
                     await scalar(op, "allocations.release", allocation_id=allocation_id)

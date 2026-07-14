@@ -186,8 +186,11 @@ Flagged, not asserted; each is retired inside the named sub-issue:
   (issue 12).
 - SLOF direct-kernel boot of the uploaded ELF payload as packaged by the contract
   (issue 7).
-- `pin_nic_slot=False` and other pseries runtime defaults from PR #1070 that have never
-  seen a live boot (issue 5).
+- ~~`pin_nic_slot=False` and other pseries runtime defaults from PR #1070 that have never
+  seen a live boot (issue 5).~~ **Retired in #1144** — a live TCG boot on the x86_64 host
+  proved `pin_nic_slot=False`, `console_device="hvc0"`, `machine="pseries"`, and the
+  no-`<cpu>`-for-TCG rendering (POWER9 default, no ISA SIGILL). See
+  `2026-07-13-ppc64le-tcg-boot-proof-record-1144.md`.
 
 ## Out of scope
 

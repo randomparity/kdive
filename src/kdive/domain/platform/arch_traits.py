@@ -28,10 +28,13 @@ class ArchTraits:
             cmdline token and as ``/dev/<x>`` for the readiness marker. ``ttyS0`` on x86; on
             pseries there is no ``ttyS0`` — the serial console is the hypervisor virtual
             console ``hvc0`` (spapr-vty), so a ``console=ttyS0`` guest never emits the marker.
+            ``hvc0`` was live-proven under TCG in #1144 — the ``kdive-ready`` marker was observed
+            on ``hvc0``.
         pin_nic_slot: Whether the raw ``-device virtio-net-pci`` SSH NIC must pin an explicit
             PCI address. The q35 PCIe root complex needs it (``addr=0x10``) to avoid colliding
             with libvirt's own auto-assigned slots; the pseries spapr-pci-host-bridge assigns
-            addresses itself, so a pinned slot is left off there.
+            addresses itself, so a pinned slot is left off there. ``False`` on pseries was
+            live-proven under TCG in #1144 — SSH reached the guest over the unpinned virtio NIC.
         kvm_cpu_mode: The ``<cpu mode=…>`` a **KVM** domain pins (ADR-0340). ``host-passthrough``
             on x86 (ADR-0294: the QEMU default ``qemu64`` is x86-64-v1 but EL9 glibc requires
             x86-64-v2, so a wrong model aborts PID 1); ``host-model`` on pseries. A TCG domain
