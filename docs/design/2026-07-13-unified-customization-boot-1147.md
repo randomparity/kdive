@@ -65,16 +65,21 @@ A family stops emitting a flat `virt-customize` argv and instead emits **one ord
 typed customization steps** — the single source of truth for *what* the customization does.
 Two renderers consume that list, differing only in *where* each step runs:
 
-Step kinds (initial set, sufficient for both families):
+Step kinds (initial set, sufficient for both families). Two "write content" kinds preserve the
+two argv renderings that exist today, so the debian argv stays **byte-identical**; unit-enables
+are just `RunCommand('systemctl enable …')` (no separate kind):
 
 | Step | Meaning | Offline-injector target | Argv-renderer target |
 |------|---------|-------------------------|----------------------|
 | `Mkdir(path)` | create a directory | guestfish `mkdir-p` | `--mkdir` |
-| `WriteFile(path, content, mode?)` | write file content | guestfish `write`/`chmod` | `--write` (+`--chmod`) |
-| `UploadFile(host_src, dest, mode?)` | upload a host file | guestfish `upload`/`chmod` | `--upload` (+`--chmod`) |
+| `WriteFile(path, content)` | write inline content | guestfish `write` | `--write path:content` |
+| `StageFile(path, content)` | write content via a host tempfile | guestfish `write` | staged `--upload <tmp>:path` |
+| `UploadFile(host_src, dest, mode?)` | upload a host file | guestfish `upload` (+`chmod`) | `--upload host:dest` (+`--chmod`) |
 | `InstallPackages(names)` | install packages | firstboot: `dnf -y install …` | `--install a,b,c` |
-| `RunCommand(sh)` | run a shell command | firstboot: the command | `--run-command` |
-| `EnableUnit(name)` | enable a systemd unit | firstboot: `systemctl enable` | `--run-command 'systemctl enable …'` |
+| `RunCommand(sh)` | run a shell command | firstboot: the command | `--run-command sh` |
+
+The offline injector collapses `WriteFile`/`StageFile` to one guestfish `write` (the staged-vs-
+inline distinction only matters to the argv renderer reproducing today's exact bytes).
 
 - **Offline injector (rhel, new path).** Applies `Mkdir`/`WriteFile`/`UploadFile` **now**,
   file-level via guestfish (arch-safe — no guest execution). Collects
