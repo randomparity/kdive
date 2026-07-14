@@ -26,11 +26,21 @@ _VALID: dict[str, Any] = {
 
 
 def _profile(
-    *, gdbstub: bool = False, preserve_on_crash: bool = False, crashkernel: str | None = None
+    *,
+    gdbstub: bool = False,
+    preserve_on_crash: bool = False,
+    crashkernel: str | None = None,
+    fadump: bool = False,
+    arch: str = "x86_64",
 ) -> ProvisioningProfile:
     data = copy.deepcopy(_VALID)
+    data["arch"] = arch
     section = data["provider"]["local-libvirt"]
-    section["debug"] = {"gdbstub": gdbstub, "preserve_on_crash": preserve_on_crash}
+    section["debug"] = {
+        "gdbstub": gdbstub,
+        "preserve_on_crash": preserve_on_crash,
+        "fadump": fadump,
+    }
     if crashkernel is not None:
         section["crashkernel"] = crashkernel
     return ProvisioningProfile.parse(data)
@@ -54,3 +64,21 @@ def test_host_dump_provisioned_tracks_preserve_on_crash() -> None:
     policy = LocalLibvirtProfilePolicy()
     assert policy.host_dump_provisioned(_profile(gdbstub=True, preserve_on_crash=True)) is True
     assert policy.host_dump_provisioned(_profile(gdbstub=True, preserve_on_crash=False)) is False
+
+
+def test_fadump_provisioned_tracks_flag() -> None:
+    policy = LocalLibvirtProfilePolicy()
+    fadump = _profile(fadump=True, crashkernel="512M", arch="ppc64le")
+    assert policy.fadump_provisioned(fadump) is True
+    assert policy.fadump_provisioned(_profile(crashkernel="512M", arch="ppc64le")) is False
+
+
+def test_capture_method_fadump_when_flag_and_reservation_set() -> None:
+    from kdive.domain.capture import CaptureMethod
+
+    policy = LocalLibvirtProfilePolicy()
+    fadump = _profile(fadump=True, crashkernel="512M", arch="ppc64le")
+    assert policy.capture_method(fadump) is CaptureMethod.FADUMP
+    # crashkernel without the fadump flag stays KDUMP.
+    kdump = _profile(crashkernel="512M", arch="ppc64le")
+    assert policy.capture_method(kdump) is CaptureMethod.KDUMP
