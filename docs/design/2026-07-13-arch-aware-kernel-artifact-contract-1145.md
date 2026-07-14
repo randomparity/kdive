@@ -55,9 +55,13 @@ with a default is a backward-compatible v1 document. Validation reuses the exist
 `CONFIGURATION_ERROR` and scrubs submitted values; an unknown arch is rejected at
 `runs.create`, **before** any upload round-trip.
 
-`SUPPORTED_ARCHES` stays the single source of truth (a `pydantic.field_validator`, not a
-duplicated `Literal`), so a future arch is one `arch_traits` row. The `Field` description
-names the allowed values and the default for agent discoverability.
+`SUPPORTED_ARCHES` stays the single source of truth for the *allowed* set (a
+`pydantic.field_validator`, not a duplicated `Literal`); the `Field` description names the
+allowed values and the default for agent discoverability. Enabling a future arch is two
+coupled rows — an `arch_traits._TRAITS` row (which extends `SUPPORTED_ARCHES`) **and** a
+`BOOT_MEMBER_FORMATS` row (§2). Those two tables are kept from drifting by an invariant
+(§2, `set(BOOT_MEMBER_FORMATS) == SUPPORTED_ARCHES`), so an arch cannot be create-accepted
+yet finalize-rejected.
 
 `dump_build_profile` serializes `arch` verbatim; the Run's persisted `build_profile` jsonb
 carries it. No migration — the column is opaque jsonb and an absent `arch` re-reads as
@@ -103,8 +107,20 @@ generalization of today's single-pin `_member_is_bzimage`.
   `arch` and match the member bytes against `BOOT_MEMBER_FORMATS[arch]`. For `x86_64` this
   is byte-identical to today.
 - An `arch` not in `BOOT_MEMBER_FORMATS` fails fast `CONFIGURATION_ERROR` (the
-  `arch_traits()` rule — never a silent x86 fallback). Unreachable in the normal path (the
-  profile-parse gate already rejected it), but the validator does not trust its caller.
+  `arch_traits()` rule — never a silent x86 fallback). This is a defensive backstop the
+  validator does not trust its caller to avoid; the coverage invariant below makes it
+  genuinely unreachable for any `SUPPORTED_ARCHES` member, so it fires only for a caller that
+  fabricates an out-of-vocabulary arch.
+
+**Coverage invariant (no create-accepted / finalize-rejected trap).** `BOOT_MEMBER_FORMATS`
+is a second hand-maintained table, independent of `arch_traits._TRAITS` (from which
+`SUPPORTED_ARCHES` derives). Left uncoupled, a future arch added as "one `arch_traits` row"
+would pass the create-time profile gate (∈ `SUPPORTED_ARCHES`) yet lack a boot-format entry,
+so the validator's fail-fast would fire only at `complete_build` — *after* a full upload
+round-trip, the exact expensive post-upload rejection this design removes. A unit test
+asserts `set(BOOT_MEMBER_FORMATS) == SUPPORTED_ARCHES` (every provisionable arch is
+uploadable and vice versa), failing CI the moment the two tables drift. So the profile-parse
+gate and the payload-format gate always agree on the arch vocabulary.
 - A boot member that does not match the declared arch's format is rejected `BUILD_FAILURE`
   with an arch-naming message (e.g. `kernel combined tar boot/vmlinuz is not a ppc64le ELF
   kernel`). This is the "arch mismatch vs profile" rejection: an x86 bzImage (or any
@@ -210,6 +226,9 @@ Runs to be drained; that is out of scope (the epic only *adds* arches).
    `vmlinux`) under `arch: ppc64le` — the `e_machine` check, not merely the ELF prefix.
 4. **Unknown arch rejected early.** `runs.create` with `build_profile.arch` ∉
    `SUPPORTED_ARCHES` is rejected `CONFIGURATION_ERROR` at parse, before any upload.
+4a. **Table-coverage invariant.** A unit test asserts
+   `set(BOOT_MEMBER_FORMATS) == SUPPORTED_ARCHES`, so a future arch cannot be create-accepted
+   yet finalize-rejected; adding an arch to one table without the other fails CI.
 5. **Shape-scan bound holds.** The 128 MiB gzip-bomb cap is unchanged and still bounds the
    ELF payload's decompressed scan; a gzip bomb under `arch: ppc64le` is still stopped. When
    the boot member is seen **and the cap was reached** before any `lib/modules` header (e.g.

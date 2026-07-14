@@ -41,7 +41,10 @@ behavior is byte-identical. `schema_version` stays `1` — an additive optional 
 default is a backward-compatible v1 document. An unknown arch is rejected at `runs.create`
 (profile parse), **before** any upload round-trip, mapped to `CONFIGURATION_ERROR` by the
 existing `BuildProfile.parse` boundary. `SUPPORTED_ARCHES` remains the single source of
-truth for the allowed set — adding an arch is one `arch_traits` row, not an edit here.
+truth for the allowed set. Enabling a future arch is two coupled rows — an
+`arch_traits._TRAITS` row (which extends `SUPPORTED_ARCHES`) **and** a `BOOT_MEMBER_FORMATS`
+row (below); a unit-test invariant `set(BOOT_MEMBER_FORMATS) == SUPPORTED_ARCHES` fails CI if
+they drift, so an arch can never be create-accepted yet finalize-rejected.
 
 **Payload check is arch-keyed.** `validate_external_artifacts` gains an `arch: str`
 parameter, threaded from `run.build_profile.arch` by `runs.complete_build`. The
@@ -103,7 +106,9 @@ boot-member table plus a stripped-ELF ppc64le `tar` recipe).
   `format` → `formats_by_arch`); its snapshot/no-drift test is updated. Agents that read the
   boot member's format move from `layout[…].format` to `layout[…].formats_by_arch[arch]`.
 - An unknown/unsupported arch is rejected at `runs.create`, before any upload — cheaper
-  than a post-upload rejection.
+  than a post-upload rejection. The `set(BOOT_MEMBER_FORMATS) == SUPPORTED_ARCHES` invariant
+  guarantees this holds for every provisionable arch (no create-accepted / finalize-rejected
+  gap when a future arch is added).
 - `runs.complete_build` on an unbound Run works unchanged: the arch comes from the build
   profile, never from a (possibly absent) System.
 - The advertised upload contract (`expected_uploads`) and the docs name both arches, so a
