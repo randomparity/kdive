@@ -24,8 +24,11 @@ def extract_boot_vmlinuz(combined_tar: Path, dest: Path) -> None:
     """Extract ``boot/vmlinuz`` from the combined kernel tar to ``dest``.
 
     The unified ``kernel`` artifact is a gzip tar of ``boot/vmlinuz`` + ``lib/modules/<ver>/``
-    (ADR-0234). libvirt's direct-kernel ``<kernel>`` element needs a raw bzImage path, so the
-    bzImage is extracted host-side via temp-then-rename.
+    (ADR-0234). libvirt's direct-kernel ``<kernel>`` element needs a raw kernel-image path — a
+    bzImage on x86_64, an ELF ``vmlinux`` on ppc64le (powerpc has no bzImage; ADR-0343/0344) — so
+    whatever bytes the ``boot/vmlinuz`` member carries are extracted host-side via temp-then-rename.
+    The extraction is arch-opaque by design: the arch was already validated at upload (ADR-0343),
+    so this reads no magic and copies the member verbatim regardless of arch.
     """
     try:
         with tarfile.open(combined_tar, "r:gz") as archive:
