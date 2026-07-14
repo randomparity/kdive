@@ -92,11 +92,18 @@ generalized to "the arch default was in force".
 ### 2. Cross-arch module indexing: host-side `depmod` (unblocks kdump capture)
 
 `depmod` is arch-neutral **as a tool** — it parses each module's ELF header and `.modinfo`,
-resolves inter-module symbol dependencies, and writes `modules.dep(.bin)` in a fixed
-byte-order index format; it never *executes* module code. The cross-arch failure exists only
-because libguestfs `command()` chroots into the guest and runs the *guest's* `depmod` binary.
-Running the **host's** `depmod` against the extracted module tree with `-b <basedir>` indexes a
-ppc64le tree correctly under an x86_64 host.
+resolves inter-module symbol dependencies, and writes `modules.dep(.bin)`; it never *executes*
+module code. The cross-arch failure exists only because libguestfs `command()` chroots into the
+guest and runs the *guest's* `depmod` binary. Running the **host's** `depmod` against the
+extracted module tree with `-b <basedir>` indexes a ppc64le tree correctly under an x86_64 host.
+Two facts make the produced index cross-arch-readable, so this is evidenced, not assumed:
+(a) **ppc64le and x86_64 are both little-endian**, so no byte-swap arises in the plain-text
+`modules.dep`/`modules.alias`; and (b) kmod writes the binary index files
+(`modules.dep.bin`/`modules.alias.bin`) in network (big-endian) order regardless of host and
+reads them back with `ntohl`, so the `.bin` index is host-endianness-independent by construction.
+Residual caveat (named, not a blocker within current Fedora): a host `depmod` far *newer* than the
+guest kmod could emit an index-format version an old guest kmod cannot read — the live proof (§4)
+confirms the guest actually loads the host-indexed modules, closing this.
 
 `_extract_and_index` is restructured to index host-side and inject the result, replacing the
 in-guest `depmod` for **every** arch (not an arch-conditional branch — one path, arch-neutral,
@@ -158,19 +165,41 @@ Known-unverified item with a reproduced fact.
 
 A documented `live_stack` run on the x86_64 host, driven over the real MCP HTTP spine (mirroring
 #1146's driver and proof-record format), skipping cleanly without `qemu-system-ppc64` /
-`KDIVE_GUEST_IMAGE_PPC64LE`:
+`KDIVE_GUEST_IMAGE_PPC64LE`.
+
+**Preconditions the proof must establish first (named, not assumed):**
+- **kdump *userspace* in the rootfs.** The capture is guest-driven (#115/#654): the guest's own
+  `kdumpctl`/`kexec-tools`, an enabled `kdump.service`, and the dracut kdump module must be
+  present in the ppc64le rootfs — the uploaded bundle supplies only the capture *kernel + modules*
+  (and ADR-0318's `crash_capture_refusal` checks only the uploaded kernel *config*). #1146's
+  scaffold is a minimal file-injection image (readiness unit + SSH) with **no** kdump tooling, so
+  the proof first prepares/confirms a kdump-enabled ppc64le rootfs (mirroring the x86 kdive-ready
+  kdump config-fragment, PR#330: `kexec-tools` installed, `kdump.service` enabled, kdump dracut
+  module present). The proof record states this precondition was met; if it cannot be met, that is
+  a rootfs gap to close *before* the capture run, not an indeterminate capture verdict.
+- **Guest RAM ≥ 2 GB.** A 512M reservation is only honored above the distro memory threshold and
+  must still leave a bootable first kernel; the ppc64le fixture must provision ≥2 GB. The proof
+  records the guest's total RAM alongside the confirmed reservation, so "reservation applied" is
+  falsifiable rather than silently skipped on an undersized guest.
+
+Then, over the spine:
 
 1. `allocate → provision(arch=ppc64le)` — admission persists `accel=tcg`; the pseries/qemu domain
-   boots the baseline rootfs to `ready`.
+   boots the kdump-enabled rootfs to `ready`.
 2. Package the guest's own kdump-capable baseline ppc64le kernel + its `lib/modules/<ver>/` as an
    ADR-0343 combined tar (`boot/vmlinuz` = the ELF, `lib/modules/<ver>/`) plus the matching
    `initrd`, sourced from the Fedora ppc64le scaffold #1144/#1146 already publish — no
    cross-compile toolchain. Upload both; `runs.complete_build`.
-3. `runs.install` **with the KDUMP method** (a profile `crashkernel` opt-in, or the per-install
-   `crashkernel` argument) → this **fires the module injection §2 unblocks**. Assert the install
-   step succeeds (the depmod fix is exercised end-to-end here: the ppc64le module tree is indexed
-   host-side and injected; `/lib/modules/<ver>/modules.dep` is present in-guest). Boot with the
-   **default** ppc64le crashkernel (512M) — the §1 default is live-exercised, not just unit-tested.
+3. `runs.install` on the **KDUMP-method** System. KDUMP is opted into via the **profile**
+   `crashkernel` token set to a **sentinel different from the arch default** (e.g. `256M`), with
+   **no per-install `crashkernel` argument** — because the profile token is only a *method signal*
+   (`capture_method`: `if section.crashkernel is not None`) and is never read as the reservation
+   *size*; only the per-install ADR-0300 argument or the arch default sizes the cmdline. Leaving
+   the per-install argument unset is what makes the **arch default (512M)** the size, distinct from
+   both the sentinel profile token and any per-install value — so observing `crashkernel=512M`
+   (not `256M`) in `/proc/cmdline` proves the *§1 arch default* sized the reservation. The install
+   **fires the module injection §2 unblocks**: assert the step succeeds and
+   `/lib/modules/<ver>/modules.dep` is present in-guest (the host-side depmod fix, end-to-end).
 4. `control.force_crash` (sysrq-c via the destructive-op gate) → the guest panics → its kdump
    kernel kexec-boots, runs makedumpfile, writes the vmcore → kdive's existing capture job
    harvests it (`capture_vmcore`, #115/#654).
@@ -180,9 +209,10 @@ A documented `live_stack` run on the x86_64 host, driven over the real MCP HTTP 
 
 **Discriminating attribution** (not a bare "capture succeeded"): the proof records the running
 domain's `<kernel>` at the per-Run staged path, a unique install cmdline token in the crashed
-guest's console, `crashkernel=512M` in the guest `/proc/cmdline` (the §1 default reached the
-kernel), and the vmcore's `EM_PPC64` machine — so the captured core is provably *this* ppc64le
-guest's, under the default reservation, via the install-plane KDUMP path.
+guest's console, `crashkernel=512M` (not the `256M` sentinel profile token) in the guest
+`/proc/cmdline` — proving the §1 *arch default*, not the profile/per-install value, sized the
+reservation — the guest's total RAM, and the vmcore's `EM_PPC64` machine — so the captured core is
+provably *this* ppc64le guest's, under the arch-default reservation, via the install-plane KDUMP path.
 
 **Falsifiable pre-registered signals** (named before the run, mirroring #1146): capture success =
 a non-empty `EM_PPC64` vmcore artifact retrieved **and** makedumpfile field output recorded. A
@@ -215,11 +245,14 @@ VMCOREINFO/fw_cfg verdict (§3) are written to
    live capture, whether a ppc64le kdump needs any `<features>` device emission, and adjusts
    `xml.py`/`arch_traits` only if the capture forces it (hypothesis: no change). The epic's
    "pseries fw_cfg/VMCOREINFO device behavior (issue 9)" item is retired.
-5. **Live capture recorded (blocking, discriminating).** A documented `live_stack` run
-   force-crashes a ppc64le guest under TCG on the x86_64 host, its kdump kernel captures a vmcore,
-   and the vmcore is retrieved through the existing pipeline with makedumpfile fields recorded;
-   the proof attributes the core to the install-plane KDUMP path at the default 512M reservation
-   (per-Run staged `<kernel>`, `crashkernel=512M` in `/proc/cmdline`, `EM_PPC64` core).
+5. **Live capture recorded (blocking, discriminating).** On a **kdump-enabled ppc64le rootfs**
+   (kexec-tools + kdump.service + dracut kdump module) with **≥2 GB guest RAM** (both recorded as
+   met preconditions), a documented `live_stack` run force-crashes a ppc64le guest under TCG on the
+   x86_64 host, its kdump kernel captures a vmcore, and the vmcore is retrieved through the existing
+   pipeline with makedumpfile fields recorded. The proof attributes the core to the install-plane
+   KDUMP path at the **arch-default** 512M reservation: per-Run staged `<kernel>`, `crashkernel=512M`
+   (not the `256M` sentinel profile token) in `/proc/cmdline`, recorded guest RAM, and an `EM_PPC64`
+   core.
 
 ## Scope / non-goals
 

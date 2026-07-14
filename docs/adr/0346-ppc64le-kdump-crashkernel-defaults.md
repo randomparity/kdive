@@ -91,11 +91,19 @@ behavior (issue 9)" item is retired with a reproduced fact.
 A documented `live_stack` run force-crashes a provisioned ppc64le guest under TCG on the x86_64
 host at the **default** 512M reservation; its kdump kernel captures a vmcore; the vmcore is
 retrieved through the existing pipeline (`capture_vmcore`) and its makedumpfile fields recorded.
-Discriminating attribution: the per-Run staged `<kernel>`, `crashkernel=512M` in the guest
-`/proc/cmdline`, and an `EM_PPC64` core prove the capture is *this* ppc64le guest's under the §1
-default via the §2-unblocked install path. Per the issue owner, there is **no CONSTRAINED
-fallback for the capture itself** — a failed capture is iterated to a definitive verdict, not
-shipped as indeterminate.
+
+Named preconditions the proof establishes first (not assumed): a **kdump-enabled ppc64le rootfs**
+(kexec-tools + `kdump.service` + dracut kdump module — the capture is guest-driven, and #1146's
+scaffold has none) and **≥2 GB guest RAM** (a 512M reservation is honored only above the distro
+threshold and must leave a bootable first kernel). KDUMP is opted into via the **profile**
+`crashkernel` token set to a sentinel *different* from the arch default (e.g. `256M`) with **no
+per-install argument** — the profile token is only a method signal, never the size — so observing
+`crashkernel=512M` (not `256M`) in the guest `/proc/cmdline` proves the *arch default*, not the
+profile/per-install value, sized the reservation. Discriminating attribution: that
+`/proc/cmdline`, the per-Run staged `<kernel>`, the recorded guest RAM, and an `EM_PPC64` core
+prove the capture is *this* ppc64le guest's under the §1 default via the §2-unblocked install
+path. Per the issue owner, there is **no CONSTRAINED fallback for the capture itself** — a failed
+capture is iterated to a definitive verdict, not shipped as indeterminate.
 
 ## Live-proof outcome (pending)
 
