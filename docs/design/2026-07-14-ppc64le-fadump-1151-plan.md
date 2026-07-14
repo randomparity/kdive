@@ -153,8 +153,10 @@ bound resource to gate against); load the Resource, and if
 QEMU 10.2 floor, the host, and a "re-run discovery if you recently upgraded QEMU" hint. Call it
 at the same two mint points the accel resolution uses (`_insert_defined_system`,
 `_insert_provisioning_system`), inside the existing `try/except CategorizedError ->
-_failure_from_error` wrap so a rejection consumes no capacity. Requires the parsed profile +
-the bound `profile_policy` at that point (both already in scope for accel resolution).
+_failure_from_error` wrap so a rejection consumes no capacity. It is a method on
+`SystemAdmission` (or takes `profile_policy` explicitly): it reads `self.profile_policy`
+(the admission service already holds it) and the parsed profile being admitted — **not** the
+accel-resolution path, which threads only `arch`.
 
 **Do (tests first):**
 1. `tests/services/systems/test_admission.py` (or the admission unit module): a fadump-opted
@@ -192,15 +194,17 @@ in-scope `CaptureMethod.KDUMP` site so FADUMP is handled consciously.
   methods.append(resolved.value)` so a fadump System reports `"fadump"` as an inert method.
 - `src/kdive/providers/local_libvirt/composition.py:158` — add `CaptureMethod.FADUMP` to the
   `capture_methods` frozenset.
-- `src/kdive/mcp/tools/catalog/resources.py` — `_VMCORE_METHODS` is in the vmcore handler (above);
-  in `_augment_with_capabilities` (the block at `:255-266`), after the static
-  `supported_capture_methods`, set `envelope.data["pseries_fadump"] =
-  runtime`… no — the per-host signal is on the **Resource**, not the runtime. Surface it from the
-  Resource's `capability_view.pseries_fadump()` where the resource row is in scope (read the
-  surrounding function; if the resource capabilities are not already threaded here, thread the
-  bool through, or add it where `guest_arches` is surfaced). If surfacing cleanly requires more
-  than a one-line add, record that and surface it in the nearest resource-description block that
-  already reads `capability_view`; do not force it into the runtime-only block.
+- `src/kdive/mcp/tools/catalog/resources.py` — **only** `_VMCORE_METHODS` in the vmcore
+  handler (above); `supported_capture_methods` in `_project_capabilities` (`:258-259`) picks up
+  `"fadump"` automatically from the runtime support set (Task 5 composition edit), no change
+  here. **No per-host `pseries_fadump` surfacing in `resources.get`** — verified this session:
+  `_project_capabilities(:246-266)` receives only `runtime` (the provider descriptor), not the
+  Resource row, so the per-host signal (on the Resource capabilities column) cannot be surfaced
+  there without threading resource state into a descriptor-only projection (a layer violation),
+  and it is **not an AC** (AC 3 requires the `pseries_fadump()` reader + the doctor signal, not
+  the `resources.get` description). The host fadump signal is exposed to agents/operators via
+  the doctor check (Task 7) and enforced at admission (Task 4); a provision that would not be
+  admitted fails fast there with a clear category. Descoped deliberately.
 - **Untouched (assert in tests, do not edit):** `providers/local_libvirt/retrieve.py`
   (`capture()` falls through), `remote_libvirt/*`, `fault_inject/*`, `observability/labels.py`,
   `console/capture_telemetry.py`.
@@ -236,13 +240,13 @@ reader, resource description). This task is the integration test binding them.
    **omitted** method resolves FADUMP and enqueues `CaptureVmcorePayload(method=FADUMP)`; an
    explicit `method="fadump"` is accepted; the ADR-0318 gate fires (kdump-symbol refusal path)
    for FADUMP the same as KDUMP.
-2. `tests/mcp/tools/catalog/test_resources.py`: a resource whose `capability_view` reports
-   `pseries_fadump=True` surfaces `data["pseries_fadump"] == True`; `False`/absent → `False`;
-   `supported_capture_methods` lists `"fadump"` for the local runtime.
-3. Implement any missing surfacing to green.
+2. `tests/mcp/tools/catalog/test_resources.py`: `supported_capture_methods` lists `"fadump"`
+   for the local runtime (from the Task 5 support-set edit). No per-host `pseries_fadump` field
+   in `resources.get` (descoped — see Task 5).
+3. Implement any missing wiring to green.
 
 **Acceptance (criterion 4):** `just lint`, `just type`, `just test` green; a fadump System's
-`vmcore.fetch` resolves and enqueues FADUMP; the description surfaces the per-host flag.
+`vmcore.fetch` resolves and enqueues FADUMP; `supported_capture_methods` lists fadump.
 
 **Rollback:** revert; falls back to Task 5 state.
 
@@ -293,18 +297,22 @@ TCG; prove the *mechanism* (not just the outcome); or document the native-POWER 
   `test_ppc64le_fadump_captures_a_vmcore_under_tcg`, mirroring the #1148 kdump driver's
   structure (skip cleanly without `qemu-system-ppc64` / `KDIVE_GUEST_IMAGE_PPC64LE` and the
   bundle). Provision with a **fadump profile** (`crashkernel="512M"` + `debug.fadump=True`),
-  install the bundle, read `/sys/kernel/fadump_enabled`, `/sys/kernel/fadump_registered`,
-  `kexec_crash_loaded` **pre-crash** over the guest SSH forward, `control.force_crash`, harvest
-  via `vmcore.fetch`/`vmcore.list`.
+  install the bundle, read the fadump `enabled`/`registered` sysfs values (probe the modern
+  `/sys/kernel/fadump/{enabled,registered}` directory first, fall back to the legacy flat
+  `/sys/kernel/fadump_{enabled,registered}` — the path is kernel-version-dependent) and
+  `/sys/kernel/kexec_crash_loaded` **pre-crash** over the guest SSH forward, `control.force_crash`,
+  harvest via `vmcore.fetch`/`vmcore.list`.
 - `docs/design/2026-07-14-ppc64le-fadump-proof-record-1151.md` (new) — the proof record.
 
 **Do — the run:**
 1. Provision → install → assert the running domain `<cmdline>` carries `fadump=on` and the
    guest `/proc/cmdline` shows `crashkernel=512M fadump=on`.
-2. **Discriminating mechanism check (the finding-1 safeguard):** assert
-   `fadump_enabled==1` and `fadump_registered==1` **and** `kexec_crash_loaded==0` on the
-   pre-crash guest — fadump is active and registered, and the kdump kexec path is *not* loaded,
-   ruling out a silent kdump fallback that would otherwise masquerade as a fadump success.
+2. **Discriminating mechanism check (the finding-1 safeguard):** assert fadump `enabled==1`
+   and `registered==1` (whichever sysfs interface the kernel exposes) **and**
+   `kexec_crash_loaded==0` on the pre-crash guest — fadump is active and registered, and the
+   kdump kexec path is *not* loaded, ruling out a silent kdump fallback that would otherwise
+   masquerade as a fadump success (`registered==1` is primary; `kexec_crash_loaded==1`
+   alongside it is a misconfiguration to record).
 3. `force_crash` → harvest → assert a non-empty `EM_PPC64` core under the `vmcore-fadump` key,
    record makedumpfile fields. Record the domain-settle behavior (fadump reboot-to-production
    vs poweroff) and whether the core was written either way.

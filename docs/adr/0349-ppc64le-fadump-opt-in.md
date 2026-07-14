@@ -131,8 +131,10 @@ register memory (and still writes a `/var/crash/vmcore` kdive labels `vmcore-fad
 `fadump=on` in the cmdline and the object key only prove the flag was set. Confirm-first
 preconditions: `CONFIG_FA_DUMP=y` in the running kernel (strictly stronger than kdump's
 `CONFIG_CRASH_DUMP`), the kdump userspace, and ≥2 GB RAM. Discriminating attribution: the
-provisioned guest observed **pre-crash** with `/sys/kernel/fadump_registered==1` and
-`kexec_crash_loaded==0` (the fadump-active runtime signal ruling out the kdump fallback),
+provisioned guest observed **pre-crash** with fadump `registered==1` (via whichever sysfs
+interface the kernel exposes — the modern `/sys/kernel/fadump/` directory or the legacy flat
+files) and `kexec_crash_loaded==0` (the fadump-active runtime signal ruling out the kdump
+fallback),
 plus the domain cmdline `fadump=on`, `crashkernel=512M fadump=on` in `/proc/cmdline`, and a
 non-empty `EM_PPC64` core under `vmcore-fadump` with makedumpfile fields recorded. The
 ADR-0318 config gate stays kdump-symbol-only (it cannot tell a fadump kernel from one that
