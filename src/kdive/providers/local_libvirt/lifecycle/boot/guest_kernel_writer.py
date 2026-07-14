@@ -35,24 +35,27 @@ class DepmodRunner(Protocol):
 
 
 def _safe_module_extract_filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo | None:
-    """A ``data``-safe extraction filter that skips (never extracts) unsafe link members.
+    """A ``data``-safe extraction filter that skips only the benign absolute build/source symlink.
 
-    Host-side indexing extracts the uploaded modules tar as root into a temp dir, so it must keep
-    the ``data`` filter's protections — no absolute member names, no ``..`` traversal, no writing
+    Host-side indexing extracts the uploaded modules tar as root into a temp dir, so it keeps the
+    ``data`` filter's protections — no absolute member names, no ``..`` traversal, no writing
     through a symlink outside the destination (the classic root symlink-escape write primitive).
-    But a real kernel module tree carries ``build``/``source`` symlinks to *absolute* paths (e.g.
-    ``/usr/src/kernels/<ver>``), which ``data`` rejects outright (``AbsoluteLinkError``). Those
-    symlinks are not needed for ``depmod`` or for kdump, so they are **skipped** (returned
-    ``None``) rather than extracted — safety kept, indexing unblocked. Any other ``data``
-    violation (an absolute member name, a ``..`` path, a special file) still raises, so a
-    genuinely hostile tar is rejected, not silently trimmed.
+    A real kernel module tree carries ``build``/``source`` symlinks to *absolute* paths (e.g.
+    ``/usr/src/kernels/<ver>``), which ``data`` rejects outright (``AbsoluteLinkError``); those are
+    not needed for ``depmod`` or kdump, so **only that case** is skipped (returned ``None``) —
+    safety kept, indexing unblocked. Every other ``data`` violation still raises and rejects the
+    upload: an absolute member name, a ``..`` path, a special file, or a **path-traversal link**
+    (``LinkOutsideDestinationError``), which a legitimate module tree never contains. So a genuinely
+    hostile tar is rejected, not silently trimmed.
     """
     try:
         return tarfile.data_filter(member, dest_path)
-    except (tarfile.AbsoluteLinkError, tarfile.LinkOutsideDestinationError) as _exc:
+    except tarfile.AbsoluteLinkError:
         # Named at debug so a dropped-but-needed link is diagnosable rather than a silent trim.
         _log.debug(
-            "module indexing: skipping unsafe link member %r -> %r", member.name, member.linkname
+            "module indexing: skipping absolute build/source symlink %r -> %r",
+            member.name,
+            member.linkname,
         )
         return None
 
@@ -142,8 +145,10 @@ def index_modules_tar(
         The path to the repacked, indexed ``lib/modules/`` gzip tar under ``workdir``.
 
     Raises:
-        CategorizedError: ``INFRASTRUCTURE_FAILURE`` if the extract fails or ``modules.dep`` is
-            absent after indexing; the ``run_depmod`` seam's own categories propagate.
+        CategorizedError: ``CONFIGURATION_ERROR`` if the tar is oversized/over the member cap or
+            carries an unsafe member (path traversal, escaping link); ``INFRASTRUCTURE_FAILURE`` if
+            the extract otherwise fails or ``modules.dep`` is absent after indexing; the
+            ``run_depmod`` seam's own categories propagate.
     """
     try:
         with tarfile.open(modules_tar, "r:gz") as archive:
@@ -151,6 +156,14 @@ def index_modules_tar(
             # symlinks a module tree carries, see _safe_module_extract_filter) and bound the total
             # size so a tar bomb cannot exhaust the host temp filesystem.
             _extract_modules_bounded(archive, workdir)
+    except tarfile.FilterError as exc:
+        # A path-traversal member/link or other data-filter violation: a hostile/malformed upload,
+        # not a transient fault — reject it, do not retry.
+        raise CategorizedError(
+            "module tar rejected by the safe extraction filter (unsafe member)",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"modules_tar": str(modules_tar), "reason": type(exc).__name__},
+        ) from exc
     except (OSError, tarfile.TarError) as exc:
         raise CategorizedError(
             "failed to extract the modules tar for host-side indexing",

@@ -76,6 +76,23 @@ def test_index_modules_tar_skips_unsafe_build_symlink(tmp_path: Path) -> None:
     assert f"lib/modules/{_VERSION}/modules.dep" in names
 
 
+def test_index_modules_tar_rejects_a_traversal_link(tmp_path: Path) -> None:
+    # A path-traversal symlink (escaping the destination) is hostile — a real module tree never has
+    # one — so it is rejected (CONFIGURATION_ERROR), not silently skipped like an absolute
+    # build/source symlink (#1148 review).
+    tar_path = tmp_path / "evil.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as out:
+        link = tarfile.TarInfo(f"lib/modules/{_VERSION}/escape")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../../../../../../etc/evil"
+        out.addfile(link)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    with pytest.raises(CategorizedError) as exc:
+        index_modules_tar(tar_path, _VERSION, workdir=workdir, run_depmod=lambda **_kw: None)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
 def test_index_modules_tar_runs_depmod_and_repacks_with_dep(tmp_path: Path) -> None:
     modules_tar = _modules_tar(tmp_path, _VERSION)
 

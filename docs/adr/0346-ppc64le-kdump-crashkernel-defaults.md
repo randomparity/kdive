@@ -105,6 +105,31 @@ prove the capture is *this* ppc64le guest's under the §1 default via the §2-un
 path. Per the issue owner, there is **no CONSTRAINED fallback for the capture itself** — a failed
 capture is iterated to a definitive verdict, not shipped as indeterminate.
 
+## Security note — the ELF-parsing trust boundary moves from the appliance to host root
+
+Host-side indexing is a deliberate widening of the worker's host trust boundary, recorded here so
+the tradeoff is reviewable. Before this change, the uploaded (authenticated, semi-trusted) module
+tree was materialized and its ELF objects parsed **only inside the disposable libguestfs
+appliance** (`guest.tar_in` + in-guest `depmod`) — an isolated, throwaway VM. Now the tar is
+extracted to the worker host filesystem and the host's `depmod`/libkmod ELF+symbol parser runs over
+it directly, in the worker's context. A libkmod parser flaw triggered by a crafted `.ko` would
+therefore run on the host rather than being confined to the appliance.
+
+Residual risk is bounded and accepted for this issue:
+
+- The uploaded tar is authenticated and project-scoped (not anonymous input).
+- Extraction keeps `data`-filter protection (no absolute names, no `..`, no symlink-escape write),
+  rejects a path-traversal link as `CONFIGURATION_ERROR`, and is capped by cumulative uncompressed
+  size (2 GiB) and member count (200k), so a tar/gzip bomb cannot exhaust the host temp filesystem.
+- `depmod -b <tmpdir>` needs no elevated privilege; it only reads the temp tree and writes its
+  index files there. The worker runs as root for pre-existing reasons (libvirt, libguestfs,
+  staging under `/var/lib/kdive`), so this path inherits root but does not *require* it.
+
+**Deferred hardening (not done here):** running the extraction + `depmod` as a dropped-privilege
+user would shrink the exposure to non-root. That is a worker-wide privilege-model change (the
+whole worker is root today), so it is out of scope for this sub-issue and left as a follow-up
+rather than a one-off asymmetry.
+
 ## Live-proof outcome (2026-07-14)
 
 Recorded in `docs/design/2026-07-13-ppc64le-kdump-proof-record-1148.md` (driver
