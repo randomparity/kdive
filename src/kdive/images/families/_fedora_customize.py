@@ -1,21 +1,28 @@
-"""Fedora/rhel-family rootfs customization primitives (ADR-0251).
+"""Fedora/rhel-family rootfs customization primitives (ADR-0251, ADR-0345).
 
-Single source of truth for the constants and argv fragments the local-libvirt rootfs build
-shares with the :mod:`kdive.images.families.rhel` FamilyCustomizer: the kdive-ready serial
-readiness unit, the kdump NMI-panic sysctl and ``final_action`` pin, the debug-image drgn
+Single source of truth for the constants and typed customization ``Step``s the local-libvirt
+rootfs build shares with the :mod:`kdive.images.families.rhel` FamilyCustomizer: the kdive-ready
+serial readiness unit, the kdump NMI-panic sysctl and ``final_action`` pin, the debug-image drgn
 staging, the shared cloud-init first-boot seed (ADR-0288), and the default debug/build package
-sets. Relocated here from
-``providers/local_libvirt/rootfs_build.py`` (which now imports them) so the legacy in-line
-builder and the new family customizer encode them once.
+sets. Each primitive returns ``list[Step]`` — one source of truth the argv renderer
+(``virt_customize`` path) and the firstboot renderer (boot path) both consume (ADR-0345).
 """
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families.base import CustomizeContext
+from kdive.images.families.steps import (
+    InstallPackages,
+    Mkdir,
+    RunCommand,
+    StageFile,
+    Step,
+    UploadFile,
+    WriteFile,
+)
 from kdive.images.planes.provenance_probes import (
     DRGN_MARKER_GUEST_PATH,
     MAKEDUMPFILE_MARKER_GUEST_PATH,
@@ -81,17 +88,8 @@ _STRIP_NET_DISABLE_CMD = (
 )
 
 
-def _staged_upload(content: str, suffix: str, dest: str, cleanup: list[Path]) -> list[str]:
-    """Stage ``content`` to a tempfile (appended to ``cleanup``) and upload it to ``dest``."""
-    with tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False) as handle:
-        handle.write(content)
-        staged = Path(handle.name)
-    cleanup.append(staged)
-    return ["--upload", f"{staged}:{dest}"]
-
-
-def cloud_init_first_boot_args(ctx: CustomizeContext) -> list[str]:
-    """virt-customize fragment that makes cloud-init the uniform first-boot mechanism (ADR-0288).
+def cloud_init_first_boot_steps(ctx: CustomizeContext) -> list[Step]:
+    """Steps that make cloud-init the uniform first-boot mechanism (ADR-0288, ADR-0345).
 
     Bakes the authoritative kdive ``cloud.cfg.d`` drop-in (network + NoCloud pin + root
     protection) and a NoCloud seed, strips any base network-disabling drop-in, undoes any
@@ -105,25 +103,19 @@ def cloud_init_first_boot_args(ctx: CustomizeContext) -> list[str]:
     live-found on Debian 13); leaving enablement to the vendor/package is version-robust.
 
     Args:
-        ctx: The customize context; ``is_cloud_image`` gates the cloud-init install and
-            ``cleanup`` receives the staged tempfiles for the caller to unlink.
+        ctx: The customize context; ``is_cloud_image`` gates the cloud-init install.
     """
-    argv: list[str] = []
+    steps: list[Step] = []
     if not ctx.is_cloud_image:
-        argv += ["--install", "cloud-init"]
-    argv += ["--mkdir", NOCLOUD_SEED_DIR]
-    argv += _staged_upload(KDIVE_CLOUD_CFG_CONTENT, ".cfg", KDIVE_CLOUD_CFG_PATH, ctx.cleanup)
-    argv += _staged_upload(_NOCLOUD_META_DATA, ".md", f"{NOCLOUD_SEED_DIR}/meta-data", ctx.cleanup)
-    argv += _staged_upload(_NOCLOUD_USER_DATA, ".ud", f"{NOCLOUD_SEED_DIR}/user-data", ctx.cleanup)
-    argv += [
-        "--run-command",
-        _STRIP_NET_DISABLE_CMD,
-        "--run-command",
-        "rm -f /etc/cloud/cloud-init.disabled",
-        "--write",
-        f"/etc/machine-id:{SEED_MACHINE_ID}",  # pragma: allowlist secret
-    ]
-    return argv
+        steps.append(InstallPackages(("cloud-init",)))
+    steps.append(Mkdir(NOCLOUD_SEED_DIR))
+    steps.append(StageFile(KDIVE_CLOUD_CFG_PATH, KDIVE_CLOUD_CFG_CONTENT))
+    steps.append(StageFile(f"{NOCLOUD_SEED_DIR}/meta-data", _NOCLOUD_META_DATA))
+    steps.append(StageFile(f"{NOCLOUD_SEED_DIR}/user-data", _NOCLOUD_USER_DATA))
+    steps.append(RunCommand(_STRIP_NET_DISABLE_CMD))
+    steps.append(RunCommand("rm -f /etc/cloud/cloud-init.disabled"))
+    steps.append(WriteFile("/etc/machine-id", SEED_MACHINE_ID))  # pragma: allowlist secret
+    return steps
 
 
 def readiness_unit(kdump_unit: str, console_device: str) -> str:
@@ -206,18 +198,18 @@ def drgn_helper_source() -> Path:
     return Path(__file__).parents[4].joinpath(*DRGN_HELPER_REPO_RELPATH)
 
 
-def drgn_helper_args() -> list[str]:
+def drgn_helper_steps() -> list[Step]:
     """Stage the reviewed ``kdive-drgn`` in-guest helper, read-executable (ADR-0220, #724).
 
-    Returns the virt-customize/virt-builder argv fragment that uploads the helper and makes it
-    ``0755``. Family-neutral: the live ``introspect.run`` path SSH-execs this fixed program on any
-    debug guest carrying a working ``drgn`` (``drgn`` on ``rhel``, ``python3-drgn`` — which ships
-    ``/usr/bin/drgn`` — on ``debian``, #824).
+    Returns the step that uploads the helper and makes it ``0755``. Family-neutral: the live
+    ``introspect.run`` path SSH-execs this fixed program on any debug guest carrying a working
+    ``drgn`` (``drgn`` on ``rhel``, ``python3-drgn`` — which ships ``/usr/bin/drgn`` — on
+    ``debian``, #824).
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` if the reviewed ``kdive-drgn`` helper is not a
-            readable file in the source tree — fail loud rather than ship a guest that cannot
-            introspect.
+            readable file in the source tree — fail loud (before returning the step) rather than
+            defer a missing helper to guestfish runtime and ship a guest that cannot introspect.
     """
     helper = drgn_helper_source()
     if not helper.is_file():
@@ -227,16 +219,11 @@ def drgn_helper_args() -> list[str]:
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"helper": str(helper)},
         )
-    return [
-        "--upload",
-        f"{helper}:{DRGN_HELPER_GUEST_PATH}",
-        "--run-command",
-        f"chmod 0755 {DRGN_HELPER_GUEST_PATH}",
-    ]
+    return [UploadFile(helper, DRGN_HELPER_GUEST_PATH, mode="0755")]
 
 
-def makedumpfile_version_marker_args() -> list[str]:
-    """virt-customize fragment recording ``makedumpfile --version`` to a guest marker file.
+def makedumpfile_version_marker_steps() -> list[Step]:
+    """Step recording ``makedumpfile --version`` to a guest marker file.
 
     Read back at build time into ``provenance["makedumpfile_version"]`` (ADR-0253), the per-image
     operand of the computed kdump-capability predicate. ``makedumpfile -v`` prints
@@ -247,16 +234,17 @@ def makedumpfile_version_marker_args() -> list[str]:
     ``PATH`` still populates the marker.
     """
     return [
-        "--run-command",
-        "mkdir -p /usr/lib/kdive && "
-        "{ command -v makedumpfile >/dev/null 2>&1 && makedumpfile -v "
-        "|| /usr/sbin/makedumpfile -v ; } "
-        f"> {MAKEDUMPFILE_MARKER_GUEST_PATH} 2>/dev/null || true",
+        RunCommand(
+            "mkdir -p /usr/lib/kdive && "
+            "{ command -v makedumpfile >/dev/null 2>&1 && makedumpfile -v "
+            "|| /usr/sbin/makedumpfile -v ; } "
+            f"> {MAKEDUMPFILE_MARKER_GUEST_PATH} 2>/dev/null || true"
+        )
     ]
 
 
-def drgn_version_marker_args() -> list[str]:
-    """virt-customize fragment recording ``drgn --version`` to a guest marker file.
+def drgn_version_marker_steps() -> list[Step]:
+    """Step recording ``drgn --version`` to a guest marker file.
 
     Read back at build time into ``provenance["drgn_version"]`` (ADR-0334), the per-image operand
     of the computed ``live_drgn`` capability predicate (ADR-0328) — the same marker/probe pipeline
@@ -268,21 +256,20 @@ def drgn_version_marker_args() -> list[str]:
     ``PATH`` still populates the marker.
     """
     return [
-        "--run-command",
-        "mkdir -p /usr/lib/kdive && "
-        "{ command -v drgn >/dev/null 2>&1 && drgn --version "
-        "|| /usr/bin/drgn --version ; } "
-        f"> {DRGN_MARKER_GUEST_PATH} 2>/dev/null || true",
+        RunCommand(
+            "mkdir -p /usr/lib/kdive && "
+            "{ command -v drgn >/dev/null 2>&1 && drgn --version "
+            "|| /usr/bin/drgn --version ; } "
+            f"> {DRGN_MARKER_GUEST_PATH} 2>/dev/null || true"
+        )
     ]
 
 
-def debug_image_args(packages: tuple[str, ...], cleanup: list[Path]) -> list[str]:
+def debug_image_steps(packages: tuple[str, ...]) -> list[Step]:
     """Stage the drgn helper for an ``rhel`` debug image (ADR-0220, #724).
 
-    ``cleanup`` is retained for signature stability with the caller; the drgn helper stages no
-    tempfile. Non-debug images (no ``drgn`` in ``packages``) get an empty fragment.
+    Non-debug images (no ``drgn`` in ``packages``) get no steps.
     """
-    del cleanup
     if "drgn" not in packages:
         return []
-    return drgn_helper_args()
+    return drgn_helper_steps()

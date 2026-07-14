@@ -32,6 +32,17 @@ def domain_name_for(system_id: UUID) -> str:
     return f"kdive-{system_id}"
 
 
+def build_domain_name(build_id: UUID) -> str:
+    """The transient customization-boot domain name for a build (ADR-0345).
+
+    The ``kdive-build-`` infix keeps this ephemeral build VM out of the System name-fallback
+    reaper: :func:`system_id_from_domain_name` returns ``None`` for this form (the ``build-``
+    infix is not hex, so it never satisfies ``_SYSTEM_DOMAIN_RE``), so the reconciler never
+    mistakes an in-flight build for a leaked System.
+    """
+    return f"kdive-build-{build_id}"
+
+
 def system_id_from_domain_name(name: str) -> UUID | None:
     """The owning System UUID encoded in a ``kdive-<uuid>`` domain name, or ``None``.
 

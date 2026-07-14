@@ -6,16 +6,20 @@ from pathlib import Path
 
 import pytest
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.families import _fedora_customize
 from kdive.images.families._fedora_customize import (
     KDIVE_CLOUD_CFG_PATH,
     NOCLOUD_SEED_DIR,
     SEED_MACHINE_ID,
-    cloud_init_first_boot_args,
-    drgn_version_marker_args,
-    makedumpfile_version_marker_args,
+    cloud_init_first_boot_steps,
+    drgn_helper_steps,
+    drgn_version_marker_steps,
+    makedumpfile_version_marker_steps,
     readiness_unit,
 )
 from kdive.images.families.base import CustomizeContext
+from kdive.images.families.renderers import render_argv
 from kdive.images.planes._build_common import (
     DRGN_MARKER_GUEST_PATH,
     MAKEDUMPFILE_MARKER_GUEST_PATH,
@@ -23,7 +27,7 @@ from kdive.images.planes._build_common import (
 
 
 def test_makedumpfile_marker_args_writes_version_file() -> None:
-    argv = makedumpfile_version_marker_args()
+    argv = render_argv(makedumpfile_version_marker_steps(), cleanup=[])
     joined = " ".join(argv)
     assert "--run-command" in argv
     assert MAKEDUMPFILE_MARKER_GUEST_PATH in joined
@@ -31,11 +35,23 @@ def test_makedumpfile_marker_args_writes_version_file() -> None:
 
 
 def test_drgn_marker_args_writes_version_file() -> None:
-    argv = drgn_version_marker_args()
+    argv = render_argv(drgn_version_marker_steps(), cleanup=[])
     joined = " ".join(argv)
     assert "--run-command" in argv
     assert DRGN_MARKER_GUEST_PATH in joined
     assert "drgn --version" in joined
+
+
+def test_drgn_helper_steps_fail_loud_when_source_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The reviewed kdive-drgn helper is resolved from the source tree; an absent helper file must
+    # fail loud with CONFIGURATION_ERROR *before* returning the UploadFile (not deferred to
+    # guestfish runtime) rather than ship a guest that cannot introspect (ADR-0220 D2, #724).
+    monkeypatch.setattr(_fedora_customize, "drgn_helper_source", lambda: tmp_path / "missing")
+    with pytest.raises(CategorizedError) as exc:
+        drgn_helper_steps()
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
 def _after_targets(unit: str) -> list[str]:
@@ -88,10 +104,14 @@ def _ci_ctx(tmp_path: Path, *, is_cloud_image: bool) -> CustomizeContext:
         packages=("openssh-server",),
         readiness_unit_path=tmp_path / "u.service",
         is_cloud_image=is_cloud_image,
-        cleanup=[],
         distro="fedora",
         version="44",
     )
+
+
+def _ci_argv(tmp_path: Path, *, is_cloud_image: bool) -> list[str]:
+    ctx = _ci_ctx(tmp_path, is_cloud_image=is_cloud_image)
+    return render_argv(cloud_init_first_boot_steps(ctx), cleanup=[])
 
 
 def _uploads(argv: list[str]) -> dict[str, str]:
@@ -105,7 +125,7 @@ def _uploads(argv: list[str]) -> dict[str, str]:
 
 
 def test_cloud_init_helper_writes_authoritative_cfg(tmp_path: Path) -> None:
-    argv = cloud_init_first_boot_args(_ci_ctx(tmp_path, is_cloud_image=True))
+    argv = _ci_argv(tmp_path, is_cloud_image=True)
     cfg = _uploads(argv)[KDIVE_CLOUD_CFG_PATH]
     assert "datasource_list: [ NoCloud ]" in cfg
     assert "disable_root: false" in cfg
@@ -117,7 +137,7 @@ def test_cloud_init_helper_writes_authoritative_cfg(tmp_path: Path) -> None:
 
 
 def test_cloud_init_helper_writes_nocloud_seed(tmp_path: Path) -> None:
-    argv = cloud_init_first_boot_args(_ci_ctx(tmp_path, is_cloud_image=True))
+    argv = _ci_argv(tmp_path, is_cloud_image=True)
     uploads = _uploads(argv)
     assert uploads[f"{NOCLOUD_SEED_DIR}/meta-data"].startswith("instance-id:")
     assert uploads[f"{NOCLOUD_SEED_DIR}/user-data"].startswith("#cloud-config")
@@ -128,7 +148,7 @@ def test_cloud_init_helper_undisables_and_seeds_machine_id(tmp_path: Path) -> No
     # ADR-0288: the helper undoes any cloud-init disable and seeds machine-id, but does NOT
     # `systemctl enable` named units — the vendor base ships them enabled and unit names vary
     # across cloud-init versions (24.x renamed cloud-init.service). Enumerating names is fragile.
-    j = " ".join(cloud_init_first_boot_args(_ci_ctx(tmp_path, is_cloud_image=True)))
+    j = " ".join(_ci_argv(tmp_path, is_cloud_image=True))
     assert "rm -f /etc/cloud/cloud-init.disabled" in j  # harmless if absent (debian path)
     assert f"/etc/machine-id:{SEED_MACHINE_ID}" in j  # seeded on every image now
     assert "systemctl enable cloud-init" not in j  # no fragile unit-name enumeration
@@ -136,7 +156,7 @@ def test_cloud_init_helper_undisables_and_seeds_machine_id(tmp_path: Path) -> No
 
 
 def test_cloud_init_helper_installs_cloud_init_only_on_non_cloud_base(tmp_path: Path) -> None:
-    cloud = " ".join(cloud_init_first_boot_args(_ci_ctx(tmp_path, is_cloud_image=True)))
-    scratch = " ".join(cloud_init_first_boot_args(_ci_ctx(tmp_path, is_cloud_image=False)))
+    cloud = " ".join(_ci_argv(tmp_path, is_cloud_image=True))
+    scratch = " ".join(_ci_argv(tmp_path, is_cloud_image=False))
     assert "--install cloud-init" not in cloud  # ships cloud-init already
     assert "--install cloud-init" in scratch  # virt-builder base needs it installed

@@ -26,7 +26,7 @@ from kdive.images.families._fedora_customize import DRGN_HELPER_GUEST_PATH, KDUM
 # (ADR-0286) — ``build``/``ssh``/``selinux``/``apparmor`` have no build-written in-guest marker —
 # enforced by two guard tests: one that the keys are a Capability subset, and one
 # (``test_guest_contract_markers_are_baked_by_declaring_families``) that every path here is
-# actually written by a declaring family's ``customize_argv``, so the probe cannot drift onto a
+# actually written by a declaring family's ``customize_steps``, so the probe cannot drift onto a
 # phantom marker. The values are the SAME constants the families bake: the family-neutral kdump
 # NMI-panic sysctl (written on every kdump image, gated identically to kdump enablement) and the
 # staged ``kdive-drgn`` helper.

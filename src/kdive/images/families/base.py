@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from kdive.domain.catalog.images import Capability
+from kdive.images.families.steps import Step
 from kdive.images.rootfs.kinds import RootfsImageKind
 
 
@@ -33,7 +34,6 @@ class CustomizeContext:
         readiness_unit_path: Host path of the rendered kdive-ready systemd unit to upload.
         is_cloud_image: True when the base is a cloud-image (needs cloud-init masking and a
             seeded ``/etc/machine-id``); False for a virt-builder scratch.
-        cleanup: Mutable list the customizer appends tempfiles to for the caller to unlink.
         distro: The base-OS distro (e.g. ``fedora`` / ``rocky`` / ``centos-stream``); with
             ``version`` it drives the family's EL-major package and EPEL decisions (#823).
         version: The base-OS release (e.g. ``44`` / ``8`` / ``10``).
@@ -43,7 +43,6 @@ class CustomizeContext:
     packages: tuple[str, ...]
     readiness_unit_path: Path
     is_cloud_image: bool
-    cleanup: list[Path]
     distro: str
     version: str
 
@@ -60,6 +59,10 @@ class FamilyCustomizer(Protocol):
     #: ``selinux-permissive`` (rhel — repack drops xattrs, so a first-boot relabel + permissive) or
     #: ``apparmor`` (debian — profile-based, needs no relabel).
     guest_mac: str
+    #: How the build plane applies this family's ``customize_steps`` (ADR-0345): ``"boot"`` (rhel —
+    #: boot the image and let it self-customize) or ``"virt_customize"`` (debian — render the steps
+    #: to ``virt-customize`` argv and apply them offline).
+    customize_via: Literal["boot", "virt_customize"]
 
     def packages(self, kind: RootfsImageKind, distro: str, version: str) -> tuple[str, ...]:
         """Return the package set this family installs for ``kind`` on ``distro``/``version``."""
@@ -71,10 +74,16 @@ class FamilyCustomizer(Protocol):
         """Return the capability tags this family bakes for ``kind`` on ``distro``/``version``."""
         ...
 
-    def customize_argv(self, ctx: CustomizeContext) -> list[str]:
-        """Return the virt-customize argv fragment that customizes the base image."""
+    def customize_steps(self, ctx: CustomizeContext) -> list[Step]:
+        """Return the ordered customization steps that turn the base into a kdive-ready rootfs."""
         ...
 
-    def normalize(self, qcow2: Path) -> None:
-        """Normalize the repacked qcow2 (fstab/crypttab/SELinux) in place via guestfish."""
+    def normalize(self, qcow2: Path, *, relabel: bool = True) -> None:
+        """Normalize the repacked qcow2 (fstab/crypttab/SELinux) in place via guestfish.
+
+        ``relabel`` controls the first-boot SELinux relabel (``/.autorelabel``): the
+        virt-customize path leaves it on (default); the boot path passes ``relabel=False`` and
+        defers the touch to the offline seal after the customization boot (ADR-0345). Families
+        with no SELinux (debian) ignore the flag.
+        """
         ...

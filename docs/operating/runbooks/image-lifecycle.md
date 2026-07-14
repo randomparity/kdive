@@ -51,6 +51,16 @@ provenance. On success it prints exactly one line to **stdout** — the `KDIVE_G
 for the live spine — while the human summary (the destination path and the `sha256:` content
 digest) goes to **stderr** (the logger). That split makes the command's stdout `eval`-safe.
 
+> **How the packages get installed (ADR-0345, #1147).** For the `rhel` family (Fedora/RHEL),
+> `build-fs` no longer runs the guest's `dnf` inside the host-arch libguestfs appliance — it
+> repacks + normalizes the base first, injects the family customization as a one-shot firstboot
+> unit (file-level, arch-safe), then **boots the image once** (KVM natively, TCG for a foreign
+> arch such as ppc64le on an x86_64 host) so the guest self-installs its packages, and seals the
+> result. This makes foreign-arch image builds possible and keeps native builds on the guest's own
+> package manager. A build boot needs guest network egress for the package fetch; a failed in-guest
+> install surfaces the guest's error via the console tail rather than a silent timeout. The
+> `debian` family still uses the offline `virt-customize` path until its own follow-up (#1167).
+
 > **Agent-selectable disk requires a rebuilt image (ADR-0312, #985).** An `allocations.request`
 > may size the guest disk via `disk_gb` (a custom triple or the `debug` shape). The platform grows
 > the per-System overlay to that size at provision, and cloud-init's `resize_rootfs` grows the

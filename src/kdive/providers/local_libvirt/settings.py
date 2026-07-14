@@ -43,6 +43,18 @@ LIBVIRT_ALLOCATION_CAP = Setting(
     help="Per-host concurrent-Allocation cap.",
 )
 
+
+def _parse_positive_int(raw: str) -> int:
+    """Parse a positive integer, rejecting values <= 0.
+
+    Raises ``ValueError`` so the registry surfaces a ``CONFIGURATION_ERROR``.
+    """
+    value = int(raw)
+    if value <= 0:
+        raise ValueError(f"must be > 0 (got {value})")
+    return value
+
+
 LIBVIRT_TCG_DEADLINE_MULTIPLIER = Setting(
     name="KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER",
     parse=_parse_tcg_multiplier,
@@ -57,4 +69,24 @@ LIBVIRT_TCG_DEADLINE_MULTIPLIER = Setting(
     suggest="set a float >= 1.0 (default 10.0); 1.0 disables TCG deadline scaling",
 )
 
-SETTINGS = [LIBVIRT_URI, LIBVIRT_ALLOCATION_CAP, LIBVIRT_TCG_DEADLINE_MULTIPLIER]
+LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S = Setting(
+    name="KDIVE_LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S",
+    parse=_parse_positive_int,
+    default="1800",
+    group="local-libvirt",
+    processes=_RT,
+    help=(
+        "Native-KVM base window (seconds) for the customization boot's completion poll. "
+        "30 minutes. Foreign (TCG-emulated) guests scale this by "
+        "tcg_deadline_multiplier(accel) (ADR-0341). This is a provisional default absorbing "
+        "mirror/network fetch variance; a live-proof measurement will re-pin it."
+    ),
+    suggest="set an integer number of seconds > 0 (default 1800 = 30 min native-KVM base window)",
+)
+
+SETTINGS = [
+    LIBVIRT_URI,
+    LIBVIRT_ALLOCATION_CAP,
+    LIBVIRT_TCG_DEADLINE_MULTIPLIER,
+    LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S,
+]

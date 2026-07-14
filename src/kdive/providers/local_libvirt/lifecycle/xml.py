@@ -16,7 +16,11 @@ from kdive.providers.shared.libvirt_xml import (
     register_kdive_namespace,
     register_qemu_namespace,
 )
-from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for
+from kdive.providers.shared.runtime_paths import (
+    build_domain_name,
+    console_log_path,
+    domain_name_for,
+)
 
 # loopback-only: local transports never listen off-host (ADR-0210/0218).
 _LOOPBACK_HOST = "127.0.0.1"
@@ -155,7 +159,7 @@ def _build_baseline_domain(
     # <cpu> stays here (after <vcpu>, before <os>) so the x86-KVM domain is byte-identical to
     # the pre-ADR-0340 output; a TCG domain emits nothing and <os> follows <vcpu> directly.
     _append_guest_cpu(domain, is_kvm=is_kvm, kvm_cpu_mode=traits.kvm_cpu_mode)
-    os_el = _append_os(domain, profile, machine=machine)
+    os_el = _append_os(domain, arch=profile.arch, machine=machine)
     _append_direct_kernel(os_el, kernel_path, initrd_path, _baseline_cmdline(traits.console_device))
     if traits.emit_acpi_features:
         _append_crash_capture_features(domain)
@@ -205,10 +209,10 @@ def _append_emulator(devices: ET.Element, emulator: str | None) -> None:
     ET.SubElement(devices, "emulator").text = emulator
 
 
-def _append_os(domain: ET.Element, profile: ProvisioningProfile, *, machine: str) -> ET.Element:
+def _append_os(domain: ET.Element, *, arch: str, machine: str) -> ET.Element:
     """Append the libvirt OS section without boot artifacts."""
     os_el = ET.SubElement(domain, "os")
-    ET.SubElement(os_el, "type", arch=profile.arch, machine=machine).text = "hvm"
+    ET.SubElement(os_el, "type", arch=arch, machine=machine).text = "hvm"
     return os_el
 
 
@@ -339,21 +343,110 @@ def _append_ssh_forward(
             "SSH port",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    commandline = _qemu_commandline(domain)
     restrict = "off" if guest_egress else "on"
     netdev = f"user,id=kdivessh,restrict={restrict},hostfwd=tcp:{_LOOPBACK_HOST}:{ssh_port}-:22"
+    _append_virtio_nic(
+        _qemu_commandline(domain),
+        netdev_value=netdev,
+        netdev_id="kdivessh",
+        pin_nic_slot=pin_nic_slot,
+    )
+
+
+def _append_virtio_nic(
+    commandline: ET.Element, *, netdev_value: str, netdev_id: str, pin_nic_slot: bool
+) -> None:
+    """Append a ``-netdev``/``-device virtio-net-pci`` pair to the qemu commandline (ADR-0281).
+
+    Both the System SSH forward and the customization-boot egress NIC render the same shape — a
+    ``-netdev <value>`` followed by a ``-device virtio-net-pci,netdev=<id>`` — differing only in the
+    netdev value and id; this owns that rendering (and the q35 slot-pin) once.
+
+    On q35 (``pin_nic_slot``) the device pins an explicit PCI slot. Without ``addr=`` QEMU
+    auto-assigns the first free slot (0x1 on the ``pcie.0`` root complex), which collides with a
+    libvirt-managed ``pcie-root-port``: because this NIC is added via raw ``-device`` on the qemu
+    commandline, libvirt's PCI allocator cannot see it and routes its own devices over the same
+    slot, so ``define``/``start`` fails (``slot 1 function 0 not available``). Slot 0x10 sits in the
+    gap between libvirt's low-numbered root-ports and its high-numbered integrated devices
+    (LPC/USB/SATA at 0x1a-0x1f). The pseries spapr-pci-host-bridge assigns addresses itself, so a
+    pinned slot is left off there and QEMU/libvirt allocate.
+    """
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-netdev")
-    ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=netdev)
+    ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=netdev_value)
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-device")
-    # On q35 (``pin_nic_slot``) pin an explicit PCI slot. Without ``addr=`` QEMU auto-assigns the
-    # first free slot (0x1 on the ``pcie.0`` root complex), which collides with a libvirt-managed
-    # ``pcie-root-port``: because this NIC is added via raw ``-device`` on the qemu commandline,
-    # libvirt's PCI allocator cannot see it and routes its own devices over the same slot, so
-    # ``define``/``start`` fails (``slot 1 function 0 not available``). Slot 0x10 sits in the gap
-    # between libvirt's low-numbered root-ports and its high-numbered integrated devices
-    # (LPC/USB/SATA at 0x1a-0x1f). The pseries spapr-pci-host-bridge assigns addresses itself, so a
-    # pinned slot is left off there and QEMU/libvirt allocate.
-    device = "virtio-net-pci,netdev=kdivessh"
+    device = f"virtio-net-pci,netdev={netdev_id}"
     if pin_nic_slot:
         device = f"{device},addr=0x10"
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=device)
+
+
+def render_customization_domain_xml(
+    build_id: UUID,
+    *,
+    arch: str,
+    disk_path: str,
+    kernel_path: Path,
+    initrd_path: Path | None,
+    accel: str,
+    emulator: str | None,
+    memory_mb: int = 2048,
+    vcpu: int = 2,
+) -> str:
+    """Render the transient customization-boot domain XML for a build (ADR-0345, ADR-0340).
+
+    This is a **dedicated minimal renderer**, not an extension of :func:`render_domain_xml`
+    (which requires a ``ProvisioningProfile`` + ``ssh_port`` and renders the System SSH forward /
+    gdbstub). The build boots this ``kdive-build-<uuid>`` domain once to self-customize, then
+    seals; there is no System, no inbound SSH forward, no gdbstub, and no preserve-on-crash.
+
+    The domain is direct-kernel (ADR-0272): ``<os>`` carries the baseline ``<kernel>``, an optional
+    ``<initrd>``, and the ``root=/dev/vda console=<device> rw`` cmdline whose console is
+    arch-resolved (``ttyS0`` on x86, ``hvc0`` on pseries). ``<on_reboot>destroy</on_reboot>`` stops
+    the domain rather than looping if the firstboot script reboots. ``accel``/``emulator``
+    (ADR-0340) set ``<domain type>`` (``kvm`` / ``qemu``-TCG), the ``<cpu>`` element (omitted under
+    TCG), and the TCG-only ``<emulator>``. The lone NIC is a SLIRP egress NIC (``restrict=off``) so
+    the guest can reach its distro mirrors to install packages.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` for an unknown ``arch``, a missing
+            ``kernel_path``, or a TCG domain (``accel != "kvm"``) rendered without an ``emulator``.
+    """
+    _ensure_namespaces_registered()
+    traits = arch_traits(arch)
+    is_kvm = accel == "kvm"
+    domain = ET.Element("domain", type="kvm" if is_kvm else "qemu")
+    ET.SubElement(domain, "name").text = build_domain_name(build_id)
+    ET.SubElement(domain, "uuid").text = str(build_id)
+    ET.SubElement(domain, "memory", unit="MiB").text = str(memory_mb)
+    ET.SubElement(domain, "vcpu").text = str(vcpu)
+    _append_guest_cpu(domain, is_kvm=is_kvm, kvm_cpu_mode=traits.kvm_cpu_mode)
+    os_el = _append_os(domain, arch=arch, machine=traits.machine)
+    _append_direct_kernel(os_el, kernel_path, initrd_path, _baseline_cmdline(traits.console_device))
+    if traits.emit_acpi_features:
+        _append_crash_capture_features(domain)
+    ET.SubElement(domain, "on_reboot").text = "destroy"
+    devices = ET.SubElement(domain, "devices")
+    if not is_kvm:
+        _append_emulator(devices, emulator)
+    _append_root_disk(devices, disk_path)
+    _append_serial_console(devices, build_id)
+    _append_egress_nic(domain, pin_nic_slot=traits.pin_nic_slot)
+    return ET.tostring(domain, encoding="unicode")
+
+
+def _append_egress_nic(domain: ET.Element, *, pin_nic_slot: bool) -> None:
+    """Append a SLIRP egress NIC for the customization boot (ADR-0345, ADR-0313).
+
+    ``-netdev user,restrict=off`` is QEMU's built-in unprivileged SLIRP user-mode network with NAT
+    + DNS so the guest reaches its distro mirrors to install packages; unlike the System forward
+    there is **no** ``hostfwd`` (no inbound SSH), no gdbstub, and no preserve-on-crash.
+
+    On q35 (``pin_nic_slot``) the raw ``-device virtio-net-pci`` must pin ``addr=0x10`` — exactly
+    as :func:`_append_ssh_forward`; :func:`_append_virtio_nic` owns that slot-pin rationale.
+    """
+    _append_virtio_nic(
+        _qemu_commandline(domain),
+        netdev_value="user,id=kdivebuild,restrict=off",
+        netdev_id="kdivebuild",
+        pin_nic_slot=pin_nic_slot,
+    )
