@@ -42,24 +42,37 @@ Two concrete gaps:
   readiness deadline (`tcg_deadline_multiplier`). The boot window already scales for a slow
   emulated boot; this issue adds no new deadline machinery.
 - `domain/platform/arch_traits.py`: `console_device="hvc0"` for ppc64le, flowing into the boot
-  cmdline via `services/runs/steps.py`. The writer's `depmod -a <ver>` is arch-neutral.
+  cmdline via `services/runs/steps.py`.
 
 ## Design
 
 ### 1. Audit verdict: the boot path is arch-opaque, and that is the contract
 
-The install/boot mechanics are **byte-agnostic** and stay that way:
+The **host-side staging + `<os>` rendering** mechanics are byte-agnostic and stay that way:
 
 - `extract_boot_vmlinuz` copies whatever bytes sit at the `boot/vmlinuz` tar member to a host
   file for the `<kernel>` element. It reads no magic; an ELF `vmlinux` round-trips identically to a
   bzImage.
-- `repack_modules_subtree` and the guest kernel writer's `depmod -a <ver>` operate on
-  `lib/modules/<ver>/` names and module blobs — no arch assumption. `_read_release` parses the
-  version from the module path (e.g. `6.19.10-300.fc44.ppc64le`), which is already arch-general.
+- `repack_modules_subtree` and `_read_release` operate on `lib/modules/<ver>/` tar member *names*
+  (host-side tar I/O, no guest execution): repack copies the subtree, and `_read_release` parses the
+  version from the path (e.g. `6.19.10-300.fc44.ppc64le`) — already arch-general.
 - `_render_direct_kernel_xml` points `<kernel>`/`<initrd>` at host file paths and sets `<cmdline>`
   from the request. The machine type (`pseries`), console (`hvc0`), and CPU/accel rendering are
   the provisioner's job (ADR-0340), already correct from #1144; install only *redefines the `<os>`*
   on the existing domain, so it inherits them.
+
+**The guest kernel writer is not fully arch-neutral — it runs a guest binary in a host-arch
+appliance.** `_RealGuestKernelWriter.inject` fires only when `request.method is KDUMP or
+debuginfo_ref is not None` (install.py:339) and, inside libguestfs, runs
+`guest.command(["depmod", "-a", version])` (guest_kernel_writer.py:133) — i.e. the *guest's own*
+ppc64le `depmod` ELF executed inside libguestfs's **x86_64** appliance. What `depmod` *computes*
+(a `modules.dep` from module names) is arch-general, but *executing* a ppc64le binary on an x86_64
+appliance requires `qemu-user` + `binfmt_misc` registered in the appliance, which stock libguestfs
+appliances do not carry. So the writer's in-guest `depmod` on a ppc64le overlay is a **live-only
+cross-arch question**, not a settled "arch-neutral" fact (see §3, live-verified or flagged
+UNVERIFIED and deferred to the kdump sub-issue). A **plain** direct-kernel boot of an uploaded
+bundle does not inject modules at all, so it is unaffected — the writer is only load-bearing for the
+kdump/debug paths.
 
 **Decision (ADR-0344): the boot path trusts the upload contract and does not re-validate the
 payload arch.** The uploaded bundle was already arch-validated at `runs.complete_build`
@@ -97,7 +110,10 @@ deliverable: they fail the instant someone re-adds a bzImage assumption to the b
   carries the ppc64le version; `<cmdline>` is passed through verbatim.
 
 These are unit/contract tests (no host) — the fakes already exist. The x86 assertions stay
-byte-identical.
+byte-identical. **Scope caveat:** the fake writer proves the *orchestration* (which artifacts are
+staged, in what order, into which paths) is arch-opaque; it does **not** prove the *real*
+`_RealGuestKernelWriter`'s in-guest `depmod` runs on a ppc64le overlay (the libguestfs cross-arch
+constraint of §1). That is a live-only question, addressed in §3.
 
 ### 3. Live proof: upload → install → direct-kernel-boot a ppc64le bundle under TCG
 
@@ -108,27 +124,60 @@ not here), reusing the #1144 preflight idiom (skip cleanly without `qemu-system-
 
 1. Provision a `arch=ppc64le` System (admission persists `accel=tcg`; the provisioner renders the
    pseries/qemu domain; the baseline rootfs boots to `ready`).
-2. Package the guest's own baseline ppc64le kernel as a combined tar per the ADR-0343 contract
-   (`boot/vmlinuz` = the stripped bootable ELF, `lib/modules/<ver>/`) — sourced from the same
-   Fedora ppc64le scaffold #1144 already publishes, so no cross-compile toolchain is required on
-   the host. Upload it and `runs.complete_build` (which validates it as a ppc64le ELF, ADR-0343)
-   to obtain a `kernel_ref`.
-3. `runs.install` (extracts the ELF via `extract_boot_vmlinuz`, injects the module tree, redefines
-   the `<os>` for direct-kernel boot) → `runs.boot`.
-4. **Assert `runs.boot` reaches readiness** (`runs.get` install/boot ledger; SSH reachable), the
-   load-bearing proof that QEMU/SLOF direct-kernel-booted the *uploaded* ELF bundle on pseries.
+2. Package the guest's own baseline ppc64le kernel **and its matching initramfs** (see the initrd
+   note below) as the ADR-0343 combined tar (`boot/vmlinuz` = the stripped bootable ELF,
+   `lib/modules/<ver>/`) plus a separate `initrd` artifact — sourced from the same Fedora ppc64le
+   scaffold #1144 already publishes (`select_kernel_and_initrd`, ADR-0272), so no cross-compile
+   toolchain is required. Upload both and `runs.complete_build` (which validates the boot member as
+   a ppc64le ELF, ADR-0343) to obtain `kernel_ref` **and** `initrd_ref`.
+3. `runs.install` (extracts the ELF via `extract_boot_vmlinuz`, stages the `initrd`, redefines the
+   `<os>` with `<kernel>`/`<initrd>`/`<cmdline>` for direct-kernel boot) → `runs.boot`. **No module
+   injection** — a plain boot (`method != KDUMP`, no `debuginfo_ref`) does not invoke the guest
+   kernel writer (§1); this proof exercises the host-side staging + `<os>`-render + SLOF boot path,
+   which is exactly issue 7's headline.
+4. **Assert readiness *and* attribute it to the installed bundle (discriminating).** The proof does
+   not merely assert `runs.boot` reaches readiness — the uploaded payload is derived from the same
+   baseline #1144 already boots, so a bare readiness signal cannot distinguish an install-plane boot
+   from pre-existing baseline state. So it also asserts, over the live spine:
+   - the running domain's `<kernel>`/`<initrd>` XML resolve to the **per-Run staged paths**
+     (`{staging}/{system_id}/{run_id}/kernel`, `…/initrd`), not the provision-time baseline dir; and
+   - a **unique cmdline token** passed at `runs.install` is present in the booted guest's
+     `/proc/cmdline` (read over SSH), proving the install-plane `<cmdline>` reached the running
+     kernel.
 
-**Initrd addressing is the empirical unknown this proof resolves.** A modular distro kernel needs
-an initramfs to mount root; the ADR-0272 baseline is a monolithic `root=/dev/vda` boot with no
-initrd. Whether the uploaded ppc64le bundle boots with no initrd (monolithic), with a staged
-`<initrd>`, or requires a pseries-specific initrd-addressing accommodation is discovered here and
-**captured in ADR-0344**, not left as tribal knowledge (the acceptance criterion). If SLOF/QEMU
-needs no special addressing (the expected outcome — QEMU loads `-initrd` and the kernel finds it
-via the device tree), the ADR records "no quirk"; if it does, the accommodation lands in code with
-a test and the ADR documents why.
+   Together these make "QEMU/SLOF direct-kernel-booted the *uploaded* bundle via the install plane"
+   falsifiable, not confounded with #1144's baseline boot.
 
-The console record and any quirk are written to
-`docs/design/2026-07-13-ppc64le-boot-bundle-proof-record-1146.md`, mirroring #1144's proof record.
+**Initrd addressing is the empirical unknown this proof resolves — and it needs an initrd to exist.**
+The Fedora ppc64le baseline kernel is **modular**: ADR-0272 extracts the rootfs's kernel *and* its
+`initramfs-<ver>.img` and boots them as a unit precisely because "a modular kernel cannot boot
+without its initramfs." So the uploaded bundle proof **must** stage an `<initrd>` (step 2/3); a
+no-initrd boot of this modular kernel would simply fail to mount root and is not attempted. The real
+unknown is therefore whether pseries/SLOF direct-kernel boot needs any special `<initrd>` *addressing*
+(load address / device-tree `linux,initrd-start`) beyond what QEMU's `-initrd` supplies. The expected
+outcome is none — QEMU sets the device-tree initrd properties and the kernel reads them — and the
+proof **records the finding either way in ADR-0344**: "no addressing quirk" if it boots as-is, or the
+accommodation (in code + a test) with its rationale if one is required.
+
+**Guest kernel writer (module injection) — live-verified or explicitly deferred.** The plain proof
+above does not exercise `_RealGuestKernelWriter` (§1), so the libguestfs cross-arch `depmod` question
+stays open after it. This issue resolves it one of two ways, decided during the build by what the
+host can actually do:
+- **(a) Verify live if a ppc64le DWARF `vmlinux` is obtainable.** A second `runs.install` with a
+  `debuginfo_ref` set triggers `_RealGuestKernelWriter.inject` (module tree + vmlinux) on the ppc64le
+  overlay, live-testing whether libguestfs runs the guest's ppc64le `depmod` in its x86_64 appliance.
+  If it works, ADR-0344 records the writer verified for ppc64le; if it fails with an exec-format /
+  binfmt error, that *is* the discovered constraint.
+- **(b) Otherwise, flag UNVERIFIED and defer to the kdump sub-issue (9).** If no ppc64le debuginfo is
+  practically available on the proof host, the proof documents the real writer's in-guest `depmod` as
+  **UNVERIFIED on ppc64le**, records the libguestfs same-arch `command` constraint in ADR-0344, and
+  defers its live proof + any `qemu-user`/`binfmt` appliance accommodation to issue 9 (where module
+  injection is load-bearing for kdump). This is honest scoping, not a silent gap — the writer is not
+  claimed arch-neutral.
+
+The console record, the initrd-addressing finding, and the writer verdict (verified or deferred) are
+written to `docs/design/2026-07-13-ppc64le-boot-bundle-proof-record-1146.md`, mirroring #1144's proof
+record.
 
 ## Acceptance criteria
 
@@ -137,15 +186,24 @@ The console record and any quirk are written to
    to today. "Byte-agnostic" is asserted, not assumed.
 2. **ppc64le bundle exercised (unit).** `extract_boot_vmlinuz` extracts an ELF64-LE `EM_PPC64`
    boot member byte-identically; `repack_modules_subtree`/`_read_release` handle a
-   `…​.ppc64le` module version; the arch-parameterized install flow injects the ppc64le module
-   tree and renders the ELF `<kernel>` with the request cmdline.
-3. **Live proof recorded.** A documented `live_stack` run boots an *uploaded* ppc64le kernel
-   bundle on pseries under TCG on the x86_64 host and observes `runs.boot` readiness; the proof
-   record doc captures the console evidence and the initrd-addressing finding.
+   `…​.ppc64le` module version; the arch-parameterized install flow (with the injected fake writer)
+   renders the ELF `<kernel>` + staged `<initrd>` with the request cmdline and, on the injection
+   path, hands the ppc64le module tree to the writer. (The *real* writer's in-guest `depmod` on a
+   ppc64le overlay is a live question — criterion 5 — not a unit claim.)
+3. **Live proof recorded (discriminating).** A documented `live_stack` run installs and
+   direct-kernel-boots an *uploaded* ppc64le kernel+initrd bundle on pseries under TCG on the x86_64
+   host, reaches readiness, **and** attributes it to the install plane: the running domain's
+   `<kernel>`/`<initrd>` resolve to the per-Run staged paths and a unique install cmdline token
+   appears in the guest's `/proc/cmdline`. The proof record captures the console evidence and the
+   initrd-addressing finding.
 4. **No tribal knowledge.** Any pseries direct-boot quirk (initrd addressing or its absence) is
    recorded in ADR-0344 (and in code + a test if it needs an accommodation), and the epic's
    "SLOF direct-kernel boot … (issue 7)" Known-unverified item is retired.
-5. **De-x86-ed prose.** `extract_boot_vmlinuz` (and adjacent install docstrings) no longer assert
+5. **Guest kernel writer verdict, not assumption.** The real `_RealGuestKernelWriter`'s in-guest
+   `depmod` on a ppc64le overlay is either live-verified (a `debuginfo_ref` install exercises it) or
+   explicitly recorded UNVERIFIED with the libguestfs cross-arch `command` constraint and deferred to
+   issue 9 — never asserted "arch-neutral" on the strength of the fake-writer unit tests.
+6. **De-x86-ed prose.** `extract_boot_vmlinuz` (and adjacent install docstrings) no longer assert
    a bzImage-only `<kernel>`; the arch-opaque contract is stated where a reader meets it.
 
 ## Scope / non-goals
