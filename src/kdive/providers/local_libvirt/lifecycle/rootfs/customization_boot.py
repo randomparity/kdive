@@ -56,9 +56,16 @@ FAIL_MARKER = "kdive-customize-failed"
 CUSTOMIZE_UNIT = "kdive-customize.service"
 CUSTOMIZE_SCRIPT_PATH = "/usr/local/sbin/kdive-customize"
 
+# Genuine kernel-fatal patterns, used ONLY as a backstop for a guest that dies without emitting
+# the (authoritative) ERR-trap fail marker — e.g. a panic that kills the shell before the trap
+# runs. This scan runs over the WHOLE customization console, which (unlike a quiet provision boot)
+# carries `dnf` transaction + scriptlet output, so the broad `BUG:` alternative is deliberately
+# EXCLUDED: a package changelog or scriptlet line containing `BUG:` would false-fail an otherwise
+# good build. The retained patterns are kernel-log-specific and do not appear in package output.
+# The common panic-then-die case is already caught by settled-without-ok; this only speeds a
+# hung panic. `soft lockup`/`detected stall` stay excluded (benign under TCG load) (ADR-0345).
 _GENUINE_FAULT = re.compile(
     r"Kernel panic"
-    r"|(?<![A-Za-z])BUG:(?! soft lockup)"
     r"|(?<![A-Za-z])Oops:"
     r"|general protection fault"
     r"|[Uu]nable to handle kernel"

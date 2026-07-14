@@ -144,10 +144,15 @@ def render_firstboot_script(
         f"rm -f /etc/systemd/system/{unit_name} "
         f"/etc/systemd/system/multi-user.target.wants/{unit_name} {script_path}"
     )
+    # Order matters: sync BEFORE echoing the ok marker. The orchestration force-destroys the
+    # domain the instant a poll reads the marker (10s cadence, slower under TCG), so a marker
+    # emitted before the flush completes would let the destroy truncate the customization writes
+    # (installed packages, version markers, the unit self-removal). Flushing first means the host
+    # can only ever observe ok after every write is durable (ADR-0345).
     lines += [
         "trap - EXIT",
-        f"echo {ok_marker} > /dev/{console_device}",
         "sync",
+        f"echo {ok_marker} > /dev/{console_device}",
         "systemctl poweroff",
     ]
     return "\n".join(lines) + "\n"

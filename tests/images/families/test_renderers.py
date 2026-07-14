@@ -104,6 +104,12 @@ def test_firstboot_script_shape() -> None:
     assert "trap - EXIT" in script
     assert script.rstrip().endswith("systemctl poweroff")
     assert "echo kdive-customize-ok > /dev/hvc0" in script
+    # Durability: the success sync must precede the ok marker, so the orchestration's
+    # force-destroy (fired on reading the marker) cannot truncate the customization writes.
+    body = script.splitlines()
+    sync_idx = body.index("sync")
+    ok_idx = next(i for i, ln in enumerate(body) if ln == "echo kdive-customize-ok > /dev/hvc0")
+    assert sync_idx < ok_idx
 
 
 def test_firstboot_unit_orders_after_network_and_wants_multiuser() -> None:

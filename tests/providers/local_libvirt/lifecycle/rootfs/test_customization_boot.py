@@ -40,8 +40,17 @@ def test_benign_tcg_stall_is_pending():
     assert C(b"watchdog: BUG: soft lockup - CPU#0 stuck for 22s!\n") is CustomizeVerdict.PENDING
 
 
-def test_real_bug_still_fails():
+def test_kernel_fatal_fault_still_fails():
+    # A genuine kernel-fatal line still fails via a retained pattern (unable-to-handle-kernel).
     assert C(b"BUG: unable to handle kernel paging request\n") is CustomizeVerdict.FAILED
+
+
+def test_incidental_bug_token_in_dnf_output_is_pending():
+    # The customization console carries dnf transaction + scriptlet output; a bare `BUG:` token
+    # (e.g. a package changelog line) must NOT false-fail the build — only the authoritative
+    # ERR-trap fail marker and kernel-log-specific faults do (ADR-0345).
+    assert C(b"  Updating   : foo-1.2 (fixes BUG: crash in bar)\n") is CustomizeVerdict.PENDING
+    assert C(b"BUG: scheduling while atomic in a package note\n") is CustomizeVerdict.PENDING
 
 
 def test_pending_when_quiet():
