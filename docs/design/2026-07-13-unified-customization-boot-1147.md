@@ -133,15 +133,17 @@ the customized `staged` image, not `scratch` (which is never customized on this 
 
 Assembled from existing local-libvirt seams (all injected for unit tests):
 
-- **Build-boot identity (a build is not a System) — the naming seam needs extending, not just
-  reuse.** A customization build has no `system_id`, so the orchestration mints a **per-build
-  UUID**. But `render_domain_xml`→`domain_name_for` hardcodes the **System** form `kdive-<uuid>`
-  (`runtime_paths.py`), so reusing it verbatim would name the build domain `kdive-<build_uuid>`,
-  which `system_id_from_domain_name` parses as a System — exposing the build domain to the
-  reconciler's name-fallback reap **mid-build**. `render_domain_xml`/`domain_name_for` are
-  therefore **extended** to emit `kdive-build-<uuid>` for the build path; that form is already
-  excluded from System-name parsing (`runtime_paths.py`), so once the renderer emits it the
-  reconciler correctly ignores it. Distinct per-build UUIDs give **concurrent-build isolation**
+- **Build-boot identity (a build is not a System) — a dedicated minimal renderer, not reuse.** A
+  customization build has no `system_id`, so the orchestration mints a **per-build UUID**.
+  `render_domain_xml` is System-shaped (it requires a `ProvisioningProfile` + `ssh_port` and
+  renders the SSH forward / gdbstub), and `domain_name_for` hardcodes the System form
+  `kdive-<uuid>` — which `system_id_from_domain_name` would parse as a System, exposing a reused
+  domain to the reconciler's reap **mid-build**. So the build path adds a **dedicated
+  `render_customization_domain_xml` + `build_domain_name`** (`kdive-build-<uuid>`), leaving
+  `render_domain_xml`/`domain_name_for` System-only. The `kdive-build-` form is already excluded
+  from System-name parsing (`runtime_paths.py`), so the reconciler ignores build domains. The
+  dedicated renderer must still replicate the q35 NIC-slot pin (`addr=0x10`) or an x86 build
+  domain fails `define`/`start`. Distinct per-build UUIDs give **concurrent-build isolation**
   (domain name + console path), with no collision with a provisioned System.
 - **Transient auto-destroy domain — one connection held open across the whole build.** Unlike
   provision domains (persistent, because a System outlives the worker), the build domain is
@@ -201,10 +203,12 @@ Assembled from existing local-libvirt seams (all injected for unit tests):
   that wedges the guest (no clean poweroff, no libvirt `crashed`) still fast-fails instead of
   burning the full deadline. Failure is signalled authoritatively by:
   - `kdive-customize-ok` → success → force-off → seal.
-  - `kdive-customize-failed` (the ERR-trap marker) **or** a libvirt **`crashed`** domstate
-    **or** a genuine-fault console pattern (the subtractive set above) **or**
-    shutoff-without-ok-marker → `PROVISIONING_FAILURE` + `redacted_console_tail` (the normal
-    evidence path).
+  - `kdive-customize-failed` (the ERR-trap marker) **or** a genuine-fault console pattern (the
+    subtractive set above) **or** the domain **settled without the ok-marker** →
+    `PROVISIONING_FAILURE` + console tail (the normal evidence path). "Settled" uses the
+    crashed-aware domstate probe (shut off **or** crashed), so a panic that ends the domain — no
+    pvpanic is rendered on the build domain — is caught here rather than needing a separate
+    "crashed domstate" branch.
   - window elapsed → `BOOT_TIMEOUT` + console tail.
 
   Only `detected stall` and `BUG: soft lockup` are excluded; the guest's own `set -e`/ERR trap
@@ -305,6 +309,15 @@ the customized `staged` image, before publish:
   to bring the network up on the first customization boot. rhel catalog rows are cloud images,
   so this affects nothing shipped; a non-cloud network bring-up (e.g. an injected
   systemd-networkd unit) is a follow-up if a virt-builder row is ever added.
+- **Console readability is a hard build-path precondition (ADR-0223).** The completion handshake
+  reads the serial `<log>`, which a non-root worker under `qemu:///system` cannot read
+  (virtlogd `root:0600`). Unlike provisioning (where it only degrades evidence), the build fails
+  outright, so build-fs requires the worker to run as root, use `qemu:///session`, or hold
+  virtlogd group read. A `build-fs` preflight fails fast with that remediation before the boot.
+- **Network-disable bases** are unsupported on the boot path: the base must be cloud-init-enabled
+  with no `network:{config:disabled}` drop-in. The injected `99-kdive.cfg` is the primary network
+  config and `/etc/cloud/cloud-init.disabled` is removed offline pre-boot; shipped Fedora rows
+  comply.
 - Native builds now boot the full guest OS to customize — modestly slower than the supermin
   appliance under KVM (the `dnf` install + kdump initramfs rebuild dominates either way) and a
   new failure mode on the build host (which is already a libvirt host).

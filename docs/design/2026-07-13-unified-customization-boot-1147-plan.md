@@ -20,6 +20,22 @@
 - Conventional-commit subjects ≤72 chars; end every commit body with `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
 - Native x86_64 behavior is **not** byte-identical (it now boots to customize); debian's virt-customize **argv** stays byte-identical until the fast-follow.
 
+## Known preconditions (new for the boot path)
+
+- **Console readability (ADR-0223).** The customization boot's completion handshake reads the
+  serial `<log>` (`read_console_log`), which raises `CONFIGURATION_ERROR` on `PermissionError` —
+  the virtlogd `root:0600` wall a non-root worker under `qemu:///system` hits. For provisioning
+  this only degrades evidence; here it is **load-bearing** (the read *is* the handshake), so a
+  non-root `qemu:///system` worker fails every build. Task 11 documents the remediation (run the
+  worker as root, use `KDIVE_LIBVIRT_URI=qemu:///session`, or grant the worker group read access);
+  Task 9 adds a `build-fs` preflight that fails fast with that remediation **before** starting a
+  30-minute boot, rather than after. (This dev host runs `qemu:///system` — build-fs live proof
+  runs the worker as root or grants group read.)
+- **Base image shape.** Boot-path customization requires a **cloud-init-enabled** base with no
+  `network:{config:disabled}` drop-in (the injected `99-kdive.cfg` is the primary network config;
+  `/etc/cloud/cloud-init.disabled` is removed offline pre-boot). Shipped Fedora Cloud Base rows
+  satisfy this.
+
 ---
 
 ### Task 1: Typed customization Step model
@@ -120,7 +136,7 @@ def test_uploadfile_mode_appends_chmod():
 - [ ] **Step 2: Run — FAIL (no `render_argv`).**
 - [ ] **Step 3: Implement `render_argv`** per the mapping. Keep it ≤100 lines; a per-kind dispatch (`match step:`).
 - [ ] **Step 4: Run the renderer test — PASS.**
-- [ ] **Step 5: Refactor `_fedora_customize.py` primitives to return `list[Step]`.** `cloud_init_first_boot_args(ctx)` → returns Steps: `InstallPackages(("cloud-init",))` when `not ctx.is_cloud_image`; `Mkdir(NOCLOUD_SEED_DIR)`; `StageFile(KDIVE_CLOUD_CFG_PATH, KDIVE_CLOUD_CFG_CONTENT)`; `StageFile(f"{NOCLOUD_SEED_DIR}/meta-data", _NOCLOUD_META_DATA)`; `StageFile(f"{NOCLOUD_SEED_DIR}/user-data", _NOCLOUD_USER_DATA)`; `RunCommand(_STRIP_NET_DISABLE_CMD)`; `RunCommand("rm -f /etc/cloud/cloud-init.disabled")`; `WriteFile("/etc/machine-id", SEED_MACHINE_ID)`. Rename it `cloud_init_first_boot_steps` (drop the `cleanup` param — `StageFile` needs no host tempfile until argv-render time). `drgn_helper_args`→`drgn_helper_steps` returning `[UploadFile(drgn_helper_source(), DRGN_HELPER_GUEST_PATH, mode="0755")]`. `makedumpfile_version_marker_args`/`drgn_version_marker_args`→`_steps` returning `[RunCommand(<the same shell string>)]`. `debug_image_args`→`debug_image_steps`. `readiness` unit stays a rendered file uploaded via `UploadFile(readiness_unit_path, f"/etc/systemd/system/{READINESS_MARKER}.service")`.
+- [ ] **Step 5: Refactor `_fedora_customize.py` primitives to return `list[Step]`.** `cloud_init_first_boot_args(ctx)` → returns Steps: `InstallPackages(("cloud-init",))` when `not ctx.is_cloud_image`; `Mkdir(NOCLOUD_SEED_DIR)`; `StageFile(KDIVE_CLOUD_CFG_PATH, KDIVE_CLOUD_CFG_CONTENT)`; `StageFile(f"{NOCLOUD_SEED_DIR}/meta-data", _NOCLOUD_META_DATA)`; `StageFile(f"{NOCLOUD_SEED_DIR}/user-data", _NOCLOUD_USER_DATA)`; `RunCommand(_STRIP_NET_DISABLE_CMD)`; `RunCommand("rm -f /etc/cloud/cloud-init.disabled")`; `WriteFile("/etc/machine-id", SEED_MACHINE_ID)`. Rename it `cloud_init_first_boot_steps` (drop the `cleanup` param — `StageFile` needs no host tempfile until argv-render time). `drgn_helper_args`→`drgn_helper_steps` returning `[UploadFile(drgn_helper_source(), DRGN_HELPER_GUEST_PATH, mode="0755")]` — **preserve the existing `is_file()` fail-loud guard**: `drgn_helper_steps` still raises `CategorizedError(CONFIGURATION_ERROR)` when `drgn_helper_source()` is not a readable file, before returning the `UploadFile` (do not defer a missing helper to guestfish runtime). Add a regression test asserting a missing helper raises. `makedumpfile_version_marker_args`/`drgn_version_marker_args`→`_steps` returning `[RunCommand(<the same shell string>)]`. `debug_image_args`→`debug_image_steps`. `readiness` unit stays a rendered file uploaded via `UploadFile(readiness_unit_path, f"/etc/systemd/system/{READINESS_MARKER}.service")`.
 - [ ] **Step 6: Convert `rhel.py`.** Replace `customize_argv` with `customize_steps(ctx) -> list[Step]` building the same sequence with Steps (EPEL `RunCommand`, `InstallPackages(ctx.packages)`, `RunCommand("systemctl enable sshd.service")` when debug, the kdump `RunCommand`+`WriteFile(KDUMP_SYSCTL_PATH, KDUMP_SYSCTL_CONTENT)`+`RunCommand(KDUMP_FINAL_ACTION_CMD)`, `cloud_init_first_boot_steps(ctx)`, `debug_image_steps`, marker steps, `UploadFile(readiness_unit)`, `RunCommand(_SELINUX_PERMISSIVE_SED)`). Add `customize_via = "boot"`. Keep `packages`/`capabilities`/`normalize` unchanged.
 - [ ] **Step 7: Convert `debian.py`** analogously to `customize_steps`; add `customize_via = "virt_customize"`.
 - [ ] **Step 8: Update `base.py` Protocol** — `customize_steps` + `customize_via`; drop `customize_argv`.
@@ -198,9 +214,9 @@ def test_firstboot_script_shape():
 - Test: `tests/providers/shared/test_runtime_paths.py`, `tests/providers/local_libvirt/lifecycle/test_xml.py` (match existing test module for xml)
 
 **Interfaces:**
-- Produces: `build_domain_name(build_id: UUID) -> str` returning `f"kdive-build-{build_id}"`. `render_customization_domain_xml(build_id: UUID, *, arch: str, disk_path: str, kernel_path: Path, initrd_path: Path | None, accel: str, emulator: str | None, memory_mb: int = 2048, vcpu: int = 2) -> str` — a minimal domain reusing the low-level element helpers (`_append_guest_cpu`, `_append_os`, `_append_direct_kernel`, `_append_emulator`, `_append_root_disk`, `_append_serial_console`) with: `<name>` = `build_domain_name(build_id)`, `<uuid>` = `build_id`, `<on_reboot>destroy</on_reboot>`, an egress NIC via `_append_egress_nic` (raw `-netdev user,id=kdivebuild,restrict=off` + `virtio-net-pci` on the qemu commandline — no hostfwd, no gdbstub, no ssh forward, no preserve-on-crash). Console log path is `console_log_path(build_id)` (reused). `_append_serial_console` currently takes `system_id`; it derives the console path from the UUID, so pass `build_id` — no change needed there.
+- Produces: `build_domain_name(build_id: UUID) -> str` returning `f"kdive-build-{build_id}"`. `render_customization_domain_xml(build_id: UUID, *, arch: str, disk_path: str, kernel_path: Path, initrd_path: Path | None, accel: str, emulator: str | None, memory_mb: int = 2048, vcpu: int = 2) -> str` — a minimal domain reusing the low-level element helpers (`_append_guest_cpu`, `_append_os`, `_append_direct_kernel`, `_append_emulator`, `_append_root_disk`, `_append_serial_console`) with: `<name>` = `build_domain_name(build_id)`, `<uuid>` = `build_id`, `<on_reboot>destroy</on_reboot>`, an egress NIC via `_append_egress_nic` (raw `-netdev user,id=kdivebuild,restrict=off` + `virtio-net-pci` on the qemu commandline — no hostfwd, no gdbstub, no ssh forward, no preserve-on-crash). **`_append_egress_nic` must replicate the q35 NIC-slot pin** from `_append_ssh_forward` (append `,addr=0x10` to the `virtio-net-pci` device when `arch_traits(arch).pin_nic_slot` is true) — without it an x86_64/q35 build domain fails `define`/`start` with a PCI slot-1 collision (xml.py:349-358). Console log path is `console_log_path(build_id)` (reused). `_append_serial_console` derives the console path from the UUID, so pass `build_id` — no change needed there.
 
-**Note:** do NOT reuse `render_domain_xml` (it requires a `ProvisioningProfile`, an `ssh_port`, and renders the System SSH forward / gdbstub). The build domain is deliberately minimal.
+**Note (reconciled with the ADR):** this is a **dedicated minimal renderer**, not an extension of `render_domain_xml` (which requires a `ProvisioningProfile`, an `ssh_port`, and renders the System SSH forward / gdbstub). `domain_name_for` stays System-only; `build_domain_name` is new. Reconciler-safety holds because `system_id_from_domain_name` already returns `None` for the `kdive-build-` form. The spec/ADR text is updated to say "a dedicated renderer is added" (was "extend render_domain_xml").
 
 - [ ] **Step 1: Write failing tests**
 
@@ -241,7 +257,9 @@ def test_customization_domain_x86_kvm_has_no_emulator_and_egress_on():
     root = ET.fromstring(xml)
     assert root.get("type") == "kvm"
     assert root.find("devices/emulator") is None
-    assert any("restrict=off" in (a.get("value") or "") for a in root.iter())
+    vals = [a.get("value") or "" for a in root.iter()]
+    assert any("restrict=off" in v for v in vals)
+    assert any("virtio-net-pci" in v and "addr=0x10" in v for v in vals)  # q35 slot pin
 ```
 
 - [ ] **Step 2: Run — FAIL.**
@@ -303,7 +321,7 @@ def test_pending_when_quiet():
 - Test: `tests/providers/local_libvirt/test_settings.py` (or the settings test module in use)
 
 **Interfaces:**
-- Produces: `LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S = Setting(name="KDIVE_LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S", parse=_parse_positive_int, default="1800", group="local-libvirt", processes=_RT, help=…, suggest=…)`; append to `SETTINGS`. `1800` (30 min) native-KVM base window; the customization-boot poll multiplies it by `tcg_deadline_multiplier(accel)`. Doc the value is a live-proof-pinned default absorbing mirror/network fetch variance (spec §Deadline).
+- Produces: `LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S = Setting(name="KDIVE_LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S", parse=_parse_positive_int, default="1800", group="local-libvirt", processes=_RT, help=…, suggest=…)`; append to `SETTINGS`. `1800` (30 min) native-KVM base window; the customization-boot poll multiplies it by `tcg_deadline_multiplier(accel)`. Doc the value is a live-proof-pinned default absorbing mirror/network fetch variance (spec §Deadline). **`1800` is a provisional default; Task 10 re-pins it to the measured native-KVM customization time × 3.** Land it now so Task 7 can consume it; Task 10 updates it (and the help text) if the measurement warrants.
 
 - [ ] **Step 1: Write failing test** — assert the setting resolves to `1800` by default and rejects `<= 0`.
 - [ ] **Step 2: Run — FAIL.**
@@ -327,15 +345,15 @@ def test_pending_when_quiet():
       open_conn: Callable[[], _Conn]                 # returns a libvirt conn held open for the call
       create_transient: Callable[[_Conn, str], _Domain]   # createXML(xml, AUTODESTROY)
       read_console: Callable[[UUID], bytes]          # read_console_log(console_log_path(build_id))
-      domain_settled: Callable[[UUID], bool]         # domstate shut off/crashed via virsh subprocess
+      domain_settled: Callable[[UUID], bool]         # readiness._domain_exit_probe: shut off OR crashed
       sleep: Callable[[float], None]
-      window_polls: Callable[[str], int]             # base window / poll-interval, scaled by accel
+      window_polls: Callable[[str], int]             # base window / _POLL_INTERVAL_S, scaled by accel
   def run_customization_boot(build_id: UUID, domain_xml: str, *, accel: str, seams: CustomizationBootSeams) -> None
   ```
   Returns `None` on success; raises `CategorizedError(PROVISIONING_FAILURE)` with `details["console_tail"]` on a `kdive-customize-failed`/genuine-fault/settled-without-ok verdict, and `CategorizedError(BOOT_TIMEOUT)` on window exhaustion (also with the tail).
 - Consumes: `classify_customization_console` (Task 5), `tcg_deadline_multiplier` (deadlines.py), `redacted_console_tail` (or a plain bounded tail of `read_console` output — a build has no `RequestContext`/secret registry, so use a local bounded-tail helper on the console bytes rather than `redacted_console_tail`).
 
-**Control flow (the load-bearing part):** open ONE connection; `create_transient(conn, domain_xml)`; loop up to `window_polls(accel)` times: read console, classify; OK→break to seal; FAILED/genuine-fault→raise PROVISIONING_FAILURE + tail; else if `domain_settled(build_id)`→re-read+classify, OK→break else raise (settled without ok); else `sleep(interval)`. On loop exhaustion→raise BOOT_TIMEOUT + tail. In a `finally`, force-off the domain (destroy if active) and **only then** close the connection (closing triggers AUTODESTROY cleanup). The connection object stays open for the whole function — never opened/closed per poll.
+**Control flow (the load-bearing part):** define `_POLL_INTERVAL_S = 10.0` in this module (coarser than the boot readiness 5.0s — a customization boot is minutes-to-tens-of-minutes; `window_polls(accel) = ceil((CUSTOMIZATION_BOOT_WINDOW_S / _POLL_INTERVAL_S) * tcg_deadline_multiplier(accel))`). Open ONE connection; `create_transient(conn, domain_xml)`; loop up to `window_polls(accel)` times: read console, classify; OK→break to seal; FAILED (fail-marker OR genuine-fault, both from `classify_customization_console`)→raise PROVISIONING_FAILURE + tail; else if `domain_settled(build_id)` (shut off **or** crashed, via the crashed-aware `readiness._domain_exit_probe`)→re-read+classify, OK→break else raise (**settled without ok-marker**, which subsumes a crash: no pvpanic is rendered, so a panic ends as shut-off/crashed and is caught here — there is no separate "crashed domstate" path); else `sleep(_POLL_INTERVAL_S)`. On loop exhaustion→raise BOOT_TIMEOUT + tail. In a `finally`, force-off the domain (destroy if active) and **only then** close the connection (closing triggers AUTODESTROY cleanup). The connection object stays open for the whole function — never opened/closed per poll.
 
 - [ ] **Step 1: Write failing tests** (fake seams; a `FakeConn` records `closed`, a `FakeDomain` records `destroyed`):
 
@@ -410,10 +428,12 @@ def test_window_exhaustion_is_boot_timeout():
 - Test: `tests/providers/local_libvirt/test_rootfs_build.py`
 
 **Interfaces:**
-- `RootfsBuildTools` gains injected boot seams: `inject_offline: Callable[[Path, list[Step], str, str], None]` (apply file-ops + write the firstboot unit into the qcow2; args: qcow2, file_ops, firstboot_script, unit_name), `run_customization_boot: Callable[..., None]` (Task 7 `run_customization_boot`, defaulting to the `_from_env` seams), `seal_customized_image: Callable[..., None]` (Task 8), `extract_baseline_kernel: ExtractBaselineKernel` (reuse the provisioning seam type to get kernel+initrd from `staged`). Defaults wire the real implementations.
+- `RootfsBuildTools` gains injected boot seams: `inject_offline: Callable[[Path, list[Step], str, str], None]` (apply file-ops + write the firstboot unit into the qcow2; args: qcow2, file_ops, firstboot_script, unit_name — it also unconditionally `rm -f /etc/cloud/cloud-init.disabled` offline via guestfish, see the network-precondition note), `run_customization_boot: Callable[..., None]` (Task 7 `run_customization_boot`, defaulting to the `_from_env` seams), `seal_customized_image: Callable[..., None]` (Task 8), `extract_baseline_kernel: ExtractBaselineKernel` (reuse the provisioning seam type to get kernel+initrd from `staged`), and **`resolve_accel: Callable[[str], tuple[str, str | None]]`** — resolves `(accel, emulator)` for `spec.arch`. Its default (`# pragma: no cover - live_vm`) wraps the live `conn.getCapabilities()` → `parse_guest_arches(caps_xml, arch_traits.SUPPORTED_ARCHES)` → `resolve_accel_emulator(guest_arches, arch)` path (mirroring `provisioning.py`), returning `("kvm", None)` fail-open on empty guest_arches (exactly `resolve_accel_emulator`'s documented default). Defaults wire the real implementations.
 - `build()` dispatches on `family.customize_via`:
   - `"virt_customize"` (debian): the **current** order (acquire → customize(argv) → repack → normalize → probes-from-scratch → publish), unchanged.
-  - `"boot"` (rhel): acquire → **repack `staged`** → **normalize `staged` WITHOUT `/.autorelabel`** (see note) → `steps = family.customize_steps(ctx)`; `file_ops, exec = partition_steps(steps)`; `script = render_firstboot_script(exec, console_device=arch_traits(spec.arch).console_device, unit_name=_CUSTOMIZE_UNIT, ok_marker=OK_MARKER, fail_marker=FAIL_MARKER)`; `inject_offline(staged, file_ops, script, _CUSTOMIZE_UNIT)`; extract baseline kernel from `staged`; resolve `{accel, emulator}` for `spec.arch`; `xml = render_customization_domain_xml(build_id, …)`; `run_customization_boot(build_id, xml, accel=accel, seams=…)`; `seal_customized_image(staged, unit_name=_CUSTOMIZE_UNIT, selinux=(family.guest_mac.startswith("selinux")))`; **probes read `staged`**; `verify_cloud_init(staged)`; publish.
+  - `"boot"` (rhel): acquire → **repack `staged`** → **normalize `staged` WITHOUT `/.autorelabel`** (see note) → `steps = family.customize_steps(ctx)`; `file_ops, exec = partition_steps(steps)`; `script = render_firstboot_script(exec, console_device=arch_traits(spec.arch).console_device, unit_name=_CUSTOMIZE_UNIT, ok_marker=OK_MARKER, fail_marker=FAIL_MARKER)`; `inject_offline(staged, file_ops, script, _CUSTOMIZE_UNIT)`; extract baseline kernel from `staged`; `accel, emulator = self._tools.resolve_accel(spec.arch)`; `xml = render_customization_domain_xml(build_id, arch=spec.arch, disk_path=str(staged), kernel_path=…, initrd_path=…, accel=accel, emulator=emulator)`; `run_customization_boot(build_id, xml, accel=accel, seams=…)`; `seal_customized_image(staged, unit_name=_CUSTOMIZE_UNIT, selinux=(family.guest_mac.startswith("selinux")))`; **probes read `staged`**; `verify_cloud_init(staged)`; publish.
+
+**Network precondition (offline).** `inject_offline` removes `/etc/cloud/cloud-init.disabled` **offline** (guestfish `rm-f`, arch-safe) *before* the boot — that file disables cloud-init wholesale, so deferring its removal to a post-`network-online.target` firstboot would deadlock (no cloud-init → no DHCP → firstboot never runs). Boot-path customization requires a **cloud-init-enabled base with no `network:{config:disabled}` drop-in**; the injected `99-kdive.cfg` (`StageFile`) is the primary network config (highest-numbered drop-in wins). The `_STRIP_NET_DISABLE_CMD` `RunCommand` stays best-effort in the firstboot (a no-op on compliant bases). Shipped Fedora rows satisfy this (see Known preconditions).
 
 **`normalize` change:** the boot path must NOT touch `/.autorelabel` before the boot (seal does it after). Split `RhelFamily.normalize` so the `/.autorelabel` touch is separable: add a `relabel: bool = True` parameter (`normalize(qcow2, *, relabel=True)`); the boot path calls `family.normalize(staged, relabel=False)` and relies on Task 8's seal for the touch; the virt-customize path calls `normalize(staged)` (relabel=True, unchanged). Debian's `normalize` ignores `relabel` (no SELinux). Update `base.py` Protocol signature.
 
@@ -421,15 +441,24 @@ def test_window_exhaustion_is_boot_timeout():
 
 ```python
 def test_rhel_build_uses_customization_boot(tmp_path):
-    calls = _RecordingBootTools()
+    # _RecordingBootTools injects resolve_accel=lambda arch: ("kvm", None) (x86)
+    # or ("tcg", "/usr/bin/qemu-system-ppc64") (ppc64le); no libvirt is touched.
+    calls = _RecordingBootTools(accel=("kvm", None))
     plane = LocalLibvirtRootfsBuildPlane(workspace=tmp_path, tools=calls.as_tools())
     out = plane.build(_spec(name="fedora-kdive-ready-44", arch="x86_64"))
     assert calls.customization_boot_ran
+    assert calls.boot_accel == "kvm"                # resolve_accel seam drove the branch
     assert calls.boot_domain_name.startswith("kdive-build-")
     assert calls.normalize_relabel is False
     assert calls.sealed and calls.seal_selinux is True
     assert calls.probed_path == calls.staged_path   # provenance from staged, not scratch
     assert not calls.virt_customize_ran
+
+def test_ppc64le_build_boots_under_tcg(tmp_path):
+    calls = _RecordingBootTools(accel=("tcg", "/usr/bin/qemu-system-ppc64"))
+    plane = LocalLibvirtRootfsBuildPlane(workspace=tmp_path, tools=calls.as_tools())
+    plane.build(_spec(name="fedora-kdive-ready-44-ppc64le", arch="ppc64le"))
+    assert calls.boot_accel == "tcg"                # TCG branch is unit-covered
 
 def test_debian_build_stays_on_virt_customize(tmp_path):
     calls = _RecordingBootTools()
@@ -447,7 +476,7 @@ def test_boot_failure_aborts_publish(tmp_path):
 ```
 
 - [ ] **Step 2: Run — FAIL.**
-- [ ] **Step 3: Implement** the dispatch + reordered boot path + `RootfsBuildTools` boot seams + `normalize(relabel=…)` split. Keep `build()` ≤100 lines by extracting `_build_via_boot(...)` and `_build_via_virt_customize(...)`.
+- [ ] **Step 3: Implement** the dispatch + reordered boot path + `RootfsBuildTools` boot seams + `normalize(relabel=…)` split. Keep `build()` ≤100 lines by extracting `_build_via_boot(...)` and `_build_via_virt_customize(...)`. On the boot path, before the (long) boot, run a **console-readability preflight**: attempt `read_console_log(console_log_path(build_id))` on the not-yet-existent log (absent → `b""`, fine) and surface an early `CONFIGURATION_ERROR` with the ADR-0223 remediation if it raises `PermissionError` on the console *directory* — i.e. fail fast rather than after a 30-minute boot. (Simplest: check the console dir is writable/readable by the worker; reuse `WORKER_READABILITY_REMEDIATION`.) Add a unit test that an injected read seam raising `CONFIGURATION_ERROR` aborts before `run_customization_boot`.
 - [ ] **Step 4: Run** the full `test_rootfs_build.py` + families suites — PASS (debian unchanged, rhel now boots).
 - [ ] **Step 5: `just lint && just type && just test`; commit** → `feat(local-libvirt): build rhel rootfs via customization boot (#1147)`.
 

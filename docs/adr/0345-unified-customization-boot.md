@@ -67,10 +67,12 @@ Concretely (the mechanism is specified in
   `KASAN:`, `Kernel panic`) but removes the two watchdog patterns a starved TCG vCPU emits
   benignly under load (`detected stall`, `BUG: soft lockup`) — so a real oops that wedges the
   guest fast-fails while benign stalls do not false-fail the exact ppc64le-TCG path this feature
-  proves. Failure is the `kdive-customize-failed` marker, a libvirt `crashed` domstate, a
-  genuine-fault pattern, or timeout. The deadline is a measured value (the live-proof native-KVM
+  proves. Failure is the `kdive-customize-failed` marker, a genuine-fault pattern, the domain
+  settling (shut off or crashed, via the crashed-aware domstate probe) without the ok-marker, or
+  timeout — no pvpanic is rendered, so a panic is caught by settled-without-ok rather than a
+  separate "crashed" branch. The deadline is a measured value (the live-proof native-KVM
   customization time × a 3× margin absorbing mirror/network fetch variance) ×
-  `tcg_deadline_multiplier(accel)`; failure surfaces `redacted_console_tail`.
+  `tcg_deadline_multiplier(accel)`; failure surfaces the bounded console tail.
 - **Build-boot identity, transient + auto-destroy.** A build is not a System, so the
   orchestration mints a per-build UUID and names the domain `kdive-build-<uuid>` (namespaced
   from provision domains, giving concurrent-build isolation). The domain is created **transient**
@@ -83,9 +85,10 @@ Concretely (the mechanism is specified in
   rather than re-running/looping) and `restrict=off` (`guest_egress=True`) **unconditionally** —
   the build's mirror fetch is decoupled from the provision-time ADR-0313 operator egress policy
   (the build boot runs the vendor image + kdive firstboot, the same trust as today's
-  `virt-customize` fetch). `render_domain_xml`/`domain_name_for` are **extended** to emit the
-  `kdive-build-<uuid>` name (currently hardcoded to the `kdive-<uuid>` System form); that form is
-  already excluded from System-name parsing, so the reconciler ignores build domains.
+  `virt-customize` fetch). A **dedicated `render_customization_domain_xml` + `build_domain_name`**
+  emit the `kdive-build-<uuid>` name (`render_domain_xml`/`domain_name_for` stay System-only — the
+  former needs a `ProvisioningProfile` + SSH forward); that form is already excluded from
+  System-name parsing, so the reconciler ignores build domains.
 - **Three seal-time details the reordering forces (all offline, post-boot).** (1) The build boot
   runs cloud-init to completion for the *constant* NoCloud instance-id, so seal removes
   `/var/lib/cloud/{instances,instance,sem,data}` — else the provision boot sees the instance as
