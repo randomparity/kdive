@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kdive.images.families.renderers import render_argv
+from kdive.images.families.renderers import (
+    partition_steps,
+    render_argv,
+    render_firstboot_script,
+    render_firstboot_unit,
+)
 from kdive.images.families.steps import (
     InstallPackages,
     Mkdir,
     RunCommand,
     StageFile,
+    Step,
     UploadFile,
     WriteFile,
 )
@@ -65,3 +71,45 @@ def test_uploadfile_mode_appends_chmod() -> None:
         "--run-command",
         "chmod 0755 /usr/local/sbin/k",
     ]
+
+
+def test_partition_separates_file_and_exec_ops() -> None:
+    steps: list[Step] = [
+        Mkdir("/d"),
+        InstallPackages(("a",)),
+        WriteFile("/f", "x"),
+        RunCommand("y"),
+    ]
+    file_ops, exec_ops = partition_steps(steps)
+    assert file_ops == [Mkdir("/d"), WriteFile("/f", "x")]
+    assert exec_ops == [InstallPackages(("a",)), RunCommand("y")]
+
+
+def test_firstboot_script_shape() -> None:
+    script = render_firstboot_script(
+        [InstallPackages(("drgn", "kexec-tools")), RunCommand("systemctl enable kdump.service")],
+        console_device="hvc0",
+        unit_name="kdive-customize.service",
+        script_path="/usr/local/sbin/kdive-customize",
+        ok_marker="kdive-customize-ok",
+        fail_marker="kdive-customize-failed",
+    )
+    assert script.startswith("#!/bin/sh\nset -e\n")
+    assert "trap 'echo kdive-customize-failed > /dev/hvc0" in script
+    assert "dnf -y install drgn kexec-tools" in script
+    assert "systemctl enable kdump.service" in script
+    assert "rm -f /etc/systemd/system/kdive-customize.service" in script
+    assert "multi-user.target.wants/kdive-customize.service" in script
+    assert "/usr/local/sbin/kdive-customize" in script
+    assert "trap - EXIT" in script
+    assert script.rstrip().endswith("systemctl poweroff")
+    assert "echo kdive-customize-ok > /dev/hvc0" in script
+
+
+def test_firstboot_unit_orders_after_network_and_wants_multiuser() -> None:
+    unit = render_firstboot_unit(script_path="/usr/local/sbin/kdive-customize")
+    assert "After=network-online.target" in unit
+    assert "Wants=network-online.target" in unit
+    assert "Type=oneshot" in unit
+    assert "ExecStart=/usr/local/sbin/kdive-customize" in unit
+    assert "WantedBy=multi-user.target" in unit
