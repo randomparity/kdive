@@ -110,8 +110,11 @@ the attach fails with `MISSING_DEPENDENCY`.
   gdbstub from the x86_64 host and reads registers. The pass signal must **discriminate the
   arch**, not merely return non-empty: `-data-list-register-names` yields the ppc64le GPR/SPR
   set (`r0`…`r31`, `pc`/`nip`) and none of the x86 names (`rax`), so the proof fails if gdb
-  targeted the wrong architecture rather than only if the stub was silent. Recorded as a proof
-  note; `UNVERIFIED` only if the host cannot run the proof at all.
+  targeted the wrong architecture rather than only if the stub was silent. **VERIFIED
+  2026-07-14** — `2026-07-14-ppc64le-multiarch-gdb-proof-record-1149.md`: the real
+  `GdbMiEngine.attach` connected over RSP to a `pseries`/TCG gdbstub from the x86_64 host, selected
+  `/usr/bin/gdb` (Fedora multiarch fallback), and read the ppc64le register set (`r0/r1/r31/pc/lr/
+  ctr`, no x86 names).
 
 ## Out of scope
 
