@@ -41,6 +41,10 @@ _PINNED_SHA256 = "bd322c68c540542484cde32df94d3e074874374a1eb2ca50551e808f4c7190
 _PINNED_SIZE = 90463884
 _EXPECTED_BUILD_ID = "06466f9617cff9e5a762af9216bfc23837310b9c"
 
+# Last verified passing against drgn 0.2.0 (2026-07-14). Recorded next to the pins so a future
+# drgn bump is diffable: re-run this test on the retained-core host after changing drgn — a
+# regression in real ppc64le-core opening fails it loudly (see the proof record's re-proof trigger).
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
