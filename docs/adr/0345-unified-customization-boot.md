@@ -1,6 +1,6 @@
 # ADR 0345 — Unify rootfs customization on a boot-to-self-customize mechanism; retire virt-customize execution
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-13
 - **Issue:** #1147
 - **Epic:** #1139 (full ppc64le support)
