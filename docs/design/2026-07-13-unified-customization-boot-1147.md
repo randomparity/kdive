@@ -103,11 +103,11 @@ acquire_base -> scratch (partitioned cloud base)
   -> repack whole-disk-ext4 -> staged
   -> normalize (fstab=/dev/vda, rm crypttab, SELINUX=permissive)   [pre-boot; NO /.autorelabel yet]
   -> inject offline steps + firstboot unit                          [guestfish, arch-safe]
-  -> boot transient domain kdive-build-<uuid> under accel (KVM native / TCG foreign)
+  -> createXML transient kdive-build-<uuid> (AUTODESTROY, on_reboot=destroy) under accel
        firstboot: install pkgs, enable units, record versions,
                   self-remove unit, echo kdive-customize-ok, poweroff
-  -> await ok-marker | fail on failure-marker / hard-panic / crashed-domstate / timeout (+tail)
-  -> seal: force-off + undefine domain; reset cloud-init per-instance state;
+  -> await ok-marker | fail on failure-marker / genuine-fault / crashed-domstate / timeout (+tail)
+  -> seal: force-off (transient — nothing to undefine); reset cloud-init per-instance state;
            touch /.autorelabel (SELinux); assert firstboot unit removed
   -> provenance probes read from `staged`
   -> verify_cloud_init -> publish
@@ -131,15 +131,26 @@ Assembled from existing local-libvirt seams (all injected for unit tests):
 - **Build-boot identity (a build is not a System).** The reused seams
   (`render_domain_xml`, the serial `<log>` sink, `classify_console`/domstate polling) are keyed
   on a UUID. A customization build has no `system_id`, so the orchestration mints a **per-build
-  UUID** and drives those seams with it: the transient domain is named `kdive-build-<uuid>`
-  (namespaced away from `kdive-<system-uuid>` provision domains) and its console log resolves
-  from the same UUID. Distinct per-build UUIDs give **concurrent-build isolation** — two builds
-  on one host never collide on domain name or console path, and never collide with a
-  provisioned System. The transient domain is **force-off + `undefine`d on every exit path**
-  (success, failure-marker, hard-panic, timeout, crash) so no build domain is ever left defined.
+  UUID** and drives those seams with it: the domain is named `kdive-build-<uuid>` (namespaced
+  away from `kdive-<system-uuid>` provision domains) and its console log resolves from the same
+  UUID. Distinct per-build UUIDs give **concurrent-build isolation** — two builds on one host
+  never collide on domain name or console path, and never collide with a provisioned System.
+- **Transient auto-destroy domain (no leak, no reaper).** Unlike provision domains (persistent,
+  because a System outlives the worker), the build domain is created **transient** via
+  `createXML(xml, VIR_DOMAIN_START_AUTODESTROY)` — it is **never persisted** (nothing to
+  `undefine`, nothing to leak) and libvirt **auto-destroys it when the worker's connection
+  drops**. So even the uncovered failure mode of the worker being SIGKILLed mid-build (an
+  established mode, #583) cannot leave a defined build domain behind; no `kdive-build-*` reaper
+  is needed. On the normal exit paths the orchestration also force-offs explicitly.
+- **`on_reboot=destroy` (fail fast on an unexpected reboot).** The firstboot unit self-removes
+  only on the success path, immediately before the ok-marker + poweroff. A guest-initiated
+  reboot during customization (a package scriptlet, a cloud-init `power_state`) would otherwise
+  re-run the whole firstboot against the same deadline — or loop. The build domain sets
+  `on_reboot=destroy`, so any such reboot destroys the domain instead → `shutoff-without-ok-marker`
+  → fast-fail with the console tail, never a re-run or loop.
 - **Render + start.** `render_domain_xml(build_uuid, ..., accel, emulator)` with an egress NIC,
-  then `defineXML`+`create` (the `_define_and_start` pattern). The serial `<log append="off">`
-  sink gives a truncated per-boot console automatically.
+  then `createXML(..., AUTODESTROY)`. The serial `<log append="off">` sink gives a truncated
+  per-boot console automatically.
 - **Network on the customization boot.** The kdive DHCP `cloud.cfg` drop-in + NoCloud seed are
   `WriteFile` steps injected offline *before* the boot, so cloud-init brings up deterministic
   DHCP over the SLIRP NIC on the customization boot itself — not dependent on the vendor base's
@@ -155,28 +166,38 @@ Assembled from existing local-libvirt seams (all injected for unit tests):
     `poweroff` immediately (never waits the full timeout on a broken install).
 
   The two build markers are **distinct** from the provision-time `kdive-ready` marker.
-- **Poll — the explicit marker is authoritative, not a heuristic regex.** The provision-boot
-  `classify_console` crash regex (`readiness.py` `_CRASH_SIGNATURE`) matches `detected stall`
-  and `soft lockup` — lines a **slow TCG guest emits benignly under load** while running `dnf`
-  + a kdump initramfs rebuild. Reusing it verbatim would spuriously fail the exact ppc64le-TCG
-  build this feature must prove. So the customization boot does **not** reuse that regex.
-  Failure is signalled authoritatively by:
-  - `kdive-customize-ok` → success → force-off + undefine → seal.
+- **Poll — the explicit marker is authoritative; the crash classifier is subtractive.** The
+  provision-boot `classify_console` regex (`readiness.py` `_CRASH_SIGNATURE`) matches eight
+  patterns — `Kernel panic`, `BUG:`, `Oops:`, `general protection fault`, `unable to handle
+  kernel`, `KASAN:`, `KFENCE:`, `detected stall`. Two of those fire **benignly on a slow TCG
+  guest under load** while `dnf` + a kdump initramfs rebuild starve the vCPU: RCU `detected
+  stall`, and the soft-lockup watchdog line (which matches via the broad `BUG:` alternative — so
+  the exclusion is the specific `BUG: soft lockup` form, not all `BUG:`). The customization boot
+  therefore uses the provision crash set **minus exactly those two load-sensitive watchdog
+  patterns** — it keeps every genuine fault (`Oops:`, `unable to handle kernel`, `KFENCE:`,
+  `general protection fault`, `KASAN:`, `Kernel panic`, a real `kernel BUG at`), so a real oops
+  that wedges the guest (no clean poweroff, no libvirt `crashed`) still fast-fails instead of
+  burning the full deadline. Failure is signalled authoritatively by:
+  - `kdive-customize-ok` → success → force-off → seal.
   - `kdive-customize-failed` (the ERR-trap marker) **or** a libvirt **`crashed`** domstate
-    **or** a hard-panic-only console pattern (`Kernel panic`, GPF, KASAN — patterns that cannot
-    fire benignly) **or** shutoff-without-ok-marker → `PROVISIONING_FAILURE` +
-    `redacted_console_tail` (the normal evidence path).
+    **or** a genuine-fault console pattern (the subtractive set above) **or**
+    shutoff-without-ok-marker → `PROVISIONING_FAILURE` + `redacted_console_tail` (the normal
+    evidence path).
   - window elapsed → `BOOT_TIMEOUT` + console tail.
 
-  Benign `detected stall` / `soft lockup` lines are explicitly **excluded** from the build-boot
-  classifier; the guest's own `set -e`/ERR trap is the real install-failure detector.
+  Only `detected stall` and `BUG: soft lockup` are excluded; the guest's own `set -e`/ERR trap
+  remains the real install-failure detector regardless.
 - **Deadline — measured, not "high".** A dedicated customization-boot window (new operator-
   tunable `KDIVE_*` setting) covers `dnf install` of the debug set **plus** the kdump initramfs
   rebuild, × `tcg_deadline_multiplier(accel)` for foreign. The default is **pinned to the
-  native-KVM customization time measured in the live proof** (recorded in the proof record) with
-  margin — not an arbitrary constant — so it is falsifiable. The live proof also records whether
-  the boot-tuned TCG multiplier suffices for this download+install+initramfs workload or needs a
-  dedicated factor. **In-guest package fetch:** `dnf` install now runs in the guest over the
+  native-KVM customization time measured in the live proof × a stated safety factor (3×)** — not
+  an arbitrary constant, so it is falsifiable — where the 3× headroom absorbs **mirror/network
+  variance** (the dominant, high-variance cost is the in-guest `dnf` fetch, which a single
+  fast-mirror sample under-represents), *not* just accel scaling. The proof records the
+  **install-phase and boot-phase times separately** so the segment the margin must cover is
+  explicit, and records whether the boot-tuned TCG multiplier suffices for this
+  download+install+initramfs workload or needs a dedicated factor. **In-guest package fetch:**
+  `dnf` install now runs in the guest over the
   SLIRP NIC (host uplink, NAT'd — the same upstream mirrors virt-customize used, not a new
   network dependency). Transient mirror/GPG failures rely on `dnf`'s built-in retries and, on
   exhaustion, fail the build via the ERR-trap marker with the console tail as evidence — never a
@@ -220,16 +241,17 @@ the customized `staged` image, before publish:
 - **debian argv-renderer regression guard:** its `virt-customize` argv is byte-identical to
   today (debian is not converted yet; this proves no accidental drift).
 - boot-customize-seal orchestration against fake domain/console seams:
-  ok-marker→seal; failure-marker→`PROVISIONING_FAILURE`+tail; hard-panic pattern→fail;
+  ok-marker→seal; failure-marker→`PROVISIONING_FAILURE`+tail; genuine-fault pattern→fail;
   `crashed` domstate→fail; timeout→`BOOT_TIMEOUT`+tail; shutoff-without-ok-marker→fail;
   deadline scales by `tcg_deadline_multiplier(accel)`.
-- **build-boot classifier excludes benign TCG output:** a console region containing
-  `rcu: … detected stalls` / `watchdog: BUG: soft lockup …` **without** the ok/failed marker is
-  *not* classified as a failure (only the markers, `crashed` domstate, hard-panic patterns, and
-  timeout are).
+- **subtractive classifier:** a region with a genuine fault (`Oops:`, `unable to handle kernel`,
+  `KFENCE:`, `Kernel panic`) → fail; a region with only the two excluded watchdog lines
+  (`rcu: … detected stalls`, `watchdog: BUG: soft lockup …`) and no marker → **not** a failure.
+- **transient domain:** created via `createXML(AUTODESTROY)` (asserted, not `defineXML`), so no
+  persistent definition exists to leak; force-off invoked on normal exits; `on_reboot=destroy`
+  is rendered so a mid-customization reboot fails fast rather than re-running the firstboot.
 - **seal steps invoked:** cloud-init per-instance state removed; `/.autorelabel` touched exactly
-  once (post-boot, not before); firstboot-unit-removed assertion runs; transient domain
-  undefined on every exit path (success/failure/timeout/crash).
+  once (post-boot, not before); firstboot-unit-removed assertion runs.
 - **build-boot identity:** the transient domain is `kdive-build-<uuid>` with a UUID-derived
   console path; two concurrent builds get distinct names/paths.
 

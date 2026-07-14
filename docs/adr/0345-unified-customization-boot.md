@@ -62,17 +62,23 @@ Concretely (the mechanism is specified in
   console (`ttyS0`/`hvc0`) and powers off; an `ERR`/`EXIT` trap echoes `kdive-customize-failed` +
   the error tail and powers off immediately, so a broken install fails fast instead of burning
   the full timeout. These build markers are distinct from the provision-time `kdive-ready`
-  marker. The customization boot does **not** reuse the provision-boot crash regex
-  (`_CRASH_SIGNATURE` matches `detected stall`/`soft lockup`, which a slow TCG guest emits
-  benignly under load — a false-fail on the exact path this feature proves): failure is the
-  `kdive-customize-failed` marker, a libvirt `crashed` domstate, a hard-panic-only pattern
-  (`Kernel panic`/GPF/KASAN), or timeout. The deadline is a measured value (pinned to the
-  live-proof native-KVM customization time) × `tcg_deadline_multiplier(accel)`, not an arbitrary
-  constant; failure surfaces `redacted_console_tail`.
-- **Build-boot identity.** A build is not a System, so the orchestration mints a per-build UUID,
-  names the transient domain `kdive-build-<uuid>` (namespaced from provision domains), derives
-  the console path from it, and force-off + `undefine`s it on every exit path — giving
-  concurrent-build isolation and no collision with provisioned Systems.
+  marker. The customization-boot crash classifier is **subtractive**: it keeps the provision
+  `_CRASH_SIGNATURE` genuine faults (`Oops:`, `unable to handle kernel`, `KFENCE:`, GPF,
+  `KASAN:`, `Kernel panic`) but removes the two watchdog patterns a starved TCG vCPU emits
+  benignly under load (`detected stall`, `BUG: soft lockup`) — so a real oops that wedges the
+  guest fast-fails while benign stalls do not false-fail the exact ppc64le-TCG path this feature
+  proves. Failure is the `kdive-customize-failed` marker, a libvirt `crashed` domstate, a
+  genuine-fault pattern, or timeout. The deadline is a measured value (the live-proof native-KVM
+  customization time × a 3× margin absorbing mirror/network fetch variance) ×
+  `tcg_deadline_multiplier(accel)`; failure surfaces `redacted_console_tail`.
+- **Build-boot identity, transient + auto-destroy.** A build is not a System, so the
+  orchestration mints a per-build UUID and names the domain `kdive-build-<uuid>` (namespaced
+  from provision domains, giving concurrent-build isolation). The domain is created **transient**
+  via `createXML(VIR_DOMAIN_START_AUTODESTROY)` — never persisted (nothing to `undefine` or
+  leak) and auto-destroyed when the worker connection drops, so even a mid-build worker SIGKILL
+  (#583) cannot leave a defined build domain behind; no reaper is needed. It renders
+  `on_reboot=destroy` so a guest-initiated reboot during customization fails fast (→
+  shutoff-without-marker) rather than re-running the firstboot or looping.
 - **Three seal-time details the reordering forces (all offline, post-boot).** (1) The build boot
   runs cloud-init to completion for the *constant* NoCloud instance-id, so seal removes
   `/var/lib/cloud/{instances,instance,sem,data}` — else the provision boot sees the instance as
