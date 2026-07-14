@@ -18,6 +18,7 @@ import kdive.config as config
 from kdive.diagnostics.checks import (
     BASE_IMAGE_STAGING_ID,
     GDBSTUB_ACL_ID,
+    MULTIARCH_GDB_ID,
     PROVIDER_TLS_ID,
     REACHABILITY_ID,
     SECRET_REF_ID,
@@ -167,13 +168,17 @@ def test_factory_builds_a_service_with_a_secret_ref_check(monkeypatch, tmp_path:
     assert "secret_ref" in ids
 
 
-def test_provider_diagnostics_registration_includes_remote_libvirt() -> None:
+def test_provider_diagnostics_registration_includes_local_and_remote_libvirt() -> None:
     from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 
     contributions = diagnostic_provider_contributions()
-    assert len(contributions) == 1
-    assert contributions[0].checks
-    assert contributions[0].unavailable_worker_checks
+    by_provider = {c.provider: c for c in contributions}
+    assert {"local-libvirt", "remote-libvirt"} <= set(by_provider)
+    # Remote contributes server-vantage checks; both declare worker-vantage checks (multiarch_gdb
+    # for local, tls + gdbstub_acl for remote), so both carry unavailable-worker descriptors.
+    assert by_provider["remote-libvirt"].checks
+    assert by_provider["local-libvirt"].unavailable_worker_checks
+    assert by_provider["remote-libvirt"].unavailable_worker_checks
 
 
 def test_contribution_names_the_remote_libvirt_provider() -> None:
@@ -378,9 +383,12 @@ def test_factory_includes_reachability_and_tls_acl_metadata_when_remote_configur
     assert isinstance(service._worker_mode, WorkerVantageSubstitutionMode)  # noqa: SLF001
     unavailable_ids = {c.id for c in service._worker_mode.checks}  # noqa: SLF001
     assert {SECRET_REF_ID, REACHABILITY_ID, BASE_IMAGE_STAGING_ID} <= runnable_ids
-    assert {PROVIDER_TLS_ID, GDBSTUB_ACL_ID} == unavailable_ids
+    # local-libvirt's multiarch_gdb is also a worker-vantage check, so it joins the substituted
+    # set with no pool wired.
+    assert {PROVIDER_TLS_ID, GDBSTUB_ACL_ID, MULTIARCH_GDB_ID} == unavailable_ids
     assert PROVIDER_TLS_ID not in runnable_ids
     assert GDBSTUB_ACL_ID not in runnable_ids
+    assert MULTIARCH_GDB_ID not in runnable_ids
 
 
 def test_factory_service_is_worker_unavailable_when_remote_configured(
@@ -527,7 +535,7 @@ def test_factory_keeps_substitution_when_no_pool(monkeypatch, tmp_path: Path) ->
     service = _factory(None)
     assert isinstance(service._worker_mode, WorkerVantageSubstitutionMode)  # noqa: SLF001
     unavailable_ids = {c.id for c in service._worker_mode.checks}  # noqa: SLF001
-    assert unavailable_ids == {PROVIDER_TLS_ID, GDBSTUB_ACL_ID}
+    assert unavailable_ids == {PROVIDER_TLS_ID, GDBSTUB_ACL_ID, MULTIARCH_GDB_ID}
 
 
 def test_factory_substitutes_every_enabled_worker_contribution_without_pool(
@@ -603,13 +611,16 @@ def test_factory_dispatches_every_enabled_worker_contribution_with_pool(
     assert worker_results == {("worker-a", "provider-a"), ("worker-b", "provider-b")}
 
 
-def test_factory_no_dispatcher_when_pool_but_remote_not_configured(
+def test_factory_dispatches_local_libvirt_when_pool_but_remote_not_configured(
     monkeypatch, tmp_path: Path
 ) -> None:
+    # local-libvirt is always enabled and contributes the multiarch_gdb worker check, so a pool
+    # yields a dispatch mode even with remote-libvirt unconfigured — the dispatcher just carries
+    # the one local worker check id.
     from typing import cast
 
     from psycopg_pool import AsyncConnectionPool
 
     _no_remote_instance(monkeypatch, tmp_path)
     service = _factory(None, pool=cast(AsyncConnectionPool, object()))
-    assert service._worker_mode is None  # noqa: SLF001
+    assert isinstance(service._worker_mode, WorkerVantageDispatchMode)  # noqa: SLF001
