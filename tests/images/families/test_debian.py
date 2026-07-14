@@ -170,8 +170,9 @@ def test_normalize_writes_fstab_removes_crypttab_no_selinux(tmp_path: Path) -> N
     # no /etc/selinux/config to touch (#824). Capture the guestfish script via an injected runner.
     scripts: list[str] = []
 
-    def _fake_run_guestfs(argv: list[str], **kwargs: object) -> None:
+    def _fake_run_guestfs(argv: list[str], **kwargs: object) -> str:
         scripts.append(str(kwargs.get("input_text", "")))
+        return ""
 
     DebianFamily().normalize(tmp_path / "img.qcow2", _run_guestfs=_fake_run_guestfs)
     assert len(scripts) == 1

@@ -119,8 +119,14 @@ def run_guestfs_tool(
     missing_message: str,
     failure_message: str | None = None,
     input_text: str | None = None,
-) -> None:
-    """Run a fixed-argv libguestfs tool, mapping failures onto categorized errors."""
+) -> str:
+    """Run a fixed-argv libguestfs tool, mapping failures onto categorized errors.
+
+    Returns the tool's captured stdout so callers that run a guestfish query script (native,
+    arch-safe ``is-file``/``exists``/``grep`` commands) can parse the result — a cross-arch-safe
+    alternative to ``sh`` guest-command checks, which run guest-arch binaries in the host-arch
+    appliance and fail with ``Exec format error`` on a foreign-arch image.
+    """
     try:
         result = subprocess.run(  # noqa: S603 - fixed argv, no shell  # nosec B603
             argv,
@@ -167,6 +173,7 @@ def run_guestfs_tool(
             category=ErrorCategory.PROVISIONING_FAILURE,
             details={"stage": stage, "tool": argv[0], "stderr": result.stderr[-2000:]},
         )
+    return result.stdout
 
 
 @contextmanager

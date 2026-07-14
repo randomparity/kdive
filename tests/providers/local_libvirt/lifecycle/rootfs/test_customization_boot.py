@@ -202,27 +202,29 @@ def test_unreadable_console_propagates_and_tears_down():
 
 
 class _RecordingGuestfish:
-    """A fake `GuestfishRunner` that records the `(qcow2, script)` it was called with."""
+    """A fake `GuestfishRunner` recording `(qcow2, script)` and returning a canned stdout.
 
-    def __init__(self) -> None:
-        self.calls: list[tuple[Path, str]] = []
-
-    def __call__(self, qcow2: Path, script: str) -> None:
-        self.calls.append((qcow2, script))
-
-
-def _raising_guestfish(_qcow2: Path, _script: str) -> None:
-    """A fake `GuestfishRunner` simulating a guestfish script whose unit-removed check failed.
-
-    Mirrors the real runner: the check is embedded in the guestfish script itself, so a still-
-    present unit surfaces as the script exiting non-zero, which `run_guestfs_tool` maps onto
-    `PROVISIONING_FAILURE`.
+    The real runner returns the guestfish script's stdout; the seal's native ``is-file``/
+    ``is-symlink`` predicates print ``true``/``false``. Default output is both ``false`` (the
+    firstboot self-removed cleanly), so the seal does not raise.
     """
-    raise CategorizedError(
-        "customization firstboot unit was not self-removed; the build boot did not "
-        "complete cleanly",
-        category=ErrorCategory.PROVISIONING_FAILURE,
-    )
+
+    def __init__(self, output: str = "false\nfalse\n") -> None:
+        self.calls: list[tuple[Path, str]] = []
+        self._output = output
+
+    def __call__(self, qcow2: Path, script: str) -> str:
+        self.calls.append((qcow2, script))
+        return self._output
+
+
+def _unit_present_guestfish(_qcow2: Path, _script: str) -> str:
+    """A fake `GuestfishRunner` whose ``is-file`` reports the firstboot unit still present.
+
+    The unit-removed assertion is now parsed from the runner's stdout (arch-safe native
+    predicates), not a script abort: a ``true`` line means the unit did not self-remove.
+    """
+    return "true\nfalse\n"
 
 
 def test_seal_script_resets_cloud_init_state(tmp_path):
@@ -257,8 +259,11 @@ def test_seal_script_asserts_firstboot_unit_and_wants_symlink_are_gone():
         Path("/img.qcow2"), unit_name=CUSTOMIZE_UNIT, selinux=False, run_guestfish=guestfish
     )
     script = guestfish.calls[0][1]
-    assert f"/etc/systemd/system/{CUSTOMIZE_UNIT}" in script
-    assert f"multi-user.target.wants/{CUSTOMIZE_UNIT}" in script
+    # Arch-safe native predicates (appliance ops on guest data), NOT a guest-command `sh 'test'`
+    # which would exec the guest's /bin/sh in the host-arch appliance and fail cross-arch.
+    assert f"is-file /etc/systemd/system/{CUSTOMIZE_UNIT}" in script
+    assert f"is-symlink /etc/systemd/system/multi-user.target.wants/{CUSTOMIZE_UNIT}" in script
+    assert "sh '" not in script  # no guest-command execution
 
 
 def test_seal_raises_provisioning_failure_when_unit_still_present():
@@ -267,7 +272,7 @@ def test_seal_raises_provisioning_failure_when_unit_still_present():
             Path("/img.qcow2"),
             unit_name=CUSTOMIZE_UNIT,
             selinux=False,
-            run_guestfish=_raising_guestfish,
+            run_guestfish=_unit_present_guestfish,
         )
     assert ei.value.category is ErrorCategory.PROVISIONING_FAILURE
     assert "was not self-removed" in str(ei.value)

@@ -71,7 +71,9 @@ _USE_KDUMP_CMD = (
 )
 _GUESTFISH_TIMEOUT_S = 5 * 60
 
-type RunGuestfs = Callable[..., None]
+# run_guestfs_tool returns the tool's stdout (for callers that parse a native guestfish query);
+# this normalize seam ignores it, but the alias must match the real signature's return type.
+type RunGuestfs = Callable[..., str]
 
 
 class DebianFamily:

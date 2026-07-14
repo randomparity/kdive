@@ -11,6 +11,7 @@ drives ``acquire base → virt-customize(family argv) → repack ext4 → family
 from __future__ import annotations
 
 import hashlib
+import stat
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -791,6 +792,7 @@ class _RecordingBootTools:
     virt_customize_ran: bool = False
     boot_accel: str | None = None
     boot_domain_name: str | None = None
+    boot_disk_dir_traversable: bool | None = None
     inject_file_ops: list[Step] = field(default_factory=list)
     inject_script: str | None = None
     normalize_relabel: bool | None = None
@@ -849,7 +851,14 @@ class _RecordingBootTools:
     def run_customization_boot(self, build_id: object, domain_xml: str, *, accel: str) -> None:
         self.customization_boot_ran = True
         self.boot_accel = accel
-        self.boot_domain_name = ET.fromstring(domain_xml).findtext("name")
+        root = ET.fromstring(domain_xml)
+        self.boot_domain_name = root.findtext("name")
+        # The qemu:///system hypervisor must be able to traverse the workspace dir holding the
+        # boot disk; the boot path widens the tempfile-0700 scratch dir before createXML.
+        source = root.find(".//disk/source")
+        if source is not None and (disk := source.get("file")):
+            mode = Path(disk).parent.stat().st_mode
+            self.boot_disk_dir_traversable = bool(mode & stat.S_IXOTH)
         self.order.append("boot")
         if self.boot_raises is not None:
             raise self.boot_raises
@@ -896,6 +905,9 @@ def test_rhel_build_uses_customization_boot(tmp_path: Path) -> None:
     assert calls.boot_accel == "kvm", "the resolve_accel seam drove the accelerator branch"
     assert calls.boot_domain_name is not None
     assert calls.boot_domain_name.startswith("kdive-build-")
+    assert calls.boot_disk_dir_traversable is True, (
+        "the boot path must widen the 0700 workspace dir so qemu:///system can reach the disk"
+    )
     assert calls.normalize_relabel is False, "the boot path normalizes without /.autorelabel"
     assert calls.sealed and calls.seal_selinux is True, "selinux family seals with a relabel"
     assert calls.probed_path == calls.staged_path, "provenance is probed from staged, not scratch"

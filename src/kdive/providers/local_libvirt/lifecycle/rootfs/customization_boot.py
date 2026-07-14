@@ -150,12 +150,15 @@ class CustomizationBootSeams:
         whole boot: closing it triggers ``VIR_DOMAIN_START_AUTODESTROY`` cleanup, so an
         opened/closed-per-poll connection would reap the domain mid-customization.
         ``prepare_console`` creates the console-log directory and worker-owned ``0644`` file
-        *before* the domain starts, exactly as the System provision path does
-        (``storage._prepare_console_log``): with the serial ``<log append="off">`` virtlogd
-        truncates that existing worker-owned file in place, so a **non-root** ``qemu:///system``
-        worker can still read the completion handshake back (the ADR-0223 mitigation) and the
-        ``/var/lib/kdive/console`` directory is guaranteed to exist on a never-provisioned build
-        host. The settled probe is the crashed-aware domstate probe (shut off *or* crashed).
+        *before* the domain starts (``storage._prepare_console_log``), guaranteeing
+        ``/var/lib/kdive/console`` exists on a never-provisioned build host. The completion
+        handshake reads that serial ``<log>``, which virtlogd writes ``root:0600``; whether the
+        pre-touched worker-owned file survives (so a **non-root** reader can read it) is
+        virtlogd-version-dependent — on libvirt 12 virtlogd unlinks+recreates it ``root:0600`` and
+        the truncate-in-place mitigation does not hold, so the reliable readers are the worker
+        running as **root** (the deployment default) or ``KDIVE_LIBVIRT_URI=qemu:///session``
+        (session virtlogd writes the log worker-owned) — see the #1147 proof record. The settled
+        probe is the crashed-aware domstate probe (shut off *or* crashed).
         """
         uri = config.require(LIBVIRT_URI)
         return cls(
@@ -242,11 +245,19 @@ def _teardown(domain: _Domain | None, conn: _Conn) -> None:
 
 
 def _force_off(domain: _Domain) -> None:
-    """Destroy the transient domain if it is still running (best-effort)."""
+    """Destroy the transient domain if it is still running (best-effort).
+
+    The firstboot's own ``systemctl poweroff`` is the success path, so the transient domain has
+    usually already vanished by the time teardown runs — ``isActive``/``destroy`` then raise
+    ``VIR_ERR_NO_DOMAIN``, which is the expected benign end state, not a failure. Only a genuine
+    force-off error is worth a warning; otherwise every successful build would log a traceback.
+    """
     try:
         if domain.isActive():
             domain.destroy()
-    except libvirt.libvirtError:  # pragma: no cover - live_vm
+    except libvirt.libvirtError as err:  # pragma: no cover - live_vm
+        if err.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+            return
         _log.warning("force-off of the customization-boot domain failed; continuing", exc_info=True)
 
 
@@ -283,7 +294,7 @@ def _boot_timeout(data: bytes) -> CategorizedError:
     )
 
 
-type GuestfishRunner = Callable[[Path, str], None]
+type GuestfishRunner = Callable[[Path, str], str]
 
 _SEAL_UNIT_NOT_REMOVED_MESSAGE = (
     "customization firstboot unit was not self-removed; the build boot did not complete cleanly"
@@ -296,11 +307,13 @@ def _seal_script(*, unit_name: str, selinux: bool) -> str:
 
     Resets cloud-init's per-instance state (so a subsequent provision boot re-runs
     ``resize_rootfs`` against the fresh overlay rather than a stale seen-once record),
-    optionally forces a first-boot SELinux relabel, and — as its last check — asserts the
-    firstboot customization unit self-removed: the ``sh`` command aborts the guestfish
-    script non-zero if the unit file or its ``multi-user.target.wants`` symlink is still
-    present (mirrors ``verify_cloud_init``'s empirically-verified abort-on-failed-check
-    pattern), which the real runner maps onto ``PROVISIONING_FAILURE``.
+    optionally forces a first-boot SELinux relabel, and — as its last two lines — emits the
+    unit-removed evidence: the libguestfs-**native** ``is-file``/``is-symlink`` predicates print
+    ``true``/``false`` for the firstboot unit file and its ``multi-user.target.wants`` symlink,
+    which :func:`seal_customized_image` parses. These are appliance operations on guest *data*, so
+    they work on a foreign-arch image; a guest-command ``sh 'test ...'`` would instead exec the
+    guest's ``/bin/sh`` in the host-arch appliance and fail ``Exec format error`` cross-arch — the
+    very limitation this whole build path exists to avoid (ADR-0345).
     """
     lines = [
         "rm-rf /var/lib/cloud/instances",
@@ -310,8 +323,8 @@ def _seal_script(*, unit_name: str, selinux: bool) -> str:
     ]
     if selinux:
         lines.append("touch /.autorelabel")
-    lines.append(f"sh 'test ! -e /etc/systemd/system/{unit_name}'")
-    lines.append(f"sh 'test ! -e /etc/systemd/system/multi-user.target.wants/{unit_name}'")
+    lines.append(f"is-file /etc/systemd/system/{unit_name}")
+    lines.append(f"is-symlink /etc/systemd/system/multi-user.target.wants/{unit_name}")
     return "\n".join(lines) + "\n"
 
 
@@ -321,27 +334,33 @@ def seal_customized_image(
     """Offline-seal a customized rootfs image after a successful customization boot (ADR-0345).
 
     Runs one guestfish script (via the injected ``run_guestfish``) that resets cloud-init's
-    per-instance state, optionally touches ``/.autorelabel``, and asserts the firstboot
-    customization unit self-removed. ``run_guestfish`` raises on any script failure — a
-    still-present unit is the only realistic way this script exits non-zero, so its failure
-    is reported as the customization boot not completing cleanly.
+    per-instance state, optionally touches ``/.autorelabel``, and prints the unit file's and
+    wants-symlink's presence. A ``true`` in that output means the firstboot did not self-remove
+    (the build boot did not complete cleanly), which this raises as ``PROVISIONING_FAILURE`` —
+    an arch-safe replacement for the former ``sh 'test'`` guest-command check that broke on a
+    foreign-arch image.
 
     Args:
         qcow2: The staged rootfs image the customization boot ran against.
         unit_name: The firstboot unit name that must have self-removed (``CUSTOMIZE_UNIT``).
         selinux: Whether to force a first-boot SELinux relabel via ``/.autorelabel``.
-        run_guestfish: The injected guestfish script runner (real or fake).
+        run_guestfish: The injected guestfish script runner (real or fake), returning stdout.
     """
-    run_guestfish(qcow2, _seal_script(unit_name=unit_name, selinux=selinux))
+    output = run_guestfish(qcow2, _seal_script(unit_name=unit_name, selinux=selinux))
+    if "true" in output.split():
+        raise CategorizedError(
+            _SEAL_UNIT_NOT_REMOVED_MESSAGE,
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details={"unit": unit_name},
+        )
 
 
-def _real_run_guestfish(qcow2: Path, script: str) -> None:  # pragma: no cover - live_vm
-    """Run a guestfish script against ``qcow2``, mapping any failure onto a categorized error."""
-    run_guestfs_tool(
+def _real_run_guestfish(qcow2: Path, script: str) -> str:  # pragma: no cover - live_vm
+    """Run a guestfish script against ``qcow2``, returning its stdout (mapping failure)."""
+    return run_guestfs_tool(
         ["guestfish", "--rw", "-a", str(qcow2), "-i"],
         stage="customization-seal",
         timeout_s=_SEAL_TIMEOUT_S,
         missing_message="guestfish is not installed; cannot seal the customized rootfs image",
-        failure_message=_SEAL_UNIT_NOT_REMOVED_MESSAGE,
         input_text=script,
     )

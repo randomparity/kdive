@@ -28,6 +28,7 @@ is synchronous — the worker offloads the whole call via ``asyncio.to_thread`` 
 from __future__ import annotations
 
 import logging
+import stat
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -181,6 +182,26 @@ def _real_repack_whole_disk_ext4(*, scratch: Path, qcow2: Path, size: str) -> No
         tar_path.unlink(missing_ok=True)
 
 
+def _grant_hypervisor_traversal(work_dir: Path) -> None:
+    """Let the ``qemu:///system`` hypervisor reach the boot disk + kernel in the build workspace.
+
+    The customization boot attaches the in-progress disk and the extracted baseline
+    kernel/initrd straight from the per-build workspace directory, which
+    ``tempfile.TemporaryDirectory`` creates mode ``0700``. libvirt's dynamic ownership relabels
+    and chowns the disk *file* at domain start, but never widens parent directories, so without
+    this the non-root ``qemu`` process cannot traverse the scratch directory and ``createXML``
+    fails with an opaque ``Cannot access storage file … Permission denied (as uid:107)``. Add
+    ``o+x`` to every directory in the tree (path traversal) and ``o+r`` to every file (the
+    read-only kernel/initrd; libvirt makes the disk writable via chown). Owner-only directory
+    listing is preserved — no ``o+r`` on directories.
+    """
+    for path in (work_dir, *work_dir.rglob("*")):
+        mode = path.stat().st_mode
+        widened = mode | (stat.S_IXOTH if path.is_dir() else stat.S_IROTH)
+        if widened != mode:
+            path.chmod(widened)
+
+
 type AcquireBase = Callable[..., None]
 type VirtBuilder = Callable[..., None]
 type Customize = Callable[[Path, list[str]], None]
@@ -315,41 +336,85 @@ def _real_seal_customized_image(
     )
 
 
-def _real_verify_cloud_init(qcow2: Path) -> None:  # pragma: no cover - live_vm
-    """Assert cloud-init first-boot is correctly baked into the built image (ADR-0288).
+_CLOUD_INIT_CHECK_SENTINEL = "__KDIVE_CI__"
 
-    A version-robust offline guard for silent no-ops CI cannot catch by booting. Each check runs
-    in the guest via guestfish ``sh`` (which aborts the script non-zero on any failed check,
-    verified empirically): the kdive drop-in and NoCloud seed exist, cloud-init is installed,
-    nothing re-disables it, no cloud.cfg.d drop-in disables cloud-init networking, and the drop-in
-    keeps ``resize_rootfs`` on (ADR-0312) so a built image cannot silently ship the disk-grow knob
-    disabled. It does **not** assert specific unit-enable state — unit names vary across cloud-init
-    versions (24.x renamed ``cloud-init.service`` to ``cloud-init-network.service``, live-found on
-    Debian 13); the vendor cloud base ships cloud-init enabled and ``--install`` enables it via the
-    package preset, so enumerating names would be fragile without adding safety.
-    """
-    from kdive.images.families._fedora_customize import (
-        KDIVE_CLOUD_CFG_PATH,
-        NOCLOUD_SEED_DIR,
-    )
 
-    checks = (
-        f"test -e {KDIVE_CLOUD_CFG_PATH}",
-        f"test -e {NOCLOUD_SEED_DIR}/meta-data",
-        "test ! -e /etc/cloud/cloud-init.disabled",
-        "test -x /usr/bin/cloud-init",
-        '! grep -rqs "config:[[:space:]]*disabled" /etc/cloud/cloud.cfg.d/',
-        f'grep -qs "resize_rootfs:[[:space:]]*true" {KDIVE_CLOUD_CFG_PATH}',
-    )
-    script = "".join(f"sh '{check}'\n" for check in checks)
-    run_guestfs_tool(
+def _run_cloud_init_guestfish(qcow2: Path, script: str) -> str:
+    """Run a read-only native guestfish check script against ``qcow2``, returning stdout."""
+    return run_guestfs_tool(
         ["guestfish", "--ro", "-a", str(qcow2), "-i"],
         stage="cloud-init-self-check",
         timeout_s=_REPACK_TIMEOUT_S,
         missing_message="guestfish is not installed; cannot verify cloud-init in the rootfs",
-        failure_message="built image failed the cloud-init first-boot self-check (ADR-0288)",
         input_text=script,
     )
+
+
+def _fail_cloud_init(detail: str) -> CategorizedError:
+    return CategorizedError(
+        f"built image failed the cloud-init first-boot self-check (ADR-0288): {detail}",
+        category=ErrorCategory.PROVISIONING_FAILURE,
+        details={"check": detail},
+    )
+
+
+def _real_verify_cloud_init(qcow2: Path) -> None:  # pragma: no cover - live_vm
+    """Assert cloud-init first-boot is correctly baked into the built image (ADR-0288).
+
+    A version-robust offline guard for silent no-ops CI cannot catch by booting. Every check is a
+    libguestfs-**native** predicate (``exists``/``is-file``/``grep`` — appliance operations on
+    guest *data*), not a ``sh`` guest command: a ``sh 'test'``/``sh 'grep'`` would exec the guest's
+    own binaries in the host-arch appliance and fail ``Exec format error`` on a foreign-arch image
+    (the ADR-0345 boot path builds ppc64le on an x86_64 host). The checks: the kdive drop-in and
+    NoCloud seed exist, cloud-init is installed, nothing re-disables it, the drop-in keeps
+    ``resize_rootfs`` on (ADR-0312), and no ``cloud.cfg.d`` drop-in disables cloud-init networking.
+    It does **not** assert specific unit-enable state — unit names vary across cloud-init versions —
+    nor cloud-init's executable bit (existence is the arch-safe signal; the vendor ships it +x).
+    """
+    from kdive.images.families._fedora_customize import KDIVE_CLOUD_CFG_PATH, NOCLOUD_SEED_DIR
+
+    s = _CLOUD_INIT_CHECK_SENTINEL
+    script = "\n".join(
+        f"echo {s}\n{cmd}"
+        for cmd in (
+            f"exists {KDIVE_CLOUD_CFG_PATH}",
+            f"exists {NOCLOUD_SEED_DIR}/meta-data",
+            "exists /etc/cloud/cloud-init.disabled",
+            "is-file /usr/bin/cloud-init",
+            f"grep resize_rootfs {KDIVE_CLOUD_CFG_PATH}",
+            "ls /etc/cloud/cloud.cfg.d/",
+        )
+    )
+    segs = [seg.strip() for seg in _run_cloud_init_guestfish(qcow2, script + "\n").split(s)][1:]
+    cfg_exists, seed_exists, disabled, cloud_init, resize, cfgd = segs
+    if cfg_exists != "true":
+        raise _fail_cloud_init(f"kdive cloud drop-in {KDIVE_CLOUD_CFG_PATH} is missing")
+    if seed_exists != "true":
+        raise _fail_cloud_init("NoCloud seed meta-data is missing")
+    if disabled != "false":
+        raise _fail_cloud_init("/etc/cloud/cloud-init.disabled re-disables cloud-init")
+    if cloud_init != "true":
+        raise _fail_cloud_init("/usr/bin/cloud-init is not installed")
+    if "true" not in resize:
+        raise _fail_cloud_init("drop-in does not keep resize_rootfs on (ADR-0312)")
+    _assert_no_network_disable(qcow2, cfgd)
+
+
+def _assert_no_network_disable(qcow2: Path, cfgd: str) -> None:  # pragma: no cover - live_vm
+    """Fail if any ``cloud.cfg.d`` ``*.cfg`` drop-in disables cloud-init networking.
+
+    The former ``grep -rqs 'config: disabled'`` was a guest ``sh`` command (cross-arch-broken);
+    this greps each drop-in with libguestfs-native ``grep`` (a match means a drop-in carries
+    ``network: {config: disabled}``). ``.cfg`` only mirrors cloud-init's own drop-in selection.
+    """
+    cfgs = [f for f in cfgd.split() if f.endswith(".cfg")]
+    if not cfgs:
+        return
+    grep_script = "\n".join(
+        f"grep config:.*disabled /etc/cloud/cloud.cfg.d/{name}" for name in cfgs
+    )
+    if _run_cloud_init_guestfish(qcow2, grep_script + "\n").strip():
+        raise _fail_cloud_init("a cloud.cfg.d drop-in disables cloud-init networking")
 
 
 @dataclass(frozen=True, slots=True)
@@ -561,6 +626,7 @@ class LocalLibvirtRootfsBuildPlane:
     def _run_boot(self, staged: Path, work_dir: Path, arch: str) -> None:
         """Extract the baseline kernel, render the build domain XML, and drive the boot to ok."""
         baseline = self._tools.extract_baseline_kernel(staged, work_dir / "baseline", None)
+        _grant_hypervisor_traversal(work_dir)
         accel, emulator = self._tools.resolve_accel(arch)
         build_id = uuid4()
         xml = render_customization_domain_xml(
