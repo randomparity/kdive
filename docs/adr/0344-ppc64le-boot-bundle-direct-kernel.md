@@ -80,11 +80,15 @@ Concretely:
   paths and a unique install cmdline token reaches the guest's `/proc/cmdline` — so the boot is
   attributable to the install plane, not confounded with #1144's baseline boot of the same bytes.
   Because the kernel is modular it *must* boot with a staged `<initrd>`; a no-initrd boot is not
-  attempted. **The initrd-addressing finding is tied to a positive `hvc0` console marker**, not to
-  readiness alone (which a TCG boot can miss for unrelated reasons): initramfs unpacked/mounted →
-  "no addressing quirk" (retires issue 7); kernel started but failed at the initramfs → "quirk"
-  (accommodation in code + a test); a boot failure with no initramfs-stage signal is *indeterminate*
-  and does not retire issue 7. Whichever finding is recorded here (code + ADR, not tribal knowledge).
+  attempted. **The initrd-addressing finding is tied to pre-registered `hvc0` console tokens**, not
+  to readiness alone (which a TCG boot can miss for unrelated reasons): the `kdive-ready` marker on
+  `hvc0` (emitted from the *real* root post-pivot, ADR-0342) → "no addressing quirk," retires issue 7;
+  the kernel banner plus an initramfs-stage failure token (`Kernel panic … VFS: Unable to mount root
+  fs` / `dracut:` FATAL / `Cannot open root device`) and no `kdive-ready` → "quirk," accommodation in
+  code + a test, attributed via the offline `virsh dumpxml` `<kernel>`/`<initrd>` per-Run-path check
+  (SSH `/proc/cmdline` is unavailable on a failed boot); anything else is *indeterminate* and does not
+  retire issue 7. The proof first confirms `hvc0` is teed from domain start and persisted on a
+  non-ready boot, so "no early-boot output" is distinguishable from "console not captured."
 - **Guest kernel writer — verified with a stub, deferred only if unrunnable.** The plain proof
   injects no modules, so the libguestfs cross-arch `depmod` question is answered by a second
   `runs.install` with a `debuginfo_ref` (`method != KDUMP`): `_RealGuestKernelWriter.inject` runs the

@@ -161,17 +161,35 @@ outcome is none — QEMU sets the device-tree initrd properties and the kernel r
 ppc64le kernel can miss readiness for reasons unrelated to initrd addressing (TCG slowness beyond the
 scaled deadline → `BOOT_TIMEOUT`; the SSH readiness probe failing → `READINESS_FAILURE`; a bad `root=`
 cmdline; SLOF declining the ELF; a mismatched module tree). So the initrd-addressing conclusion is
-tied to a **positive console marker on `hvc0`**, not to overall readiness:
-- **"No addressing quirk"** requires the boot console to show the kernel reached early boot *and*
-  unpacked/mounted the initramfs (e.g. the dracut/initramfs stage runs and pivots to the real root) —
-  then reaches readiness. Only that positive marker retires the issue-7 item (criterion 4).
-- **"Addressing quirk found"** requires the console to show the kernel started but failed
-  specifically at finding/mounting the initramfs (vs. never starting, or panicking *after* root
-  mount). The accommodation then lands in code + a test, and ADR-0344 documents it.
-- **Indeterminate** — a boot failure with *no* such initramfs-stage console signal (e.g. a bare
-  `BOOT_TIMEOUT` with no early-boot output) — is recorded as indeterminate and **does not** retire
-  issue 7; the proof is iterated (more deadline, console capture) until it yields one of the two
-  definitive signals. "Reaches readiness" is necessary but not sufficient for the initrd verdict.
+tied to **pre-registered `hvc0` console tokens**, not to overall readiness. The tokens are named
+here (and in ADR-0344) *before* the run, so the verdict is not a post-hoc judgment call:
+- **"No addressing quirk"** requires the console to show (a) the kernel `Linux version …ppc64le`
+  banner (kernel started) **and** (b) the **`kdive-ready` marker on `hvc0`**. The `kdive-ready` unit
+  runs in the *real* root (post-pivot, ADR-0342/#1144), so its appearance is positive proof the
+  staged initramfs unpacked, mounted root, and pivoted — exactly what an initrd-addressing failure
+  would prevent. Only the `kdive-ready`-on-`hvc0` token retires the issue-7 item (criterion 4); a
+  bare "reaches readiness" (SSH) without it does not.
+- **"Addressing quirk found"** requires the console to show the kernel banner (b above absent) plus a
+  pre-registered *initramfs-stage* failure token — one of `Kernel panic … VFS: Unable to mount root
+  fs`, a `dracut:` FATAL / emergency-shell line, or `Cannot open root device` — i.e. started but
+  stalled at the initramfs, distinct from a panic *after* root mount. The accommodation then lands in
+  code + a test, and ADR-0344 documents it. **Attribution on this branch is the offline domain-XML
+  check**, not the SSH `/proc/cmdline` token (unavailable on a boot that never reaches readiness):
+  the running domain's `<kernel>`/`<initrd>` (readable via `virsh dumpxml` without a booted guest)
+  must resolve to the per-Run staged paths, so the failing console is provably the *installed* bundle,
+  not a coincidental baseline failure.
+- **Indeterminate** — a boot failure with the kernel banner present but *no* `kdive-ready` and *no*
+  initramfs-stage failure token, or no early-boot output at all — is recorded indeterminate and
+  **does not** retire issue 7; the proof is iterated (more deadline, console capture) until it yields
+  a definitive token. "Reaches readiness" is necessary but not sufficient for the initrd verdict.
+
+**Prerequisite the proof demonstrates first: `hvc0` is captured regardless of boot outcome.** The
+above depends on the pseries `hvc0` console being teed from *domain start* and persisted even for a
+non-ready boot — otherwise "no early-boot output" cannot be told from "console not captured." The
+proof confirms this up front (the kernel banner is present in the captured console for a
+deliberately-failed or still-booting run) before trusting the indeterminate classification; if
+early-boot `hvc0` is not persisted on a failed boot, that capture gap is fixed first (it is a
+prerequisite of any honest boot-failure verdict).
 
 **Guest kernel writer (module injection) — live-verified with a stub, or deferred only if unrunnable.**
 The plain boot above injects no modules (§1), so the libguestfs cross-arch `depmod` question is
@@ -185,7 +203,13 @@ DWARF `vmlinux` is *not* required (that matters only for drgn usefulness, issues
   **verified** for ppc64le under an x86_64 appliance.
 - If it fails with an exec-format / binfmt error, that *is* the discovered libguestfs same-arch
   constraint — captured in ADR-0344, with the `qemu-user`/`binfmt` appliance accommodation scoped to
-  issue 9 (where module injection is load-bearing for kdump).
+  issue 9 (where module injection is load-bearing for kdump). **Classifying this needs the chained
+  cause:** `_extract_and_index` collapses any `guest.command(["depmod", …])` fault into one
+  `INFRASTRUCTURE_FAILURE` whose `details` carry only the exception *type name* (guest_kernel_writer
+  .py:134-137, 192-198) — the libguestfs message survives only on `__cause__`. So the proof step
+  records the chained cause / libguestfs log and confirms the pre-registered substring (`exec format
+  error` / binfmt) before concluding "cross-arch constraint," rather than trusting the categorized
+  type name alone (which also fires for a `tar_in` fault or the missing-`modules.dep` check).
 - **UNVERIFIED/defer** applies only if the stub inject cannot even run on the proof host (e.g.
   libguestfs absent) — not merely because production-grade debuginfo is unavailable. The writer is
   never claimed arch-neutral on the strength of the fake-writer unit tests.
