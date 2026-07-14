@@ -13,6 +13,7 @@ from pathlib import Path
 
 from kdive.images.families.base import CustomizeContext
 from kdive.images.families.debian import DebianFamily
+from kdive.images.families.renderers import render_argv
 from kdive.images.planes._build_common import (
     DRGN_MARKER_GUEST_PATH,
     MAKEDUMPFILE_MARKER_GUEST_PATH,
@@ -40,19 +41,24 @@ def _ctx(
     )
 
 
+def _argv(ctx: CustomizeContext) -> list[str]:
+    """Render the debian family's steps to the virt-customize argv the tests pin (ADR-0345)."""
+    return render_argv(DebianFamily().customize_steps(ctx), cleanup=[])
+
+
 def test_debug_argv_writes_makedumpfile_version_marker(tmp_path: Path) -> None:
-    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True, kind="debug"))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True, kind="debug"))
     assert MAKEDUMPFILE_MARKER_GUEST_PATH in " ".join(argv)
 
 
 def test_build_argv_omits_makedumpfile_version_marker(tmp_path: Path) -> None:
-    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True, kind="build"))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True, kind="build"))
     assert MAKEDUMPFILE_MARKER_GUEST_PATH not in " ".join(argv)
 
 
 def test_debug_argv_writes_drgn_version_marker(tmp_path: Path) -> None:
     # python3-drgn is in the debug set, so the drgn-version marker is written (ADR-0334).
-    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True, kind="debug"))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True, kind="debug"))
     joined = " ".join(argv)
     assert DRGN_MARKER_GUEST_PATH in joined
     assert "drgn --version" in joined
@@ -60,7 +66,7 @@ def test_debug_argv_writes_drgn_version_marker(tmp_path: Path) -> None:
 
 def test_build_argv_omits_drgn_version_marker(tmp_path: Path) -> None:
     # A build-host image installs no python3-drgn, so no drgn marker is written.
-    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True, kind="build"))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True, kind="build"))
     assert DRGN_MARKER_GUEST_PATH not in " ".join(argv)
 
 
@@ -91,7 +97,7 @@ def test_build_packages_are_the_toolchain_set() -> None:
 
 
 def test_debug_argv_enables_ssh_and_kdump_tools(tmp_path: Path) -> None:
-    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True))
     j = " ".join(argv)
     assert "systemctl enable ssh.service" in argv, "Debian's sshd unit is ssh.service"
     assert "systemctl enable sshd.service" not in argv
@@ -102,7 +108,7 @@ def test_debug_argv_enables_ssh_and_kdump_tools(tmp_path: Path) -> None:
 
 
 def test_debug_argv_omits_ssh_inject_and_stages_readiness_unit(tmp_path: Path) -> None:
-    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True))
     j = " ".join(argv)
     assert "--ssh-inject" not in argv
     assert "root:file:" not in j
@@ -110,7 +116,7 @@ def test_debug_argv_omits_ssh_inject_and_stages_readiness_unit(tmp_path: Path) -
 
 
 def test_debian_argv_bakes_cloud_init_drops_sshd_keygen(tmp_path: Path) -> None:
-    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True))
     j = " ".join(argv)
     assert "/etc/cloud/cloud.cfg.d/99-kdive.cfg" in j
     assert "rm -f /etc/cloud/cloud-init.disabled" in j  # undoes any cloud-init disable
@@ -121,7 +127,7 @@ def test_debian_argv_bakes_cloud_init_drops_sshd_keygen(tmp_path: Path) -> None:
 
 def test_debug_argv_touches_no_selinux_and_stages_no_nm_keyfile(tmp_path: Path) -> None:
     # Debian has no /etc/selinux/config and no NetworkManager — neither must be touched (#824).
-    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True))
     j = " ".join(argv)
     assert "selinux" not in j.lower()
     assert "NetworkManager" not in j and "kdive-ssh-nic" not in j
@@ -130,13 +136,13 @@ def test_debug_argv_touches_no_selinux_and_stages_no_nm_keyfile(tmp_path: Path) 
 def test_debug_argv_stages_kdive_drgn_helper(tmp_path: Path) -> None:
     # The live introspect path SSH-execs /usr/local/sbin/kdive-drgn; python3-drgn ships the drgn CLI
     # so `drgn -k` works. The debug image must carry the reviewed helper, read-executable.
-    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True))
     assert any(a.endswith(":/usr/local/sbin/kdive-drgn") for a in argv)
     assert "chmod 0755 /usr/local/sbin/kdive-drgn" in argv
 
 
 def test_virt_builder_base_installs_cloud_init_and_seeds_machine_id(tmp_path: Path) -> None:
-    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=False))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=False))
     j = " ".join(argv)
     assert "--install cloud-init" in j
     assert "/etc/machine-id" in j
@@ -144,7 +150,7 @@ def test_virt_builder_base_installs_cloud_init_and_seeds_machine_id(tmp_path: Pa
 
 def test_build_argv_omits_kdump_nmi_and_drgn_helper(tmp_path: Path) -> None:
     # A build-host image never runs force_crash and carries no introspection contract.
-    argv = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True, kind="build"))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True, kind="build"))
     j = " ".join(argv)
     assert "kdump-tools.service" not in j
     assert "unknown_nmi_panic" not in j
@@ -154,8 +160,8 @@ def test_build_argv_omits_kdump_nmi_and_drgn_helper(tmp_path: Path) -> None:
 def test_ssh_enable_is_coupled_to_the_debug_kind(tmp_path: Path) -> None:
     # sshd enablement mirrors the SSH capability, which capabilities() ties to kind: a debug image
     # enables ssh.service, a build-host image (which declares no SSH) never does.
-    debug = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True, kind="debug"))
-    build = DebianFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True, kind="build"))
+    debug = _argv(_ctx(tmp_path, is_cloud_image=True, kind="debug"))
+    build = _argv(_ctx(tmp_path, is_cloud_image=True, kind="build"))
     assert "systemctl enable ssh.service" in debug
     assert "systemctl enable ssh.service" not in build
 

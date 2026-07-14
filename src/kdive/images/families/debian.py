@@ -1,6 +1,8 @@
-"""The debian-family (apt + kdump-tools) rootfs FamilyCustomizer (ADR-0251, #824).
+"""The debian-family (apt + kdump-tools) rootfs FamilyCustomizer (ADR-0251, ADR-0345, #824).
 
-Encodes the virt-customize argv that turns a Debian genericcloud base into a kdive-ready rootfs.
+Emits the ordered customization ``Step``s that turn a Debian genericcloud base into a kdive-ready
+rootfs; ``customize_via = "virt_customize"``, so the build plane renders them to virt-customize
+argv and applies them offline (ADR-0345).
 Debian diverges from ``rhel`` in ways that need a distinct family (all verified against the Debian
 package database / manpages, 2026-06-26): apt package names (``kdump-tools``, ``python3-drgn``,
 ``crash``); ``kdump-tools.service`` not ``kdump.service``; ``ssh.service`` not ``sshd.service``;
@@ -22,12 +24,19 @@ from kdive.images.families._fedora_customize import (
     KDUMP_SYSCTL_CONTENT,
     KDUMP_SYSCTL_PATH,
     READINESS_MARKER,
-    cloud_init_first_boot_args,
-    drgn_helper_args,
-    drgn_version_marker_args,
-    makedumpfile_version_marker_args,
+    cloud_init_first_boot_steps,
+    drgn_helper_steps,
+    drgn_version_marker_steps,
+    makedumpfile_version_marker_steps,
 )
 from kdive.images.families.base import CustomizeContext, _mac_tag
+from kdive.images.families.steps import (
+    InstallPackages,
+    RunCommand,
+    Step,
+    UploadFile,
+    WriteFile,
+)
 from kdive.images.planes._build_common import run_guestfs_tool
 from kdive.images.rootfs.kinds import RootfsImageKind
 
@@ -68,6 +77,7 @@ class DebianFamily:
     family = "debian"
     kdump_unit = "kdump-tools.service"
     guest_mac = "apparmor"
+    customize_via = "virt_customize"
 
     def packages(self, kind: RootfsImageKind, distro: str, version: str) -> tuple[str, ...]:
         del distro, version
@@ -84,46 +94,39 @@ class DebianFamily:
             return (mac, Capability.BUILD)
         return (Capability.SSH, mac, Capability.KDUMP, Capability.DRGN)
 
-    def customize_argv(self, ctx: CustomizeContext) -> list[str]:
-        """Build the virt-customize argv that turns the Debian base into a kdive-ready rootfs."""
-        argv: list[str] = ["--install", ",".join(ctx.packages)]
+    def customize_steps(self, ctx: CustomizeContext) -> list[Step]:
+        """Build the ordered steps that turn the Debian base into a kdive-ready rootfs."""
+        steps: list[Step] = [InstallPackages(ctx.packages)]
         # Enable ssh exactly when this image declares the SSH capability, which ``capabilities()``
         # ties to ``kind`` (every debug image, never a build-host image). Gating on ``kind`` (not
         # package membership) keeps the declaration and the enable from diverging: a debug image
         # that somehow lacks openssh-server fails the build loudly here rather than shipping an
         # ``ssh``-tagged image with no sshd.
         if ctx.kind == "debug":
-            argv += ["--run-command", "systemctl enable ssh.service"]
+            steps.append(RunCommand("systemctl enable ssh.service"))
         # Gate kdump enable + the NMI-panic sysctl on the kdump package (in every debug set, absent
         # from the build set) so a build-host image never panics on a stray NMI.
         if "kdump-tools" in ctx.packages:
-            argv += [
-                "--run-command",
-                "systemctl enable kdump-tools.service",
-                "--run-command",
-                _USE_KDUMP_CMD,
-                "--write",
-                f"{KDUMP_SYSCTL_PATH}:{KDUMP_SYSCTL_CONTENT}",
-            ]
-        argv += cloud_init_first_boot_args(ctx)  # cloud-init owns network + host keys now
+            steps.append(RunCommand("systemctl enable kdump-tools.service"))
+            steps.append(RunCommand(_USE_KDUMP_CMD))
+            steps.append(WriteFile(KDUMP_SYSCTL_PATH, KDUMP_SYSCTL_CONTENT))
+        steps += cloud_init_first_boot_steps(ctx)  # cloud-init owns network + host keys now
         # The debug image carries the reviewed kdive-drgn helper (the live introspection contract);
         # Debian needs no NetworkManager keyfile — cloud-init's baked cloud.cfg dhcp4/NoCloud config
         # (above, ADR-0288) DHCPs the NIC on first boot.
         if ctx.kind == "debug":
-            argv += drgn_helper_args()
-            argv += makedumpfile_version_marker_args()
+            steps += drgn_helper_steps()
+            steps += makedumpfile_version_marker_steps()
         # Record the shipped drgn version only when the introspection package is installed
         # (``python3-drgn`` on debian), so the ``live_drgn`` signal resolves for this built image
         # (ADR-0334); a build-host image with no drgn writes no marker.
         if "python3-drgn" in ctx.packages:
-            argv += drgn_version_marker_args()
-        argv += [
-            "--upload",
-            f"{ctx.readiness_unit_path}:/etc/systemd/system/{READINESS_MARKER}.service",
-            "--run-command",
-            f"systemctl enable {READINESS_MARKER}.service",
-        ]
-        return argv
+            steps += drgn_version_marker_steps()
+        steps.append(
+            UploadFile(ctx.readiness_unit_path, f"/etc/systemd/system/{READINESS_MARKER}.service")
+        )
+        steps.append(RunCommand(f"systemctl enable {READINESS_MARKER}.service"))
+        return steps
 
     def normalize(self, qcow2: Path, *, _run_guestfs: RunGuestfs = run_guestfs_tool) -> None:
         """Normalize fstab to a lone ``/`` and drop crypttab via guestfish (#824).

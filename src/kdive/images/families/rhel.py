@@ -1,11 +1,12 @@
-"""The rhel-family (Fedora/RHEL) rootfs FamilyCustomizer (ADR-0251).
+"""The rhel-family (Fedora/RHEL) rootfs FamilyCustomizer (ADR-0251, ADR-0345).
 
-Encodes the virt-customize argv PROVEN live on Fedora 44 in the #817 de-risk spike: install the
-dnf package set, enable ``sshd``/``kdump``, write the NMI-panic sysctl, pin kdump
-``final_action poweroff``, stage the debug-image drgn/SSH-NIC helpers, upload+enable the
-kdive-ready serial-readiness unit, and set SELinux permissive. It also enables cloud-init via a
-baked NoCloud seed (ADR-0288), the uniform rootfs first-boot mechanism. The image bakes no
-authorized key (ADR-0289, #963); the per-System bootstrap key is injected at provision time.
+Emits the ordered customization ``Step``s PROVEN live on Fedora 44 in the #817 de-risk spike:
+install the dnf package set, enable ``sshd``/``kdump``, write the NMI-panic sysctl, pin kdump
+``final_action poweroff``, stage the debug-image drgn helper, upload+enable the kdive-ready
+serial-readiness unit, and set SELinux permissive. It also enables cloud-init via a baked NoCloud
+seed (ADR-0288), the uniform rootfs first-boot mechanism. ``customize_via = "boot"``: the build
+plane boots the image and lets it self-customize (ADR-0345). The image bakes no authorized key
+(ADR-0289, #963); the per-System bootstrap key is injected at provision time.
 """
 
 from __future__ import annotations
@@ -22,12 +23,19 @@ from kdive.images.families._fedora_customize import (
     KDUMP_SYSCTL_CONTENT,
     KDUMP_SYSCTL_PATH,
     READINESS_MARKER,
-    cloud_init_first_boot_args,
-    debug_image_args,
-    drgn_version_marker_args,
-    makedumpfile_version_marker_args,
+    cloud_init_first_boot_steps,
+    debug_image_steps,
+    drgn_version_marker_steps,
+    makedumpfile_version_marker_steps,
 )
 from kdive.images.families.base import CustomizeContext, _mac_tag
+from kdive.images.families.steps import (
+    InstallPackages,
+    RunCommand,
+    Step,
+    UploadFile,
+    WriteFile,
+)
 from kdive.images.planes._build_common import run_guestfs_tool
 from kdive.images.rootfs.kinds import RootfsImageKind
 
@@ -66,6 +74,7 @@ class RhelFamily:
     family = "rhel"
     kdump_unit = "kdump.service"
     guest_mac = "selinux-permissive"
+    customize_via = "boot"
 
     def packages(self, kind: RootfsImageKind, distro: str, version: str) -> tuple[str, ...]:
         """Return the dnf package set for ``kind`` on ``distro``/``version``.
@@ -92,48 +101,40 @@ class RhelFamily:
             return (mac, Capability.BUILD)
         return (Capability.SSH, mac, Capability.KDUMP, Capability.DRGN)
 
-    def customize_argv(self, ctx: CustomizeContext) -> list[str]:
-        """Build the virt-customize argv that turns the base image into a kdive-ready rootfs."""
-        argv: list[str] = []
+    def customize_steps(self, ctx: CustomizeContext) -> list[Step]:
+        """Build the ordered steps that turn the base image into a kdive-ready rootfs."""
+        steps: list[Step] = []
         if _el_major(ctx.distro, ctx.version) == 8 and "drgn" in ctx.packages:
-            argv += ["--run-command", _ENABLE_EPEL_CMD]
-        argv += ["--install", ",".join(ctx.packages)]
+            steps.append(RunCommand(_ENABLE_EPEL_CMD))
+        steps.append(InstallPackages(ctx.packages))
         # Enable sshd exactly when this image declares the SSH capability, which ``capabilities()``
         # ties to ``kind`` (every debug image, never a build-host image). Gating on ``kind`` (not
         # package membership) keeps the declaration and the enable from diverging: a debug image
         # that somehow lacks openssh-server fails the build loudly here rather than shipping an
         # ``ssh``-tagged image with no sshd.
         if ctx.kind == "debug":
-            argv += ["--run-command", "systemctl enable sshd.service"]
+            steps.append(RunCommand("systemctl enable sshd.service"))
         # Gate on ``kexec-tools`` (in every debug set, absent from the build set), not the
         # Fedora-only ``kdump-utils`` — EL 8/9 get kdump from ``kexec-tools`` (#823).
         if "kexec-tools" in ctx.packages:
-            argv += [
-                "--run-command",
-                "systemctl enable kdump.service",
-                "--write",
-                f"{KDUMP_SYSCTL_PATH}:{KDUMP_SYSCTL_CONTENT}",
-                "--run-command",
-                KDUMP_FINAL_ACTION_CMD,
-            ]
-        argv += cloud_init_first_boot_args(ctx)
-        argv += debug_image_args(ctx.packages, ctx.cleanup)
+            steps.append(RunCommand("systemctl enable kdump.service"))
+            steps.append(WriteFile(KDUMP_SYSCTL_PATH, KDUMP_SYSCTL_CONTENT))
+            steps.append(RunCommand(KDUMP_FINAL_ACTION_CMD))
+        steps += cloud_init_first_boot_steps(ctx)
+        steps += debug_image_steps(ctx.packages)
         if ctx.kind == "debug":
-            argv += makedumpfile_version_marker_args()
+            steps += makedumpfile_version_marker_steps()
         # Record the shipped drgn version only when the introspection package is installed
         # (``drgn`` on rhel/fedora), so the ``live_drgn`` signal resolves for this built image
         # (ADR-0334); a build-host image with no drgn writes no marker.
         if "drgn" in ctx.packages:
-            argv += drgn_version_marker_args()
-        argv += [
-            "--upload",
-            f"{ctx.readiness_unit_path}:/etc/systemd/system/{READINESS_MARKER}.service",
-            "--run-command",
-            f"systemctl enable {READINESS_MARKER}.service",
-            "--run-command",
-            _SELINUX_PERMISSIVE_SED,
-        ]
-        return argv
+            steps += drgn_version_marker_steps()
+        steps.append(
+            UploadFile(ctx.readiness_unit_path, f"/etc/systemd/system/{READINESS_MARKER}.service")
+        )
+        steps.append(RunCommand(f"systemctl enable {READINESS_MARKER}.service"))
+        steps.append(RunCommand(_SELINUX_PERMISSIVE_SED))
+        return steps
 
     def normalize(self, qcow2: Path) -> None:
         """Normalize fstab/crypttab/SELinux and force a first-boot SELinux relabel via guestfish.

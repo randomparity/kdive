@@ -10,6 +10,7 @@ from kdive.domain.catalog.images import Capability
 from kdive.images.cataloging.validation import GUEST_CONTRACT_PATHS
 from kdive.images.families import _FAMILIES
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer, _mac_tag
+from kdive.images.families.renderers import render_argv
 from kdive.images.rootfs.kinds import RootfsImageKind
 
 
@@ -83,10 +84,10 @@ def _baked_paths(argv: list[str]) -> set[str]:
 def test_guest_contract_markers_are_baked_by_declaring_families(tmp_path: Path) -> None:
     # The tests above prove a declared tag maps to an installed *package*. This proves the second
     # vocabulary — the guest-contract *file probe* (validation.GUEST_CONTRACT_PATHS) — is created
-    # by customize_argv for every family that declares the tag, and NOT created when the tag is
-    # absent. A phantom marker (a probe path no customize_argv writes, e.g. the never-written
-    # drgn-ready) fails here, not at a live IMAGE_BUILD/upload; and a marker that leaked onto a
-    # non-declaring image (which would wrongly satisfy that contract) fails too.
+    # by customize_steps for every family that declares the tag, and NOT created when the tag is
+    # absent. A phantom marker (a probe path no family writes, e.g. the never-written drgn-ready)
+    # fails here, not at a live IMAGE_BUILD/upload; and a marker that leaked onto a non-declaring
+    # image (which would wrongly satisfy that contract) fails too.
     readiness = tmp_path / "kdive-ready.service"
     readiness.write_text("[Unit]\n")
     for family in _FAMILIES.values():
@@ -101,14 +102,14 @@ def test_guest_contract_markers_are_baked_by_declaring_families(tmp_path: Path) 
                     distro=name,
                     version=version,
                 )
-                created = _baked_paths(family.customize_argv(ctx))
+                created = _baked_paths(render_argv(family.customize_steps(ctx), cleanup=[]))
                 declared = family.capabilities(kind, name, version)
                 for element, path in GUEST_CONTRACT_PATHS.items():
                     baked = path in created
                     wants = Capability(element) in declared
                     assert baked == wants, (
                         f"{family.family}/{name}-{version}/{kind}: declares {element}={wants} but "
-                        f"customize_argv {'omits' if wants else 'leaks'} its marker {path}"
+                        f"customize_steps {'omits' if wants else 'leaks'} its marker {path}"
                     )
 
 

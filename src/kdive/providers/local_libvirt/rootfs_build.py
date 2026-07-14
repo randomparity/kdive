@@ -44,6 +44,7 @@ from kdive.images.families._fedora_customize import (
     readiness_unit as _readiness_unit,
 )
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
+from kdive.images.families.renderers import render_argv
 from kdive.images.kdump_support import MakedumpfileVersion
 from kdive.images.planes._build_common import (
     build_workspace,
@@ -426,7 +427,7 @@ class LocalLibvirtRootfsBuildPlane:
         spec: RootfsBuildSpec,
         entry: RootfsCatalogEntry,
     ) -> None:
-        """Render the kdive-ready unit, build the family argv, and run ``virt-customize``."""
+        """Render the kdive-ready unit and the family steps to argv, then run ``virt-customize``."""
         cleanup: list[Path] = []
         with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as unit:
             unit.write(_readiness_unit(family.kdump_unit, arch_traits(spec.arch).console_device))
@@ -442,7 +443,8 @@ class LocalLibvirtRootfsBuildPlane:
                 distro=entry.distro,
                 version=entry.version,
             )
-            self._tools.customize(scratch, family.customize_argv(ctx))
+            argv = render_argv(family.customize_steps(ctx), cleanup=cleanup)
+            self._tools.customize(scratch, argv)
         finally:
             for path in cleanup:
                 path.unlink(missing_ok=True)

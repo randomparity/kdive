@@ -19,7 +19,9 @@ import pytest
 from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
+from kdive.images.families.renderers import render_argv
 from kdive.images.families.rhel import RhelFamily
+from kdive.images.families.steps import InstallPackages, RunCommand, Step
 from kdive.images.planes._build_common import (
     BootEntriesProbeSeam,
     DrgnProbeSeam,
@@ -65,6 +67,7 @@ class _FakeFamily:
     family: str = "rhel"
     kdump_unit: str = "kdump.service"
     guest_mac: str = "selinux-permissive"
+    customize_via: str = "virt_customize"
 
     def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
         return ("marker-pkg",)
@@ -72,12 +75,12 @@ class _FakeFamily:
     def capabilities(self, kind: str, distro: str, version: str) -> tuple[Capability, ...]:
         return (Capability.SSH,)
 
-    def customize_argv(self, ctx: CustomizeContext) -> list[str]:
+    def customize_steps(self, ctx: CustomizeContext) -> list[Step]:
         self.rec.customize_ctxs.append(ctx)
         # The plane renders the kdive-ready unit (with this family's kdump_unit) before calling us
         # and unlinks it afterwards, so capture its content here to guard the point-6 wiring (#824).
         self.rec.readiness_unit_texts.append(ctx.readiness_unit_path.read_text())
-        return ["--install", "marker-pkg", "--run-command", "marker-customize"]
+        return [InstallPackages(("marker-pkg",)), RunCommand("marker-customize")]
 
     def normalize(self, qcow2: Path) -> None:
         self.rec.order.append("normalize")
@@ -681,7 +684,7 @@ def _rhel_argv(
         distro=distro,
         version=version,
     )
-    return RhelFamily().customize_argv(ctx)
+    return render_argv(RhelFamily().customize_steps(ctx), cleanup=[])
 
 
 def _upload_target(argv: list[str], guest_path: str) -> str:

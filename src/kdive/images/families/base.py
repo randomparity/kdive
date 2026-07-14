@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Protocol
 
 from kdive.domain.catalog.images import Capability
+from kdive.images.families.steps import Step
 from kdive.images.rootfs.kinds import RootfsImageKind
 
 
@@ -60,6 +61,10 @@ class FamilyCustomizer(Protocol):
     #: ``selinux-permissive`` (rhel — repack drops xattrs, so a first-boot relabel + permissive) or
     #: ``apparmor`` (debian — profile-based, needs no relabel).
     guest_mac: str
+    #: How the build plane applies this family's ``customize_steps`` (ADR-0345): ``"boot"`` (rhel —
+    #: boot the image and let it self-customize) or ``"virt_customize"`` (debian — render the steps
+    #: to ``virt-customize`` argv and apply them offline).
+    customize_via: str
 
     def packages(self, kind: RootfsImageKind, distro: str, version: str) -> tuple[str, ...]:
         """Return the package set this family installs for ``kind`` on ``distro``/``version``."""
@@ -71,8 +76,8 @@ class FamilyCustomizer(Protocol):
         """Return the capability tags this family bakes for ``kind`` on ``distro``/``version``."""
         ...
 
-    def customize_argv(self, ctx: CustomizeContext) -> list[str]:
-        """Return the virt-customize argv fragment that customizes the base image."""
+    def customize_steps(self, ctx: CustomizeContext) -> list[Step]:
+        """Return the ordered customization steps that turn the base into a kdive-ready rootfs."""
         ...
 
     def normalize(self, qcow2: Path) -> None:
