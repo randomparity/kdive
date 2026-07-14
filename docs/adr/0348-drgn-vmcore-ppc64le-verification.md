@@ -77,28 +77,40 @@ Concretely:
   mirror gets the same parameterization. They fail the instant a change makes the offline
   path branch on arch or drop a section for a non-x86 core.
 - **Catalog `drgn_version` stays meaningful for the ppc64le row.** Beyond the existing
-  snapshot equality (`test_rootfs_catalog.py:125`), a focused assertion ties the
-  ppc64le row's `drgn_version` to `live_drgn_capability` (`images/drgn_support.py`), so
-  "meaningful" means *a version that actually clears the live-drgn capability threshold*,
-  not merely a non-empty string.
-- **Live proof — discriminating.** A documented run opens the real #1148 ppc64le vmcore
-  (`local/runs/<run>/vmcore-kdump`) with drgn on the x86_64 host and asserts drgn
-  identifies the target as `ppc64le` (`prog.platform.arch`) and reads its VMCOREINFO
-  `BUILD-ID=`. This proves *"a ppc64le vmcore opens"* with **no debuginfo required** — the
-  VMCOREINFO/build-id path (`core_file.py`, `drgn_program.py:read_vmcoreinfo_build_id`) is
-  exactly the contract's provenance gate and needs no `vmlinux`. Reading the **full**
-  introspection contract (task list, sysinfo counters, by-name symbol reads) additionally
-  requires a DWARF-bearing `vmlinux`; the epic ships stripped `vmlinuz` boot images and no
-  ppc64le `kernel-debuginfo`, so:
-  - if a matching debuginfo `vmlinux` is obtainable on the proof host, the proof drives the
-    full `from_vmcore` contract (task list + `machine="ppc64le"` sysinfo) and records it;
-  - otherwise the proof records the **open + platform-arch + VMCOREINFO** result as the
-    live evidence and notes that the full task-list contract is carried by the
-    arch-parameterized unit tests, with the debuginfo requirement being **arch-neutral**
-    (the x86_64 offline path has the identical `load_debug_info` prerequisite — see
-    `core_file.py`'s `DMESG_UNAVAILABLE`, which fires on *any* arch when debuginfo is
-    absent at capture time). **UNVERIFIED** applies only if drgn cannot open the real core
-    at all — never merely for lack of production debuginfo.
+  snapshot equality (`test_rootfs_catalog.py:125`), a focused assertion pins the ppc64le
+  row's `drgn_version` to a non-empty parseable version **equal to the same-distro/version
+  x86_64 row** (`fedora-kdive-ready-44`, both `0.0.33`), encoding the catalog's stated
+  "Fedora 44 ships the same drgn across arches" invariant so a placeholder or degraded
+  ppc64le drgn is caught. It deliberately does **not** tie to `live_drgn_capability`
+  (`images/drgn_support.py`): that is the in-guest **BTF** threshold (0.0.31) for the
+  live/SSH path this issue puts out of scope, and against the installed drgn 0.2.0 it is
+  near-tautological — it would certify the wrong capability for the offline vmcore contract.
+- **Live proof — discriminating, durable, and pinned.** The real-bytes verification is a
+  `live_vm`-gated test (not a one-shot doc artifact) that opens the retained real #1148
+  ppc64le vmcore with drgn on the x86_64 host and **asserts equality**
+  `prog.platform.arch == drgn.Architecture.PPC64` (the exact enum, confirmed present in the
+  installed drgn 0.2.0) plus a readable VMCOREINFO `BUILD-ID=`. It exercises drgn's real
+  ppc64le ELF-header + note parsing, **needs no debuginfo**, *fails* on any other platform
+  arch or an unreadable build-id, and *skips cleanly* when the core fixture is absent
+  (`KDIVE_PPC64LE_VMCORE`). Because it lives in the `live_vm` suite it re-runs on drgn
+  version bumps — so a future drgn that regresses real ppc64le-core opening is caught, not
+  silently lost; this is the durable regression guard the unit fakes (which never invoke
+  drgn) cannot be. A one-shot proof record under `docs/design/` captures the same run and
+  records the core's **SHA-256 digest and retained path** for reproducibility.
+- **The full structural read on real ppc64le bytes is DEFERRED, not faked.** Reading the
+  task list and by-name symbols out of a real ppc64le core requires a DWARF-bearing
+  `vmlinux`. The epic ships only stripped `vmlinuz` and no ppc64le `kernel-debuginfo` (a
+  secondary-arch package), so — following ADR-0344, which put real ppc64le DWARF out of
+  scope — this issue does **not** prove the structural decode on real ppc64le bytes and
+  explicitly defers it (follow-up: obtain ppc64le `kernel-debuginfo`, drive `from_vmcore`
+  end-to-end). The arch-parameterized unit fakes prove the offline orchestration is
+  arch-blind — the ADR audit shows the adapter uses only arch-general drgn helpers — and
+  are **not** claimed as proof of real DWARF decoding; conflating the two would let the
+  headline contract ship certified while never running on real ppc64le bytes. The debuginfo
+  prerequisite is itself arch-neutral (the x86_64 offline path needs the identical
+  `load_debug_info` — see `core_file.py`'s `DMESG_UNAVAILABLE`, which fires on *any* arch
+  when debuginfo is absent). **UNVERIFIED — a defect, not a deferral — applies only if the
+  real-bytes open above fails**, never for lack of production debuginfo.
 
 ## Consequences
 
@@ -106,9 +118,14 @@ Concretely:
   already uses; an x86_64 core's behavior is byte-identical (asserted, not assumed).
 - The path has exactly one arch-observable value (`sysinfo.machine`), and it is inert —
   no second arch gate to drift.
-- The arch-parameterized tests lock the arch-neutral offline contract: a future change that
-  re-adds an x86 assumption to `drgn_program.py` / `introspect.py` fails CI.
-- The epic's drgn-on-ppc64le verification item is retired by this ADR + the live proof.
+- The arch-parameterized tests lock the arch-neutral offline *orchestration*: a future
+  change that re-adds an x86 assumption to `drgn_program.py` / `introspect.py` fails CI.
+- **Precisely scoped:** the ppc64le core is proven drgn-*openable* on real bytes
+  (`Architecture.PPC64` + VMCOREINFO) with a durable `live_vm` guard; the *structural* read
+  (task list / by-name symbols from real DWARF) is **deferred** pending ppc64le
+  `kernel-debuginfo`, tracked as a Known-limitation, not claimed as done. The epic's
+  "drgn on ppc64le" item is *partially* retired — open proven, structural read deferred —
+  and this ADR says so rather than over-claiming from fakes.
 - No migration, no schema change, no new dependency, no agent-facing contract change.
 
 ## Rejected alternatives

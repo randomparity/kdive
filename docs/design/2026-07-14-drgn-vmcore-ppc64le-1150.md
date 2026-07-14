@@ -46,20 +46,37 @@ Out of scope (settled elsewhere in the epic):
 
 Mapping the issue's two acceptance criteria to falsifiable checks:
 
-**AC1 — A ppc64le vmcore opens and yields the same introspection contract as x86_64
-(task list, symbol reads).**
+**AC1 — A ppc64le vmcore opens and drgn identifies it as ppc64le on real bytes.**
 
-- **AC1a (live, mandatory):** On the x86_64 host, drgn opens the real #1148 ppc64le vmcore
-  (`local/runs/<run>/vmcore-kdump`), `prog.platform.arch` reports the powerpc/ppc64
-  architecture, and the core's VMCOREINFO `BUILD-ID=` line reads. Proves "a ppc64le vmcore
-  opens" with no debuginfo. Recorded in a proof record under `docs/design/`.
-- **AC1b (full contract, debuginfo-gated):** If a DWARF-bearing ppc64le `vmlinux` matching
-  the captured kernel is obtainable on the proof host, the proof additionally drives
-  `LocalLibvirtVmcoreIntrospect.from_vmcore` end-to-end and records that the task list,
-  modules, and `sysinfo.machine == "ppc64le"` sections populate with the same shape as
-  x86_64. If not obtainable, AC1b is carried by the arch-parameterized unit tests (below)
-  and the proof record notes the arch-neutral debuginfo constraint. **UNVERIFIED only if
-  drgn cannot open the real core at all** — never for lack of debuginfo.
+The issue's headline "yields the same introspection contract (task list, symbol reads)"
+splits into two tiers by what real ppc64le bytes can actually prove on this host. The
+distinction is load-bearing: an arch-parameterized *fake* whose `uts()` returns
+`machine="ppc64le"` proves the orchestration is **arch-blind**, but invokes **zero** real
+drgn ppc64le decoding (DWARF struct layout, pointer width, little-endian reads). So the
+fakes cannot substitute for a real open; they and the real open verify different things.
+
+- **AC1a (real-bytes open — mandatory, durable).** A `live_vm`-gated test opens the retained
+  real #1148 ppc64le vmcore with drgn on the x86_64 host and **asserts
+  `prog.platform.arch == drgn.Architecture.PPC64`** (the exact enum, confirmed present in
+  drgn 0.2.0) and that the core's VMCOREINFO `BUILD-ID=` line reads. This exercises drgn's
+  real ppc64le ELF-header + note parsing and **needs no debuginfo**. The test *fails* if the
+  platform arch is anything other than `PPC64` or the build-id does not read; it **skips
+  cleanly** when the core fixture is absent (env `KDIVE_PPC64LE_VMCORE` unset / missing).
+  Being in the `live_vm` suite, it re-runs on drgn version bumps — so a future drgn that
+  regresses real ppc64le-core opening is caught, not silently lost (see Risks). A one-shot
+  proof record under `docs/design/` captures the same run with the core's SHA-256 digest.
+- **AC1b (full structural contract — DEFERRED, debuginfo-gated).** Reading the *task list*
+  and *by-name symbols* out of a real ppc64le core requires a DWARF-bearing `vmlinux`. The
+  epic ships only stripped `vmlinuz` boot images and no ppc64le `kernel-debuginfo` (a
+  secondary-arch package), so the full structural decode on **real** ppc64le bytes is **not
+  proven by this issue** and is explicitly **deferred** — the same real-DWARF scope
+  ADR-0344 put out of bounds. The arch-parameterized unit tests below prove the offline
+  orchestration is arch-blind (the ADR audit shows the adapter uses only arch-general drgn
+  helpers), which is what CI *can* guard; they are **not** claimed as proof of real ppc64le
+  DWARF decoding. This deferral is recorded as a Known-limitation in the proof record and
+  ADR-0348, with the follow-up being "obtain ppc64le `kernel-debuginfo` and drive
+  `from_vmcore` end-to-end." **UNVERIFIED (a defect, not a deferral) applies only if AC1a's
+  real-bytes open fails** — never for lack of debuginfo.
 
 **AC2 — Arch-parameterized tests in `tests/` mirror the existing x86_64 coverage.**
 
@@ -70,16 +87,25 @@ Mapping the issue's two acceptance criteria to falsifiable checks:
   (tasks/modules/sysinfo/truncated), same keys, same redaction and byte-cap behavior — with
   only `sysinfo.machine` differing by arch.
 - The remote-libvirt mirror gets the same parameterization.
-- A test ties the ppc64le catalog row's `drgn_version` to `live_drgn_capability`.
+- A test asserts the ppc64le row's `drgn_version` stays meaningful for the **offline**
+  path: it is a non-empty, parseable version **equal to the same-distro/version x86_64 row**
+  (`fedora-kdive-ready-44`), encoding the catalog's stated "Fedora 44 ships the same drgn
+  across arches" invariant — so a placeholder or silently-degraded ppc64le drgn is caught.
+  It does **not** tie to `live_drgn_capability`: that predicate is the in-guest BTF
+  threshold (0.0.31) for the live/SSH path this issue puts out of scope, and against the
+  installed drgn 0.2.0 it is near-tautological — the wrong capability for the offline
+  vmcore contract.
 - `just ci` green (lint, type whole-tree, lint-shell, lint-workflows, check-mermaid, test).
 
 ## Approach
 
 Per ADR-0348: **no production change** (the path carries no `x86_64` to remove). The
-deliverable is test coverage + a live proof + the catalog assertion. The `arch` knob on the
-fakes is the minimal seam — it threads only into `uts()`, since that is the sole
-arch-observable value in the contract. Parameterizing over `{x86_64, ppc64le}` proves the
-orchestration is arch-blind; the live open proves drgn reads a real ppc64le core.
+deliverable is test coverage + a durable live-open test + a one-shot proof record + the
+catalog assertion. The `arch` knob on the fakes is the minimal seam — it threads only into
+`uts()`, since that is the sole arch-observable value in the contract. Parameterizing over
+`{x86_64, ppc64le}` proves the orchestration is arch-blind; the `live_vm`-gated
+`Architecture.PPC64` test proves drgn reads a **real** ppc64le core and is the durable
+regression guard, not a one-shot artifact.
 
 ## Risks & failure modes
 
@@ -87,15 +113,22 @@ orchestration is arch-blind; the live open proves drgn reads a real ppc64le core
   helper that silently assumes x86). *Mitigation:* fail-fast — fix the defect, add a
   regression test, record the finding in ADR-0348 and the proof record. Not anticipated:
   the adapter uses only arch-general drgn helpers.
-- **The #1148 vmcore artifact is gone from the object store.** *Mitigation:* the artifact
-  survives in `/home/dave/kdive-ppc-proof/` inputs and the live stack is up; if the object
-  is expired, re-run the #1148 `live_stack` capture (`test_ppc64le_kdump_captures_a_vmcore_
-  under_tcg`) to regenerate one, then open it. The proof records which path was taken.
+- **Regression: a future drgn stops opening ppc64le cores.** The unit fakes cannot catch
+  this (they never invoke real drgn). *Mitigation:* AC1a is a `live_vm`-gated test, not a
+  one-shot doc proof — it re-runs in `just test-live` against the retained core and fails on
+  a real ppc64le-open regression. The proof record names the drgn-version-bump re-proof
+  trigger explicitly.
+- **The #1148 vmcore artifact is lost / not reproducible.** A fresh TCG re-capture is slow
+  and need not reproduce the same bytes. *Mitigation:* the core is **retained at a stable
+  path with its SHA-256 recorded** in the proof record, and the `live_vm` test reads it from
+  `KDIVE_PPC64LE_VMCORE` (skipping cleanly when unset). Re-capture via the #1148
+  `live_stack` test (`test_ppc64le_kdump_captures_a_vmcore_under_tcg`) is the last resort,
+  and the proof record states which core (by digest) the run used.
 - **Default-arg regression risk on the fakes.** *Mitigation:* the `arch` knob defaults to
   `"x86_64"`; the existing x86_64 assertions are the guard that the default is inert.
-- **`platform.arch` API name drift across drgn versions.** *Mitigation:* the proof reads
-  `prog.platform.arch` against the installed drgn 0.2.0 and records the exact value; the
-  proof is a one-shot live artifact, not a CI test, so no version-pinning is needed.
+- **`Architecture.PPC64` API drift across drgn versions.** *Mitigation:* AC1a asserts equality
+  against the named enum member (confirmed present in the installed drgn 0.2.0); a drgn that
+  renamed or dropped it would fail the `live_vm` test loudly rather than silently pass.
 
 ## Non-goals / explicitly deferred
 
