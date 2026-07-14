@@ -95,6 +95,10 @@ def test_firstboot_script_shape() -> None:
         fail_marker="kdive-customize-failed",
     )
     assert script.startswith("#!/bin/sh\nset -e\n")
+    # Command output is routed to the console so a failed dnf/RunCommand's error lands in the
+    # captured console log (the failure-evidence path), before any exec step runs.
+    assert "exec > /dev/hvc0 2>&1" in script
+    assert script.index("exec > /dev/hvc0 2>&1") < script.index("dnf -y install")
     assert "trap 'echo kdive-customize-failed > /dev/hvc0" in script
     assert "dnf -y install drgn kexec-tools" in script
     assert "systemctl enable kdump.service" in script

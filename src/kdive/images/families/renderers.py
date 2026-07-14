@@ -132,6 +132,13 @@ def render_firstboot_script(
     lines = [
         "#!/bin/sh",
         "set -e",
+        # Route ALL command output to the serial console so a failed dnf/RunCommand's stderr lands
+        # in the captured console log (console_log_path) — the failure evidence path surfaces its
+        # tail (ADR-0345, #1147: "a failed in-guest dnf must not be a silent timeout"). Without this
+        # systemd's default StandardOutput=journal keeps the root cause inside the (discarded) guest
+        # journal. The marker echoes below stay on their own line, so interleaved output cannot
+        # false-match the anchored marker regex.
+        f"exec > /dev/{console_device} 2>&1",
         f"trap 'echo {fail_marker} > /dev/{console_device}; sync; systemctl poweroff' EXIT",
     ]
     for step in exec_steps:
