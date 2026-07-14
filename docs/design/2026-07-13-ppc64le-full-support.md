@@ -43,7 +43,11 @@ remainder.
    as N/A, not silently skipped.
 5. **Cross-arch image customization: customization boot under TCG.** Package-installing
    customization of a foreign-arch image runs inside the image itself via a one-shot
-   firstboot payload, booted once under TCG. virt-customize remains the native-arch path.
+   firstboot payload, booted once under TCG. ~~virt-customize remains the native-arch
+   path.~~ **Superseded by [ADR-0345](../adr/0345-unified-customization-boot.md) (#1147):**
+   the boot method is unified for *every* arch and family and `virt-customize` execution is
+   retired — a foreign-only path beside `virt-customize` left two customization methods to
+   maintain, and the boot method extends to bare-metal installs and developer custom setup.
 6. **Sequencing: vertical slice first.** Issues 1–9 prove one ppc64le guest end-to-end
    under TCG; later issues broaden (fadump, catalog parity, gdb/drgn, host symmetry,
    POWER10).
@@ -163,7 +167,7 @@ remainder.
 | 5 | ppc64le profile fixture + seed data; live TCG boot proof of the Fedora ppc64le row | 3, 4 |
 | 6 | Kernel-artifact contract: arch declaration + per-arch payload validation + docs | — |
 | 7 | Boot path: direct-kernel-boot ppc64le bundle, with live proof | 5, 6 |
-| 8 | Cross-arch customization boot (firstboot payload + TCG boot + seal), Fedora family | 5 |
+| 8 | Unify customization on the boot method + retire virt-customize (ADR-0345): rhel first (#1147), debian + argv-path deletion next | 5 |
 | 9 | kdump on ppc64le: per-arch crashkernel defaults, pseries VMCOREINFO proof, capture/retrieve | 7, 8 |
 | 10 | gdb multiarch support in the debug plane + doctor check | 5 |
 | 11 | drgn on ppc64le: vmcore + live verification, arch-parameterized tests | 9 |
