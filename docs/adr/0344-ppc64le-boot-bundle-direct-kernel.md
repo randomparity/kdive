@@ -100,6 +100,24 @@ Concretely:
   applies only if the stub inject cannot run on the proof host at all (e.g. libguestfs absent) — never
   merely for lack of production debuginfo, and never "arch-neutral" on the fake-writer unit tests.
 
+## Live-proof outcome (2026-07-13)
+
+Recorded in `docs/design/2026-07-13-ppc64le-boot-bundle-proof-record-1146.md`:
+
+- **Boot proof PASS.** An uploaded ppc64le combined tar (ELF64-LE `EM_PPC64` `boot/vmlinuz`) +
+  `initrd` installed and direct-kernel-booted on `pseries` under TCG on the x86_64 host, reaching
+  `runs.boot` readiness. Attribution: the running domain's `<kernel>`/`<initrd>` resolved to the
+  per-Run staged path and a unique `kdive_proof_token` reached the running kernel's `<cmdline>`.
+- **Initrd addressing: NO QUIRK.** The modular kernel booted with its staged `<initrd>`; reaching
+  readiness means `kdive-ready` fired on `hvc0` (real-root, post-pivot), so the initramfs unpacked,
+  mounted root, and pivoted with no special addressing beyond QEMU's `-initrd`. No accommodation
+  was needed. Retires the epic's issue-7 Known-unverified item.
+- **Writer `depmod`: CONSTRAINED, deferred to issue 9.** A `debuginfo_ref` install fired
+  `_RealGuestKernelWriter.inject`, whose in-guest ppc64le `depmod` failed under the x86_64
+  libguestfs appliance with `command: depmod: Exec format error` — the anticipated same-arch
+  `command` constraint. Plain boot (no injection) is unaffected; the `qemu-user`/`binfmt`
+  accommodation is scoped to issue 9 (kdump), where module injection is load-bearing.
+
 ## Consequences
 
 - An uploaded ppc64le ELF bundle installs and direct-kernel-boots on pseries under TCG through the

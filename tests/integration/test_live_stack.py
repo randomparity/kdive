@@ -26,12 +26,17 @@ The shared phase-naming contract has its own non-gated unit tests in
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
+from uuid import uuid4
 
+import httpx
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -41,6 +46,7 @@ from kdive.mcp.dev_harness import (
     LiveStackToolError,
     OidcIssuer,
 )
+from kdive.mcp.responses import ToolResponse
 from kdive.profiles.provisioning import reconcile_profile_sizing
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.spine import (
@@ -80,6 +86,14 @@ _PPC64LE_EMULATOR = "qemu-system-ppc64"
 # generous deadline rather than the fast KVM-tuned authorize_ssh_key pre-flight (#1144).
 _PPC64LE_REACHABLE_DEADLINE_S = 900.0
 _PPC64LE_REACHABLE_POLL_S = 20.0
+# The #1146 boot proof also uploads a ppc64le kernel *bundle* and boots it via the install plane.
+# KDIVE_PPC64LE_BUNDLE points at a directory holding `kernel.tar.gz` (the ADR-0343 combined tar:
+# an ELF `boot/vmlinuz` + `lib/modules/<ver>/`) and `initrd.img`. Build it from the published
+# ppc64le rootfs per docs/design/2026-07-13-ppc64le-boot-bundle-proof-record-1146.md; the test
+# skips cleanly when it is absent.
+_PPC64LE_BUNDLE_ENV = "KDIVE_PPC64LE_BUNDLE"
+# The boot window under TCG (upload+install+boot of an uploaded modular kernel) is generous.
+_PPC64LE_BOOT_DEADLINE_S = 1800.0
 # A throwaway ed25519 public key (public half only; KDIVE never needs the private key to append it).
 # Fixed is fine: authorize_ssh_key dedups on the key fingerprint, so a re-run is idempotent.
 _REACHABILITY_PUBKEY = (
@@ -941,6 +955,181 @@ def test_ppc64le_guest_is_ssh_reachable_over_the_wire() -> None:
                             f"console tail: {tail!r}"
                         )
                         await asyncio.sleep(_PPC64LE_REACHABLE_POLL_S)
+            finally:
+                if allocation_id:
+                    await scalar(op, "allocations.release", allocation_id=allocation_id)
+
+    asyncio.run(_run())
+
+
+# --- #1146: uploaded ppc64le kernel bundle boots via the install plane (epic #1139) ----------
+
+
+def _sha256_b64(path: Path) -> str:
+    """The base64 SHA-256 the upload contract declares (S3 ``x-amz-checksum-sha256``)."""
+    return base64.b64encode(hashlib.sha256(path.read_bytes()).digest()).decode()
+
+
+async def _put_presigned(item: ToolResponse, path: Path) -> None:
+    """PUT ``path`` to a ``create_run_upload`` item's presigned URL + required headers."""
+    url = item.refs["upload_url"]
+    raw_headers = item.data.get("required_headers", {})
+    headers = {k: str(v) for k, v in raw_headers.items()} if isinstance(raw_headers, dict) else {}
+    async with httpx.AsyncClient(timeout=180.0) as http:
+        resp = await http.put(url, content=path.read_bytes(), headers=headers)
+        resp.raise_for_status()
+
+
+def _ppc64le_bundle_preflight() -> tuple[OidcIssuer, str, str, Path, Path]:
+    """Reachability preflight + the uploaded-bundle artifacts, or skip with the exact fix."""
+    issuer, base_url, _db_url, image = _ppc64le_reachability_preflight()
+    bundle = os.environ.get(_PPC64LE_BUNDLE_ENV)
+    if not bundle:
+        pytest.skip(
+            f"{_PPC64LE_BUNDLE_ENV} unset; build kernel.tar.gz + initrd.img from the ppc64le "
+            "rootfs (see the #1146 proof-record doc) and point it here"
+        )
+    kernel_tar, initrd = Path(bundle) / "kernel.tar.gz", Path(bundle) / "initrd.img"
+    if not kernel_tar.exists() or not initrd.exists():
+        pytest.skip(f"{_PPC64LE_BUNDLE_ENV} must contain kernel.tar.gz and initrd.img")
+    return issuer, base_url, image, kernel_tar, initrd
+
+
+@pytest.mark.live_stack
+def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
+    """Prove an *uploaded* ppc64le bundle installs and direct-kernel-boots on pseries (#1146).
+
+    Extends the #1144 baseline-boot proof through the **install plane**: a provisioned ppc64le
+    System (``accel=tcg``) gets an uploaded combined kernel tar (ELF ``boot/vmlinuz`` +
+    ``lib/modules/<ver>/``, validated as a ppc64le ELF at ``complete_build``, ADR-0343) plus an
+    ``initrd``; ``runs.install`` extracts the ELF via ``extract_boot_vmlinuz`` and redefines the
+    direct-kernel ``<os>``; ``runs.boot`` power-cycles into it under the TCG-scaled deadline
+    (ADR-0341) and reaches readiness — proving the boot path (ADR-0344) is arch-opaque for the ELF
+    payload, not bzImage-literal.
+
+    The readiness verdict is **discriminating** (not confounded with #1144's baseline boot of the
+    same bytes): the running domain's ``<kernel>``/``<initrd>`` must resolve to the *per-Run* staged
+    path, and a unique ``kdive_proof_token`` passed at install must reach ``<cmdline>``. Reaching
+    ``runs.boot`` readiness means ``kdive-ready`` fired on ``hvc0`` (real-root, post-pivot,
+    ADR-0342/0055) — the positive initrd-addressing signal (no pseries ``<initrd>`` quirk).
+
+    Skips cleanly without ``qemu-system-ppc64`` / the published rootfs / the uploaded bundle. The
+    guest-kernel-writer's in-guest ``depmod`` (module injection) is a separate, arch-constrained
+    path proven in the committed record, not exercised by this plain boot (ADR-0344). Self-cleans.
+    """
+    issuer, base_url, image, kernel_tar, initrd = _ppc64le_bundle_preflight()
+    operator_token = _token(issuer, role="operator")
+    proof_token = f"kdive_proof_token={uuid4().hex[:12]}"
+
+    async def _run() -> None:
+        op = LiveStackClient.over_http(base_url, operator_token)
+        allocation_id = ""
+        async with op:
+            try:
+                async with phase("ppc64le-bundle:allocate"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "allocations.request",
+                            project=_PROJECT,
+                            request={
+                                "vcpus": 2,
+                                "memory_gb": 2,
+                                "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+                                "resource": {"mode": "kind"},
+                            },
+                        ),
+                        "ppc64le-bundle:allocate",
+                    )
+                    allocation_id = env.object_id
+                async with phase("ppc64le-bundle:provision"):
+                    # No crashkernel → CaptureMethod.CONSOLE → a PLAIN boot (no module injection),
+                    # so this exercises extract_boot_vmlinuz + <os> render + SLOF boot only.
+                    profile = _reachability_provision_profile(image, arch="ppc64le")
+                    env = ok(
+                        await scalar(
+                            op, "systems.provision", allocation_id=allocation_id, profile=profile
+                        ),
+                        "ppc64le-bundle:provision",
+                    )
+                    system_id = data_str(env, "system_id")
+                    await await_system_state(op, "ppc64le-bundle:provision", system_id, "ready")
+                async with phase("ppc64le-bundle:create-run"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "investigations.open",
+                            request={"project": _PROJECT, "title": "ppc64le-bundle-1146"},
+                        ),
+                        "ppc64le-bundle:create-run",
+                    )
+                    env = ok(
+                        await scalar(
+                            op,
+                            "runs.create",
+                            request={
+                                "investigation_id": env.object_id,
+                                "system_id": system_id,
+                                "build_profile": {"schema_version": 1, "arch": "ppc64le"},
+                            },
+                        ),
+                        "ppc64le-bundle:create-run",
+                    )
+                    run_id = env.object_id
+                async with phase("ppc64le-bundle:upload"):
+                    decls = [
+                        {
+                            "name": "kernel",
+                            "sha256": _sha256_b64(kernel_tar),
+                            "size_bytes": kernel_tar.stat().st_size,
+                        },
+                        {
+                            "name": "initrd",
+                            "sha256": _sha256_b64(initrd),
+                            "size_bytes": initrd.stat().st_size,
+                        },
+                    ]
+                    up = ok(
+                        await scalar(
+                            op, "artifacts.create_run_upload", run_id=run_id, artifacts=decls
+                        ),
+                        "ppc64le-bundle:upload",
+                    )
+                    by_name = {item.data.get("name"): item for item in up.items}
+                    await _put_presigned(by_name["kernel"], kernel_tar)
+                    await _put_presigned(by_name["initrd"], initrd)
+                    ok(
+                        await scalar(op, "runs.complete_build", run_id=run_id),
+                        "ppc64le-bundle:upload",
+                    )
+                async with phase("ppc64le-bundle:install"):
+                    env = ok(
+                        await scalar(op, "runs.install", run_id=run_id, cmdline=proof_token),
+                        "ppc64le-bundle:install",
+                    )
+                    await drain_job(op, "ppc64le-bundle:install", env.object_id)
+                async with phase("ppc64le-bundle:boot"):
+                    env = ok(await scalar(op, "runs.boot", run_id=run_id), "ppc64le-bundle:boot")
+                    # Reaching readiness == kdive-ready on hvc0 (real-root, post-pivot): the
+                    # uploaded ELF booted on pseries/TCG + the initramfs pivoted (no initrd quirk).
+                    await drain_job(
+                        op,
+                        "ppc64le-bundle:boot",
+                        env.object_id,
+                        deadline_s=_PPC64LE_BOOT_DEADLINE_S,
+                    )
+                async with phase("ppc64le-bundle:attribute"):
+                    # Discriminating: the running domain boots the *per-Run staged* uploaded bundle
+                    # (not the provision-time baseline); the unique install token reached cmdline.
+                    xml = subprocess.run(
+                        ["virsh", "-c", "qemu:///system", "dumpxml", f"kdive-{system_id}"],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    ).stdout
+                    assert run_id in xml, "domain <kernel>/<initrd> not at the per-Run staged path"
+                    assert proof_token in xml, "install cmdline token did not reach <cmdline>"
+                    assert "pseries" in xml, "domain is not a pseries machine"
             finally:
                 if allocation_id:
                     await scalar(op, "allocations.release", allocation_id=allocation_id)
