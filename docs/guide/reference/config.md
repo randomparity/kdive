@@ -113,6 +113,7 @@
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
 | `KDIVE_LIBVIRT_ALLOCATION_CAP` | reconciler, worker | `1` | no | Per-host concurrent-Allocation cap. |
+| `KDIVE_LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S` | reconciler, worker | `1800` | no | Native-KVM base window (seconds) for the customization boot's completion poll. 30 minutes. Foreign (TCG-emulated) guests scale this by tcg_deadline_multiplier(accel) (ADR-0341). This is a provisional default absorbing mirror/network fetch variance; a live-proof measurement will re-pin it. |
 | `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER` | reconciler, worker | `10.0` | no | Multiplier applied to boot-readiness deadlines for non-KVM (TCG-emulated) guests, keyed off the System's persisted accelerator. KVM guests are unscaled (1.0); TCG and unknown accelerators scale by this factor. Must be >= 1.0; 1.0 disables scaling. |
 | `KDIVE_LIBVIRT_URI` | reconciler, worker | `qemu:///system` | no | libvirt connection URI for the local host. |
 | `KDIVE_LOCAL_LIBVIRT_ENABLED` | migrate, reconciler, server, worker | `true` | no | Whether the local-libvirt provider is composed (default on): its reconciler leaked-domain reaper and its provider-discovery registration and resolver runtime. Set to false on deployments with no local libvirt host (e.g. a remote-libvirt-only k8s deploy) so neither the leaked-domain sweep nor startup discovery fails on a missing socket. |
