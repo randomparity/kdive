@@ -196,6 +196,35 @@ def test_complete_build_finalizes_external_run(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_complete_build_threads_profile_arch_to_validator(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(
+                pool, build_profile={"schema_version": 1, "arch": "ppc64le"}
+            )
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            resp = await _build_handlers(validator).complete_build(
+                pool, _ctx(), str(run_id), build_id=None
+            )
+            assert resp.status == "succeeded"
+        assert validator.last_arch == "ppc64le"
+
+    asyncio.run(_run())
+
+
+def test_complete_build_defaults_arch_x86_64_when_profile_omits_it(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)  # {"schema_version": 1}
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            await _build_handlers(validator).complete_build(
+                pool, _ctx(), str(run_id), build_id=None
+            )
+        assert validator.last_arch == "x86_64"
+
+    asyncio.run(_run())
+
+
 def test_complete_build_without_cmdline_records_none(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
