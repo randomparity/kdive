@@ -177,3 +177,29 @@ def test_capped_tar_members_rejects_a_member_count_bomb(
     with tarfile.open(tar_path, "r:gz") as archive, pytest.raises(CategorizedError) as exc:
         list(capped_tar_members(archive))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_extract_boot_vmlinuz_rejects_an_oversize_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A boot member declaring a huge size is a decompression bomb: reject before read() allocates.
+    monkeypatch.setattr(kernel_bundle, "MAX_KERNEL_TAR_UNCOMPRESSED_BYTES", 4)
+    combined = tmp_path / "kernel.tar.gz"
+    combined.write_bytes(_combined_tar(_ppc64le_elf_boot_member()))
+    with pytest.raises(CategorizedError) as exc:
+        extract_boot_vmlinuz(combined, tmp_path / "kernel")
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_repack_modules_subtree_rejects_an_oversize_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A cumulative module-tree size over the bound is rejected, and the partial temp tar is cleaned.
+    monkeypatch.setattr(kernel_bundle, "MAX_KERNEL_TAR_UNCOMPRESSED_BYTES", 4)
+    combined = tmp_path / "kernel.tar.gz"
+    combined.write_bytes(_combined_tar(_ppc64le_elf_boot_member()))
+    dest = tmp_path / "modules.tar.gz"
+    with pytest.raises(CategorizedError) as exc:
+        repack_modules_subtree(combined, dest)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert not dest.with_name(dest.name + ".part").exists()
