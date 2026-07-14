@@ -9,10 +9,11 @@ unlinks it via ``cleanup``), mirroring the old ``_staged_upload`` helper.
 The firstboot renderer (:func:`partition_steps`, :func:`render_firstboot_script`,
 :func:`render_firstboot_unit`) supports the boot-to-self-customize path (ADR-0345): a family's
 ``Step`` list is partitioned into offline file-ops (applied via guestfish before boot) and exec-ops
-(collected into a firstboot script the guest runs on its own first boot). ``CUSTOMIZE_UNIT`` and
-``CUSTOMIZE_SCRIPT_PATH`` are shared with the offline injector (``rootfs_build.py``) via
-``customization_boot.py`` so the self-removal ``rm`` targets and the injector's write locations
-never skew.
+(collected into a firstboot script the guest runs on its own first boot). The unit name and script
+path are passed in by the provider-layer caller (``rootfs_build.py``, which shares the
+``CUSTOMIZE_UNIT``/``CUSTOMIZE_SCRIPT_PATH`` constants with the offline injector) so the
+self-removal ``rm`` targets and the injector's write locations never skew — this module stays in
+the ``images`` layer and does not depend on the provider.
 """
 
 from __future__ import annotations
@@ -28,10 +29,6 @@ from kdive.images.families.steps import (
     Step,
     UploadFile,
     WriteFile,
-)
-from kdive.providers.local_libvirt.lifecycle.rootfs.customization_boot import (
-    CUSTOMIZE_SCRIPT_PATH,
-    CUSTOMIZE_UNIT,
 )
 
 _FILE_OP_TYPES = (Mkdir, WriteFile, StageFile, UploadFile)
@@ -106,8 +103,8 @@ def render_firstboot_script(
     exec_steps: list[Step],
     *,
     console_device: str,
-    unit_name: str = CUSTOMIZE_UNIT,
-    script_path: str = CUSTOMIZE_SCRIPT_PATH,
+    unit_name: str,
+    script_path: str,
     ok_marker: str,
     fail_marker: str,
 ) -> str:
@@ -123,9 +120,9 @@ def render_firstboot_script(
             :func:`partition_steps`).
         console_device: The guest console device (e.g. ``hvc0``) markers are echoed to.
         unit_name: The firstboot systemd unit's file name; must match the value
-            ``inject_offline`` writes (``CUSTOMIZE_UNIT`` by default).
+            ``inject_offline`` writes (the caller passes ``CUSTOMIZE_UNIT``).
         script_path: This script's own guest path; must match the value ``inject_offline``
-            writes (``CUSTOMIZE_SCRIPT_PATH`` by default).
+            writes (the caller passes ``CUSTOMIZE_SCRIPT_PATH``).
         ok_marker: The console line echoed on success.
         fail_marker: The console line echoed on failure (via the ``EXIT`` trap).
 
@@ -156,7 +153,7 @@ def render_firstboot_script(
     return "\n".join(lines) + "\n"
 
 
-def render_firstboot_unit(*, script_path: str = CUSTOMIZE_SCRIPT_PATH) -> str:
+def render_firstboot_unit(*, script_path: str) -> str:
     """Render the firstboot systemd unit body (ADR-0345).
 
     This unit is the boot-to-self-customize bootstrap: it has no in-guest ``systemctl enable``
@@ -165,7 +162,7 @@ def render_firstboot_unit(*, script_path: str = CUSTOMIZE_SCRIPT_PATH) -> str:
 
     Args:
         script_path: The firstboot script's guest path, used as ``ExecStart``; must match
-            ``render_firstboot_script``'s ``script_path`` (``CUSTOMIZE_SCRIPT_PATH`` by default).
+            ``render_firstboot_script``'s ``script_path`` (the caller passes the shared constant).
 
     Returns:
         The unit file body.
