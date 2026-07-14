@@ -105,13 +105,29 @@ prove the capture is *this* ppc64le guest's under the §1 default via the §2-un
 path. Per the issue owner, there is **no CONSTRAINED fallback for the capture itself** — a failed
 capture is iterated to a definitive verdict, not shipped as indeterminate.
 
-## Live-proof outcome (pending)
+## Live-proof outcome (2026-07-14)
 
-> Filled in from `docs/design/2026-07-13-ppc64le-kdump-proof-record-1148.md` when the live run
-> completes. Records: the retrieved `EM_PPC64` vmcore + makedumpfile fields; the confirmed
-> `crashkernel=512M` default in the crashed guest's `/proc/cmdline`; the host-side-`depmod`
-> install success on ppc64le; and the §3 VMCOREINFO/fw_cfg verdict (whether any `<features>`
-> emission was required).
+Recorded in `docs/design/2026-07-13-ppc64le-kdump-proof-record-1148.md` (driver
+`test_ppc64le_kdump_captures_a_vmcore_under_tcg`, `1 passed in 218.58s`, on this branch's build):
+
+- **Per-arch default: PASS.** A ppc64le KDUMP install (sentinel profile `crashkernel="256M"`, no
+  per-install override) resolved `console=hvc0 root=/dev/vda crashkernel=512M …` — the arch default
+  (512M), not the sentinel, sized the reservation; the same reached the running domain's
+  `<cmdline>`.
+- **Host-side depmod: PASS.** The KDUMP install's module injection completed under the x86_64
+  libguestfs appliance with no `Exec format error`, retiring #1146's CONSTRAINED verdict. The live
+  run also caught and fixed a real defect the unit fakes missed — `extractall(filter="data")`
+  rejected the absolute `build`/`source` symlinks every module tree carries; the fix skips those
+  link members with a `data`-safe custom filter (regression test added).
+- **Capture: PASS.** `force_crash` → `crashed` → the guest's kdump kernel + makedumpfile produced
+  an ~86 MiB core, retrieved via `vmcore.fetch`/`vmcore.list` (only the `-redacted` ref surfaced).
+  The makedumpfile KDUMP header reports `machine=ppc64le`, `release=6.19.10-300.fc44.ppc64le`
+  (makedumpfile 1.7.9) — the discriminating attribution.
+- **VMCOREINFO/fw_cfg verdict: NO device needed.** The capture succeeded with **no `<features>`
+  device** emitted on the pseries domain (asserted absent in `virsh dumpxml`). kdump read VMCOREINFO
+  from `/proc/vmcore`, independent of any QEMU device — the hypothesis held, so `xml.py`/`arch_traits`
+  are unchanged and the x86-only `emit_acpi_features` gate is correct for the kdump path. The
+  epic's issue-9 "pseries fw_cfg/VMCOREINFO device behavior" Known-unverified item is retired.
 
 ## Consequences
 
