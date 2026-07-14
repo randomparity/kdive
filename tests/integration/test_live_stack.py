@@ -1014,8 +1014,9 @@ def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
     ADR-0342/0055) — the positive initrd-addressing signal (no pseries ``<initrd>`` quirk).
 
     Skips cleanly without ``qemu-system-ppc64`` / the published rootfs / the uploaded bundle. The
-    guest-kernel-writer's in-guest ``depmod`` (module injection) is a separate, arch-constrained
-    path proven in the committed record, not exercised by this plain boot (ADR-0344). Self-cleans.
+    guest-kernel-writer's module injection is a separate path (host-side ``depmod`` as of #1148,
+    ADR-0346); this plain boot injects no modules, so it does not exercise it (ADR-0344).
+    Self-cleans.
     """
     issuer, base_url, image, kernel_tar, initrd = _ppc64le_bundle_preflight()
     operator_token = _token(issuer, role="operator")

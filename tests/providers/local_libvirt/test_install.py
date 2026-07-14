@@ -561,8 +561,8 @@ def test_install_stages_the_bundle_through_inject_and_render(
     # #1146: the install path is byte-agnostic — a ppc64le ELF boot/vmlinuz and a .ppc64le module
     # version flow through extract → repack → inject → <os> render exactly like an x86 bzImage.
     # This asserts the ORCHESTRATION (which bytes land where, the rendered <os>) with the fake
-    # writer; the real writer's in-guest depmod on a ppc64le overlay (libguestfs cross-arch) is a
-    # live-only question proven in the #1146 live_stack proof, not here.
+    # writer; the real writer's cross-arch module indexing is host-side depmod as of #1148
+    # (unit-tested in test_module_indexing.py) and live-exercised in the #1148 kdump proof.
     events: list[str] = []
     conn = _conn_with_existing(events=events)
     writer = _FakeKernelWriter(events)

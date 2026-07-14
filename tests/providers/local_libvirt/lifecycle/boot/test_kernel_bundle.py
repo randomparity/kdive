@@ -6,8 +6,9 @@ bzImage on x86_64, an ELF ``vmlinux`` on ppc64le. These tests lock that contract
 ELF boot member round-trips byte-identically and a ``.ppc64le`` module version is handled, so the
 day someone re-adds a bzImage-only assumption to the host-side path, ppc64le fails CI here.
 
-Scope: the *host-side tar I/O* only. The real ``_RealGuestKernelWriter``'s in-guest ``depmod`` on
-a ppc64le overlay (libguestfs cross-arch execution) is a live-only question, not covered here.
+Scope: the *host-side tar I/O* only. Cross-arch module indexing (``depmod``) is covered separately
+in ``test_module_indexing.py`` — as of #1148 it runs host-side, so it is no longer a libguestfs
+cross-arch-execution question.
 """
 
 from __future__ import annotations

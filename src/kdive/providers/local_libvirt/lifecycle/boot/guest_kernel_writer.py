@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import subprocess
 import tarfile
+import tempfile
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -15,6 +17,105 @@ _log = logging.getLogger(__name__)
 _MODULES_ROOT = "/lib/modules"
 _BOOT_ROOT = "/boot"
 _DEBUGINFO_ROOT = "/usr/lib/debug/lib/modules"
+# The relative in-tar / in-guest modules root (``_MODULES_ROOT`` without the leading slash).
+_MODULES_TREE = _MODULES_ROOT.lstrip("/")
+_DEPMOD_STDERR_MAX = 500
+
+
+class DepmodRunner(Protocol):
+    """Run ``depmod`` against an extracted module tree rooted at ``basedir``."""
+
+    def __call__(self, *, basedir: Path, version: str) -> None: ...
+
+
+def _run_host_depmod(*, basedir: Path, version: str) -> None:
+    """Index ``basedir/lib/modules/<version>`` with the **host** ``depmod`` (ADR-0346).
+
+    ``depmod`` parses each module's ELF header and symbol tables to build ``modules.dep``; it never
+    executes module code, so the host's ``depmod`` indexes a foreign-arch (e.g. ppc64le) tree
+    correctly under an x86_64 host — the cross-arch fix for #1148. ``-b <basedir>`` points it at the
+    extracted tree; the produced index is host-endianness-independent (kmod writes the ``.bin``
+    files in network byte order and both x86_64 and ppc64le are little-endian anyway).
+
+    Raises:
+        CategorizedError: ``MISSING_DEPENDENCY`` when no ``depmod`` binary is on ``PATH``;
+            ``INFRASTRUCTURE_FAILURE`` on a non-zero exit, carrying the trimmed ``depmod`` stderr
+            in ``details`` so the cause is legible from the tool envelope (the #1146 note).
+    """
+    try:
+        result = subprocess.run(
+            ["depmod", "-b", str(basedir), version],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise CategorizedError(
+            "depmod is required on the worker host to index kernel modules for staging; "
+            "install kmod (provides depmod)",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+        ) from exc
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()[-_DEPMOD_STDERR_MAX:]
+        raise CategorizedError(
+            "host depmod failed indexing the kernel modules for staging",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"version": version, "depmod_stderr": stderr},
+        )
+
+
+def index_modules_tar(
+    modules_tar: Path, version: str, *, workdir: Path, run_depmod: DepmodRunner = _run_host_depmod
+) -> Path:
+    """Extract a modules tar, index it host-side, and repack the indexed tree (ADR-0346).
+
+    ``modules_tar`` is the ``lib/modules/<version>/`` subtree repacked from the combined kernel tar
+    (``repack_modules_subtree``). It is extracted under ``workdir`` (an existing dir the caller
+    owns — typically a ``TemporaryDirectory``), ``run_depmod`` indexes it in place, and the whole
+    ``lib/modules/`` subtree — now carrying ``modules.dep`` and the ``.bin`` indices — is repacked
+    to a gzip tar the caller ``tar_in``s into the guest overlay. No guest binary is executed.
+
+    Args:
+        modules_tar: The modules-only gzip tar (members under ``lib/modules/<version>/``).
+        version: The kernel release, e.g. ``6.19.10-300.fc44.ppc64le`` (arch suffix preserved).
+        workdir: An existing directory to extract and repack under.
+        run_depmod: The indexing seam (defaults to the host ``depmod``); injected in tests.
+
+    Returns:
+        The path to the repacked, indexed ``lib/modules/`` gzip tar under ``workdir``.
+
+    Raises:
+        CategorizedError: ``INFRASTRUCTURE_FAILURE`` if the extract fails or ``modules.dep`` is
+            absent after indexing; the ``run_depmod`` seam's own categories propagate.
+    """
+    try:
+        with tarfile.open(modules_tar, "r:gz") as archive:
+            archive.extractall(workdir, filter="data")
+    except (OSError, tarfile.TarError) as exc:
+        raise CategorizedError(
+            "failed to extract the modules tar for host-side indexing",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"modules_tar": str(modules_tar)},
+        ) from exc
+    run_depmod(basedir=workdir, version=version)
+    version_dir = workdir / _MODULES_TREE / version
+    if not (version_dir / "modules.dep").is_file():
+        raise CategorizedError(
+            "module indexing completed but modules.dep is absent after depmod",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"version_dir": str(version_dir)},
+        )
+    indexed = workdir / "indexed-modules.tar.gz"
+    try:
+        with tarfile.open(indexed, "w:gz") as out:
+            out.add(workdir / _MODULES_TREE, arcname=_MODULES_TREE)
+    except (OSError, tarfile.TarError) as exc:
+        raise CategorizedError(
+            "failed to repack the indexed modules tree for staging",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"dest": str(indexed)},
+        ) from exc
+    return indexed
 
 
 class GuestKernelWriter(Protocol):
@@ -126,11 +227,21 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
 
     @staticmethod
     def _extract_and_index(guest: _GuestFS, overlay: str, tar: str, version: str) -> None:
+        """Index the module tree host-side (`depmod -b`) and inject it into the overlay (ADR-0346).
+
+        The tree is indexed on the host — where ``depmod`` runs natively regardless of the module
+        arch — then the ready-indexed tree is ``tar_in``'d into the guest (a file op libguestfs
+        does cross-arch). This replaces running the guest's own ``depmod`` inside the host-arch
+        appliance, which fails for a foreign-arch (ppc64le) tree (#1146, #1148).
+        """
         version_dir = f"{_MODULES_ROOT}/{version}"
         try:
-            guest.rm_rf(version_dir)
-            guest.tar_in(tar, "/", compress="gzip")
-            guest.command(["depmod", "-a", version])
+            with tempfile.TemporaryDirectory() as tmp:
+                indexed = index_modules_tar(Path(tar), version, workdir=Path(tmp))
+                guest.rm_rf(version_dir)
+                guest.tar_in(str(indexed), "/", compress="gzip")
+        except CategorizedError:
+            raise
         except Exception as exc:
             raise _RealGuestKernelWriter._io_failure(
                 "extracting and indexing the kernel modules", overlay, exc
