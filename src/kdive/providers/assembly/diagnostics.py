@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
+from kdive.diagnostics.multiarch_gdb import diagnostic_contribution as local_diagnostics
 from kdive.diagnostics.provider_contracts import DiagnosticProviderContribution
-from kdive.providers.local_libvirt.diagnostics.contribution import (
-    diagnostic_contribution as local_diagnostics,
-)
 from kdive.providers.remote_libvirt.diagnostics.contribution import (
     diagnostic_contribution as remote_diagnostics,
 )

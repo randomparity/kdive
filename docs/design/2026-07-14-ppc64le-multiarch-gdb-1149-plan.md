@@ -118,8 +118,10 @@ unchanged (they pass no `host_arch_finder`, so the default applies).
 ## Task 4 — Local-libvirt diagnostic contribution + assembly
 
 **What.**
-- New `src/kdive/providers/local_libvirt/diagnostics/__init__.py` and
-  `.../diagnostics/contribution.py`:
+- New `src/kdive/diagnostics/multiarch_gdb.py` (the probe attributes to `local-libvirt` but
+  imports no local-libvirt internals, so the boundary guard `test_provider_boundaries.py` — which
+  reserves `providers/local_libvirt/*` imports for `composition.py` — keeps it in the neutral
+  diagnostics package rather than under the provider):
   - The real probe `default_multiarch_gdb_probe(*, host_arch=platform.machine(),
     supported=SUPPORTED_ARCHES, which=shutil.which, run=<real subprocess runner>) ->
     MultiarchGdbProbe` (async) — inject `host_arch`, `supported`, `which`, and the runner with
@@ -148,7 +150,7 @@ unchanged (they pass no `host_arch_finder`, so the default applies).
 `_unavailable_worker_checks` / `_worker_checks` structure so the assembly wiring is identical in
 shape.
 
-**Tests** (`tests/providers/local_libvirt/diagnostics/test_contribution.py`):
+**Tests** (`tests/diagnostics/test_multiarch_gdb.py`):
 - Probe with an injected fake `which` + fake subprocess runner keyed on **stdout**: host
   `x86_64`, ppc runner stdout confirms `powerpc:common64` → `SUPPORTED`; candidate `None` →
   `MISSING`; runner stdout does not confirm the target (error text / wrong arch) → `MISSING`;

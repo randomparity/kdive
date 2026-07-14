@@ -1,10 +1,12 @@
-"""Local-libvirt provider-owned diagnostic contribution: the multiarch-gdb prerequisite.
+"""The multiarch-gdb worker-vantage diagnostic contribution (ADR-0347).
 
-Cross-arch debug sessions (a ppc64le guest on an x86_64 host, ADR-0347) spawn a
-multiarch-capable gdb on the worker host. This contribution adds one worker-vantage check that
-confirms such a gdb exists, keyed off kdive's *static* cross-arch capability
-(``SUPPORTED_ARCHES − host``) — so the probe needs no DB handle and no libvirt call — and gdb's
-*stdout* (its batch exit status is unreliable for a rejected ``set architecture``).
+Cross-arch debug sessions (a ppc64le guest on an x86_64 host) spawn a multiarch-capable gdb on
+the worker host. This contribution adds one worker-vantage check that confirms such a gdb exists,
+keyed off kdive's *static* cross-arch capability (``SUPPORTED_ARCHES − host``) — so the probe
+needs no DB handle and no libvirt call — and gdb's *stdout* (its batch exit status is unreliable
+for a rejected ``set architecture``). It attributes to ``local-libvirt`` (the provider that runs
+cross-arch guests) but depends on no local-libvirt internals, so it lives in the neutral
+diagnostics package rather than behind the provider-assembly seam.
 """
 
 from __future__ import annotations

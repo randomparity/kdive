@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import asyncio
 
-from kdive.diagnostics.provider_checks import MultiarchGdbCheck, MultiarchGdbOutcome
-from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
-from kdive.providers.local_libvirt.diagnostics.contribution import (
+from kdive.diagnostics.multiarch_gdb import (
     default_multiarch_gdb_probe,
     diagnostic_contribution,
 )
+from kdive.diagnostics.provider_checks import MultiarchGdbCheck, MultiarchGdbOutcome
+from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 
 
 def _which(present: dict[str, str]):

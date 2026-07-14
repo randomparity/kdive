@@ -234,6 +234,11 @@ trap, surfacing as a debug.continue timeout rather than an error. Requires contr
 
 Open a single-attach transport and insert a live DebugSession. Requires contributor.
 
+A `gdbstub` session on a System whose guest architecture differs from the worker host's
+(e.g. a ppc64le guest on an x86_64 host) needs a multiarch-capable gdb on the worker; a
+later debug op failing with `missing_dependency` naming `gdb-multiarch` means installing
+it (or a multiarch gdb build) — the `multiarch_gdb` doctor check reports this ahead of time.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `run_id` | string | yes | The booted Run to attach a debug session to. |

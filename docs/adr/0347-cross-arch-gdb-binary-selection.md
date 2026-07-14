@@ -1,6 +1,6 @@
 # ADR 0347 — Cross-arch gdb binary selection: derive the guest arch from the staged vmlinux
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-14
 - **Issue:** #1149
 - **Epic:** #1139 (full ppc64le support)
@@ -66,7 +66,10 @@ Concretely:
   `MultiarchGdbProbe` outcome to a three-state `CheckResult`: every supported foreign arch is
   targetable → `pass`; a supported foreign arch has no gdb that can target it → `fail` with the
   `apt install gdb-multiarch` / distro hint; the probe could not run → `error`. The real probe
-  lives in a new local-libvirt diagnostic contribution and gates on kdive's **static** cross-arch
+  lives in `diagnostics/multiarch_gdb.py` — it attributes to `local-libvirt` but depends on no
+  local-libvirt internals, so it stays in the neutral diagnostics package rather than behind the
+  provider-assembly seam (the boundary guard reserves `providers/local_libvirt/*` imports for
+  `composition.py`) — and gates on kdive's **static** cross-arch
   capability — the foreign set is `arch_traits.SUPPORTED_ARCHES − {host arch}`, so a
   worker-vantage check needs no DB handle and no libvirt call — running a candidate gdb in batch
   mode to confirm it accepts each foreign `set architecture`; a host whose only supported arch is
