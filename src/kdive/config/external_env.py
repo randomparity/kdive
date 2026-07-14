@@ -70,6 +70,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "(#1144, epic #1139); unset (or no qemu-system-ppc64) → that test skips.",
     ),
     ExternalEnvVar(
+        "KDIVE_PPC64LE_BUNDLE",
+        "test",
+        None,
+        "Directory holding kernel.tar.gz (the ADR-0343 combined tar: ELF boot/vmlinuz + "
+        "lib/modules/<ver>/) and initrd.img for the #1146 uploaded-bundle boot proof live_stack "
+        "test (epic #1139); unset → that test skips.",
+    ),
+    ExternalEnvVar(
         "KDIVE_TEST_BUILD_CONFIG",
         "test",
         None,
