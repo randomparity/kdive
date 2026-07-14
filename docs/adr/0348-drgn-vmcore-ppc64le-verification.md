@@ -76,27 +76,34 @@ Concretely:
   same keys, same redaction/byte-cap behavior) with only `machine` differing. The remote
   mirror gets the same parameterization. They fail the instant a change makes the offline
   path branch on arch or drop a section for a non-x86 core.
-- **Catalog `drgn_version` stays meaningful for the ppc64le row.** Beyond the existing
-  snapshot equality (`test_rootfs_catalog.py:125`), a focused assertion pins the ppc64le
-  row's `drgn_version` to a non-empty parseable version **equal to the same-distro/version
-  x86_64 row** (`fedora-kdive-ready-44`, both `0.0.33`), encoding the catalog's stated
-  "Fedora 44 ships the same drgn across arches" invariant so a placeholder or degraded
-  ppc64le drgn is caught. It deliberately does **not** tie to `live_drgn_capability`
-  (`images/drgn_support.py`): that is the in-guest **BTF** threshold (0.0.31) for the
-  live/SSH path this issue puts out of scope, and against the installed drgn 0.2.0 it is
-  near-tautological — it would certify the wrong capability for the offline vmcore contract.
-- **Live proof — discriminating, durable, and pinned.** The real-bytes verification is a
-  `live_vm`-gated test (not a one-shot doc artifact) that opens the retained real #1148
-  ppc64le vmcore with drgn on the x86_64 host and **asserts equality**
-  `prog.platform.arch == drgn.Architecture.PPC64` (the exact enum, confirmed present in the
-  installed drgn 0.2.0) plus a readable VMCOREINFO `BUILD-ID=`. It exercises drgn's real
-  ppc64le ELF-header + note parsing, **needs no debuginfo**, *fails* on any other platform
-  arch or an unreadable build-id, and *skips cleanly* when the core fixture is absent
-  (`KDIVE_PPC64LE_VMCORE`). Because it lives in the `live_vm` suite it re-runs on drgn
-  version bumps — so a future drgn that regresses real ppc64le-core opening is caught, not
-  silently lost; this is the durable regression guard the unit fakes (which never invoke
-  drgn) cannot be. A one-shot proof record under `docs/design/` captures the same run and
-  records the core's **SHA-256 digest and retained path** for reproducibility.
+- **Catalog `drgn_version` stays meaningful for the ppc64le row (row hygiene).** Beyond the
+  existing snapshot equality (`test_rootfs_catalog.py:125`), a focused assertion checks the
+  ppc64le row's `drgn_version` parses via `DrgnVersion.parse` (`images/drgn_support.py`) into
+  a real version clearing the `BTF_CAPABLE_DRGN` (0.0.31) floor its purpose implies — so a
+  placeholder, empty, or malformed value is caught. This is **catalog-row hygiene, not
+  offline-path proof:** `drgn_version` is the **guest-baked** drgn consumed by the in-guest
+  live/SSH path, not the worker-host offline drgn (0.2.0) this issue verifies — the two are
+  different drgns, and the assertion claims nothing about the offline contract. It
+  deliberately does **not** pin cross-arch row-equality with `fedora-kdive-ready-44`: Fedora
+  ppc64le is a *secondary* arch that may legitimately lag primary packaging, so an equality
+  invariant would risk a spurious CI failure on a real divergence.
+- **Live proof — discriminating, pinned, and honestly scoped.** The real-bytes verification
+  is a `live_vm`-gated test (not a one-shot doc artifact) that opens the retained real #1148
+  ppc64le vmcore with drgn and asserts drgn identifies it as **ppc64le specifically**:
+  `prog.platform.arch == drgn.Architecture.PPC64` **and**
+  `PlatformFlags.IS_LITTLE_ENDIAN in prog.platform.flags` (the arch enum has no LE/BE variant,
+  so the flag is what separates ppc64le from the out-of-scope big-endian ppc64), a readable
+  VMCOREINFO `BUILD-ID=`, and a **SHA-256 equal to the pinned digest** so the guard provably
+  runs against this exact #1148 artifact. It exercises drgn's real ppc64le ELF-header + note
+  parsing and **needs no debuginfo**. It **skips only** when the fixture is unconfigured
+  (`KDIVE_PPC64LE_VMCORE` unset) and **fails loudly** when the env is set but the file is
+  missing/unreadable or its digest mismatches — so a skip is distinguishable from a pass and a
+  mis-provisioned runner is a failure, not a silent "no core." **Durability is within the live
+  suite, not CI:** the 86 MiB core cannot ship to CI, so — like every `live_vm` test here — the
+  guard runs in `just test-live` on the host holding the retained core; a green PR does not
+  assert this AC. The proof record names that host, the drgn version last verified (0.2.0), the
+  core's digest + retained path, and a re-run-on-drgn-bump trigger, so re-exercise is a recorded
+  procedure rather than unstated discipline.
 - **The full structural read on real ppc64le bytes is DEFERRED, not faked.** Reading the
   task list and by-name symbols out of a real ppc64le core requires a DWARF-bearing
   `vmlinux`. The epic ships only stripped `vmlinuz` and no ppc64le `kernel-debuginfo` (a
