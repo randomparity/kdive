@@ -86,13 +86,15 @@ def default_multiarch_gdb_probe(
     async def _probe() -> MultiarchGdbOutcome:
         foreign = sorted(set(supported) - {resolved_host})
         for arch in foreign:
-            candidate = select_gdb_binary(resolved_host, arch, which)
-            if candidate is None:
-                return MultiarchGdbOutcome.MISSING
             gdb_name = gdb_target_arch_name(arch)
             if gdb_name is None:
-                # No gdb architecture name for a supported arch: cannot positively confirm, so
-                # do not claim support. Unreachable for the current SUPPORTED_ARCHES.
+                # No gdb architecture name for a supported arch: the capability cannot be probed,
+                # which is "undeterminable", not "no gdb installed". Unreachable for the current
+                # SUPPORTED_ARCHES; guards a future arch added without a gdb-name mapping. Checked
+                # before `which` so an unmappable arch does not waste a PATH scan.
+                return MultiarchGdbOutcome.UNDETERMINABLE
+            candidate = select_gdb_binary(resolved_host, arch, which)
+            if candidate is None:
                 return MultiarchGdbOutcome.MISSING
             try:
                 stdout = await run(

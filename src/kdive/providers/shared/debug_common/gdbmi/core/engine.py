@@ -206,7 +206,11 @@ class GdbMiEngine(
                 attachment, f"-file-exec-and-symbols {self._mi_path(resolved_vmlinux)}"
             )
             if is_cross_arch:
-                gdb_arch = gdb_target_arch_name(guest_arch)  # type: ignore[arg-type]
+                # gdb usually infers the target arch from the loaded vmlinux ELF, but the gdbstub's
+                # own target description can override that; set it explicitly so a cross-arch attach
+                # never mis-targets. `is_cross_arch` implies `guest_arch is not None`.
+                assert guest_arch is not None
+                gdb_arch = gdb_target_arch_name(guest_arch)
                 if gdb_arch is not None:
                     self.execute_mi_command(attachment, f"-gdb-set architecture {gdb_arch}")
             self.execute_mi_command(attachment, f"-gdb-set remotetimeout {RSP_REMOTE_TIMEOUT_SEC}")
