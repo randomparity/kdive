@@ -34,6 +34,10 @@ def test_read_vmcoreinfo_build_id_rejects_short_hex() -> None:
 
 
 class _FakeProgram:
+    def __init__(self, arch: str = "x86_64") -> None:
+        # `arch` feeds uts.machine; the "x86_64" default keeps the no-arg callers unchanged.
+        self._arch = arch
+
     def iter_tasks(self) -> list[object]:
         return []
 
@@ -41,7 +45,7 @@ class _FakeProgram:
         return []
 
     def uts(self) -> dict[str, str]:
-        return {"release": "7.0.0", "version": "#1", "machine": "x86_64", "nodename": "g"}
+        return {"release": "7.0.0", "version": "#1", "machine": self._arch, "nodename": "g"}
 
     def boot_cmdline(self) -> str:
         return "console=ttyS0 root=/dev/vda"
@@ -60,6 +64,20 @@ def test_run_introspection_helper_dispatches_fixed_names() -> None:
     sysinfo = run_introspection_helper(prog, "sysinfo")
     assert sysinfo["release"] == "7.0.0"
     assert sysinfo["boot_cmdline"] == "console=ttyS0 root=/dev/vda"
+
+
+@pytest.mark.parametrize("arch", ["x86_64", "ppc64le"])
+def test_run_introspection_helper_sysinfo_reports_guest_arch(arch: str) -> None:
+    """The sysinfo helper reports the guest arch verbatim through the fixed-name dispatch (#1150).
+
+    Proves the shared drgn seam is arch-blind: `machine` round-trips whatever the program's uts
+    reports, and the tasks/modules dispatch is unaffected by arch.
+    """
+    prog = _FakeProgram(arch=arch)
+    assert run_introspection_helper(prog, "sysinfo")["machine"] == arch
+    # Dispatch of the other fixed names is arch-invariant.
+    assert run_introspection_helper(prog, "tasks") == {"tasks": [], "truncated": False}
+    assert run_introspection_helper(prog, "modules")["modules"] == []
 
 
 def test_run_introspection_helper_rejects_unknown_name() -> None:
