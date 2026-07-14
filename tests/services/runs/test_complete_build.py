@@ -194,8 +194,8 @@ def test_complete_build_finalizer_returns_recorded_success_after_reassembly_fail
             )
             await _record_build_step(pool, run_id, recorded)
 
-            def unexpected_validator(*args: object) -> NoReturn:
-                del args
+            def unexpected_validator(*args: object, **kwargs: object) -> NoReturn:
+                del args, kwargs
                 raise AssertionError("recorded success must bypass validation")
 
             result = await _complete(

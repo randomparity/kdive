@@ -50,10 +50,14 @@ def test_kernel_byte_contract_derives_from_validator_constants() -> None:
     paths = {member.path for member in kernel.layout}
     assert validation._KERNEL_BOOT_MEMBER in paths
     assert validation._MODULES_MEMBER_PREFIX in paths
-    # boot/vmlinuz carries the bzImage HdrS magic at the validator's offset.
+    # boot/vmlinuz advertises the per-arch payload format, derived from BOOT_MEMBER_FORMATS so
+    # the advertisement and the validator cannot drift (#1145, ADR-0343). The single `format` key
+    # is gone; both arches are advertised.
     boot = next(m for m in kernel.layout if m.path == validation._KERNEL_BOOT_MEMBER)
-    assert boot.format is not None
-    assert boot.format.magic == (
+    assert boot.formats_by_arch is not None
+    assert boot.formats_by_arch == validation.BOOT_MEMBER_FORMATS
+    assert set(boot.formats_by_arch) == {"x86_64", "ppc64le"}
+    assert boot.formats_by_arch["x86_64"].magic == (
         MagicPin(offset=validation._BZIMAGE_MAGIC_OFFSET, hex=validation._BZIMAGE_MAGIC.hex()),
     )
 

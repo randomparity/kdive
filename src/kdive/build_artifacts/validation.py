@@ -15,10 +15,13 @@ from kdive.artifacts.storage import HeadResult
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
 from kdive.serialization import JsonValue
 
 _NT_GNU_BUILD_ID = 3
 _ELF_MAGIC = b"\x7fELF"
+_ELF64LE_PREFIX = b"\x7fELF\x02\x01"  # magic + EI_CLASS=64-bit + EI_DATA=little-endian
+_EM_PPC64_LE16 = (21).to_bytes(2, "little")  # e_machine == EM_PPC64, 16-bit LE at offset 0x12
 _GZIP_MAGIC = b"\x1f\x8b"
 _BZIMAGE_MAGIC = b"HdrS"
 _BZIMAGE_MAGIC_OFFSET = 0x202
@@ -74,22 +77,28 @@ class FormatContract:
 
 @dataclass(frozen=True, slots=True)
 class LayoutMember:
-    """One member inside a container artifact (e.g. a path inside the combined kernel tar)."""
+    """One member inside a container artifact (e.g. a path inside the combined kernel tar).
+
+    ``formats_by_arch`` gives a member a per-arch byte contract (e.g. the ``boot/vmlinuz``
+    bzImage-vs-ELF split of #1145); a member with no format constraint leaves it unset.
+    """
 
     path: str
     required: bool
     note: str
-    format: FormatContract | None = None
+    formats_by_arch: Mapping[str, FormatContract] | None = None
 
     def to_json(self) -> dict[str, JsonValue]:
-        """Return a JSON-safe view; the nested ``format`` is present only when the member has it."""
+        """Return a JSON-safe view; ``formats_by_arch`` appears only when the member declares it."""
         data: dict[str, JsonValue] = {
             "path": self.path,
             "required": self.required,
             "note": self.note,
         }
-        if self.format is not None:
-            data["format"] = self.format.to_json()
+        if self.formats_by_arch is not None:
+            data["formats_by_arch"] = {
+                arch: fmt.to_json() for arch, fmt in self.formats_by_arch.items()
+            }
         return data
 
 
@@ -119,6 +128,34 @@ class ArtifactContract:
         return data
 
 
+# The per-arch boot/vmlinuz member format (#1145, ADR-0343): the single source both the validator
+# and the expected_uploads advertisement read, so they cannot drift. x86_64 is the bzImage HdrS
+# magic; ppc64le (powerpc has no bzImage) is an ELF64-LE kernel pinned to EM_PPC64 at e_machine so
+# a non-ppc64 ELF64-LE (x86_64/aarch64 vmlinux, same \x7fELF\x02\x01 prefix) cannot leak in.
+BOOT_MEMBER_FORMATS: Mapping[str, FormatContract] = {
+    "x86_64": FormatContract(
+        container="bzImage",
+        magic=(MagicPin(offset=_BZIMAGE_MAGIC_OFFSET, hex=_BZIMAGE_MAGIC.hex()),),
+    ),
+    "ppc64le": FormatContract(
+        container="ppc64le ELF (vmlinux)",
+        magic=(
+            MagicPin(offset=0, hex=_ELF64LE_PREFIX.hex()),
+            MagicPin(offset=0x12, hex=_EM_PPC64_LE16.hex()),
+        ),
+    ),
+}
+
+# The profile-parse gate (SUPPORTED_ARCHES) and this payload-format gate must agree on the arch
+# vocabulary; otherwise a create-accepted arch would finalize-reject after a full upload. This is a
+# loud import-time failure if a future arch is added to one table but not the other.
+if set(BOOT_MEMBER_FORMATS) != SUPPORTED_ARCHES:
+    raise RuntimeError(
+        "BOOT_MEMBER_FORMATS must cover exactly SUPPORTED_ARCHES; "
+        f"got {sorted(BOOT_MEMBER_FORMATS)} vs {sorted(SUPPORTED_ARCHES)}"
+    )
+
+
 # The provider-neutral external-build upload contract, keyed by artifact name (ADR-0234 §5). The
 # byte details (magic, layout member paths, the effective_config cap) are taken from this module's
 # own validator constants, so the advertised contract cannot drift from what the validator enforces.
@@ -127,9 +164,9 @@ EXTERNAL_BUILD_CONTRACTS: Mapping[str, ArtifactContract] = {
         name="kernel",
         requirement="required",
         summary=(
-            "Combined kernel+modules tar (gzip): boot/vmlinuz (the bzImage, NOT the vmlinux ELF) "
-            "plus lib/modules/<release>/. One artifact for both; there is no separate 'modules' "
-            "upload."
+            "Combined kernel+modules tar (gzip): boot/vmlinuz (the bzImage for x86_64, the ELF "
+            "vmlinux for ppc64le - the arch is declared in the build profile) plus "
+            "lib/modules/<release>/. One artifact for both; there is no separate 'modules' upload."
         ),
         format=FormatContract(
             container="gzip tar",
@@ -139,11 +176,12 @@ EXTERNAL_BUILD_CONTRACTS: Mapping[str, ArtifactContract] = {
             LayoutMember(
                 path=_KERNEL_BOOT_MEMBER,
                 required=True,
-                note="The bzImage (arch/x86/boot/bzImage), renamed to boot/vmlinuz in the tar.",
-                format=FormatContract(
-                    container="bzImage",
-                    magic=(MagicPin(offset=_BZIMAGE_MAGIC_OFFSET, hex=_BZIMAGE_MAGIC.hex()),),
+                note=(
+                    "The bootable kernel renamed to boot/vmlinuz: the bzImage "
+                    "(arch/x86/boot/bzImage) for x86_64, or the stripped ELF vmlinux for ppc64le "
+                    "(powerpc has no bzImage). The format is keyed by the build profile's arch."
                 ),
+                formats_by_arch=BOOT_MEMBER_FORMATS,
             ),
             LayoutMember(
                 path=_MODULES_MEMBER_PREFIX,
@@ -233,12 +271,19 @@ def validate_external_artifacts(
     manifest: Sequence[ManifestEntry],
     keys: Mapping[str, str],
     declared_build_id: str | None,
+    arch: str = "x86_64",
 ) -> ValidatedUpload:
     """Validate uploaded build artifacts; return the ``BuildOutput`` plus object heads.
 
     The kernel bytes and any uploaded ``vmlinux`` build-id are checked, but the uploaded
     ``effective_config`` is accepted verbatim and never inspected (no Kconfig validation).
+
+    ``arch`` (default ``x86_64``) selects the ``boot/vmlinuz`` payload format (ADR-0343): a
+    bzImage for ``x86_64``, an ``EM_PPC64`` ELF64-LE kernel for ``ppc64le``. An arch outside
+    :data:`BOOT_MEMBER_FORMATS` fails fast ``CONFIGURATION_ERROR`` (a defensive backstop; the
+    build-profile parse already gated it upstream).
     """
+    boot_format = _resolve_boot_format(arch)
     by_name = {e.name: e for e in manifest}
     if "kernel" not in by_name or "kernel" not in keys:
         raise CategorizedError(
@@ -254,7 +299,7 @@ def validate_external_artifacts(
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"name": name},
             )
-        heads[name] = _validate_one_artifact(store, name, entry, key)
+        heads[name] = _validate_one_artifact(store, name, entry, key, boot_format)
 
     build_id = ""
     if "vmlinux" in by_name:
@@ -304,8 +349,20 @@ def extract_build_id_ranged(store: ValidatorStore, key: str, *, max_size: int) -
         raise _build_failure("vmlinux ELF is structurally malformed") from exc
 
 
+def _resolve_boot_format(arch: str) -> FormatContract:
+    """Resolve the ``boot/vmlinuz`` format for ``arch``, failing fast on an unknown arch."""
+    boot_format = BOOT_MEMBER_FORMATS.get(arch)
+    if boot_format is None:
+        supported = ", ".join(sorted(BOOT_MEMBER_FORMATS))
+        raise CategorizedError(
+            f"unsupported build arch; expected one of {supported}",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    return boot_format
+
+
 def _validate_one_artifact(
-    store: ValidatorStore, name: str, entry: ManifestEntry, key: str
+    store: ValidatorStore, name: str, entry: ManifestEntry, key: str, boot_format: FormatContract
 ) -> HeadResult:
     head = store.head(key)
     if head is None:
@@ -322,38 +379,48 @@ def _validate_one_artifact(
         # whole-object SHA-256 is not comparable here; the per-chunk pins (verify_chunks)
         # already bound every byte. Only the total size is checked on the final object.
         raise _build_failure("reassembled artifact size disagrees with its manifest", name=name)
-    _check_artifact_content(store, name, key, head.size_bytes)
+    _check_artifact_content(store, name, key, head.size_bytes, boot_format)
     return head
 
 
-def _check_artifact_content(store: ValidatorStore, name: str, key: str, size_bytes: int) -> None:
+def _check_artifact_content(
+    store: ValidatorStore, name: str, key: str, size_bytes: int, boot_format: FormatContract
+) -> None:
     if name == "vmlinux":
         if store.get_range(key, start=0, length=4) != _ELF_MAGIC:
             raise _build_failure("vmlinux is not an ELF file", name=name)
     elif name == "kernel":
-        _check_kernel_combined_tar(store, key, name, size_bytes=size_bytes)
+        _check_kernel_combined_tar(store, key, name, size_bytes=size_bytes, boot_format=boot_format)
 
 
 def _check_kernel_combined_tar(
-    store: ValidatorStore, key: str, name: str, *, size_bytes: int
+    store: ValidatorStore, key: str, name: str, *, size_bytes: int, boot_format: FormatContract
 ) -> None:
     """Validate the external `kernel` upload is a combined kernel+modules tar (ADR-0234 §2).
 
-    The artifact must be a gzip stream whose tar holds ``boot/vmlinuz`` (itself a bzImage) and at
-    least one ``lib/modules/<ver>/`` member. The scan decompresses at most
+    The artifact must be a gzip stream whose tar holds ``boot/vmlinuz`` (matching ``boot_format``
+    for the declared arch — a bzImage for x86_64, an ELF kernel for ppc64le) and at least one
+    ``lib/modules/<ver>/`` member. The scan decompresses at most
     :data:`_KERNEL_TAR_SCAN_MAX_BYTES` so a gzip bomb cannot make this read unbounded; if both
     members are not seen within that bound the upload is rejected.
     """
     if store.get_range(key, start=0, length=2) != _GZIP_MAGIC:
         raise _build_failure("kernel artifact is not a gzip-compressed combined tar", name=name)
-    data = _decompress_bounded(
+    data, cap_reached = _decompress_bounded(
         store, key, total_size=size_bytes, max_out=_KERNEL_TAR_SCAN_MAX_BYTES
     )
-    _verify_combined_tar_shape(data, name)
+    _verify_combined_tar_shape(data, name, boot_format, cap_reached=cap_reached)
 
 
-def _decompress_bounded(store: ValidatorStore, key: str, *, total_size: int, max_out: int) -> bytes:
-    """Gunzip ``key`` via sequential ranged reads, stopping at ``max_out`` decompressed bytes."""
+def _decompress_bounded(
+    store: ValidatorStore, key: str, *, total_size: int, max_out: int
+) -> tuple[bytes, bool]:
+    """Gunzip ``key`` via sequential ranged reads, stopping at ``max_out`` decompressed bytes.
+
+    Returns the decompressed prefix and ``cap_reached`` (``True`` when the ``max_out`` bound cut
+    the stream short rather than reaching a clean gzip EOF), which lets the caller tell an
+    oversized boot member from a genuinely short tar.
+    """
     decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)  # 16 + MAX_WBITS selects gzip framing
     out = bytearray()
     offset = 0
@@ -366,10 +433,13 @@ def _decompress_bounded(store: ValidatorStore, key: str, *, total_size: int, max
         out += decompressor.decompress(chunk, max_out - len(out))
         if decompressor.eof:
             break
-    return bytes(out)
+    return bytes(out), len(out) >= max_out
 
 
-def _verify_combined_tar_shape(data: bytes, name: str) -> None:
+def _verify_combined_tar_shape(
+    data: bytes, name: str, boot_format: FormatContract, *, cap_reached: bool
+) -> None:
+    boot_seen = False
     boot_ok = False
     modules_ok = False
     try:
@@ -377,7 +447,8 @@ def _verify_combined_tar_shape(data: bytes, name: str) -> None:
             for member in archive:
                 path = _normalized_member_name(member.name)
                 if path == _KERNEL_BOOT_MEMBER and member.isfile():
-                    boot_ok = _member_is_bzimage(archive, member)
+                    boot_seen = True
+                    boot_ok = _member_matches_format(archive, member, boot_format)
                 elif path.startswith(_MODULES_MEMBER_PREFIX):
                     modules_ok = True
                 if boot_ok and modules_ok:
@@ -389,19 +460,42 @@ def _verify_combined_tar_shape(data: bytes, name: str) -> None:
         if not (boot_ok or modules_ok):
             raise _build_failure("kernel artifact is not a readable tar", name=name) from exc
     if not boot_ok:
-        raise _build_failure("kernel combined tar has no boot/vmlinuz bzImage member", name=name)
+        # Distinguish "member absent" from "member present but wrong arch" — the latter is the
+        # #1145 arch cross-check (a plausible operator mistake: right file, wrong build arch), and
+        # a "has no ... member" message would misdirect them to look for a missing file.
+        if boot_seen:
+            raise _build_failure(
+                f"kernel combined tar boot/vmlinuz is present but is not a "
+                f"{boot_format.container} member for the declared arch",
+                name=name,
+            )
+        raise _build_failure(
+            f"kernel combined tar has no boot/vmlinuz {boot_format.container} member", name=name
+        )
     if not modules_ok:
+        if cap_reached:
+            raise _build_failure(
+                "kernel combined tar boot/vmlinuz exceeds the scan bound before any lib/modules "
+                "member; strip the boot image or list lib/modules earlier",
+                name=name,
+            )
         raise _build_failure(
             "kernel combined tar has no lib/modules member within the scan bound", name=name
         )
 
 
-def _member_is_bzimage(archive: tarfile.TarFile, member: tarfile.TarInfo) -> bool:
+def _member_matches_format(
+    archive: tarfile.TarFile, member: tarfile.TarInfo, boot_format: FormatContract
+) -> bool:
+    """Whether ``member``'s bytes satisfy every magic pin of ``boot_format`` (all required)."""
     extracted = archive.extractfile(member)
     if extracted is None:
         return False
-    head = extracted.read(_BZIMAGE_MAGIC_OFFSET + 4)
-    return head[_BZIMAGE_MAGIC_OFFSET : _BZIMAGE_MAGIC_OFFSET + 4] == _BZIMAGE_MAGIC
+    pins = [(pin.offset, bytes.fromhex(pin.hex)) for pin in boot_format.magic]
+    if not pins:
+        return False
+    head = extracted.read(max(offset + len(want) for offset, want in pins))
+    return all(head[offset : offset + len(want)] == want for offset, want in pins)
 
 
 def _normalized_member_name(name: str) -> str:

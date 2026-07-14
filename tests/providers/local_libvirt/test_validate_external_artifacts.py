@@ -18,6 +18,18 @@ from kdive.build_artifacts.validation import (
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 _BZIMAGE_BODY = b"\x00" * 0x202 + b"HdrS" + b"\x00" * 16  # bzImage magic at offset 0x202
+_EM_PPC64 = 21
+_EM_X86_64 = 62
+
+
+def _boot_elf(*, e_machine: int = _EM_PPC64, pad: int = 0) -> bytes:
+    """A minimal ELF64-LE boot member with the given ``e_machine`` at offset 0x12."""
+    body = bytearray(0x40)
+    body[0:4] = b"\x7fELF"
+    body[4] = 2  # ELFCLASS64
+    body[5] = 1  # ELFDATA2LSB
+    struct.pack_into("<H", body, 0x12, e_machine)  # e_machine
+    return bytes(body) + b"\x00" * pad
 
 
 def _tar_add(tar: tarfile.TarFile, name: str, data: bytes) -> None:
@@ -137,7 +149,7 @@ def test_checksum_mismatch_is_build_failure() -> None:
     assert e.value.category is ErrorCategory.BUILD_FAILURE
 
 
-def _validate_kernel_blob(blob: bytes) -> None:
+def _validate_kernel_blob(blob: bytes, *, arch: str = "x86_64") -> None:
     """Wire a `kernel` blob through validate_external_artifacts to reach the content check."""
     store = _FakeStore({"k": blob}, {"k": HeadResult(len(blob), "csum", "e")})
     validate_external_artifacts(
@@ -145,6 +157,7 @@ def _validate_kernel_blob(blob: bytes) -> None:
         manifest=[ManifestEntry("kernel", "csum", len(blob))],
         keys={"kernel": "k"},
         declared_build_id=None,
+        arch=arch,
     )
 
 
@@ -169,14 +182,16 @@ def test_kernel_tar_missing_boot_vmlinuz_is_build_failure() -> None:
     with pytest.raises(CategorizedError) as e:
         _validate_kernel_blob(_combined_kernel_tar(boot=None))
     assert e.value.category is ErrorCategory.BUILD_FAILURE
-    assert "boot/vmlinuz" in str(e.value)
+    # Absent member: "has no ... member" (present-but-wrong uses a distinct message).
+    assert "has no boot/vmlinuz" in str(e.value)
 
 
 def test_kernel_tar_boot_not_bzimage_is_build_failure() -> None:
     with pytest.raises(CategorizedError) as e:
         _validate_kernel_blob(_combined_kernel_tar(boot=b"\x00" * 0x300))
     assert e.value.category is ErrorCategory.BUILD_FAILURE
-    assert "boot/vmlinuz" in str(e.value)
+    # Member present but wrong format: names it as present, not missing.
+    assert "boot/vmlinuz is present but is not" in str(e.value)
 
 
 def test_kernel_tar_missing_lib_modules_is_build_failure() -> None:
@@ -466,6 +481,112 @@ def test_oversized_section_size_is_build_failure() -> None:
         with pytest.raises(CategorizedError) as e:
             _validate_vmlinux_blob(blob)
         assert e.value.category is ErrorCategory.BUILD_FAILURE
+
+
+# --- Arch-keyed boot-member payload (#1145, ADR-0343) -----------------------------------
+
+
+def test_boot_member_formats_covers_supported_arches() -> None:
+    # The profile-parse gate (SUPPORTED_ARCHES) and the payload-format gate
+    # (BOOT_MEMBER_FORMATS) must agree, or a create-accepted arch could finalize-reject.
+    from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
+
+    assert set(validation.BOOT_MEMBER_FORMATS) == SUPPORTED_ARCHES
+
+
+def test_ppc64le_elf_boot_member_validates() -> None:
+    # A combined tar whose boot/vmlinuz is a ppc64le ELF64-LE kernel validates under ppc64le.
+    _validate_kernel_blob(_combined_kernel_tar(boot=_boot_elf()), arch="ppc64le")
+
+
+def test_x86_bzimage_under_ppc64le_is_build_failure() -> None:
+    with pytest.raises(CategorizedError) as e:
+        _validate_kernel_blob(_combined_kernel_tar(boot=_BZIMAGE_BODY), arch="ppc64le")
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+    assert "ppc64le" in str(e.value)
+
+
+def test_elf_boot_member_under_x86_64_is_build_failure() -> None:
+    with pytest.raises(CategorizedError) as e:
+        _validate_kernel_blob(_combined_kernel_tar(boot=_boot_elf()), arch="x86_64")
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+    assert "bzImage" in str(e.value)
+
+
+def test_non_ppc64_elf_under_ppc64le_is_build_failure() -> None:
+    # The e_machine pin: an x86_64 ELF64-LE begins with the same \x7fELF\x02\x01 prefix but
+    # carries EM_X86_64 (62), not EM_PPC64 (21). The prefix alone would leak it in; the
+    # e_machine check rejects it.
+    with pytest.raises(CategorizedError) as e:
+        _validate_kernel_blob(
+            _combined_kernel_tar(boot=_boot_elf(e_machine=_EM_X86_64)), arch="ppc64le"
+        )
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+    assert "ppc64le" in str(e.value)
+
+
+def test_unknown_arch_to_validator_is_configuration_error() -> None:
+    # Defensive fail-fast: the validator does not trust its caller (the profile-parse gate
+    # already rejected an unknown arch upstream).
+    with pytest.raises(CategorizedError) as e:
+        _validate_kernel_blob(_KERNEL_TAR, arch="s390x")
+    assert e.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_small_boot_only_tar_reports_plain_missing_modules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A valid boot member with no lib/modules, well under the scan cap, keeps the plain message.
+    import kdive.build_artifacts.validation as validation_module
+
+    monkeypatch.setattr(validation_module, "_KERNEL_TAR_SCAN_MAX_BYTES", 1 * 1024 * 1024)
+    with pytest.raises(CategorizedError) as e:
+        _validate_kernel_blob(
+            _combined_kernel_tar(boot=_boot_elf(), with_modules=False), arch="ppc64le"
+        )
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+    assert "no lib/modules member within the scan bound" in str(e.value)
+    assert "exceeds the scan bound" not in str(e.value)
+
+
+def test_oversized_boot_member_reports_cap_reached_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Boot member fully readable (boot_ok) but the scan cap lands at the lib/modules header, so
+    # modules is never seen: the message names the oversized-boot-member cause, not a bare
+    # "no lib/modules". The boot member occupies 512 (tar header) + 2048 (content) = 2560 bytes,
+    # so a 2560-byte cap reaches exactly its end and stops before the lib/modules header.
+    import kdive.build_artifacts.validation as validation_module
+
+    monkeypatch.setattr(validation_module, "_KERNEL_TAR_SCAN_MAX_BYTES", 2560)
+    blob = _combined_kernel_tar(boot=_boot_elf(pad=2048 - 0x40), with_modules=True)
+    with pytest.raises(CategorizedError) as e:
+        _validate_kernel_blob(blob, arch="ppc64le")
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+    assert "exceeds the scan bound" in str(e.value)
+
+
+def test_ppc64le_vmlinux_build_id_pairs() -> None:
+    # The optional vmlinux build-id path is ELF64-LE and already fits ppc64le: a ppc64le-flavored
+    # debug ELF (EM_PPC64) with a GNU build-id note resolves and pairs.
+    blob = bytearray(_elf_with_build_id(bytes.fromhex("deadbeef")))
+    struct.pack_into("<H", blob, 0x12, _EM_PPC64)  # mark it ppc64le
+    kernel = _combined_kernel_tar(boot=_boot_elf())
+    store = _FakeStore(
+        {"k": kernel, "v": bytes(blob)},
+        {"k": HeadResult(len(kernel), "ck", "e"), "v": HeadResult(len(blob), "cv", "e")},
+    )
+    out = validate_external_artifacts(
+        store,
+        manifest=[
+            ManifestEntry("kernel", "ck", len(kernel)),
+            ManifestEntry("vmlinux", "cv", len(blob)),
+        ],
+        keys={"kernel": "k", "vmlinux": "v"},
+        declared_build_id="deadbeef",
+        arch="ppc64le",
+    )
+    assert out.output.debuginfo_ref == "v" and out.output.build_id == "deadbeef"
 
 
 # --- Chunked artifacts (ADR-0104 §4) ----------------------------------------------------

@@ -73,7 +73,14 @@ def test_run_item_states_the_unified_provider_neutral_contract() -> None:
     member_paths = {member["path"] for member in kernel["layout"]}
     assert member_paths == {"boot/vmlinuz", "lib/modules/"}
     boot = next(m for m in kernel["layout"] if m["path"] == "boot/vmlinuz")
-    assert boot["format"]["magic"] == [{"offset": 0x202, "hex": "48647253"}]  # "HdrS"
+    # The boot member advertises the per-arch payload format, not a single `format` (#1145).
+    assert "format" not in boot
+    assert set(boot["formats_by_arch"]) == {"x86_64", "ppc64le"}
+    assert boot["formats_by_arch"]["x86_64"]["magic"] == [{"offset": 0x202, "hex": "48647253"}]
+    assert boot["formats_by_arch"]["ppc64le"]["magic"] == [
+        {"offset": 0, "hex": "7f454c460201"},  # \x7fELF\x02\x01  # pragma: allowlist secret
+        {"offset": 18, "hex": "1500"},  # e_machine == EM_PPC64 (21), LE16
+    ]
 
     assert run["contracts"]["vmlinux"]["requirement"] == "optional"
     assert run["contracts"]["initrd"]["requirement"] == "optional"

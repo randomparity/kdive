@@ -129,16 +129,20 @@ async def seed_run(conn_pool: AsyncConnectionPool, build_profile: dict[str, Any]
     return run.id
 
 
-async def seed_external_run(conn_pool: AsyncConnectionPool) -> UUID:
+async def seed_external_run(
+    conn_pool: AsyncConnectionPool, build_profile: dict[str, Any] | None = None
+) -> UUID:
     """A CREATED external Run with no upload manifest."""
-    return await seed_run(conn_pool, {"schema_version": 1})
+    return await seed_run(conn_pool, build_profile or {"schema_version": 1})
 
 
 async def seed_external_run_with_manifest(
-    conn_pool: AsyncConnectionPool, entries: list[ManifestEntry] | None = None
+    conn_pool: AsyncConnectionPool,
+    entries: list[ManifestEntry] | None = None,
+    build_profile: dict[str, Any] | None = None,
 ) -> UUID:
     """A CREATED external Run plus a persisted upload manifest."""
-    run_id = await seed_external_run(conn_pool)
+    run_id = await seed_external_run(conn_pool, build_profile)
     async with conn_pool.connection() as conn:
         await upload_manifest.replace_manifest(
             conn,
@@ -157,15 +161,19 @@ class FakeValidator:
     def __init__(self, output: BuildOutput | Exception) -> None:
         self._output = output
         self.calls = 0
+        self.last_arch: str | None = None
 
     def __call__(
         self,
         manifest,
         keys,
         declared_build_id,
+        *,
+        arch: str = "x86_64",
     ) -> ValidatedUpload:
         _ = (manifest, declared_build_id)
         self.calls += 1
+        self.last_arch = arch
         if isinstance(self._output, Exception):
             raise self._output
         heads = {name: HeadResult(size_bytes=1, checksum_sha256="c", etag="e") for name in keys}

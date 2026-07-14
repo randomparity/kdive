@@ -50,8 +50,10 @@ class _RunsCreatePayload(ToolPayload):
     investigation_id: str = Field(description="Investigation to attach the Run to.")
     build_profile: BuildProfile = Field(
         description=(
-            "Build profile for the Run's kernel: a thin document, currently just "
-            "{'schema_version': 1}. The kernel is built locally and uploaded, so no source tree "
+            "Build profile for the Run's kernel: a thin document, e.g. {'schema_version': 1} or "
+            "{'schema_version': 1, 'arch': 'ppc64le'}. 'arch' (default x86_64) is the target CPU "
+            "architecture and selects the boot/vmlinuz upload payload format (bzImage for x86_64, "
+            "ELF vmlinux for ppc64le). The kernel is built locally and uploaded, so no source tree "
             "or config is named here. After runs.create, call artifacts.expected_uploads to learn "
             "the exact bytes to produce and artifacts.feature_config_requirements to learn which "
             "CONFIG_* each debug feature needs, artifacts.create_run_upload to upload, then "
@@ -381,7 +383,13 @@ def _register_runs_complete_build(
             Field(description="Optional build finalization fields: cmdline, build_id, and source."),
         ] = None,
     ) -> ToolResponse:
-        """Complete an externally built run."""
+        """Finalize an externally built Run: validate the uploaded artifacts, mark it succeeded.
+
+        The `kernel` tar's boot/vmlinuz member is validated against the Run's build-profile arch
+        (declared at runs.create): a bzImage for x86_64, an ELF vmlinux for ppc64le. A payload that
+        does not match the declared arch is rejected. See artifacts.expected_uploads for the
+        per-arch byte contract.
+        """
         payload = request or _RunsCompleteBuildPayload()
         ctx = current_context()
         return await with_runtime_for_run_target_kind(

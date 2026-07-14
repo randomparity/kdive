@@ -60,12 +60,23 @@ There is **one required artifact, named `kernel`**: a single gzip-compressed tar
 boot image and the matching module tree. There is no separate `modules` artifact — the module
 tree rides inside the `kernel` tar.
 
-The tar must contain:
+The `boot/vmlinuz` payload format is keyed by the **target architecture** you declare in the
+build profile (`arch`, default `x86_64`) at `runs.create`:
+
+| `arch` | `boot/vmlinuz` is | Rule |
+|---|---|---|
+| `x86_64` | the **bzImage** (`arch/x86/boot/bzImage`), renamed | must carry the bzImage `HdrS` magic at offset `0x202` — the `vmlinux` ELF is **not** accepted here |
+| `ppc64le` | the **stripped ELF kernel** (powerpc has no bzImage — this is what Fedora/RHEL install as `/boot/vmlinuz-<ver>`) | must be a 64-bit little-endian ELF whose `e_machine` is `EM_PPC64`; the unstripped DWARF `vmlinux` belongs in the optional `vmlinux` artifact, not here |
+
+The tar must also contain:
 
 | Member | What it is | Rule |
 |---|---|---|
-| `boot/vmlinuz` | the **bzImage** (`arch/x86/boot/bzImage`), renamed | must carry the bzImage `HdrS` magic at offset `0x202` — the `vmlinux` ELF is **not** accepted here |
 | `lib/modules/<release>/…` | the `make modules_install` tree for that kernel | at least one `lib/modules/` member must be present |
+
+The declared `arch` and the payload must agree: an x86 bzImage under `arch: ppc64le`, or an ELF
+(or non-ppc64 ELF) under `arch: x86_64`, is rejected. Learn the exact per-arch magic bytes from
+`artifacts.expected_uploads` (`contracts.kernel.layout[boot/vmlinuz].formats_by_arch`).
 
 Two further rules come from how the artifact is validated and consumed:
 
@@ -80,7 +91,7 @@ Two further rules come from how the artifact is validated and consumed:
   symlinks under `lib/modules/<release>/` that point at absolute paths in your build tree.
   Exclude them; left in, they become dangling links inside the guest.
 
-### The recipe
+### The recipe (x86_64)
 
 This is the exact `tar` invocation the platform's own build planes use. Run it from a built
 kernel tree, with `MODROOT` pointing at the staging root you passed to
@@ -100,6 +111,28 @@ tar -czf kernel.tar.gz \
 `--transform` renames the bzImage to `boot/vmlinuz` in the archive; the two `--exclude`s drop
 the back-reference symlinks; listing `arch/x86/boot/bzImage` before `lib/modules` keeps the
 boot image first.
+
+### The recipe (ppc64le)
+
+powerpc has no bzImage — the boot member is the **stripped** ELF kernel. Strip the build-tree
+`vmlinux` first (the unstripped one carries full DWARF and is hundreds of MB, which pushes
+`lib/modules` past the validator's decompress scan bound), then tar the stripped copy:
+
+```bash
+KBUILD=.                 # the built kernel tree (contains the top-level vmlinux)
+MODROOT=/tmp/modstage    # INSTALL_MOD_PATH from `make modules_install`
+
+"${CROSS_COMPILE}strip" -s "$KBUILD/vmlinux" -o /tmp/vmlinuz   # stripped, bootable, tens of MB
+
+tar -czf kernel.tar.gz \
+  --exclude='*/build' --exclude='*/source' \
+  --transform='s|^vmlinuz$|boot/vmlinuz|' \
+  -C /tmp        vmlinuz \
+  -C "$MODROOT"  lib/modules
+```
+
+Declare `arch: ppc64le` in the build profile at `runs.create`. The unstripped DWARF `vmlinux`
+goes in the optional `vmlinux` artifact (below), not the boot member.
 
 ## Optional artifacts
 

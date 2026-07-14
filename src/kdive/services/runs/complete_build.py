@@ -57,10 +57,19 @@ class ExternalBuildStore(Protocol):
     def abort_multipart_upload(self, key: str, upload_id: str) -> None: ...
 
 
-type CompleteBuildValidation = Callable[
-    [Sequence[ManifestEntry], Mapping[str, str], str | None],
-    ValidatedUpload,
-]
+class CompleteBuildValidation(Protocol):
+    """The upload-validation seam: validate a manifest for a given target ``arch`` (ADR-0343)."""
+
+    def __call__(
+        self,
+        manifest: Sequence[ManifestEntry],
+        keys: Mapping[str, str],
+        declared_build_id: str | None,
+        *,
+        arch: str = "x86_64",
+    ) -> ValidatedUpload: ...
+
+
 type ObjectStoreFactory = Callable[[], ExternalBuildStore]
 
 
@@ -104,7 +113,7 @@ class CompleteBuildFinalizer:
         try:
             prepared = await self._prepare(conn, run)
             validated = await self._validate_uploads(
-                conn, run.id, str(run.id), prepared, build_id=build_id
+                conn, run.id, str(run.id), prepared, build_id=build_id, arch=_build_arch(run)
             )
             return await _finalize_external_build(
                 conn, ctx, validated, cmdline=cmdline, source_provenance=source_provenance
@@ -141,6 +150,7 @@ class CompleteBuildFinalizer:
         prepared: _ExternalBuildCompletion,
         *,
         build_id: str | None,
+        arch: str,
     ) -> _ExternalBuildFinalization:
         if prepared.store is not None:
             await _reassemble_chunked_artifacts(
@@ -153,6 +163,7 @@ class CompleteBuildFinalizer:
                 list(prepared.manifest_row.entries),
                 prepared.keys,
                 build_id,
+                arch,
             )
         except CategorizedError as exc:
             raise CompleteBuildValidationError(exc) from exc
@@ -173,14 +184,16 @@ class CompleteBuildFinalizer:
         manifest: Sequence[ManifestEntry],
         keys: Mapping[str, str],
         declared_build_id: str | None,
+        arch: str,
     ) -> ValidatedUpload:
         if self.validate_complete_build is not None:
-            return self.validate_complete_build(manifest, keys, declared_build_id)
+            return self.validate_complete_build(manifest, keys, declared_build_id, arch=arch)
         return validate_external_artifacts(
             self.object_store_factory(),
             manifest=manifest,
             keys=keys,
             declared_build_id=declared_build_id,
+            arch=arch,
         )
 
 
@@ -247,6 +260,23 @@ async def _reassemble_artifacts(
 def _require_created_run(run: Run) -> None:
     if run.state is not RunState.CREATED:
         raise CompleteBuildConfigurationError({"current_status": run.state.value})
+
+
+def _build_arch(run: Run) -> str:
+    """The target arch for payload validation, read straight from the persisted build profile.
+
+    The build profile was arch-validated at ``runs.create`` (ADR-0343); reading the field here
+    (defaulting to ``x86_64`` when absent) — rather than re-parsing the whole profile — keeps a
+    Run finalizable even if the arch vocabulary shifts after create, and the validator's own
+    fail-fast is the backstop for an unrecognized value. A present-but-non-string arch is a
+    corrupt profile (unreachable via ``runs.create``): fail loudly rather than mask it as x86_64.
+    """
+    arch = run.build_profile.get("arch")
+    if arch is None:
+        return "x86_64"
+    if not isinstance(arch, str):
+        raise CompleteBuildConfigurationError({"reason": "invalid_build_profile_arch"})
+    return arch
 
 
 async def _finalize_external_build(
