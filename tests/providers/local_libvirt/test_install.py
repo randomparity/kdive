@@ -72,16 +72,6 @@ def _tar_add(tar: tarfile.TarFile, name: str, data: bytes) -> None:
     tar.addfile(info, io.BytesIO(data))
 
 
-def _first_modules_version(modules_tar: Path) -> str | None:
-    """The <ver> of the first ``lib/modules/<ver>/`` member — what the injector's depmod keys on."""
-    with tarfile.open(modules_tar, "r:gz") as archive:
-        for name in archive.getnames():
-            normalized = name.strip("/")
-            if normalized.startswith("lib/modules/"):
-                return normalized[len("lib/modules/") :].split("/", 1)[0]
-    return None
-
-
 def _combined_kernel_tar_bytes(
     *,
     with_modules: bool = True,
@@ -178,7 +168,8 @@ class _FakeKernelWriter:
         self.modules_tar = modules_tar
         self.modules_tar_existed = modules_tar.exists()  # captured before install reclaims it
         if self.modules_tar_existed:
-            self.modules_version = _first_modules_version(modules_tar)
+            # Reuse the production parser the real writer keys depmod off, so the fake cannot drift.
+            self.modules_version = _RealGuestKernelWriter._read_release(modules_tar, "overlay")
         self.vmlinux = vmlinux
         if self.fail:
             raise CategorizedError(
