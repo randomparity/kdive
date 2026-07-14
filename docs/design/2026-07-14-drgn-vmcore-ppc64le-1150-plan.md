@@ -34,11 +34,13 @@ the core's ELF header + DWARF, and the only arch-observable value in the contrac
 
 ## Tasks
 
-### Task 1 — Confirm production code needs no change (audit gate; TDD anchor)
+### Task 1 — One-time pre-work audit: confirm production code needs no change
 
-**What:** Assert-by-search that the offline path carries no `x86_64` literal that would make a
-ppc64le core misbehave. This is the ADR-0348 audit made executable; it produces no code change
-but pins the "no production change" decision.
+**What:** A one-time (not durable) manual audit confirming the offline path carries no `x86_64`
+literal that would make a ppc64le core misbehave — the ADR-0348 audit re-run before coding. It
+produces no code and **is not the durable guard**: the arch-parameterized tests in Tasks 2–4
+are what re-run in CI and pin the arch-neutrality. This task only validates the "no production
+change" premise before the test tasks lean on it.
 
 **Where:** `src/kdive/providers/shared/debug_common/drgn_program.py`,
 `src/kdive/providers/shared/debug_common/core_file.py`,
@@ -82,16 +84,22 @@ green; the ppc64le params exercise `machine == "ppc64le"`; the x86_64 assertions
 
 **Where:** `tests/providers/debug_common/test_drgn_program.py`.
 
-**What & how:** The module-level `_FakeProgram.uts()` hardcodes `machine="x86_64"`, and
-`_ProgramFromLists` already accepts a `uts` dict. Add a parameterized test over
-`("x86_64", "ppc64le")` that drives `run_introspection_helper(prog, "sysinfo")` (or
-`helper_sysinfo`) with a `_ProgramFromLists(uts={..., "machine": arch})` and asserts
-`out["machine"] == arch` and the fixed dispatch (`tasks`/`modules`) is unaffected. Keep the
-existing `test_helper_sysinfo_maps_uts_and_counters` x86_64 assertion intact (or fold it into
-the x86_64 param, byte-identical).
+**What & how:** This file's real fixture is the module-level `_FakeProgram` (line 36) whose
+`uts()` (line 43) is a **no-arg** method returning a hardcoded `{... "machine": "x86_64" ...}`
+dict — it has no `__init__`. (Note: `_ProgramFromLists`, `helper_sysinfo`, and
+`test_helper_sysinfo_maps_uts_and_counters` do **not** live here — they are in the *remote*
+file and belong to Task 4; do not reference them here.) So:
+- Give `_FakeProgram` an `__init__(self, arch: str = "x86_64")` that stores the arch and have
+  `uts()` return `"machine": self._arch` (default `"x86_64"` keeps the existing no-arg callers
+  byte-identical — the `run_introspection_helper` dispatch test constructs `_FakeProgram()`).
+- Parameterize the sysinfo path over `("x86_64", "ppc64le")` — either extend
+  `test_run_introspection_helper_dispatches_fixed_names` (line 56) or add a focused test — that
+  builds `_FakeProgram(arch=arch)` and asserts
+  `run_introspection_helper(prog, "sysinfo")["machine"] == arch`, and that the `tasks`/`modules`
+  dispatch is unaffected. Keep an x86_64 case byte-identical to the current assertions.
 
 **Acceptance:** `uv run python -m pytest tests/providers/debug_common/test_drgn_program.py -q`
-green; ppc64le sysinfo round-trips `machine`.
+green; ppc64le sysinfo round-trips `machine`; existing no-arg `_FakeProgram()` callers unchanged.
 
 ### Task 4 — Arch-parameterize the remote-libvirt offline mirror
 
@@ -105,19 +113,29 @@ via `helper_sysinfo`, asserting `machine == arch` and the same contract shape. (
 **Acceptance:** `uv run python -m pytest tests/providers/remote_libvirt/debug/test_introspect.py -q`
 green; ppc64le offline sysinfo mirrors x86_64.
 
-### Task 5 — Catalog `drgn_version` row-hygiene assertion for the ppc64le row
+### Task 5 — Catalog `drgn_version` meaningfulness for the ppc64le row (reconcile with baseline)
 
 **Where:** `tests/images/test_rootfs_catalog.py`.
 
-**What & how:** Add a test that loads the catalog, takes the `fedora-kdive-ready-44-ppc64le`
-row, and asserts its `drgn_version` **parses via `DrgnVersion.parse`**
-(`kdive.images.drgn_support`) into a real version that **clears `BTF_CAPABLE_DRGN` (0.0.31)** —
-catching a placeholder/empty/malformed value. Frame it in a comment as *catalog-row hygiene of
-the guest-baked drgn*, explicitly **not** offline-path proof, and **not** a cross-arch equality
-pin (Fedora secondary-arch may diverge). Leave the existing snapshot test
-(`test_catalog_drgn_versions_match_snapshot`) unchanged.
+**Baseline (acknowledged — do not re-assert):** two existing tests already cover the AC's
+"drgn_version stays meaningful for ppc64le rows" via `_EXPECTED_DRGN` (which includes
+`fedora-kdive-ready-44-ppc64le`): `test_catalog_drgn_versions_match_snapshot` (line 125) pins the
+exact `0.0.33`, and `test_only_below_threshold_rows_are_live_drgn_incapable` (line 131) computes
+`live_drgn_capability` for each row — which internally `DrgnVersion.parse`s and floors against
+`BTF_CAPABLE_DRGN`, mapping empty/unparseable to `unverified`. So a placeholder/malformed ppc64le
+value is **already** caught; a standalone parse/floor test would be redundant.
 
-**Acceptance:** `uv run python -m pytest tests/images/test_rootfs_catalog.py -q` green.
+**What & how:** Add **one focused, ppc64le-named** assertion the generic loop does not make
+explicit: a test `test_ppc64le_row_drgn_version_is_capability_meaningful` that takes the
+`fedora-kdive-ready-44-ppc64le` row and asserts `live_drgn_capability(drgn_version=row.drgn_version,
+drgn_tooling=True)` computes a **`capable`** verdict (non-empty, parseable, ≥ floor) — the AC's
+"meaningful for ppc64le rows" restated as a single greppable, arch-named check. A comment notes
+the deliberate overlap with the generic loop and that this is the ppc64le-explicit restatement,
+not new machinery. Do **not** re-implement `DrgnVersion.parse`/floor logic. Leave the two
+existing tests unchanged.
+
+**Acceptance:** `uv run python -m pytest tests/images/test_rootfs_catalog.py -q` green; the new
+test names the ppc64le row explicitly.
 
 ### Task 6 — `live_vm`-gated real-bytes ppc64le open test (durable guard)
 
@@ -140,7 +158,10 @@ existing `live_vm` provider module).
   `drgn.PlatformFlags.IS_LITTLE_ENDIAN in prog.platform.flags`.
 - Read VMCOREINFO and assert its `BUILD-ID=` line reads via
   `read_vmcoreinfo_build_id(bytes(prog["VMCOREINFO"].value_()))` (reuse the production helper);
-  assert it equals `06466f9617cff9e5a762af9216bfc23837310b9c`.
+  assert it equals `06466f9617cff9e5a762af9216bfc23837310b9c`. **Call form confirmed on-host**
+  (2026-07-14): that exact expression returns `06466f96…` against the retained core — the
+  `prog["VMCOREINFO"].value_()` object coerces to the `bytes` the helper's `BUILD-ID=` matcher
+  expects.
 
 **Why:** The only check that exercises drgn's *real* ppc64le decoding; the durable regression
 guard the fakes cannot be. Fail-loud/skip-only-when-unset per spec AC1a.
