@@ -184,8 +184,12 @@ Flagged, not asserted; each is retired inside the named sub-issue:
 - pseries fw_cfg/VMCOREINFO device behavior (issue 9).
 - QEMU version floor for pseries fadump, and whether fadump works under TCG at all
   (issue 12).
-- SLOF direct-kernel boot of the uploaded ELF payload as packaged by the contract
-  (issue 7).
+- ~~SLOF direct-kernel boot of the uploaded ELF payload as packaged by the contract
+  (issue 7).~~ **Retired in #1146** — a documented `live_stack` TCG boot on the x86_64 host
+  installs and direct-kernel-boots an *uploaded* ppc64le kernel bundle (packaged per the ADR-0343
+  contract) on pseries; the install/boot path is confirmed arch-opaque and the pseries
+  initrd-addressing behavior is recorded. See ADR-0344 and
+  `2026-07-13-ppc64le-boot-bundle-proof-record-1146.md`.
 - ~~`pin_nic_slot=False` and other pseries runtime defaults from PR #1070 that have never
   seen a live boot (issue 5).~~ **Retired in #1144** — a live TCG boot on the x86_64 host
   proved `pin_nic_slot=False`, `console_device="hvc0"`, `machine="pseries"`, and the
