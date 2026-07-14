@@ -251,7 +251,9 @@ def test_ppc64le_provision_profile_disk_gb_equals_allocation_request(
     and its ``arch`` is ``ppc64le`` (the field that routes provisioning through the pseries traits).
     """
     monkeypatch.setenv(_KERNEL_TREE_ENV, "/nonexistent/kernel-src")
-    profile = _ppc64le_reachability_provision_profile("/nonexistent/fedora-ppc64le.qcow2")
+    profile = _reachability_provision_profile(
+        "/nonexistent/fedora-ppc64le.qcow2", arch="ppc64le", crashkernel="512M"
+    )
     assert profile["arch"] == "ppc64le"
     assert profile["disk_gb"] == LOCAL_ALLOCATION_DISK_GB
 
@@ -683,16 +685,23 @@ def _reachability_preflight(family: str) -> tuple[OidcIssuer, str, str, str]:
     return issuer, base_url, db_url, image
 
 
-def _reachability_provision_profile(image: str) -> dict[str, object]:
+def _reachability_provision_profile(
+    image: str, *, arch: str = "x86_64", crashkernel: str = "256M"
+) -> dict[str, object]:
     """A minimal direct-kernel profile for the reachability proof.
 
     The loopback SSH forward + virtio NIC render on *every* local-libvirt provision (ADR-0281), so
     the profile carries no credential field — drgn-live authenticates with the per-System bootstrap
     key (ADR-0289/0315). No ``force_crash`` (no destructive op needed).
+
+    ``arch`` selects the guest arch (``ppc64le`` for the #1144 TCG boot proof; admission then
+    persists ``accel=tcg`` and the provisioner renders a pseries/qemu domain). ``kernel_source_ref``
+    is a required-but-unread ``direct-kernel`` token — provision boots the rootfs's *own* baseline
+    kernel (ADR-0272), so the x86_64 kernel tree is a valid arch-opaque value for a ppc64le guest.
     """
     return {
         "schema_version": 1,
-        "arch": "x86_64",
+        "arch": arch,
         "vcpu": 2,
         "memory_mb": 2048,
         "disk_gb": LOCAL_ALLOCATION_DISK_GB,
@@ -701,7 +710,7 @@ def _reachability_provision_profile(image: str) -> dict[str, object]:
         "provider": {
             "local-libvirt": {
                 "rootfs": {"kind": "local", "path": image},
-                "crashkernel": "256M",
+                "crashkernel": crashkernel,
             }
         },
     }
@@ -821,33 +830,6 @@ def _ppc64le_reachability_preflight() -> tuple[OidcIssuer, str, str, str]:
     return issuer, base_url, db_url, image
 
 
-def _ppc64le_reachability_provision_profile(image: str) -> dict[str, object]:
-    """A direct-kernel ppc64le profile for the TCG boot proof.
-
-    Mirrors ``_reachability_provision_profile`` but ``arch = "ppc64le"``, so admission persists
-    ``accel = "tcg"`` (ADR-0339), the provisioner renders a pseries/qemu/emulator domain
-    (ADR-0340), and the boot handler applies the TCG-scaled deadline (ADR-0341).
-    ``kernel_source_ref`` is a required-but-unread ``direct-kernel`` token (provision boots its own
-    ppc64le kernel, ADR-0272; the ref feeds the build/install lane), so the x86_64 kernel tree is a
-    valid arch-opaque value here — the booted kernel is genuinely ppc64le.
-    """
-    return {
-        "schema_version": 1,
-        "arch": "ppc64le",
-        "vcpu": 2,
-        "memory_mb": 2048,
-        "disk_gb": LOCAL_ALLOCATION_DISK_GB,
-        "boot_method": "direct-kernel",
-        "kernel_source_ref": os.environ[_KERNEL_TREE_ENV],
-        "provider": {
-            "local-libvirt": {
-                "rootfs": {"kind": "local", "path": image},
-                "crashkernel": "512M",
-            }
-        },
-    }
-
-
 @pytest.mark.live_stack
 def test_ppc64le_guest_is_ssh_reachable_over_the_wire() -> None:
     """Prove a Fedora ppc64le guest boots end-to-end under TCG on the x86_64 host (#1144).
@@ -902,7 +884,9 @@ def test_ppc64le_guest_is_ssh_reachable_over_the_wire() -> None:
                             op,
                             "systems.provision",
                             allocation_id=allocation_id,
-                            profile=_ppc64le_reachability_provision_profile(image),
+                            profile=_reachability_provision_profile(
+                                image, arch="ppc64le", crashkernel="512M"
+                            ),
                         ),
                         "ppc64le:provision",
                     )
