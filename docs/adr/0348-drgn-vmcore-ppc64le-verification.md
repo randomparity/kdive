@@ -93,8 +93,12 @@ Concretely:
   `prog.platform.arch == drgn.Architecture.PPC64` **and**
   `PlatformFlags.IS_LITTLE_ENDIAN in prog.platform.flags` (the arch enum has no LE/BE variant,
   so the flag is what separates ppc64le from the out-of-scope big-endian ppc64), a readable
-  VMCOREINFO `BUILD-ID=`, and a **SHA-256 equal to the pinned digest** so the guard provably
-  runs against this exact #1148 artifact. It exercises drgn's real ppc64le ELF-header + note
+  VMCOREINFO `BUILD-ID=` (empirically confirmed present on the retained core,
+  `06466f96…`, so the raise-on-absence helper returns rather than false-negatives a valid
+  core), and a **SHA-256 equal to the pinned digest plus a size equal to the pinned
+  `90463884` bytes** — two independent anchors (the size also corroborating #1148's own
+  recorded core size) so the guard provably runs against this exact #1148 artifact and a
+  truncated core is caught even if the digest were mis-pinned. It exercises drgn's real ppc64le ELF-header + note
   parsing and **needs no debuginfo**. It **skips only** when the fixture is unconfigured
   (`KDIVE_PPC64LE_VMCORE` unset) and **fails loudly** when the env is set but the file is
   missing/unreadable or its digest mismatches — so a skip is distinguishable from a pass and a

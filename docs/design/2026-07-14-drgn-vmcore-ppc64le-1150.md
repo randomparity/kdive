@@ -62,10 +62,18 @@ fakes cannot substitute for a real open; they and the real open verify different
     0.2.0), **and** `PlatformFlags.IS_LITTLE_ENDIAN in prog.platform.flags` — the arch enum
     has no LE/BE variant, so the endianness flag is what discriminates ppc64**le** from the
     out-of-scope big-endian ppc64 (both share `Architecture.PPC64`);
-  - the core's VMCOREINFO `BUILD-ID=` line reads (exercises real ppc64le note parsing);
+  - the core's VMCOREINFO `BUILD-ID=` line reads (exercises real ppc64le note parsing).
+    *Empirically confirmed on the retained core* — it carries a parseable
+    `BUILD-ID=06466f9617cff9e5a762af9216bfc23837310b9c`, so `read_vmcoreinfo_build_id`
+    (which raises `CONFIGURATION_ERROR` on absence) returns rather than raises; the assertion
+    is safe to make mandatory because the property was checked on this artifact, not assumed;
   - the file's SHA-256 equals the pinned digest
-    `bd322c68c540542484cde32df94d3e074874374a1eb2ca50551e808f4c7190fa`, so the guard provably
-    runs against *this exact #1148 artifact*, not a swapped/truncated core.
+    `bd322c68c540542484cde32df94d3e074874374a1eb2ca50551e808f4c7190fa` **and** its size equals
+    the pinned `90463884` bytes — two independent anchors, so the guard provably runs against
+    *this exact #1148 artifact*, not a swapped/truncated core, and a truncated core is caught
+    even if the digest were mis-pinned. The size independently corroborates #1148's own record
+    (its proof record logs the captured core at 90463884 bytes), tying the pin to the
+    artifact's birth record rather than resting on a single spec-author computation.
 
   **Skip vs. fail discipline (a skip must be distinguishable from a pass):** the test skips
   **only** when the fixture is unconfigured (`KDIVE_PPC64LE_VMCORE` unset). When the env is
@@ -149,8 +157,8 @@ regression guard, not a one-shot artifact.
   `KDIVE_PPC64LE_VMCORE`. **The pin lives in one authoritative place — the `live_vm` test
   constant — and the proof record carries a human-readable copy.** If the artifact is lost,
   the recovery runbook is: re-capture via the #1148 `live_stack` test
-  (`test_ppc64le_kdump_captures_a_vmcore_under_tcg`), recompute the new core's SHA-256, and
-  **update the pin in the test (authoritative) and the proof-record copy** in one commit. The
+  (`test_ppc64le_kdump_captures_a_vmcore_under_tcg`), recompute the new core's SHA-256 **and size**, and
+  **update both pins in the test (authoritative) and the proof-record copy** in one commit. The
   digest-mismatch failure message must distinguish the two cases — *"unexpected digest: if you
   just re-captured the core, recompute and update the pinned constant; otherwise the core at
   this path is swapped or corrupt"* — so a recovering operator is never left guessing whether
